@@ -6093,6 +6093,63 @@
           "canonicality_state": "canonical"
         }
       ]
+    },
+    {
+      "id": "ens_registry_old_standard_approval",
+      "normalized_events": [
+        {
+          "event_identity": "standard_approval:1:ethereum-sepolia:0xe6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6:0xe7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7:0:AccountPermissionChanged:0x1111111111111111111111111111111111111111:0x2222222222222222222222222222222222222222:0",
+          "namespace": "ens",
+          "logical_name_id": null,
+          "resource_id": null,
+          "event_kind": "AccountPermissionChanged",
+          "source_family": "ens_v1_registry_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-sepolia",
+          "block_number": 210,
+          "block_hash": "0xe6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6",
+          "transaction_hash": "0xe7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "chain_id": "ethereum-sepolia",
+            "block_hash": "0xe6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6",
+            "block_number": 210
+          },
+          "derivation_kind": "standard_approval",
+          "canonicality_state": "canonical",
+          "before_state": {},
+          "after_state": {
+            "subject": "0x2222222222222222222222222222222222222222",
+            "relation_kind": "operator",
+            "approved": true,
+            "scope": {
+              "kind": "account",
+              "chain_id": "ethereum-sepolia",
+              "authority_kind": "registry",
+              "authority_contract": "0x94f523b8261b815b87effcf4d18e6abef18d6e4b",
+              "authority_contract_instance_id": "00000000-0000-0000-0000-000000000024",
+              "owner": "0x1111111111111111111111111111111111111111"
+            },
+            "effective_powers": ["registry_control"],
+            "grant_source": {
+              "kind": "raw_log",
+              "source_event": "ApprovalForAll"
+            },
+            "revocation_source": null,
+            "inheritance_path": [],
+            "transfer_behavior": {
+              "mode": "owner_scoped",
+              "on_registry_owner_change": "ceases_to_apply"
+            },
+            "source_event": "ApprovalForAll"
+          }
+        }
+      ],
+      "name_surfaces": [],
+      "surface_bindings": [],
+      "resources": [],
+      "token_lineages": []
     }
   ]
 }

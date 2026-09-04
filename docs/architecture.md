@@ -43,7 +43,7 @@ compatibility layer for this contract.
 
 ### Subgraph-compatible GraphQL surface
 
-Alongside the REST contract, bigname serves a narrow, deliberately scoped subgraph-compatible read surface at `POST /graphql`. It is **not** general subgraph parity: it implements `domain`, `domains`, `registrationConnection`, and `domainConnection` over `bigname_phase.name_current`, `bigname_phase.address_names_current`, and `bigname_phase.record_inventory_current` [projections](glossary.md), plus `_meta` for the served publication. Entity reads accept the subgraph-shaped `block` and `subgraphError` arguments, while the current execution boundary remains the [served head](glossary.md#served-head) rather than historical projection reads. All root fields in one HTTP GraphQL request share one served-head selection. Reads admit unchanged rows whose target is at or before that position, carry the same selection into nested record-inventory fields, and verify before returning that the matching completed `project` phase row did not change. Rows whose projection support status is `unsupported` are not exposed; an unsupported record inventory maps to the compatibility surface's existing empty record shapes. GraphQL `createdAt` uses a declared registration or history timestamp; when neither exists, it preserves the non-null response field with Unix epoch `0` because the current phase projection has no legacy surface-creation timestamp. `createdAt` and `expiryDate` are decimal-string `BigInt` values. The GraphQL surface is a compatibility adapter, not a consumer-replacement declaration.
+Alongside the REST contract, bigname serves a narrow, deliberately scoped subgraph-compatible read surface at `POST /graphql`. It is **not** general subgraph parity: it implements `account`, `accounts`, `domain`, `domains`, `resolver`, `resolvers`, `registrationConnection`, and `domainConnection` over `bigname_phase.name_current`, `bigname_phase.address_names_current`, and `bigname_phase.record_inventory_current` [projections](glossary.md), plus `_meta` for the served publication. Entity reads accept the subgraph-shaped `block` and `subgraphError` arguments, while the current execution boundary remains the [served head](glossary.md#served-head) rather than historical projection reads. All root fields in one HTTP GraphQL request share one served-head selection. Reads admit unchanged rows whose target is at or before that position, carry the same selection into nested record-inventory fields, and verify before returning that the matching completed `project` phase row did not change. Rows whose projection support status is `unsupported` are not exposed; an unsupported record inventory maps to the compatibility surface's existing empty record shapes. GraphQL `createdAt` uses a declared registration or history timestamp; when neither exists, it preserves the non-null response field with Unix epoch `0` because the current phase projection has no legacy surface-creation timestamp. `createdAt` and `expiryDate` are decimal-string `BigInt` values. The GraphQL surface is a compatibility adapter, not a consumer-replacement declaration.
 
 Manager name inputs have ENS name semantics rather than display-string equality.
 `domain(id: ...)`, generated-root `Domain_filter.name`, and legacy-connection
@@ -301,37 +301,25 @@ rule: after activation, only expiry facts from the current ENSv2 resource can
 replace current `expires_at`; later ENSv1 husk expiry or renewal facts remain
 history. Candidate facts in slice 1 change neither value.
 
-The replacement authority contract selects authority per logical name, not
-once for an entire subtree. An unmigrated child can remain
-ENSv1-authoritative below an ENSv2-authoritative
-parent; the [migration registry](glossary.md#migration-registry-wrapperregistry)
-returns the ENSv1 fallback resolver for a
-protected child until that child migrates. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L186 @ ens_v2@a971bd64) When a child obtains a current ENSv2 registration, its
-ENSv2 parent-child row is current and the retained ENSv1 row for the same
-parent and child is historical residue. Consumer slice 3B has replaced the
-existing child recency tie-break. The [Project phase](glossary.md#projection)
-stages the parent-child relation each authority arm states into
-`project_child_candidates`, then publishes the arm the child's own selected
-[authority epoch](glossary.md#authority-epoch) names, reading the
-`project_name_authority` selection slice 2C already staged rather than
-re-deriving that proof.
-Selection is per child, not per subtree: an unmigrated ENSv1 child below a
-migrated parent publishes its ENSv1 relation on its own authority rather than
-inheriting the parent's, and a child holding ENSv2 authority — through an
-activated ENSv1→ENSv2 migration boundary, or through a current positive ENSv2
-registration with no such boundary — publishes its ENSv2 relation while the
-retained ENSv1 relation stays residue rather than a failure. A released ENSv2
-child publishes no row and does not fall back to ENSv1. A pair whose two arms
-disagree with no authority proof to separate them is omitted as unsupported,
-consistent with the refusal-over-ranking rule below; it is neither ranked nor a
-generation failure. Recency now orders only the current relation within the one
-selected arm by block, transaction, and log position. If multiple admitted
-events occupy the same exact position, their stable `event_identity` is the
-final tie-break; generated database IDs never participate. The cross-era block,
-event-id, and source-priority tie-break is gone. Complete direct-child
-migration groups now supply production input to the activated-boundary branch.
-A refused or unmigrated child still reaches ENSv2 authority only through a
-current positive ENSv2 registration.
+The replacement authority contract selects authority per logical name, but an
+ENSv1 child relation must first remain reachable through its parent's
+ENSv1→ENSv2 migration path. The parent rule is:
+
+| Parent state | ENSv1 child-arm eligibility |
+| --- | --- |
+| No activated `MigrationApplied` | Eligible under the existing live-owner rule. |
+| `migration_path = unwrapped` | Ineligible. |
+| `migration_path = unlocked_wrapped` | Ineligible. |
+| `migration_path = locked_wrapped` | Eligible only for a [migratable child](glossary.md#migratable-child): the label has never had a reserved, registered, or renewed entry in the parent's [migration `WrapperRegistry`](glossary.md#migration-registry-wrapperregistry), its current expiry-effective fuse word has `PARENT_CANNOT_CONTROL` set while `IS_DOT_ETH` is clear, and its current ENSv1 registry owner is nonzero. NameWrapper preserves fuse and expiry data when a child unwraps, so Project uses the latest wrapper resource evidence even when the active ENSv1 binding has rotated. (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276-L277 @ ens_v1@91c966f) |
+| `migration_path = locked_child` | Eligible under the same migratable-child predicate. A locked child receives its own proxy-backed `WrapperRegistry`, so that nested registry becomes the parent migration registry for its descendants. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L146-L164 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L26-L32 @ ens_v2@a971bd64) |
+| `migration_path = emancipated_child` | Ineligible. The child is unwrapped into the Graveyard and no registry is deployed for it; the caller-supplied subregistry is injected with the child instead. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178-L188 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L25-L27 @ ens_v2@a971bd64) |
+
+Unlocked ENSv1→ENSv2 migration registers the parent in ENSv2 without deploying a child subregistry, while the Graveyard clears the unreachable ENSv1 descendants. (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L29-L31 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L153-L166 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L96-L102 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L170-L201 @ ens_v2@a971bd64) The two locked paths deploy a `WrapperRegistry` for the migrated name; it routes only migratable children to the ENSv1 resolver and blocks new ENSv2 registration while that condition holds. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L158-L186 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64) The fuse predicate is exact: `PARENT_CANNOT_CONTROL` must be set and `IS_DOT_ETH` clear. (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L84-L89 @ ens_v2@a971bd64) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18-L19 @ ens_v1@91c966f)
+
+Project accepts the current ENSv2 `SubregistryChanged` pointer only when its exact instance and address match a readable canonical `migration_registry_creation` association whose non-empty evidence references are contained in the activated boundary, and its active ordinary announcement. A replacement or empty-evidence association fails closed. `successor_registry_contract_instance_id` instead identifies the registry that received the parent; the locked controller registers the parent there with its new `WrapperRegistry` as subregistry. (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L103-L109 @ ens_v2@a971bd64)
+An entry in that migration registry is historical, not merely current: `RegistrationReserved`, `RegistrationGranted`, and `RegistrationRenewed` each show that `getExpiry(labelId)` has been positive, which makes the child non-migratable even after the entry lapses. Unregistering an entry records the current timestamp as its expiry rather than clearing it. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L410-L480 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64) An activated `MigrationApplied` path outside the five values above is a data integrity failure rather than a silently hidden child relation.
+
+Parent reachability filters only the ENSv1 candidate arm. Project then unions it with the ENSv2 candidate, applies the child's selected [authority epoch](glossary.md#authority-epoch), and ranks only within that arm. A released ENSv2 child does not fall back; reachable arms that disagree without proof are omitted. Recency orders only within one arm by block, transaction, log, then stable `event_identity`; generated IDs and cross-era recency never choose the arm.
 
 Both arms stating a relation for the same Mainnet pair is not itself the
 failure condition. Neither ENSv1→ENSv2 migration branch retracts the ENSv1
@@ -343,18 +331,20 @@ and the emancipated branch unwraps the node into the Graveyard
 (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64),
 which sets a new registry owner rather than clearing the entry
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1029 @ ens_v1@91c966f).
-A migrated or positively registered child therefore ordinarily retains its
-ENSv1 relation. The slice 3B child assertion — ordered after the slice 2E
-exact-name assertion and keyed on the parent-child pair — fails the
-[projection generation](glossary.md#projection-generation) only when, on
-either ENS deployment profile (Mainnet or Sepolia), a child whose authority
-proof kind is
-`migration_authority_transition` or `positive_v2_child_registration` has an
-ENSv1 parent-child relation asserted at a position after that child's authority
-epoch start. Such a relation contradicts the selection instead of trailing it,
-so the generation aborts with failure kind `dual_current_child_authority`
-through the same post-rollback audit path described below rather than dropping
-the contradiction silently.
+A migrated or positively registered child retains its ENSv1 relation only when
+parent reachability admits it. The slice 3B assertion, ordered after
+reachability and exact-name integrity, fails a
+[projection generation](glossary.md#projection-generation) on either ENS
+deployment profile (Mainnet or Sepolia) when a child with an activated
+`migration_authority_transition` has a surviving ENSv1 relation asserted after
+its authority epoch began. An unmigrated parent can expose this contradiction;
+unwrapped, unlocked-wrapped, and emancipated-child paths cannot. Neither locked
+path can expose the `positive_v2_child_registration` form because that
+registration is permanent migration-registry entry history, so the
+migratable-child predicate filters the ENSv1 relation first. The query retains
+both proof kinds defensively, but the positive-proof form is unreachable under
+this contract. A surviving contradiction aborts with
+`dual_current_child_authority` through the post-rollback audit path below.
 
 The exact-name ownership rule consumes the activated proof. A
 name with an activated transition authority proof, or a current ENSv2 child
@@ -783,7 +773,8 @@ Lineage and control: `TokenResourceLinked`, `TokenRegenerated`, `TokenControlTra
 
 Topology and resolution: `ResolverChanged`, `SubregistryChanged`, `ParentChanged`, `AliasChanged`, `RecordChanged`, `RecordVersionChanged`.
 
-Permissions: `PermissionChanged`, `RootPermissionChanged`, `PermissionScopeChanged`.
+Permissions: `AccountPermissionChanged`, `PermissionChanged`,
+`RootPermissionChanged`, `PermissionScopeChanged`.
 
 Reverse and primary: `ReverseChanged`.
 
@@ -1212,11 +1203,13 @@ authority from raw role bitmaps. `GET /v2/permissions` is the current
 resource-anchored permission collection; name- and address-centric views
 summarize or filter the same truth.
 
-The current projection does not ingest standard registry operator, registrar
-token/operator, or resolver operator/delegate approvals. Non-wrapper permission
-summaries are therefore request-relative partial rather than authoritative
-enumerations, including for empty results; the known rows that apply to the resource
-remain visible. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
+The current projection interprets admitted ENSv1 and Basenames registry
+`ApprovalForAll` events as [account permission
+state](glossary.md#account-permission-state). Registrar token/operator,
+resolver operator/delegate, NameWrapper, and ENSv2 registry approvals remain
+unprojected. Non-wrapper permission summaries are therefore request-relative
+partial rather than authoritative enumerations, including for empty results.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L148-L158 @ basenames@1809bbc) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
 
 For ENSv1 wrapper-backed resources, the current projection publishes no wrapper-holder subject grant derived from fuse state. Fuse changes remain available as `PermissionScopeChanged` history, and any separately observed compatible holder grant is masked by the effective lifecycle state and owner-controlled fuses. A locked name has no broad `resource_control`; individual fuses remove only their matching powers. Once an emancipated or locked position expires, it contributes no wrapper-holder powers because NameWrapper clears the owner and fuse values. (upstream: .refs/ens_v1/contracts/wrapper/README.md:L89 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/README.md:L93 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L849 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L852 @ ens_v1@91c966f) A `.eth` second-level name keeps its lifecycle state and token holder through the 90-day registrar grace period, while owner modification, transfer, and effective-controller membership stop at grace start. (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L48 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L218 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L221 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L820 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L825 @ ens_v1@91c966f) Internal projection inputs for a registrar name wrapped after registration can retain stale pre-wrap control facets; public exact-name reads do not publish those facets as effective control and instead return an explicit unsupported control summary for every current wrapper resource.[^v1-iname-l10][^v1-nw-l421][^v1-nw-l427][^v1-nw-l637][^v1-nw-l666][^v1-nw-l676][^v1-nw-l723][^v1-nw-l827][^v1-nw-l1023][^v1-nw-l132] An empty permission result therefore still does not prove complete wrapper-holder enumeration.
 
@@ -1357,7 +1350,7 @@ Additive expansion, not a separate route. Adds `role_summary` (one `subjects[*]`
 
 ### Name → children
 
-Default returns declared direct child nodes. ENSv1 and Basenames registry edges whose parent surface is active remain children even when bigname cannot state the child's name; those rows carry a [non-name form](glossary.md#non-name-form) — the bracketed labelhash placeholder when the label was never observed, or the escape encoding of the whole stored name when the label was observed as bytes that do not decode — rather than minting exact-name surfaces. The ENSv2 arm additionally joins the child's own name surface, so a child without an active surface — label never observed, or rejected by the normalization gate — is absent there rather than named by a stand-in. Optional buckets: linked-subregistry, alias-derived, observed wildcard. `subname_count` in the main name summary means declared direct children only.
+Default returns declared direct child nodes. Basenames registry edges whose parent surface is active remain children. ENSv1 registry edges additionally must remain reachable through the parent's ENSv1→ENSv2 migration path under the rule above. A surviving row remains available even when bigname cannot state the child's name; it carries a [non-name form](glossary.md#non-name-form) — the bracketed labelhash placeholder when the label was never observed, or the escape encoding of the whole stored name when the label was observed as bytes that do not decode — rather than minting an exact-name surface. The ENSv2 arm additionally joins the child's own name surface, so a child without an active surface — label never observed, or rejected by the normalization gate — is absent there rather than named by a stand-in. Optional buckets: linked-subregistry, alias-derived, observed wildcard. `subname_count` in the main name summary means declared direct children only.
 
 ### Resource → permissions
 
@@ -1420,17 +1413,20 @@ displaced readable lineage branch `orphaned` before making the selected branch
 readable; interpretation selects raw facts through that lineage rather than
 rewriting immutable raw rows. An explicit `interpret` redo replaces derived
 identity, discovery, and normalized-event output for its selected range, except
-for three bounded kinds of coordination state carried across redo preparation.
+for four bounded kinds of coordination state carried across redo preparation.
 It preserves the resolver references that Project needs to find projection rows
 affected by disappearing events, the available logical-name and
 permission-resource identifiers from state-derived ENSv2 path-expiry releases,
+child identifiers from entry-creating events in ENSv1→ENSv2 migration registries,
 and finitely retired manifest-declared address ranges that prevent replay of
-older observations from reopening retired authority. Project consumes the
-resolver references and preserved release identifiers in the covering redo or
-later normal catch-up publication: logical names seed bounded descendant replay
-as [expiry roots](glossary.md#expiry-root), while permission resources force a
-resource rebuild. Interpret uses the retired address boundary while rewriting
-discovery output.
+older observations from reopening retired authority. Project seeds from the
+resolver references, release identifiers, and child identifiers only during the
+covering Redo-mode publication: logical names seed bounded descendant replay as
+[expiry roots](glossary.md#expiry-root), permission resources force a resource
+rebuild, and migration-registry entry history seeds the affected child. A later
+Normal-mode catch-up consumes those rows without seeding from them; #828 tracks
+whether that asymmetry should change.
+Interpret uses the retired address boundary while rewriting discovery output.
 
 The live phase uses the same head-publication transaction as ingest. That
 transaction orphans the displaced suffix, clears affected active resolution

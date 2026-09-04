@@ -1,6 +1,6 @@
-mod intake_only;
 mod migration;
 pub(super) mod permissions;
+mod standard_approvals;
 pub(super) mod v1;
 
 #[cfg(test)]
@@ -237,7 +237,7 @@ pub(super) fn interpret(
     state: &mut State,
     registrar_migration_enabled: bool,
 ) -> anyhow::Result<Interpreted> {
-    if let Some(output) = intake_only::approval(selected, raw)? {
+    if let Some(output) = standard_approvals::interpret(selected, raw)? {
         return Ok(output);
     }
     let mut output = match selected.source.source_family.as_str() {
@@ -361,7 +361,7 @@ pub(super) fn validate_manifest(
             && !event.normalized_events.is_empty()
         {
             bail!(
-                "source family {} intake-only approval {} must declare no normalized events",
+                "source family {} adapter-owned standard approval mapping {} must declare no normalized events",
                 source.source_family,
                 event.signature
             );

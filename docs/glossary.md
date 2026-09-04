@@ -316,6 +316,15 @@ rename. "Unwrapped authority" is a historical name kept because it is a stored
 identifier: that pipeline derives ownership and control for ENSv1 and Basenames
 names alike, whether the name is registry-, registrar-, or NameWrapper-held.
 
+<a id="standard-approval-derivation"></a>
+### Standard approval derivation (`standard_approval`)
+
+the adapter-owned derivation path for declaration-backed Ethereum approval
+events whose manifests deliberately leave `normalized_events` empty. In the
+current scope it emits `AccountPermissionChanged` only for admitted ENSv1 and
+Basenames registry `ApprovalForAll` logs; declared registrar, resolver, and
+NameWrapper approvals still decode without normalized output.
+
 ## Discovery graph / discovery edge
 
 the time-versioned indexability and
@@ -1021,8 +1030,8 @@ so the child cannot be taken on the ENSv2 side and keeps resolving through
 ENSv1 for as long as it stays unmigrated. Three conditions must hold at once,
 and failing each one means something different:
 
-1. *Never registered on ENSv2* — the label has never had an entry, live or
-   lapsed, in the parent's ENSv2 registry
+1. *Never entered on ENSv2* — the label has never had a reserved, registered,
+   or renewed entry, live or lapsed, in the parent's migration `WrapperRegistry`
    (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L296 @ ens_v2@a971bd64).
    Failing this is permanent: once the label has had an entry, ENSv2 is its
    authority and the protection never comes back. What becomes of the label is
@@ -1037,6 +1046,8 @@ and failing each one means something different:
    (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L442 @ ens_v2@a971bd64),
    and only an expired ENSv2 entry can be registered again
    (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L431 @ ens_v2@a971bd64).
+   Project therefore treats `RegistrationReserved`, `RegistrationGranted`, and `RegistrationRenewed` as permanent entry history. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L410-L480 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @ ens_v2@a971bd64)
+   For `locked_child`, the proxy deployed from `WRAPPER_REGISTRY_IMPL` is the name's migration registry, so the same rule governs its descendants. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L146-L164 @ ens_v2@a971bd64)
 2. *`PARENT_CANNOT_CONTROL` burned* — the child is *helper-positive* under
    `LibMigration.isEmancipatedChild`, the superset the three-way split below is
    built on
@@ -1359,13 +1370,36 @@ writer and consumers were deleted before the legacy schema was dropped.
 
 ## Intake-only event
 
-a manifest-declared event whose empty
-`normalized_events` list promises raw-log intake and ABI validation without a
-normalized event or permission-state change. This is a closed, typed adapter
-capability rather than a general bypass for declarations with empty output.
-When its watch policy is address-scoped, only contract roles named by that
-event declaration contribute watched addresses and historical intervals;
+a manifest-declared event whose empty `normalized_events` list promises raw-log
+intake and ABI validation without a manifest-owned output mapping. Most such
+events produce no normalized output; an adapter-owned standard approval mapping
+may produce output versioned by the
+[interpreter content hash](#interpreter-content-hash). This is a closed, typed
+adapter capability rather than a general bypass for declarations with empty
+output. When its watch policy is address-scoped, only contract roles named by
+that event declaration contribute watched addresses and historical intervals;
 discovered emitters and all-emitter watches do not inherit it.
+
+## Account permission state
+
+the latest normalized approval state keyed by chain, authority kind, authority contract, owner,
+subject, and relation, independent of any currently known name. A revoked
+state remains stored with `approved=false` so projection replay and reorg repair
+can recover either a losing-fork grant or a losing-fork revocation without
+creating per-name approval rows.
+
+## Registry-owner binding
+
+the current, evidence-backed association between an ENSv1 or Basenames permission
+resource, its registry contract, and its registry owner. Registry-wide account
+permission is applicable only when this binding matches the approval's chain,
+contract, and owner. Project first selects `name_current`, then carries registry
+owner observations onto that selected resource rather than the separate resource
+that retains registry observations. An observation without an eligible selected resource or
+logical name stays on its emitting resource, and the remapping never crosses onto
+an ENSv2 resource. The latest admitted registry observation wins before its owner
+value is interpreted, so a zero owner clears the binding instead of exposing an
+older nonzero owner.
 
 ## Interpreter content hash
 

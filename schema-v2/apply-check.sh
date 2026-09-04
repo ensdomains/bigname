@@ -173,7 +173,11 @@ for migration_file in \
     "$ROOT/migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql" \
     "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
     "$ROOT/migrations/20260902140000_project_redo_expiry_roots.sql" \
-    "$ROOT/migrations/20260902150000_project_redo_expiry_resources.sql"
+    "$ROOT/migrations/20260902150000_project_redo_expiry_resources.sql" \
+    "$ROOT/migrations/20260902160000_registry_operator_account_permissions.sql" \
+    "$ROOT/migrations/20260902160100_registry_operator_account_permissions_validate.sql" \
+    "$ROOT/migrations/20260902160200_registry_operator_account_permissions_swap.sql" \
+    "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -325,7 +329,15 @@ for migration_file in \
     "$ROOT/migrations/20260902140000_project_redo_expiry_roots.sql" \
     "$ROOT/migrations/20260902140000_project_redo_expiry_roots.sql" \
     "$ROOT/migrations/20260902150000_project_redo_expiry_resources.sql" \
-    "$ROOT/migrations/20260902150000_project_redo_expiry_resources.sql"
+    "$ROOT/migrations/20260902150000_project_redo_expiry_resources.sql" \
+    "$ROOT/migrations/20260902160000_registry_operator_account_permissions.sql" \
+    "$ROOT/migrations/20260902160000_registry_operator_account_permissions.sql" \
+    "$ROOT/migrations/20260902160100_registry_operator_account_permissions_validate.sql" \
+    "$ROOT/migrations/20260902160100_registry_operator_account_permissions_validate.sql" \
+    "$ROOT/migrations/20260902160200_registry_operator_account_permissions_swap.sql" \
+    "$ROOT/migrations/20260902160200_registry_operator_account_permissions_swap.sql" \
+    "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql" \
+    "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -1127,6 +1139,14 @@ ALTER TABLE normalized_events
             )
         );
 DROP FUNCTION migration_correlation_ids_valid(text[]);
+DROP TABLE account_permission_state_current;
+DROP INDEX permissions_current_resource_registry_binding_idx;
+ALTER TABLE permissions_current_resource_summary
+    DROP CONSTRAINT permissions_current_resource_summary_registry_binding_check,
+    DROP COLUMN registry_owner,
+    DROP COLUMN registry_contract,
+    DROP COLUMN registry_binding_provenance,
+    DROP COLUMN registry_binding_chain_positions;
 SQL
     for migration_file in \
         "$ROOT/migrations/20260811120000_ens_v2_migration_slice_1.sql" \
@@ -1134,7 +1154,10 @@ SQL
         "$ROOT/migrations/20260811120200_ens_v2_migration_slice_1_constraints.sql" \
         "$ROOT/migrations/20260820140000_raw_block_preimage_derivation.sql" \
         "$ROOT/migrations/20260820140100_raw_block_preimage_derivation_validate.sql" \
-        "$ROOT/migrations/20260820140200_raw_block_preimage_derivation_swap.sql"
+        "$ROOT/migrations/20260820140200_raw_block_preimage_derivation_swap.sql" \
+        "$ROOT/migrations/20260902160000_registry_operator_account_permissions.sql" \
+        "$ROOT/migrations/20260902160100_registry_operator_account_permissions_validate.sql" \
+        "$ROOT/migrations/20260902160200_registry_operator_account_permissions_swap.sql"
     do
         sed "s/bigname_phase/$scratch_schema/g" "$migration_file"
     done
@@ -1196,6 +1219,7 @@ DECLARE
 BEGIN
     WITH expected(table_name) AS (
         VALUES
+            ('account_permission_state_current'),
             ('address_names_current'),
             ('chain_heads'),
             ('chain_header_audit'),
@@ -1222,6 +1246,7 @@ BEGIN
             ('name_surfaces'),
             ('normalized_events'),
             ('project_generation_failures'),
+            ('project_redo_child_registration_history'),
             ('project_redo_expiry_roots'),
             ('project_redo_resolver_evidence'),
             ('permissions_current'),
@@ -1251,8 +1276,16 @@ BEGIN
         RAISE EXCEPTION 'missing schema-v2 tables: %', missing_tables;
     END IF;
 
+    IF to_regclass('account_permission_state_current_active_subject_idx') IS NULL
+       OR to_regclass('account_permission_state_current_applicability_idx') IS NULL
+       OR to_regclass('permissions_current_resource_registry_binding_idx') IS NULL
+    THEN
+        RAISE EXCEPTION 'registry-operator projection indexes are incomplete';
+    END IF;
+
     WITH expected(table_name) AS (
         VALUES
+            ('account_permission_state_current'),
             ('address_names_current'),
             ('chain_heads'),
             ('chain_header_audit'),
@@ -1279,6 +1312,7 @@ BEGIN
             ('name_surfaces'),
             ('normalized_events'),
             ('project_generation_failures'),
+            ('project_redo_child_registration_history'),
             ('project_redo_expiry_roots'),
             ('project_redo_resolver_evidence'),
             ('permissions_current'),
@@ -1442,6 +1476,7 @@ BEGIN
               'name_current',
               'address_names_current',
               'permissions_current',
+              'account_permission_state_current',
               'permissions_current_resource_summary',
               'record_inventory_current',
               'resolver_current',
@@ -2117,6 +2152,7 @@ DO $$
 DECLARE
     manifest_key bigint;
     transition_case record;
+    violated_constraint text;
     accepted_projection_identity_mismatches text[] := ARRAY[]::text[];
     accepted_cross_chain_relationships text[] := ARRAY[]::text[];
     accepted_head_invariants text[] := ARRAY[]::text[];
@@ -4775,9 +4811,71 @@ BEGIN
             'manifest_sync',
             'proxy_upgrade',
             'raw_block_preimage_observation',
-            'raw_log_preimage_observation'
+            'raw_log_preimage_observation',
+            'standard_approval'
         ]
     ) AS admitted(derivation_kind);
+
+    INSERT INTO normalized_events (
+        event_identity, namespace, event_kind, source_family,
+        manifest_version, chain_id, derivation_kind
+    ) VALUES (
+        'valid-account-permission-changed', 'schema-v2-check',
+        'AccountPermissionChanged', 'ens_v1_registry_l1', 1,
+        'schema-v2-check', 'standard_approval'
+    );
+
+    FOR transition_case IN
+        SELECT * FROM (VALUES
+            ('0x00000000000000000000000000000000000000AA',
+             '0x00000000000000000000000000000000000000bb', true, '["registry_control"]'::jsonb),
+            ('', '0x00000000000000000000000000000000000000bb', true, '["registry_control"]'::jsonb),
+            ('0x00000000000000000000000000000000000000aa',
+             '0x00000000000000000000000000000000000000bb', true, '[]'::jsonb),
+            ('0x00000000000000000000000000000000000000aa',
+             '0x00000000000000000000000000000000000000bb', false, '["registry_control"]'::jsonb)
+        ) AS invalid(authority_contract, owner, approved, powers)
+    LOOP
+        BEGIN
+            INSERT INTO account_permission_state_current (
+                chain_id, authority_kind, authority_contract, authority_contract_instance_id,
+                owner, subject, relation_kind, approved, effective_powers, grant_source,
+                inheritance_path, transfer_behavior, provenance, chain_positions,
+                canonicality_summary, manifest_version
+            ) VALUES (
+                'schema-v2-check', 'registry', transition_case.authority_contract,
+                '00000000-0000-0000-0000-000000000099', transition_case.owner,
+                '0x00000000000000000000000000000000000000cc', 'operator',
+                transition_case.approved, transition_case.powers, '{}', '[]', '{}', '{}', '{}', '{}', 1
+            );
+            RAISE EXCEPTION 'account permission state accepted an invalid row';
+        EXCEPTION WHEN check_violation THEN NULL;
+        END;
+    END LOOP;
+
+    BEGIN
+        INSERT INTO permissions_current_resource_summary (
+            resource_id, registry_owner, registry_contract,
+            registry_binding_chain_positions, support_status,
+            unsupported_reason, provenance, chain_positions,
+            canonicality_summary, manifest_version
+        ) VALUES (
+            '00000000-0000-0000-0000-000000000011',
+            '0x00000000000000000000000000000000000000aa',
+            '0x00000000000000000000000000000000000000bb',
+            '{}', 'unsupported', 'registry-binding-probe', '{}', '{}', '{}', 1
+        );
+        RAISE EXCEPTION 'permission resource summary accepted a partial registry binding';
+    EXCEPTION WHEN check_violation THEN
+        GET STACKED DIAGNOSTICS violated_constraint = CONSTRAINT_NAME;
+        IF violated_constraint <>
+            'permissions_current_resource_summary_registry_binding_check'
+        THEN
+            RAISE EXCEPTION
+                'partial registry binding failed through unexpected constraint %',
+                violated_constraint;
+        END IF;
+    END;
 
     BEGIN
         INSERT INTO normalized_events (

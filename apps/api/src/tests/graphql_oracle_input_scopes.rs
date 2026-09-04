@@ -4,10 +4,22 @@ fn partial_domain_filter_surfaces() -> (OracleMap<String, Value>, OracleMap<Stri
         ("input:Domain_filter.id".into(), json!({"type":"ID"})),
         ("input:Domain_filter.id_not".into(), json!({"type":"ID"})),
         ("input:Domain_filter.owner".into(), json!({"type":"String"})),
+        ("type:Account_filter".into(), json!({"kind":"INPUT_OBJECT"})),
+        ("input:Account_filter.id".into(), json!({"type":"ID"})),
+        ("input:Account_filter.id_not".into(), json!({"type":"ID"})),
+        ("type:Resolver_filter".into(), json!({"kind":"INPUT_OBJECT"})),
+        ("input:Resolver_filter.id".into(), json!({"type":"ID"})),
+        ("input:Resolver_filter.address".into(), json!({"type":"Bytes"})),
+        ("input:Resolver_filter.address_in".into(), json!({"type":"[Bytes!]"})),
     ]);
     let local = OracleMap::from([
         ("type:Domain_filter".into(), json!({"kind":"INPUT_OBJECT"})),
         ("input:Domain_filter.id".into(), json!({"type":"ID"})),
+        ("type:Account_filter".into(), json!({"kind":"INPUT_OBJECT"})),
+        ("input:Account_filter.id".into(), json!({"type":"ID"})),
+        ("type:Resolver_filter".into(), json!({"kind":"INPUT_OBJECT"})),
+        ("input:Resolver_filter.id".into(), json!({"type":"ID"})),
+        ("input:Resolver_filter.address".into(), json!({"type":"Bytes"})),
     ]);
     (upstream, local)
 }
@@ -27,7 +39,9 @@ fn exact_input_coverage(scopes: &[&str]) -> Value {
             "Domain_filter": {
                 "owner": "#670/T3",
                 "docs": "docs/consumer-capabilities.md#graphql-compatibility"
-            }
+            },
+            "Account_filter": { "owner": "#670/T3", "docs": "docs/consumer-capabilities.md#graphql-compatibility" },
+            "Resolver_filter": { "owner": "#670/T3", "docs": "docs/consumer-capabilities.md#graphql-compatibility" }
         }
     })
 }
@@ -39,7 +53,11 @@ fn graphql_oracle_exact_input_scope_owns_one_member() {
         "input:Domain_filter.owner".into(),
         json!({"type":"String"}),
     );
-    let coverage = exact_input_coverage(&["input:Domain_filter.id_not"]);
+    let coverage = exact_input_coverage(&[
+        "input:Domain_filter.id_not",
+        "input:Account_filter.id_not",
+        "input:Resolver_filter.address_in",
+    ]);
     apply_oracle_coverage(&upstream, &local, &coverage)
         .expect("exact input scope must own one upstream-only member");
 }
@@ -96,6 +114,17 @@ fn graphql_oracle_rejects_stale_duplicate_unknown_and_wildcard_input_scopes() {
     ] {
         let error = apply_oracle_coverage(&upstream, &local, &exact_input_coverage(&scopes))
             .expect_err("invalid exact-input scope unexpectedly passed")
+            .to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+    for (scope, expected) in [
+        ("input:Account_filter.id", "stale upstream disposition"),
+        ("input:Resolver_filter.address_in", "unowned upstream-only path: input:Account_filter.id_not"),
+        ("input:Resolver_filter.missing", "stale upstream disposition"),
+        ("input:Resolver_filter.*", "overbroad disposition"),
+    ] {
+        let error = apply_oracle_coverage(&upstream, &local, &exact_input_coverage(&[scope]))
+            .expect_err("invalid Account/Resolver exact-input scope unexpectedly passed")
             .to_string();
         assert!(error.contains(expected), "{error}");
     }

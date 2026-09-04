@@ -1,4 +1,5 @@
 use async_graphql::Enum;
+use bigname_storage::NameCurrentListOrder;
 
 /// Subgraph `Domain_orderBy`. The underscore + lowercase-`o` type name and the lowercase-camel
 /// value names are set explicitly rather than relying on async-graphql's default
@@ -21,12 +22,36 @@ pub(crate) enum DomainOrderBy {
 }
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "Account_orderBy")]
+pub(crate) enum AccountOrderBy {
+    #[graphql(name = "id")]
+    Id,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "Resolver_orderBy")]
+pub(crate) enum ResolverOrderBy {
+    #[graphql(name = "id")]
+    Id,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
 #[graphql(name = "OrderDirection")]
 pub(crate) enum OrderDirection {
     #[graphql(name = "asc")]
     Asc,
     #[graphql(name = "desc")]
     Desc,
+}
+
+pub(crate) fn generated_order(
+    _order_by: Option<()>,
+    direction: Option<OrderDirection>,
+) -> NameCurrentListOrder {
+    match direction.unwrap_or(OrderDirection::Asc) {
+        OrderDirection::Asc => NameCurrentListOrder::Asc,
+        OrderDirection::Desc => NameCurrentListOrder::Desc,
+    }
 }
 
 /// Policy argument reserved for per-entity indexing-error behavior.

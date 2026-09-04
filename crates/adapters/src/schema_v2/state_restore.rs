@@ -404,6 +404,7 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
                 .get("owner")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            event.emitting_address.as_deref().map(str::to_lowercase),
             event
                 .after_state
                 .get("authority_key")

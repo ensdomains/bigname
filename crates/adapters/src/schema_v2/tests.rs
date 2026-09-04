@@ -2041,6 +2041,7 @@ fn incremental_v2_delta_refreshes_only_the_affected_topology_component() {
             source_family: "ens_v2_registry_l1".to_owned(),
             manifest_version: 1,
             source_manifest_id: Some(58),
+            emitting_address: None,
             state_scope: Some(format!("{registry}:-:{token_id}:-:LabelRegistered")),
             block_timestamp: Some(OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(timestamp)),
             after_state: json!({
@@ -2572,6 +2573,7 @@ fn assert_registration_grant_restore_matches_live(registration: bool) -> anyhow:
         source_family: "ens_v1_registry_l1".to_owned(),
         manifest_version: 1,
         source_manifest_id: None,
+        emitting_address: None,
         state_scope: Some(format!("registry:{namehash}")),
         block_timestamp: Some(OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1)),
         after_state: json!({
@@ -2649,6 +2651,7 @@ fn assert_registration_grant_restore_matches_live(registration: bool) -> anyhow:
         source_family: selected.source.source_family.clone(),
         manifest_version: selected.source.manifest_version,
         source_manifest_id: Some(selected.source.manifest_id),
+        emitting_address: None,
         state_scope: Some(grant.state_scope),
         block_timestamp: Some(raw.block_timestamp),
         after_state: grant.after_state,
@@ -7757,6 +7760,7 @@ fn surface_before_first_owner_links_a_later_ownerless_resolver() -> anyhow::Resu
         source_family: "ens_v1_registrar_l1".to_owned(),
         manifest_version: 1,
         source_manifest_id: Some(94),
+        emitting_address: None,
         state_scope: Some(format!("surface:{node:#x}")),
         block_timestamp: Some(OffsetDateTime::UNIX_EPOCH),
         after_state: json!({"source_event":"NameRegistered", "namehash":format!("{node:#x}")}),
@@ -9078,6 +9082,11 @@ fn ens_v2_resource_and_lineage_survive_prior_state_and_token_regeneration() -> a
             source_family: event.source_family.clone(),
             manifest_version: event.manifest_version,
             source_manifest_id: event.source_manifest_id,
+            emitting_address: event
+                .raw_fact_ref
+                .get("emitting_address")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
             state_scope: event
                 .raw_fact_ref
                 .get("state_scope")
@@ -12885,6 +12894,7 @@ fn ens_v1_unwrap_prior_state_reactivates_the_live_registrar_anchor() -> anyhow::
 
 #[test]
 fn released_registration_restores_registry_authority_across_batches() -> anyhow::Result<()> {
+    const OLD_REGISTRY: &str = "0x0000000000000000000000000000000000000065";
     const REGISTRY: &str = "0x0000000000000000000000000000000000000066";
     const RESOLVER: &str = "0x0000000000000000000000000000000000000067";
     let parent_labels = vec!["eth".to_owned()];
@@ -12909,7 +12919,9 @@ fn released_registration_restores_registry_authority_across_batches() -> anyhow:
         &["RegistrationGranted"],
     );
     let mut registry_admission = admission(61, "registry");
-    registry_admission.address = REGISTRY.to_owned();
+    registry_admission.address = OLD_REGISTRY.to_owned();
+    let mut current_registry_admission = registry_admission.clone();
+    current_registry_admission.address = REGISTRY.to_owned();
     let first = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![registry_manifest.clone(), registrar_manifest.clone()],
@@ -12927,7 +12939,7 @@ fn released_registration_restores_registry_authority_across_batches() -> anyhow:
                 .encode_log_data(),
                 1,
                 0,
-                REGISTRY,
+                OLD_REGISTRY,
             ),
             raw_at(
                 NameRegistered {
@@ -12952,7 +12964,101 @@ fn released_registration_restores_registry_authority_across_batches() -> anyhow:
         .and_then(|event| event.resource_id)
         .expect("registrar authority");
     assert_ne!(registry_resource, registrar_resource);
-
+    let transfer_manifest = manifest(
+        63,
+        "ens_v1_registrar_l1",
+        "Transfer",
+        "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+        &["registrar"],
+        &["TokenControlTransferred"],
+    );
+    let current_owner = raw_at(
+        v1_registry::NewOwner {
+            node: parent,
+            label: labelhash,
+            owner: CONTRACT.parse()?,
+        }
+        .encode_log_data(),
+        2,
+        0,
+        REGISTRY,
+    );
+    let transfer = raw_at(
+        v1_registrar::Transfer {
+            from: CONTRACT.parse()?,
+            to: "0x0000000000000000000000000000000000000068".parse()?,
+            tokenId: U256::from_be_bytes(*labelhash),
+        }
+        .encode_log_data(),
+        2,
+        1,
+        CONTRACT,
+    );
+    let transferred = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![registry_manifest.clone(), transfer_manifest.clone()],
+        discovery_rules: Vec::new(),
+        admissions: vec![
+            current_registry_admission.clone(),
+            admission(63, "registrar"),
+        ],
+        prior_events: first.normalized_events.iter().map(prior_event).collect(),
+        blocks: Vec::new(),
+        raw_logs: vec![current_owner.clone(), transfer.clone()],
+    })?;
+    let transition = |kind, resource| {
+        transferred
+            .normalized_events
+            .iter()
+            .find(|event| event.event_kind == kind && event.resource_id == Some(resource))
+    };
+    let unbound = transition("SurfaceUnbound", registrar_resource)
+        .expect("registrar authority detached after the token transfer");
+    let rebound = transition("SurfaceBound", registry_resource)
+        .expect("registry authority restored after the token transfer");
+    assert_eq!(unbound.source_family, "ens_v1_registrar_l1");
+    assert_eq!(rebound.source_family, "ens_v1_registrar_l1");
+    assert_eq!(rebound.after_state["owner_getter"], CONTRACT);
+    assert_eq!(rebound.after_state["registry_contract"], REGISTRY);
+    let refreshed = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![registry_manifest.clone()],
+        discovery_rules: Vec::new(),
+        admissions: vec![current_registry_admission],
+        prior_events: first.normalized_events.iter().map(prior_event).collect(),
+        blocks: Vec::new(),
+        raw_logs: vec![current_owner],
+    })?;
+    let mut split_prior = first
+        .normalized_events
+        .iter()
+        .chain(&refreshed.normalized_events)
+        .map(prior_event)
+        .collect::<Vec<_>>();
+    split_prior.sort_by_key(|event| event.block_timestamp);
+    let split = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![transfer_manifest],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(63, "registrar")],
+        prior_events: split_prior,
+        blocks: Vec::new(),
+        raw_logs: vec![RawLogInput {
+            block_number: 3,
+            block_hash: "block-3".to_owned(),
+            block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(3),
+            transaction_hash: "transaction-3".to_owned(),
+            ..transfer
+        }],
+    })?;
+    let split_rebound = split
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "SurfaceBound" && event.resource_id == Some(registry_resource)
+        })
+        .expect("split registry authority");
+    assert_eq!(split_rebound.after_state["registry_contract"], REGISTRY);
     let released = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![registry_manifest, registrar_manifest],
@@ -12969,9 +13075,15 @@ fn released_registration_restores_registry_authority_across_batches() -> anyhow:
         }],
         raw_logs: Vec::new(),
     })?;
-    assert!(released.normalized_events.iter().any(|event| {
-        event.event_kind == "SurfaceBound" && event.resource_id == Some(registry_resource)
-    }));
+    let restored = released
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "SurfaceBound" && event.resource_id == Some(registry_resource)
+        })
+        .expect("restored registry authority");
+    assert_eq!(restored.after_state["owner_getter"], CONTRACT);
+    assert_eq!(restored.after_state["registry_contract"], OLD_REGISTRY);
     let persisted_resources = first
         .resources
         .iter()
@@ -13408,14 +13520,6 @@ fn declared_approval_grants_revocations_and_clears_are_decode_only() -> anyhow::
     let owner = CONTRACT.parse::<Address>()?;
     let operator = "0x0000000000000000000000000000000000000043".parse::<Address>()?;
     let zero = Address::ZERO;
-    let approval_for_all = [true, false].map(|approved| {
-        approvals::ApprovalForAll {
-            owner,
-            operator,
-            approved,
-        }
-        .encode_log_data()
-    });
     let approval = [operator, zero].map(|approved| {
         approvals::Approval {
             owner,
@@ -13434,20 +13538,6 @@ fn declared_approval_grants_revocations_and_clears_are_decode_only() -> anyhow::
         .encode_log_data()
     });
     let cases = [
-        (
-            "ens_v1_registry_l1",
-            "registry",
-            "ApprovalForAll",
-            "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)",
-            approval_for_all.as_slice(),
-        ),
-        (
-            "basenames_base_registry",
-            "registry",
-            "ApprovalForAll",
-            "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)",
-            approval_for_all.as_slice(),
-        ),
         (
             "ens_v1_registrar_l1",
             "registrar",
@@ -13509,6 +13599,58 @@ fn declared_approval_grants_revocations_and_clears_are_decode_only() -> anyhow::
             BatchOutput::default(),
             "{source_family} {name} must not mutate interpretation state"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn registry_approval_for_all_emits_account_permission_state() -> anyhow::Result<()> {
+    let owner = CONTRACT.parse::<Address>()?;
+    let operator = "0x0000000000000000000000000000000000000043".parse::<Address>()?;
+    for (manifest_id, source_family, namespace) in [
+        (111, "ens_v1_registry_l1", "ens"),
+        (112, "basenames_base_registry", "basenames"),
+    ] {
+        let logs = [true, false].map(|approved| {
+            raw(approvals::ApprovalForAll {
+                owner,
+                operator,
+                approved,
+            }
+            .encode_log_data())
+        });
+        let output = interpret_test_batch(BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest_with_events(
+                manifest_id,
+                namespace,
+                source_family,
+                &[(
+                    "ApprovalForAll",
+                    "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)",
+                    &["registry"],
+                    &[],
+                )],
+            )],
+            discovery_rules: Vec::new(),
+            admissions: vec![admission(manifest_id, "registry")],
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: logs.into_iter().collect(),
+        })?;
+        assert_eq!(output.normalized_events.len(), 2);
+        let grant = &output.normalized_events[0];
+        let revoke = &output.normalized_events[1];
+        assert_eq!(grant.event_kind, "AccountPermissionChanged");
+        assert_eq!(grant.derivation_kind, "standard_approval");
+        assert!(grant.logical_name_id.is_none() && grant.resource_id.is_none());
+        assert_eq!(
+            grant.after_state["effective_powers"],
+            json!(["registry_control"])
+        );
+        assert_eq!(revoke.before_state["approved"], json!(true));
+        assert_eq!(revoke.after_state["approved"], json!(false));
+        assert_eq!(revoke.after_state["effective_powers"], json!([]));
     }
     Ok(())
 }
@@ -17827,6 +17969,11 @@ fn prior_event(event: &NormalizedEvent) -> PriorEventInput {
         source_family: event.source_family.clone(),
         manifest_version: event.manifest_version,
         source_manifest_id: event.source_manifest_id,
+        emitting_address: event
+            .raw_fact_ref
+            .get("emitting_address")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
         state_scope: event
             .raw_fact_ref
             .get("state_scope")

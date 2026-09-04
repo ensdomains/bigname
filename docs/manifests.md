@@ -201,15 +201,23 @@ ABI entries use Alloy-parseable human-readable Solidity fragments, not handwritt
 - `notes` — optional reviewer-facing context.
 
 An [intake-only event](glossary.md#intake-only-event) may be declared for raw
-intake without promising normalized-event production by declaring an empty
-`normalized_events` list. This is not an
-unrestricted adapter-admission bypass. Supported intake-only events retain
-their declared ABI validation and produce no normalized events. Standard
-approval events are watched only at explicitly declared, role-eligible
+intake without promising a manifest-owned normalized-event mapping by declaring
+an empty `normalized_events` list. This is not an unrestricted
+adapter-admission bypass. [Standard approval](glossary.md#standard-approval-derivation) declarations must retain the empty
+list: their ABI decoding is declaration-backed, while any normalized output is
+an adapter-owned mapping versioned by the
+[interpreter content hash](glossary.md#interpreter-content-hash). The admitted
+ENSv1 and Basenames registry `ApprovalForAll` declarations map to
+`AccountPermissionChanged`; registrar, resolver, and NameWrapper approvals
+remain decoded with no normalized output. Standard approval events are watched
+only at explicitly declared, role-eligible
 contract addresses and their declared historical intervals; they are not added
 to generic resolver [all-emitter watches](glossary.md#watch-plan--watched-tuple).
-Raw capture does not imply permission
-interpretation or complete permission coverage.
+The admitted Sepolia legacy registry artifact declares that exact
+`ApprovalForAll(owner, operator, approved)` event.
+(upstream: .refs/ens_v1/deployments/sepolia/LegacyENSRegistry.json:L2-L32 @ ens_v1@91c966f)
+Raw capture does not by itself imply permission interpretation or complete
+permission coverage.
 
 ABI fragments should cite upstream in nearby manifest comments or in the public doc section that admits the source family. If an adapter still has an in-code selector or `sol!` definition for a manifest-declared fragment, that code is a compatibility bridge until the adapter consumes the manifest ABI directly.
 
@@ -670,11 +678,13 @@ reclassify an effect: a `ParentUpdated`, role, registration, renewal, topology,
 or normalized-event output that `ens_v2_registry_l1` derives from the ordinary
 edge and raw event without ENSv1→ENSv2 migration correlation remains ordinary and
 byte-for-byte unchanged. Only the additional meaning that depends on the
-correlation follows candidate-to-activated complete-group visibility. The
-exact-name Project read has one narrow exception: after
+correlation follows candidate-to-activated complete-group visibility. Beyond
+that rebuild-scope use, Project has two narrow semantic reads: after
 an activated parent boundary, the exact-name authority selector may require the
 readable ordinary edge and its canonical `migration_registry_creation`
-association to classify the emitter of a positive child registration. Neither
+association to classify a positive child-registration emitter, while child
+reachability may require them to prove the current parent subregistry is the
+migration-created `WrapperRegistry`. Neither
 row is authority proof by itself, and no product route consumes either row
 directly. A later
 `SubregistryUpdated` remains the bidirectional parent-child topology edge and
@@ -760,7 +770,7 @@ and there is nothing for correlation to key on.
 
 Diagnostic correlation output does not mean zero effect on Project. Admitting a child
 registry writes a `migration_registry_creation` discovery association, and
-Project's rebuild scope reads that table without a `consumer_visibility` filter,
+Project's rebuild scope and parent-reachability selector read that table without a `consumer_visibility` filter,
 so names registered into a newly-admitted child registry enter delete-and-rebuild
 candidacy. What those rebuilds publish is unchanged: the child-registration
 authority proof also requires an activated parent boundary. Complete parent and
@@ -776,8 +786,8 @@ correlation kind. Every correlation-dependent downstream effect keeps that
 group's `migration_correlation_ids` and `consumer_visibility` even though it
 interprets under `ens_v2_registry_l1`. Candidate effects do not update ordinary
 identity, topology, or consumer state; the ordinary indexability edge is the
-explicit slice-1 exception because the watch plan consumes it. Slice 2C's
-authority-selector read above does not expose the edge or association as a
+explicit slice-1 exception because the watch plan consumes it. The authority-selector
+and parent-reachability reads above do not expose the edge or association as a
 product row.
 
 Independent admission takes precedence. An existing-family normalized event

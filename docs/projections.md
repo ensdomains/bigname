@@ -227,13 +227,9 @@ outcomes, or durable traces.
 - The independently admitted `registry_announcement` edge for an ENSv1→ENSv2
   migration-created registry remains ordinary because it drives the watch plan,
   not a product projection. Project ignores every candidate downstream effect.
-  Its authority selector is the sole exception for the corresponding
-  `migration_discovery_associations` row: after an activated parent transition,
-  it may use that row together with the readable ordinary edge and the parent
-  topology current at the registration/proof position to classify a positive
-  ENSv2 child-registration [authority proof](glossary.md#authority-proof), as
-  specified by the storage contract. The association cannot establish authority
-  by itself.
+  After an activated parent transition, authority selection may classify a positive
+  child-registration [authority proof](glossary.md#authority-proof), and child reachability may prove the current subregistry is its migration-created `WrapperRegistry`.
+  Both require the readable canonical association, active ordinary announcement, and matching topology; reachability additionally requires non-empty association evidence contained in the parent boundary. The association proves neither result by itself.
 - Coverage and support are explicit. They are never inferred from row presence
   or a historical ingest range.
 - Verified provider answers are request-scoped lookup output, not projection
@@ -247,6 +243,7 @@ outcomes, or durable traces.
 | `address_names_current` | `(address, logical_name_id, relation)` | address-to-names and reverse lookup |
 | `children_current` | parent/child identity plus class | direct and classified child collections |
 | `permissions_current` | resource, subject, and scope | resource permissions and role summaries |
+| `account_permission_state_current` | (`chain_id`, `authority_kind`, `authority_contract`, `owner`, `subject`, `relation_kind`) | no serving reader yet; a follow-up change adds storage and API readers |
 | `permissions_current_resource_summary` | `resource_id` | permission support and authority summary |
 | `resolver_current` | chain and resolver address | resolver overview |
 | `record_inventory_current` | resource plus record boundary key | indexed record inventory and values |
@@ -298,6 +295,23 @@ wrapper fuses are projected as zero, matching NameWrapper `getData`; an expired
 emancipated or locked position also contributes no lifecycle value or effective
 holder powers because that read clears its owner.[^v1-wrapper-expired]
 
+Incremental Project redo maps wrapper resources to affected children after it
+has retained resources from projection rows whose cited events disappeared.
+That second mapping reads only the resource IDs already selected for the batch;
+it does not scan all wrapper resources. The ordering is required when a child
+has no current child or exact-name row and its historical wrapper resource is
+not the resource on its active binding: retracting the latest disqualifying
+`PermissionScopeChanged` or `ExpiryChanged` event must still rebuild the child
+from the surviving wrapper history.
+
+A pre-existing owner-retraction gap remains: if an owner-zeroing ENSv1 or Basenames registry
+`AuthorityTransferred` event hides a child that has no current child or exact-name row, later retracting that
+event does not restore the child incrementally because no current child or
+exact-name row cites it. A fresh Project rebuild or the next full source re-walk
+at a [re-derivation boundary](glossary.md#re-derivation-boundary) restores the
+child; [#835](https://github.com/ensdomains/bigname/issues/835) tracks the
+missing bounded replay seed.
+
 For the ENSv2 post-audit Sepolia deployment profile, declared exact-name rows
 come from the admitted registry and registrar families. Out-of-profile resolver,
 reverse, primary-name, mainnet, and execution behavior does not become exact-name
@@ -315,6 +329,22 @@ is `registrant`, `token_holder`, and `effective_controller`. Surface is the
 default unit; resource deduplication is explicit.
 
 `children_current` stores direct and classified child relations. For registry
+events from ENSv1, Project first filters the relation by the parent's
+ENSv1→ENSv2 migration path: `unwrapped`, `unlocked_wrapped`, and
+`emancipated_child` parents retain no ENSv1 children, while `locked_wrapped` and
+`locked_child` parents retain only a [migratable child](glossary.md#migratable-child)
+through their [migration registry](glossary.md#migration-registry-wrapperregistry).
+An unknown activated path is a Project data-integrity failure. Child authority
+selection then chooses among the surviving arms; cross-era recency never chooses
+the arm. A surviving locked-path row cites the matched association's stable
+logical-edge and correlation identities plus its source manifest; its row-level
+manifest version therefore accounts for the association that authorized the
+migration registry. Its `normalized_event_ids`, `event_identities`,
+`raw_fact_refs`, and `manifest_versions` arrays are independent evidence sets,
+not positionally aligned tuples; an input contributes only the identifiers it
+actually owns.
+Reachability is per parent relation, not transitive: hiding a parent-to-child relation does not itself hide that child's children.
+For registry
 events that expose only a labelhash, Project composes the child name from a
 verified label preimage when one exists and its normalization verdict is true,
 and leaves the name columns null when none does — the labelhash and child node
@@ -402,8 +432,30 @@ chains retain independent publication decisions.
 effective powers, provenance, and chain positions. The companion resource
 summary distinguishes authoritative empty enumeration from unsupported or
 partial permission support. Current non-wrapper summaries are partial because
-standard registry operators, registrar token and account approvals, resolver
-operators and delegates, and ENSv2 registry operators are not indexed.
+registrar token and account approvals, resolver operators and delegates, and
+ENSv2 registry operators are not indexed.
+
+`account_permission_state_current` separately folds `AccountPermissionChanged`
+events from the [`standard_approval`
+derivation](glossary.md#standard-approval-derivation) by chain, authority kind, authority contract,
+owner, subject, and relation. It retains both active and revoked latest states;
+`approved=true` carries `registry_control`, while `approved=false` carries no
+effective powers. Project never fans this account mapping out into per-name
+rows. After constructing `name_current`, Project carries the latest
+[registry-owner binding](glossary.md#registry-owner-binding) onto the resource
+selected for an ENSv1 or Basenames name. Registry-family owner observations are
+first ranked by logical name or emitting resource to suppress detached history,
+then mapped onto that selected resource and ranked again by output resource.
+The separate resource that retains registry observations is bypassed by that
+mapping. When `name_current` has no eligible selected resource, or the event has
+no logical name, the observation stays on its emitting resource. This remapping
+never crosses onto an ENSv2 resource. A latest zero owner or an admitted registry-
+or registrar-family `SurfaceUnbound` transition clears the binding. A registrar-
+family `SurfaceBound` carries the registry owner and emitter-derived registry
+contract remembered at transition time, not the registrar token owner, so the new
+current authority receives the binding without attribution to the registrar
+emitter; wrapper-family authority transitions remain outside this rule.
+
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
@@ -620,12 +672,14 @@ Canonicality change, manifest change, or interpreted-content replacement stamps
 the affected Project range. Project rebuilds the affected scope in dependency
 order and publishes one coherent generation. There is no worker invalidation
 queue, apply cursor, replay-version fence, general-purpose durable staging,
-replay marker, dead-letter queue, or cache invalidation side effect. Two narrow
+replay marker, dead-letter queue, or cache invalidation side effect. Three narrow
 handoffs preserve input that would otherwise disappear before Project can
 select its redo scope: `project_redo_resolver_evidence` retains resolver and
 permission-resource references, while `project_redo_expiry_roots` retains
 logical names and permission resources from state-derived ENSv2 path-expiry
-releases. Neither table is serving data. Project consumes a row only when its
+releases. `project_redo_child_registration_history` retains affected child and
+registry identifiers for removed migration-registry entry history. None is
+serving data. Project consumes a row only when its
 publication range covers the recorded block; an operator redo ending below an
 already recorded Project head can therefore leave later rows for a covering
 redo or full rebuild.
@@ -652,10 +706,11 @@ new truth family.
 ## Ownership
 
 - Interpret and adapters emit identity, discovery, and normalized events.
-  Interpret also preserves the pre-delete resolver references and state-derived
-  ENSv2 path-expiry logical names or permission resources needed for a covering
-  Project redo or normal catch-up; these are replay coordination, not projection
-  writes.
+  Interpret also preserves pre-delete resolver references, ENSv2 path-expiry
+  names or resources, and migration-registry child names that seed the covering
+  Redo-mode Project publication. Normal-mode catch-up currently consumes these
+  rows without seeding from them; #828 tracks that asymmetry. These rows are
+  replay coordination, not projection writes.
 - Project reads canonical interpreted input and owns every projection write.
 - The API reads projections and request-scoped lookup output.
 - Storage exposes typed reads and phase publication boundaries; it does not

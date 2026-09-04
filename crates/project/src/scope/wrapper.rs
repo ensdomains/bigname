@@ -98,7 +98,7 @@ pub(super) async fn include_time_boundaries(
     .map_err(|error| {
         ProjectError::database("failed to scope wrapper timestamp transitions", error)
     })?;
-    include_effect_resources(transaction).await?;
+    include_effect_resources(transaction, chain_id, target.number).await?;
     Ok(())
 }
 
@@ -142,11 +142,15 @@ async fn include_all(
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to scope wrapper redo", error))?;
-    include_effect_resources(transaction).await?;
+    include_effect_resources(transaction, chain_id, target.number).await?;
     Ok(())
 }
 
-async fn include_effect_resources(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+pub(super) async fn include_effect_resources(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target_block: i64,
+) -> Result<()> {
     sqlx::query(
         "INSERT INTO project_scope_resources
          SELECT resource_id FROM project_scope_permission_effect_resources
@@ -157,6 +161,30 @@ async fn include_effect_resources(transaction: &mut Transaction<'_, Postgres>) -
     .map_err(|error| {
         ProjectError::database("failed to include permission-effect resources", error)
     })?;
+    sqlx::query(
+        r#"
+        INSERT INTO project_scope_children
+        SELECT DISTINCT event.logical_name_id
+        FROM project_scope_permission_effect_resources scope
+        JOIN normalized_events event USING (resource_id)
+        JOIN chain_lineage lineage
+          ON lineage.chain_id = event.chain_id
+         AND lineage.block_hash = event.block_hash
+         AND lineage.block_number = event.block_number
+        WHERE event.chain_id = $1
+          AND event.block_number <= $2
+          AND event.source_family = 'ens_v1_wrapper_l1'
+          AND event.logical_name_id IS NOT NULL
+          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+          AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(chain_id)
+    .bind(target_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to include wrapper child scope", error))?;
     Ok(())
 }
 

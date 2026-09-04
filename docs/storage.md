@@ -162,6 +162,7 @@ mandatory full Interpret and Project redos.
 | `discovery_watch_admissions` | Interpret | The last acknowledged [discovery-watch admission snapshot](glossary.md#discovery-watch-admission-snapshot) for each active manifest-authority fingerprint and lineage-orphaning epoch. This is replay coordination state, never fetched-fact evidence, redo authority, projection, or serving data. |
 | `project_redo_resolver_evidence` | Interpret, then Project consumption | Pre-delete resolver and permission-resource references preserved across Interpret retries for one redo range; redo coordination only, never serving data. |
 | `project_redo_expiry_roots` | Interpret, then Project consumption | Logical names or permission resources from state-derived ENSv2 path-expiry releases preserved before Interpret deletes a redo range; bounded projection-redo coordination only, never serving data. |
+| `project_redo_child_registration_history` | Interpret, then Project consumption | Child and registry identifiers from entry-creating events in an ENSv1→ENSv2 [migration `WrapperRegistry`](glossary.md#migration-registry-wrapperregistry), preserved before Interpret deletes a redo range; bounded child-scope coordination only, never serving data. |
 | `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding; never identity, normalized-event, projection, or serving data. |
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or [discovery edges](glossary.md#discovery-graph--discovery-edge). The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
@@ -363,14 +364,17 @@ intake carveout. A migration-created registry's independently admitted
 announcement position, because it records indexability only and the watch plan
 traverses it. Interpret attaches the `migration_registry_creation` relationship
 in `migration_discovery_associations`, keyed to that ordinary edge;
-the association does not change the edge's columns or active range. Slice 2C's
-authority selector is the sole Project exception: after an activated transition
-has proved the parent migrated, it may use the readable canonical
-`migration_registry_creation` association to classify the independently
-admitted registry that emitted a positive child registration. The association
-remains diagnostic whether its [complete group](glossary.md#complete-group) is candidate or activated; it
-neither establishes child authority by itself nor activates any
-correlation-dependent effect. Correlation-dependent parent, topology, identity,
+the association does not change the edge's columns or active range. After an
+activated parent transition, Project may use the readable canonical association
+and active ordinary announcement to classify a positive child-registration
+emitter or prove the current parent subregistry is the migration-created
+`WrapperRegistry`. Candidate or activated, the association establishes neither
+result by itself and activates no correlation-dependent effect. Parent
+reachability additionally requires the association's evidence-reference array
+to be non-empty, every reference to be a non-empty object, and the whole array
+to be contained in the activated boundary; an empty array, non-object reference,
+or empty-object reference cannot authorize an ENSv1 child relation under a locked parent.
+Correlation-dependent parent, topology, identity,
 role, registration, renewal, and normalized-event rows from the watched registry
 activate only when every group they reference is complete. Refused and incomplete
 rows remain candidate. Association with the migration group is not
@@ -1000,12 +1004,14 @@ Project is the only projection writer. It derives the affected scope from
 canonical interpreted input, stages rows in connection-local tables, and
 publishes the affected projection set transactionally. It has no legacy claim
 queue, general-purpose durable replay stage tables, apply cursors, dead-letter
-queue, database session version stamp, or worker heartbeat. The two narrow replay
+queue, database session version stamp, or worker heartbeat. The three narrow replay
 handoffs contain pre-delete input rather than staged projection rows:
 `project_redo_resolver_evidence` retains resolver and permission-resource
 references, and `project_redo_expiry_roots` retains the available logical-name
 or permission-resource identifiers whose deleted path-expiry releases must seed
-a bounded rebuild.
+a bounded rebuild. `project_redo_child_registration_history` retains affected
+child and registry identifiers for entry-creating events in a correlated
+migration `WrapperRegistry`, so removing history can re-evaluate a hidden child.
 Project consumes a row when a publication covers its recorded block. The normal
 Interpret-to-Project pipeline does so immediately; if an operator runs an
 Interpret redo whose requested Project endpoint is below the already recorded
@@ -1054,12 +1060,13 @@ run does not affect its scope. Serving admission therefore accepts targets at
 or before the selected head rather than requiring every row to equal the latest
 Project block.
 
-The projection families used by the API include:
+Published projection families include:
 
 - `name_current` and identity companions;
 - `address_names_current`;
 - `children_current`;
-- `permissions_current` and its per-resource summary;
+- `permissions_current`, `account_permission_state_current`, and the
+  per-resource permission summary;
 - `resolver_current`;
 - `record_inventory_current`; and
 - `primary_names_current`.
@@ -1072,6 +1079,16 @@ unchanged; Project
 clears only the rebuildable current summary when the served projection timestamp
 passes wrapper expiry. Permission reads join this current summary by
 `resource_id` rather than persisting a second copy in `permissions_current`.
+Registry-wide approvals use the same rule: Project owns the replayable
+[account permission state](glossary.md#account-permission-state) and the
+[registry-owner binding](glossary.md#registry-owner-binding). Revoked account
+rows remain in the current-state table so losing-fork grants and losing-fork
+revocations both rebuild from surviving canonical history. Interpret re-walks
+retained raw facts through the [`standard_approval`
+derivation](glossary.md#standard-approval-derivation); Project then rebuilds both state legs without a provider
+refetch. App-facing synthesis from those two state legs is deferred to the
+follow-up serving change.
+
 For ENSv2, a latest state-derived `RegistryPathExpired` release removes that resource's effective
 permission rows without removing its partial-coverage summary. A later
 `RegistrationRenewed` marked as a revival readmits retained grants when the same
@@ -1090,17 +1107,32 @@ ens_v2@a971bd64)
 Coverage wording is not an exhaustiveness claim. `support_status` and
 `unsupported_reason` carry admission separately from projection completeness.
 `operator_approval_surfaces_not_ingested` maps to partial, best-effort
-permission coverage; `ensv1_wrapper_holder_permissions_not_projected` remains a
-separate unsupported class. Readers reject inconsistent typed combinations and
+permission coverage. This interpretation-and-projection change retains that
+broad reason for every authority class; the follow-up serving change owns any
+request-relative narrowing based on a proven registry-owner binding.
+`ensv1_wrapper_holder_permissions_not_projected`
+remains a separate unsupported class. Readers reject inconsistent typed combinations and
 map an unrecognized persisted unsupported reason to unknown partial product
 coverage rather than treating it as wrapper support or returning an internal
-server error. The scoped ENSv1 and Basenames approval declarations widen raw
-intake without changing normalized-event semantics. A retained database must
-complete the manifest-sync-required Ingest redo for the widened address/topic
-intervals before the shared interpreter content-hash rotation permits the
-planned full-history Interpret and Project walk. A fresh deployment instead
-loads the final manifests before its block-zero historical walk, so the new raw
-facts arrive in that initial pass. The ENSv2 expiry Project fold also rotates
+server error. The adapter-owned mapping requires a full-history Interpret
+re-walk and Project rebuild under the rotated interpreter content hash; Ingest
+does not rerun only when retained raw facts cover the registry
+`ApprovalForAll` range required by the current [compiled watch
+plan](glossary.md#compiled-watch-plan). That range was declared by commit
+`b22bccee` on 2026-08-31 through
+[`ens_v1_registry_l1` manifest version 3](../manifests/mainnet/ethereum/ens/ens_v1_registry_l1/v3.toml)
+on Ethereum Mainnet,
+[`ens_v1_registry_l1` manifest version 1](../manifests/sepolia/ethereum/ens/ens_v1_registry_l1/v1.toml)
+on Sepolia, and
+[`basenames_base_registry` manifest version 2](../manifests/mainnet/base/basenames/basenames_base_registry/v2.toml)
+on Base Mainnet. A retained database whose Ingest predates that declaration must
+have completed the retained-range Ingest redo; otherwise, the [re-derivation
+boundary](glossary.md#re-derivation-boundary) must start with Ingest for that
+range before Interpret and Project. A
+from-zero Ingest under the current compiled watch plan satisfies the
+precondition directly.
+
+The ENSv2 expiry Project fold also rotates
 the shared interpreter content hash without changing raw facts or
 normalized-event semantics; the expiry interpretation slice must not be served
 before its paired Project fold is deployed and that coherent replay and rebuild

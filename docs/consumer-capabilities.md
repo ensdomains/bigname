@@ -159,10 +159,12 @@ binding transition or change an authority epoch.
 
 Slice 3B selects direct-subname ownership per child, replacing the previous
 child recency tie-break rather than layering authority on top of it: recency now
-orders only the current relation within the one selected arm. A child that has
-not migrated can remain ENSv1-authoritative below a migrated parent and publishes
-its ENSv1 parent-child relation on its own authority, not by inheriting the
-parent's. Once that child migrates or otherwise obtains a current ENSv2
+orders only the current relation within the one selected arm. Parent reachability
+first removes an ENSv1 relation below a parent on the `unwrapped`,
+`unlocked_wrapped`, or `emancipated_child` path. A parent on the
+`locked_wrapped` or `locked_child` path retains it only for a
+[migratable child](glossary.md#migratable-child). Once that child migrates or
+otherwise obtains a current ENSv2
 registration, the published relation is the ENSv2 one and the retained ENSv1
 relation is residue. A later release leaves the child unregistered on the ENSv2
 side rather than restoring the retained ENSv1 relation. An ordinary Mainnet
@@ -170,7 +172,7 @@ pair whose two arms disagree with no authority proof to separate them is omitted
 as unsupported
 rather than resolved by event recency; it is neither an ambiguous product row nor
 a publication failure. A proven Sepolia boundary, or a current
-child registration in the admitted migration registry below a proven migrated
+child registration in the admitted [migration registry](glossary.md#migration-registry-wrapperregistry) below a proven migrated
 parent, follows the same per-name or per-child selection rule. Sepolia overlap
 without either proof is expected because the runtime admits evidence from both
 protocol eras without establishing per-name authority between them. It remains
@@ -196,15 +198,21 @@ Project transaction rolls back, the phase runner persists that evidence in the
 append-only `project_generation_failures` diagnostic audit described in
 [`storage.md`](storage.md#projection-publication). Slice 2E introduces that audit
 path for the exact-name invariant; slice 3B reuses it for the child invariant,
-whose condition is narrower. Because neither ENSv1→ENSv2 migration branch
-retracts the ENSv1 registry entry, both arms stating a relation for one pair is
-expected residue rather than an anomaly: the child assertion fails a
-[projection generation](glossary.md#projection-generation) with failure kind
-`dual_current_child_authority` only when a child on either configured ENS
-deployment profile whose authority proof
-kind is `migration_authority_transition` or `positive_v2_child_registration`
-has an ENSv1 parent-child relation asserted after that child's authority epoch
-started. An ordinary Sepolia overlap without a proof remains refused rather
+whose condition is narrower. Because an ENSv1 relation can survive below an
+unmigrated parent or a locked path, both arms stating a relation for one pair
+can be expected residue rather than an anomaly. The child assertion runs after
+parent reachability and fails a
+  [projection generation](glossary.md#projection-generation) with failure kind
+`dual_current_child_authority` only when a surviving child on either configured
+ENS deployment profile (Mainnet or Sepolia) with an
+activated `migration_authority_transition` has an ENSv1 parent-child relation
+asserted after that child's authority epoch started. A positive ENSv2 child
+registration is permanent entry history in a locked parent's migration registry
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64), so parent reachability filters that ENSv1 relation before the
+assertion even though the defensive integrity query recognizes that proof kind.
+Relations filtered by an
+unwrapped, unlocked-wrapped, or emancipated-child parent cannot trigger the
+assertion. An ordinary Sepolia overlap without a proof remains refused rather
 than becoming a generation failure.
 
 ## ENSv1→ENSv2 delivery slices
@@ -237,8 +245,8 @@ statements that complete migration groups remain candidate-only.
 | 2D. Authority fanout across product collections | Address-name membership and role summaries, name-filtered permission selection, search membership, primary-name forward verification, and address-derived product-history anchors all consume the exact-name authority slice 2C selects ([current-authority fanout](glossary.md#current-authority-fanout)); no collection performs an ENSv1-versus-ENSv2 ranking of its own. Explicit registration or resource reads remain audit views, and per-result exact-name classification in batch lookup stays 2C-owned. A collection that carries no row-local unsupported vocabulary omits a name whose exact-name authority is unsupported instead of inventing a row-local status. | 5 |
 | 2E. Post-rollback generation-failure audit | Enforce the reconciled dual-current invariant for every ENS deployment profile (Mainnet and Sepolia) and persist the rolled-back generation failure in a separate append-only diagnostic transaction. | To be scoped |
 | 3A. Direct-child correlation | Derive the deferred child-migration shapes that reach no migration controller, where the already-migrated parent's own [migration registry](glossary.md#migration-registry-wrapperregistry) registers the child into itself through the self-call that definition cites; admit the registry a locked child receives from its parent registry so admitted depth is unbounded; derive the child's ENSv1 predecessor from the parent registry's own migration evidence and the registered labelhash rather than inheriting the `.eth` second-level rule, under the separate `wrapper_backed_child_control` anchor defined at [child migration boundary](glossary.md#child-migration-boundary), selected against the child's ENSv1 cleanup rather than the registration; admit both cleanup shapes that definition cites — the `locked_child` path, whose wrapper token is parked in the Graveyard, and the `emancipated_child` path, whose node is unwrapped into it — each only with that ENSv1 predecessor cleanup present, earlier in the registration's own transaction; and reject the clobbered registration, the unmigrated child, factory-only evidence, incomplete parent discovery, and any self-claim lacking ENSv1 predecessor cleanup as non-boundaries, `MigrationHelper` participation being unobservable for the reason cited there and so never a correlation key at all. Correlation reuses `authority_transition`; every child boundary and effect is candidate-only, so no child state, projection, or product row changes — though an admitted child registry does widen Project's delete-and-rebuild scope — and activating a child transition remains an explicit refusal until slice 3B. | 4 |
-| 3B. Children publication invariant | Stage the parent-child relation each authority arm states into `project_child_candidates` and publish the arm the child's own staged authority selects, so recency orders only the current relation inside that one arm and never picks the arm: an unmigrated ENSv1 child keeps its ENSv1 relation below a migrated parent, a child with an activated ENSv1→ENSv2 migration boundary or a current positive ENSv2 registration publishes its ENSv2 relation over retained ENSv1 residue, a released ENSv2 child publishes nothing and does not fall back, and a pair whose arms disagree with no authority proof is omitted as unsupported rather than ranked. Add the ordered child assertion that fails an ENS [projection generation](glossary.md#projection-generation) on either deployment profile (Mainnet or Sepolia) with failure kind `dual_current_child_authority` only when a child holding `migration_authority_transition` or `positive_v2_child_registration` authority has an ENSv1 parent-child relation asserted after its authority epoch started, write the child transition relative to the ENSv1 cleanup, and scope the redo reopen to the authority arm. Activating a complete ENSv1→ENSv2 migration group remains the separate follow-on. | 4 (children projection builder, Project integrity assertion, child transition writer, redo reopen) plus one reviewed schema-migration file for the failure-kind vocabulary |
-| Final activation. Production [complete groups](glossary.md#complete-group) | Run the already-proven activation function after all batch correlation paths finish; activate the authority paths that pass predecessor resolution and complete non-boundary normalized rows while retaining candidate-only diagnostic effect records; keep registrar-token `unwrapped` groups with the controller's ENSv1 registry cleanup blocked on issue #822 until their production writer path is repaired; preserve named refusals, ordinary events, exact predecessor selection, and Sepolia's refusal of ordinary no-proof overlap; rotate the [interpreter content hash](glossary.md#interpreter-content-hash) and require the full Interpret→Project walk before publication. Coverage is enumerated in [`migration-activation-coverage.md`](migration-activation-coverage.md). | 4 adapter production files, one of which deletes the superseded helper; no schema, manifest, API, or Project vocabulary change |
+| 3B. Children publication invariant | Stage the parent-child relation each authority arm states, first filtering ENSv1 relations by the parent's activated ENSv1→ENSv2 migration path: unwrapped, unlocked-wrapped, and emancipated-child parents retain none, while locked-wrapped and locked-child parents retain only [migratable children](glossary.md#migratable-child). Then publish the arm the child's own staged authority selects, so recency orders only within that arm; a released ENSv2 child publishes nothing and does not fall back, and a pair whose surviving arms disagree with no authority proof is omitted as unsupported rather than ranked. The ordered child assertion fails an ENS [projection generation](glossary.md#projection-generation) on either deployment profile (Mainnet or Sepolia) with `dual_current_child_authority` only when a post-epoch ENSv1 relation survives that parent filter; positive registration in a locked parent's migration registry is itself disqualifying entry history, so it is filtered before the assertion. | 4 (children projection builder, Project integrity assertion, child transition writer, redo reopen) plus one reviewed schema-migration file for the failure-kind vocabulary |
+| Final activation. Production [complete groups](glossary.md#complete-group) | Run the already-proven activation function after all batch correlation paths finish; activate all five authority paths that pass predecessor resolution and complete non-boundary normalized rows while retaining candidate-only diagnostic effect records; keep registrar-token `unwrapped` groups with the controller's ENSv1 registry cleanup blocked on issue #822 until their production writer path is repaired; preserve named refusals, ordinary events, exact predecessor selection, and Sepolia's refusal of ordinary no-proof overlap; rotate the [interpreter content hash](glossary.md#interpreter-content-hash) and require the full Interpret→Project walk before publication. Coverage is enumerated in [`migration-activation-coverage.md`](migration-activation-coverage.md). | 4 adapter production files, one of which deletes the superseded helper; no schema, manifest, API, or Project vocabulary change |
 
 Issues [#348](https://github.com/ensdomains/bigname/issues/348) and
 [#529](https://github.com/ensdomains/bigname/issues/529) ship together at one
@@ -448,8 +456,123 @@ domains(
 ): [Domain!]!
 ```
 
-`account`, `accounts`, `resolver`, and `resolvers` are the named second-PR
-boundary of `#670/T2`; this slice does not add them through adjacent root work.
+The generated-style Account and Resolver roots have these signatures:
+
+```graphql
+account(
+  id: ID!
+  block: Block_height
+  subgraphError: _SubgraphErrorPolicy_! = deny
+): Account
+
+accounts(
+  skip: Int = 0
+  first: Int = 100
+  orderBy: Account_orderBy
+  orderDirection: OrderDirection
+  where: Account_filter
+  block: Block_height
+  subgraphError: _SubgraphErrorPolicy_! = deny
+): [Account!]!
+
+resolver(
+  id: ID!
+  block: Block_height
+  subgraphError: _SubgraphErrorPolicy_! = deny
+): Resolver
+
+resolvers(
+  skip: Int = 0
+  first: Int = 100
+  orderBy: Resolver_orderBy
+  orderDirection: OrderDirection
+  where: Resolver_filter
+  block: Block_height
+  subgraphError: _SubgraphErrorPolicy_! = deny
+): [Resolver!]!
+```
+
+`Account.id: ID!` is the lowercase address. `Account_filter` accepts exactly
+`id: ID` and `id_in: [ID!]`; `Account_orderBy` accepts only `id`. The entity
+source is the distinct set of current registrant, token-holder, and effective-
+controller addresses in `address_names_current`. An address with no current
+membership relation is absent, including a current address-record target that
+is not also a registrant, token holder, or effective controller. `#670/T4` owns
+historical Account persistence and `#670/T5` owns serving resolved-address
+Account membership. A former owner or registrant is therefore absent even
+though the ENS subgraph retains the Account created by an earlier ownership
+event; `#670/T4` owns that persistence
+gap (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L89-L92 @ ens_subgraph@723f1b6)
+(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L146-L151 @ ens_subgraph@723f1b6)
+(upstream: .refs/ens_subgraph/src/ethRegistrar.ts:L43-L56 @ ens_subgraph@723f1b6)
+(upstream: .refs/ens_subgraph/src/ethRegistrar.ts:L163-L174 @ ens_subgraph@723f1b6).
+Account reverse fields remain deferred to `#670/T4`.
+`Domain.owner.id` can also serve the zero address while `account(id:)` returns
+null because the current address-name projection drops the zero address; this
+is the same zero-owner residual owned by `#670/T5` as the Domain owner filter.
+
+`Resolver.id: ID!` is
+`<lowercase-resolver-address>-<lowercase-domain-namehash>`, and
+`Resolver.address: Bytes!` continues to serialize as the same lowercase
+hexadecimal JSON string. `Resolver_filter` accepts exactly `id: ID`,
+`address: Bytes`, and `domain: String`; `Resolver_orderBy` accepts only `id`.
+One entity comes from each current resolver-address/namehash binding in
+`name_current`, so two names using one resolver address remain distinct. For
+rows produced by the normal projection builder, nested `Domain.resolver` and
+the Resolver roots form the same identity. The roots additionally reject zero-
+address and off-snapshot-chain bindings if out-of-builder data contains them.
+Changing a name's resolver removes the prior composite ID from local reads,
+although the ENS subgraph retains the prior Resolver entity; current Resolver
+materialization remains `#670/T6` work and event history remains `#670/T9`
+(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L167-L201 @ ens_subgraph@723f1b6)
+(upstream: .refs/ens_subgraph/src/resolver.ts:L233-L248 @ ens_subgraph@723f1b6).
+`Resolver.addr`, `Resolver.coinTypes`, `Resolver.events`, and `Resolver.domain`
+remain deferred to `#670/T6`. `Resolver.contentHash` remains the existing local
+`String` divergence under its existing `#670/T2` disposition rather than
+changing to upstream `Bytes` in this slice.
+
+Account point/filter IDs, composite Resolver point/filter IDs, and Resolver
+domain-namehash filters accept uppercase hexadecimal input and normalize it to
+the lowercase value served on the wire, a local widening over ordinary Graph
+Node string comparison (upstream: .refs/graph_node/graphql/src/store/prefetch.rs:L726-L729 @
+graph_node@aefe1737) (upstream: .refs/graph_node/graph/src/data/store/mod.rs:L357-L379 @
+graph_node@aefe1737) (upstream: .refs/graph_node/graphql/src/store/query.rs:L332-L334 @
+graph_node@aefe1737). `Resolver_filter.address` uses `Bytes`: uppercase digits
+normalize in both systems, while bigname requires the `0x` prefix that Graph
+Node also permits clients to omit (upstream:
+.refs/graph_node/graph/src/data/store/scalar/bytes.rs:L41-L52 @ graph_node@aefe1737).
+
+All Account and Resolver filter members combine with logical AND, and an empty
+`Account_filter.id_in` matches no rows. Filtering, distinctness, ordering, and
+paging execute in PostgreSQL. Omitted ordering is `id` ascending. Account IDs
+use lexical lowercase-address order. Resolver SQL orders by the exact indexed
+lowercase-address expression and then `logical_name_id`. The interpreter mints
+that key as `namespace:namehash`, so within the filtered namespace this is
+identical to address/namehash composite-ID order. Admitted addresses and
+namehashes are fixed-width lowercase hexadecimal text, whose order is the same
+under the test database's `en_US.utf8` collation and PostgreSQL `COLLATE "C"`.
+The acceptance test proves the served order directly without wrapping the
+indexed expression in another collation. An explicit-collation index would be
+schema work outside this API-only change.
+Pagination uses the Domain bounds: omitted `first`
+is `100`, positive `first` is capped at `200`, non-positive `first` returns an
+empty list after head validation, negative `skip` becomes zero, and positive
+`skip` is capped at `1_000_000`.
+
+The four roots inherit the Domain roots' current-snapshot-only block contract.
+Absent blocks and constraints satisfied by the served head are accepted;
+historical execution is not implemented. A singular refusal leaves its nullable
+field null with a path-local error, while a plural refusal propagates the error
+through its non-null root and makes `data` null.
+Absent-request-head behavior remains unchanged and is owned by `#743`.
+
+The composite Resolver ID is an intended wire change for every existing
+`Domain.resolver { id }` selection. The [locally committed Manager fixture](../apps/api/src/tests/fixtures/manager-graphql/README.md),
+copied from Manager commit `759860f5acc62ea287b0feefa23c0d17aeb862a9`, selects none of the four new
+roots, but its Resolver fragment selects both `id` and `address`. The Manager
+Domain response fixtures therefore receive the composite ID while the address
+JSON remains unchanged.
+
 `Domain.id` is `ID!` and remains a JSON string. `domain(id:)` also retains a
 local runtime extension that accepts an ENS name string. A canonical `0x` plus
 64-hex input attempts namehash lookup before the name fallback, preventing a

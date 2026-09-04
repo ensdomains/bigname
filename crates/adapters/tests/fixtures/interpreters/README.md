@@ -1,6 +1,6 @@
 # Interpreter fixtures
 
-`raw-events.json` contains 19 bounded raw-log cases. Each case runs in a new
+`raw-events.json` contains 20 bounded raw-log cases. Each case runs in a new
 migrated database so its block, transaction, and log positions remain
 unchanged. `expected-outputs.json` records every
 [normalized event](../../../../../docs/glossary.md) and every row in the
@@ -131,6 +131,13 @@ The fixture metadata carries the full pinned upstream citations. The harness
 also asserts the required event kinds, the renewal's non-empty before-state,
 the orphaned and restored reorg outputs, and the ordered wrapper transitions
 before it permits golden output to be refreshed.
+
+The registry-operator addition exercises a Sepolia ENSv1 `registry_old`
+`ApprovalForAll` log and pins its resource-independent
+`AccountPermissionChanged` output, account state key, and `standard_approval`
+writer path.
+(upstream: .refs/ens_v1/contracts/registry/ENS.sol:L17-L22 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
 
 Validate the byte-identical corpus through its schema-v2 consumer with:
 
