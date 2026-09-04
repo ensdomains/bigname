@@ -1,6 +1,6 @@
 use uuid::Uuid;
 
-use crate::schema_v2::{model::PriorEventInput, state::State};
+use crate::schema_v2::{common::hash_hex, model::PriorEventInput, state::State};
 
 fn materialize_or_sync_retained_registry(
     state: &mut State,
@@ -19,7 +19,7 @@ fn materialize_or_sync_retained_registry(
     }
 }
 
-pub(super) fn restore_preimage(state: &mut State, event: &PriorEventInput) {
+pub(in crate::schema_v2) fn restore_preimage(state: &mut State, event: &PriorEventInput) {
     if event.event_kind != "PreimageObserved" || event.logical_name_id.is_none() {
         return;
     }
@@ -48,12 +48,22 @@ pub(super) fn restore_preimage(state: &mut State, event: &PriorEventInput) {
             .after_state
             .get("labelhash")
             .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                event
+                    .after_state
+                    .get("raw_labels")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|labels| labels.first())
+                    .and_then(serde_json::Value::as_str)
+                    .map(|label| hash_hex(label.as_bytes()))
+            })
             .unwrap_or_default();
         if let Err(error) = state.materialize_v1_active_surface(
             &event.namespace,
             namehash,
             logical_name_id,
-            labelhash,
+            &labelhash,
         ) {
             state.record_restore_error(error);
         }

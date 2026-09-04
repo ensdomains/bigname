@@ -155,6 +155,10 @@ async fn exercise(ownerless: bool) -> Result<()> {
         );
         assert_eq!(
             name_body["declared_state"]["control"]["registry_owner"],
+            format!("{owner:#x}")
+        );
+        assert_eq!(
+            name_body["declared_state"]["control"]["status"],
             Value::Null
         );
         assert!(name_body["data"]["resource_id"].is_string());

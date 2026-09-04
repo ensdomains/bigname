@@ -739,12 +739,15 @@ fn pre_surface_registry_resolver_materialization_links_current_authority() -> an
             .count(),
         1
     );
+    let authority_boundary = output
+        .normalized_events
+        .iter()
+        .find(|event| event.block_number == Some(3) && event.event_kind == "AuthorityEpochChanged")
+        .expect("surface materialization must make the retained owner projectable");
+    assert_eq!(authority_boundary.resource_id, Some(authority_resource));
+    assert_eq!(authority_boundary.after_state["owner"], OWNER);
     assert!(output.normalized_events.iter().all(|event| {
-        !(event.block_number == Some(3)
-            && matches!(
-                event.event_kind.as_str(),
-                "AuthorityEpochChanged" | "PermissionChanged"
-            ))
+        !(event.block_number == Some(3) && event.event_kind == "PermissionChanged")
     }));
     Ok(())
 }
@@ -871,7 +874,7 @@ fn current_registry_transfer_invalidates_only_old_registry_resolver_links_in_eve
 }
 
 #[test]
-fn same_owner_transfer_persists_old_registry_fallback_handoff_across_every_replay_shape()
+fn same_owner_transfer_retracts_selected_old_registry_fallback_across_every_replay_shape()
 -> anyhow::Result<()> {
     let (_, _, node) = fixture();
     let history = vec![
@@ -998,24 +1001,15 @@ fn current_registry_handoff_retracts_old_resolver_from_every_linked_resource() -
 #[test]
 fn same_transaction_registration_keeps_fallback_clear_on_registry_resource() -> anyhow::Result<()> {
     let (_, _, node) = fixture();
-    let mut wrapped = wrapped(3)?;
-    wrapped.log_index = 1;
-    let mut controller_ownership = current_new_owner(REGISTRAR, 4)?;
-    controller_ownership.log_index = 0;
-    let mut resolver_clear = resolver_selection(REGISTRY, node, ZERO_ADDRESS, 4)?;
-    resolver_clear.log_index = 1;
-    let mut final_ownership = current_new_owner(OWNER_2, 4)?;
-    final_ownership.log_index = 2;
+    let mut ownership = current_new_owner(OWNER_2, 4)?;
+    ownership.log_index = 0;
     let mut registered = registration(4, 9_999)?;
-    registered.log_index = 3;
+    registered.log_index = 1;
     let history = vec![
         old_new_owner(OWNER, 1)?,
         resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 2)?,
         renewal(3),
-        wrapped,
-        controller_ownership,
-        resolver_clear,
-        final_ownership,
+        ownership,
         registered,
     ];
     let output = interpret_test_batch(input(fixture().0, fixture().1, Vec::new(), history))?;
@@ -1030,16 +1024,6 @@ fn same_transaction_registration_keeps_fallback_clear_on_registry_resource() -> 
         })
         .and_then(|event| event.resource_id)
         .expect("materialization must link the old-registry resolver to the registry resource");
-    let wrapper_resource = output
-        .normalized_events
-        .iter()
-        .find(|event| {
-            event.block_number == Some(3)
-                && event.source_family == "ens_v1_wrapper_l1"
-                && event.event_kind == "TokenControlTransferred"
-        })
-        .and_then(|event| event.resource_id)
-        .expect("wrapper authority resource");
     assert!(
         output.normalized_events.iter().any(|event| {
             event.block_number == Some(4)
@@ -1050,21 +1034,60 @@ fn same_transaction_registration_keeps_fallback_clear_on_registry_resource() -> 
         }),
         "same-transaction reconciliation moved the fallback clear off the registry resource"
     );
-    assert!(
-        output.normalized_events.iter().any(|event| {
-            event.block_number == Some(4)
-                && event.event_kind == "ResolverChanged"
-                && event.resource_id == Some(wrapper_resource)
-                && event.after_state["resolver"] == ZERO_ADDRESS
-                && event.after_state["registry_fallback_handoff"] == true
-        }),
-        "same-transaction reconciliation dropped the wrapper fallback clear"
-    );
     Ok(())
 }
 
 #[test]
-fn current_registry_handoff_retracts_old_resolver_from_wrapper_resource() -> anyhow::Result<()> {
+fn same_transaction_transient_setup_reinserts_each_fallback_clear() -> anyhow::Result<()> {
+    let (_, _, node) = fixture();
+    let mut controller_ownership = current_new_owner(REGISTRAR, 5)?;
+    controller_ownership.log_index = 0;
+    let mut resolver_clear = resolver_selection(REGISTRY, node, ZERO_ADDRESS, 5)?;
+    resolver_clear.log_index = 1;
+    let mut final_ownership = current_new_owner(OWNER_2, 5)?;
+    final_ownership.log_index = 2;
+    let mut registered = registration(5, 9_999)?;
+    registered.log_index = 3;
+    let history = vec![
+        old_new_owner(OWNER, 1)?,
+        resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 2)?,
+        renewal(3),
+        registrar_transfer(OWNER, OWNER, 4)?,
+        controller_ownership,
+        resolver_clear,
+        final_ownership,
+        registered,
+    ];
+    let output = interpret_test_batch(input(fixture().0, fixture().1, Vec::new(), history))?;
+    let linked_resources = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.block_number < Some(5)
+                && event.event_kind == "ResolverChanged"
+                && event.after_state["resolver"] == RESOLVER_A
+        })
+        .filter_map(|event| event.resource_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(linked_resources.len(), 2, "fixture must link two resources");
+    for resource_id in linked_resources {
+        assert!(
+            output.normalized_events.iter().any(|event| {
+                event.block_number == Some(5)
+                    && event.event_kind == "ResolverChanged"
+                    && event.resource_id == Some(resource_id)
+                    && event.after_state["resolver"] == ZERO_ADDRESS
+                    && event.after_state["registry_fallback_handoff"] == true
+            }),
+            "same-transaction transient setup dropped the fallback clear for {resource_id}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn current_registry_handoff_retracts_old_resolver_from_wrapper_resource_across_replay_shapes()
+-> anyhow::Result<()> {
     let (_, _, node) = fixture();
     let history = vec![
         old_new_owner(OWNER, 1)?,

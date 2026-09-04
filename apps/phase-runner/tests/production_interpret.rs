@@ -1555,6 +1555,19 @@ async fn pre_surface_resolver_materialization_matches_fresh_resume_and_redo() ->
     assert_eq!(raw_before, raw_log_digest(redone.pool()).await?);
     assert_eq!(fresh_snapshot["pointer_count"], 1);
     assert_eq!(fresh_snapshot["binding_count"], 1);
+    run_project(redone.pool(), "ethereum-mainnet", 2, 0, 2).await?;
+    let projected_control: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT declared_summary #>> '{control,registry_owner}',
+                declared_summary #>> '{control,status}'
+         FROM name_current WHERE raw_name = 'pointer.eth'",
+    )
+    .fetch_one(redone.pool())
+    .await?;
+    assert_eq!(
+        projected_control,
+        (Some(REGISTRANT.to_owned()), None),
+        "owned surface materialization must match release-rebound control fields"
+    );
     fresh.cleanup().await?;
     resumed.cleanup().await?;
     redone.cleanup().await

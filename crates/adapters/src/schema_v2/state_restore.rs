@@ -3,7 +3,7 @@ use {serde_json::Value, uuid::Uuid};
 #[path = "state_restore_support.rs"]
 mod support;
 #[path = "state_restore_v1_surface.rs"]
-mod v1_surface;
+pub(super) mod v1_surface;
 #[path = "state_restore_v1_transfer.rs"]
 mod v1_transfer;
 use support::{
