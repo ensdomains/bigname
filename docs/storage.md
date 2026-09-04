@@ -1053,12 +1053,13 @@ run does not affect its scope. Serving admission therefore accepts targets at
 or before the selected head rather than requiring every row to equal the latest
 Project block.
 
-The projection families used by the API include:
+Published projection families include:
 
 - `name_current` and identity companions;
 - `address_names_current`;
 - `children_current`;
-- `permissions_current` and its per-resource summary;
+- `permissions_current`, `account_permission_state_current`, and the
+  per-resource permission summary;
 - `resolver_current`;
 - `record_inventory_current`; and
 - `primary_names_current`.
@@ -1071,6 +1072,16 @@ unchanged; Project
 clears only the rebuildable current summary when the served projection timestamp
 passes wrapper expiry. Permission reads join this current summary by
 `resource_id` rather than persisting a second copy in `permissions_current`.
+Registry-wide approvals use the same rule: Project owns the replayable
+[account permission state](glossary.md#account-permission-state) and the
+[registry-owner binding](glossary.md#registry-owner-binding). Revoked account
+rows remain in the current-state table so losing-fork grants and losing-fork
+revocations both rebuild from surviving canonical history. Interpret re-walks
+retained raw facts through the [`standard_approval`
+derivation](glossary.md#standard-approval-derivation); Project then rebuilds both state legs without a provider
+refetch. App-facing synthesis from those two state legs is deferred to the
+follow-up serving change.
+
 For ENSv2, a latest state-derived `RegistryPathExpired` release removes that resource's effective
 permission rows without removing its partial-coverage summary. A later
 `RegistrationRenewed` marked as a revival readmits retained grants when the same
@@ -1089,17 +1100,32 @@ ens_v2@a971bd64)
 Coverage wording is not an exhaustiveness claim. `support_status` and
 `unsupported_reason` carry admission separately from projection completeness.
 `operator_approval_surfaces_not_ingested` maps to partial, best-effort
-permission coverage; `ensv1_wrapper_holder_permissions_not_projected` remains a
-separate unsupported class. Readers reject inconsistent typed combinations and
+permission coverage. This interpretation-and-projection change retains that
+broad reason for every authority class; the follow-up serving change owns any
+request-relative narrowing based on a proven registry-owner binding.
+`ensv1_wrapper_holder_permissions_not_projected`
+remains a separate unsupported class. Readers reject inconsistent typed combinations and
 map an unrecognized persisted unsupported reason to unknown partial product
 coverage rather than treating it as wrapper support or returning an internal
-server error. The scoped ENSv1 and Basenames approval declarations widen raw
-intake without changing normalized-event semantics. A retained database must
-complete the manifest-sync-required Ingest redo for the widened address/topic
-intervals before the shared interpreter content-hash rotation permits the
-planned full-history Interpret and Project walk. A fresh deployment instead
-loads the final manifests before its block-zero historical walk, so the new raw
-facts arrive in that initial pass. The ENSv2 expiry Project fold also rotates
+server error. The adapter-owned mapping requires a full-history Interpret
+re-walk and Project rebuild under the rotated interpreter content hash; Ingest
+does not rerun only when retained raw facts cover the registry
+`ApprovalForAll` range required by the current [compiled watch
+plan](glossary.md#compiled-watch-plan). That range was declared by commit
+`b22bccee` on 2026-08-31 through
+[`ens_v1_registry_l1` manifest version 3](../manifests/mainnet/ethereum/ens/ens_v1_registry_l1/v3.toml)
+on Ethereum Mainnet,
+[`ens_v1_registry_l1` manifest version 1](../manifests/sepolia/ethereum/ens/ens_v1_registry_l1/v1.toml)
+on Sepolia, and
+[`basenames_base_registry` manifest version 2](../manifests/mainnet/base/basenames/basenames_base_registry/v2.toml)
+on Base Mainnet. A retained database whose Ingest predates that declaration must
+have completed the retained-range Ingest redo; otherwise, the [re-derivation
+boundary](glossary.md#re-derivation-boundary) must start with Ingest for that
+range before Interpret and Project. A
+from-zero Ingest under the current compiled watch plan satisfies the
+precondition directly.
+
+The ENSv2 expiry Project fold also rotates
 the shared interpreter content hash without changing raw facts or
 normalized-event semantics; the expiry interpretation slice must not be served
 before its paired Project fold is deployed and that coherent replay and rebuild

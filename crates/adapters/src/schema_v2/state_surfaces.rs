@@ -1,6 +1,21 @@
 use super::{State, v1_key};
 
 impl State {
+    pub(in crate::schema_v2) fn v1_registry_binding(
+        &self,
+        namespace: &str,
+        namehash: &str,
+    ) -> Option<(String, String)> {
+        let key = v1_key(namespace, namehash);
+        Some((
+            self.v1_registry_owners.get(&key)?.clone(),
+            self.v1_registry_read_anchors
+                .get(&key)?
+                .registry_contract
+                .clone()?,
+        ))
+    }
+
     pub(in crate::schema_v2) fn observe_v1_surface(&mut self, namespace: &str, namehash: &str) {
         self.v1_materialized_surfaces
             .insert(v1_key(namespace, namehash));

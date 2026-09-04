@@ -7,6 +7,7 @@ const SCHEMA_INSTALL_LOCK_ID: i64 = 7_312_026_073_000_001;
 pub const PHASE_SCHEMA_NAME: &str = "bigname_phase";
 
 const EXPECTED_TABLES: &[&str] = &[
+    "account_permission_state_current",
     "address_names_current",
     "chain_heads",
     "chain_header_audit",

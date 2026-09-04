@@ -7,7 +7,7 @@ use super::super::{
     BindingClosureDraft, BindingDraft, EventDraft, Interpreted, ResourceDraft, ensure_declared,
     permissions::{v1_grant_states, v1_revoke_states},
 };
-use super::{support::events, unmasked_word};
+use super::{support, unmasked_word};
 use crate::evm_abi::{
     address_hex, decode_event_log_tolerant_address_word, decode_event_log_tolerant_uint64_word,
     hex_string,
@@ -20,26 +20,11 @@ use crate::schema_v2::{
 };
 
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
-const ROOT_NODE: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
-const LLL_REGISTRY: &str = "0x314159265dd8dbb310642f98f50c066173c1259b";
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum RegistryOwnerView {
     Authentic { owner: String },
-    ZeroEquivalent { reason: RegistryOwnerZeroReason },
+    ZeroEquivalent { reason: &'static str },
     UnavailableUnmasked,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RegistryOwnerZeroReason {
-    LiteralZero,
-    RegistrySelf,
-}
-impl RegistryOwnerZeroReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::LiteralZero => "literal_zero",
-            Self::RegistrySelf => "registry_self",
-        }
-    }
 }
 fn classify_registry_owner(
     owner_word: &str,
@@ -51,11 +36,11 @@ fn classify_registry_owner(
         RegistryOwnerView::UnavailableUnmasked
     } else if owner_word.eq_ignore_ascii_case(ZERO_ADDRESS) {
         RegistryOwnerView::ZeroEquivalent {
-            reason: RegistryOwnerZeroReason::LiteralZero,
+            reason: "literal_zero",
         }
     } else if registry_self_is_zero && owner_word.eq_ignore_ascii_case(registry_address) {
         RegistryOwnerView::ZeroEquivalent {
-            reason: RegistryOwnerZeroReason::RegistrySelf,
+            reason: "registry_self",
         }
     } else {
         RegistryOwnerView::Authentic {
@@ -67,19 +52,16 @@ mod transfer {
     use super::*;
     sol! { event Transfer(bytes32 indexed node, address owner); }
 }
-
 sol! {
     event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
     event NewResolver(bytes32 indexed node, address resolver);
     event NewTTL(bytes32 indexed node, uint64 ttl);
 }
-
 pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
 ) -> anyhow::Result<Interpreted> {
-    // Only ENSv1 admits the LLL-era unmasked-word tolerance (#361).
     let tolerate_unmasked_words = selected.source.source_family == "ens_v1_registry_l1";
     let (mut kinds, mut after, affected_node) = match selected.event.name.as_str() {
         "NewOwner" => {
@@ -144,7 +126,7 @@ pub(super) fn interpret(
     let emitter_role = selected.emitter_role.as_deref();
     if emitter_role == Some("registry_old")
         && state.v1_is_migrated(&selected.source.namespace, &affected_node)
-        && !(selected.event.name == "NewResolver" && affected_node == ROOT_NODE)
+        && !(selected.event.name == "NewResolver" && affected_node == support::ROOT_NODE)
     {
         return Ok(Interpreted::new());
     }
@@ -167,7 +149,8 @@ pub(super) fn interpret(
             owner,
             &raw.emitting_address,
             unmasked_word::body_has_unmasked_owner_word(&after),
-            !raw.emitting_address.eq_ignore_ascii_case(LLL_REGISTRY),
+            !raw.emitting_address
+                .eq_ignore_ascii_case(support::LLL_REGISTRY),
         )
     });
     if let Some(view) = owner_view.as_ref() {
@@ -183,7 +166,7 @@ pub(super) fn interpret(
                 );
                 object.insert(
                     "owner_getter_reason".to_owned(),
-                    Value::String(reason.as_str().to_owned()),
+                    Value::String((*reason).to_owned()),
                 );
             }
             RegistryOwnerView::UnavailableUnmasked => {}
@@ -208,7 +191,7 @@ pub(super) fn interpret(
         .is_some_and(|view| !matches!(view, RegistryOwnerView::UnavailableUnmasked))
         || selected.event.name == "NewResolver")
         .then(|| {
-            let anchor = state
+            let mut anchor = state
                 .v1_registry_read_anchor(&selected.source.namespace, &affected_node)
                 .unwrap_or_else(|| V1RegistryReadAnchor {
                     logical_name_id: format!("{}:{affected_node}", selected.source.namespace),
@@ -219,7 +202,11 @@ pub(super) fn interpret(
                     surface_known,
                     source_family: selected.source.source_family.clone(),
                     source_manifest_id: Some(selected.source.manifest_id),
+                    registry_contract: Some(raw.emitting_address.to_lowercase()),
                 });
+            if owner_view.is_some() {
+                anchor.registry_contract = Some(raw.emitting_address.to_lowercase());
+            }
             state.remember_v1_registry_read_anchor(
                 &selected.source.namespace,
                 &affected_node,
@@ -240,7 +227,7 @@ pub(super) fn interpret(
             let (owner_getter, reason) = match view {
                 RegistryOwnerView::Authentic { owner } => (owner.clone(), None),
                 RegistryOwnerView::ZeroEquivalent { reason } => {
-                    (ZERO_ADDRESS.to_owned(), Some(reason.as_str().to_owned()))
+                    (ZERO_ADDRESS.to_owned(), Some((*reason).to_owned()))
                 }
                 RegistryOwnerView::UnavailableUnmasked => unreachable!(),
             };
@@ -279,6 +266,7 @@ pub(super) fn interpret(
                         .map(str::to_owned),
                     expiry: None,
                     owner: Some(owner.to_owned()),
+                    registry_contract: Some(raw.emitting_address.to_lowercase()),
                     authority_key: Some(format!("registry-only:{}:{affected_node}", raw.chain_id)),
                     wrapper_fallback: false,
                 };
@@ -353,7 +341,7 @@ pub(super) fn interpret(
                 .map_or(Value::Null, Value::String),
         );
     }
-    let mut output = events(kinds, after.clone());
+    let mut output = support::events(kinds, after.clone());
     if let Some(event) = output
         .events
         .iter_mut()
@@ -422,6 +410,7 @@ pub(super) fn interpret(
         super::authority_arm(&selected.source.namespace),
         previous.as_ref(),
         linked.as_ref(),
+        state.v1_registry_binding(&selected.source.namespace, &affected_node),
         raw,
         &after,
         linked_resolver
@@ -543,12 +532,12 @@ pub(super) fn interpret(
     }
     Ok(output)
 }
-
 pub(super) fn append_authority_transition(
     output: &mut Interpreted,
     authority_arm: &str,
     previous: Option<&V1NameState>,
     linked: Option<&V1NameState>,
+    registry_binding: Option<(String, String)>,
     raw: &RawLogInput,
     observation_state: &Value,
     resolver: Option<String>,
@@ -623,6 +612,11 @@ pub(super) fn append_authority_transition(
         });
     }
     if let Some(linked) = linked.filter(|authority| authority.surface_known) {
+        let mut linked_observation = observation_state.clone();
+        if let Some((owner, contract)) = registry_binding {
+            linked_observation["owner_getter"] = json!(owner);
+            linked_observation["registry_contract"] = json!(contract);
+        }
         output.events.push(EventDraft {
             event_kind: "SurfaceBound".to_owned(),
             logical_name_id: Some(logical_name_id.clone()),
@@ -630,7 +624,7 @@ pub(super) fn append_authority_transition(
             identity_suffix: format!("SurfaceBound:{source_event}:{}", linked.resource_id),
             explicit_before: Some(json!({})),
             after_state: merge_observation(
-                observation_state,
+                &linked_observation,
                 json!({
                     "source_event":source_event,
                     "authority_kind":authority_kind(linked),
@@ -681,7 +675,6 @@ pub(super) fn append_authority_transition(
         });
     }
 }
-
 fn merge_observation(observation: &Value, fields: Value) -> Value {
     let mut merged = observation.clone();
     merged
@@ -695,7 +688,6 @@ fn merge_observation(observation: &Value, fields: Value) -> Value {
         );
     merged
 }
-
 pub(super) fn authority_kind(authority: &V1NameState) -> &'static str {
     match authority.authority_source_family.as_str() {
         "ens_v1_wrapper_l1" => "wrapper",
@@ -703,7 +695,6 @@ pub(super) fn authority_kind(authority: &V1NameState) -> &'static str {
         _ => "registry_only",
     }
 }
-
 #[allow(clippy::too_many_arguments)]
 fn push_permission_change(
     output: &mut Interpreted,
@@ -749,7 +740,6 @@ fn push_permission_change(
         state_scope: String::new(),
     });
 }
-
 fn append_authority_permissions(
     output: &mut Interpreted,
     previous: Option<&V1NameState>,
@@ -810,7 +800,6 @@ fn append_authority_permissions(
         }
     }
 }
-
 fn child_node(parent: B256, labelhash: B256) -> String {
     let mut input = [0u8; 64];
     input[..32].copy_from_slice(parent.as_slice());

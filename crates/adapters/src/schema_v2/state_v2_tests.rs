@@ -519,6 +519,7 @@ fn prior_event(
         source_family: "ens_v2_registry_l1".to_owned(),
         manifest_version: 1,
         source_manifest_id: Some(1),
+        emitting_address: None,
         state_scope,
         block_timestamp: Some(OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1)),
         after_state,

@@ -206,7 +206,7 @@ sol! {
 }
 
 #[tokio::test]
-async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> {
+async fn canonical_fixture_builds_all_eight_projection_families() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_all_builders").await?;
     seed_project_fixture(scratch.pool()).await?;
 
@@ -214,6 +214,13 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
 
     let grouped_builder_snapshot: Value = sqlx::query_scalar(
         "SELECT jsonb_build_object(
+             'account_permissions', COALESCE((
+                 SELECT jsonb_agg(
+                     to_jsonb(account_permission) - 'last_recomputed_at' - 'inserted_at'
+                     ORDER BY chain_id, authority_kind, authority_contract, owner, subject,
+                         relation_kind
+                 ) FROM account_permission_state_current account_permission
+             ), '[]'::jsonb),
              'permissions', COALESCE((
                  SELECT jsonb_agg(
                      to_jsonb(permission) - 'last_recomputed_at' - 'inserted_at'
@@ -251,6 +258,7 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
     assert_eq!(
         grouped_builder_snapshot,
         json!({
+            "account_permissions": [],
             "permission_summaries": [{
                 "authority_kind": "registrar",
                 "canonicality_summary": {
@@ -271,8 +279,13 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
                     "coverage": {
                         "exhaustiveness": "not_asserted",
                         "status": "projected"
-                    }
+                    },
+                    "registry_binding_clear_event_id": 3
                 },
+                "registry_binding_chain_positions": null,
+                "registry_binding_provenance": null,
+                "registry_contract": null,
+                "registry_owner": null,
                 "resource_id": RESOURCE,
                 "root_resource_id": null,
                 "support_status": "unsupported",
@@ -385,11 +398,12 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
         })
     );
 
-    let counts: (i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+    let counts: (i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM name_current),
             (SELECT count(*) FROM children_current),
             (SELECT count(*) FROM permissions_current),
+            (SELECT count(*) FROM account_permission_state_current),
             (SELECT count(*) FROM permissions_current_resource_summary),
             (SELECT count(*) FROM record_inventory_current),
             (SELECT count(*) FROM resolver_current),
@@ -398,7 +412,7 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
     )
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(counts, (2, 2, 1, 1, 1, 1, 3, 1));
+    assert_eq!(counts, (2, 2, 1, 0, 1, 1, 1, 3, 1));
 
     let evidence: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT family, status, exhaustiveness
@@ -796,8 +810,13 @@ async fn permission_builder_preserves_grouped_history_output_exactly() -> Result
                         "exhaustiveness": "not_asserted",
                         "status": "projected"
                     },
-                    "history": "tie_break_winner"
+                    "history": "tie_break_winner",
+                    "registry_binding_clear_event_id": 3
                 },
+                "registry_binding_chain_positions": null,
+                "registry_binding_provenance": null,
+                "registry_contract": null,
+                "registry_owner": null,
                 "resource_id": RESOURCE,
                 "root_resource_id": null,
                 "support_status": "unsupported",
@@ -9463,6 +9482,17 @@ async fn authority_selector_dual_open_cross_arm_fixture() -> Result<()> {
         assert_eq!(projected.2["proof_kind"], "migration_authority_transition");
         assert_eq!(projected.2["proof_event_identity"], proof_identity);
         assert_eq!(projected.2["transition_id"], "authority-proof-fixture");
+        let leaked_registry_owner: Option<String> = sqlx::query_scalar(
+            "SELECT registry_owner FROM permissions_current_resource_summary
+             WHERE resource_id = $1",
+        )
+        .bind(v2_resource)
+        .fetch_one(scratch.pool())
+        .await?;
+        assert_eq!(
+            leaked_registry_owner, None,
+            "ENSv1 registry evidence must not bind the selected ENSv2 resource"
+        );
 
         scratch.cleanup().await?;
     }
@@ -13376,6 +13406,196 @@ async fn registrar_transfer_nested_resolver_scope_matches_full_rebuild() -> Resu
 #[tokio::test]
 async fn registrar_transfer_authority_flip_matches_full_rebuild() -> Result<()> {
     assert_registrar_transfer_matches_full_rebuild("project-resolver-transfer-flip", true).await
+}
+
+#[tokio::test]
+async fn registrar_reregistration_moves_registry_binding_per_block() -> Result<()> {
+    let scratch = ScratchDatabase::create("project-registrar-reregistration-binding").await?;
+    let splits = vec![
+        (
+            11,
+            ScratchDatabase::create("project-registrar-binding-split-11").await?,
+        ),
+        (
+            13,
+            ScratchDatabase::create("project-registrar-binding-split-13").await?,
+        ),
+        (
+            14,
+            ScratchDatabase::create("project-registrar-binding-split-14").await?,
+        ),
+    ];
+    let chain = "project-registrar-reregistration-binding";
+    let fixture: Value = serde_json::from_str(include_str!(
+        "fixtures/registry-binding-reregistration.json"
+    ))?;
+    let blocks = serde_json::from_value::<Vec<i64>>(fixture["blocks"].clone())?;
+    for pool in std::iter::once(scratch.pool()).chain(splits.iter().map(|(_, db)| db.pool())) {
+        seed_raw_registrar_transfer_fixture(pool, chain, true).await?;
+        for table in ["raw_logs", "raw_transactions"] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE chain_id = $1"))
+                .bind(chain)
+                .execute(pool)
+                .await?;
+        }
+        for block in 6..=*blocks.last().unwrap() {
+            insert_lineage_block(pool, chain, block).await?;
+        }
+        sqlx::raw_sql(
+            "ALTER TABLE chain_lineage DISABLE TRIGGER chain_lineage_protect_identity;
+        UPDATE chain_lineage SET block_timestamp = to_timestamp(CASE block_number
+        WHEN 2 THEN 8000000 WHEN 3 THEN 8000001 WHEN 4 THEN 8000002
+        WHEN 5 THEN 16000004 WHEN 6 THEN 16000005 WHEN 7 THEN 16000006
+        WHEN 8 THEN 16000007 ELSE block_number END);
+        ALTER TABLE chain_lineage ENABLE TRIGGER chain_lineage_protect_identity;",
+        )
+        .execute(pool)
+        .await?;
+        for fact in fixture["facts"].as_array().unwrap() {
+            let topics = serde_json::from_value::<Vec<String>>(fact["topics"].clone())?
+                .iter()
+                .map(|topic| topic.parse())
+                .collect::<Result<Vec<B256>, _>>()?;
+            let data = alloy_primitives::hex::decode(
+                fact["data"].as_str().unwrap().trim_start_matches("0x"),
+            )?;
+            insert_raw_event_at(
+                pool,
+                chain,
+                fact["block"].as_i64().unwrap(),
+                0,
+                fact["log"].as_i64().unwrap(),
+                fact["emitter"].as_str().unwrap(),
+                &topics,
+                &data,
+            )
+            .await?;
+        }
+    }
+    let expected: Vec<Vec<String>> = serde_json::from_value(fixture["expected"].clone())?;
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: *blocks.last().unwrap(),
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    let full_payload = registry_transition_payload(scratch.pool(), chain).await?;
+    assert_eq!(full_payload["owner_getter"], TRANSFER_OWNER);
+    assert_eq!(full_payload["registry_contract"], REGISTRY);
+    for (split, database) in &splits {
+        let first = InterpretEngine::new(database.pool().clone())
+            .run_batch(InterpretRequest {
+                chain_id: chain.into(),
+                from_block: 0,
+                to_block: *split,
+                resume_current: None,
+                mode: InterpretRunMode::Normal,
+            })
+            .await?;
+        InterpretEngine::new(database.pool().clone())
+            .run_batch(InterpretRequest {
+                chain_id: chain.into(),
+                from_block: split + 1,
+                to_block: 24,
+                resume_current: Some(first.current),
+                mode: InterpretRunMode::Normal,
+            })
+            .await?;
+        assert_eq!(
+            registry_transition_payload(database.pool(), chain).await?,
+            full_payload,
+            "split after block {split}"
+        );
+    }
+    let incremental = &splits[2].1;
+    let logical_name_id: String = sqlx::query_scalar(
+        "SELECT logical_name_id FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RegistrationGranted' LIMIT 1",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    for (index, block) in blocks.into_iter().enumerate() {
+        run_project(scratch.pool(), chain, None, RunMode::Normal, 0, block).await?;
+        let rows = registry_binding_rows(scratch.pool(), &logical_name_id).await?;
+        let owners = rows
+            .iter()
+            .filter_map(|row| row.1.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            owners, expected[index],
+            "registry owners at block {block}: {rows:?}"
+        );
+        let selected: Option<Uuid> = sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT resource_id FROM name_current WHERE logical_name_id = $1",
+        )
+        .bind(&logical_name_id)
+        .fetch_one(scratch.pool())
+        .await?;
+        if let Some(selected) = selected {
+            assert!(
+                rows.iter().all(|row| row.1.is_none() || row.0 == selected),
+                "binding is not on selected resource at block {block}: selected={selected:?} rows={rows:?}"
+            );
+        }
+        assert!(rows.iter().all(|row| row.1.is_none()
+            || row.2.as_deref() == Some("0x0000000000000000000000000000000000000044")));
+    }
+    run_project(incremental.pool(), chain, None, RunMode::Normal, 0, 14).await?;
+    run_project(
+        incremental.pool(),
+        chain,
+        Some(Marker {
+            number: 14,
+            hash: block_hash(chain, 14),
+        }),
+        RunMode::Normal,
+        15,
+        24,
+    )
+    .await?;
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(scratch.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(scratch.pool()).await?
+    );
+    InterpretEngine::new(incremental.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 24,
+            resume_current: None,
+            mode: InterpretRunMode::Redo,
+        })
+        .await?;
+    assert_eq!(
+        registry_transition_payload(incremental.pool(), chain).await?,
+        full_payload
+    );
+    run_project(incremental.pool(), chain, None, RunMode::Normal, 0, 24).await?;
+    assert_eq!(
+        registry_binding_rows(incremental.pool(), &logical_name_id).await?,
+        registry_binding_rows(scratch.pool(), &logical_name_id).await?
+    );
+    for (_, database) in splits {
+        database.cleanup().await?;
+    }
+    scratch.cleanup().await
+}
+async fn registry_transition_payload(pool: &PgPool, chain: &str) -> Result<Value> {
+    Ok(sqlx::query_scalar("SELECT after_state FROM normalized_events WHERE chain_id = $1 AND block_number = 15 AND event_kind = 'SurfaceBound' AND source_family IN ('ens_v1_registrar_l1', 'basenames_base_registrar')")
+        .bind(chain).fetch_one(pool).await?)
+}
+async fn registry_binding_rows(
+    pool: &PgPool,
+    logical_name_id: &str,
+) -> Result<Vec<(Uuid, Option<String>, Option<String>)>> {
+    Ok(sqlx::query_as("SELECT resource_id, registry_owner, registry_contract FROM permissions_current_resource_summary WHERE resource_id IN (SELECT resource_id FROM normalized_events WHERE logical_name_id = $1) ORDER BY resource_id")
+        .bind(logical_name_id).fetch_all(pool).await?)
 }
 
 async fn assert_registrar_transfer_matches_full_rebuild(
@@ -22463,6 +22683,12 @@ async fn seed_raw_registrar_transfer_fixture(
                 "event NewResolver(bytes32 indexed node, address resolver)",
                 &["registry"],
                 &["ResolverChanged", "PermissionChanged"],
+            ),
+            (
+                "Transfer",
+                "event Transfer(bytes32 indexed node, address owner)",
+                &["registry"],
+                &["AuthorityTransferred", "PermissionChanged"],
             ),
         ],
     )

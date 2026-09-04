@@ -123,7 +123,7 @@ without the expansion.
 Permission-backed v2 reads also classify the served resources from the typed
 projection-owned per-resource permission summary. For a resource-bound
 `GET /v2/permissions` read, a non-wrapper summary whose standard operator,
-token-approval, or resolver-delegation paths are not indexed produces
+token-approval, or resolver-delegation paths are not fully served produces
 `meta.completeness=partial` with
 `approval_and_delegation_permissions_not_supported`. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) An ENSv1 wrapper-only
 summary instead produces `meta.completeness=unsupported` with

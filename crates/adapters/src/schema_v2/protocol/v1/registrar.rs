@@ -157,6 +157,7 @@ fn transfer(
             labelhash: Some(format!("{labelhash:#x}")),
             expiry: None,
             owner: Some(registry_owner),
+            registry_contract: None,
             authority_key: Some(format!("registry-only:{}:{raw_namehash}", raw.chain_id)),
             wrapper_fallback: false,
         };
@@ -214,6 +215,7 @@ fn transfer(
         super::authority_arm(&selected.source.namespace),
         previous_active.as_ref(),
         active_after.as_ref(),
+        state.v1_registry_binding(&selected.source.namespace, &raw_namehash),
         raw,
         &json!({"source_event":"Transfer"}),
         state.v1_resolver(&selected.source.namespace, &raw_namehash),
@@ -517,6 +519,7 @@ fn name_event(
             super::authority_arm(&selected.source.namespace),
             previous_active.as_ref(),
             active_after.as_ref(),
+            state.v1_registry_binding(&selected.source.namespace, &raw_namehash),
             raw,
             &after,
             state.v1_resolver(&selected.source.namespace, &raw_namehash),

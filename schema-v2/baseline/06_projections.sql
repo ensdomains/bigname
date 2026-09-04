@@ -233,12 +233,77 @@ CREATE INDEX IF NOT EXISTS permissions_current_resolver_scope_idx
     WHERE scope_kind = 'resolver'
       AND scope_detail ->> 'resolver_address' IS NOT NULL;
 
+CREATE TABLE IF NOT EXISTS account_permission_state_current (
+    chain_id text NOT NULL,
+    authority_kind text NOT NULL CHECK (authority_kind = 'registry'),
+    authority_contract text NOT NULL CHECK (authority_contract ~ '^0x[0-9a-f]{40}$'),
+    authority_contract_instance_id uuid NOT NULL,
+    owner text NOT NULL CHECK (owner ~ '^0x[0-9a-f]{40}$'),
+    subject text NOT NULL CHECK (subject ~ '^0x[0-9a-f]{40}$'),
+    relation_kind text NOT NULL CHECK (relation_kind = 'operator'),
+    approved boolean NOT NULL,
+    effective_powers jsonb NOT NULL,
+    grant_source jsonb NOT NULL,
+    revocation_source jsonb,
+    inheritance_path jsonb NOT NULL,
+    transfer_behavior jsonb NOT NULL,
+    provenance jsonb NOT NULL,
+    chain_positions jsonb NOT NULL,
+    canonicality_summary jsonb NOT NULL,
+    manifest_version bigint NOT NULL CHECK (manifest_version > 0),
+    last_recomputed_at timestamptz NOT NULL DEFAULT now(),
+    inserted_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (chain_id, authority_kind, authority_contract, owner, subject, relation_kind),
+    CHECK (btrim(chain_id) <> ''),
+    CHECK ((approved AND effective_powers = '["registry_control"]'::jsonb)
+        OR (NOT approved AND effective_powers = '[]'::jsonb)),
+    CHECK (jsonb_typeof(grant_source) = 'object'),
+    CHECK (revocation_source IS NULL OR jsonb_typeof(revocation_source) = 'object'),
+    CHECK (jsonb_typeof(inheritance_path) = 'array'),
+    CHECK (jsonb_typeof(transfer_behavior) = 'object'),
+    CHECK (jsonb_typeof(provenance) = 'object'),
+    CHECK (jsonb_typeof(chain_positions) = 'object'),
+    CHECK (jsonb_typeof(canonicality_summary) = 'object')
+);
+
+CREATE INDEX IF NOT EXISTS account_permission_state_current_active_subject_idx
+    ON account_permission_state_current (subject, chain_id, authority_contract, owner)
+    WHERE approved;
+CREATE INDEX IF NOT EXISTS account_permission_state_current_applicability_idx
+    ON account_permission_state_current (chain_id, authority_contract, owner, subject)
+    WHERE approved;
+
+COMMENT ON TABLE account_permission_state_current IS 'Latest account-wide permission states.';
+COMMENT ON COLUMN account_permission_state_current.chain_id IS 'The chain identifier.';
+COMMENT ON COLUMN account_permission_state_current.authority_kind IS 'The authority class.';
+COMMENT ON COLUMN account_permission_state_current.authority_contract IS 'The authority contract address.';
+COMMENT ON COLUMN account_permission_state_current.authority_contract_instance_id IS 'The admitted contract instance.';
+COMMENT ON COLUMN account_permission_state_current.owner IS 'The approving account.';
+COMMENT ON COLUMN account_permission_state_current.subject IS 'The approved operator.';
+COMMENT ON COLUMN account_permission_state_current.relation_kind IS 'The permission relation.';
+COMMENT ON COLUMN account_permission_state_current.approved IS 'The latest approval Boolean.';
+COMMENT ON COLUMN account_permission_state_current.effective_powers IS 'The effective powers.';
+COMMENT ON COLUMN account_permission_state_current.grant_source IS 'The grant evidence.';
+COMMENT ON COLUMN account_permission_state_current.revocation_source IS 'The revocation evidence.';
+COMMENT ON COLUMN account_permission_state_current.inheritance_path IS 'The inheritance path.';
+COMMENT ON COLUMN account_permission_state_current.transfer_behavior IS 'The owner-change behavior.';
+COMMENT ON COLUMN account_permission_state_current.provenance IS 'The source evidence.';
+COMMENT ON COLUMN account_permission_state_current.chain_positions IS 'The selected chain positions.';
+COMMENT ON COLUMN account_permission_state_current.canonicality_summary IS 'The selected block states.';
+COMMENT ON COLUMN account_permission_state_current.manifest_version IS 'The source manifest version.';
+COMMENT ON COLUMN account_permission_state_current.last_recomputed_at IS 'The latest rebuild time.';
+COMMENT ON COLUMN account_permission_state_current.inserted_at IS 'The row creation time.';
+
 CREATE TABLE IF NOT EXISTS permissions_current_resource_summary (
     resource_id uuid PRIMARY KEY
         REFERENCES resources (resource_id),
     authority_kind text,
     root_resource_id uuid
         REFERENCES resources (resource_id),
+    registry_owner text,
+    registry_contract text,
+    registry_binding_provenance jsonb,
+    registry_binding_chain_positions jsonb,
     support_status text NOT NULL,
     unsupported_reason text,
     provenance jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -247,6 +312,19 @@ CREATE TABLE IF NOT EXISTS permissions_current_resource_summary (
     manifest_version bigint NOT NULL,
     last_recomputed_at timestamptz NOT NULL DEFAULT now(),
     CHECK (authority_kind IS NULL OR btrim(authority_kind) <> ''),
+    CONSTRAINT permissions_current_resource_summary_registry_binding_check CHECK (
+        (registry_owner IS NULL AND registry_contract IS NULL
+            AND registry_binding_provenance IS NULL
+            AND registry_binding_chain_positions IS NULL)
+        OR (registry_owner IS NOT NULL
+            AND registry_contract IS NOT NULL
+            AND registry_binding_provenance IS NOT NULL
+            AND registry_binding_chain_positions IS NOT NULL
+            AND registry_owner ~ '^0x[0-9a-f]{40}$'
+            AND registry_contract ~ '^0x[0-9a-f]{40}$'
+            AND jsonb_typeof(registry_binding_provenance) = 'object'
+            AND jsonb_typeof(registry_binding_chain_positions) = 'object')
+    ),
     CHECK (support_status IN ('supported', 'unsupported')),
     CHECK (
         (support_status = 'supported' AND unsupported_reason IS NULL)
@@ -522,6 +600,10 @@ CREATE INDEX IF NOT EXISTS permissions_current_resource_wrapper_expiry_idx
     )
     WHERE provenance ? 'wrapper_expiry_boundary';
 
+CREATE INDEX IF NOT EXISTS permissions_current_resource_registry_binding_idx
+    ON permissions_current_resource_summary (registry_contract, registry_owner, resource_id)
+    WHERE registry_owner IS NOT NULL;
+
 COMMENT ON TABLE name_current IS
     'This table stores the current product row for each visible name.';
 COMMENT ON COLUMN name_current.logical_name_id IS
@@ -643,6 +725,14 @@ COMMENT ON COLUMN permissions_current_resource_summary.authority_kind IS
     'This value states the authority kind.';
 COMMENT ON COLUMN permissions_current_resource_summary.root_resource_id IS
     'This value identifies the registry root authority.';
+COMMENT ON COLUMN permissions_current_resource_summary.registry_owner IS
+    'This value identifies the proven current registry owner.';
+COMMENT ON COLUMN permissions_current_resource_summary.registry_contract IS
+    'This value identifies the registry that supplied the owner.';
+COMMENT ON COLUMN permissions_current_resource_summary.registry_binding_provenance IS
+    'This object identifies the registry-owner evidence.';
+COMMENT ON COLUMN permissions_current_resource_summary.registry_binding_chain_positions IS
+    'This object identifies the registry-owner chain position.';
 COMMENT ON COLUMN permissions_current_resource_summary.support_status IS
     'This value states whether permission reads are supported.';
 COMMENT ON COLUMN permissions_current_resource_summary.unsupported_reason IS
