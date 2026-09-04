@@ -549,7 +549,7 @@ fn push_selector_filter<'a>(
         }
         HistorySelector::ProductRegistration {
             logical_name_ids: _,
-            registration_id: _,
+            resource_ids: _,
         } => {
             builder.push("TRUE");
         }

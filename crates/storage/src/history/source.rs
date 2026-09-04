@@ -9,12 +9,12 @@ pub(super) fn push_history_source_for_filter<'a>(
     include_cursor_row: bool,
     include_candidates: bool,
 ) {
-    if let Some((logical_name_ids, registration_id)) =
+    if let Some((logical_name_ids, resource_ids)) =
         filter.selectors.iter().find_map(|selector| match selector {
             HistorySelector::ProductRegistration {
                 logical_name_ids,
-                registration_id,
-            } => Some((logical_name_ids, registration_id)),
+                resource_ids,
+            } => Some((logical_name_ids, resource_ids)),
             _ => None,
         })
     {
@@ -31,16 +31,17 @@ pub(super) fn push_history_source_for_filter<'a>(
                 "\nUNION ALL\n\
                  SELECT candidate.*\n\
                  FROM bigname_phase.normalized_events candidate\n\
-                 WHERE candidate.resource_id = ",
+                 WHERE candidate.resource_id = ANY(",
             );
         } else {
             builder.push(
                 "SELECT candidate.*\n\
                  FROM bigname_phase.normalized_events candidate\n\
-                 WHERE candidate.resource_id = ",
+                 WHERE candidate.resource_id = ANY(",
             );
         }
-        builder.push_bind(registration_id);
+        builder.push_bind(resource_ids.as_slice());
+        builder.push(")");
         push_bounded_candidate_canonicality(builder, canonical_only);
         if !logical_name_ids.is_empty() {
             builder.push(" AND (candidate.logical_name_id IS NULL OR NOT (");

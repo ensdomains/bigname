@@ -20,6 +20,32 @@ pub(super) fn push_product_registration_id(builder: &mut QueryBuilder<'_, Postgr
             WHEN ne.resource_id IS NULL THEN NULL::uuid
             ELSE COALESCE(
                 (
+                    SELECT wrapper_binding.resource_id
+                    FROM bigname_phase.normalized_events wrapper_binding
+                    JOIN bigname_phase.normalized_events registrar_grant
+                      ON registrar_grant.chain_id = wrapper_binding.chain_id AND registrar_grant.resource_id::text = wrapper_binding.after_state ->> 'wrapped_registrar_resource_id'
+                     AND registrar_grant.transaction_hash = wrapper_binding.transaction_hash AND registrar_grant.event_kind = 'RegistrationGranted'
+                     AND registrar_grant.source_family = 'ens_v1_registrar_l1' AND registrar_grant.consumer_visibility = 'activated'
+                     AND registrar_grant.canonicality_state IN ('canonical', 'safe', 'finalized')
+                    LEFT JOIN bigname_phase.chain_lineage wrapper_lineage ON wrapper_lineage.chain_id = wrapper_binding.chain_id AND wrapper_lineage.block_hash = wrapper_binding.block_hash
+                    LEFT JOIN bigname_phase.chain_lineage grant_lineage ON grant_lineage.chain_id = registrar_grant.chain_id AND grant_lineage.block_hash = registrar_grant.block_hash
+                    WHERE (wrapper_binding.logical_name_id = ne.logical_name_id OR (ne.logical_name_id IS NULL AND EXISTS (
+                              SELECT 1 FROM bigname_phase.name_surfaces surface
+                              LEFT JOIN bigname_phase.chain_lineage surface_lineage ON surface_lineage.chain_id = surface.chain_id AND surface_lineage.block_hash = surface.block_hash
+                              WHERE surface.logical_name_id = wrapper_binding.logical_name_id AND surface.chain_id = ne.chain_id
+                                AND surface.namehash = COALESCE(ne.after_state ->> 'namehash', ne.after_state ->> 'child_node', ne.after_state ->> 'node')
+                                AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
+                                AND (surface.block_hash IS NULL OR surface_lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
+                          )))
+                      AND (wrapper_binding.resource_id = ne.resource_id OR wrapper_binding.after_state ->> 'wrapped_registrar_resource_id' = ne.resource_id::text)
+                      AND wrapper_binding.event_kind = 'SurfaceBound' AND wrapper_binding.source_family = 'ens_v1_wrapper_l1'
+                      AND wrapper_binding.consumer_visibility = 'activated'
+                      AND wrapper_binding.canonicality_state IN ('canonical', 'safe', 'finalized')
+                      AND (wrapper_binding.block_hash IS NULL OR wrapper_lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
+                      AND (registrar_grant.block_hash IS NULL OR grant_lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
+                    ORDER BY wrapper_binding.normalized_event_id DESC LIMIT 1
+                ),
+                (
                     SELECT
                         (wrapper_binding.after_state ->>
                             'wrapped_registrar_resource_id')::uuid

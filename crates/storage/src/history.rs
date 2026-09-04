@@ -473,6 +473,7 @@ pub async fn load_address_history_page_for_relations(
     })
 }
 
+#[rustfmt::skip]
 async fn event_history_read_filter(
     pool: &PgPool,
     filter: EventHistoryFilter,
@@ -511,10 +512,15 @@ async fn event_history_read_filter(
         .with_context(|| {
             format!("failed to load event history surface anchors for resource_id {resource_id}")
         })?;
+        let mut resource_ids = vec![resource_id];
+        for logical_name_id in &logical_name_ids {
+            resource_ids.extend(wrapped_registrar::load_resource_ids_for_logical_name_id(pool, logical_name_id, canonical_only).await?);
+        }
+        resource_ids.sort_unstable(); resource_ids.dedup();
         selectors.push(if include_candidates {
             resource_history_selector(resource_id, &logical_name_ids, HistoryScope::Both)
         } else {
-            product_registration_history_selector(resource_id, logical_name_ids)
+            product_registration_history_selector(resource_ids, logical_name_ids)
         });
     }
 
@@ -565,35 +571,8 @@ async fn event_history_read_filter(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub async fn explain_registration_history_filter_for_test(
-    pool: &PgPool,
-    registration_id: Uuid,
-    logical_name_id: &str,
-    chain_id: &str,
-    namespace: &str,
-    namehash: &str,
-) -> Result<String> {
-    let filter = event_history_read_filter(
-        pool,
-        EventHistoryFilter {
-            resource_id: Some(registration_id),
-            ..EventHistoryFilter::default()
-        },
-        true,
-        false,
-    )
-    .await?;
-    query_plan::explain_history_filter_for_test(
-        pool,
-        filter,
-        query_plan::HistoryPlanLookup {
-            logical_name_id,
-            registration_id,
-            chain_id,
-            namespace,
-            namehash,
-        },
-        true,
-    )
-    .await
+#[rustfmt::skip]
+pub async fn explain_registration_history_filter_for_test(pool: &PgPool, registration_id: Uuid, logical_name_id: &str, chain_id: &str, namespace: &str, namehash: &str) -> Result<String> {
+    let filter = event_history_read_filter(pool, EventHistoryFilter { resource_id: Some(registration_id), ..EventHistoryFilter::default() }, true, false).await?;
+    query_plan::explain_history_filter_for_test(pool, filter, query_plan::HistoryPlanLookup { logical_name_id, registration_id, chain_id, namespace, namehash }, true).await
 }

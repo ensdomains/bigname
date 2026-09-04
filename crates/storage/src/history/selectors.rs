@@ -13,17 +13,17 @@ pub(super) enum HistorySelector {
     },
     ProductRegistration {
         logical_name_ids: Vec<String>,
-        registration_id: Uuid,
+        resource_ids: Vec<Uuid>,
     },
 }
 
 pub(super) fn product_registration_history_selector(
-    registration_id: Uuid,
+    resource_ids: Vec<Uuid>,
     logical_name_ids: Vec<String>,
 ) -> HistorySelector {
     HistorySelector::ProductRegistration {
         logical_name_ids,
-        registration_id,
+        resource_ids,
     }
 }
 

@@ -115,7 +115,6 @@ async fn v2_lookup_empty_public_namespace_set_takes_precedence_over_bound_cursor
         read_json::<Value>(response).await?["error"]["code"],
         json!("conflict")
     );
-
     database.cleanup().await
 }
 
@@ -604,6 +603,7 @@ async fn v2_lookup_withholds_retained_inventory_for_released_tombstone() -> Resu
 }
 
 #[tokio::test]
+#[rustfmt::skip]
 async fn later_wrapped_lookup_uses_the_registrar_lifecycle_handle() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let wrapper_resource_id = Uuid::from_u128(0x5a_0501);
@@ -646,6 +646,11 @@ async fn later_wrapped_lookup_uses_the_registrar_lifecycle_handle() -> Result<()
         json!(registrar_resource_id.to_string()),
         "batch lookup returned the wrapper resource instead of the registrar lifecycle handle"
     );
+
+    let born_wrapper = Uuid::from_u128(0x5a_0505);
+    seed_identity_name(&database, "ens:born-wrapped-lookup.eth", "born-wrapped-lookup.eth", "born-wrapped-lookup.eth", "namehash:born-wrapped-lookup.eth", born_wrapper, Uuid::from_u128(0x5a_0506), Uuid::from_u128(0x5a_0507), "0x0000000000000000000000000000000000000abc", bigname_storage::AddressNameRelation::TokenHolder, 38).await?;
+    let born = v2_lookup_json(&database, json!({"profile":"detail","inputs":[{"name":"born-wrapped-lookup.eth"}]})).await?;
+    assert_eq!(born["data"][0]["record"]["registration_id"], json!(born_wrapper.to_string()), "batch lookup rotated a born-wrapped registration to its registrar resource");
 
     database.cleanup().await
 }
