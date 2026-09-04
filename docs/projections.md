@@ -247,7 +247,7 @@ outcomes, or durable traces.
 | `address_names_current` | `(address, logical_name_id, relation)` | address-to-names and reverse lookup |
 | `children_current` | parent/child identity plus class | direct and classified child collections |
 | `permissions_current` | resource, subject, and scope | resource permissions and role summaries |
-| `account_permission_state_current` | (`chain_id`, `authority_kind`, `authority_contract`, `owner`, `subject`, `relation_kind`) | no serving reader yet; a follow-up change adds storage and API readers |
+| `account_permission_state_current` | (`chain_id`, `authority_kind`, `authority_contract`, `owner`, `subject`, `relation_kind`) | effective registry-operator permissions by account or resource |
 | `permissions_current_resource_summary` | `resource_id` | permission support and authority summary |
 | `resolver_current` | chain and resolver address | resolver overview |
 | `record_inventory_current` | resource plus record boundary key | indexed record inventory and values |
@@ -421,6 +421,22 @@ family `SurfaceBound` carries the registry owner and emitter-derived registry
 contract remembered at transition time, not the registrar token owner, so the new
 current authority receives the binding without attribution to the registrar
 emitter; wrapper-family authority transitions remain outside this rule.
+
+The serving read combines direct `permissions_current` rows with effective
+registry-operator rows; it does not persist account approvals once per
+resource. An account row is effective only when it is approved, has
+`authority_kind=registry` and `relation_kind=operator`, and its chain,
+`authority_contract`, and owner equal the resource summary's binding chain,
+`registry_contract`, and `registry_owner`. Both the account row and binding
+must point to current canonical, safe, or finalized chain lineage, and the
+resource summary must pass its ordinary current-lineage filter. The join uses
+the emitter-derived registry contract address because one admitted address on
+one chain identifies one contract instance across manifest epochs; the account
+row retains `authority_contract_instance_id` as the corresponding admitted
+instance evidence. A binding move to a different registry address therefore
+isolates generations and makes the old approval inapplicable. A retained
+revocation (`approved=false`), a cleared binding, or orphaned account or binding
+evidence is served as absence.
 
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)

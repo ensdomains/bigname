@@ -581,6 +581,7 @@ GRANT SELECT ON TABLE
     bigname_phase.address_names_current,
     bigname_phase.children_current,
     bigname_phase.permissions_current,
+    bigname_phase.account_permission_state_current,
     bigname_phase.permissions_current_resource_summary,
     bigname_phase.resolver_current,
     bigname_phase.name_surfaces,

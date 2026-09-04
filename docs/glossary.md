@@ -1373,6 +1373,22 @@ state remains stored with `approved=false` so projection replay and reorg repair
 can recover either a losing-fork grant or a losing-fork revocation without
 creating per-name approval rows.
 
+<a id="account-permission-scope"></a>
+## Account permission scope
+
+a permission scope whose authority starts from an account-wide approval rather
+than a grant persisted for one resource. The public `grant_scope.kind` is
+`account`; its detail contains `chain_id`, `authority_kind`,
+`authority_contract`, and `owner`. Applicability to a resource is evaluated at
+read time through that resource's current registry-owner binding.
+
+<a id="grant-relation"></a>
+## Grant relation
+
+the optional public classification of how a permission subject relates to its
+authority. `operator` identifies the registry-wide `ApprovalForAll` relation.
+Direct resource permission rows have no classified relation and omit the field.
+
 ## Registry-owner binding
 
 the current, evidence-backed association between an ENSv1 or Basenames permission

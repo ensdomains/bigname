@@ -902,13 +902,18 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Method/path: `GET /v2/permissions`
 - Tier: product read.
 - Purpose: flat permission rows by name, registration, or address, including
-  registrations that are no longer a name's current one.
+  registrations that are no longer a name's current one. An `address` anchor
+  answers “what resources does account X operate?” for both direct and
+  effective account-wide grants.
 - Request parameters: at least one of `name`, `registration_id`, or `address`;
-  filters are combinable. Query `namespace`, `include=lineage`, `cursor`,
+  filters are combinable intersections. A `name` resolves its current
+  `registration_id`; an explicit `registration_id` must match it when both are
+  supplied, and `address` then restricts the permission subject. Query
+  `namespace`, `include=lineage`, `cursor`,
   `page_size`, and optional `finality=latest`. `at` and historical `finality`
   values are rejected by the shared latest-state collection rule.
 - Response shape: `data` is an array of permission rows
-  `{address, grant_scope, powers, registration_id, name?, authority_context,
+  `{address, grant_relation?, grant_scope, powers, registration_id, name?, authority_context,
   wrapper_state?, wrapper_fuses?}`. The two wrapper fields use the same atomic,
   [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word)
   contract as name detail and appear only for a returned current ENSv1 wrapper
@@ -930,8 +935,57 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `grant_scope` is `{kind, detail}`. Detail is `{}` for `root`, `registry`,
   and `registration`;
   `{resolver: {chain_id, address}}` for `resolver` with numeric `chain_id`;
-  and `{chain_id, manager}` for `record_manager`.
-- Pagination behavior: standard collection pagination.
+  `{chain_id, manager}` for `record_manager`; and
+  `{chain_id, authority_kind, authority_contract, owner}` for the
+  [`account` permission scope](glossary.md#account-permission-scope). Effective
+  account rows carry `grant_relation=operator` and
+  `powers=["registry_control"]`; direct rows omit `grant_relation` and are
+  otherwise byte-for-byte compatible. For example, a direct row remains:
+
+  ```json
+  {
+    "address": "0xdirect",
+    "grant_scope": {"kind": "registration", "detail": {}},
+    "powers": ["registration_control"],
+    "registration_id": "018f...",
+    "name": "example.eth",
+    "authority_context": "current_for_name"
+  }
+  ```
+
+  An effective registry operator is:
+
+  ```json
+  {
+    "address": "0xoperator",
+    "grant_relation": "operator",
+    "grant_scope": {
+      "kind": "account",
+      "detail": {
+        "chain_id": "1",
+        "authority_kind": "registry",
+        "authority_contract": "0xregistry",
+        "owner": "0xregistry-owner"
+      }
+    },
+    "powers": ["registry_control"],
+    "registration_id": "018f...",
+    "name": "example.eth",
+    "authority_context": "current_for_name"
+  }
+  ```
+
+- Pagination behavior: standard collection pagination with fixed sort
+  `address_registration_scope_asc` and keyset
+  `(subject, resource_id, effective_scope_storage_key)`. Direct and account
+  scopes share that order. The account key is
+  `account:{chain_id}:{authority_kind}:{authority_contract}:{owner}`. The
+  signed cursor binds the exact normalized collection anchor: normalized
+  `address`, resolved `registration_id`, namespace when explicit or implied by
+  a name (and namespace absence for an address-only request),
+  `include=lineage`, `snapshot=None`, the fixed sort, and the last keyset
+  tuple. Changing any bound value rejects the cursor; crossing from direct to
+  operator rows neither duplicates nor omits a row.
 - Snapshot behavior: a `name` filter resolves its current registration anchor,
   and permission rows come from current state. The response omits `meta.as_of`
   and `meta.as_of_token`; completeness metadata remains available. Its cursor
@@ -942,41 +996,42 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   current state. Unsupported filter combinations return `422 unsupported`;
   pairing `name` with a `registration_id` that is not that name's selected
   current registration is not one of them. It is a supported query that selects
-  nothing, so it returns `200` with empty `data`.
+  nothing, so it returns `200` with empty `data` and the resource-bound partial
+  reason.
   A supplied `name` that is missing or unrecognized, whose current name is
   marked unsupported, or that resolves to a current name not bound to a
   registration resource cannot select a supported current registration. Its
   request-relative empty result returns `meta.completeness=partial` with
   `unsupported_reason=permission_support_unknown`; it does not prove that the
-  name has no permission rows. By contrast, a resolved current name paired with
-  an explicitly different `registration_id` is a supported, proven-empty
-  selection, so its empty page has no `completeness` or `unsupported_reason`.
+  name has no permission rows. A resolved current name paired with an explicitly
+  different `registration_id` is a supported empty intersection, but its empty
+  page still carries the resource-bound partial reason.
   The route reads current permission rows and summaries without claiming a
   request-wide immutable projection generation; current-state generation changes
   do not produce `409 stale`. When `name` or `registration_id` binds the read to a
   registration, the projection-owned
-  per-registration permission summary classifies the result. Independently
-  proven full support adds no completeness metadata. A non-wrapper resource
-  whose standard operator, token-approval, or resolver-delegation paths are not
-  fully served returns `meta.completeness=partial` with
-  `unsupported_reason=approval_and_delegation_permissions_not_supported`.
+  per-registration permission summary classifies the result. Every response in
+  this slice remains `meta.completeness=partial`. A non-wrapper resource-bound
+  request returns
+  `unsupported_reason=registrar_erc721_approvals_and_resolver_approvals_delegates_not_supported`.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) A
-  wrapper-only resource returns `meta.completeness=unsupported` with
-  `unsupported_reason=wrapper_holder_permissions_not_supported`. Missing or
-  unrecognized summary metadata returns `meta.completeness=partial` with
+  wrapper resource returns `meta.completeness=partial` with
+  `unsupported_reason=registrar_erc721_approvals_resolver_approvals_delegates_and_wrapper_permissions_not_supported`.
+  Missing or unrecognized summary metadata returns `meta.completeness=partial` with
   `unsupported_reason=permission_support_unknown` and takes precedence. A mixed
-  wrapper/non-wrapper request uses the approval/delegation partial reason. An
-  address-only read is always at least `partial` with the approval/delegation
-  reason, including for zero rows, unless missing or unrecognized summary
-  metadata wins. Returned rows do not define the request denominator: zero rows
+  wrapper/non-wrapper request uses the combined reason. An address-only read
+  always uses the combined account-wide reason, including for zero rows or a
+  page with no wrapper row, unless indeterminate support wins. Returned rows do
+  not define the request denominator: zero rows
   do not prove that no account can mutate the selected name or registration.
   Projected rows are not suppressed by these classifications and remain useful,
   but neither the page nor a role summary is an authoritative permission
-  enumeration while the partial marker is present. NameWrapper holder
-  enumeration remains separately unsupported, and ENSv2 registry operator
-  approval remains separately narrowed until indexed.
+  enumeration while the partial marker is present. Registrar ERC-721 approvals,
+  resolver approvals/delegates, and NameWrapper holder, operator, and per-token
+  approval surfaces remain absent. ENSv2 registry operators remain outside this
+  slice.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) A `name` filter
   resolves only the selected current registration: a migrated name returns its
   ENSv2 permission rows, while an explicit `registration_id` can still select a
@@ -990,6 +1045,14 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `registration_id` read remains available with `resource_audit`; that marker
   does not claim the evidence is live for the reserved name. Every
   permission row carries the required `authority_context` field.
+  An address-filtered request discovers effective registry operators and returns
+  one row per currently matching resource. Name and `registration_id` filters
+  expose the same rows. Applicability reads the current registry-owner binding
+  described in [`projections.md`](projections.md#permissions), rather than
+  deriving it from events. A registry-contract generation move, owner change,
+  zero owner, revocation, or orphaned account or binding lineage makes the row
+  absent. `include=lineage` exposes the approval event as the grant source and
+  does not expose registry-binding provenance.
   `current_for_name` means a `name` filter selected the row's current
   registration for that requested name. A row admitted without a `name` filter,
   including an explicit-`registration_id` or address-filtered resource read, is
@@ -1055,12 +1118,15 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   Resolver records are not included; use `GET /v2/names/{name}/records` for
   resolver data.
   `include=role_summary` adds
-  `role_summary: [{address, grants: [{grant_scope, powers}]}]` grouped by the
+  `role_summary: [{address, grants: [{grant_relation?, grant_scope, powers}]}]` grouped by the
   permission subject address and `record_count` when record inventory exists
   for the row. `record_count` counts the known record selectors for the name's
   current registration, including unsupported-family selectors and excluding
   explicit gaps. `grant_scope` uses the same shape documented for
-  `GET /v2/permissions`.
+  `GET /v2/permissions`. Direct grants omit `grant_relation`; effective
+  registry-operator grants carry `grant_relation=operator`, the account scope,
+  and `powers=["registry_control"]`. Operator grants expand roles for resources
+  already on the page but never add or remove address-name membership rows.
 - Pagination behavior: standard collection pagination. Cursors are bound to
   address, optional namespace filter, normalized relation set, `q`, dedupe
   mode, sort, and order.
@@ -1075,17 +1141,16 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   does not claim a request-wide immutable projection generation, and current-state
   generation changes do not produce `409 stale`. The expansion batch-loads
   projection-owned permission summaries for every
-  registration on the served page. If all are independently proven full, no
-  completeness metadata is added. A non-wrapper approval/delegation limitation
-  returns `meta.completeness=partial`,
+  registration on the served page. The expansion remains partial. A page of
+  non-wrapper resources returns `meta.completeness=partial`,
   `meta.unsupported_fields=["role_summary"]`, and
-  `unsupported_reason=approval_and_delegation_permissions_not_supported`. An
-  ENSv1 wrapper-only summary uses the same `partial` response classification and
-  unsupported field with
-  `unsupported_reason=wrapper_holder_permissions_not_supported`. Projected
+  `unsupported_reason=registrar_erc721_approvals_and_resolver_approvals_delegates_not_supported`.
+  A wrapper or mixed page uses the same partial classification and unsupported
+  field with
+  `unsupported_reason=registrar_erc721_approvals_resolver_approvals_delegates_and_wrapper_permissions_not_supported`.
+  Projected
   grants remain in `role_summary`, but the expansion is non-authoritative;
-  therefore an empty summary is not a proven empty permission set. A mixed
-  wrapper/non-wrapper page uses the approval/delegation reason. Missing or
+  therefore an empty summary is not a proven empty permission set. Missing or
   unrecognized summary metadata takes precedence and uses
   `permission_support_unknown`.
   Current address relations and
