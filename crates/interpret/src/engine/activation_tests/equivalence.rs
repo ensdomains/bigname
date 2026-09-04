@@ -102,7 +102,6 @@ async fn fresh_activation_and_candidate_state_redo_publish_identical_end_state()
         "binding_closure_positions",
         "activation_project_stage_capture",
         "name_current",
-        "children_current",
     ] {
         let rows = fresh_state
             .iter()
@@ -114,6 +113,15 @@ async fn fresh_activation_and_candidate_state_redo_publish_identical_end_state()
             "{required} must be non-vacuous"
         );
     }
+    let children = fresh_state
+        .iter()
+        .find_map(|(table, rows)| (table == "children_current").then_some(rows))
+        .expect("children_current semantic snapshot");
+    assert_eq!(
+        children,
+        &serde_json::json!([]),
+        "the unlocked parent makes the fixture's retained ENSv1 child unreachable"
+    );
     for ((fresh_table, fresh_rows), (redo_table, redo_rows)) in fresh_state.iter().zip(&redo_state)
     {
         assert_eq!(fresh_table, redo_table);

@@ -3156,7 +3156,11 @@ async fn a_post_boundary_ens_v1_child_relation_blocks_mainnet_publication() -> R
 /// Seeds the same parent-child pair, but with the child's ENSv2 authority proven by a
 /// positive ENSv2 child registration under a migrated parent registry instead of by the
 /// child's own migration boundary. The ENSv1 relation is restated at `v1_block`.
-async fn seed_positive_child_authority_fixture(pool: &PgPool, v1_block: i64) -> Result<()> {
+async fn seed_positive_child_authority_fixture(
+    pool: &PgPool,
+    v1_block: i64,
+    parent_path: &str,
+) -> Result<()> {
     let subregistry_instance = Uuid::parse_str("00000000-0000-0000-0000-0000000000e4")?;
     let subregistry_address = "0x00000000000000000000000000000000000000e4";
     for block in 4..=6 {
@@ -3198,7 +3202,8 @@ async fn seed_positive_child_authority_fixture(pool: &PgPool, v1_block: i64) -> 
              transaction_index, log_index, canonicality_state, consumer_visibility,
              interpreter_content_hash
          ) VALUES (
-             $1, $2, 'migration_registry_creation', $3, lower($4), $5, '[]'::jsonb,
+             $1, $2, 'migration_registry_creation', $3, lower($4), $5,
+             '[{\"event_identity\":\"positive-child-registry-proof\"}]'::jsonb,
              $6, 1, $7, $8, 0, 0, 'canonical', 'candidate', $9
          )",
     )
@@ -3239,7 +3244,12 @@ async fn seed_positive_child_authority_fixture(pool: &PgPool, v1_block: i64) -> 
         None,
         "MigrationApplied",
         "ens_v2_migration_l1",
-        json!({"successor_binding":{"authority_epoch":"ens_v2"}}),
+        json!({
+            "successor_binding":{"authority_epoch":"ens_v2"},
+            "migration_path":parent_path,
+            "successor_registry_contract_instance_id":subregistry_instance,
+            "evidence":[{"event_identity":"positive-child-registry-proof"}]
+        }),
         json!({}),
     )
     .await?;
@@ -3269,6 +3279,30 @@ async fn seed_positive_child_authority_fixture(pool: &PgPool, v1_block: i64) -> 
             "label":"alice",
             "registrant":OWNER
         }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        2,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "PermissionScopeChanged",
+        "ens_v1_wrapper_l1",
+        json!({"fuses":65536,"wrapper_state":"emancipated"}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        2,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "ExpiryChanged",
+        "ens_v1_wrapper_l1",
+        json!({"expiry":2_000_000_000_i64}),
         json!({}),
     )
     .await?;
@@ -3541,35 +3575,42 @@ async fn same_position_multi_candidate_child_conflict_is_replay_stable_within_ea
 // for a chain/address, and `ranked_v2_registrations` keeps one current row per child and admitted
 // instance, so that proposed second candidate cannot reach `publish` after candidate construction.
 
-// The other ENSv2 child authority proof reaches the same assertion: a positive ENSv2 child
-// registration is an authority epoch too, so an ENSv1 relation asserted after it is the same
-// unreconcilable contradiction as one asserted after a migration boundary.
+// Parent reachability is applied before the child's positive ENSv2 authority proof. An ENSv1
+// relation restated beneath an unlocked migrated parent is unreachable, so it cannot become a
+// dual-current contradiction or suppress the reachable ENSv2 relation.
 #[tokio::test]
-async fn a_post_epoch_ens_v1_relation_blocks_a_positively_registered_child() -> Result<()> {
-    let scratch = ScratchDatabase::create("production_project_child_positive_conflict").await?;
-    seed_project_fixture(scratch.pool()).await?;
-    seed_positive_child_authority_fixture(scratch.pool(), 5).await?;
+async fn parent_reachability_filters_before_positive_v2_child_integrity() -> Result<()> {
+    for path in ["unlocked_wrapped", "locked_wrapped"] {
+        let scratch =
+            ScratchDatabase::create(&format!("production_project_positive_child_{path}")).await?;
+        seed_project_fixture(scratch.pool()).await?;
+        seed_positive_child_authority_fixture(scratch.pool(), 5, path).await?;
 
-    let failure = run_project_phase(scratch.pool(), CHAIN, 5)
-        .await
-        .expect_err("a post-epoch ENSv1 child relation must not publish");
-    assert!(
-        failure
-            .to_string()
-            .contains("after the child's ENSv2 authority began"),
-        "unexpected failure: {failure}"
-    );
-    let rows = generation_failure_rows(scratch.pool(), CHAIN).await?;
-    assert_eq!(rows.len(), 1);
-    let (_, _, _, failure_kind, _, name, evidence) = rows[0].clone();
-    assert_eq!(failure_kind, DUAL_CURRENT_CHILD_AUTHORITY);
-    assert_eq!(name, "ens:0xalice");
+        run_project_phase(scratch.pool(), CHAIN, 5).await?;
+        assert_eq!(
+            child_relation(scratch.pool()).await?,
+            Some((None, Some(OWNER.to_owned()))),
+            "the ENSv2 relation publishes after the ENSv1 arm is filtered for {path}"
+        );
+        assert!(
+            generation_failure_rows(scratch.pool(), CHAIN)
+                .await?
+                .is_empty()
+        );
+        scratch.cleanup().await?;
+    }
+    let control = ScratchDatabase::create("production_project_positive_child_control").await?;
+    seed_project_fixture(control.pool()).await?;
+    seed_positive_child_authority_fixture(control.pool(), 5, "locked_wrapped").await?;
+    sqlx::query("DELETE FROM normalized_events WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'RegistrationGranted' AND logical_name_id = 'ens:0xalice' AND after_state ->> 'registry_contract_instance_id' = '00000000-0000-0000-0000-0000000000e4'")
+        .execute(control.pool()).await?;
+    run_project(control.pool(), CHAIN, None, RunMode::Normal, 0, 5).await?;
     assert_eq!(
-        evidence["authority_proof"]["proof_kind"],
-        json!("positive_v2_child_registration"),
-        "the positive registration is the proof this conflict is measured against"
+        child_relation(control.pool()).await?,
+        Some((Some(OWNER.to_owned()), None))
     );
-    scratch.cleanup().await
+    control.cleanup().await?;
+    Ok(())
 }
 
 // Basenames subnames are their own authority arm. The child's authority selects `basenames`,
@@ -10782,7 +10823,9 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
         "ens_v2_migration_l1",
         json!({
             "successor_registry_contract_instance_id":Uuid::new_v4(),
-            "fixture_child_registry_contract_instance_id":registry_instance
+            "migration_path":"locked_wrapped",
+            "fixture_child_registry_contract_instance_id":registry_instance,
+            "evidence":[{"event_identity":"fixture-migration-registry-proof"}]
         }),
         json!({}),
     )
@@ -10808,7 +10851,8 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
              transaction_index, log_index, canonicality_state, consumer_visibility,
              interpreter_content_hash
          ) VALUES (
-             $1, $2, 'migration_registry_creation', $3, lower($4), $5, '[]'::jsonb,
+             $1, $2, 'migration_registry_creation', $3, lower($4), $5,
+             '[{\"event_identity\":\"fixture-migration-registry-proof\"}]'::jsonb,
              $6, $7, $8, $9, $10, $11, 'canonical', 'candidate', $12
          )",
     )

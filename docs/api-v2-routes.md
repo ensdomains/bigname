@@ -798,13 +798,35 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   to the revision-bound storage follow-up.
 - Status semantics: no direct subnames returns `200` with empty `data`.
   Missing parent names return `404 not_found`. Each child appears at most once,
-  from the relation its own selected authority names. An unmigrated protected
-  child can remain ENSv1-backed; a migrated or otherwise currently registered
-  ENSv2 child is ENSv2-backed. A child whose arms disagree with no authority
-  proof is omitted entirely, and on the Mainnet deployment profile an ENSv1
-  relation asserted after a proven ENSv2 child authority began blocks Project
+  from the relation its own selected authority names. ENSv1 relations that are
+  unreachable through the parent's ENSv1→ENSv2 migration path are omitted. A
+  parent on the `unwrapped`, `unlocked_wrapped`, or `emancipated_child` path
+  retains no ENSv1 children. A parent on the `locked_wrapped` or `locked_child`
+  path retains only a [migratable child](glossary.md#migratable-child): one
+  whose label has never had a reserved, registered, or renewed entry in that
+  parent's [migration `WrapperRegistry`](glossary.md#migration-registry-wrapperregistry), whose current
+  expiry-effective fuse word has `PARENT_CANNOT_CONTROL` set and `IS_DOT_ETH`
+  clear, and whose current ENSv1 registry owner is nonzero. The wrapper fuse
+  and expiry evidence remains effective across an ENSv1 binding rotation.
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276-L277 @ ens_v1@91c966f)
+  The child's own
+  [authority arm](glossary.md#authority-epoch) still chooses between the remaining ENSv1 and ENSv2 candidates.
+  An unknown activated migration-path value blocks the Project generation as a
+  data-integrity failure instead of silently hiding relations. A child whose
+  arms disagree with no authority proof is omitted entirely. On the Mainnet
+  deployment profile, an ENSv1 relation that survives parent reachability and
+  was asserted after a proven ENSv2 child authority began blocks Project
   publication for that generation,
-  so this route never chooses one by recency, emits two rows for one logical
+  though a positive ENSv2 registration in a locked parent's migration registry
+  is itself entry history and therefore filters the ENSv1 relation before this
+  assertion. The dual-current assertion remains a defensive generation check:
+  an unmigrated parent can expose this contradiction, but no ordinary on-chain
+  parent-and-child ENSv1→ENSv2 shape reaches it after parent reachability and
+  migration-registry history are applied.
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L146-L164 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
+  This route therefore never chooses one
+  by recency, emits two rows for one logical
   child, or adds a row-local unsupported shape.
   A V1 child with getter-visible owner zero is omitted unless a current
   event-linked nonzero resolver independently establishes read reachability.

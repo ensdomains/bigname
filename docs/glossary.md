@@ -1017,8 +1017,8 @@ so the child cannot be taken on the ENSv2 side and keeps resolving through
 ENSv1 for as long as it stays unmigrated. Three conditions must hold at once,
 and failing each one means something different:
 
-1. *Never registered on ENSv2* — the label has never had an entry, live or
-   lapsed, in the parent's ENSv2 registry
+1. *Never entered on ENSv2* — the label has never had a reserved, registered,
+   or renewed entry, live or lapsed, in the parent's migration `WrapperRegistry`
    (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L296 @ ens_v2@a971bd64).
    Failing this is permanent: once the label has had an entry, ENSv2 is its
    authority and the protection never comes back. What becomes of the label is
@@ -1033,6 +1033,8 @@ and failing each one means something different:
    (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L442 @ ens_v2@a971bd64),
    and only an expired ENSv2 entry can be registered again
    (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L431 @ ens_v2@a971bd64).
+   Project therefore treats `RegistrationReserved`, `RegistrationGranted`, and `RegistrationRenewed` as permanent entry history. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L410-L480 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @ ens_v2@a971bd64)
+   For `locked_child`, the proxy deployed from `WRAPPER_REGISTRY_IMPL` is the name's migration registry, so the same rule governs its descendants. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L146-L164 @ ens_v2@a971bd64)
 2. *`PARENT_CANNOT_CONTROL` burned* — the child is *helper-positive* under
    `LibMigration.isEmancipatedChild`, the superset the three-way split below is
    built on
