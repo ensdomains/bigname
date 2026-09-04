@@ -1700,9 +1700,15 @@ async fn v2_lookup_reverse_uses_candidate_name_for_order_flag_and_cursor_across_
         json!({
             "name": payload["data"][0]["records"][0]["name"],
             "display_name": payload["data"][0]["records"][0]["display_name"],
+            "token_id": payload["data"][0]["records"][0]["token_id"],
             "is_primary": payload["data"][0]["records"][0]["is_primary"],
         }),
-        json!({"name": "alice.eth", "display_name": "alice.eth", "is_primary": true})
+        json!({
+            "name": "alice.eth",
+            "display_name": "alice.eth",
+            "token_id": "70564938991660933374592024341600875602376452319261984317470407481576058979585",
+            "is_primary": true
+        })
     );
     assert_eq!(payload["data"][0]["page"]["has_more"], json!(true));
     let cursor = payload["data"][0]["page"]["next_cursor"]

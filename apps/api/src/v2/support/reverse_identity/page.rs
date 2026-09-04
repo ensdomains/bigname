@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use bigname_storage::{
     IdentityPrimaryNameSnapshot, READABLE_REVERSE_IDENTITY_CTES, ReverseIdentityStorageInput,
@@ -6,6 +8,14 @@ use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
 
 use super::{ReverseIdentityPageRow, roles_storage_value};
+
+#[derive(Clone)]
+struct CandidateNameForms {
+    normalized_name: String,
+    canonical_display_name: String,
+    labelhash: Option<String>,
+    labelhash_count: Option<i32>,
+}
 
 pub(super) async fn load_reverse_identity_page_rows(
     pool: &PgPool,
@@ -161,21 +171,37 @@ pub(super) async fn load_reverse_identity_page_rows(
     #[cfg(test)]
     super::primary_coherence_test_hooks::pause_after_candidate_read(pool).await?;
 
+    // Coin-type variants can repeat the same candidate across request inputs.
+    let mut candidate_name_forms = BTreeMap::<(String, String), CandidateNameForms>::new();
     rows.into_iter()
         .map(|row| {
             let logical_name_id = row.try_get::<String, _>("logical_name_id")?;
             let raw_name = row.try_get::<String, _>("raw_name")?;
-            let normalized = bigname_domain::normalization::normalize_name(&raw_name)
-                .with_context(|| {
-                    format!("reverse candidate {logical_name_id} has an unreadable name")
-                })?;
-            let labelhash = normalized.normalized_labels.first().map(|label| {
-                format!(
-                    "0x{}",
-                    alloy_primitives::hex::encode(alloy_primitives::keccak256(label.as_bytes()))
-                )
-            });
-            let labelhash_count = i32::try_from(normalized.normalized_labels.len()).ok();
+            let candidate_key = (logical_name_id.clone(), raw_name.clone());
+            let name_forms = if let Some(name_forms) = candidate_name_forms.get(&candidate_key) {
+                name_forms.clone()
+            } else {
+                let normalized = bigname_domain::normalization::normalize_name(&raw_name)
+                    .with_context(|| {
+                        format!("reverse candidate {logical_name_id} has an unreadable name")
+                    })?;
+                let labelhash = normalized.normalized_labels.first().map(|label| {
+                    format!(
+                        "0x{}",
+                        alloy_primitives::hex::encode(alloy_primitives::keccak256(
+                            label.as_bytes(),
+                        ))
+                    )
+                });
+                let name_forms = CandidateNameForms {
+                    normalized_name: normalized.normalized_name,
+                    canonical_display_name: normalized.canonical_display_name,
+                    labelhash,
+                    labelhash_count: i32::try_from(normalized.normalized_labels.len()).ok(),
+                };
+                candidate_name_forms.insert(candidate_key, name_forms.clone());
+                name_forms
+            };
             let primary_name = row
                 .try_get::<Option<Value>, _>("primary_name")?
                 .map(decode_primary_name)
@@ -183,10 +209,10 @@ pub(super) async fn load_reverse_identity_page_rows(
             Ok(ReverseIdentityPageRow {
                 input_index: row.try_get::<i32, _>("input_index")? as usize,
                 logical_name_id,
-                normalized_name: normalized.normalized_name,
-                canonical_display_name: normalized.canonical_display_name,
-                labelhash,
-                labelhash_count,
+                normalized_name: name_forms.normalized_name,
+                canonical_display_name: name_forms.canonical_display_name,
+                labelhash: name_forms.labelhash,
+                labelhash_count: name_forms.labelhash_count,
                 primary_name,
             })
         })
