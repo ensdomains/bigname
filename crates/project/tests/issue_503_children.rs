@@ -388,7 +388,8 @@ async fn locked_parent_publishes_migratable_v1_child() -> Result<()> {
     seed_v1_relation(&incremental, OWNER, 10).await?;
     seed_wrapper(&incremental, 65_536, 1_800_000_010).await?;
     seed_parent_migration_registry(&incremental, 10).await?;
-    seed_migration(&incremental, "locked_wrapped", 10, "parent-migration").await?;
+    let parent_migration_id =
+        seed_migration(&incremental, "locked_wrapped", 10, "parent-migration").await?;
     sqlx::query("UPDATE normalized_events SET manifest_version = CASE event_identity WHEN 'parent-migration' THEN 6 WHEN 'wrapper-fuses' THEN 8 ELSE 9 END WHERE event_identity IN ('parent-migration', 'wrapper-fuses', 'wrapper-expiry')")
         .execute(&incremental).await?;
     run(&incremental, 10, None, RunMode::Normal).await?;
@@ -411,7 +412,14 @@ async fn locked_parent_publishes_migratable_v1_child() -> Result<()> {
             .as_array()
             .expect("event ids")
             .len(),
-        4
+        5
+    );
+    assert!(
+        provenance["normalized_event_ids"]
+            .as_array()
+            .expect("event ids")
+            .iter()
+            .any(|value| value.as_i64() == Some(parent_migration_id))
     );
     assert_eq!(
         provenance["raw_fact_refs"]
@@ -447,7 +455,7 @@ async fn locked_parent_publishes_migratable_v1_child() -> Result<()> {
 }
 
 #[tokio::test]
-async fn empty_migration_association_evidence_fails_closed() -> Result<()> {
+async fn empty_or_vacuous_migration_association_evidence_fails_closed() -> Result<()> {
     let (_db, pool) = database("issue503_empty_association_evidence").await?;
     seed_identity(&pool, &["ens_v1"]).await?;
     seed_v1_relation(&pool, OWNER, 10).await?;
@@ -455,6 +463,11 @@ async fn empty_migration_association_evidence_fails_closed() -> Result<()> {
     seed_parent_migration_registry(&pool, 10).await?;
     seed_migration(&pool, "locked_wrapped", 10, "parent-migration").await?;
     sqlx::query("UPDATE migration_discovery_associations SET evidence_refs = '[]'")
+        .execute(&pool)
+        .await?;
+    run(&pool, 10, None, RunMode::Normal).await?;
+    assert!(!visible(&pool).await?);
+    sqlx::query("UPDATE migration_discovery_associations SET evidence_refs = '[{}]'")
         .execute(&pool)
         .await?;
     run(&pool, 10, None, RunMode::Normal).await?;
@@ -581,7 +594,6 @@ async fn registration_history_retraction_converges(kind: &str) -> Result<()> {
     seed_hash_only_locked(&redo, Some(kind)).await?;
     run(&redo, 11, None, RunMode::Normal).await?;
     assert!(!visible(&redo).await?);
-    raw_sql("CREATE TABLE IF NOT EXISTS project_redo_child_registration_history (chain_id text NOT NULL, event_identity text NOT NULL, block_number bigint NOT NULL, event_kind text NOT NULL, logical_name_id text NOT NULL, registry_contract_instance_id uuid NOT NULL, recorded_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (chain_id, event_identity))").execute(&redo).await?;
     sqlx::query("INSERT INTO project_redo_child_registration_history (chain_id, event_identity, block_number, event_kind, logical_name_id, registry_contract_instance_id) SELECT chain_id, event_identity, block_number, event_kind, logical_name_id, (after_state ->> 'registry_contract_instance_id')::uuid FROM normalized_events WHERE event_identity = $1")
         .bind(format!("history-{REGISTRY}")).execute(&redo).await?;
     sqlx::query("DELETE FROM normalized_events WHERE event_identity = $1")
