@@ -366,7 +366,7 @@ pub struct EffectivePermissionRow {
 pub struct EffectivePermissionsAccountResourcePage {
     pub rows: Vec<EffectivePermissionRow>,
     pub next_cursor: Option<PermissionsCurrentAccountResourceCursor>,
-    pub summary: PermissionsCurrentFullFilterSummary,
+    pub summary: Option<PermissionsCurrentFullFilterSummary>,
 }
 
 impl From<&EffectivePermissionRow> for PermissionsCurrentAccountResourceCursor {

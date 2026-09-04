@@ -271,7 +271,11 @@ async fn load_page(
     let (rows, next_cursor) = split_keyset_page(rows, size, |row| {
         PermissionsCurrentAccountResourceCursor::from(row)
     });
-    let summary = load_summary(pool, subject, resource_id, !count).await?;
+    let summary = if count {
+        Some(load_summary(pool, subject, resource_id, false).await?)
+    } else {
+        None
+    };
     Ok(EffectivePermissionsAccountResourcePage {
         rows,
         next_cursor,

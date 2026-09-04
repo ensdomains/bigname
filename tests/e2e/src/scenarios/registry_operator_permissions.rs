@@ -192,6 +192,19 @@ async fn registry_operator_approval_serving_lifecycle() -> Result<()> {
     )
     .await?;
     let move_run = support::ingest_and_serve(&anvil, &next, None).await?;
+    // Manifest reconciliation retires account state for the registry emitter
+    // demoted by the new deployment.
+    let old_registry_state: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM account_permission_state_current \
+         WHERE authority_contract = $1)",
+    )
+    .bind(format!("{:#x}", deployment.registry.address))
+    .fetch_one(&move_run.db.pool)
+    .await?;
+    assert!(
+        !old_registry_state,
+        "old registry account state was retained"
+    );
     assert_operator(&move_run, &anvil, owner, operator, false).await?;
     move_run.db.cleanup().await?;
 

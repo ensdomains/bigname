@@ -1380,7 +1380,8 @@ a permission scope whose authority starts from an account-wide approval rather
 than a grant persisted for one resource. The public `grant_scope.kind` is
 `account`; its detail contains `chain_id`, `authority_kind`,
 `authority_contract`, and `owner`. Applicability to a resource is evaluated at
-read time through that resource's current registry-owner binding.
+read time through that resource's current
+[registry-owner binding](#registry-owner-binding).
 
 <a id="grant-relation"></a>
 ## Grant relation

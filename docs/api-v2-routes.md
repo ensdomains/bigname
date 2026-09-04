@@ -984,9 +984,12 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `address`, resolved `registration_id`, namespace when explicit or implied by
   a name (and namespace absence for an address-only request),
   `include=lineage`, the fixed sort, and the last keyset tuple. New cursors carry
-  `snapshot=None`; legacy snapshot components are ignored. Changing any bound
-  filter, sort, or keyset value rejects the cursor; crossing from direct to
-  operator rows neither duplicates nor omits a row.
+  `snapshot=None`; legacy snapshot components are ignored. Malformed cursor
+  encoding, a different bound filter anchor or sort, and a missing or malformed
+  keyset tuple are rejected. A well-formed edited keyset tuple is accepted as a
+  caller-supplied resume position; the cursor is opaque but is not
+  cryptographically signed. Crossing from direct to operator rows neither
+  duplicates nor omits a row.
 - Snapshot behavior: a `name` filter resolves its current registration anchor,
   and permission rows come from current state. The response omits `meta.as_of`
   and `meta.as_of_token`; completeness metadata remains available. Its cursor
@@ -1048,8 +1051,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   permission row carries the required `authority_context` field.
   An address-filtered request discovers effective registry operators and returns
   one row per currently matching resource. Name and `registration_id` filters
-  expose the same rows. Applicability reads the current registry-owner binding
-  described in [`projections.md`](projections.md#permissions), rather than
+  expose the same rows. Applicability reads the current
+  [registry-owner binding](glossary.md#registry-owner-binding) described in
+  [`projections.md`](projections.md#permissions), rather than
   deriving it from events. A registry-contract generation move, owner change,
   zero owner, revocation, or orphaned account or binding lineage makes the row
   absent. `include=lineage` exposes the approval event as the grant source and

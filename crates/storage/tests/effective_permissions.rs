@@ -187,6 +187,10 @@ async fn effective_permissions_page_direct_and_operator_rows_without_gaps() -> R
         1,
     )
     .await?;
+    assert!(
+        first.summary.is_none(),
+        "a page read must not run a whole-relation count or aggregate"
+    );
     let second = load_effective_permissions_account_resource_page(
         db.pool(),
         Some(SUBJECT),
@@ -215,7 +219,7 @@ async fn effective_permissions_summary_uses_the_same_relation() -> Result<()> {
         10,
     )
     .await?;
-    assert_eq!(page.summary.row_count, 1);
+    assert_eq!(page.summary.expect("count summary").row_count, 1);
     db.cleanup().await
 }
 
@@ -257,11 +261,20 @@ async fn assert_plan(plan: Value, indexes: &[&str]) -> Result<()> {
     Ok(())
 }
 
+async fn assert_page_plan(plan: Value, indexes: &[&str]) -> Result<()> {
+    let text = serde_json::to_string(&plan)?;
+    ensure!(
+        !text.contains("\"Node Type\":\"Aggregate\""),
+        "page plan performed a whole-relation aggregate: {text}"
+    );
+    assert_plan(plan, indexes).await
+}
+
 #[tokio::test]
 async fn effective_permissions_address_page_uses_active_subject_and_binding_indexes() -> Result<()>
 {
     let (db, _) = fixture().await?;
-    assert_plan(
+    assert_page_plan(
         explain_effective_permissions_account_resource_page(
             db.pool(),
             Some(SUBJECT),
@@ -282,7 +295,7 @@ async fn effective_permissions_address_page_uses_active_subject_and_binding_inde
 #[tokio::test]
 async fn effective_permissions_resource_page_uses_applicability_index() -> Result<()> {
     let (db, resource) = fixture().await?;
-    assert_plan(
+    assert_page_plan(
         explain_effective_permissions_account_resource_page(
             db.pool(),
             None,
