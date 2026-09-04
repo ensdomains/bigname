@@ -299,8 +299,8 @@ not the resource on its active binding: retracting the latest disqualifying
 `PermissionScopeChanged` or `ExpiryChanged` event must still rebuild the child
 from the surviving wrapper history.
 
-A pre-existing owner-retraction gap remains: if an owner-zeroing ENSv1 registry
-`AuthorityTransferred` event hides a hash-only child, later retracting that
+A pre-existing owner-retraction gap remains: if an owner-zeroing ENSv1 or Basenames registry
+`AuthorityTransferred` event hides a child that has no current child or exact-name row, later retracting that
 event does not restore the child incrementally because no current child or
 exact-name row cites it. A fresh Project rebuild or the next full source re-walk
 at a [re-derivation boundary](glossary.md#re-derivation-boundary) restores the
