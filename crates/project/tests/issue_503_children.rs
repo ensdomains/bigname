@@ -649,7 +649,14 @@ async fn wrapper_disqualifier_retraction_converges(kind: &str) -> Result<()> {
     Ok(())
 }
 
-#[rustfmt::skip] macro_rules! wrapper_disqualifier_retraction_test { ($name:ident, $kind:literal) => { #[tokio::test] async fn $name() -> Result<()> { wrapper_disqualifier_retraction_converges($kind).await } }; }
+macro_rules! wrapper_disqualifier_retraction_test {
+    ($name:ident, $kind:literal) => {
+        #[tokio::test]
+        async fn $name() -> Result<()> {
+            wrapper_disqualifier_retraction_converges($kind).await
+        }
+    };
+}
 
 #[rustfmt::skip]
 wrapper_disqualifier_retraction_test!(retracted_wrapper_fuse_disqualifier_restores_hash_only_child, "PermissionScopeChanged");
