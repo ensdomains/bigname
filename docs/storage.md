@@ -821,6 +821,11 @@ or the latest persisted state per key. A smaller capacity may cause more
 database reads, but it has no interpretation meaning and is not part of the
 [interpreter content hash](glossary.md#interpreter-content-hash).
 
+ENSv1 old-registry fallback tracking retains per-resource resolver links only
+while the selected resolver comes from the old registry. Its per-name fan-out
+is therefore bounded by resources carrying a currently selected old-registry
+fallback pointer rather than by all names with resolver selections.
+
 Every cached value is the `after_state` of the latest readable normalized event
 for the exact interpreter state key before the current batch. A cache miss uses
 the existing interpreter-state history index: chain, presence of an opaque key,

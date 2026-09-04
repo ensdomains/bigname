@@ -262,6 +262,12 @@ of the event that selected the current resolver pointer. Resolver binding
 summaries use that stored event provenance rather than a prior resolver row's
 classification.
 
+When a retained direct-registry authority first becomes name-addressable, its
+state-derived surface and authority-boundary events carry the observed registry owner.
+`name_current.declared_summary.control.registry_owner` therefore exposes that
+owner on the same terms as a registrar-release rebound. `control.status`
+remains null unless another selected authority event supplies a status.
+
 ENSv1 wrapper lifecycle and fuse effects are projected from canonical wrapper
 facts. During registrar grace, the holder and lifecycle state remain visible,
 while owner modification, transfer, and effective-controller membership stop at
