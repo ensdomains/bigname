@@ -183,8 +183,10 @@ ENS root, `eth`, `reverse`, and `addr.reverse` are the four exact
 select ENSv2 when the ENSv2 arm is current and ENSv1 evidence, current or
 historical, exists, without fabricating a proof or extending the exception to
 descendants. Historical ENSv2 evidence without a current binding does not
-qualify. Complete direct-child groups
-now supply production input
+qualify. The root selection is internal authority state only: public name
+routes reject root input and `name_current` excludes the empty root, so `eth`,
+`reverse`, and `addr.reverse` are the servable names in this class. Complete
+direct-child groups now supply production input
 to the activated-boundary branch; a refused or unmigrated child reaches ENSv2
 authority only through a current positive ENSv2 registration.
 

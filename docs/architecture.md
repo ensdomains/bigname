@@ -195,9 +195,10 @@ existing source family. Candidate identity and discovery effects live in
 separate diagnostic effect rows rather than mutating consumer-authoritative
 identity or active-range columns.
 
-Correlation cannot revoke an independent admission. When an existing manifest
-and discovery path already produces an ordinary normalized event, slice 1 keeps
-that event byte-for-byte activated and product-visible and records only its
+Correlation cannot revoke an
+[independently admitted event](glossary.md#independently-admitted-event). When
+an existing manifest and discovery path already produces one, slice 1 keeps it
+byte-for-byte activated and product-visible and records only its
 candidate correlation association in a diagnostic association table. Project staging and
 product event/history reads exclude correlation-dependent candidate events and
 all candidate association/effect tables, not the independently admitted ordinary event;

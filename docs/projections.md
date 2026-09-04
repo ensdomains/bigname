@@ -221,9 +221,11 @@ outcomes, or durable traces.
   input. It excludes candidate normalized events and never reads the planned
   `migration_event_associations` or candidate identity/discovery effect tables.
   Candidate effects therefore cannot change the materialized identity rows that
-  builders join. An independently admitted ordinary event remains activated and
-  byte-for-byte unchanged when an ENSv1→ENSv2 correlation references it; only
-  the ignored association row carries the candidate relationship.
+  builders join. An
+  [independently admitted event](glossary.md#independently-admitted-event)
+  remains activated and byte-for-byte unchanged when an ENSv1→ENSv2 correlation
+  references it; only the ignored association row carries the candidate
+  relationship.
 - The independently admitted `registry_announcement` edge for an ENSv1→ENSv2
   migration-created registry remains ordinary because it drives the watch plan,
   not a product projection. Project ignores every candidate downstream effect.
