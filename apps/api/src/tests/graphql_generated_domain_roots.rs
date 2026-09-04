@@ -710,9 +710,12 @@ async fn graphql_generated_domain_all_id_and_name_operators_agree_with_served_fi
     let corpus = generated_domain_values(&database, json!({})).await?;
     let ids = corpus.iter().map(|row| row["id"].as_str().unwrap()).collect::<Vec<_>>();
     let names = corpus.iter().map(|row| row["name"].as_str().unwrap()).collect::<Vec<_>>();
+    let mixed_id = ids[0].to_uppercase().replacen("0X", "0x", 1);
     let cases = [
         ("id", json!(ids[0])), ("id_not", json!(ids[0])), ("id_gt", json!(ids[0])),
         ("id_gte", json!(ids[1])), ("id_lt", json!(ids[1])), ("id_lte", json!(ids[0])),
+        ("id_gt", json!(mixed_id.clone())), ("id_gte", json!(mixed_id.clone())),
+        ("id_lt", json!(mixed_id.clone())), ("id_lte", json!(mixed_id)),
         ("id_in", json!([ids[0], ids[0]])), ("id_not_in", json!([ids[0]])),
         ("name", json!(names[0])), ("name_not", json!(names[0])),
         ("name_gt", json!(names[0])), ("name_gte", json!(names[1])),
