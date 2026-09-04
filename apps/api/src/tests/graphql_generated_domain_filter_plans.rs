@@ -79,17 +79,21 @@ fn assert_id_index_bounded(explain: &Value, label: &str) -> Result<()> {
     let scan = nodes.iter().find(|node| node["Node Type"] == "Index Scan" && node["Index Name"] == "name_current_lookup_idx")
         .with_context(|| format!("name_current_lookup_idx Index Scan: {label}"))?;
     assert!(scan["Actual Rows"].as_u64().unwrap_or(0) <= 204, "index rows: {label}: {scan}");
+    assert_eq!(scan["Actual Loops"], 1, "index loops: {label}: {scan}");
     assert!(scan["Rows Removed by Filter"].as_u64().unwrap_or(0) <= 4, "index removals: {label}: {scan}");
     Ok(())
 }
 
 #[tokio::test]
-async fn graphql_generated_domain_operator_plans_are_bounded_below_limit() -> Result<()> {
+async fn graphql_generated_domain_operator_plans_are_index_bounded_or_linear() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
     pad_generated_domain_plans(&database).await?;
     let chains = vec!["ethereum-mainnet".to_owned()];
     let late_id = format!("0x{:064x}", 5_999);
+    let database_range = sqlx::query_scalar::<_, String>("SELECT namehash FROM bigname_phase.name_current WHERE namespace = 'ens' AND namehash >= $1 ORDER BY namehash").bind("0x").fetch_all(&database.lookup_pool).await?;
+    let c_range = sqlx::query_scalar::<_, String>("SELECT namehash FROM bigname_phase.name_current WHERE namespace = 'ens' AND (namehash COLLATE \"C\") >= ($1 COLLATE \"C\") ORDER BY namehash COLLATE \"C\"").bind("0x").fetch_all(&database.lookup_pool).await?;
+    assert_eq!(database_range, c_range, "fixed-width hexadecimal range order");
     crate::graphql::explain_phase_graphql_name_list_page(
         &database.lookup_pool, &chains, &Default::default(),
         crate::graphql::GeneratedDomainSort::Id, bigname_storage::NameCurrentListOrder::Desc,
@@ -143,7 +147,7 @@ async fn graphql_generated_domain_operator_plans_are_bounded_below_limit() -> Re
 }
 
 #[tokio::test]
-async fn graphql_generated_domain_order_plans_sort_before_limit_with_fixed_bounds() -> Result<()> {
+async fn graphql_generated_domain_order_plans_are_index_bounded_or_linear() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
     pad_generated_domain_plans(&database).await?;

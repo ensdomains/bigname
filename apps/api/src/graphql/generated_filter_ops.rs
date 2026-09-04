@@ -46,21 +46,11 @@ pub fn push_generated_domain_filters<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a GeneratedDomainFilter,
 ) {
-    push_nullable_comparison(
-        builder,
-        "(nc.namehash COLLATE \"C\")",
-        filter.id.eq.as_ref(),
-        false,
-    );
-    push_nullable_comparison(
-        builder,
-        "(nc.namehash COLLATE \"C\")",
-        filter.id.not.as_ref(),
-        true,
-    );
+    push_nullable_comparison(builder, "nc.namehash", filter.id.eq.as_ref(), false);
+    push_nullable_comparison(builder, "nc.namehash", filter.id.not.as_ref(), true);
     push_scalar_comparisons(
         builder,
-        "(nc.namehash COLLATE \"C\")",
+        "nc.namehash",
         [
             (filter.id.gt.as_ref(), " > "),
             (filter.id.gte.as_ref(), " >= "),
@@ -70,13 +60,13 @@ pub fn push_generated_domain_filters<'a>(
     );
     push_membership(
         builder,
-        "(nc.namehash COLLATE \"C\")",
+        "nc.namehash",
         filter.id.in_values.as_deref(),
         false,
     );
     push_membership(
         builder,
-        "(nc.namehash COLLATE \"C\")",
+        "nc.namehash",
         filter.id.not_in_values.as_deref(),
         true,
     );

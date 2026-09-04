@@ -842,6 +842,7 @@ async fn graphql_generated_domain_order_values_match_served_fields() -> Result<(
     assert_eq!(actual_values, ["createdAt", "expiryDate", "id", "name", "owner", "owner__id", "registrationDate", "resolver"]);
 
     let corpus = generated_domain_values(&database, json!({})).await?;
+    assert!(corpus.iter().any(|row| row["createdAt"] == "0"));
     assert!(corpus.iter().any(|row| row["expiryDate"].is_null()));
     assert!(corpus.iter().any(|row| row["resolver"].is_null()));
     assert!(corpus.iter().enumerate().any(|(index, row)| corpus[index + 1..].iter().any(|other| row["owner"] == other["owner"])), "owner tie fixture");

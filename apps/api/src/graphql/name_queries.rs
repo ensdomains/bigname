@@ -362,8 +362,7 @@ fn push_filtered_names<'a>(
     }
     builder.push(
         " FROM bigname_phase.name_current nc \
-          JOIN bigname_phase.name_surfaces surface \
-            ON surface.logical_name_id = nc.logical_name_id \
+          JOIN LATERAL (SELECT 1 FROM bigname_phase.name_surfaces surface \
           LEFT JOIN bigname_phase.resources resource \
             ON resource.resource_id = nc.resource_id \
           LEFT JOIN bigname_phase.surface_bindings binding \
@@ -372,6 +371,9 @@ fn push_filtered_names<'a>(
             ON token_lineage.token_lineage_id = nc.token_lineage_id ",
     );
     builder.push(DEFAULT_NAME_CURRENT_LINEAGE_JOINS);
+    builder.push(" WHERE surface.namespace = nc.namespace AND surface.namehash = nc.namehash");
+    builder.push(DEFAULT_NAME_CURRENT_READ_FILTER);
+    builder.push(" OFFSET 0) name_guard ON TRUE");
     if filter.address.is_some() {
         builder.push(
             " JOIN address_membership \
@@ -379,7 +381,6 @@ fn push_filtered_names<'a>(
         );
     }
     builder.push(" WHERE nc.support_status = 'supported'");
-    builder.push(DEFAULT_NAME_CURRENT_READ_FILTER);
     if let Some(chain_ids) = snapshot_chain_ids {
         builder.push(
             " AND nc.chain_positions <> '{}'::JSONB \
@@ -481,7 +482,7 @@ fn push_order(
         NameCurrentListOrder::Desc => "DESC",
     };
     let column = match sort {
-        GeneratedDomainSort::Id => "namehash COLLATE \"C\"".to_owned(),
+        GeneratedDomainSort::Id => "namehash".to_owned(),
         GeneratedDomainSort::Storage(NameCurrentListSort::Name) => {
             "canonical_display_name COLLATE \"C\"".to_owned()
         }
@@ -495,9 +496,7 @@ fn push_order(
     if matches!(
         sort,
         GeneratedDomainSort::Storage(
-            NameCurrentListSort::ExpiryDate
-                | NameCurrentListSort::RegistrationDate
-                | NameCurrentListSort::CreatedAt
+            NameCurrentListSort::ExpiryDate | NameCurrentListSort::RegistrationDate
         )
     ) {
         builder.push(match order {
@@ -513,10 +512,10 @@ fn push_order(
     builder.push(" ");
     builder.push(direction);
     if !matches!(sort, GeneratedDomainSort::Id) {
-        builder.push(", namehash COLLATE \"C\" ");
+        builder.push(", namehash ");
         builder.push(direction);
     }
-    builder.push(", namespace COLLATE \"C\" ASC");
+    builder.push(", namespace ASC");
 }
 
 fn decode_row(row: PgRow) -> Result<PhaseGraphqlNameListRow> {
