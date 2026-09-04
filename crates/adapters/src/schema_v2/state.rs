@@ -19,7 +19,6 @@ mod wrapper;
 
 #[path = "state_surfaces.rs"]
 mod surfaces;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct V1NameState {
     pub logical_name_id: String,
@@ -42,6 +41,7 @@ pub(super) struct V1RegistryReadAnchor {
     pub surface_known: bool,
     pub source_family: String,
     pub source_manifest_id: Option<i64>,
+    pub registry_contract: Option<String>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct V1ResolverLink {

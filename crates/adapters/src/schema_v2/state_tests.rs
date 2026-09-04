@@ -17,6 +17,7 @@ fn observed_v1_active_surface_upgrades_an_existing_registry_read_anchor() {
             surface_known: false,
             source_family: "ens_v1_registry_l1".to_owned(),
             source_manifest_id: Some(1),
+            registry_contract: None,
         },
     );
 

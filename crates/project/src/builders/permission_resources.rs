@@ -8,7 +8,7 @@ pub(super) async fn build_registry_binding(
     sqlx::query(
         r#"
         WITH latest_registry_observation AS (
-            SELECT DISTINCT ON (COALESCE(current_name.resource_id, event.resource_id))
+            SELECT DISTINCT ON (COALESCE(event.logical_name_id, event.resource_id::text))
                    COALESCE(current_name.resource_id, event.resource_id) AS resource_id,
                    event.normalized_event_id,
                    CASE WHEN event.event_kind = 'SurfaceUnbound' THEN NULL
@@ -36,6 +36,8 @@ pub(super) async fn build_registry_binding(
             LEFT JOIN project_stage_name_current current_name
               ON event.event_kind IN ('AuthorityTransferred', 'SubregistryChanged')
              AND current_name.logical_name_id = event.logical_name_id
+             AND current_name.provenance #>> '{authority_selection,authority_arm}'
+                 IN ('ens_v1', 'basenames')
             WHERE event.event_kind IN (
                       'AuthorityTransferred', 'SubregistryChanged', 'SurfaceBound', 'SurfaceUnbound'
                   )
@@ -45,7 +47,7 @@ pub(super) async fn build_registry_binding(
                            'ens_v1_registrar_l1', 'basenames_base_registrar'
                        )))
               AND event.resource_id IS NOT NULL
-            ORDER BY COALESCE(current_name.resource_id, event.resource_id),
+            ORDER BY COALESCE(event.logical_name_id, event.resource_id::text),
                      event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
