@@ -102,6 +102,10 @@ async fn graphql_generated_domain_operator_plans_are_index_bounded_or_linear() -
     let database_range = sqlx::query_scalar::<_, String>("SELECT namehash FROM bigname_phase.name_current WHERE namespace = 'ens' AND namehash >= $1 ORDER BY namehash").bind("0x").fetch_all(&database.lookup_pool).await?;
     let c_range = sqlx::query_scalar::<_, String>("SELECT namehash FROM bigname_phase.name_current WHERE namespace = 'ens' AND (namehash COLLATE \"C\") >= ($1 COLLATE \"C\") ORDER BY namehash COLLATE \"C\"").bind("0x").fetch_all(&database.lookup_pool).await?;
     assert_eq!(database_range, c_range, "fixed-width hexadecimal range order");
+    let pair = vec![format!("0x2a{}", "0".repeat(62)), format!("0x10a{}", "0".repeat(61))];
+    let database_pair = sqlx::query_scalar::<_, String>("SELECT value FROM UNNEST($1::text[]) sample(value) ORDER BY value").bind(&pair).fetch_all(&database.lookup_pool).await?;
+    let c_pair = sqlx::query_scalar::<_, String>("SELECT value FROM UNNEST($1::text[]) sample(value) ORDER BY value COLLATE \"C\"").bind(&pair).fetch_all(&database.lookup_pool).await?;
+    assert_eq!(database_pair, c_pair, "deployed collation must order hexadecimal text as C");
     crate::graphql::explain_phase_graphql_name_list_page(
         &database.lookup_pool, &chains, &Default::default(),
         crate::graphql::GeneratedDomainSort::Id, bigname_storage::NameCurrentListOrder::Desc,
