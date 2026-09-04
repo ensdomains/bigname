@@ -312,9 +312,9 @@ exact `wrapped_registrar_resource_id` on the immediately preceding wrapper bindi
 admits that registrar release to the lifecycle fold, but the release does not
 replace the last wrapper holder in the served registrant fold: the registrar token
 is held in NameWrapper custody, while the wrapper token records the user-facing
-holder. A selected registry-only binding still publishes that non-null registrant
-in `address_names_current`; a token-holder relation continues to require a token
-lineage.
+holder. An active selected registry-only binding still publishes that non-null
+registrant in `address_names_current`. A released cross-resource lifecycle does so
+only when the exact wrapper association proves it; a token-holder relation still requires a token lineage.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L278 @ ens_v1@91c966f)
 
 When plaintext enrichment creates a registrar binding after earlier resource-keyed
