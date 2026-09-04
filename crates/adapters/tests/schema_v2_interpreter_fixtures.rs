@@ -36,6 +36,7 @@ sol! {
         uint256 cost,
         uint256 expires
     );
+    event BaseNameRegistered(uint256 indexed id, address indexed owner, uint256 expires);
     event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
     event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
     event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender);
@@ -751,6 +752,7 @@ struct MaterializedDenseCase {
 }
 
 fn dense_case(fixture: DenseFixture) -> Result<MaterializedDenseCase> {
+    const BASE_REGISTRAR: &str = "0x00000000000000000000000000000000000050dd";
     const REGISTRATION_CONTROLLER: &str = "0x00000000000000000000000000000000000050aa";
     const REGISTRY: &str = "0x00000000000000000000000000000000000050bb";
     const RESOLVER: &str = "0x00000000000000000000000000000000000050cc";
@@ -760,8 +762,8 @@ fn dense_case(fixture: DenseFixture) -> Result<MaterializedDenseCase> {
     let controller = REGISTRATION_CONTROLLER.parse::<Address>()?;
     let registrant = REGISTRANT.parse::<Address>()?;
     let record_address = REGISTRANT.parse::<Address>()?;
-    let logs_per_transaction = fixture.register_with_config_per_transaction * 4
-        + fixture.register_per_transaction * 2
+    let logs_per_transaction = fixture.register_with_config_per_transaction * 5
+        + fixture.register_per_transaction * 3
         + fixture.unrelated_logs_per_transaction;
     let mut logs = Vec::with_capacity(fixture.transaction_count * logs_per_transaction);
     for transaction_index in 0..fixture.transaction_count {
@@ -770,6 +772,23 @@ fn dense_case(fixture: DenseFixture) -> Result<MaterializedDenseCase> {
         for registration_index in 0..fixture.register_with_config_per_transaction {
             let label = format!("bulk-config-{transaction_index:02}-{registration_index:03}");
             let (labelhash, node) = dense_namehash(parent_node, &label);
+            logs.push(dense_log(
+                &fixture.block,
+                &transaction_hash,
+                transaction_index,
+                log_index,
+                BASE_REGISTRAR,
+                with_topic0(
+                    BaseNameRegistered {
+                        id: U256::from_be_bytes(*labelhash),
+                        owner: registrant,
+                        expires: U256::from(1_800_000_000_u64),
+                    }
+                    .encode_log_data(),
+                    keccak256(b"NameRegistered(uint256,address,uint256)"),
+                ),
+            ));
+            log_index += 1;
             logs.push(dense_log(
                 &fixture.block,
                 &transaction_hash,
@@ -831,6 +850,23 @@ fn dense_case(fixture: DenseFixture) -> Result<MaterializedDenseCase> {
         for registration_index in 0..fixture.register_per_transaction {
             let label = format!("bulk-direct-{transaction_index:02}-{registration_index:03}");
             let (labelhash, _) = dense_namehash(parent_node, &label);
+            logs.push(dense_log(
+                &fixture.block,
+                &transaction_hash,
+                transaction_index,
+                log_index,
+                BASE_REGISTRAR,
+                with_topic0(
+                    BaseNameRegistered {
+                        id: U256::from_be_bytes(*labelhash),
+                        owner: registrant,
+                        expires: U256::from(1_800_000_000_u64),
+                    }
+                    .encode_log_data(),
+                    keccak256(b"NameRegistered(uint256,address,uint256)"),
+                ),
+            ));
+            log_index += 1;
             logs.push(dense_log(
                 &fixture.block,
                 &transaction_hash,
@@ -937,6 +973,11 @@ fn dense_log(
             .collect(),
         data: format!("0x{}", alloy_primitives::hex::encode(encoded.data)),
     }
+}
+
+fn with_topic0(mut encoded: alloy_primitives::LogData, topic0: B256) -> alloy_primitives::LogData {
+    encoded.topics_mut()[0] = topic0;
+    encoded
 }
 
 fn interpret_with_incremental_equivalence(case_id: &str, input: BatchInput) -> Result<BatchOutput> {
@@ -2063,6 +2104,94 @@ fn checked_in_manifests() -> Result<Vec<LoadedManifest>> {
     Ok(manifests)
 }
 
+#[test]
+fn ens_v1_registrar_manifests_assign_lifecycle_to_base_registrar() -> Result<()> {
+    let manifests = checked_in_manifests()?;
+    let registrar = |chain: &str| {
+        manifests
+            .iter()
+            .find(|loaded| {
+                loaded.manifest.source_family == "ens_v1_registrar_l1"
+                    && loaded.manifest.chain == chain
+            })
+            .map(|loaded| &loaded.manifest)
+            .with_context(|| format!("missing ENSv1 registrar manifest for {chain}"))
+    };
+    let events = |chain: &str, fragment: &str| -> Result<Vec<Vec<String>>> {
+        Ok(registrar(chain)?
+            .abi
+            .events
+            .iter()
+            .filter(|event| event.fragment == fragment)
+            .map(|event| event.normalized_events.clone())
+            .collect())
+    };
+
+    assert_eq!(
+        events(
+            "ethereum-mainnet",
+            "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)"
+        )?,
+        [vec![
+            "RegistrationGranted",
+            "ExpiryChanged",
+            "PermissionChanged",
+            "SurfaceUnbound",
+            "SurfaceBound",
+            "AuthorityEpochChanged",
+            "ResolverChanged",
+            "RegistrationReleased",
+        ]]
+    );
+    assert_eq!(
+        events(
+            "ethereum-sepolia",
+            "event NameRenewed(uint256 indexed id, uint256 expires)"
+        )?,
+        [vec![
+            "RegistrationGranted",
+            "RegistrationRenewed",
+            "ExpiryChanged",
+            "SurfaceUnbound",
+            "SurfaceBound",
+            "AuthorityEpochChanged",
+            "ResolverChanged",
+        ]]
+    );
+    for event in registrar("ethereum-mainnet")?
+        .abi
+        .events
+        .iter()
+        .filter(|event| event.fragment.starts_with("event NameRegistered(string"))
+    {
+        assert_eq!(event.normalized_events, ["PreimageObserved"]);
+    }
+    let controllers = registrar("ethereum-mainnet")?
+        .contracts
+        .iter()
+        .filter(|contract| contract.role.contains("registrar_controller"))
+        .map(|contract| (contract.address.as_str(), contract.start_block))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        controllers,
+        [
+            (
+                "0x283Af0B28c62C092C9727F1Ee09c02CA627EB7F5",
+                Some(9_380_471)
+            ),
+            (
+                "0x253553366Da8546fC250F225fe3d25d0C782303b",
+                Some(16_925_618)
+            ),
+            (
+                "0x59E16fcCd424Cc24e280Be16E11Bcd56fb0CE547",
+                Some(22_764_821)
+            ),
+        ]
+    );
+    Ok(())
+}
+
 fn find_checked_in<'a>(
     fixture: &FixtureManifest,
     checked_in: &'a [LoadedManifest],
@@ -2320,9 +2449,11 @@ fn interpreter_output_is_identical_when_later_resolver_traffic_splits_off() -> R
          no re-thread"
     );
     assert_eq!(
-        late_record.before_state, registration_record.after_state,
-        "the late record must chain its before_state from the reconciled record's surviving row"
+        late_record.before_state,
+        serde_json::json!({}),
+        "the registrar-first anchor avoids the controller-era post-registration re-key"
     );
+    assert_eq!(late_record.after_state, registration_record.after_state);
     Ok(())
 }
 
@@ -2368,13 +2499,9 @@ fn flatten_outputs(outputs: &[BatchOutput]) -> BatchOutput {
 }
 
 #[test]
-fn dense_output_is_purely_additive_over_the_pre_retention_snapshot() -> Result<()> {
-    // Retaining superseded registry-only resource emissions at their first derivation block
-    // must leave every pre-retention row byte-for-byte intact: the only permitted dense-corpus
-    // differences are the non-persisted `before_state_explicit` debug flag and the retained
-    // resource rows themselves (exactly the rows no surviving normalized event or surface
-    // binding references). Remove both and the output must collapse to the pre-retention
-    // snapshot — pinned here by that snapshot's own committed keccak.
+fn dense_registrar_first_output_has_no_unreferenced_registry_resources() -> Result<()> {
+    // A numeric BaseRegistrar event can reconcile the entire transaction, so the registry setup
+    // resources retained by the controller-era prior-only window are now all referenced.
     let fixture: DenseFixture = serde_json::from_str(DENSE_SAME_TRANSACTION)?;
     let case = dense_case(fixture)?;
     let expected_gate = ExpectedCase {
@@ -2408,21 +2535,17 @@ fn dense_output_is_purely_additive_over_the_pre_retention_snapshot() -> Result<(
         .len();
     assert_eq!(
         (retained_ids.len(), distinct_retained),
-        (480, 320),
-        "the retention change adds exactly the unreferenced superseded registry-only rows"
+        (0, 0),
+        "registrar-first reconciliation must not leave unreferenced registry resources"
     );
-    reduced
-        .resources
-        .retain(|resource| referenced.contains(&resource.resource_id));
-    let snapshot = format!("{reduced:#?}")
-        .lines()
-        .filter(|line| !line.trim().starts_with("before_state_explicit:"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    for event in &mut reduced.normalized_events {
+        event.before_state_explicit = false;
+    }
+    let snapshot = format!("{reduced:#?}");
     assert_eq!(
         format!("{:#x}", keccak256(snapshot.as_bytes())),
-        "0xac19cb31201bebee2b745d3d4f713668db48cd7cefe11e7df6b6ba08920c7af0",
-        "output minus the debug-only flag and the retained rows must equal the pre-retention snapshot"
+        case.expected_output_keccak,
+        "the resource audit and the dense snapshot must cover the same registrar-first output"
     );
     Ok(())
 }

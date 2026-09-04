@@ -1484,8 +1484,8 @@ fn cross_family_registrar_renewal_preserves_resource_anchored_multiplicity() -> 
     assert_eq!(
         base.raw_fact_ref["state_scope"],
         format!(
-            "migration-renewal:base-registrar:{}",
-            base.logical_name_id.as_deref().unwrap()
+            "migration-renewal:base-registrar:ens:{}",
+            base.after_state["namehash"].as_str().unwrap()
         )
     );
     assert_ne!(
@@ -3435,6 +3435,113 @@ fn cross_family_registrar_cleanup_and_historical_renewal_reject_lookalikes() -> 
 }
 
 #[test]
+fn numeric_registrar_lifecycle_coexists_with_launch_bounded_migration() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["R-01"];
+    let addresses = &fixture["addresses"];
+    let mut input = batch(
+        vec![raw_at_transaction(
+            with_topic0(
+                BaseNameRenewed {
+                    id: decimal_u256(&scenario["base_token_id"])? + U256::from(77),
+                    expires: U256::from(scenario["v1_expiry"].as_u64().unwrap()),
+                }
+                .encode_log_data(),
+                keccak256(b"NameRenewed(uint256,uint256)"),
+            ),
+            scenario["renewal_block"].as_i64().unwrap(),
+            0,
+            0,
+            addresses["base_registrar"].as_str().unwrap(),
+        )],
+        &fixture,
+        false,
+    );
+    enable_registrar_lifecycle(&mut input)?;
+    let output = interpret_test_batch(input)?;
+    assert!(output.normalized_events.iter().any(|event| {
+        event.source_family == "ens_v2_migration_l1"
+            && event.event_kind == "RegistrationRenewed"
+            && event.after_state["lifecycle_classification"] == "historical_renewal"
+            && event.logical_name_id.is_none()
+    }));
+    assert!(
+        output.normalized_events.iter().any(|event| {
+            event.source_family == "ens_v1_registrar_l1"
+                && event.event_kind == "RegistrationGranted"
+        }),
+        "launch-bounded renewal must also establish the ordinary registrar lease"
+    );
+    Ok(())
+}
+
+#[test]
+fn base_registrar_registration_distinguishes_user_lease_from_graveyard_cleanup()
+-> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let cleanup = &fixture["scenarios"]["G-02"];
+    let addresses = &fixture["addresses"];
+    let block = cleanup["cleanup_block"].as_i64().unwrap();
+    let mut input = batch(
+        vec![
+            raw_at_transaction(
+                with_topic0(
+                    BaseNameRegistered {
+                        id: decimal_u256(&cleanup["token_id"])? + U256::from(1),
+                        owner: Address::from([0x66; 20]),
+                        expires: U256::from(i64::MAX as u64),
+                    }
+                    .encode_log_data(),
+                    keccak256(b"NameRegistered(uint256,address,uint256)"),
+                ),
+                block,
+                0,
+                0,
+                addresses["base_registrar"].as_str().unwrap(),
+            ),
+            raw_at_transaction(
+                with_topic0(
+                    BaseNameRegistered {
+                        id: decimal_u256(&cleanup["token_id"])?,
+                        owner: address(addresses, "graveyard")?,
+                        expires: decimal_u256(&cleanup["cleanup_expiry"])?,
+                    }
+                    .encode_log_data(),
+                    keccak256(b"NameRegistered(uint256,address,uint256)"),
+                ),
+                block,
+                1,
+                0,
+                addresses["base_registrar"].as_str().unwrap(),
+            ),
+        ],
+        &fixture,
+        false,
+    );
+    enable_registrar_lifecycle(&mut input)?;
+    let output = interpret_test_batch(input)?;
+    let grants = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.source_family == "ens_v1_registrar_l1"
+                && event.event_kind == "RegistrationGranted"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].after_state["expiry"], i64::MAX);
+    assert!(
+        output
+            .normalized_events
+            .iter()
+            .any(|event| event.source_family == "ens_v2_migration_l1"
+                && event.after_state["lifecycle_classification"] == "graveyard_cleanup"
+                && event.logical_name_id.is_none())
+    );
+    Ok(())
+}
+
+#[test]
 fn locked_migration_does_not_require_a_registrar_admission() -> anyhow::Result<()> {
     let fixture = fixture()?;
     let scenario = &fixture["scenarios"]["L-01"];
@@ -4061,6 +4168,47 @@ fn batch(raw_logs: Vec<RawLogInput>, fixture: &Value, include_registry_setup: bo
         blocks: Vec::new(),
         raw_logs,
     }
+}
+
+fn enable_registrar_lifecycle(input: &mut BatchInput) -> anyhow::Result<()> {
+    let manifest = input
+        .manifests
+        .iter_mut()
+        .find(|manifest| manifest.manifest_id == V1_REGISTRAR_MANIFEST_ID)
+        .expect("registrar manifest");
+    let mut payload: Value = serde_json::from_str(&manifest.payload_json)?;
+    for event in payload["abi"]["events"].as_array_mut().expect("ABI events") {
+        match event["fragment"].as_str() {
+            Some(
+                "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)",
+            ) => {
+                event["normalized_events"] = serde_json::json!([
+                    "RegistrationGranted",
+                    "ExpiryChanged",
+                    "PermissionChanged",
+                    "SurfaceUnbound",
+                    "SurfaceBound",
+                    "AuthorityEpochChanged",
+                    "ResolverChanged",
+                    "RegistrationReleased"
+                ])
+            }
+            Some("event NameRenewed(uint256 indexed id, uint256 expires)") => {
+                event["normalized_events"] = serde_json::json!([
+                    "RegistrationGranted",
+                    "RegistrationRenewed",
+                    "ExpiryChanged",
+                    "SurfaceUnbound",
+                    "SurfaceBound",
+                    "AuthorityEpochChanged",
+                    "ResolverChanged"
+                ])
+            }
+            _ => {}
+        }
+    }
+    manifest.payload_json = serde_json::to_string(&payload)?;
+    Ok(())
 }
 
 fn registry_only_batch(raw_logs: Vec<RawLogInput>, fixture: &Value) -> BatchInput {

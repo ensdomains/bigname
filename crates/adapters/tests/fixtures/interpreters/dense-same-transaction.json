@@ -5,11 +5,22 @@
   "register_with_config_per_transaction": 40,
   "register_per_transaction": 40,
   "unrelated_logs_per_transaction": 48,
-  "expected_raw_log_count": 1152,
+  "expected_raw_log_count": 1472,
   "expected_registration_count": 320,
-  "expected_normalized_event_count": 3232,
-  "expected_output_keccak": "0x0e909920ff7a92b7ab2935babd7570d4c481f28630ddc34a02eba4d841c81247",
+  "expected_normalized_event_count": 3872,
+  "expected_output_keccak": "0xa7d3d262de738fceabc449bb8913fc775d508892505da9d167dff8bb8c05e2d0",
   "manifests": [
+    {
+      "namespace": "ens",
+      "source_family": "ens_v1_registrar_l1",
+      "chain": "ethereum-mainnet",
+      "deployment_epoch": "ens_v1",
+      "file_path": "manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml",
+      "declaration_name": "base_registrar",
+      "role": "registrar",
+      "address": "0x00000000000000000000000000000000000050dd",
+      "contract_instance_id": "00000000-0000-0000-0000-000000000034"
+    },
     {
       "namespace": "ens",
       "source_family": "ens_v1_registrar_l1",

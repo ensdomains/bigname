@@ -190,13 +190,13 @@ async fn registry_migration_legacy_to_current_semantics() -> Result<()> {
            AND lower(after_state->>'owner') = '{still_legacy_owner:#x}' \
            AND lower(raw_fact_ref->>'emitting_address') = '{legacy_registry}') \
          AND EXISTS (SELECT 1 FROM normalized_events \
-           WHERE logical_name_id = 'ens:0x47841aea2cf37e6ff19afa53e6181c9ca34542bee4bc5201ea9936bb884412ac' \
+           WHERE (logical_name_id = 'ens:0x47841aea2cf37e6ff19afa53e6181c9ca34542bee4bc5201ea9936bb884412ac' OR after_state->>'node' = '0x47841aea2cf37e6ff19afa53e6181c9ca34542bee4bc5201ea9936bb884412ac') \
            AND event_kind = 'ResolverChanged' \
            AND source_family = 'ens_v1_registry_l1' \
            AND canonicality_state = 'canonical' \
            AND lower(after_state->>'resolver') = '{current_resolver}') \
          AND EXISTS (SELECT 1 FROM normalized_events \
-           WHERE logical_name_id = 'ens:0x47841aea2cf37e6ff19afa53e6181c9ca34542bee4bc5201ea9936bb884412ac' \
+           WHERE (logical_name_id = 'ens:0x47841aea2cf37e6ff19afa53e6181c9ca34542bee4bc5201ea9936bb884412ac' OR after_state->>'node' = '0x47841aea2cf37e6ff19afa53e6181c9ca34542bee4bc5201ea9936bb884412ac') \
            AND event_kind = 'AuthorityTransferred' \
            AND source_family = 'ens_v1_registry_l1' \
            AND canonicality_state = 'canonical' \
@@ -273,8 +273,8 @@ async fn registry_migration_legacy_to_current_semantics() -> Result<()> {
             .pointer("/declared_state/control/registry_owner")
             .cloned()
             .unwrap_or(Value::Null),
-        Value::Null,
-        "the exact-name summary does not synthesize registry ownership; the canonical authority event above proves that the current-registry owner stands after the later legacy write: {migrate_body}"
+        format!("{migrate_current_owner:#x}"),
+        "the current-registry owner must stand after the later legacy write: {migrate_body}"
     );
 
     run.db.cleanup().await?;
@@ -382,7 +382,7 @@ async fn assert_current_migrate_state(
              'after_state', after_state) \
            ORDER BY block_number, log_index), '[]'::jsonb) \
          FROM normalized_events \
-         WHERE logical_name_id = 'ens:0x47841aea2cf37e6ff19afa53e6181c9ca34542bee4bc5201ea9936bb884412ac' \
+         WHERE (logical_name_id = 'ens:0x47841aea2cf37e6ff19afa53e6181c9ca34542bee4bc5201ea9936bb884412ac' OR after_state->>'node' = '0x47841aea2cf37e6ff19afa53e6181c9ca34542bee4bc5201ea9936bb884412ac') \
            AND source_family = 'ens_v1_registry_l1' \
            AND event_kind IN ('AuthorityTransferred', 'ResolverChanged') \
            AND canonicality_state = 'canonical'",

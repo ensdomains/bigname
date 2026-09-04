@@ -92,13 +92,13 @@ normalized_events = ["PermissionChanged"]
 name = "NameRegistered"
 fragment = "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)"
 emitter_roles = ["registrar"]
-normalized_events = ["RegistrationReleased"]
+normalized_events = ["RegistrationGranted", "ExpiryChanged", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "RegistrationReleased"]
 
 [[abi.events]]
 name = "NameRenewed"
 fragment = "event NameRenewed(uint256 indexed id, uint256 expires)"
 emitter_roles = ["registrar"]
-normalized_events = ["RegistrationRenewed", "ExpiryChanged"]
+normalized_events = ["RegistrationGranted", "RegistrationRenewed", "ExpiryChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged"]
 
 # NameRegistered uses the canonical legacy-controller event shape:
 # (upstream: .refs/ens_v1/deployments/archive/ETHRegistrarController_mainnet_9380471.sol/ETHRegistrarController_mainnet_9380471.json:L35 @ ens_v1@91c966f)
@@ -112,7 +112,7 @@ normalized_events = ["RegistrationRenewed", "ExpiryChanged"]
 name = "NameRegistered"
 fragment = "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires)"
 emitter_roles = ["legacy_registrar_controller"]
-normalized_events = ["RegistrationGranted", "ExpiryChanged", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]
+normalized_events = ["PreimageObserved"]
 
 # NameRegistered wrapped-controller admission follows the pinned ENS subgraph:
 # (upstream: .refs/ens_subgraph/subgraph.yaml:L187 @ ens_subgraph@723f1b6)
@@ -122,7 +122,7 @@ normalized_events = ["RegistrationGranted", "ExpiryChanged", "PermissionChanged"
 name = "NameRegistered"
 fragment = "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 baseCost, uint256 premium, uint256 expires)"
 emitter_roles = ["wrapped_registrar_controller"]
-normalized_events = ["RegistrationGranted", "ExpiryChanged", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]
+normalized_events = ["PreimageObserved"]
 
 # NameRegistered unwrapped-controller admission follows the pinned ENSv1
 # controller event declaration:
@@ -138,7 +138,7 @@ normalized_events = ["RegistrationGranted", "ExpiryChanged", "PermissionChanged"
 name = "NameRegistered"
 fragment = "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 baseCost, uint256 premium, uint256 expires, bytes32 referrer)"
 emitter_roles = ["unwrapped_registrar_controller"]
-normalized_events = ["RegistrationGranted", "ExpiryChanged", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]
+normalized_events = ["PreimageObserved"]
 
 # NameRenewed uses the canonical legacy-controller event shape:
 # (upstream: .refs/ens_v1/deployments/archive/ETHRegistrarController_mainnet_9380471.sol/ETHRegistrarController_mainnet_9380471.json:L72 @ ens_v1@91c966f)
@@ -150,7 +150,7 @@ normalized_events = ["RegistrationGranted", "ExpiryChanged", "PermissionChanged"
 name = "NameRenewed"
 fragment = "event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires)"
 emitter_roles = ["legacy_registrar_controller", "wrapped_registrar_controller"]
-normalized_events = ["RegistrationGranted", "RegistrationRenewed", "ExpiryChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]
+normalized_events = ["ExpiryChanged", "PreimageObserved"]
 
 # BaseRegistrar authorization checks both ERC-721 token approvals and
 # owner-wide operators; controller contracts are not emitters for this surface.
@@ -181,4 +181,4 @@ normalized_events = []
 name = "NameRenewed"
 fragment = "event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires, bytes32 referrer)"
 emitter_roles = ["unwrapped_registrar_controller"]
-normalized_events = ["RegistrationGranted", "RegistrationRenewed", "ExpiryChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]
+normalized_events = ["PreimageObserved"]

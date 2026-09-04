@@ -30,6 +30,109 @@ fn observed_v1_active_surface_upgrades_an_existing_registry_read_anchor() {
 }
 
 #[test]
+fn controller_preimage_restore_rebinds_existing_registrar_identity() {
+    let mut state = State::new(Vec::new(), Vec::new());
+    observe_registrar(&mut state, "restored", Some(100));
+    let resource = state.v1_registrars["test:restored"].resource_id;
+    state
+        .v1_registrars
+        .get_mut("test:restored")
+        .unwrap()
+        .surface_known = false;
+    state
+        .v1_names
+        .get_mut("test:restored")
+        .unwrap()
+        .surface_known = false;
+    state.active_resources.remove("test:restored");
+
+    state.bind_v1_active_surface(NAMESPACE, "restored");
+
+    assert!(state.v1_registrars["test:restored"].surface_known);
+    assert!(state.v1_names["test:restored"].surface_known);
+    assert_eq!(state.active_resources.get("test:restored"), Some(&resource));
+}
+
+#[test]
+fn activating_a_retained_authority_uses_an_already_known_surface() {
+    const NODE: &str = "node";
+    const OWNER: &str = "0x0000000000000000000000000000000000000001";
+    let mut state = State::new(Vec::new(), Vec::new());
+    state.observe_v1_registry(
+        NAMESPACE,
+        NODE,
+        format!("{NAMESPACE}:{NODE}"),
+        false,
+        Uuid::from_u128(3),
+        "ens_v1_registry_l1".to_owned(),
+        Some(OWNER.to_owned()),
+        Some(format!("registry-only:{NODE}")),
+    );
+    let retained = state.v1_name(NAMESPACE, NODE).expect("registry authority");
+    state.activate_v1_authority(NAMESPACE, NODE, None);
+    state.observe_v1_active_surface(NAMESPACE, NODE);
+
+    state.activate_v1_authority(NAMESPACE, NODE, Some(retained));
+    let activated = state
+        .v1_name(NAMESPACE, NODE)
+        .expect("reactivated authority");
+
+    assert!(activated.surface_known);
+}
+
+#[test]
+fn release_returns_the_promoted_retained_registry_authority() {
+    const NODE: &str = "node";
+    const OWNER: &str = "0x0000000000000000000000000000000000000001";
+    let mut state = State::new(Vec::new(), Vec::new());
+    state.observe_v1_registry(
+        NAMESPACE,
+        NODE,
+        format!("{NAMESPACE}:{NODE}"),
+        false,
+        Uuid::from_u128(3),
+        "ens_v1_registry_l1".to_owned(),
+        Some(OWNER.to_owned()),
+        Some(format!("registry-only:{NODE}")),
+    );
+    state.set_v1_registry_owner_views(
+        NAMESPACE,
+        NODE,
+        OWNER.to_owned(),
+        OWNER.to_owned(),
+        Some("retained registry owner".to_owned()),
+    );
+    state.observe_v1_registrar(
+        NAMESPACE,
+        NODE,
+        format!("{NAMESPACE}:{NODE}"),
+        false,
+        Uuid::from_u128(1),
+        Uuid::from_u128(2),
+        "ens_v1_registrar_l1".to_owned(),
+        Some(1),
+        None,
+        Some(1),
+        Some(OWNER.to_owned()),
+        Some(format!("registrar:{NODE}")),
+        false,
+        true,
+    );
+    state.observe_v1_active_surface(NAMESPACE, NODE);
+
+    let releases = state.settle_v1_releases(1 + super::ENS_GRACE_PERIOD_SECS + 1);
+    let next = releases
+        .first()
+        .and_then(|release| release.next_authority.as_ref())
+        .expect("retained registry authority");
+
+    assert!(
+        next.surface_known,
+        "the release output must carry the surface-known state established during activation"
+    );
+}
+
+#[test]
 fn zero_getter_blocks_stale_registry_authority_fallback_during_registrar_transfer() {
     const NODE: &str = "node";
     const OWNER: &str = "0x0000000000000000000000000000000000000001";
@@ -151,6 +254,25 @@ fn v1_release_occurs_one_second_after_the_grace_boundary() {
     );
 }
 
+#[test]
+fn v1_expiry_overflow_is_never_released_and_does_not_block_finite_expiry() {
+    let mut state = State::new(Vec::new(), Vec::new());
+    observe_registrar(&mut state, "overflow", Some(i64::MAX));
+    observe_registrar(&mut state, "finite", Some(1));
+
+    let releases = release_keys(state.settle_v1_releases(1 + super::ENS_GRACE_PERIOD_SECS + 1));
+
+    assert_eq!(releases, ["test:finite"]);
+    assert!(state.v1_registrars.contains_key("test:overflow"));
+    assert!(v1_registration_is_live(Some(i64::MAX), i64::MAX));
+    assert!(
+        !state
+            .v1_expiries
+            .iter()
+            .any(|(_, key)| key == "test:overflow")
+    );
+}
+
 fn assert_release_sequence(state: &mut State, timestamp: i64, step: usize) {
     let expected = naive_due_keys(state, timestamp);
     let actual = release_keys(state.settle_v1_releases(timestamp));
@@ -177,12 +299,23 @@ fn release_keys(releases: Vec<V1Release>) -> Vec<String> {
 }
 
 fn assert_expiry_index_is_derived(state: &State) {
-    let expected = state
+    let expected: OrdSet<(i64, String)> = state
         .v1_registrars
         .iter()
-        .filter_map(|(key, registrar)| registrar.expiry.map(|expiry| (expiry, key.clone())))
+        .filter_map(|(key, registrar)| {
+            registrar
+                .expiry
+                .filter(|expiry| expiry.checked_add(super::ENS_GRACE_PERIOD_SECS).is_some())
+                .map(|expiry| (expiry, key.clone()))
+        })
         .collect::<OrdSet<_>>();
-    assert_eq!(state.v1_expiries, expected);
+    let actual: OrdSet<(i64, String)> = state
+        .v1_expiries
+        .iter()
+        .filter(|(expiry, _)| expiry.checked_add(super::ENS_GRACE_PERIOD_SECS).is_some())
+        .map(|(expiry, key)| (*expiry, key.clone()))
+        .collect::<OrdSet<_>>();
+    assert_eq!(actual, expected);
 }
 
 fn observe_registrar(state: &mut State, namehash: &str, expiry: Option<i64>) {

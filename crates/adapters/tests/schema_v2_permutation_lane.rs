@@ -46,8 +46,8 @@ use permutation::{
     convergence::BatchBoundaryArtifacts,
     directed::Directed,
     events::{
-        V1LegacyController, V1Registry, V1Resolver, V1UnwrappedController, V1WrappedController,
-        V1Wrapper, V2Registry, V2Resolver, declared_events,
+        V1BaseRegistrar, V1LegacyController, V1Registry, V1Resolver, V1UnwrappedController,
+        V1WrappedController, V1Wrapper, V2Registry, V2Resolver, declared_events,
     },
     invariants::{IdentityReferences, assert_upsert_guards_agree, converge, split},
     names::{dns_encode, labelhash, namehash},
@@ -3084,6 +3084,7 @@ fn wrapped_past_grace_lapse_input(wiring: &Wiring) -> Result<BatchInput> {
     const WRAPPER: &str = "ens_v1_wrapper_l1";
     const EXPIRY: u64 = 1_608_204_400;
     let registry = wiring.address(REGISTRY, "registry");
+    let registrar = wiring.address(REGISTRAR, "registrar");
     let wrapped_controller = wiring.address(REGISTRAR, "wrapped_registrar_controller");
     let wrapper = wiring.address(WRAPPER, "name_wrapper");
     let wrapper_address: Address = wrapper.parse()?;
@@ -3117,6 +3118,17 @@ fn wrapped_past_grace_lapse_input(wiring: &Wiring) -> Result<BatchInput> {
         }
     };
     let logs = [
+        log(
+            0,
+            0,
+            registrar,
+            V1BaseRegistrar::NameRegistered {
+                id: U256::from_be_bytes(label.0),
+                owner: wrapper_address,
+                expires: U256::from(EXPIRY),
+            }
+            .encode_log_data(),
+        ),
         log(
             0,
             1,
@@ -3827,14 +3839,13 @@ const UNREACHED_EVENT_KINDS: &[(&str, &str, &str)] = &[
     (
         ENS_V1_SEPOLIA.label,
         "RegistrationReleased",
-        "numeric BaseRegistrar registrations are candidate-only ENSv1→ENSv2 migration input and \
-         the dedicated ENSv1→ENSv2 migration corpus exercises their correlation",
+        "the generated registrations remain live beyond the settlement timestamp, so no release \
+         boundary is reached",
     ),
     (
         ENS_V1_SEPOLIA.label,
         "RegistrationRenewed",
-        "numeric BaseRegistrar renewals are candidate-only ENSv1→ENSv2 migration input and the \
-         dedicated ENSv1→ENSv2 migration corpus exercises their correlation",
+        "the generated Sepolia pool emits no numeric BaseRegistrar renewal",
     ),
     (
         ENS_V2_SEPOLIA.label,
@@ -4502,7 +4513,7 @@ fn a_boundary_closure_cannot_exempt_a_binding_whose_opening_provenance_does_not_
     Ok(())
 }
 
-/// Runs the #339 fixture family with both orders of the two release-transaction logs. For each
+/// Runs the #339 fixture family with both orders of the registry and numeric registrar logs. For each
 /// ordering, the adapter must produce the same complete output as a rebuild when restarted before
 /// the release boundary, after the boundary binding and closure have been emitted, or after every
 /// physical block. `converge` also compares fresh and incremental interpretation, a compacted
@@ -4578,9 +4589,9 @@ fn issue_339_event_orders(directed: &Directed) -> Result<Vec<(&'static str, Batc
         .filter(|(_, log)| log.block_number == release_block_number)
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
-    if release_logs.len() != 2 {
+    if release_logs.len() != 3 {
         bail!(
-            "directed={}: expected two synthetic release-transaction logs, found {}",
+            "directed={}: expected three synthetic release-transaction logs, found {}",
             directed.id,
             release_logs.len()
         );

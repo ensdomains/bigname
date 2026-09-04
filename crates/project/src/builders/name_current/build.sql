@@ -39,6 +39,7 @@
                        END,
                        'authority_kind', authority_context.authority_kind,
                        'authority_key', authority_context.authority_key,
+                       'resource_id', selected_registration.resource_id,
                        'registrant', registrant.registrant,
                        'expiry', CASE
                            WHEN selected_registration.is_v2_lifecycle
@@ -321,13 +322,19 @@
         LEFT JOIN LATERAL (
             SELECT lower(CASE event.event_kind
                        WHEN 'TokenControlTransferred' THEN event.after_state ->> 'to'
+                       WHEN 'RegistrationReleased' THEN event.before_state ->> 'registrant'
                        ELSE event.after_state ->> 'registrant'
                    END) AS registrant
-            FROM project_authority_events event
+            FROM project_registration_events event
             WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind IN (
-                  'RegistrationGranted', 'TokenControlTransferred'
+                  'RegistrationGranted', 'RegistrationReleased', 'TokenControlTransferred'
               )
+              AND CASE event.event_kind
+                      WHEN 'TokenControlTransferred' THEN event.after_state ->> 'to'
+                      WHEN 'RegistrationReleased' THEN event.before_state ->> 'registrant'
+                      ELSE event.after_state ->> 'registrant'
+                  END IS NOT NULL
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
@@ -346,7 +353,8 @@
             FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind IN (
-                  'RegistrationGranted', 'RegistrationRenewed', 'ExpiryChanged'
+                  'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
+                  'ExpiryChanged'
               )
               AND NOT (
                   event.event_kind = 'ExpiryChanged'

@@ -88,7 +88,7 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     );
     let ready_sql = format!(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
-           WHERE logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' \
+           WHERE (logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' OR after_state->>'namehash' = '0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141') \
              AND event_kind = 'RegistrationGranted' \
              AND source_family = 'ens_v1_registrar_l1' \
              AND transaction_hash = '{tx_hash}' \
@@ -100,7 +100,7 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
              AND transaction_hash = '{tx_hash}' \
              AND canonicality_state = 'canonical') \
          AND EXISTS (SELECT 1 FROM normalized_events \
-           WHERE logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' \
+           WHERE (logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' OR after_state->>'child_node' = '0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141') \
              AND event_kind = 'AuthorityTransferred' \
              AND lower(after_state->>'owner') = '{wrapper:#x}' \
              AND transaction_hash = '{tx_hash}' \
@@ -118,7 +118,7 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
 
     let registration: Value = sqlx::query_scalar(
         "SELECT after_state FROM normalized_events \
-         WHERE logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' \
+         WHERE (logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' OR after_state->>'namehash' = '0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141') \
            AND event_kind = 'RegistrationGranted' \
            AND source_family = 'ens_v1_registrar_l1' \
            AND transaction_hash = $1 \
@@ -127,7 +127,10 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     .bind(tx_hash)
     .fetch_one(&run.db.pool)
     .await?;
-    assert_eq!(registration["registrant"], format!("{alice:#x}"));
+    assert_eq!(
+        registration["registrant"],
+        format!("{:#x}", deployment.name_wrapper.address)
+    );
     assert_eq!(registration["authority_kind"], "registrar");
     let registrar_expiry = registration["expiry"]
         .as_i64()
@@ -143,7 +146,7 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     assert_eq!(
         transaction_to.as_deref(),
         Some(format!("{:#x}", deployment.wrapped_controller.address).as_str()),
-        "RegistrationGranted must come from the admitted wrapped-controller reveal"
+        "the BaseRegistrar grant remains in the wrapped-controller transaction"
     );
 
     let wrapper_expiry: i64 = sqlx::query_scalar(
@@ -234,7 +237,7 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
 
     let registry_owner_events: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
-         WHERE logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' \
+         WHERE (logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' OR after_state->>'child_node' = '0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141') \
            AND event_kind = 'AuthorityTransferred' \
            AND source_family = 'ens_v1_registry_l1' \
            AND lower(after_state->>'owner') = $1 \
@@ -374,12 +377,12 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     );
     assert_eq!(
         pointer(&body, "/declared_state/registration/authority_kind"),
-        "registrar"
+        "wrapper"
     );
     assert!(
         pointer(&body, "/declared_state/registration/authority_key")
             .as_str()
-            .is_some_and(|key| key.starts_with("registrar:")),
+            .is_some_and(|key| key.starts_with("wrapper:")),
         "born-wrapped authority key missing: {body}"
     );
 
@@ -707,7 +710,7 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
                AND after_state->>'authority_kind' = 'wrapper' \
                AND canonicality_state = 'canonical'), \
            EXISTS (SELECT 1 FROM normalized_events \
-             WHERE logical_name_id = 'ens:0xfb43d46f1fd1b637140404515fcb87f1aaa2c42faef41bd7313aff9b912dda05' \
+             WHERE (logical_name_id = 'ens:0xfb43d46f1fd1b637140404515fcb87f1aaa2c42faef41bd7313aff9b912dda05' OR after_state->>'node' = '0xfb43d46f1fd1b637140404515fcb87f1aaa2c42faef41bd7313aff9b912dda05') \
                AND event_kind = 'AuthorityEpochChanged' \
                AND after_state->>'authority_kind' = 'registry_only' \
                AND canonicality_state = 'canonical')",
@@ -899,7 +902,7 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
     assert_eq!(parent_summary["control"]["registrant"], format!("{bob:#x}"));
     let retained_registry_owner: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
-         WHERE logical_name_id = 'ens:0xfb43d46f1fd1b637140404515fcb87f1aaa2c42faef41bd7313aff9b912dda05' \
+         WHERE (logical_name_id = 'ens:0xfb43d46f1fd1b637140404515fcb87f1aaa2c42faef41bd7313aff9b912dda05' OR after_state->>'node' = '0xfb43d46f1fd1b637140404515fcb87f1aaa2c42faef41bd7313aff9b912dda05') \
            AND event_kind = 'AuthorityTransferred' \
            AND source_family = 'ens_v1_registry_l1' \
            AND lower(after_state->>'owner') = $1 \

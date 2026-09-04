@@ -16,42 +16,56 @@ use crate::schema_v2::{
     model::RawLogInput,
     state::{State, V1NameState},
 };
-
 mod identity;
 use identity::{new_registrar_identity, registrar_namehash};
-
+pub(super) mod base;
 mod decode;
+mod enrichment;
 mod wrapper_renewal;
-
-mod transfer {
-    use super::*;
-    sol! { event Transfer(address indexed from, address indexed to, uint256 indexed tokenId); }
-}
-
+#[rustfmt::skip] mod transfer { use super::*; sol! { event Transfer(address indexed from, address indexed to, uint256 indexed tokenId); } }
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
-    migration_enabled: bool,
+    context: super::super::super::migration::RegistrarContext,
 ) -> anyhow::Result<Interpreted> {
     match selected.event.signature.as_str() {
-        "ControllerAdded(address)"
-        | "ControllerRemoved(address)"
-        | "NameRegistered(uint256,address,uint256)"
-        | "NameRenewed(uint256,uint256)" => {
-            return if migration_enabled {
+        "ControllerAdded(address)" | "ControllerRemoved(address)" => {
+            return if context.migration_enabled {
                 super::super::migration::interpret_base_registrar(selected, raw, state)
             } else {
                 Ok(Interpreted::new())
             };
+        }
+        "NameRegistered(uint256,address,uint256)" | "NameRenewed(uint256,uint256)"
+            if selected.source.source_family == "ens_v1_registrar_l1"
+                && selected.emitter_role.as_deref() == Some("registrar") =>
+        {
+            let mut correlated = if context.migration_enabled {
+                super::super::migration::interpret_base_registrar(selected, raw, state)?
+            } else {
+                Interpreted::new()
+            };
+            let lifecycle_enabled = selected
+                .event
+                .normalized_events
+                .iter()
+                .any(|event| event == "RegistrationGranted");
+            let mut ordinary = if context.graveyard_cleanup || !lifecycle_enabled {
+                Interpreted::new()
+            } else {
+                base::interpret(selected, raw, state, context.transaction_has_registry_setup)?
+            };
+            ordinary.append(&mut correlated);
+            return Ok(ordinary);
         }
         "Transfer(address,address,uint256)"
             if selected.source.source_family == "ens_v1_registrar_l1"
                 && selected.emitter_role.as_deref() == Some("registrar") =>
         {
             let mut ordinary = transfer(selected, raw, state)?;
-            if migration_enabled {
+            if context.migration_enabled {
                 let mut correlated =
                     super::super::migration::interpret_base_registrar(selected, raw, state)?;
                 ordinary.append(&mut correlated);
@@ -61,6 +75,36 @@ pub(super) fn interpret(
         _ => {}
     }
     match selected.event.name.as_str() {
+        "NameRegistered"
+            if selected.source.source_family == "ens_v1_registrar_l1"
+                && selected.emitter_role.as_deref() != Some("registrar") =>
+        {
+            if selected
+                .event
+                .normalized_events
+                .iter()
+                .any(|event| event == "RegistrationGranted")
+            {
+                name_event(selected, raw, state, true)
+            } else {
+                enrichment::name_registered(selected, raw, state)
+            }
+        }
+        "NameRenewed"
+            if selected.source.source_family == "ens_v1_registrar_l1"
+                && selected.emitter_role.as_deref() != Some("registrar") =>
+        {
+            if selected
+                .event
+                .normalized_events
+                .iter()
+                .any(|event| event == "RegistrationGranted")
+            {
+                name_event(selected, raw, state, false)
+            } else {
+                enrichment::name_renewed(selected, raw, state)
+            }
+        }
         "NameRegistered" => name_event(selected, raw, state, true),
         "NameRenewed" => name_event(selected, raw, state, false),
         "Transfer" => transfer(selected, raw, state),
@@ -180,8 +224,8 @@ fn transfer(
         "token_lineage_id": linked.token_lineage_id.map(|id| id.to_string()),
     });
     // A fallback-created registrar identity must be recoverable from the latest transfer row
-    // alone. Until a label-bearing registrar-controller registration or renewal replaces it,
-    // every transfer repeats the marker and uses that transfer's sender as the restore-time owner.
+    // alone. Until numeric BaseRegistrar lifecycle refreshes it, every transfer repeats the marker
+    // and uses that transfer's sender as restore-time owner; controllers only enrich plaintext.
     if wrapper_fallback || linked.wrapper_fallback {
         after["fallback_from_wrapper"] = json!(true);
         after["fallback_from"] = json!(from);
@@ -193,7 +237,7 @@ fn transfer(
     }
     let mut output = single_event(
         "TokenControlTransferred",
-        Some(linked.logical_name_id.clone()),
+        linked.surface_known.then(|| linked.logical_name_id.clone()),
         Some(linked.resource_id),
         after,
     );
@@ -269,7 +313,7 @@ fn append_transfer_permissions(
             };
             output.events.push(EventDraft {
                 event_kind: "PermissionChanged".to_owned(),
-                logical_name_id: Some(after.logical_name_id.clone()),
+                logical_name_id: after.surface_known.then(|| after.logical_name_id.clone()),
                 resource_id: Some(after.resource_id),
                 identity_suffix: format!("PermissionChanged:transfer:{index}:{action}:{subject}"),
                 explicit_before: Some(before_state),

@@ -164,17 +164,10 @@ pub(super) fn correlate_cleanups(
     graveyard: &str,
     output: &mut BatchOutput,
 ) -> anyhow::Result<()> {
-    const GRAVEYARD_CLEANUP_EXPIRY: u64 = 18_446_744_073_701_775_615;
     for observation in observations.iter().copied().filter(|observation| {
         observation.event_name == "NameRegistered"
             && super::is_v1_registrar_observation(observation)
-            && observation
-                .decoded
-                .get("owner")
-                .and_then(Value::as_str)
-                .is_some_and(|owner| owner.eq_ignore_ascii_case(graveyard))
-            && observation.decoded.get("expiry").and_then(Value::as_u64)
-                == Some(GRAVEYARD_CLEANUP_EXPIRY)
+            && is_graveyard_cleanup(&observation.decoded, graveyard)
     }) {
         let logical_name_id = logical_name_from_decoded(&observation.decoded)?;
         let evidence = vec![observation_evidence(observation)];
@@ -182,6 +175,15 @@ pub(super) fn correlate_cleanups(
         mark_direct_historical(output, &observation.raw, &id, "graveyard_cleanup");
     }
     Ok(())
+}
+
+pub(super) fn is_graveyard_cleanup(decoded: &Value, graveyard: &str) -> bool {
+    const GRAVEYARD_CLEANUP_EXPIRY: u64 = 18_446_744_073_701_775_615;
+    decoded
+        .get("owner")
+        .and_then(Value::as_str)
+        .is_some_and(|owner| owner.eq_ignore_ascii_case(graveyard))
+        && decoded.get("expiry").and_then(Value::as_u64) == Some(GRAVEYARD_CLEANUP_EXPIRY)
 }
 
 pub(super) fn correlate_historical_renewals(

@@ -4,13 +4,14 @@ mod event_page;
 #[cfg(any(test, feature = "test-support"))]
 pub mod history_anchor_read_test_hooks;
 mod paging;
+#[cfg(any(test, feature = "test-support"))]
+mod query_plan;
 mod redo;
 mod registration_identity;
 mod selectors;
 mod source;
 mod summary;
-
-use std::collections::BTreeSet;
+mod wrapped_registrar;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -20,15 +21,17 @@ use uuid::Uuid;
 use crate::{CanonicalityState, address_names::AddressNameRelation};
 
 use address_matches::load_address_history_selector;
-use paging::{load_event_history_rows, load_history, load_history_head};
-use selectors::{name_history_selector, resource_history_selector};
-
 pub use event_page::{load_event_history_page, load_event_history_page_with_redo_policy};
+use paging::{load_event_history_rows, load_history, load_history_head};
 pub use redo::{
     InterpretRedoFence, InterpretRedoInProgress, capture_interpret_redo_fence,
     revalidate_interpret_redo_fence,
 };
 pub use redo::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
+use selectors::{
+    name_history_selector, product_registration_history_selector, resource_history_selector,
+};
+pub use wrapped_registrar::load_wrapped_registrar_resource_ids_by_logical_name_id;
 
 /// Anchor selection for normalized-event history reads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -480,7 +483,11 @@ async fn event_history_read_filter(
 
     if let Some(logical_name_id) = filter.logical_name_id.as_deref() {
         let resource_ids =
-            load_resource_ids_for_logical_name_id(pool, logical_name_id, canonical_only)
+            wrapped_registrar::load_resource_ids_for_logical_name_id(
+                pool,
+                logical_name_id,
+                canonical_only,
+            )
                 .await
                 .with_context(|| {
                     format!(
@@ -495,19 +502,20 @@ async fn event_history_read_filter(
     }
 
     if let Some(resource_id) = filter.resource_id {
-        let logical_name_ids =
-            load_logical_name_ids_for_resource_id(pool, resource_id, canonical_only)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to load event history surface anchors for resource_id {resource_id}"
-                    )
-                })?;
-        selectors.push(resource_history_selector(
+        let logical_name_ids = wrapped_registrar::load_logical_name_ids_for_resource_id(
+            pool,
             resource_id,
-            &logical_name_ids,
-            HistoryScope::Both,
-        ));
+            canonical_only,
+        )
+        .await
+        .with_context(|| {
+            format!("failed to load event history surface anchors for resource_id {resource_id}")
+        })?;
+        selectors.push(if include_candidates {
+            resource_history_selector(resource_id, &logical_name_ids, HistoryScope::Both)
+        } else {
+            product_registration_history_selector(resource_id, logical_name_ids)
+        });
     }
 
     if let Some(address_filter) = filter.address.as_ref() {
@@ -556,44 +564,36 @@ async fn event_history_read_filter(
     })
 }
 
-async fn load_resource_ids_for_logical_name_id(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn explain_registration_history_filter_for_test(
     pool: &PgPool,
+    registration_id: Uuid,
     logical_name_id: &str,
-    canonical_only: bool,
-) -> Result<Vec<Uuid>> {
-    let bindings = if canonical_only {
-        crate::load_surface_bindings_by_logical_name_id(pool, logical_name_id).await
-    } else {
-        crate::load_surface_bindings_by_logical_name_id_including_noncanonical(
-            pool,
+    chain_id: &str,
+    namespace: &str,
+    namehash: &str,
+) -> Result<String> {
+    let filter = event_history_read_filter(
+        pool,
+        EventHistoryFilter {
+            resource_id: Some(registration_id),
+            ..EventHistoryFilter::default()
+        },
+        true,
+        false,
+    )
+    .await?;
+    query_plan::explain_history_filter_for_test(
+        pool,
+        filter,
+        query_plan::HistoryPlanLookup {
             logical_name_id,
-        )
-        .await
-    }?;
-
-    Ok(bindings
-        .into_iter()
-        .map(|binding| binding.resource_id)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect())
-}
-
-async fn load_logical_name_ids_for_resource_id(
-    pool: &PgPool,
-    resource_id: Uuid,
-    canonical_only: bool,
-) -> Result<Vec<String>> {
-    let bindings = if canonical_only {
-        crate::load_surface_bindings_by_resource_id(pool, resource_id).await
-    } else {
-        crate::load_surface_bindings_by_resource_id_including_noncanonical(pool, resource_id).await
-    }?;
-
-    Ok(bindings
-        .into_iter()
-        .map(|binding| binding.logical_name_id)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect())
+            registration_id,
+            chain_id,
+            namespace,
+            namehash,
+        },
+        true,
+    )
+    .await
 }

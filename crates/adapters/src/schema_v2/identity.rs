@@ -240,7 +240,6 @@ pub(super) fn materialize(
             canonicality_state: raw.canonicality_state.clone(),
         });
     }
-
     let mut represented = BTreeSet::<Vec<u8>>::new();
     for name in &interpreted.names {
         let logical_name_id = format!("{}:{}", selected.source.namespace, name.namehash);
@@ -259,11 +258,12 @@ pub(super) fn materialize(
             .collect::<Vec<_>>();
         let active = errors.is_empty();
         if v1_surface {
-            if active {
-                state.observe_v1_active_surface(&selected.source.namespace, &name.namehash);
-            } else {
-                state.observe_v1_surface(&selected.source.namespace, &name.namehash);
-            }
+            state.materialize_v1_surface(
+                &selected.source.namespace,
+                &name.namehash,
+                active,
+                name.bind,
+            );
         }
         let labelhashes = name
             .labels

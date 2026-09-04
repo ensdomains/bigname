@@ -30,6 +30,12 @@ pub(super) enum SourceEvent {
     Other,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RegistrationWindow {
+    PriorLogsOnly,
+    WholeTransaction,
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct EventFields {
     pub(super) position: Option<Position>,
@@ -45,6 +51,7 @@ pub(super) struct EventFields {
     pub(super) resource_scope: bool,
     pub(super) grant: bool,
     pub(super) revocation: bool,
+    pub(super) current_registry_setup: bool,
 }
 
 impl EventFields {
@@ -57,17 +64,19 @@ impl EventFields {
             Some(_) | None => SourceEvent::Other,
         };
         let scope = state.get("scope").cloned();
+        let family = match event.source_family.as_str() {
+            "ens_v1_registry_l1" | "basenames_base_registry" => SourceFamily::Registry,
+            "ens_v1_resolver_l1" | "basenames_base_resolver" => SourceFamily::Resolver,
+            _ => SourceFamily::Other,
+        };
         Self {
             position: event_position(event),
-            family: match event.source_family.as_str() {
-                "ens_v1_registry_l1" | "basenames_base_registry" => SourceFamily::Registry,
-                "ens_v1_resolver_l1" | "basenames_base_resolver" => SourceFamily::Resolver,
-                _ => SourceFamily::Other,
-            },
+            family,
             source_event,
             target_namehash: state
                 .get("child_node")
                 .or_else(|| state.get("node"))
+                .or_else(|| state.get("namehash"))
                 .and_then(Value::as_str)
                 .map(|value| value.to_ascii_lowercase()),
             resource_id: event.resource_id,
@@ -76,6 +85,7 @@ impl EventFields {
             permission: event.event_kind == "PermissionChanged",
             owner: state
                 .get("owner")
+                .or_else(|| state.get("to"))
                 .and_then(Value::as_str)
                 .map(|value| value.to_ascii_lowercase()),
             subject: state
@@ -94,18 +104,27 @@ impl EventFields {
             revocation: state
                 .get("revocation_source")
                 .is_some_and(|source| !source.is_null()),
+            current_registry_setup: matches!(
+                source_event,
+                SourceEvent::NewOwner | SourceEvent::Transfer
+            ) && family == SourceFamily::Registry
+                && state.get("emitter_role").and_then(Value::as_str) == Some("registry"),
         }
     }
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct Registration {
+    pub(super) event_index: usize,
     pub(super) key: TargetKey,
     pub(super) logical_name_id: String,
+    pub(super) surface_known: bool,
     pub(super) resource_id: Uuid,
     pub(super) log_index: i64,
     pub(super) authority_key: Option<String>,
-    pub(super) emitter: String,
+    pub(super) _emitter: String,
+    pub(super) provisional_owner: String,
+    pub(super) window: RegistrationWindow,
     /// Chain position of the registration event; the block number scopes how far reconciliation
     /// may reach back for predecessor-epoch observations.
     pub(super) position: Position,
@@ -174,7 +193,7 @@ impl EventIndex {
             .filter(|(index, _)| {
                 self.fields[*index].source_event == SourceEvent::NameRegistered
             })
-            .filter_map(|(_, event)| {
+            .filter_map(|(event_index, event)| {
                 let registrant = event.after_state.get("registrant").and_then(Value::as_str);
                 let emitter = event
                     .raw_fact_ref
@@ -197,18 +216,20 @@ impl EventIndex {
                     event.event_identity,
                 );
                 registrant?;
+                let namehash = event.after_state["namehash"].as_str()?.to_ascii_lowercase();
                 Some(Registration {
+                    event_index,
                     key: TargetKey {
                         namespace: event.namespace.clone(),
                         block_hash: event.block_hash.clone()?,
                         transaction_hash: event.transaction_hash.clone()?,
-                        namehash: event
-                            .after_state
-                            .get("namehash")?
-                            .as_str()?
-                            .to_ascii_lowercase(),
+                        namehash: namehash.clone(),
                     },
-                    logical_name_id: event.logical_name_id.clone()?,
+                    logical_name_id: event
+                        .logical_name_id
+                        .clone()
+                        .unwrap_or_else(|| format!("{}:{namehash}", event.namespace)),
+                    surface_known: event.logical_name_id.is_some(),
                     resource_id: event.resource_id?,
                     log_index: event.log_index?,
                     authority_key: event
@@ -216,7 +237,13 @@ impl EventIndex {
                         .get("authority_key")
                         .and_then(Value::as_str)
                         .map(str::to_owned),
-                    emitter: emitter?.to_ascii_lowercase(),
+                    _emitter: emitter?.to_ascii_lowercase(),
+                    provisional_owner: registrant?.to_ascii_lowercase(),
+                    window: if event.after_state["registration_window"] == "whole_transaction" {
+                        RegistrationWindow::WholeTransaction
+                    } else {
+                        RegistrationWindow::PriorLogsOnly
+                    },
                     position: position?,
                 })
             })

@@ -39,16 +39,17 @@ pub(super) fn events(kinds: Vec<&str>, after_state: Value) -> Interpreted {
 
 pub(super) fn events_linked(
     kinds: Vec<&str>,
-    logical_name_id: String,
+    logical_name_id: impl Into<Option<String>>,
     resource_id: uuid::Uuid,
     after_state: Value,
 ) -> Interpreted {
+    let logical_name_id = logical_name_id.into();
     let mut output = Interpreted::new();
     output
         .events
         .extend(kinds.into_iter().map(|kind| EventDraft {
             event_kind: kind.to_owned(),
-            logical_name_id: Some(logical_name_id.clone()),
+            logical_name_id: logical_name_id.clone(),
             resource_id: Some(resource_id),
             identity_suffix: kind.to_owned(),
             explicit_before: None,

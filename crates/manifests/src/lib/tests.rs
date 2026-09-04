@@ -1220,12 +1220,29 @@ fn mainnet_registrar_family_pins_the_base_registrar_event_surface() -> Result<()
         (
             "NameRegistered",
             "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)",
-            &["RegistrationReleased"][..],
+            &[
+                "RegistrationGranted",
+                "ExpiryChanged",
+                "PermissionChanged",
+                "SurfaceUnbound",
+                "SurfaceBound",
+                "AuthorityEpochChanged",
+                "ResolverChanged",
+                "RegistrationReleased",
+            ][..],
         ),
         (
             "NameRenewed",
             "event NameRenewed(uint256 indexed id, uint256 expires)",
-            &["RegistrationRenewed", "ExpiryChanged"][..],
+            &[
+                "RegistrationGranted",
+                "RegistrationRenewed",
+                "ExpiryChanged",
+                "SurfaceUnbound",
+                "SurfaceBound",
+                "AuthorityEpochChanged",
+                "ResolverChanged",
+            ][..],
         ),
     ];
 
@@ -1616,8 +1633,8 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
             "ApprovalForAll|event ApprovalForAll(address indexed owner, address indexed operator, bool approved)|registrar|",
             "ControllerAdded|event ControllerAdded(address indexed controller)|registrar|PermissionChanged",
             "ControllerRemoved|event ControllerRemoved(address indexed controller)|registrar|PermissionChanged",
-            "NameRegistered|event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)|registrar|RegistrationReleased",
-            "NameRenewed|event NameRenewed(uint256 indexed id, uint256 expires)|registrar|RegistrationRenewed,ExpiryChanged",
+            "NameRegistered|event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)|registrar|RegistrationGranted,ExpiryChanged,PermissionChanged,SurfaceUnbound,SurfaceBound,AuthorityEpochChanged,ResolverChanged,RegistrationReleased",
+            "NameRenewed|event NameRenewed(uint256 indexed id, uint256 expires)|registrar|RegistrationGranted,RegistrationRenewed,ExpiryChanged,SurfaceUnbound,SurfaceBound,AuthorityEpochChanged,ResolverChanged",
             "Transfer|event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)|registrar|TokenControlTransferred,PermissionChanged,SurfaceUnbound,SurfaceBound,AuthorityEpochChanged,ResolverChanged",
         ]
     );

@@ -88,7 +88,7 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
         80,
     )
     .await?;
-    seed_v2_history_blocks(&database, 121..=121).await?;
+    seed_v2_history_blocks(&database, 121..=122).await?;
     upsert_test_resources(
         &database.pool,
         &[address_name_resource(
@@ -199,7 +199,7 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
 }
 
 #[tokio::test]
-async fn v2_registry_history_registration_identity_uses_event_position() -> Result<()> {
+async fn v2_tokenized_registry_history_keeps_identity_outside_the_binding_window() -> Result<()> {
     const ADDRESS: &str = "0x0000000000000000000000000000000000007122";
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "ens:event-position-history.eth";
@@ -270,11 +270,73 @@ async fn v2_registry_history_registration_identity_uses_event_position() -> Resu
     let rows = payload["data"].as_array().expect("product history rows");
     assert_eq!(rows.len(), 3, "{rows:?}");
     assert_eq!(rows[0]["log_index"], json!(4));
-    assert_eq!(rows[0]["registration_id"], Value::Null);
+    assert_eq!(rows[0]["registration_id"], json!(resource_id.to_string()));
     assert_eq!(rows[1]["log_index"], json!(2));
     assert_eq!(rows[1]["registration_id"], json!(resource_id.to_string()));
     assert_eq!(rows[2]["log_index"], json!(0));
-    assert_eq!(rows[2]["registration_id"], Value::Null);
+    assert_eq!(rows[2]["registration_id"], json!(resource_id.to_string()));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn pre_enrichment_registrar_resolver_keeps_the_registration_handle() -> Result<()> {
+    const ADDRESS: &str = "0x0000000000000000000000000000000000007123";
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:pre-enrichment-resolver.eth";
+    let registrar_resource_id = Uuid::from_u128(0x7123);
+    let surface_binding_id = Uuid::from_u128(0x9123);
+    seed_identity_name(
+        &database,
+        logical_name_id,
+        "pre-enrichment-resolver.eth",
+        "pre-enrichment-resolver.eth",
+        "node:pre-enrichment-resolver.eth",
+        registrar_resource_id,
+        Uuid::from_u128(0x8123),
+        surface_binding_id,
+        ADDRESS,
+        bigname_storage::AddressNameRelation::Registrant,
+        80,
+    )
+    .await?;
+    seed_v2_history_blocks(&database, 121..=122).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.surface_bindings
+         SET active_from = to_timestamp(1700000122)
+         WHERE surface_binding_id = $1",
+    )
+    .bind(surface_binding_id)
+    .execute(&database.pool)
+    .await?;
+
+    let mut resolver = v2_history_event(
+        "registrar-resolver-before-enrichment",
+        None,
+        Some(registrar_resource_id),
+        "ResolverChanged",
+        121,
+    );
+    resolver.source_family = "ens_v1_registry_l1".to_owned();
+    resolver.after_state = json!({
+        "source_event": "NewResolver",
+        "node": "node:pre-enrichment-resolver.eth",
+        "resolver": "0x00000000000000000000000000000000000000aa"
+    });
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[resolver]).await?;
+
+    let payload = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/events?registration_id={registrar_resource_id}&page_size=20"),
+    )
+    .await?;
+    let rows = payload["data"].as_array().expect("registrar history rows");
+    assert_eq!(rows.len(), 1, "pre-enrichment resolver was omitted: {rows:?}");
+    assert_eq!(rows[0]["type"], json!("resolver"));
+    assert_eq!(
+        rows[0]["registration_id"],
+        json!(registrar_resource_id.to_string())
+    );
 
     database.cleanup().await
 }
@@ -1119,6 +1181,510 @@ async fn v2_get_history_keeps_prior_registration_resources_after_rebinding() -> 
     assert!(payload["data"].as_array().expect("history data").iter().any(
         |row| row["registration_id"] == json!(prior_resource_id.to_string())
     ));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn later_wrapped_name_keeps_one_followable_registrar_lifecycle_handle() -> Result<()> {
+    const NAME: &str = "later-wrapped-history.eth";
+    const SEED_LOGICAL_NAME_ID: &str = "ens:later-wrapped-history.eth";
+    const HOLDER: &str = "0x0000000000000000000000000000000000007150";
+    let database = TestDatabase::new_migrated().await?;
+    let wrapper_resource_id = Uuid::from_u128(0x7150);
+    let registrar_resource_id = Uuid::from_u128(0x7151);
+    let older_registrar_resource_id = Uuid::from_u128(0x7152);
+    let namehash = bigname_lookup::ens_namehash_hex(NAME)?;
+    let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
+
+    seed_identity_name(
+        &database,
+        SEED_LOGICAL_NAME_ID,
+        NAME,
+        NAME,
+        "node:later-wrapped-history.eth",
+        wrapper_resource_id,
+        Uuid::from_u128(0x8150),
+        Uuid::from_u128(0x9150),
+        HOLDER,
+        bigname_storage::AddressNameRelation::Registrant,
+        80,
+    )
+    .await?;
+    upsert_test_resources(
+        &database.pool,
+        &[
+            address_name_resource(
+                registrar_resource_id,
+                None,
+                "0xregistrar-resource",
+                79,
+            ),
+            address_name_resource(
+                older_registrar_resource_id,
+                None,
+                "0xolder-registrar-resource",
+                78,
+            ),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+                 jsonb_set(
+                     declared_summary,
+                     '{registration,authority_kind}',
+                     '\"wrapper\"'::jsonb,
+                     true
+                 ),
+                 '{registration,resource_id}',
+                 to_jsonb($2::text),
+                 true
+             )
+         WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .bind(registrar_resource_id)
+    .execute(&database.pool)
+    .await?;
+    let projected_registration_id: Option<String> = sqlx::query_scalar(
+        "SELECT declared_summary #>> '{registration,resource_id}'
+         FROM bigname_phase.name_current
+         WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(projected_registration_id, Some(registrar_resource_id.to_string()));
+    seed_v2_history_blocks(&database, 120..=125).await?;
+
+    let mut older_registration = v2_history_event(
+        "later-wrap-older-unbound-registration",
+        None,
+        Some(older_registrar_resource_id),
+        "RegistrationGranted",
+        120,
+    );
+    older_registration.after_state["namehash"] = json!(&namehash);
+    let mut registration = v2_history_event(
+        "later-wrap-controller-free-registration",
+        None,
+        Some(registrar_resource_id),
+        "RegistrationGranted",
+        121,
+    );
+    registration.after_state["namehash"] = json!(&namehash);
+    let mut wrapper_binding = v2_history_event(
+        "later-wrap-binding",
+        Some(&logical_name_id),
+        Some(wrapper_resource_id),
+        "SurfaceBound",
+        121,
+    );
+    wrapper_binding.source_family = "ens_v1_wrapper_l1".to_owned();
+    wrapper_binding.after_state = json!({
+        "source_event": "NameWrapped",
+        "node": namehash,
+        "wrapped_registrar_resource_id": registrar_resource_id,
+    });
+    let mut wrapper_transfer = v2_history_event(
+        "later-wrap-holder-transfer",
+        Some(&logical_name_id),
+        Some(wrapper_resource_id),
+        "TokenControlTransferred",
+        122,
+    );
+    wrapper_transfer.source_family = "ens_v1_wrapper_l1".to_owned();
+    let mut wrapped_controller_renewal = v2_history_event(
+        "later-wrap-wrapped-controller-renewal",
+        Some(&logical_name_id),
+        Some(wrapper_resource_id),
+        "ExpiryChanged",
+        123,
+    );
+    wrapped_controller_renewal.source_family = "ens_v1_registrar_l1".to_owned();
+    wrapped_controller_renewal.after_state["source_event"] = json!("NameRenewed");
+    let mut wrapper_registry_resolver = v2_history_event(
+        "later-wrap-registry-resolver",
+        Some(&logical_name_id),
+        Some(wrapper_resource_id),
+        "ResolverChanged",
+        124,
+    );
+    wrapper_registry_resolver.source_family = "ens_v1_registry_l1".to_owned();
+    wrapper_registry_resolver.after_state["source_event"] = json!("NewResolver");
+    let surface_record = v2_history_event(
+        "later-wrap-surface-record",
+        Some(&logical_name_id),
+        None,
+        "RecordChanged",
+        125,
+    );
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            older_registration,
+            registration,
+            wrapper_binding,
+            wrapper_transfer,
+            wrapped_controller_renewal,
+            wrapper_registry_resolver,
+            surface_record,
+        ],
+    )
+    .await?;
+
+    let exact_name = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/names/{NAME}"),
+    )
+    .await?;
+    assert_eq!(
+        exact_name["data"]["registration_id"],
+        json!(registrar_resource_id.to_string()),
+        "the exact-name response returned the wrapper resource instead of the registrar lifecycle handle"
+    );
+
+    let name_history_route =
+        format!("/v2/names/{NAME}/history?scope=registration&page_size=20");
+    {
+        let payload = v2_history_payload_for_database(&database, &name_history_route).await?;
+        let rows = payload["data"].as_array().expect("history data");
+        assert!(
+            rows.iter().any(|row| {
+                row["type"] == json!("registration")
+                    && row["registration_id"] == json!(registrar_resource_id.to_string())
+            }),
+            "{name_history_route} did not return the registrar registration: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| {
+                row["type"] == json!("transfer")
+                    && row["registration_id"] == json!(registrar_resource_id.to_string())
+            }),
+            "{name_history_route} did not keep the wrapper holder change on the registrar lifecycle handle: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| {
+                row["type"] == json!("expiry")
+                    && row["registration_id"] == json!(registrar_resource_id.to_string())
+            }),
+            "{name_history_route} did not keep the wrapped-controller renewal on the registrar lifecycle handle: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| {
+                row["type"] == json!("resolver")
+                    && row["registration_id"] == json!(registrar_resource_id.to_string())
+            }),
+            "{name_history_route} did not keep the wrapper-active registry resolver on the registrar lifecycle handle: {rows:?}"
+        );
+    }
+
+    let registration_route =
+        format!("/v2/events?registration_id={registrar_resource_id}&page_size=20");
+    let registration_payload =
+        v2_history_payload_for_database(&database, &registration_route).await?;
+    let registration_rows = registration_payload["data"]
+        .as_array()
+        .expect("history data");
+    assert!(registration_rows.iter().any(|row| {
+        row["type"] == json!("registration")
+            && row["registration_id"] == json!(registrar_resource_id.to_string())
+    }));
+    assert!(registration_rows.iter().any(|row| {
+        row["type"] == json!("transfer")
+            && row["registration_id"] == json!(registrar_resource_id.to_string())
+    }), "the registrar lifecycle filter omitted the later wrapper holder change: {registration_rows:?}");
+    assert!(registration_rows.iter().any(|row| {
+        row["type"] == json!("expiry")
+            && row["registration_id"] == json!(registrar_resource_id.to_string())
+    }), "the registrar lifecycle filter omitted the wrapped-controller renewal: {registration_rows:?}");
+    assert!(registration_rows.iter().any(|row| {
+        row["type"] == json!("resolver")
+            && row["registration_id"] == json!(registrar_resource_id.to_string())
+    }), "the registrar lifecycle filter omitted the wrapper-active registry resolver: {registration_rows:?}");
+    assert!(registration_rows.iter().any(|row| {
+        row["type"] == json!("record") && row["registration_id"] == Value::Null
+    }), "the registrar lifecycle filter omitted resource-less exact-name history: {registration_rows:?}");
+    let plan = bigname_storage::explain_registration_history_filter_for_test(
+        &database.pool,
+        registrar_resource_id,
+        &logical_name_id,
+        "ethereum-mainnet",
+        "ens",
+        &namehash,
+    )
+    .await?;
+    assert!(
+        plan.contains("normalized_events_resource_projection_replay_idx")
+            || plan.contains("normalized_events_history_resource_lookup_idx")
+            || plan.contains("normalized_events_resource_history_idx"),
+        "registration history must retain an indexed registrar-resource anchor:\n{plan}"
+    );
+    assert!(
+        plan.contains("normalized_events_name_projection_replay_idx")
+            || plan.contains("normalized_events_name_history_idx"),
+        "registration history must use the exact-name history index for associated rows:\n{plan}"
+    );
+    assert!(
+        plan.contains("name_surfaces_exact_namehash_projection_idx")
+            || plan.contains("name_surfaces_hash_idx")
+            || plan.contains("name_surfaces_visibility_idx"),
+        "wrapper association must use the exact-namehash surface index:\n{plan}"
+    );
+    assert!(
+        !plan.contains("Seq Scan on normalized_events"),
+        "registration history and association discovery must not scan the complete normalized-event table:\n{plan}"
+    );
+    let older_registration_payload = v2_history_payload_for_database(
+        &database,
+        &format!(
+            "/v2/events?registration_id={older_registrar_resource_id}&page_size=20"
+        ),
+    )
+    .await?;
+    let older_registration_rows = older_registration_payload["data"]
+        .as_array()
+        .expect("older registration history");
+    assert_eq!(history_types(older_registration_rows), vec!["registration"]);
+    assert_eq!(
+        older_registration_rows[0]["registration_id"],
+        json!(older_registrar_resource_id.to_string())
+    );
+
+    let by_name = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/events?name={NAME}&page_size=20"),
+    )
+    .await?;
+    let by_name_rows = by_name["data"].as_array().expect("history data");
+    assert!(by_name_rows.iter().any(|row| {
+        row["type"] == json!("registration")
+            && row["registration_id"] == json!(registrar_resource_id.to_string())
+    }));
+
+    sqlx::query(
+        "UPDATE bigname_phase.normalized_events
+         SET canonicality_state = 'orphaned'
+         WHERE event_identity = 'later-wrap-binding'",
+    )
+    .execute(&database.pool)
+    .await?;
+    let after_binding_retraction =
+        v2_history_payload_for_database(&database, &registration_route).await?;
+    assert_eq!(
+        history_types(
+            after_binding_retraction["data"]
+                .as_array()
+                .expect("history after wrapper-binding retraction")
+        ),
+        vec!["registration"]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn name_history_keeps_a_superseded_controller_free_wrapped_registration() -> Result<()> {
+    const NAME: &str = "superseded-later-wrap.eth";
+    const SEED_LOGICAL_NAME_ID: &str = "ens:superseded-later-wrap.eth";
+    const HOLDER: &str = "0x0000000000000000000000000000000000007160";
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
+    let namehash = bigname_lookup::ens_namehash_hex(NAME)?;
+    let prior_wrapper_resource_id = Uuid::from_u128(0x7160);
+    let prior_registrar_resource_id = Uuid::from_u128(0x7161);
+    let current_registrar_resource_id = Uuid::from_u128(0x7162);
+
+    seed_identity_name(
+        &database,
+        SEED_LOGICAL_NAME_ID,
+        NAME,
+        NAME,
+        &namehash,
+        current_registrar_resource_id,
+        Uuid::from_u128(0x8162),
+        Uuid::from_u128(0x9162),
+        HOLDER,
+        bigname_storage::AddressNameRelation::Registrant,
+        84,
+    )
+    .await?;
+    upsert_test_resources(
+        &database.pool,
+        &[
+            address_name_resource(
+                prior_wrapper_resource_id,
+                None,
+                "0xprior-wrapper-resource",
+                79,
+            ),
+            address_name_resource(
+                prior_registrar_resource_id,
+                None,
+                "0xprior-registrar-resource",
+                78,
+            ),
+        ],
+    )
+    .await?;
+    let mut prior_wrapper_binding = address_name_surface_binding(
+        Uuid::from_u128(0x9160),
+        SEED_LOGICAL_NAME_ID,
+        prior_wrapper_resource_id,
+        "0xprior-wrapper-binding",
+        80,
+        1_717_171_600,
+    );
+    prior_wrapper_binding.active_to = Some(timestamp(1_717_171_699));
+    upsert_test_surface_bindings(&database.pool, &[prior_wrapper_binding]).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+             declared_summary,
+             '{registration,resource_id}',
+             to_jsonb($2::text),
+             true
+         )
+         WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .bind(current_registrar_resource_id)
+    .execute(&database.pool)
+    .await?;
+    seed_v2_history_blocks(&database, 121..=124).await?;
+
+    let prior_registration = v2_history_event(
+        "superseded-later-wrap-registration",
+        None,
+        Some(prior_registrar_resource_id),
+        "RegistrationGranted",
+        121,
+    );
+    let mut prior_wrapper_binding_event = v2_history_event(
+        "superseded-later-wrap-binding",
+        Some(&logical_name_id),
+        Some(prior_wrapper_resource_id),
+        "SurfaceBound",
+        122,
+    );
+    prior_wrapper_binding_event.source_family = "ens_v1_wrapper_l1".to_owned();
+    prior_wrapper_binding_event.after_state = json!({
+        "source_event": "NameWrapped",
+        "node": namehash,
+        "wrapped_registrar_resource_id": prior_registrar_resource_id,
+    });
+    let prior_release = v2_history_event(
+        "superseded-later-wrap-release",
+        None,
+        Some(prior_registrar_resource_id),
+        "RegistrationReleased",
+        123,
+    );
+    let current_registration = v2_history_event(
+        "superseded-current-registration",
+        Some(&logical_name_id),
+        Some(current_registrar_resource_id),
+        "RegistrationGranted",
+        124,
+    );
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            prior_registration,
+            prior_wrapper_binding_event,
+            prior_release,
+            current_registration,
+        ],
+    )
+    .await?;
+
+    let payload = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/names/{NAME}/history?scope=registration&page_size=20"),
+    )
+    .await?;
+    let rows = payload["data"].as_array().expect("history data");
+    assert!(
+        rows.iter().any(|row| {
+            row["type"] == json!("registration")
+                && row["registration_id"] == json!(prior_registrar_resource_id.to_string())
+        }),
+        "name-scoped history forgot the superseded controller-free registrar lifecycle: {rows:?}"
+    );
+    assert!(rows.iter().any(|row| {
+        row["type"] == json!("registration")
+            && row["registration_id"] == json!(current_registrar_resource_id.to_string())
+    }));
+
+    let event_payload = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/events?name={NAME}&page_size=20"),
+    )
+    .await?;
+    let event_rows = event_payload["data"].as_array().expect("event data");
+    assert!(
+        event_rows.iter().any(|row| {
+            row["type"] == json!("registration")
+                && row["registration_id"] == json!(prior_registrar_resource_id.to_string())
+        }),
+        "name-filtered events forgot the superseded controller-free registrar lifecycle: {event_rows:?}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn wrapper_without_prior_registrar_keeps_name_history_readable() -> Result<()> {
+    const NAME: &str = "wrapper-without-registrar.eth";
+    const SEED_LOGICAL_NAME_ID: &str = "ens:wrapper-without-registrar.eth";
+    const HOLDER: &str = "0x0000000000000000000000000000000000007170";
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
+    let namehash = bigname_lookup::ens_namehash_hex(NAME)?;
+    let wrapper_resource_id = Uuid::from_u128(0x7170);
+
+    seed_identity_name(
+        &database,
+        SEED_LOGICAL_NAME_ID,
+        NAME,
+        NAME,
+        &namehash,
+        wrapper_resource_id,
+        Uuid::from_u128(0x8170),
+        Uuid::from_u128(0x9170),
+        HOLDER,
+        bigname_storage::AddressNameRelation::Registrant,
+        80,
+    )
+    .await?;
+    seed_v2_history_blocks(&database, 121..=121).await?;
+    let mut wrapper_binding_event = v2_history_event(
+        "wrapper-without-prior-registrar-binding",
+        Some(&logical_name_id),
+        Some(wrapper_resource_id),
+        "SurfaceBound",
+        121,
+    );
+    wrapper_binding_event.source_family = "ens_v1_wrapper_l1".to_owned();
+    wrapper_binding_event.after_state = json!({
+        "source_event": "NameWrapped",
+        "node": namehash,
+        "wrapped_registrar_resource_id": null,
+    });
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[wrapper_binding_event],
+    )
+    .await?;
+
+    let payload = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/names/{NAME}/history?scope=registration&page_size=20"),
+    )
+    .await?;
+    assert_eq!(payload["data"], json!([]));
 
     database.cleanup().await
 }

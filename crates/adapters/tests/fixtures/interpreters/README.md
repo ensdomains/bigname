@@ -9,7 +9,8 @@ interpret-phase-owned `name_surfaces`, `surface_bindings`, `resources`,
 
 `binding-fk-release.json` is a production-derived, four-batch regression
 corpus for the `puy.eth` lease release observed at Ethereum block 16,176,355.
-It retains the exact `NameRenewed`, registrar transfers, registry `NewOwner`,
+It retains the exact numeric BaseRegistrar renewal before the controller
+`NameRenewed`, registrar transfers, registry `NewOwner`,
 block hashes, timestamps, and expected release-side resource and binding IDs.
 The physical-batch harness proves that compacted prior-state restoration and a
 live incremental session both materialize the dormant direct-registry resource
@@ -76,11 +77,13 @@ The seven A3 additions exercise:
   (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L475 @ ens_v2_sepolia_20260629@ccaeb58)
   and registrar registration
   (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@a971bd64);
-- ENSv1 registration followed by renewal against non-empty persisted state,
-  and a losing registration branch that is orphaned before a winning branch
-  restores canonical state
-  (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L116 @ ens_v1@91c966f)
-  (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L133 @ ens_v1@91c966f);
+- numeric BaseRegistrar registration followed by a controller-free numeric
+  renewal against non-empty persisted state, and numeric registrar events plus
+  plaintext controller enrichment across a losing registration branch that is
+  orphaned before a winning branch restores canonical state
+  (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L15-L20 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L108-L139 @ ens_v1@91c966f);
 - a non-`.eth` ENSv1 `NameWrapped` → `FusesSet` lifecycle, with
   committed `wrapped`, `emancipated`, `locked`, and owner-controlled-fuse
   outputs. The fixture covers a zero bitmap, `PARENT_CANNOT_CONTROL`,
@@ -118,19 +121,34 @@ The four PR #301 reconciliation additions exercise a Basenames registration
 over a preceding registry owner, an ENS registration born wrapped, a reverse
 claim followed by a resolver name record without a materialized forward
 [name surface](../../../../../docs/glossary.md), and the legacy mainnet
-controller's `registerWithConfig` ordering. The last case
-commits one mid-flow `RecordChanged`, the final `NewOwner`-derived
-`SubregistryChanged`, `AuthorityTransferred`, and `PermissionChanged`, and the
-five `NameRegistered` lifecycle events. All nine retained events reference the
-same materialized surface and registration resource; the temporary-controller
-ownership events are absent
+controller's `registerWithConfig` ordering. The `.eth` cases place each
+numeric BaseRegistrar registration at its actual position among the registry,
+resolver, registrar-transfer, and controller logs. The last case follows the
+legacy controller's configured-registration flow: registry ownership first goes
+to the controller, the BaseRegistrar then emits the numeric registration for
+that controller, resolver setup follows, and the registry and registrar token
+finally move to the requested owner before the controller emits its plaintext
+event. Reconciliation attributes those setup observations to one registration
+resource, so no separate temporary-controller
+[authority epoch](../../../../../docs/glossary.md#authority-epoch) remains.
 (upstream: .refs/ens_subgraph/subgraph.yaml:L145 @ ens_subgraph@723f1b6)
-(upstream: .refs/ens_v1/deployments/mainnet/solcInputs/40ce5451dce8f428cafdaca8fb82d91d.json:L158 @ ens_v1@91c966f).
+(upstream: .refs/ens_v1/deployments/mainnet/solcInputs/40ce5451dce8f428cafdaca8fb82d91d.json:L158 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L142-L152 @ ens_v1@91c966f).
 
 The fixture metadata carries the full pinned upstream citations. The harness
-also asserts the required event kinds, the renewal's non-empty before-state,
-the orphaned and restored reorg outputs, and the ordered wrapper transitions
-before it permits golden output to be refreshed.
+matches each committed event, surface, resource, lineage, and active binding to
+the interpreted output. Dedicated reorg, renewal, binding-closure, and wrapper
+tests cover the state transitions that are not represented by every golden case.
+
+The registrar-authority cases additionally cover a labelhash-only registration
+and renewal without controller observations, numeric-plus-controller binding,
+conflicting registrar/controller expiry payloads, and resolver setup after the
+numeric registration event. ENSv1→ENSv2 correlation, exact Graveyard cleanup,
+wrapped renewal routing, and live-versus-cold surface enrichment are exercised
+by the schema-v2 unit fixtures that share the same manifest catalog. The dense
+same-transaction corpus now contains 1,472 logs and 320 numeric registrar
+anchors; `binding-fk-release.json` and `binding-closure-dangling.json` include
+the numeric renewal that establishes the lease they later settle.
 
 Validate the byte-identical corpus through its schema-v2 consumer with:
 

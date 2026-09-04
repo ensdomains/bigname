@@ -1,10 +1,9 @@
-use alloy_primitives::{B256, keccak256};
 use alloy_sol_types::sol;
 use anyhow::bail;
 use serde_json::{Value, json};
 
 use super::super::{
-    BindingClosureDraft, BindingDraft, EventDraft, Interpreted, ResourceDraft, ensure_declared,
+    BindingClosureDraft, EventDraft, Interpreted, ResourceDraft, ensure_declared,
     permissions::{v1_grant_states, v1_revoke_states},
 };
 use super::{support::events, unmasked_word};
@@ -14,7 +13,7 @@ use crate::evm_abi::{
 };
 use crate::schema_v2::{
     catalog::Selected,
-    common::{event_time, stable_uuid},
+    common::stable_uuid,
     model::RawLogInput,
     state::{State, V1NameState, V1RegistryReadAnchor},
 };
@@ -22,47 +21,11 @@ use crate::schema_v2::{
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const ROOT_NODE: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 const LLL_REGISTRY: &str = "0x314159265dd8dbb310642f98f50c066173c1259b";
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum RegistryOwnerView {
-    Authentic { owner: String },
-    ZeroEquivalent { reason: RegistryOwnerZeroReason },
-    UnavailableUnmasked,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RegistryOwnerZeroReason {
-    LiteralZero,
-    RegistrySelf,
-}
-impl RegistryOwnerZeroReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::LiteralZero => "literal_zero",
-            Self::RegistrySelf => "registry_self",
-        }
-    }
-}
-fn classify_registry_owner(
-    owner_word: &str,
-    registry_address: &str,
-    body_has_unmasked_owner_word: bool,
-    registry_self_is_zero: bool,
-) -> RegistryOwnerView {
-    if body_has_unmasked_owner_word {
-        RegistryOwnerView::UnavailableUnmasked
-    } else if owner_word.eq_ignore_ascii_case(ZERO_ADDRESS) {
-        RegistryOwnerView::ZeroEquivalent {
-            reason: RegistryOwnerZeroReason::LiteralZero,
-        }
-    } else if registry_self_is_zero && owner_word.eq_ignore_ascii_case(registry_address) {
-        RegistryOwnerView::ZeroEquivalent {
-            reason: RegistryOwnerZeroReason::RegistrySelf,
-        }
-    } else {
-        RegistryOwnerView::Authentic {
-            owner: owner_word.to_owned(),
-        }
-    }
-}
+pub(super) mod node;
+mod owner;
+mod surface;
+use node::child_node;
+use owner::{RegistryOwnerView, classify as classify_registry_owner};
 mod transfer {
     use super::*;
     sol! { event Transfer(bytes32 indexed node, address owner); }
@@ -563,22 +526,17 @@ pub(super) fn append_authority_transition(
     if previous.map(|authority| authority.resource_id)
         == linked.map(|authority| authority.resource_id)
     {
+        if let (Some(previous), Some(linked)) = (previous, linked)
+            && !previous.surface_known
+            && linked.surface_known
+        {
+            surface::append_binding(output, linked, authority_arm, raw, binding_active_from);
+            surface::append_bound_event(output, linked, raw, observation_state);
+        }
         return;
     }
     if let Some(linked) = linked.filter(|authority| authority.surface_known) {
-        output.bindings.push(BindingDraft {
-            logical_name_id: linked.logical_name_id.clone(),
-            resource_id: linked.resource_id,
-            binding_kind: "declared_registry_path".to_owned(),
-            authority_arm: authority_arm.to_owned(),
-            surface_binding_id: linked.authority_key.as_ref().map(|authority_key| {
-                stable_uuid(&format!(
-                    "binding:{authority_key}:{}",
-                    event_time(raw).unix_timestamp_nanos()
-                ))
-            }),
-            active_from: binding_active_from,
-        });
+        surface::append_binding(output, linked, authority_arm, raw, binding_active_from);
     } else if let Some(previous) = previous.filter(|authority| authority.surface_known) {
         output.binding_closures.push(BindingClosureDraft {
             logical_name_id: previous.logical_name_id.clone(),
@@ -586,14 +544,21 @@ pub(super) fn append_authority_transition(
         });
     }
     let logical_name_id = linked
-        .filter(|authority| authority.surface_known || authority.token_lineage_id.is_some())
+        .filter(|authority| authority.surface_known)
         .map(|authority| authority.logical_name_id.clone())
         .or_else(|| {
             previous
-                .filter(|authority| authority.surface_known || authority.token_lineage_id.is_some())
+                .filter(|authority| authority.surface_known)
                 .map(|authority| authority.logical_name_id.clone())
         });
-    let Some(logical_name_id) = logical_name_id else {
+    let Some(identity_name_id) = linked
+        .filter(|authority| authority.surface_known || authority.token_lineage_id.is_some())
+        .or_else(|| {
+            previous
+                .filter(|authority| authority.surface_known || authority.token_lineage_id.is_some())
+        })
+        .map(|authority| authority.logical_name_id.clone())
+    else {
         return;
     };
     let source_event = observation_state
@@ -603,7 +568,7 @@ pub(super) fn append_authority_transition(
     if let Some(previous) = previous.filter(|authority| authority.surface_known) {
         output.events.push(EventDraft {
             event_kind: "SurfaceUnbound".to_owned(),
-            logical_name_id: Some(logical_name_id.clone()),
+            logical_name_id: Some(previous.logical_name_id.clone()),
             resource_id: Some(previous.resource_id),
             identity_suffix: format!("SurfaceUnbound:{source_event}:{}", previous.resource_id),
             explicit_before: Some(json!({
@@ -623,32 +588,15 @@ pub(super) fn append_authority_transition(
         });
     }
     if let Some(linked) = linked.filter(|authority| authority.surface_known) {
-        output.events.push(EventDraft {
-            event_kind: "SurfaceBound".to_owned(),
-            logical_name_id: Some(logical_name_id.clone()),
-            resource_id: Some(linked.resource_id),
-            identity_suffix: format!("SurfaceBound:{source_event}:{}", linked.resource_id),
-            explicit_before: Some(json!({})),
-            after_state: merge_observation(
-                observation_state,
-                json!({
-                    "source_event":source_event,
-                    "authority_kind":authority_kind(linked),
-                    "authority_key":linked.authority_key,
-                    "active_from":raw.block_timestamp.unix_timestamp(),
-                    "binding_kind":"declared_registry_path",
-                }),
-            ),
-            state_scope: String::new(),
-        });
+        surface::append_bound_event(output, linked, raw, observation_state);
     }
     output.events.push(EventDraft {
         event_kind: "AuthorityEpochChanged".to_owned(),
-        logical_name_id: Some(logical_name_id.clone()),
+        logical_name_id: logical_name_id.clone(),
         resource_id: linked
             .map(|authority| authority.resource_id)
             .or_else(|| previous.map(|authority| authority.resource_id)),
-        identity_suffix: format!("AuthorityEpochChanged:{source_event}:{logical_name_id}"),
+        identity_suffix: format!("AuthorityEpochChanged:{source_event}:{identity_name_id}"),
         explicit_before: Some(json!({
             "authority_kind":previous.map(authority_kind),
             "authority_key":previous.and_then(|authority| authority.authority_key.clone()),
@@ -666,7 +614,7 @@ pub(super) fn append_authority_transition(
     if let (Some(linked), Some(resolver)) = (linked, resolver) {
         output.events.push(EventDraft {
             event_kind: "ResolverChanged".to_owned(),
-            logical_name_id: Some(logical_name_id),
+            logical_name_id,
             resource_id: Some(linked.resource_id),
             identity_suffix: format!("ResolverChanged:authority:{source_event}:{resolver}"),
             explicit_before: Some(json!({"resolver":Value::Null})),
@@ -682,7 +630,7 @@ pub(super) fn append_authority_transition(
     }
 }
 
-fn merge_observation(observation: &Value, fields: Value) -> Value {
+pub(super) fn merge_observation(observation: &Value, fields: Value) -> Value {
     let mut merged = observation.clone();
     merged
         .as_object_mut()
@@ -809,11 +757,4 @@ fn append_authority_permissions(
             );
         }
     }
-}
-
-fn child_node(parent: B256, labelhash: B256) -> String {
-    let mut input = [0u8; 64];
-    input[..32].copy_from_slice(parent.as_slice());
-    input[32..].copy_from_slice(labelhash.as_slice());
-    format!("{:#x}", keccak256(input))
 }

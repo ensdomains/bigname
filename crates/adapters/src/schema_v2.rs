@@ -72,6 +72,8 @@ fn settle_block_boundary(
             .unwrap_or(&registrar_source)
             .clone();
         let logical_name_id = release.registrar.logical_name_id.clone();
+        let surface_materialized =
+            state.v1_surface_materialized(&registrar_source.namespace, &release.namehash);
         let registrar_key = release
             .registrar
             .authority_key
@@ -79,7 +81,7 @@ fn settle_block_boundary(
             .unwrap_or_else(|| format!("registrar:{}", release.namehash));
         let mut registration_events = vec![protocol::EventDraft {
             event_kind: "RegistrationReleased".to_owned(),
-            logical_name_id: Some(logical_name_id.clone()),
+            logical_name_id: surface_materialized.then(|| logical_name_id.clone()),
             resource_id: Some(release.registrar.resource_id),
             identity_suffix: format!("RegistrationReleased:{}:{registrar_key}", release.namehash),
             explicit_before: Some(serde_json::json!({
@@ -91,6 +93,7 @@ fn settle_block_boundary(
                 "released_at":block.block_timestamp.unix_timestamp(),
                 "labelhash":release.registrar.labelhash,
                 "namehash":release.namehash,
+                "expiry":release.registrar.expiry,
             }),
             state_scope: format!("boundary:{}:registration", release.namehash),
         }];

@@ -7,7 +7,7 @@ use super::{
     paging::{
         push_history_filters, push_history_order_terms, push_product_history_duplicate_filter,
     },
-    source::push_history_source,
+    source::push_history_source_for_filter,
 };
 
 pub(super) async fn load_history_summary(
@@ -48,7 +48,7 @@ async fn load_history_total_count(
         SELECT COUNT(*)::BIGINT AS total_count
         "#,
     );
-    push_history_source(&mut builder, false);
+    push_history_source_for_filter(&mut builder, filter, canonical_only, false, false);
     push_history_filters(&mut builder, filter, canonical_only);
     push_product_history_duplicate_filter(&mut builder);
 
@@ -108,7 +108,7 @@ async fn load_history_full_summary(
             MAX(rb.block_timestamp) AS last_updated
         "#,
     );
-    push_history_source(&mut builder, false);
+    push_history_source_for_filter(&mut builder, filter, canonical_only, false, false);
     push_history_filters(&mut builder, filter, canonical_only);
     push_product_history_duplicate_filter(&mut builder);
 
@@ -149,7 +149,7 @@ async fn load_history_chain_position_samples(
             rb.block_timestamp
         "#,
     );
-    push_history_source(&mut builder, false);
+    push_history_source_for_filter(&mut builder, filter, canonical_only, false, false);
     builder.push(
         r#"
           AND ne.chain_id IS NOT NULL

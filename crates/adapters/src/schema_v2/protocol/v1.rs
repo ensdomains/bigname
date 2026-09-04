@@ -23,11 +23,11 @@ pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
-    registrar_migration_enabled: bool,
+    registrar_context: super::super::migration::RegistrarContext,
 ) -> anyhow::Result<Interpreted> {
     match selected.source.source_family.as_str() {
         "ens_v1_registrar_l1" | "basenames_base_registrar" => {
-            registrar::interpret(selected, raw, state, registrar_migration_enabled)
+            registrar::interpret(selected, raw, state, registrar_context)
         }
         "ens_v1_registry_l1" | "basenames_base_registry" => {
             registry::interpret(selected, raw, state)
@@ -46,6 +46,20 @@ pub(super) fn interpret(
 
 pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
     reconcile_support::reconcile(output);
+}
+
+pub(in crate::schema_v2) fn registrar_registration_namehash(
+    selected: &Selected,
+    raw: &RawLogInput,
+) -> anyhow::Result<Option<(String, String)>> {
+    registrar::base::registration_namehash(selected, raw)
+}
+
+pub(in crate::schema_v2) fn registry_registration_setup_namehash(
+    selected: &Selected,
+    raw: &RawLogInput,
+) -> anyhow::Result<Option<(String, String)>> {
+    registry::node::registration_setup_node(selected, raw)
 }
 
 fn authority_arm(namespace: &str) -> &'static str {

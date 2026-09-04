@@ -127,6 +127,9 @@ which registration contributes current authority, address relations, and role
 summaries. A superseded ENSv1 registration is therefore never selected, while a
 current registration queried by resource can still contribute in a separate
 name-scoped view.
+For a name wrapped in a later transaction, name detail and lifecycle history keep
+the registrar lifecycle handle, but a permissions `name` filter selects the
+current wrapper authority resource. Permission rows do not merge those resources.
 
 The final activation re-derives a [complete
 group](glossary.md#complete-group) through
@@ -565,9 +568,16 @@ address on a non-wrapper-authority name and no later resource-scoped
 `PermissionChanged` event exists on the selected resource. Task `#670/T5` owns
 these remaining disagreement classes:
 
-- Wrapper-authority names serve the wrapper token holder through the registrant
-  fallback, while the effective controller is a registry-controller fold for
-  eligible wrapped or emancipated names and is absent for locked or in-grace names.
+- Wrapper-authority names normally serve the wrapper token holder through the
+  registrant fallback. A name wrapped in a later transaction keeps its pre-wrap
+  registrar holder as bigname's served registration registrant until a subsequent
+  ERC-1155 transfer establishes a new wrapper holder; upstream itself mints wrapper
+  ownership immediately, so this projection difference is recorded in
+  `docs/upstream.md` § Known divergences. The effective controller is a registry-controller fold for eligible
+  wrapped or emancipated names and is absent for locked or in-grace names.
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L278 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L250-L258 @ ens_v1@91c966f)
 - A zero registry owner is served as the zero address; a masked owner word is
   served as the registrant fallback, or the zero address when there is none. In
   both cases the address-name projection drops the row, so the filter selects

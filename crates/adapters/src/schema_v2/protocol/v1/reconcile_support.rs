@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use self::{
     event_index::{
-        EventFields, EventIndex, PermissionRevocation, Position, Registration, SourceEvent,
-        SourceFamily,
+        EventFields, EventIndex, PermissionRevocation, Position, Registration, RegistrationWindow,
+        SourceEvent, SourceFamily,
     },
     side_index::{BindingIndex, ClosureIndex},
 };
@@ -54,15 +54,104 @@ fn reconcile_registration(
         .get(&registration.key)
         .cloned()
         .unwrap_or_default();
+    let current_registry_setups = target_candidates
+        .iter()
+        .map(|index| &events.fields[*index])
+        .filter(|fields| fields.current_registry_setup);
+    let latest_pre_anchor_setup = current_registry_setups
+        .clone()
+        .filter(|fields| {
+            fields
+                .position
+                .is_some_and(|position| position < registration.position)
+        })
+        .max_by_key(|fields| fields.position);
+    let registry_setup_proven = registration.window == RegistrationWindow::WholeTransaction
+        && latest_pre_anchor_setup
+            .map(|fields| fields.owner.as_ref() == Some(&registration.provisional_owner))
+            .unwrap_or_else(|| {
+                current_registry_setups
+                    .clone()
+                    .any(|fields| fields.owner.as_ref() == Some(&registration.provisional_owner))
+            });
+    if registry_setup_proven {
+        output.normalized_events[registration.event_index].after_state["registration_registry_setup"] =
+            serde_json::Value::Bool(true);
+    }
+    let registry_cutover_proven = registry_setup_proven
+        && current_registry_setups.clone().any(|fields| {
+            fields.source_event == SourceEvent::NewOwner
+                && fields.owner.as_ref() == Some(&registration.provisional_owner)
+        });
+    if registry_cutover_proven {
+        output.normalized_events[registration.event_index].after_state["registry_migrated"] =
+            serde_json::Value::Bool(true);
+    }
+    let registrar_owner = target_candidates
+        .iter()
+        .filter_map(|index| {
+            let fields = &events.fields[*index];
+            (fields.source_event == SourceEvent::Transfer
+                && fields.family == SourceFamily::Other
+                && fields.resource_id == Some(registration.resource_id))
+            .then_some((fields.position?, fields.owner.clone()?))
+        })
+        .max_by_key(|(position, _)| *position)
+        .map(|(_, owner)| owner)
+        .unwrap_or_else(|| registration.provisional_owner.clone());
+    // Registrar-token ownership and registry ownership may intentionally differ: reclaim writes
+    // the registry owner independently, and that owner can later call setOwner.
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
+    let divergence_start = target_candidates
+        .iter()
+        .filter_map(|index| {
+            let fields = &events.fields[*index];
+            (fields.family == SourceFamily::Registry
+                && matches!(
+                    fields.source_event,
+                    SourceEvent::NewOwner | SourceEvent::Transfer
+                )
+                && fields
+                    .position
+                    .is_some_and(|position| position > registration.position))
+            .then_some((fields.position?, fields.owner.clone()?))
+        })
+        .filter(|(_, owner)| owner != &registrar_owner)
+        .min_by_key(|(position, _)| *position)
+        .map(|(position, _)| position);
+    let eligible = |fields: &EventFields| {
+        fields.position.is_some_and(|position| {
+            if registration.window == RegistrationWindow::WholeTransaction {
+                let pre_anchor_setup_is_proven =
+                    position >= registration.position || registry_setup_proven;
+                let pre_anchor_owner_matches = !(fields.family == SourceFamily::Registry
+                    && matches!(
+                        fields.source_event,
+                        SourceEvent::NewOwner | SourceEvent::Transfer
+                    )
+                    && position < registration.position)
+                    || fields.owner.as_ref() == Some(&registration.provisional_owner);
+                pre_anchor_setup_is_proven
+                    && pre_anchor_owner_matches
+                    && divergence_start.is_none_or(|start| position < start)
+            } else {
+                position.2 < registration.log_index
+            }
+        })
+    };
     let pending = target_candidates
         .iter()
         .copied()
         .filter(|index| {
             events.active[*index]
                 && events.fields[*index].family == SourceFamily::Registry
-                && events.fields[*index]
-                    .position
-                    .is_some_and(|position| position.2 < registration.log_index)
+                && (registration.window != RegistrationWindow::WholeTransaction
+                    || matches!(
+                        events.fields[*index].source_event,
+                        SourceEvent::NewOwner | SourceEvent::Transfer
+                    ))
+                && eligible(&events.fields[*index])
         })
         .collect::<Vec<_>>();
     let pending_positions = pending
@@ -94,12 +183,26 @@ fn reconcile_registration(
             ))
         })
         .collect::<BTreeMap<_, _>>();
-    let last_owner_position = owner_positions.keys().next_back().copied();
+    let last_owner_position = pending
+        .iter()
+        .filter(|index| {
+            matches!(
+                events.fields[**index].source_event,
+                SourceEvent::NewOwner | SourceEvent::Transfer
+            )
+        })
+        .filter_map(|index| events.fields[*index].position)
+        .max();
+    let transient_owner = if registration.window == RegistrationWindow::WholeTransaction {
+        &registration.provisional_owner
+    } else {
+        &registration._emitter
+    };
     let transient_owner_positions = owner_positions
         .iter()
         .filter(|(position, owner)| {
             Some(**position) != last_owner_position
-                && *owner == &registration.emitter
+                && *owner == transient_owner
                 && events.candidates_at(**position).into_iter().any(|index| {
                     let fields = &events.fields[index];
                     events.active[index]
@@ -148,10 +251,23 @@ fn reconcile_registration(
     );
     for index in predecessor_events {
         let event = &mut output.normalized_events[index];
-        event.logical_name_id = Some(registration.logical_name_id.clone());
+        event.logical_name_id = registration
+            .surface_known
+            .then(|| registration.logical_name_id.clone());
         refresh_interpreter_state_key(event);
     }
 
+    let redundant_successor_positions = target_candidates
+        .iter()
+        .filter_map(|index| {
+            let fields = &events.fields[*index];
+            (fields.resource_id == Some(registration.resource_id)
+                && fields
+                    .position
+                    .is_some_and(|position| position > registration.position && eligible(fields)))
+            .then_some(fields.position?)
+        })
+        .collect::<BTreeSet<_>>();
     let retarget_candidates = retarget_candidates(events, &target_candidates, &pending_positions);
     for index in retarget_candidates {
         if concerns_predecessor_epoch(
@@ -163,17 +279,25 @@ fn reconcile_registration(
             continue;
         }
         let fields = &events.fields[index];
+        let registry_ownership = matches!(
+            fields.source_event,
+            SourceEvent::NewOwner | SourceEvent::Transfer
+        );
+        let follows_registry_setup = fields.position.is_some_and(|position| {
+            first_ownership_log_index.is_some_and(|first_log_index| position.2 > first_log_index)
+        });
         let targets_registry = fields.family == SourceFamily::Registry
-            && fields
-                .position
-                .is_some_and(|position| position.2 < registration.log_index)
+            && eligible(fields)
+            && (registration.window != RegistrationWindow::WholeTransaction
+                || registry_ownership
+                || (registry_setup_proven && follows_registry_setup))
             && target_candidates.binary_search(&index).is_ok();
         let targets_resolver = fields.family == SourceFamily::Resolver
             && fields
                 .resource_id
                 .is_none_or(|resource| stale_resources.contains(&resource))
             && fields.position.is_some_and(|position| {
-                position.2 < registration.log_index
+                eligible(fields)
                     // Resolver retargeting starts strictly after the first qualifying ownership
                     // setup, preserving records written before the incoming authority exists.
                     && first_ownership_log_index
@@ -189,8 +313,23 @@ fn reconcile_registration(
         if !(targets_registry || targets_resolver || references_pending_resource) {
             continue;
         }
+        if fields.family == SourceFamily::Registry
+            && matches!(
+                fields.source_event,
+                SourceEvent::NewOwner | SourceEvent::Transfer
+            )
+            && matches!(
+                output.normalized_events[index].event_kind.as_str(),
+                "SurfaceBound" | "SurfaceUnbound" | "AuthorityEpochChanged" | "ResolverChanged"
+            )
+        {
+            events.active[index] = false;
+            continue;
+        }
         let event = &mut output.normalized_events[index];
-        event.logical_name_id = Some(registration.logical_name_id.clone());
+        event.logical_name_id = registration
+            .surface_known
+            .then(|| registration.logical_name_id.clone());
         event.resource_id = Some(registration.resource_id);
         if let Some(authority_key) = registration.authority_key.as_deref() {
             retarget_permission_authority(&mut event.after_state, authority_key);
@@ -208,7 +347,15 @@ fn reconcile_registration(
         events.update_resource(index, registration.resource_id);
     }
     bindings.remove(&stale_resources, &pending_positions);
+    bindings.remove(
+        &BTreeSet::from([registration.resource_id]),
+        &redundant_successor_positions,
+    );
     closures.remove(&registration.logical_name_id, &pending_positions);
+    closures.remove(
+        &registration.logical_name_id,
+        &redundant_successor_positions,
+    );
 }
 
 fn remove_transient_events(

@@ -4,7 +4,7 @@ use anyhow::bail;
 use serde_json::{Value, json};
 
 use crate::{
-    evm_abi::{address_hex, decode_event_log_data_as, hex_string},
+    evm_abi::{address_hex, decode_event_log_data_as, hex_string, saturating_u256_i64, u256_i64},
     schema_v2::{catalog::Selected, model::RawLogInput},
 };
 
@@ -58,7 +58,7 @@ pub(super) fn name(
             Ok((
                 event.name.to_vec(),
                 event.label,
-                json!({"source_event":"NameRegistered","registrant":address_hex(event.owner),"expiry":crate::evm_abi::u256_i64(event.expires, "NameRegistered expiry")?}),
+                json!({"source_event":"NameRegistered","registrant":address_hex(event.owner),"expiry":expiry(selected, event.expires, "NameRegistered expiry")?}),
             ))
         }
         "NameRegistered(string,bytes32,address,uint256,uint256)" => {
@@ -71,7 +71,7 @@ pub(super) fn name(
             Ok((
                 event.name.to_vec(),
                 event.label,
-                json!({"source_event":"NameRegistered","registrant":address_hex(event.owner),"cost":event.cost.to_string(),"expiry":crate::evm_abi::u256_i64(event.expires, "NameRegistered expiry")?}),
+                json!({"source_event":"NameRegistered","registrant":address_hex(event.owner),"cost":event.cost.to_string(),"expiry":expiry(selected, event.expires, "NameRegistered expiry")?}),
             ))
         }
         "NameRegistered(string,bytes32,address,uint256,uint256,uint256)" => {
@@ -84,7 +84,7 @@ pub(super) fn name(
             Ok((
                 event.name.to_vec(),
                 event.label,
-                json!({"source_event":"NameRegistered","registrant":address_hex(event.owner),"base_cost":event.baseCost.to_string(),"premium":event.premium.to_string(),"expiry":crate::evm_abi::u256_i64(event.expires, "NameRegistered expiry")?}),
+                json!({"source_event":"NameRegistered","registrant":address_hex(event.owner),"base_cost":event.baseCost.to_string(),"premium":event.premium.to_string(),"expiry":expiry(selected, event.expires, "NameRegistered expiry")?}),
             ))
         }
         "NameRegistered(string,bytes32,address,uint256,uint256,uint256,bytes32)" => {
@@ -97,7 +97,7 @@ pub(super) fn name(
             Ok((
                 event.name.to_vec(),
                 event.label,
-                json!({"source_event":"NameRegistered","registrant":address_hex(event.owner),"base_cost":event.baseCost.to_string(),"premium":event.premium.to_string(),"expiry":crate::evm_abi::u256_i64(event.expires, "NameRegistered expiry")?,"referrer":hex_string(event.referrer)}),
+                json!({"source_event":"NameRegistered","registrant":address_hex(event.owner),"base_cost":event.baseCost.to_string(),"premium":event.premium.to_string(),"expiry":expiry(selected, event.expires, "NameRegistered expiry")?,"referrer":hex_string(event.referrer)}),
             ))
         }
         "NameRenewed(string,bytes32,uint256)" => {
@@ -110,7 +110,7 @@ pub(super) fn name(
             Ok((
                 event.name.to_vec(),
                 event.label,
-                json!({"source_event":"NameRenewed","expiry":crate::evm_abi::u256_i64(event.expires, "NameRenewed expiry")?}),
+                json!({"source_event":"NameRenewed","expiry":expiry(selected, event.expires, "NameRenewed expiry")?}),
             ))
         }
         "NameRenewed(string,bytes32,uint256,uint256)" => {
@@ -123,7 +123,7 @@ pub(super) fn name(
             Ok((
                 event.name.to_vec(),
                 event.label,
-                json!({"source_event":"NameRenewed","cost":event.cost.to_string(),"expiry":crate::evm_abi::u256_i64(event.expires, "NameRenewed expiry")?}),
+                json!({"source_event":"NameRenewed","cost":event.cost.to_string(),"expiry":expiry(selected, event.expires, "NameRenewed expiry")?}),
             ))
         }
         "NameRenewed(string,bytes32,uint256,uint256,bytes32)" => {
@@ -136,9 +136,21 @@ pub(super) fn name(
             Ok((
                 event.name.to_vec(),
                 event.label,
-                json!({"source_event":"NameRenewed","cost":event.cost.to_string(),"expiry":crate::evm_abi::u256_i64(event.expires, "NameRenewed expiry")?,"referrer":hex_string(event.referrer)}),
+                json!({"source_event":"NameRenewed","cost":event.cost.to_string(),"expiry":expiry(selected, event.expires, "NameRenewed expiry")?,"referrer":hex_string(event.referrer)}),
             ))
         }
         signature => bail!("unsupported registrar ABI event {signature}"),
+    }
+}
+
+fn expiry(
+    selected: &Selected,
+    value: alloy_primitives::U256,
+    context: &'static str,
+) -> anyhow::Result<i64> {
+    if selected.source.source_family == "ens_v1_registrar_l1" {
+        Ok(saturating_u256_i64(value))
+    } else {
+        u256_i64(value, context)
     }
 }

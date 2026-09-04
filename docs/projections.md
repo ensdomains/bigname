@@ -97,6 +97,19 @@ deleted or orphaned release is not served, and unrelated topology components are
 not admitted.
 `project_events` remains the single filter for data that builders may serve.
 
+Incremental scope also follows the identity recorded when a separately registered
+`.eth` name is wrapped later. If a scoped wrapper resource has a canonical
+`SurfaceBound` event whose `wrapped_registrar_resource_id` identifies the registrar
+token that was wrapped, Project adds that exact registrar resource before staging
+history. In the reverse direction, a changed registrar event reaches the exact name
+and wrapper resource only when a canonical wrapper binding names that registrar
+resource. These expansions begin from the already affected name or resource and use
+that identifier relationship; they do not admit every registrar history for the
+name. The same closure runs for normal incremental publication and redo, so a
+wrapper-only transfer, resolver update, fuse change, retraction, or registrar renewal
+stages the same registration inputs as a rebuild from block zero.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L278 @ ens_v1@91c966f)
+
 Code that builds a replacement projection row may read normalized events staged
 for the current Project batch and fields that an earlier build deliberately
 stored for later reuse. A builder may obtain those stored reuse fields from
@@ -292,6 +305,11 @@ grace start.[^v1-wrapper-grace-expiry][^v1-wrapper-grace-authority] Expired
 wrapper fuses are projected as zero, matching NameWrapper `getData`; an expired
 emancipated or locked position also contributes no lifecycle value or effective
 holder powers because that read clears its owner.[^v1-wrapper-expired]
+When an ENSv1 registrar lease expires while wrapped, the registrar release does
+not replace the last wrapper holder in the served registrant fold: the registrar
+token is held in NameWrapper custody, while the wrapper token records the
+user-facing holder.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L278 @ ens_v1@91c966f)
 
 For the ENSv2 post-audit Sepolia deployment profile, declared exact-name rows
 come from the admitted registry and registrar families. Out-of-profile resolver,

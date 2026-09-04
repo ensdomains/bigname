@@ -17,8 +17,11 @@ mod tests;
 #[path = "state_wrapper.rs"]
 mod wrapper;
 
+#[path = "state_registrar.rs"]
+mod registrar;
 #[path = "state_surfaces.rs"]
 mod surfaces;
+pub(super) use self::registrar::v1_key;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct V1NameState {
@@ -117,7 +120,7 @@ pub(super) struct State {
     restored_surface_counts: OrdMap<String, usize>,
     v2_current_surface_counts: OrdMap<String, usize>,
     surface_removal_candidates: OrdSet<String>,
-    restoring_state_key: Option<String>,
+    pub(super) restoring_state_key: Option<String>,
     active_resources: OrdMap<String, Uuid>,
     v2_tokens: OrdMap<String, V2TokenState>,
     v2_subregistry_tokens_by_observation: OrdMap<(String, String), OrdSet<String>>,
@@ -405,8 +408,8 @@ impl State {
         {
             self.active_resources.remove(&previous.logical_name_id);
         }
-        if let Some(authority) = authority {
-            if authority.surface_known {
+        if let Some(mut authority) = authority {
+            if self.promote_known_v1_authority(&key, &mut authority) {
                 self.remember_known_surface(authority.logical_name_id.clone());
                 self.active_resources
                     .insert(authority.logical_name_id.clone(), authority.resource_id);
@@ -474,8 +477,8 @@ impl State {
         } else {
             self.v1_registry_authority_if_authentic(&v1_key(namespace, namehash))
         };
-        self.activate_v1_authority(namespace, namehash, next.clone());
-        next
+        self.activate_v1_authority(namespace, namehash, next);
+        self.v1_name(namespace, namehash)
     }
 
     pub(super) fn transfer_v1_wrapper_owner(
@@ -624,7 +627,7 @@ impl State {
             if expiry.checked_add(ENS_GRACE_PERIOD_SECS).is_some() {
                 break;
             }
-            due.push(self.v1_expiries.remove_max().unwrap().1);
+            self.v1_expiries.remove_max();
         }
         while let Some((expiry, _)) = self.v1_expiries.get_min() {
             if v1_registration_is_live(Some(*expiry), at_unix_timestamp) {
@@ -649,8 +652,8 @@ impl State {
             };
             let next_authority = if release_is_active {
                 let next = self.v1_registry_authority_if_authentic(&key);
-                self.activate_v1_authority(namespace, namehash, next.clone());
-                next
+                self.activate_v1_authority(namespace, namehash, next);
+                self.v1_name(namespace, namehash)
             } else {
                 previous_authority.clone()
             };
@@ -690,10 +693,6 @@ fn v1_registration_is_live(expiry: Option<i64>, at_unix_timestamp: i64) -> bool 
     expiry.is_none_or(|expiry| {
         expiry
             .checked_add(ENS_GRACE_PERIOD_SECS)
-            .is_some_and(|release| at_unix_timestamp <= release)
+            .is_none_or(|release| at_unix_timestamp <= release)
     })
-}
-
-fn v1_key(namespace: &str, namehash: &str) -> String {
-    format!("{namespace}:{}", namehash.to_ascii_lowercase())
 }

@@ -144,7 +144,8 @@ async fn composed_mainnet_profile_serves_both_protocols_without_leakage() -> Res
 
     let ready_sql = "SELECT \
          EXISTS (SELECT 1 FROM normalized_events \
-          WHERE logical_name_id = 'ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec' \
+          WHERE (logical_name_id = 'ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec' \
+              OR after_state->>'namehash' = '0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec') \
             AND event_kind = 'RegistrationGranted' \
             AND canonicality_state = 'canonical') \
        AND EXISTS (SELECT 1 FROM normalized_events \

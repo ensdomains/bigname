@@ -1,5 +1,5 @@
 mod intake_only;
-mod migration;
+pub(in crate::schema_v2) mod migration;
 pub(super) mod permissions;
 pub(super) mod v1;
 
@@ -235,14 +235,14 @@ pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
-    registrar_migration_enabled: bool,
+    registrar_context: super::migration::RegistrarContext,
 ) -> anyhow::Result<Interpreted> {
     if let Some(output) = intake_only::approval(selected, raw)? {
         return Ok(output);
     }
     let mut output = match selected.source.source_family.as_str() {
         family if family.starts_with("ens_v1_") || family.starts_with("basenames_") => {
-            v1::interpret(selected, raw, state, registrar_migration_enabled)
+            v1::interpret(selected, raw, state, registrar_context)
         }
         "ens_v2_registry_l1" | "ens_v2_root_l1" | "ens_v2_registrar_l1" => {
             v2_registry::interpret(selected, raw, state)
