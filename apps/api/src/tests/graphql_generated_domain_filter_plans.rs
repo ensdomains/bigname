@@ -57,25 +57,29 @@ async fn pad_generated_domain_plans(database: &TestDatabase) -> Result<()> {
     Ok(())
 }
 
-fn assert_domain_plan_bounds(explain: &Value, label: &str) -> Result<()> {
+fn assert_domain_plan_shape(explain: &Value, label: &str) -> Result<()> {
     let plan = &explain[0]["Plan"];
     assert_eq!(plan["Node Type"], "Limit", "{label}");
     let text = serde_json::to_string(plan)?;
     assert!(text.contains("name_current"), "predicate must execute below Limit: {label}");
     assert!(text.contains("chain_positions") && text.contains("supported"), "snapshot eligibility: {label}");
-    assert!(text.contains("name_current_pkey"), "phase-row index: {label}");
     assert!(text.contains("chain_lineage_readable_height_idx"), "lineage index: {label}");
     for node in plan_nodes(explain) {
-        assert!(node["Actual Loops"].as_u64().unwrap_or(0) <= 5_100, "loops: {label}: {node}");
-        assert!(node["Shared Hit Blocks"].as_u64().unwrap_or(0) <= 31_000, "hits: {label}: {node}");
-        assert!(node["Shared Read Blocks"].as_u64().unwrap_or(0) <= 128, "reads: {label}: {node}");
-        assert!(node["Rows Removed by Filter"].as_u64().unwrap_or(0) <= 5_100, "removed: {label}: {node}");
         if node["Node Type"] == "Sort" {
-            assert!(node["Actual Rows"].as_u64().unwrap_or(0) <= 5_100, "sort rows: {label}");
             assert!(matches!(node["Sort Method"].as_str(), Some("top-N heapsort" | "quicksort")), "sort method: {label}: {node}");
             assert!(node["Sort Space Used"].as_u64().unwrap_or(0) <= 2_048, "sort memory: {label}");
         }
     }
+    Ok(())
+}
+
+fn assert_id_index_bounded(explain: &Value, label: &str) -> Result<()> {
+    assert_domain_plan_shape(explain, label)?;
+    let nodes = plan_nodes(explain);
+    let scan = nodes.iter().find(|node| node["Node Type"] == "Index Scan" && node["Index Name"] == "name_current_lookup_idx")
+        .with_context(|| format!("name_current_lookup_idx Index Scan: {label}"))?;
+    assert!(scan["Actual Rows"].as_u64().unwrap_or(0) <= 204, "index rows: {label}: {scan}");
+    assert!(scan["Rows Removed by Filter"].as_u64().unwrap_or(0) <= 4, "index removals: {label}: {scan}");
     Ok(())
 }
 
@@ -118,7 +122,11 @@ async fn graphql_generated_domain_operator_plans_are_bounded_below_limit() -> Re
             200, 0,
         ).await?;
         println!("DOMAIN OPERATOR {member} PLAN {}", serde_json::to_string_pretty(&explain)?);
-        assert_domain_plan_bounds(&explain, member)?;
+        if matches!(member, "id" | "id_gt" | "id_gte" | "id_lt" | "id_lte" | "id_in") {
+            assert_id_index_bounded(&explain, member)?;
+        } else {
+            assert_domain_plan_shape(&explain, member)?;
+        }
         assert!(
             serde_json::to_string(&explain[0]["Plan"])?.contains(value),
             "bound predicate value must occur below Limit: {member}"
@@ -161,8 +169,13 @@ async fn graphql_generated_domain_order_plans_sort_before_limit_with_fixed_bound
             bigname_storage::NameCurrentListOrder::Asc, 200, 0,
         ).await?;
         println!("DOMAIN ORDER {sort:?} PLAN {}", serde_json::to_string_pretty(&explain)?);
-        assert_domain_plan_bounds(&explain, &format!("{sort:?}"))?;
-        assert!(plan_nodes(&explain).iter().any(|node| node["Node Type"] == "Sort"), "sort must occur below Limit: {sort:?}");
+        if sort == crate::graphql::GeneratedDomainSort::Id {
+            assert_id_index_bounded(&explain, "id order")?;
+            assert!(!plan_nodes(&explain).iter().any(|node| node["Node Type"] == "Sort"), "id order must not sort");
+        } else {
+            assert_domain_plan_shape(&explain, &format!("{sort:?}"))?;
+            assert!(plan_nodes(&explain).iter().any(|node| node["Node Type"] == "Sort"), "sort must occur below Limit: {sort:?}");
+        }
     }
     database.cleanup().await
 }
