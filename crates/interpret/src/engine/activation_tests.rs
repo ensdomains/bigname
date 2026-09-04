@@ -251,7 +251,7 @@ async fn faithful_unwrapped_migration_reaches_predecessor_refusal() -> TestResul
     // The ENSv1→ENSv2 migration block has the same ordered ten-event shape as
     // U-01 logs 0-9, using the checked-in Sepolia deployment and fixture values.
     // The pre-state is a wrapped-then-unwrapped name held by the eventual
-    // migration sender; U-01 instead uses a plain registration with resolver
+    // ENSv1→ENSv2 migration sender; U-01 instead uses a plain registration with resolver
     // state, so plain-registration predecessor materialization remains a
     // separate open question. This test flips to an activation and publication
     // assertion when #822 lands.

@@ -42,7 +42,7 @@ transaction is retained by the ignored
 `faithful_unwrapped_migration_reaches_predecessor_refusal` test, which reaches
 Interpret's `0 active ENSv1 predecessors` refusal. The fixture is faithful for the
 ENSv1→ENSv2 migration block only: its predecessor comes from a wrapped name
-unwrapped to the eventual migration sender, while U-01's predecessor comes from
+unwrapped to the eventual ENSv1→ENSv2 migration sender, while U-01's predecessor comes from
 plain `BaseRegistrar.register` and has resolver state. Plain-registration
 predecessor materialization is a separate open question. The reduced
 `checked_in_sepolia_manifests_materialize_exactly_one_transition_predecessor`
