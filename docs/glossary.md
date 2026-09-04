@@ -1706,7 +1706,9 @@ the replayed transition at the first current ENS registry ownership record for
 a node. That record ends delegation to `ENSRegistryOld`, suppresses later old-
 registry input for the node, and retracts an old-registry resolver pointer from
 every retained [serving resource](#serving-resource) to which it was linked. The
-root resolver is the documented exception.
+root resolver is the documented exception: current-registry ownership neither
+retracts that pointer nor prevents later old-registry root-resolver updates.
+(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L243-L248 @ ens_subgraph@723f1b6a)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)

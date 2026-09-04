@@ -475,6 +475,9 @@ retract it from every registry, registrar, or wrapper resource to which it was
 linked, including a resource from an authority epoch that ended before the
 handoff. An old-registry `Transfer` cannot clear a resolver
 selected from the current registry.
+The root resolver is the frozen exception: current-registry ownership does not
+retract its old-registry pointer or suppress later old-registry root updates.
+(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L243-L248 @ ens_subgraph@723f1b6a)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)

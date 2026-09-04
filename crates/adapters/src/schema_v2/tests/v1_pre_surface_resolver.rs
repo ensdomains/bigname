@@ -7,6 +7,7 @@ const WRAPPER: &str = "0x00000000000000000000000000000000000000a6";
 const OWNER: &str = "0x00000000000000000000000000000000000000a3";
 const OWNER_2: &str = "0x00000000000000000000000000000000000000a5";
 const RESOLVER_A: &str = "0x00000000000000000000000000000000000000a4";
+const RESOLVER_B: &str = "0x00000000000000000000000000000000000000b4";
 const REGISTRY_MANIFEST_ID: i64 = 6131;
 const REGISTRAR_MANIFEST_ID: i64 = 6132;
 const WRAPPER_MANIFEST_ID: i64 = 6133;
@@ -1134,6 +1135,35 @@ fn current_registry_handoff_retracts_old_resolver_from_historical_wrapper_resour
         }),
         "current-registry handoff left a stale pointer on the historical wrapper resource"
     );
+    Ok(())
+}
+
+#[test]
+fn current_registry_ownership_preserves_the_old_registry_root_resolver() -> anyhow::Result<()> {
+    const ROOT_NODE: B256 = B256::ZERO;
+    let history = vec![
+        resolver_selection(OLD_REGISTRY, ROOT_NODE, RESOLVER_A, 1)?,
+        current_transfer(ROOT_NODE, OWNER, 2)?,
+        resolver_selection(OLD_REGISTRY, ROOT_NODE, RESOLVER_B, 3)?,
+    ];
+    let (_, live) = assert_four_way_and_restore_parity(&history, 2)?;
+    assert!(
+        live.normalized_events.iter().all(|event| {
+            !(event.event_kind == "ResolverChanged"
+                && event.after_state["registry_fallback_handoff"] == true)
+        }),
+        "current-registry ownership incorrectly cleared the old-registry root resolver exception"
+    );
+    let replacement = live
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.block_number == Some(3)
+                && event.event_kind == "ResolverChanged"
+                && event.after_state["resolver"] == RESOLVER_B
+        })
+        .expect("later old-registry root resolver update");
+    assert_eq!(replacement.before_state["resolver"], RESOLVER_A);
     Ok(())
 }
 

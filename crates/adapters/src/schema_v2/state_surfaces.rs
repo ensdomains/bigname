@@ -156,6 +156,11 @@ impl State {
     ) -> (bool, Vec<V1ResolverLink>) {
         let key = v1_key(namespace, namehash);
         let newly_migrated = self.v1_migrated_nodes.insert(key.clone()).is_none();
+        if namehash.eq_ignore_ascii_case(
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+        ) {
+            return (newly_migrated, Vec::new());
+        }
         let retired_resolver = if self
             .v1_resolver_links
             .get(&key)
