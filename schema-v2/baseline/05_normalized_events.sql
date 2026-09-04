@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS normalized_events (
     CONSTRAINT normalized_events_event_kind_check
         CHECK (
             event_kind IN (
+                'AccountPermissionChanged',
                 'AliasChanged',
                 'AuthorityEpochChanged',
                 'AuthorityTransferred',
@@ -133,6 +134,7 @@ CREATE TABLE IF NOT EXISTS normalized_events (
                 'proxy_upgrade',
                 'raw_block_preimage_observation',
                 'raw_log_preimage_observation'
+                ,'standard_approval'
             )
         ),
     CHECK (jsonb_typeof(before_state) = 'object'),

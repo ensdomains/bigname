@@ -5,14 +5,14 @@ use sqlx::types::Uuid;
 use super::convert::resolver_from_store;
 use super::error::internal_error;
 use super::loader::{RecordInventoryLoader, record_inventory_key};
-use super::scalars::BigInt;
+use super::scalars::{BigInt, Bytes};
 use super::snapshot::{require_inventory_at_head, revalidate_graphql_head};
 
 /// Subgraph `Account` — the lowercased address as `id`.
 #[derive(SimpleObject)]
 #[graphql(name = "Account")]
 pub(crate) struct Account {
-    pub(crate) id: String,
+    pub(crate) id: ID,
 }
 
 /// Subgraph `AddressRecord` — a coin-typed address record. `coinType` is `u32`, not `i32`:
@@ -29,15 +29,17 @@ pub(crate) struct AddressRecord {
     pub(crate) address: String,
 }
 
-/// Subgraph `Resolver`. `id`/`address` carry the resolver contract address; the record fields
-/// (`texts`/`contentHash`/`addresses`) are
+/// Subgraph `Resolver`. `id` combines the resolver address and Domain namehash while `address`
+/// carries the resolver contract bytes. The record fields (`texts`/`contentHash`/`addresses`) are
 /// read from the `record_inventory_current` projection by [`resolver_from_store`] — a name whose
 /// resolver has no projected records serves the empty shapes.
+// Upstream schema identity and address types:
+// (upstream: .refs/ens_subgraph/schema.graphql:L281-L287 @ ens_subgraph@723f1b6)
 #[derive(SimpleObject)]
 #[graphql(name = "Resolver")]
 pub(crate) struct Resolver {
-    pub(crate) id: String,
-    pub(crate) address: String,
+    pub(crate) id: ID,
+    pub(crate) address: Bytes,
     pub(crate) texts: Option<Vec<String>>,
     #[graphql(name = "contentHash")]
     pub(crate) content_hash: Option<String>,
@@ -147,12 +149,14 @@ impl Domain {
             }
             None => None,
         };
-        Ok(Some(resolver_from_store(address, inventory.as_ref())))
+        resolver_from_store(address, self.id.as_str(), inventory.as_ref())
+            .map(Some)
+            .map_err(|error| internal_error("Domain.resolver", error))
     }
 
     async fn owner(&self) -> Account {
         Account {
-            id: self.owner_id.clone(),
+            id: ID(self.owner_id.clone()),
         }
     }
 }

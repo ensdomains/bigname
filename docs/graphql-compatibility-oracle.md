@@ -44,6 +44,22 @@ errors, and reports are deferred. The Domain point and name-equality responses
 remain the claimed response cases; schema coverage additionally claims the
 generated-style Domain roots and the six-member partial `Domain_filter`.
 
+Coverage also claims the generated `account`, `accounts`, `resolver`, and
+`resolvers` roots and every argument in their captured signatures. It claims
+`Account.id`, `Resolver.id`, and `Resolver.address`, resolving their former
+signature differences. The exact partial inputs are `Account_filter.id`,
+`Account_filter.id_in`, `Resolver_filter.id`, `Resolver_filter.address`, and
+`Resolver_filter.domain`; each new order enum claims only `id`.
+
+The captured inputs contain 14 Account-filter members and 84 Resolver-filter
+members. Exact `#670/T3` dispositions retain the 12 and 81 unimplemented
+members respectively; non-`id` order values continue to inherit the existing
+type-level `#670/T3` owner. Account reverse fields stay with `#670/T4`, Resolver
+serving fields stay with `#670/T6`, and the `Resolver.contentHash` signature
+difference remains with its existing `#670/T2` disposition. The resulting upstream census is 113 types with zero
+unowned upstream-only paths. Any `coverage.json` update must re-sign both the
+manifest's top-level `coverage_sha256` and its `coverage.json` artifact entry.
+
 The steward's live introspection observed the Graph Node logging types `LogLevel`, `_LogArgument_`, `_LogMeta_`, and
 `_Log_`. They are infrastructure rather than ENS schema, so coverage assigns them to `#670/T0`; they are captured but
 not claimed. The pinned Graph Node defines those four types (upstream:

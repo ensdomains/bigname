@@ -196,6 +196,9 @@ fn settle_block_boundary(
                     "source_event":"RegistrationReleased",
                     "authority_kind":next_kind,
                     "authority_key":next_key,
+                    // The expiry fallback has no registry observation of its own.
+                    "owner_getter":next.owner,
+                    "registry_contract":next.registry_contract,
                     "active_from":block.block_timestamp.unix_timestamp(),
                     "binding_kind":"declared_registry_path",
                 }),

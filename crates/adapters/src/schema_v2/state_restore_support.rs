@@ -70,6 +70,7 @@ pub(super) fn v1_registry_read_anchor(
         )),
         source_family: event.source_family.clone(),
         source_manifest_id: event.source_manifest_id,
+        registry_contract: event.emitting_address.as_deref().map(str::to_lowercase),
     }
 }
 
@@ -93,6 +94,7 @@ pub(super) fn v1_registry_authority(
             .map(str::to_owned),
         expiry: None,
         owner: Some(owner_getter.to_owned()),
+        registry_contract: event.emitting_address.as_deref().map(str::to_lowercase),
         authority_key: Some(format!("registry-only:{}:{namehash}", event.chain_id)),
         wrapper_fallback: false,
     }

@@ -243,6 +243,7 @@ outcomes, or durable traces.
 | `address_names_current` | `(address, logical_name_id, relation)` | address-to-names and reverse lookup |
 | `children_current` | parent/child identity plus class | direct and classified child collections |
 | `permissions_current` | resource, subject, and scope | resource permissions and role summaries |
+| `account_permission_state_current` | (`chain_id`, `authority_kind`, `authority_contract`, `owner`, `subject`, `relation_kind`) | no serving reader yet; a follow-up change adds storage and API readers |
 | `permissions_current_resource_summary` | `resource_id` | permission support and authority summary |
 | `resolver_current` | chain and resolver address | resolver overview |
 | `record_inventory_current` | resource plus record boundary key | indexed record inventory and values |
@@ -409,8 +410,30 @@ chains retain independent publication decisions.
 effective powers, provenance, and chain positions. The companion resource
 summary distinguishes authoritative empty enumeration from unsupported or
 partial permission support. Current non-wrapper summaries are partial because
-standard registry operators, registrar token and account approvals, resolver
-operators and delegates, and ENSv2 registry operators are not indexed.
+registrar token and account approvals, resolver operators and delegates, and
+ENSv2 registry operators are not indexed.
+
+`account_permission_state_current` separately folds `AccountPermissionChanged`
+events from the [`standard_approval`
+derivation](glossary.md#standard-approval-derivation) by chain, authority kind, authority contract,
+owner, subject, and relation. It retains both active and revoked latest states;
+`approved=true` carries `registry_control`, while `approved=false` carries no
+effective powers. Project never fans this account mapping out into per-name
+rows. After constructing `name_current`, Project carries the latest
+[registry-owner binding](glossary.md#registry-owner-binding) onto the resource
+selected for an ENSv1 or Basenames name. Registry-family owner observations are
+first ranked by logical name or emitting resource to suppress detached history,
+then mapped onto that selected resource and ranked again by output resource.
+The separate resource that retains registry observations is bypassed by that
+mapping. When `name_current` has no eligible selected resource, or the event has
+no logical name, the observation stays on its emitting resource. This remapping
+never crosses onto an ENSv2 resource. A latest zero owner or an admitted registry-
+or registrar-family `SurfaceUnbound` transition clears the binding. A registrar-
+family `SurfaceBound` carries the registry owner and emitter-derived registry
+contract remembered at transition time, not the registrar token owner, so the new
+current authority receives the binding without attribution to the registrar
+emitter; wrapper-family authority transitions remain outside this rule.
+
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)

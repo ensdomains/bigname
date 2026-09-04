@@ -107,13 +107,26 @@ upstream event. The admitted values are `ens_v1_reverse_claim`,
 `ens_v1_unwrapped_authority`, `ens_v2_migration`, `ens_v2_permissions`, `ens_v2_registrar`,
 `ens_v2_registry_resource_surface`, `ens_v2_resolver`, `manifest_sync`,
 `proxy_upgrade`, `raw_log_preimage_observation`, and
-`raw_block_preimage_observation`. Their meanings and write owners are defined
+`raw_block_preimage_observation`, and `standard_approval`. Their meanings and
+write owners are defined
 by the canonical
-[normalized-event contract](../docs/architecture.md#derivation-kinds).
+[derivation-kind definitions](../docs/glossary.md#derivation-kind).
 
 ## Current projections
 
-`name_current`, `children_current`, `permissions_current`, `permissions_current_resource_summary`, `record_inventory_current`, `resolver_current`, `address_names_current`, and `primary_names_current` are the current-state tables written by the seven project-phase builders. The project phase is their single writer; the API and GraphQL read them now. The [historical simplification census](../simplification-audit-20260730.md#appsworker--cratesexecution-fable) and the [storage census](../simplification-audit-20260730.md#cratesstorage-fable) authorize this enumerated set. The [support-status decision](../simplification-audit-20260730.md#kimi-k3-second-opinion-lenses--adjudicated) keeps explicit support fields and removes exhaustiveness accounting.
+`name_current`, `children_current`, `permissions_current`,
+`permissions_current_resource_summary`, `account_permission_state_current`,
+`record_inventory_current`, `resolver_current`, `address_names_current`, and
+`primary_names_current` are the current-state tables written by the project
+phase. The project phase is their single writer. The API and GraphQL read the
+existing serving families; `account_permission_state_current` has no serving
+reader until the follow-up storage and API change. The [historical
+simplification census](../simplification-audit-20260730.md#appsworker--cratesexecution-fable)
+and the [storage
+census](../simplification-audit-20260730.md#cratesstorage-fable) authorize this
+enumerated set. The [support-status
+decision](../simplification-audit-20260730.md#kimi-k3-second-opinion-lenses--adjudicated)
+keeps explicit support fields and removes exhaustiveness accounting.
 
 Each run reads canonical-lineage identity rows and normalized events into
 connection-local stages. It builds all retained families before one database

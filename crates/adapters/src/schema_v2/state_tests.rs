@@ -17,6 +17,7 @@ fn observed_v1_active_surface_upgrades_an_existing_registry_read_anchor() {
             surface_known: false,
             source_family: "ens_v1_registry_l1".to_owned(),
             source_manifest_id: Some(1),
+            registry_contract: None,
         },
     );
 
@@ -26,6 +27,30 @@ fn observed_v1_active_surface_upgrades_an_existing_registry_read_anchor() {
         state
             .v1_registry_read_anchor(NAMESPACE, "node")
             .is_some_and(|anchor| anchor.surface_known)
+    );
+}
+
+#[test]
+fn registrar_state_does_not_snapshot_registry_contract() {
+    let mut state = State::new(Vec::new(), Vec::new());
+    state.observe_v1_registry(
+        NAMESPACE,
+        "node",
+        "test:node".to_owned(),
+        true,
+        Uuid::from_u128(3),
+        "ens_v1_registry_l1".to_owned(),
+        Some("0x0000000000000000000000000000000000000001".to_owned()),
+        Some("0x0000000000000000000000000000000000000066".to_owned()),
+        None,
+    );
+    observe_registrar(&mut state, "node", Some(100));
+    assert_eq!(
+        state
+            .v1_registrar(NAMESPACE, "node")
+            .unwrap()
+            .registry_contract,
+        None
     );
 }
 
@@ -66,6 +91,7 @@ fn zero_getter_blocks_stale_registry_authority_fallback_during_registrar_transfe
         Uuid::from_u128(3),
         "ens_v1_registry_l1".to_owned(),
         Some(OWNER.to_owned()),
+        None,
         Some(format!("registry-only:{NODE}")),
     );
     assert!(

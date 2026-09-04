@@ -70,6 +70,7 @@ pub struct PriorEventInput {
     pub source_family: String,
     pub manifest_version: i64,
     pub source_manifest_id: Option<i64>,
+    pub emitting_address: Option<String>,
     pub state_scope: Option<String>,
     pub block_timestamp: Option<OffsetDateTime>,
     pub after_state: Value,

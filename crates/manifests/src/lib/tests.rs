@@ -805,7 +805,7 @@ fn checked_in_manifest_trees_pass_repository_validation() -> Result<()> {
 }
 
 #[test]
-fn checked_in_approval_intake_inventory_is_exact_and_raw_only() -> Result<()> {
+fn checked_in_adapter_owned_approval_inventory_is_exact() -> Result<()> {
     let approval =
         "event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)";
     let approval_for_all =
@@ -998,7 +998,7 @@ fn checked_in_approval_intake_inventory_is_exact_and_raw_only() -> Result<()> {
         );
         assert!(
             event.normalized_events.is_empty(),
-            "{path} {name} must remain raw-only"
+            "{path} {name} must keep adapter-owned output declarations empty"
         );
     }
 

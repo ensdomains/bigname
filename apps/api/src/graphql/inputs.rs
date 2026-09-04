@@ -46,6 +46,22 @@ pub(crate) struct DomainEntityFilter {
     pub(crate) name_contains: Option<String>,
 }
 
+#[derive(InputObject, Default)]
+#[graphql(name = "Account_filter")]
+pub(crate) struct AccountEntityFilter {
+    pub(crate) id: Option<ID>,
+    #[graphql(name = "id_in")]
+    pub(crate) id_in: Option<Vec<ID>>,
+}
+
+#[derive(InputObject, Default)]
+#[graphql(name = "Resolver_filter")]
+pub(crate) struct ResolverEntityFilter {
+    pub(crate) id: Option<ID>,
+    pub(crate) address: Option<Bytes>,
+    pub(crate) domain: Option<String>,
+}
+
 /// Subgraph `RegistrationFilter`.
 #[derive(InputObject, Default)]
 #[graphql(name = "RegistrationFilter")]
