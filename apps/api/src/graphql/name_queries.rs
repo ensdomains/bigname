@@ -376,10 +376,15 @@ fn push_filtered_names<'a>(
     } else {
         builder.push(" '[]'::JSONB AS membership_targets");
     }
+    let generated_page = generated_filter.is_some();
+    builder.push(" FROM bigname_phase.name_current nc ");
+    if generated_page {
+        builder.push(" JOIN LATERAL (SELECT 1 FROM bigname_phase.name_surfaces surface ");
+    } else {
+        builder.push(" JOIN bigname_phase.name_surfaces surface ON surface.logical_name_id = nc.logical_name_id ");
+    }
     builder.push(
-        " FROM bigname_phase.name_current nc \
-          JOIN LATERAL (SELECT 1 FROM bigname_phase.name_surfaces surface \
-          LEFT JOIN bigname_phase.resources resource \
+        " LEFT JOIN bigname_phase.resources resource \
             ON resource.resource_id = nc.resource_id \
           LEFT JOIN bigname_phase.surface_bindings binding \
             ON binding.surface_binding_id = nc.surface_binding_id \
@@ -387,9 +392,11 @@ fn push_filtered_names<'a>(
             ON token_lineage.token_lineage_id = nc.token_lineage_id ",
     );
     builder.push(DEFAULT_NAME_CURRENT_LINEAGE_JOINS);
-    builder.push(" WHERE surface.namespace = nc.namespace AND surface.namehash = nc.namehash");
-    builder.push(DEFAULT_NAME_CURRENT_READ_FILTER);
-    builder.push(" OFFSET 0) name_guard ON TRUE");
+    if generated_page {
+        builder.push(" WHERE surface.namespace = nc.namespace AND surface.namehash = nc.namehash");
+        builder.push(DEFAULT_NAME_CURRENT_READ_FILTER);
+        builder.push(" OFFSET 0) name_guard ON TRUE");
+    }
     if filter.address.is_some() {
         builder.push(
             " JOIN address_membership \
@@ -397,6 +404,9 @@ fn push_filtered_names<'a>(
         );
     }
     builder.push(" WHERE nc.support_status = 'supported'");
+    if !generated_page {
+        builder.push(DEFAULT_NAME_CURRENT_READ_FILTER);
+    }
     if let Some(chain_ids) = snapshot_chain_ids {
         builder.push(
             " AND nc.chain_positions <> '{}'::JSONB \
