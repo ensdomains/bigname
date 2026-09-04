@@ -176,6 +176,7 @@ async fn registry_operator_approval_serving_lifecycle() -> Result<()> {
     assert_operator(&revoke_run, &anvil, owner, operator, false).await?;
     revoke_run.db.cleanup().await?;
 
+    ens_v1::set_registry_approval_for_all(&rpc, &deployment, owner, operator, true).await?;
     let mut next = ens_v1::deploy_ens_v1(&rpc, &repo_root()).await?;
     next.legacy_registry = Deployed {
         address: deployment.registry.address,

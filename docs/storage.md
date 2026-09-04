@@ -1079,8 +1079,8 @@ rows remain in the current-state table so losing-fork grants and losing-fork
 revocations both rebuild from surviving canonical history. Interpret re-walks
 retained raw facts through the [`standard_approval`
 derivation](glossary.md#standard-approval-derivation); Project then rebuilds both state legs without a provider
-refetch. App-facing synthesis from those two state legs is deferred to the
-follow-up serving change.
+refetch. Storage serving combines those two state legs into effective
+registry-operator permission rows without persisting per-resource fan-out.
 
 For ENSv2, a latest state-derived `RegistryPathExpired` release removes that resource's effective
 permission rows without removing its partial-coverage summary. A later

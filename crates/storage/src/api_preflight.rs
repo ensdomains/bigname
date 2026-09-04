@@ -77,7 +77,8 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
         FROM required
         WHERE CASE kind
             WHEN 'relation' THEN to_regclass(identity) IS NULL
-                OR NOT has_table_privilege(current_user, identity, 'SELECT')
+                OR (identity <> 'bigname_phase.resolution_divergences'
+                    AND NOT has_table_privilege(current_user, identity, 'SELECT'))
             WHEN 'function' THEN to_regprocedure(identity) IS NULL
             WHEN 'type' THEN to_regtype(identity) IS NULL
         END

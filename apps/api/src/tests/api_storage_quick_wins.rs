@@ -219,6 +219,8 @@ async fn api_preflight_reports_unreadable_account_permission_state_current() -> 
         .execute(&database.lookup_pool).await?;
     sqlx::query(&format!("REVOKE SELECT ON bigname_phase.account_permission_state_current FROM {role}"))
         .execute(&database.lookup_pool).await?;
+    sqlx::query(&format!("REVOKE SELECT ON bigname_phase.resolution_divergences FROM {role}"))
+        .execute(&database.lookup_pool).await?;
     let config = database.database_config(1)?;
     let options = PgConnectOptions::from_str(config.database_url.as_deref().context("test URL")?)?;
     let set_role = format!("SET ROLE {role}");
@@ -229,6 +231,8 @@ async fn api_preflight_reports_unreadable_account_permission_state_current() -> 
     let missing = bigname_storage::load_missing_api_lookup_ddl(&pool).await?;
     assert!(missing.iter().any(|object| object.identity
         == "bigname_phase.account_permission_state_current"));
+    assert!(!missing.iter().any(|object| object.identity
+        == "bigname_phase.resolution_divergences"));
     pool.close().await;
     sqlx::query(&format!("DROP OWNED BY {role}"))
         .execute(&database.lookup_pool).await?;

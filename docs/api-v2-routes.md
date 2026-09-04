@@ -962,7 +962,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
     "grant_scope": {
       "kind": "account",
       "detail": {
-        "chain_id": "1",
+        "chain_id": 1,
         "authority_kind": "registry",
         "authority_contract": "0xregistry",
         "owner": "0xregistry-owner"
@@ -980,11 +980,12 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `(subject, resource_id, effective_scope_storage_key)`. Direct and account
   scopes share that order. The account key is
   `account:{chain_id}:{authority_kind}:{authority_contract}:{owner}`. The
-  signed cursor binds the exact normalized collection anchor: normalized
+  opaque cursor binds the exact normalized collection anchor: normalized
   `address`, resolved `registration_id`, namespace when explicit or implied by
   a name (and namespace absence for an address-only request),
-  `include=lineage`, `snapshot=None`, the fixed sort, and the last keyset
-  tuple. Changing any bound value rejects the cursor; crossing from direct to
+  `include=lineage`, the fixed sort, and the last keyset tuple. New cursors carry
+  `snapshot=None`; legacy snapshot components are ignored. Changing any bound
+  filter, sort, or keyset value rejects the cursor; crossing from direct to
   operator rows neither duplicates nor omits a row.
 - Snapshot behavior: a `name` filter resolves its current registration anchor,
   and permission rows come from current state. The response omits `meta.as_of`

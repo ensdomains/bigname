@@ -439,14 +439,15 @@ revocation (`approved=false`), a cleared binding, or orphaned account or binding
 evidence is served as absence.
 
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/Registry.sol:L46-L52 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/Registry.sol:L148-L158 @ basenames@1809bbc)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
 (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L70-L84 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) Known
 owner-derived rows remain available, but neither those rows nor a zero-row
-summary is an authoritative permission enumeration. API contract tests inject
-an independently proven full summary to verify that resource-bound public
-requests are not globally forced to partial.
+summary is an authoritative permission enumeration. Every permissions response
+remains partial; request scope selects the documented absent-surface reason.
 
 When a state-derived ENSv2 path-expiry release remains the resource's terminal
 lifecycle event and retires effective permission rows, the resource summary
