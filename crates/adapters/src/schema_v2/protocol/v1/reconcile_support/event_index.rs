@@ -86,6 +86,7 @@ impl EventFields {
             owner: state
                 .get("owner")
                 .or_else(|| state.get("to"))
+                .or_else(|| state.get("registrant"))
                 .and_then(Value::as_str)
                 .map(|value| value.to_ascii_lowercase()),
             subject: state

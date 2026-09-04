@@ -609,7 +609,7 @@ mod v1_registrar {
                     4,
                     CONTRACT,
                 ),
-                controller_registration("configured", 999, 5),
+                raw_at(super::NameRegistered { name: "configured".to_owned(), label, owner: OWNER.parse()?, expires: U256::from(999) }.encode_log_data(), 1, 5, CONTROLLER),
             ],
         })?;
         let grants = output
@@ -655,7 +655,7 @@ mod v1_registrar {
         let label = "migration-marker"; let labelhash = keccak256(label.as_bytes()); let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]); let parent = super::common::namehash(&["eth".to_owned()]);
         let manifests = vec![lifecycle_manifest(), registry_manifest()]; let admissions = admissions().into_iter().chain([registry_admission(), old_registry_admission()]).collect::<Vec<_>>();
         let numeric = raw_at(with_topic0(BaseNameRegistered { id: U256::from_be_slice(labelhash.as_slice()), owner: CONTROLLER.parse()?, expires: U256::from(42) }.encode_log_data(), keccak256(b"NameRegistered(uint256,address,uint256)")), 1, 1, CONTRACT);
-        let first = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests: manifests.clone(), discovery_rules: vec![], admissions: admissions.clone(), prior_events: vec![], blocks: vec![], raw_logs: vec![raw_at(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: CONTROLLER.parse()? }.encode_log_data(), 1, 0, REGISTRY), numeric, raw_at(super::v1_registry::Transfer { node: node.parse()?, owner: OWNER.parse()? }.encode_log_data(), 1, 2, REGISTRY), raw_at(Transfer { from: CONTROLLER.parse()?, to: OWNER.parse()?, tokenId: U256::from_be_slice(labelhash.as_slice()) }.encode_log_data(), 1, 3, CONTRACT), controller_registration(label, 999, 4)] })?;
+        let first = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests: manifests.clone(), discovery_rules: vec![], admissions: admissions.clone(), prior_events: vec![], blocks: vec![], raw_logs: vec![raw_at(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: CONTROLLER.parse()? }.encode_log_data(), 1, 0, REGISTRY), numeric, raw_at(super::v1_registry::Transfer { node: node.parse()?, owner: OWNER.parse()? }.encode_log_data(), 1, 2, REGISTRY), raw_at(Transfer { from: CONTROLLER.parse()?, to: OWNER.parse()?, tokenId: U256::from_be_slice(labelhash.as_slice()) }.encode_log_data(), 1, 3, CONTRACT), raw_at(super::NameRegistered { name: label.to_owned(), label: labelhash, owner: OWNER.parse()?, expires: U256::from(999) }.encode_log_data(), 1, 4, CONTROLLER)] })?;
         let retained_markers = first.normalized_events.iter().filter(|event| event.after_state["source_event"] == "NewOwner" && event.after_state["emitter_role"] == "registry").collect::<Vec<_>>(); assert!(retained_markers.is_empty(), "the test must exercise a reconciled-away migration marker: {retained_markers:#?}");
         let second = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests, discovery_rules: vec![], admissions, prior_events: first.normalized_events.iter().map(prior_event).collect(), blocks: vec![], raw_logs: vec![raw_at(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: OWNER.parse()? }.encode_log_data(), 2, 0, OLD_REGISTRY)] })?;
         assert!(second.normalized_events.is_empty(), "later old-registry update survived restored migration state: {:#?}", second.normalized_events);
@@ -1028,6 +1028,52 @@ mod v1_registrar {
     }
 
     #[test]
+    #[rustfmt::skip]
+    fn whole_transaction_reconciliation_tracks_each_forwarded_registrar_owner() -> anyhow::Result<()> {
+        const PROXY: &str = "0x0000000000000000000000000000000000000055"; const USER: &str = "0x0000000000000000000000000000000000000066";
+        let label = "forwarded-registration"; let labelhash = keccak256(label.as_bytes()); let parent = super::common::namehash(&["eth".to_owned()]);
+        let manifests = vec![lifecycle_manifest(), registry_manifest()]; let admissions = admissions().into_iter().chain([registry_admission()]).collect::<Vec<_>>();
+        let initial_logs = vec![base_registration(label, 42, 0), controller_registration(label, 42, 1)];
+        let first = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests: manifests.clone(), discovery_rules: vec![], admissions: admissions.clone(), prior_events: vec![], blocks: vec![], raw_logs: initial_logs.clone() })?;
+        let current_logs = vec![
+            raw_at_transaction(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: CONTROLLER.parse()? }.encode_log_data(), 2, 0, 0, REGISTRY),
+            raw_at_transaction(with_topic0(BaseNameRegistered { id: U256::from_be_slice(labelhash.as_slice()), owner: CONTROLLER.parse()?, expires: U256::from(84) }.encode_log_data(), keccak256(b"NameRegistered(uint256,address,uint256)")), 2, 0, 1, CONTRACT),
+            raw_at_transaction(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: PROXY.parse()? }.encode_log_data(), 2, 0, 2, REGISTRY),
+            raw_at_transaction(Transfer { from: CONTROLLER.parse()?, to: PROXY.parse()?, tokenId: U256::from_be_slice(labelhash.as_slice()) }.encode_log_data(), 2, 0, 3, CONTRACT),
+            raw_at_transaction(super::NameRegistered { name: label.to_owned(), label: labelhash, owner: PROXY.parse()?, expires: U256::from(84) }.encode_log_data(), 2, 0, 4, CONTROLLER),
+            raw_at_transaction(Transfer { from: PROXY.parse()?, to: USER.parse()?, tokenId: U256::from_be_slice(labelhash.as_slice()) }.encode_log_data(), 2, 0, 5, CONTRACT),
+            raw_at_transaction(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: USER.parse()? }.encode_log_data(), 2, 0, 6, REGISTRY),
+        ];
+        let restored_input = BatchInput { chain_id: CHAIN.to_owned(), manifests: manifests.clone(), discovery_rules: vec![], admissions: admissions.clone(), prior_events: first.normalized_events.iter().map(prior_event).collect(), blocks: vec![], raw_logs: current_logs.clone() };
+        let cold = interpret_test_batch(restored_input.clone())?; let redo = interpret_test_batch(restored_input)?; assert_eq!(cold.normalized_events, redo.normalized_events); assert_eq!(cold.surface_bindings, redo.surface_bindings);
+        let unconfirmed = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests: manifests.clone(), discovery_rules: vec![], admissions: admissions.clone(), prior_events: first.normalized_events.iter().map(prior_event).collect(), blocks: vec![], raw_logs: current_logs.iter().filter(|log| log.log_index != 4).cloned().collect() })?; assert!(unconfirmed.normalized_events.iter().any(|event| event.log_index == Some(2) && event.event_kind == "AuthorityEpochChanged" && event.after_state["authority_kind"] == "registry_only"), "a future registrar transfer erased an unconfirmed event-time registry divergence"); for (log, kind) in [(3, "registrar"), (5, "registry_only"), (6, "registrar")] { assert!(unconfirmed.normalized_events.iter().any(|event| event.log_index == Some(log) && event.event_kind == "AuthorityEpochChanged" && event.after_state["authority_kind"] == kind), "unconfirmed log {log} lost its {kind} authority epoch: {:#?}", unconfirmed.normalized_events); }
+        let fresh = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests, discovery_rules: vec![], admissions, prior_events: vec![], blocks: vec![], raw_logs: initial_logs.into_iter().chain(current_logs).collect() })?;
+        assert_eq!(cold.normalized_events, fresh.normalized_events.into_iter().filter(|event| event.block_number == Some(2)).collect::<Vec<_>>());
+        assert_eq!(cold.surface_bindings, fresh.surface_bindings.into_iter().filter(|binding| binding.block_number == 2).collect::<Vec<_>>());
+        let registrar_resource = cold.normalized_events.iter().find(|event| event.event_kind == "RegistrationGranted").and_then(|event| event.resource_id).expect("successor registrar resource");
+        assert!(!cold.normalized_events.iter().any(|event| event.event_kind == "AuthorityEpochChanged" && event.after_state["authority_kind"] == "registry_only"), "same-transaction token forwarding minted a registry-only epoch");
+        assert!(cold.surface_bindings.iter().all(|binding| binding.resource_id == registrar_resource), "same-transaction token forwarding minted a registry-only binding: {:#?}", cold.surface_bindings);
+        Ok(())
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn reconciled_legacy_registration_keeps_a_consistent_authority_epoch_chain() -> anyhow::Result<()> {
+        const OWNER: &str = "0x0000000000000000000000000000000000000055";
+        let label = "legacy-epoch-chain"; let labelhash = keccak256(label.as_bytes()); let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]); let parent = super::common::namehash(&["eth".to_owned()]);
+        let output = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests: vec![lifecycle_manifest(), registry_manifest()], discovery_rules: vec![], admissions: admissions().into_iter().chain([registry_admission()]).collect(), prior_events: vec![], blocks: vec![], raw_logs: vec![
+            raw_at(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: CONTROLLER.parse()? }.encode_log_data(), 1, 0, REGISTRY),
+            raw_at(with_topic0(BaseNameRegistered { id: U256::from_be_slice(labelhash.as_slice()), owner: CONTROLLER.parse()?, expires: U256::from(42) }.encode_log_data(), keccak256(b"NameRegistered(uint256,address,uint256)")), 1, 1, CONTRACT),
+            raw_at(super::v1_registry::Transfer { node: node.parse()?, owner: OWNER.parse()? }.encode_log_data(), 1, 2, REGISTRY),
+            raw_at(Transfer { from: CONTROLLER.parse()?, to: OWNER.parse()?, tokenId: U256::from_be_slice(labelhash.as_slice()) }.encode_log_data(), 1, 3, CONTRACT),
+            raw_at(super::NameRegistered { name: label.to_owned(), label: labelhash, owner: OWNER.parse()?, expires: U256::from(42) }.encode_log_data(), 1, 4, CONTROLLER),
+        ] })?;
+        let mut epochs = output.normalized_events.iter().filter(|event| event.event_kind == "AuthorityEpochChanged").collect::<Vec<_>>(); epochs.sort_by_key(|event| event.log_index);
+        for pair in epochs.windows(2) { assert_eq!(pair[1].before_state["authority_kind"], pair[0].after_state["authority_kind"], "surviving authority epochs do not form a before/after chain: {epochs:#?}"); }
+        Ok(())
+    }
+
+    #[test]
     fn unknown_registry_node_does_not_emit_null_authority_epoch() -> anyhow::Result<()> {
         let labelhash = keccak256(b"unknown-registry-node");
         let parent = super::common::namehash(&["eth".to_owned()]);
@@ -1082,7 +1128,7 @@ mod v1_registrar {
         const BOB: &str = "0x0000000000000000000000000000000000000066";
         let label = "transfer-divergence"; let labelhash = keccak256(label.as_bytes()); let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]); let parent = super::common::namehash(&["eth".to_owned()]);
         let manifests = vec![lifecycle_manifest(), registry_manifest()]; let admissions = admissions().into_iter().chain([registry_admission()]).collect::<Vec<_>>();
-        let output = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests, discovery_rules: vec![], admissions, prior_events: vec![], blocks: vec![], raw_logs: vec![raw_at(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: CONTROLLER.parse()? }.encode_log_data(), 1, 0, REGISTRY), raw_at(with_topic0(BaseNameRegistered { id: U256::from_be_slice(labelhash.as_slice()), owner: CONTROLLER.parse()?, expires: U256::from(42) }.encode_log_data(), keccak256(b"NameRegistered(uint256,address,uint256)")), 1, 1, CONTRACT), raw_at(super::v1_registry::Transfer { node: node.parse()?, owner: ALICE.parse()? }.encode_log_data(), 1, 2, REGISTRY), raw_at(Transfer { from: CONTROLLER.parse()?, to: ALICE.parse()?, tokenId: U256::from_be_slice(labelhash.as_slice()) }.encode_log_data(), 1, 3, CONTRACT), controller_registration(label, 999, 4), raw_at(Transfer { from: ALICE.parse()?, to: BOB.parse()?, tokenId: U256::from_be_slice(labelhash.as_slice()) }.encode_log_data(), 2, 0, CONTRACT)] })?;
+        let output = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests, discovery_rules: vec![], admissions, prior_events: vec![], blocks: vec![], raw_logs: vec![raw_at(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: CONTROLLER.parse()? }.encode_log_data(), 1, 0, REGISTRY), raw_at(with_topic0(BaseNameRegistered { id: U256::from_be_slice(labelhash.as_slice()), owner: CONTROLLER.parse()?, expires: U256::from(42) }.encode_log_data(), keccak256(b"NameRegistered(uint256,address,uint256)")), 1, 1, CONTRACT), raw_at(super::v1_registry::Transfer { node: node.parse()?, owner: ALICE.parse()? }.encode_log_data(), 1, 2, REGISTRY), raw_at(Transfer { from: CONTROLLER.parse()?, to: ALICE.parse()?, tokenId: U256::from_be_slice(labelhash.as_slice()) }.encode_log_data(), 1, 3, CONTRACT), raw_at(super::NameRegistered { name: label.to_owned(), label: labelhash, owner: ALICE.parse()?, expires: U256::from(999) }.encode_log_data(), 1, 4, CONTROLLER), raw_at(Transfer { from: ALICE.parse()?, to: BOB.parse()?, tokenId: U256::from_be_slice(labelhash.as_slice()) }.encode_log_data(), 2, 0, CONTRACT)] })?;
         let registry_epoch = output.normalized_events.iter().find(|event| event.block_number == Some(2) && event.event_kind == "AuthorityEpochChanged" && event.after_state["authority_kind"] == "registry_only").expect("registrar transfer must activate registry-only authority");
         assert!(registry_epoch.logical_name_id.is_some());
         assert!(output.surface_bindings.iter().any(|binding| binding.resource_id == registry_epoch.resource_id.expect("registry resource")), "known registry authority must receive an active binding: {:#?}", output.surface_bindings);

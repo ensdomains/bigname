@@ -1,4 +1,5 @@
 mod event_index;
+mod owner_timeline;
 mod side_index;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -9,6 +10,9 @@ use self::{
     event_index::{
         EventFields, EventIndex, PermissionRevocation, Position, Registration, RegistrationWindow,
         SourceEvent, SourceFamily,
+    },
+    owner_timeline::{
+        OwnerTimeline, remove_reconciled_transfer_structure, remove_redundant_successor_epochs,
     },
     side_index::{BindingIndex, ClosureIndex},
 };
@@ -87,39 +91,11 @@ fn reconcile_registration(
         output.normalized_events[registration.event_index].after_state["registry_migrated"] =
             serde_json::Value::Bool(true);
     }
-    let registrar_owner = target_candidates
-        .iter()
-        .filter_map(|index| {
-            let fields = &events.fields[*index];
-            (fields.source_event == SourceEvent::Transfer
-                && fields.family == SourceFamily::Other
-                && fields.resource_id == Some(registration.resource_id))
-            .then_some((fields.position?, fields.owner.clone()?))
-        })
-        .max_by_key(|(position, _)| *position)
-        .map(|(_, owner)| owner)
-        .unwrap_or_else(|| registration.provisional_owner.clone());
     // Registrar-token ownership and registry ownership may intentionally differ: reclaim writes
     // the registry owner independently, and that owner can later call setOwner.
     // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
-    let divergence_start = target_candidates
-        .iter()
-        .filter_map(|index| {
-            let fields = &events.fields[*index];
-            (fields.family == SourceFamily::Registry
-                && matches!(
-                    fields.source_event,
-                    SourceEvent::NewOwner | SourceEvent::Transfer
-                )
-                && fields
-                    .position
-                    .is_some_and(|position| position > registration.position))
-            .then_some((fields.position?, fields.owner.clone()?))
-        })
-        .filter(|(_, owner)| owner != &registrar_owner)
-        .min_by_key(|(position, _)| *position)
-        .map(|(position, _)| position);
+    let owner_timeline = OwnerTimeline::new(events, &target_candidates, registration);
     let eligible = |fields: &EventFields| {
         fields.position.is_some_and(|position| {
             if registration.window == RegistrationWindow::WholeTransaction {
@@ -134,7 +110,9 @@ fn reconcile_registration(
                     || fields.owner.as_ref() == Some(&registration.provisional_owner);
                 pre_anchor_setup_is_proven
                     && pre_anchor_owner_matches
-                    && divergence_start.is_none_or(|start| position < start)
+                    && owner_timeline
+                        .divergence_start()
+                        .is_none_or(|start| position < start)
             } else {
                 position.2 < registration.log_index
             }
@@ -220,7 +198,11 @@ fn reconcile_registration(
     let predecessor_owner_positions = owner_positions
         .keys()
         .filter(|position| {
-            Some(**position) != last_owner_position && !transient_owner_positions.contains(position)
+            let matches_registrar = owner_timeline
+                .registry_owner_matches_transfer(**position, &owner_positions[*position]);
+            Some(**position) != last_owner_position
+                && !transient_owner_positions.contains(position)
+                && !matches_registrar
         })
         .copied()
         .collect::<BTreeSet<_>>();
@@ -349,6 +331,24 @@ fn reconcile_registration(
     bindings.remove(&stale_resources, &pending_positions);
     bindings.remove(
         &BTreeSet::from([registration.resource_id]),
+        &redundant_successor_positions,
+    );
+    bindings.remove(
+        &stale_resources,
+        owner_timeline.reconciled_transfer_positions(),
+    );
+    remove_reconciled_transfer_structure(
+        output,
+        events,
+        registration,
+        &stale_resources,
+        owner_timeline.reconciled_transfer_positions(),
+    );
+    remove_redundant_successor_epochs(
+        output,
+        events,
+        registration,
+        &target_candidates,
         &redundant_successor_positions,
     );
     closures.remove(&registration.logical_name_id, &pending_positions);
