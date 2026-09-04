@@ -320,12 +320,12 @@ The fuse predicate is exact: `PARENT_CANNOT_CONTROL` must be set and
 (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L84-L89 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18-L19 @ ens_v1@91c966f)
 
-Project identifies the parent migration registry from the parent's current
-ENSv2 `SubregistryChanged` relation and its admitted contract instance. The
-`successor_registry_contract_instance_id` on the parent's `MigrationApplied`
-event instead identifies the registry that the parent was registered into;
-the locked controller registers the parent there with its newly deployed
-`WrapperRegistry` as the subregistry.
+Project accepts the current ENSv2 `SubregistryChanged` pointer only when its exact
+instance and address match a readable canonical `migration_registry_creation`
+association contained in the activated boundary and its active ordinary
+announcement. A replacement fails closed. `successor_registry_contract_instance_id`
+instead identifies the registry that received the parent; the locked controller
+registers the parent there with its new `WrapperRegistry` as subregistry.
 (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L103-L109 @ ens_v2@a971bd64)
 An entry in that migration registry is historical, not merely current:
 `RegistrationReserved`, `RegistrationGranted`, and `RegistrationRenewed` each

@@ -363,14 +363,12 @@ intake carveout. A migration-created registry's independently admitted
 announcement position, because it records indexability only and the watch plan
 traverses it. Interpret attaches the `migration_registry_creation` relationship
 in `migration_discovery_associations`, keyed to that ordinary edge;
-the association does not change the edge's columns or active range. Slice 2C's
-authority selector is the sole Project exception: after an activated transition
-has proved the parent migrated, it may use the readable canonical
-`migration_registry_creation` association to classify the independently
-admitted registry that emitted a positive child registration. The association
-remains diagnostic whether its [complete group](glossary.md#complete-group) is candidate or activated; it
-neither establishes child authority by itself nor activates any
-correlation-dependent effect. Correlation-dependent parent, topology, identity,
+the association does not change the edge's columns or active range. After an
+activated parent transition, Project may use the readable canonical association
+and active ordinary announcement to classify a positive child-registration
+emitter or prove the current parent subregistry is the migration-created
+`WrapperRegistry`. Candidate or activated, the association establishes neither
+result by itself and activates no correlation-dependent effect. Correlation-dependent parent, topology, identity,
 role, registration, renewal, and normalized-event rows from the watched registry
 activate only when every group they reference is complete. Refused and incomplete
 rows remain candidate. Association with the migration group is not

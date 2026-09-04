@@ -227,13 +227,11 @@ outcomes, or durable traces.
 - The independently admitted `registry_announcement` edge for an ENSv1→ENSv2
   migration-created registry remains ordinary because it drives the watch plan,
   not a product projection. Project ignores every candidate downstream effect.
-  Its authority selector is the sole exception for the corresponding
-  `migration_discovery_associations` row: after an activated parent transition,
-  it may use that row together with the readable ordinary edge and the parent
-  topology current at the registration/proof position to classify a positive
-  ENSv2 child-registration [authority proof](glossary.md#authority-proof), as
-  specified by the storage contract. The association cannot establish authority
-  by itself.
+  After an activated parent transition, authority selection may classify a
+  positive child-registration [authority proof](glossary.md#authority-proof),
+  and child reachability may prove the current subregistry is its migration-created
+  `WrapperRegistry`. Both require the readable canonical association, active
+  ordinary announcement, and matching topology; the association proves neither by itself.
 - Coverage and support are explicit. They are never inferred from row presence
   or a historical ingest range.
 - Verified provider answers are request-scoped lookup output, not projection

@@ -67,11 +67,8 @@ async fn candidates(
             WHERE event.source_family = 'ens_v2_migration_l1'
               AND event.event_kind = 'MigrationApplied'
               AND event.logical_name_id IS NOT NULL
-            ORDER BY event.logical_name_id,
-                     event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST,
-                     event.event_identity DESC
+            ORDER BY event.logical_name_id, event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST, event.event_identity DESC
         ), parent_migrations AS (
             SELECT boundary.*,
                    migration_registry.registry_contract_instance_id::text
@@ -102,24 +99,23 @@ async fn candidates(
              AND migration_registry.canonicality_state IN ('canonical', 'safe', 'finalized')
              AND boundary.migration_evidence @> migration_registry.evidence_refs
              AND EXISTS (
-                 SELECT 1 FROM chain_lineage lineage
-                 WHERE lineage.chain_id = migration_registry.chain_id AND lineage.block_hash = migration_registry.block_hash
+                 SELECT 1 FROM chain_lineage lineage WHERE lineage.chain_id = migration_registry.chain_id
+                   AND lineage.block_hash = migration_registry.block_hash
                    AND lineage.block_number = migration_registry.block_number
                    AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
              )
              AND EXISTS (
-                 SELECT 1 FROM discovery_edges edge
-                 WHERE edge.chain_id = migration_registry.chain_id AND edge.edge_kind = 'registry_announcement'
+                 SELECT 1 FROM discovery_edges edge WHERE edge.chain_id = migration_registry.chain_id
+                   AND edge.edge_kind = 'registry_announcement'
                    AND edge.to_contract_instance_id = migration_registry.registry_contract_instance_id
                    AND edge.source_manifest_id = migration_registry.source_manifest_id
-                   AND edge.active_from_block_number = migration_registry.block_number
-                   AND edge.active_from_block_hash = migration_registry.block_hash
+                   AND (edge.active_from_block_number, edge.active_from_block_hash) =
+                       (migration_registry.block_number, migration_registry.block_hash)
                    AND (edge.provenance ->> 'transaction_index')::bigint = migration_registry.transaction_index
                    AND (edge.provenance ->> 'log_index')::bigint = migration_registry.log_index
                    AND edge.canonicality_state IN ('canonical', 'safe', 'finalized')
-                   AND edge.active_from_block_number <= $2
+                   AND edge.active_from_block_number <= $2 AND edge.deactivated_at IS NULL
                    AND (edge.active_to_block_number IS NULL OR edge.active_to_block_number > $2)
-                   AND edge.deactivated_at IS NULL
              )
         ), latest_wrapper_modifiers AS (
             SELECT DISTINCT ON (event.logical_name_id)
@@ -142,11 +138,8 @@ async fn candidates(
             WHERE event.source_family = 'ens_v1_wrapper_l1'
               AND event.event_kind = 'PermissionScopeChanged'
               AND event.logical_name_id IS NOT NULL AND event.resource_id IS NOT NULL
-            ORDER BY event.logical_name_id,
-                     event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST,
-                     event.event_identity DESC
+            ORDER BY event.logical_name_id, event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST, event.event_identity DESC
         ), latest_wrapper_expiries AS (
             SELECT DISTINCT ON (event.logical_name_id, event.resource_id)
                    event.logical_name_id, event.resource_id,
@@ -167,11 +160,8 @@ async fn candidates(
                    event.source_family = 'ens_v1_registrar_l1'
                    AND event.after_state ->> 'source_event' = 'NameRenewed'
                    AND event.after_state ->> 'authority_kind' = 'wrapper'))
-            ORDER BY event.logical_name_id, event.resource_id,
-                     event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST,
-                     event.event_identity DESC
+            ORDER BY event.logical_name_id, event.resource_id, event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST, event.event_identity DESC
         ), effective_wrapper_state AS (
             SELECT modifier.logical_name_id,
                    CASE WHEN modifier.wrapper_state IS NULL OR modifier.fuses IS NULL
