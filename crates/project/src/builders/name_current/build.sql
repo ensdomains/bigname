@@ -281,19 +281,34 @@
             FROM (SELECT COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2' AS is_v2, NOT (registration_current.event_kind = 'RegistrationReleased' AND binding.resource_id IS NOT NULL AND registration_current.resource_id IS DISTINCT FROM binding.resource_id) AS use_event) arm
         ) selected_registration CROSS JOIN LATERAL (
             SELECT COALESCE((
-                SELECT wrapper.resource_id FROM project_events wrapper
-                JOIN project_events registrar_grant
-                  ON registrar_grant.chain_id = wrapper.chain_id
-                 AND registrar_grant.resource_id::text = wrapper.after_state ->> 'wrapped_registrar_resource_id'
-                 AND registrar_grant.event_kind = 'RegistrationGranted'
-                 AND registrar_grant.source_family = 'ens_v1_registrar_l1'
-                 AND registrar_grant.transaction_hash = wrapper.transaction_hash
-                WHERE wrapper.logical_name_id = surface.logical_name_id
-                  AND (wrapper.resource_id = selected_registration.resource_id OR registrar_grant.resource_id = selected_registration.resource_id)
-                  AND wrapper.event_kind = 'SurfaceBound'
-                  AND wrapper.source_family = 'ens_v1_wrapper_l1'
-                ORDER BY wrapper.block_number DESC NULLS LAST, wrapper.normalized_event_id DESC LIMIT 1
-            ), selected_registration.resource_id) AS resource_id
+                SELECT (current_wrapper.after_state ->> 'wrapped_registrar_resource_id')::uuid
+                FROM project_events current_wrapper
+                WHERE current_wrapper.resource_id = selected_registration.resource_id
+                  AND current_wrapper.event_kind = 'SurfaceBound'
+                  AND current_wrapper.source_family = 'ens_v1_wrapper_l1'
+                  AND current_wrapper.after_state ->> 'wrapped_registrar_resource_id' IS NOT NULL
+                ORDER BY current_wrapper.block_number DESC NULLS LAST,
+                         current_wrapper.normalized_event_id DESC
+                LIMIT 1
+            ), selected_registration.resource_id) AS registrar_resource_id
+        ) lifecycle CROSS JOIN LATERAL (
+            SELECT COALESCE((
+                SELECT born_wrapper.resource_id
+                FROM project_events registrar_grant
+                JOIN project_events born_wrapper
+                  ON born_wrapper.chain_id = registrar_grant.chain_id
+                 AND born_wrapper.logical_name_id = surface.logical_name_id
+                 AND born_wrapper.transaction_hash = registrar_grant.transaction_hash
+                 AND (born_wrapper.after_state ->> 'wrapped_registrar_resource_id')::uuid = registrar_grant.resource_id
+                WHERE registrar_grant.resource_id = lifecycle.registrar_resource_id
+                  AND registrar_grant.event_kind = 'RegistrationGranted'
+                  AND registrar_grant.source_family = 'ens_v1_registrar_l1'
+                  AND born_wrapper.event_kind = 'SurfaceBound'
+                  AND born_wrapper.source_family = 'ens_v1_wrapper_l1'
+                ORDER BY born_wrapper.block_number NULLS LAST,
+                         born_wrapper.normalized_event_id
+                LIMIT 1
+            ), lifecycle.registrar_resource_id) AS resource_id
         ) product_registration CROSS JOIN LATERAL (
             SELECT CASE WHEN identity.mismatch THEN NULL ELSE binding.surface_binding_id END AS surface_binding_id,
                    CASE WHEN identity.mismatch THEN NULL ELSE binding.resource_id END AS resource_id, CASE WHEN identity.mismatch THEN NULL ELSE binding.binding_kind END AS binding_kind,
