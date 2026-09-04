@@ -243,13 +243,22 @@ async fn graphql_generated_domain_order_plans_are_index_bounded_or_linear() -> R
     ).await?;
     assert_flat_eligibility(&selective_range, "selective id_gt with name order")?;
 
-    let id = plan_domain_filter("id", "0x000000000000000000000000000000000000000000000000000000000000176f");
+    let bounded_id = "0x000000000000000000000000000000000000000000000000000000000000176f";
+    let id = plan_domain_filter("id", bounded_id);
     let bounded_equality = crate::graphql::explain_phase_graphql_name_list_page(
         &database.lookup_pool, &chains, &id,
         crate::graphql::GeneratedDomainSort::Storage(bigname_storage::NameCurrentListSort::Name),
         bigname_storage::NameCurrentListOrder::Asc, 200, 0,
     ).await?;
     assert_id_index_bounded(&bounded_equality, "id equality with name order")?;
+
+    let id_in = plan_domain_filter("id_in", bounded_id);
+    let bounded_membership = crate::graphql::explain_phase_graphql_name_list_page(
+        &database.lookup_pool, &chains, &id_in,
+        crate::graphql::GeneratedDomainSort::Storage(bigname_storage::NameCurrentListSort::Name),
+        bigname_storage::NameCurrentListOrder::Asc, 200, 0,
+    ).await?;
+    assert_id_index_bounded(&bounded_membership, "id membership with name order")?;
     database.cleanup().await
 }
 
