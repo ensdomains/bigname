@@ -103,6 +103,7 @@ def classify_enum_coverage(upstream, local, coverage):
     results = []
     for path in sorted(key for key in upstream if key.startswith("enum:")):
         enum_type = path.removeprefix("enum:").split(".", 1)[0]
+        partially_local = f"type:{enum_type}" in local or any(candidate.startswith(f"enum:{enum_type}.") for candidate in local)
         exact = dispositions.get(path)
         if path in local:
             if exact:
@@ -110,7 +111,7 @@ def classify_enum_coverage(upstream, local, coverage):
             continue
         if exact:
             results.append({"path": path, "status": exact["status"], "owner": exact["owner"], "reason": "exact enum value disposition"})
-        elif f"type:{enum_type}" not in local and enum_type in known:
+        elif not partially_local and enum_type in known:
             results.append({"path": path, "status": "deferred", "owner": known[enum_type]["owner"], "reason": "wholly absent enum type census"})
         else:
             results.append({"path": path, "status": "unowned", "owner": None, "reason": "partially local enum requires an exact value disposition"})
@@ -379,6 +380,8 @@ def verify(root):
                 raise ValueError(f"signature disposition differs from captured upstream: {match}")
             if group == "upstream_only" and not any(coverage_scope_matches(match, path) for path in surface):
                 raise ValueError(f"upstream disposition absent from captured surface: {match}")
+            if group == "upstream_only" and match in claimed_paths and surface.get(match, {}).get("kind") == "ENUM":
+                raise ValueError(f"partially local enum requires exact value dispositions: {match}")
             if group == "local_extensions" and match in surface:
                 raise ValueError(f"local extension exists in captured upstream: {match}")
     known_upstream_types = coverage.get("known_upstream_types", {})

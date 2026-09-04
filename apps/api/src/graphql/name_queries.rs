@@ -83,7 +83,7 @@ async fn load_one(
     namehash: Option<&str>,
 ) -> Result<Option<PhaseGraphqlNameListRow>> {
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_filtered_names(&mut builder, filter, namehash, None, None);
+    push_filtered_names(&mut builder, filter, namehash, None, None, false);
     builder.push(SELECT_NAMES);
     builder.push(" LIMIT 1");
     let row = builder
@@ -114,6 +114,7 @@ pub async fn load_phase_graphql_name_list_page_offset(
         None,
         Some(generated_filter),
         Some(snapshot_chain_ids),
+        indexed_page(sort, generated_filter),
     );
     builder.push(SELECT_NAMES);
     push_order(&mut builder, sort, order);
@@ -151,6 +152,7 @@ pub async fn explain_phase_graphql_name_list_page(
         None,
         Some(filter),
         Some(snapshot_chain_ids),
+        indexed_page(sort, filter),
     );
     builder.push(SELECT_NAMES);
     push_order(&mut builder, sort, order);
@@ -160,13 +162,24 @@ pub async fn explain_phase_graphql_name_list_page(
     Ok(row.try_get(0)?)
 }
 
+fn indexed_page(sort: GeneratedDomainSort, filter: &GeneratedDomainFilter) -> bool {
+    sort == GeneratedDomainSort::Id || filter.has_bounded_id_predicate()
+}
+
 pub async fn count_phase_graphql_name_list(
     pool: &PgPool,
     filter: &NameCurrentListFilter,
     snapshot_chain_ids: &[String],
 ) -> Result<PhaseGraphqlNameCount> {
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_filtered_names(&mut builder, filter, None, None, Some(snapshot_chain_ids));
+    push_filtered_names(
+        &mut builder,
+        filter,
+        None,
+        None,
+        Some(snapshot_chain_ids),
+        false,
+    );
     builder.push(
         r#"
         , distinct_name_targets AS (
@@ -238,6 +251,7 @@ pub(crate) fn push_filtered_names<'a>(
     namehash: Option<&str>,
     generated_filter: Option<&'a GeneratedDomainFilter>,
     snapshot_chain_ids: Option<&'a [String]>,
+    indexed_page: bool,
 ) {
     builder.push("WITH ");
     if let Some(address) = filter.address.as_ref() {
@@ -360,9 +374,8 @@ pub(crate) fn push_filtered_names<'a>(
     } else {
         builder.push(" '[]'::JSONB AS membership_targets");
     }
-    let generated_page = generated_filter.is_some();
     builder.push(" FROM bigname_phase.name_current nc ");
-    if generated_page {
+    if indexed_page {
         builder.push(" JOIN LATERAL (SELECT 1 FROM bigname_phase.name_surfaces surface ");
     } else {
         builder.push(" JOIN bigname_phase.name_surfaces surface ON surface.logical_name_id = nc.logical_name_id ");
@@ -376,7 +389,7 @@ pub(crate) fn push_filtered_names<'a>(
             ON token_lineage.token_lineage_id = nc.token_lineage_id ",
     );
     builder.push(DEFAULT_NAME_CURRENT_LINEAGE_JOINS);
-    if generated_page {
+    if indexed_page {
         builder.push(" WHERE surface.namespace = nc.namespace AND surface.namehash = nc.namehash");
         builder.push(DEFAULT_NAME_CURRENT_READ_FILTER);
         builder.push(" OFFSET 0) name_guard ON TRUE");
@@ -388,7 +401,7 @@ pub(crate) fn push_filtered_names<'a>(
         );
     }
     builder.push(" WHERE nc.support_status = 'supported'");
-    if !generated_page {
+    if !indexed_page {
         builder.push(DEFAULT_NAME_CURRENT_READ_FILTER);
     }
     if let Some(chain_ids) = snapshot_chain_ids {

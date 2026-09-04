@@ -42,6 +42,12 @@ pub struct GeneratedDomainFilter {
     pub name: StringFilter,
 }
 
+impl GeneratedDomainFilter {
+    pub(crate) fn has_bounded_id_predicate(&self) -> bool {
+        self.id.eq.as_ref().is_some_and(Option::is_some) || self.id.in_values.is_some()
+    }
+}
+
 pub fn push_generated_domain_filters<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a GeneratedDomainFilter,
@@ -146,14 +152,9 @@ fn push_id_range_comparisons<'a, const N: usize>(
 ) {
     for (value, operator) in values {
         if let Some(value) = value {
-            let canonical = value.len() == 66
-                && value.starts_with("0x")
-                && value[2..]
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
             builder
                 .push(" AND ")
-                .push(if canonical {
+                .push(if is_indexed_namehash_operand(value) {
                     "nc.namehash"
                 } else {
                     "(nc.namehash COLLATE \"C\")"
@@ -162,6 +163,14 @@ fn push_id_range_comparisons<'a, const N: usize>(
                 .push_bind(value);
         }
     }
+}
+
+fn is_indexed_namehash_operand(value: &str) -> bool {
+    value.len() == 66
+        && value.starts_with("0x")
+        && value[2..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn push_nullable_comparison<'a>(
