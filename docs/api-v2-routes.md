@@ -229,8 +229,8 @@ Field ownership:
   `eth`, `reverse`, and `addr.reverse`—instead select ENSv2 when the ENSv2 arm is
   current and ENSv1 evidence, current or historical, exists without proof.
   Root selection is internal authority state only: public name routes reject
-  root input and `name_current` excludes the empty root, so the other three
-  names are the servable members of this class.
+  root input; the other three currently return identity-only
+  `status=unsupported` with `exact_name_profile_not_supported`.
   Historical ENSv2 evidence alone does not qualify, and `.reverse` descendants
   do not inherit the exception. These values replace the
   blanket mixed-corpus reason; intake from the planned [ENSv2 migration source

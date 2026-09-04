@@ -212,7 +212,7 @@ async fn checked_in_sepolia_manifests_materialize_exactly_one_transition_predece
 }
 
 #[tokio::test]
-#[ignore = "#822: activated migration boundary has 0 active ENSv1 predecessors matching its resource selector; expected exactly one"]
+#[ignore = "#822: activated ENSv1→ENSv2 migration boundary has 0 active ENSv1 predecessors matching its resource selector; expected exactly one"]
 async fn faithful_unwrapped_migration_reaches_predecessor_refusal() -> TestResult {
     let database = database("interpret_faithful_unwrapped_predecessor").await?;
     let pool = database.pool();
