@@ -10756,6 +10756,7 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
         "ens_v2_migration_l1",
         json!({
             "successor_registry_contract_instance_id":Uuid::new_v4(),
+            "migration_path":"locked_wrapped",
             "fixture_child_registry_contract_instance_id":registry_instance
         }),
         json!({}),
