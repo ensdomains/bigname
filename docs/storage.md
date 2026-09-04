@@ -433,6 +433,7 @@ closed its wrapper binding and reactivated its registrar position before that
 recorded transfer. If no prior registrar identity was materialized, that exact
 transfer confirms the fallback identity with its binding effective from the
 preceding `NameUnwrapped`; the cleanup-relative time predicate remains strict.
+For registrar-token `unwrapped`, [issue #822](https://github.com/ensdomains/bigname/issues/822) currently makes valid input present a false zero at that exact-predecessor check and rolls back the [physical Interpret batch](glossary.md#batch-grid). Zero remains an integrity error; the path above describes the required behavior after the writer resolves the actual predecessor.
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
@@ -942,8 +943,8 @@ same rule: which interpreted row wins a conflict, how a redo range reopens and
 reanchors bindings, and which surfaces a normalizer-version recompute
 activates all decide which identity, discovery, and label-preimage rows the
 projections then read, so they are interpretation rather than plumbing.
-Interpret's batch sizing stays outside, because folding the same events into
-differently sized physical batches produces the same rows. Request-scoped
+Interpret's batch sizing stays outside, because completed walks that fold the same events into
+differently sized physical batches produce the same rows. Request-scoped
 serving is outside because it writes no interpreted, discovery, or projection
 row — the guarded divergence ledger is diagnostic output, not interpretation
 input. The rest of RPC transport — client construction, timeouts, and endpoint

@@ -218,18 +218,18 @@ and no second evidence-reconstruction path. An authority-boundary group
 activates only when exactly one self-sufficient `MigrationApplied` event, one
 `surface_binding_transition` effect, one correlation ID, and one existing
 ENSv2 successor agree. An incomplete or unresolvable registration refuses only
-its own correlation; it does not abort complete sibling groups in the same
-batch. A non-boundary group activates only its existing dependent rows and
+its own correlation; it does not make complete sibling groups incomplete. A
+non-boundary group activates only its existing dependent rows and
 never schedules a cross-arm transition. A row shared by several correlation
 IDs activates only when every referenced group is complete.
 
 Registrar-token `unwrapped` groups that carry the unlocked controller's ENSv1
-registry cleanup currently stop at Interpret's exact-predecessor check instead
-of reaching activation or Project. This is the bounded production-path defect
+registry cleanup currently derive activation but fail the exact-predecessor check while committing it, so no activation rows reach Project. This is the bounded production-path defect
 tracked by [issue #822](https://github.com/ensdomains/bigname/issues/822); the
 affected catalog rows are enumerated in
 [`migration-activation-coverage.md`](migration-activation-coverage.md). The
-other authority paths retain the activation behavior described here.
+other authority paths retain the activation behavior described here. A fatal #822 predecessor error rolls
+back the whole [physical Interpret batch](glossary.md#batch-grid), including complete sibling groups in that batch.
 
 For a complete group that passes predecessor resolution, production
 re-derivation writes its normalized rows with
@@ -997,10 +997,10 @@ deleted old-schema storage layer no longer provides general field repair,
 payload arbitration, supersession, full-closure proof, or adapter-checkpoint
 reuse.
 
-Physical batching is an execution detail, not an input to interpretation.
+Physical batching is an execution detail, not an input to interpretation for a completed target.
 Identity rows, discovery edges, and normalized events must be a pure function
 of the canonical raw facts and the declared manifests, discovery rules, and
-admissions: a fresh full walk, an incremental follow, and a resumed session
+admissions: after completion, a fresh full walk, an incremental follow, and a resumed session
 over identical input must write identical rows no matter where the 500-block
 batch boundaries fall. A finitely retired manifest-declared address range is
 the narrow history-bearing exception: manifest synchronization supplies its

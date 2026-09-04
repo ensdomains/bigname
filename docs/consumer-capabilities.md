@@ -141,8 +141,13 @@ remain candidate-only diagnostic source records and are never Project input.
 Refused and incomplete groups remain
 candidate and are excluded from Project staging and product event/history reads.
 An independently admitted existing-family event remains byte-for-byte activated
-and product-visible; only its diagnostic correlation association changes
-visibility. The shared production activation function performs the arm-scoped binding
+and only its diagnostic correlation association changes visibility. After its
+[physical Interpret batch](glossary.md#batch-grid) commits in an ordinary walk,
+the event is product-visible. An active or failed redo stays fenced from serving
+until completion, even when an earlier redo batch committed. A batch-level failure
+such as [issue #822](https://github.com/ensdomains/bigname/issues/822) rolls the
+event back when it shares the failing batch, and later events remain unavailable
+while Interpret cannot advance past the failing ENSv1→ENSv2 migration block. The shared production activation function performs the arm-scoped binding
 transition already enforced by Interpret and enables the completed group's
 dependent rows. Project consumes the validated
 transition through its activated

@@ -120,9 +120,9 @@ repair path, or checkpoint-promotion consumer for these records.
 the partition of one interpret walk into consecutive physical
 batches (today 500-block ranges). Grids never split a block: the block is the
 atomic unit every grid loads. Where the boundaries fall is an execution
-detail, not an input to interpretation — surviving identity rows, discovery
-edges, and normalized events must be identical across grids over identical
-input. That identity is verified for the ENSv1 divergence classes
+detail, not an input to interpretation. After a walk completes, surviving identity rows,
+discovery edges, and normalized events must be identical across grids over identical input.
+A failed ordinary walk may retain earlier committed physical batches whose normalized events direct history reads can see; a failed [redo run shape](#run-shape) remains fenced from serving. In either case Project cannot advance to the failed target. Completed-walk identity is verified for the ENSv1 divergence classes
 [#336](https://github.com/ensdomains/bigname/issues/336) catalogued and the
 ENSv2 resolver attribution classes
 [#348](https://github.com/ensdomains/bigname/issues/348) and
@@ -621,9 +621,8 @@ later ENSv2 registration. Ordinary interpretation of the unlocked wrapped
 path's earlier `NameUnwrapped` closes the wrapper binding and reactivates that
 registrar position. The `locked_wrapped` path resolves its wrapper predecessor
 immediately before the boundary. Zero or multiple matching predecessors are
-integrity errors; it never ranks candidates. The zero case is corruption
-because both the registrar-token and wrapper-token migration entries require a
-transferable live ENSv1 token.
+integrity errors; it never ranks candidates. A genuine zero is corruption because both entries require a transferable live ENSv1 token.
+For registrar-token `unwrapped`, [issue #822](https://github.com/ensdomains/bigname/issues/822) currently makes otherwise valid input present a false zero when Interpret tries to commit activation, so production refuses before Project; the repair must resolve the predecessor rather than admit zero, then apply the exact-cleanup rule above.
 If the deployment profile had not materialized the registrar identity before
 the unwrap, the exact following BaseRegistrar transfer confirms the fallback
 identity with a binding effective from `NameUnwrapped`; it is therefore still
@@ -1792,7 +1791,7 @@ how one interpret walk executes over its input: fresh (from
 the start of the chain), incremental (continuing from retained prior events),
 or resumed (continuing from a persisted progress marker after an interruption,
 including an interrupted redo's persisted intermediate state).
-Batch-independence rules require identical surviving rows in every run shape
+Batch-independence rules require identical surviving rows in every completed run shape
 over identical input. That identity is verified for the ENSv1 divergence
 classes [#336](https://github.com/ensdomains/bigname/issues/336) and the ENSv2
 resolver attribution classes

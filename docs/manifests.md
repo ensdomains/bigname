@@ -434,8 +434,8 @@ normalized events and candidate identity/discovery effects until the later
 consumer-activation slice activates the group. Slice 2A added no capability,
 runtime, or manifest flag and left production correlations candidate. The final
 activation slice now activates [complete groups](glossary.md#complete-group) in production without changing
-that capability table, runtime configuration, or manifest authority; incomplete
-and refused correlations remain candidate.
+that capability table, runtime configuration, or manifest authority. A [physical Interpret batch](glossary.md#batch-grid) containing a registrar-token `unwrapped` group affected by
+[issue #822](https://github.com/ensdomains/bigname/issues/822) rolls back every write from that attempt, including complete sibling groups. During redo, range preparation can already have deleted previously stored candidate rows in an earlier committed physical batch; failure in a later batch therefore leaves partial, fenced redo state rather than restoring the pre-redo rows. Failure in the initial physical redo batch rolls its preparation back with that batch.
 `migration_event_associations` remains diagnostics-only before and after
 activation.
 
