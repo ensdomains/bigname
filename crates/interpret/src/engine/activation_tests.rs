@@ -201,9 +201,11 @@ async fn checked_in_sepolia_manifests_materialize_exactly_one_transition_predece
     // This reduced transition-writer fixture omits the migration transaction's
     // user-to-controller registrar `Transfer`, registry `NewOwner` reclaim,
     // registry `Transfer` to the Graveyard, conditional `NewResolver`, ENSv2
-    // `TransferSingle`, `EACRolesChanged`, and `ResolverUpdated` logs. It proves
-    // exactly-one predecessor materialization, not a production publication
-    // path. The faithful path remains ignored below until #822 is resolved.
+    // `TransferSingle`, `EACRolesChanged`, and `ResolverUpdated` logs, while it
+    // injects `RegistryCreated` and `ProxyDeployed` logs absent from U-01. It
+    // proves exactly-one predecessor materialization, not a production
+    // publication path. The faithful path remains ignored below until #822 is
+    // resolved.
 
     database.cleanup().await?;
     Ok(())
@@ -359,7 +361,6 @@ async fn seed_lineage(pool: &PgPool) -> TestResult {
 
 async fn seed_predecessor_facts(pool: &PgPool, labelhash: B256, namehash: B256) -> TestResult {
     let owner = OWNER.parse::<Address>()?;
-    let controller = UNLOCKED_CONTROLLER.parse::<Address>()?;
     insert_transaction(pool, SETUP_BLOCK, ENS_REGISTRY).await?;
     insert_log(
         pool,
@@ -410,7 +411,7 @@ async fn seed_predecessor_facts(pool: &PgPool, labelhash: B256, namehash: B256) 
         ENS_REGISTRY,
         ens_registry::Transfer {
             node: namehash,
-            owner: controller,
+            owner,
         }
         .encode_log_data(),
     )
@@ -422,7 +423,7 @@ async fn seed_predecessor_facts(pool: &PgPool, labelhash: B256, namehash: B256) 
         NAME_WRAPPER,
         NameUnwrapped {
             node: namehash,
-            owner: controller,
+            owner,
         }
         .encode_log_data(),
     )
@@ -434,7 +435,7 @@ async fn seed_predecessor_facts(pool: &PgPool, labelhash: B256, namehash: B256) 
         BASE_REGISTRAR,
         base_registrar::Transfer {
             from: NAME_WRAPPER.parse()?,
-            to: controller,
+            to: owner,
             tokenId: U256::from_be_bytes(labelhash.0),
         }
         .encode_log_data(),
@@ -460,7 +461,7 @@ async fn seed_faithful_unwrapped_migration(
     // reclaim, ENSv1 record cleanup, registrar cleanup, and ENSv2 injection.
     // The registry calls and emitted events are fixed by the pinned contracts.
     // (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
-    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L33-L44 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L82 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174-L186 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L33-L41 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L82 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174-L186 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
     // (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L182-L208 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L250-L274 @ ens_v2@a971bd64)
     insert_log(
