@@ -304,49 +304,19 @@ ENSv1→ENSv2 migration path. The parent rule is:
 | `migration_path = locked_child` | Eligible under the same migratable-child predicate. A locked child receives its own proxy-backed `WrapperRegistry`, so that nested registry becomes the parent migration registry for its descendants. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L146-L164 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L26-L32 @ ens_v2@a971bd64) |
 | `migration_path = emancipated_child` | Ineligible. The child is unwrapped into the Graveyard and no registry is deployed for it; the caller-supplied subregistry is injected with the child instead. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178-L188 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L25-L27 @ ens_v2@a971bd64) |
 
-Unlocked ENSv1→ENSv2 migration registers the parent in ENSv2 without deploying a child
-subregistry, while the Graveyard clears the unreachable ENSv1 descendants.
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L29-L31 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L153-L166 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L96-L102 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L170-L201 @ ens_v2@a971bd64)
-The two locked paths deploy a `WrapperRegistry` for the migrated name. That
-registry routes only migratable children to the ENSv1
-resolver and blocks a new ENSv2 registration while that condition holds.
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L158-L186 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
-The fuse predicate is exact: `PARENT_CANNOT_CONTROL` must be set and
-`IS_DOT_ETH` clear.
-(upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L84-L89 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18-L19 @ ens_v1@91c966f)
+Unlocked ENSv1→ENSv2 migration registers the parent in ENSv2 without deploying a child subregistry, while the Graveyard clears the unreachable ENSv1 descendants. (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L29-L31 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L153-L166 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L96-L102 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L170-L201 @ ens_v2@a971bd64)
+The two locked paths deploy a `WrapperRegistry` for the migrated name. That registry routes only migratable children to the ENSv1 resolver and blocks a new ENSv2 registration while that condition holds. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L158-L186 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
+The fuse predicate is exact: `PARENT_CANNOT_CONTROL` must be set and `IS_DOT_ETH` clear. (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L84-L89 @ ens_v2@a971bd64) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18-L19 @ ens_v1@91c966f)
 
-Project accepts the current ENSv2 `SubregistryChanged` pointer only when its exact
-instance and address match a readable canonical `migration_registry_creation`
-association whose non-empty evidence references are contained in the activated
-boundary, and its active ordinary announcement. A replacement or empty-evidence
-association fails closed. `successor_registry_contract_instance_id`
-instead identifies the registry that received the parent; the locked controller
-registers the parent there with its new `WrapperRegistry` as subregistry.
+Project accepts the current ENSv2 `SubregistryChanged` pointer only when its exact instance and address match a readable canonical `migration_registry_creation` association whose non-empty evidence references are contained in the activated boundary, and its active ordinary announcement. A replacement or empty-evidence association fails closed. `successor_registry_contract_instance_id` instead identifies the registry that received the parent; the locked controller registers the parent there with its new `WrapperRegistry` as subregistry.
 (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L103-L109 @ ens_v2@a971bd64)
-An entry in that migration registry is historical, not merely current:
-`RegistrationReserved`, `RegistrationGranted`, and `RegistrationRenewed` each
-show that `getExpiry(labelId)` has been positive, which makes the child
-non-migratable even after the entry lapses.
+An entry in that migration registry is historical, not merely current: `RegistrationReserved`, `RegistrationGranted`, and `RegistrationRenewed` each show that `getExpiry(labelId)` has been positive, which makes the child non-migratable even after the entry lapses.
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L410-L480 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
-An activated `MigrationApplied` path outside the five values above is a data
-integrity failure rather than a silently hidden child relation.
+An activated `MigrationApplied` path outside the five values above is a data integrity failure rather than a silently hidden child relation.
 
-Parent reachability filters only the ENSv1 candidate arm. Project then unions
-the surviving ENSv1 relation with the ENSv2 candidate, applies the child's own
-selected [authority epoch](glossary.md#authority-epoch), and ranks only within
-that selected arm. A released ENSv2 child publishes no row and does not fall
-back to ENSv1. A pair whose reachable arms disagree with no authority proof is
-omitted as unsupported, not ranked and not a generation failure. Recency orders
-only the current relation within one arm by block, transaction, and log
-position, with stable `event_identity` as the final tie-break. Generated
-database IDs and cross-era recency never choose the arm.
+Parent reachability filters only the ENSv1 candidate arm. Project then unions the surviving ENSv1 relation with the ENSv2 candidate, applies the child's own selected [authority epoch](glossary.md#authority-epoch), and ranks only within that selected arm. A released ENSv2 child publishes no row and does not fall back to ENSv1. A pair whose reachable arms disagree with no authority proof is omitted as unsupported, not ranked and not a generation failure. Recency orders only the current relation within one arm by block, transaction, and log position, with stable `event_identity` as the final tie-break. Generated database IDs and cross-era recency never choose the arm.
 
 Both arms stating a relation for the same Mainnet pair is not itself the
 failure condition. Neither ENSv1→ENSv2 migration branch retracts the ENSv1

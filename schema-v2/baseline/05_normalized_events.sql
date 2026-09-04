@@ -188,23 +188,17 @@ CREATE INDEX IF NOT EXISTS project_redo_expiry_roots_range_idx
     ON project_redo_expiry_roots (chain_id, block_number);
 
 CREATE TABLE IF NOT EXISTS project_redo_child_registration_history (
-    chain_id text NOT NULL,
-    event_identity text NOT NULL,
-    block_number bigint NOT NULL,
-    event_kind text NOT NULL,
-    logical_name_id text NOT NULL,
-    registry_contract_instance_id uuid NOT NULL,
+    chain_id text NOT NULL, event_identity text NOT NULL,
+    block_number bigint NOT NULL, event_kind text NOT NULL,
+    logical_name_id text NOT NULL, registry_contract_instance_id uuid NOT NULL,
     recorded_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (chain_id, event_identity),
     CHECK (block_number >= 0),
-    CHECK (event_kind IN (
-        'RegistrationReserved', 'RegistrationGranted', 'RegistrationRenewed'
-    )),
+    CHECK (event_kind IN ('RegistrationReserved', 'RegistrationGranted', 'RegistrationRenewed')),
     CHECK (btrim(logical_name_id) <> '')
 );
 
-CREATE INDEX IF NOT EXISTS project_redo_child_registration_history_range_idx
-    ON project_redo_child_registration_history (chain_id, block_number);
+CREATE INDEX IF NOT EXISTS project_redo_child_registration_history_range_idx ON project_redo_child_registration_history (chain_id, block_number);
 
 CREATE TABLE IF NOT EXISTS migration_event_associations (
     event_identity text NOT NULL,

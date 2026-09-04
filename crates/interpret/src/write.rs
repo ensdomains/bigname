@@ -125,11 +125,11 @@ async fn prepare_redo_range(
     from_block: i64,
     to_block: i64,
 ) -> Result<()> {
+    redo::capture_project_evidence(transaction, chain_id, from_block, to_block).await?;
     migration::clear_redo_range(transaction, chain_id, from_block, to_block).await?;
     stage_referenced_stable_identities(transaction, chain_id, from_block, to_block).await?;
     orphan_bindings_started_in_range(transaction, chain_id, from_block, to_block).await?;
     reopen_bindings_closed_in_range(transaction, chain_id, from_block, to_block).await?;
-    redo::capture_project_evidence(transaction, chain_id, from_block, to_block).await?;
     sqlx::query(
         "
         DELETE FROM normalized_events

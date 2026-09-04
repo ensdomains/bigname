@@ -84,11 +84,11 @@ async fn capture_child_registration_history(
     // Preserve the first pre-delete copy so a retry cannot narrow the original redo suffix.
     sqlx::query(
         r#"
-        INSERT INTO project_redo_child_registration_history (chain_id, event_identity,
-            block_number, event_kind, logical_name_id, registry_contract_instance_id)
+        INSERT INTO project_redo_child_registration_history
+            (chain_id, event_identity, block_number, event_kind,
+             logical_name_id, registry_contract_instance_id)
         SELECT DISTINCT event.chain_id, event.event_identity, event.block_number,
-               event.event_kind, event.logical_name_id,
-               association.registry_contract_instance_id
+               event.event_kind, event.logical_name_id, association.registry_contract_instance_id
         FROM normalized_events event
         JOIN migration_discovery_associations association
           ON association.chain_id = event.chain_id
