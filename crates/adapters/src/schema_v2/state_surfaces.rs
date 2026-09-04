@@ -143,6 +143,26 @@ impl State {
             .cloned()
     }
 
+    pub(in crate::schema_v2) fn v1_resolver_link_for_resource_activation(
+        &self,
+        namespace: &str,
+        namehash: &str,
+        resource_id: Uuid,
+    ) -> Option<V1ResolverLink> {
+        let retained = self
+            .v1_resolver_linked_resources
+            .get(&v1_key(namespace, namehash))
+            .and_then(|resources| resources.get(&resource_id));
+        self.v1_resolver_link(namespace, namehash).or_else(|| {
+            retained.map(|link| V1ResolverLink {
+                resolver_address: "0x0000000000000000000000000000000000000000".to_owned(),
+                resource_id: Some(resource_id),
+                logical_name_id: link.logical_name_id.clone(),
+                source_role: link.source_role.clone(),
+            })
+        })
+    }
+
     pub(in crate::schema_v2) fn v1_resolver(
         &self,
         namespace: &str,

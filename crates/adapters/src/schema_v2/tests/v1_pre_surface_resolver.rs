@@ -238,33 +238,21 @@ fn unwrapped(block: i64) -> anyhow::Result<RawLogInput> {
     ))
 }
 
-fn unsurfaced_wrapper_prior(node: B256) -> PriorEventInput {
-    let node = format!("{node:#x}");
-    let resource_id = super::common::stable_uuid(&format!("wrapper-prior:{node}"));
-    let token_lineage_id = super::common::stable_uuid(&format!("wrapper-token:{node}"));
-    PriorEventInput {
-        retained_state_key: format!("wrapper-prior:{node}"),
-        chain_id: CHAIN.to_owned(),
-        namespace: "ens".to_owned(),
-        logical_name_id: Some(format!("ens:{node}")),
-        resource_id: Some(resource_id),
-        event_kind: "TokenControlTransferred".to_owned(),
-        source_family: "ens_v1_wrapper_l1".to_owned(),
-        manifest_version: 1,
-        source_manifest_id: Some(WRAPPER_MANIFEST_ID),
-        state_scope: Some(format!("wrapper-prior:{node}")),
-        block_timestamp: Some(OffsetDateTime::from_unix_timestamp(2).expect("test timestamp")),
-        after_state: json!({
-            "source_event":"NameWrapped",
-            "node":node,
-            "to":OWNER_2,
-            "surface_known":false,
-            "token_lineage_id":token_lineage_id,
-            "expiry":9_999,
-            "authority_kind":"wrapper",
-            "authority_key":format!("wrapper-prior:{resource_id}"),
-        }),
-    }
+fn unsurfaced_wrapper_prior() -> anyhow::Result<PriorEventInput> {
+    let output = interpret_test_batch(input(
+        fixture().0,
+        fixture().1,
+        Vec::new(),
+        vec![wrapped(2)?],
+    ))?;
+    let mut prior = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "TokenControlTransferred")
+        .map(prior_event)
+        .expect("wrapper authority event");
+    prior.after_state["surface_known"] = false.into();
+    Ok(prior)
 }
 
 fn registrar_transfer(from: &str, to: &str, block: i64) -> anyhow::Result<RawLogInput> {
@@ -734,27 +722,17 @@ fn release_boundary_tracks_linked_resource_in_live_and_restored_state() -> anyho
         .expect("registry manifest")
         .clone();
     let namehash = format!("{node:#x}");
-    let logical_name_id = format!("ens:{namehash}");
-    let boundary_resource = Uuid::from_u128(6_141);
-    let selected = PriorEventInput {
-        retained_state_key: "old-registry-selection".to_owned(),
-        chain_id: CHAIN.to_owned(),
-        namespace: "ens".to_owned(),
-        logical_name_id: None,
-        resource_id: None,
-        event_kind: "ResolverChanged".to_owned(),
-        source_family: "ens_v1_registry_l1".to_owned(),
-        manifest_version: 1,
-        source_manifest_id: Some(REGISTRY_MANIFEST_ID),
-        state_scope: Some(format!("{namehash}:resolver")),
-        block_timestamp: Some(OffsetDateTime::UNIX_EPOCH),
-        after_state: json!({
-            "source_event":"NewResolver",
-            "node":namehash,
-            "resolver":RESOLVER_A,
-            "emitter_role":"registry_old",
-        }),
-    };
+    let selected = interpret_test_batch(input(
+        fixture().0,
+        fixture().1,
+        Vec::new(),
+        vec![resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 1)?],
+    ))?
+    .normalized_events
+    .iter()
+    .find(|event| event.event_kind == "ResolverChanged")
+    .map(prior_event)
+    .expect("old-registry resolver selection");
     let mut live_state = super::super::state::State::new(vec![selected.clone()], Vec::new());
     let mut live = BatchOutput::default();
     super::super::normalized::materialize_boundary(
@@ -762,8 +740,8 @@ fn release_boundary_tracks_linked_resource_in_live_and_restored_state() -> anyho
         &test_block(2),
         vec![super::super::protocol::EventDraft {
             event_kind: "ResolverChanged".to_owned(),
-            logical_name_id: Some(logical_name_id),
-            resource_id: Some(boundary_resource),
+            logical_name_id: Some(format!("ens:{namehash}")),
+            resource_id: Some(Uuid::from_u128(6_141)),
             identity_suffix: format!("ResolverChanged:{namehash}:{RESOLVER_A}"),
             explicit_before: Some(json!({"resolver":serde_json::Value::Null})),
             after_state: json!({
@@ -864,7 +842,7 @@ fn name_registered_materialization_retains_registration_trigger_provenance() -> 
         .iter()
         .map(prior_event)
         .collect::<Vec<_>>();
-    prior.push(unsurfaced_wrapper_prior(node));
+    prior.push(unsurfaced_wrapper_prior()?);
     let (output, _) = interpret_test_batch_incremental(
         input(manifests, admissions, prior, vec![registration(3, 9_999)?]),
         None,
@@ -1282,39 +1260,48 @@ fn current_registry_handoff_retracts_old_resolver_from_historical_wrapper_resour
 }
 
 #[test]
-fn changed_old_registry_selection_retains_inactive_wrapper_until_handoff() -> anyhow::Result<()> {
+fn changed_old_registry_selection_clears_inactive_resources_on_handoff_or_reactivation()
+-> anyhow::Result<()> {
     let (_, _, node) = fixture();
-    for replacement in [RESOLVER_B, ZERO_ADDRESS] {
-        let history = vec![
+    for (replacement, reactivate) in [(RESOLVER_B, false), (ZERO_ADDRESS, true)] {
+        let mut history = vec![
             old_new_owner(OWNER, 1)?,
-            renewal(2),
+            registration(2, 9_999)?,
             resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 3)?,
             wrapped(4)?,
-            unwrapped(5)?,
-            resolver_selection(OLD_REGISTRY, node, replacement, 6)?,
-            current_new_owner(OWNER_2, 7)?,
         ];
-        let (single, live) = assert_four_way_and_restore_parity(&history, 6)?;
-        let wrapper_resource = single
+        if reactivate {
+            history.push(resolver_selection(OLD_REGISTRY, node, replacement, 5)?);
+            history.push(unwrapped(6)?);
+        } else {
+            history.push(unwrapped(5)?);
+            history.push(resolver_selection(OLD_REGISTRY, node, replacement, 6)?);
+            history.push(current_new_owner(OWNER_2, 7)?);
+        }
+        let (final_block, resource_block, resource_kind) = if reactivate {
+            (6, 2, "RegistrationGranted")
+        } else {
+            (7, 4, "TokenControlTransferred")
+        };
+        let (single, live) = assert_four_way_and_restore_parity(&history, history.len() - 1)?;
+        let inactive_resource = single
+            .iter()
+            .find_map(|event| {
+                (event.block_number == Some(resource_block) && event.event_kind == resource_kind)
+                    .then_some(event.resource_id)
+                    .flatten()
+            })
+            .expect("inactive old-registry-linked resource");
+        let clear = live
+            .normalized_events
             .iter()
             .find(|event| {
-                event.block_number == Some(4)
-                    && event.source_family == "ens_v1_wrapper_l1"
-                    && event.event_kind == "TokenControlTransferred"
-            })
-            .and_then(|event| event.resource_id)
-            .expect("historical wrapper resource");
-        assert!(
-            live.normalized_events.iter().any(|event| {
-                event.block_number == Some(7)
+                event.block_number == Some(final_block)
                     && event.event_kind == "ResolverChanged"
-                    && event.resource_id == Some(wrapper_resource)
-                    && event.after_state["resolver"] == ZERO_ADDRESS
-                    && event.after_state["previous_resolver"] == RESOLVER_A
-                    && event.after_state["registry_fallback_handoff"] == true
-            }),
-            "old-registry replacement {replacement} lost the inactive wrapper's resolver A"
-        );
+                    && event.resource_id == Some(inactive_resource)
+            })
+            .expect("inactive resource must receive a resolver clear");
+        assert_eq!(clear.after_state["resolver"], ZERO_ADDRESS);
     }
     Ok(())
 }
