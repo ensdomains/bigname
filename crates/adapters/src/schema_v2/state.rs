@@ -112,6 +112,7 @@ pub(super) struct State {
     v1_registry_read_anchors: OrdMap<String, V1RegistryReadAnchor>,
     v1_resolvers: OrdMap<String, String>,
     v1_resolver_links: OrdMap<String, V1ResolverLink>,
+    v1_resolver_linked_resources: OrdMap<String, OrdMap<Uuid, V1ResolverLink>>,
     known_source_manifest_ids: Option<OrdSet<i64>>,
     restore_error: Option<String>,
     v1_migrated_nodes: OrdSet<String>,
@@ -348,9 +349,8 @@ impl State {
         previous
     }
 
-    /// Forgets the registry owner of record and any remembered registry-direct authority for
-    /// a node whose logged owner word was unmasked: the word names no authenticatable owner,
-    /// and the on-chain write ended the previous registry-direct authority with it.
+    /// Forgets registry owner state after an unmasked word names no authenticatable owner and
+    /// ends the previous registry-direct authority.
     pub(super) fn forget_v1_registry_owner(&mut self, namespace: &str, namehash: &str) {
         let key = v1_key(namespace, namehash);
         self.v1_registry_owners.remove(&key);

@@ -472,7 +472,8 @@ record. The ownership observation persists the
 [registry fallback handoff](glossary.md#registry-fallback-handoff) across replay;
 if the old pointer was already linked, later linked zero-resolver events
 retract it from every registry, registrar, or wrapper resource to which it was
-linked. An old-registry `Transfer` cannot clear a resolver
+linked, including a resource from an authority epoch that ended before the
+handoff. An old-registry `Transfer` cannot clear a resolver
 selected from the current registry.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)

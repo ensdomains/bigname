@@ -31,20 +31,66 @@ impl State {
         let key = v1_key(namespace, namehash);
         let previous = self.v1_resolver_links.remove(&key);
         self.v1_resolvers.remove(&key);
+        let selection_changed = match (&previous, resolver.as_deref(), source_role.as_deref()) {
+            (Some(previous), Some(resolver), source_role) => {
+                !previous.resolver_address.eq_ignore_ascii_case(resolver)
+                    || previous.source_role.as_deref() != source_role
+            }
+            (None, Some(_), _) => false,
+            (_, None, _) => true,
+        };
+        if selection_changed {
+            self.v1_resolver_linked_resources.remove(&key);
+        }
         if let Some(resolver_address) = resolver {
             self.v1_resolvers
                 .insert(key.clone(), resolver_address.clone());
-            self.v1_resolver_links.insert(
-                key,
-                V1ResolverLink {
-                    resolver_address,
-                    resource_id,
-                    logical_name_id,
-                    source_role,
-                },
-            );
+            let link = V1ResolverLink {
+                resolver_address,
+                resource_id,
+                logical_name_id,
+                source_role,
+            };
+            self.v1_resolver_links.insert(key.clone(), link.clone());
+            if let Some(resource_id) = resource_id {
+                self.v1_resolver_linked_resources
+                    .entry(key)
+                    .or_default()
+                    .insert(resource_id, link);
+            }
         }
         previous
+    }
+
+    pub(in crate::schema_v2) fn remember_v1_resolver_linked_resource(
+        &mut self,
+        namespace: &str,
+        namehash: &str,
+        resolver: &str,
+        resource_id: Uuid,
+        logical_name_id: Option<String>,
+    ) {
+        let key = v1_key(namespace, namehash);
+        let Some(selected) = self.v1_resolver_links.get(&key) else {
+            return;
+        };
+        if selected.source_role.as_deref() != Some("registry_old")
+            || !selected.resolver_address.eq_ignore_ascii_case(resolver)
+        {
+            return;
+        }
+        self.v1_resolver_linked_resources
+            .entry(key)
+            .or_default()
+            .insert(
+                resource_id,
+                V1ResolverLink {
+                    resolver_address: selected.resolver_address.clone(),
+                    resource_id: Some(resource_id),
+                    logical_name_id,
+                    source_role: selected.source_role.clone(),
+                },
+            );
     }
 
     pub(in crate::schema_v2) fn v1_resolver_link(
@@ -131,6 +177,11 @@ impl State {
                     retired_links.push(link);
                 }
             };
+            if let Some(linked_resources) = self.v1_resolver_linked_resources.remove(&key) {
+                for (_, link) in linked_resources {
+                    remember(link);
+                }
+            }
             remember(retired.clone());
             for authority in [
                 self.v1_names.get(&key),

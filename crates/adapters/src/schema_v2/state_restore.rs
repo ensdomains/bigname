@@ -274,9 +274,6 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
         let already_registry_linked = state
             .v1_resolver_link(&event.namespace, namehash)
             .is_some_and(|link| link.resource_id == Some(registry_resource_id));
-        if already_registry_linked && event.resource_id != Some(registry_resource_id) {
-            return;
-        }
         let resolver = event
             .after_state
             .get("resolver")
@@ -285,17 +282,35 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
                 !resolver.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
             })
             .map(str::to_owned);
-        state.set_v1_resolver_link(
+        if !(already_registry_linked && event.resource_id != Some(registry_resource_id)) {
+            state.set_v1_resolver_link(
+                &event.namespace,
+                namehash,
+                resolver,
+                event.resource_id,
+                event.logical_name_id.clone(),
+                event
+                    .after_state
+                    .get("emitter_role")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            );
+        }
+    }
+    if event.event_kind == "ResolverChanged"
+        && let (Some(namehash), Some(resolver), Some(resource_id)) = (
+            event.after_state.get("node").and_then(Value::as_str),
+            event.after_state.get("resolver").and_then(Value::as_str),
+            event.resource_id,
+        )
+        && !resolver.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
+    {
+        state.remember_v1_resolver_linked_resource(
             &event.namespace,
             namehash,
             resolver,
-            event.resource_id,
+            resource_id,
             event.logical_name_id.clone(),
-            event
-                .after_state
-                .get("emitter_role")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
         );
     }
     if event.source_family == "ens_v1_wrapper_l1"

@@ -3,9 +3,45 @@ use anyhow::Context;
 use super::{
     catalog::Catalog,
     model::{BatchOutput, RawLogInput},
-    protocol::SourcedEventBatch,
+    protocol::{Interpreted, SourcedEventBatch},
     state::State,
 };
+
+pub(super) fn remember_v1_resolver_linked_resources(
+    namespace: &str,
+    interpreted: &Interpreted,
+    state: &mut State,
+) {
+    for event in interpreted.events.iter().chain(
+        interpreted
+            .sourced_events
+            .iter()
+            .flat_map(|batch| batch.events.iter()),
+    ) {
+        let Some((node, resolver, resource_id)) = (event.event_kind == "ResolverChanged")
+            .then(|| {
+                Some((
+                    event.after_state.get("node")?.as_str()?,
+                    event.after_state.get("resolver")?.as_str()?,
+                    event.resource_id?,
+                ))
+            })
+            .flatten()
+        else {
+            continue;
+        };
+        if resolver.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000") {
+            continue;
+        }
+        state.remember_v1_resolver_linked_resource(
+            namespace,
+            node,
+            resolver,
+            resource_id,
+            event.logical_name_id.clone(),
+        );
+    }
+}
 
 pub(super) fn materialize(
     catalog: &Catalog,

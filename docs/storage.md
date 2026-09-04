@@ -798,9 +798,11 @@ old-registry pointer was already linked, the current registry source emits
 additive linked `ResolverChanged` rows with the zero address for every retained
 registry, registrar, or wrapper resource that could carry the old pointer, and
 `after_state.registry_fallback_handoff=true`; the earlier selection and surface
-materialization rows remain immutable. A same-owner `Transfer` still leaves a
-normalized handoff row when it would otherwise produce no state delta, so
-compacted restoration cannot reopen old-registry input. Same-transaction
+materialization rows remain immutable. Retained linkage includes resources that
+inherited the pointer during an earlier authority epoch and are no longer the
+current registry, registrar, or wrapper resource. A same-owner `Transfer` still
+leaves a normalized handoff row when it would otherwise produce no state delta,
+so compacted restoration cannot reopen old-registry input. Same-transaction
 registration reconciliation leaves each resource-specific handoff row attached
 to its original resource.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)

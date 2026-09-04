@@ -5,7 +5,8 @@ use serde_json::{Value, json};
 
 use super::{
     BatchInput, BatchOutput, RawLogInput, catalog::Catalog, seam::INTERPRETER_STATE_KEY,
-    state::State, state_residency::StateCacheCapacity,
+    sourced_events::remember_v1_resolver_linked_resources as remember_links, state::State,
+    state_residency::StateCacheCapacity,
 };
 
 /// Opaque retained adapter state that can be moved into the next batch for the same chain.
@@ -483,9 +484,7 @@ fn interpret_raw(
     } else {
         None
     };
-    // Some protocol paths advance time-derived state before reaching their event-specific
-    // decoder. Interpret each log on a structurally shared candidate and commit it only after the
-    // whole protocol dispatch succeeds, so a non-fatal malformed log cannot change retained state.
+    // Interpret on a structurally shared candidate so a malformed log cannot retain partial state.
     let mut candidate_state = state.clone();
     let interpreted = match super::protocol::interpret(
         &selected,
@@ -521,6 +520,8 @@ fn interpret_raw(
             });
         }
     };
+    let namespace = &selected.source.namespace;
+    remember_links(namespace, &interpreted, &mut candidate_state);
     *state = candidate_state;
     super::normalized::materialize(&selected, raw, interpreted.events.clone(), state, output);
     super::sourced_events::materialize(

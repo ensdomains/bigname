@@ -87,22 +87,35 @@ fn fixture() -> (Vec<ManifestInput>, Vec<AddressAdmissionInput>, B256) {
         WRAPPER_MANIFEST_ID,
         "ens",
         "ens_v1_wrapper_l1",
-        &[(
-            "NameWrapped",
-            "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
-            &["name_wrapper"],
-            &[
-                "TokenControlTransferred",
-                "ExpiryChanged",
-                "PermissionScopeChanged",
-                "SurfaceUnbound",
-                "SurfaceBound",
-                "AuthorityEpochChanged",
-                "ResolverChanged",
-                "PermissionChanged",
-                "PreimageObserved",
-            ],
-        )],
+        &[
+            (
+                "NameWrapped",
+                "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+                &["name_wrapper"],
+                &[
+                    "TokenControlTransferred",
+                    "ExpiryChanged",
+                    "PermissionScopeChanged",
+                    "SurfaceUnbound",
+                    "SurfaceBound",
+                    "AuthorityEpochChanged",
+                    "ResolverChanged",
+                    "PermissionChanged",
+                    "PreimageObserved",
+                ],
+            ),
+            (
+                "NameUnwrapped",
+                "event NameUnwrapped(bytes32 indexed node, address owner)",
+                &["name_wrapper"],
+                &[
+                    "SurfaceUnbound",
+                    "SurfaceBound",
+                    "AuthorityEpochChanged",
+                    "ResolverChanged",
+                ],
+            ),
+        ],
     );
     let mut registry = admission(REGISTRY_MANIFEST_ID, "registry");
     registry.address = REGISTRY.to_owned();
@@ -202,6 +215,20 @@ fn wrapped(block: i64) -> anyhow::Result<RawLogInput> {
             owner: OWNER_2.parse()?,
             fuses: 1,
             expiry: 9_999,
+        }
+        .encode_log_data(),
+        block,
+        0,
+        WRAPPER,
+    ))
+}
+
+fn unwrapped(block: i64) -> anyhow::Result<RawLogInput> {
+    let node = super::common::namehash(&["pointer".to_owned(), "eth".to_owned()]).parse()?;
+    Ok(raw_at(
+        NameUnwrapped {
+            node,
+            owner: OWNER_2.parse()?,
         }
         .encode_log_data(),
         block,
@@ -1067,6 +1094,46 @@ fn current_registry_handoff_retracts_old_resolver_from_wrapper_resource() -> any
             && event.after_state["resolver"] == ZERO_ADDRESS
             && event.after_state["registry_fallback_handoff"] == true
     }));
+    Ok(())
+}
+
+#[test]
+fn current_registry_handoff_retracts_old_resolver_from_historical_wrapper_resource()
+-> anyhow::Result<()> {
+    let (_, _, node) = fixture();
+    let history = vec![
+        old_new_owner(OWNER, 1)?,
+        resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 2)?,
+        renewal(3),
+        wrapped(4)?,
+        unwrapped(5)?,
+        current_new_owner(OWNER_2, 6)?,
+    ];
+    let (single, live) = assert_four_way_and_restore_parity(&history, 5)?;
+    let wrapper_resource = single
+        .iter()
+        .find(|event| {
+            event.block_number == Some(4)
+                && event.source_family == "ens_v1_wrapper_l1"
+                && event.event_kind == "TokenControlTransferred"
+        })
+        .and_then(|event| event.resource_id)
+        .expect("wrapper authority resource");
+    assert!(single.iter().any(|event| {
+        event.block_number == Some(4)
+            && event.event_kind == "ResolverChanged"
+            && event.resource_id == Some(wrapper_resource)
+            && event.after_state["resolver"] == RESOLVER_A
+    }));
+    assert!(
+        live.normalized_events.iter().any(|event| {
+            event.event_kind == "ResolverChanged"
+                && event.resource_id == Some(wrapper_resource)
+                && event.after_state["resolver"] == ZERO_ADDRESS
+                && event.after_state["registry_fallback_handoff"] == true
+        }),
+        "current-registry handoff left a stale pointer on the historical wrapper resource"
+    );
     Ok(())
 }
 
