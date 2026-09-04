@@ -223,16 +223,26 @@ batch. A non-boundary group activates only its existing dependent rows and
 never schedules a cross-arm transition. A row shared by several correlation
 IDs activates only when every referenced group is complete.
 
-Production re-derivation writes the complete group's normalized rows with
+Registrar-token `unwrapped` groups that carry the unlocked controller's ENSv1
+registry cleanup currently stop at Interpret's exact-predecessor check instead
+of reaching activation or Project. This is the bounded production-path defect
+tracked by [issue #822](https://github.com/ensdomains/bigname/issues/822); the
+affected catalog rows are enumerated in
+[`migration-activation-coverage.md`](migration-activation-coverage.md). The
+other authority paths retain the activation behavior described here.
+
+For a complete group that passes predecessor resolution, production
+re-derivation writes its normalized rows with
 `consumer_visibility=activated`, activates its diagnostic associations,
 and retains the candidate-effect records as the candidate-only diagnostic
 source required by the storage contract. It does this
 without rewriting their independently admitted events, changes the name's
 [`authority_epoch`](glossary.md#authority-epoch) from `ens_v1` to `ens_v2`,
-and retains or opens the concrete ENSv2 binding. Child, registrar-token
-`unwrapped`, and `unlocked_wrapped` second-level predecessors close at the exact
-ENSv1 cleanup recorded by the boundary; `locked_wrapped` second-level
-predecessors close at the boundary position. The unlocked wrapped controller
+and retains or opens the concrete ENSv2 binding. Child and `unlocked_wrapped`
+second-level predecessors close at the exact ENSv1 cleanup recorded by the
+boundary; `locked_wrapped` second-level predecessors close at the boundary
+position. Registrar-token `unwrapped` predecessors will use that exact-cleanup
+rule after issue #822 restores their production path. The unlocked wrapped controller
 unwraps before injecting the ENSv2 registration.
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@a971bd64)
 If the deployment profile had not materialized the registrar identity before
