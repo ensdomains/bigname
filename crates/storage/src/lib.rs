@@ -57,6 +57,8 @@ pub use evm_primitives::{
     ens_namehash_label_bytes, logical_name_id_for_name, normalize_evm_address, normalize_evm_b256,
 };
 #[cfg(any(test, feature = "test-support"))]
+pub use history::explain_registration_history_filter_for_test;
+#[cfg(any(test, feature = "test-support"))]
 pub use history::history_anchor_read_test_hooks;
 pub use history::{
     EventHistoryAddressFilter, EventHistoryFilter, HistoryChainPositionSample, HistoryCursor,
@@ -66,7 +68,8 @@ pub use history::{
     load_address_history_page, load_address_history_page_for_relations, load_event_history,
     load_event_history_page, load_event_history_page_with_redo_policy, load_name_history,
     load_name_history_head, load_name_history_page, load_resource_history,
-    load_resource_history_page, revalidate_interpret_redo_fence,
+    load_resource_history_page, load_wrapped_registrar_resource_ids_by_logical_name_id,
+    revalidate_interpret_redo_fence,
 };
 pub use history::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
 pub use identity::{

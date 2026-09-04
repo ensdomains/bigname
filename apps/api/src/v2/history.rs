@@ -9,11 +9,15 @@ use bigname_storage::{
     SnapshotSelectionScope,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::types::time::{OffsetDateTime, UtcOffset};
+use sqlx::types::{
+    Uuid,
+    time::{OffsetDateTime, UtcOffset},
+};
 
 use crate::AppState;
 
 use super::cursor::{cursor_value, invalid_cursor_error};
+use super::name_record::projected_registration_resource_id;
 use super::support::{
     ExactNameSnapshotSelector, exact_name_snapshot_scope, normalize_inferred_route_name,
 };
@@ -113,7 +117,7 @@ pub(crate) async fn get_history(
     let resource_ids = if matches!(params.scope, HistoryScope::Name) {
         Vec::new()
     } else {
-        bigname_storage::load_surface_bindings_by_logical_name_id(
+        let mut resource_ids = bigname_storage::load_surface_bindings_by_logical_name_id(
             &state.pool,
             &parent.logical_name_id,
         )
@@ -131,9 +135,41 @@ pub(crate) async fn get_history(
         })?
         .into_iter()
         .map(|binding| binding.resource_id)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+        .collect::<BTreeSet<_>>();
+        resource_ids.extend(
+            bigname_storage::load_wrapped_registrar_resource_ids_by_logical_name_id(
+                &state.pool,
+                &parent.logical_name_id,
+            )
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    logical_name_id = %parent.logical_name_id,
+                    error = ?error,
+                    "failed to load history wrapped registrar resources"
+                );
+                V2Error::internal_error(format!(
+                    "failed to load history for {}/{}",
+                    namespace, normalized.normalized_name
+                ))
+            })?,
+        );
+        if let Some(resource_id) = projected_registration_resource_id(&parent.declared_summary) {
+            let resource_id = Uuid::parse_str(resource_id).map_err(|error| {
+                tracing::error!(
+                    logical_name_id = %parent.logical_name_id,
+                    resource_id,
+                    error = ?error,
+                    "projected registration resource id is invalid"
+                );
+                V2Error::internal_error(format!(
+                    "failed to load history for {}/{}",
+                    namespace, normalized.normalized_name
+                ))
+            })?;
+            resource_ids.insert(resource_id);
+        }
+        resource_ids.into_iter().collect()
     };
     let storage_scope = history_storage_scope(params.scope);
     let event_kinds = product_history_event_kinds();

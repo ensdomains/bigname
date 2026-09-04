@@ -538,6 +538,51 @@ async fn v2_name_and_name_filtered_permissions_select_the_same_live_registration
 }
 
 #[tokio::test]
+async fn later_wrapped_permissions_stay_on_the_current_wrapper_authority() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let registrar_resource_id = v2_permissions_stale_resource_id();
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+             declared_summary,
+             '{registration,resource_id}',
+             to_jsonb($1::text),
+             true
+         )
+         WHERE raw_name = 'perms.eth'",
+    )
+    .bind(registrar_resource_id)
+    .execute(&database.pool)
+    .await?;
+
+    let name = v2_name_record_payload_for_database(&database, "/v2/names/Perms.eth").await?;
+    assert_eq!(
+        name["data"]["registration_id"],
+        json!(registrar_resource_id.to_string())
+    );
+    let permissions =
+        v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth").await?;
+    let rows = permissions["data"].as_array().expect("permissions data");
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|row| {
+        row["registration_id"] == json!(v2_permissions_current_resource_id().to_string())
+            && row["authority_context"] == json!("current_for_name")
+    }));
+
+    let paired = v2_permissions_payload_for_database(
+        &database,
+        &format!(
+            "/v2/permissions?name=Perms.eth&registration_id={registrar_resource_id}"
+        ),
+    )
+    .await?;
+    assert_eq!(paired["data"], json!([]));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_permissions_non_name_filters_do_not_require_snapshot_metadata() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_permissions_fixture(&database).await?;
