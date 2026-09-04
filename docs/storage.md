@@ -809,11 +809,24 @@ so compacted restoration cannot reopen old-registry input. Same-transaction
 registration reconciliation leaves each resource-specific handoff row attached
 to its original resource.
 An old-registry zero selection clears active copies but retains an inactive resource
-carrying the prior pointer. Reactivation emits a zero `ResolverChanged` before handoff.
+carrying the prior pointer. Whenever that resource becomes active again through a
+registry, registrar, or wrapper authority transition, reactivation emits a zero
+`ResolverChanged` before handoff. A current-registry resolver selection replaces the
+old-registry source and discards the retained old-registry resource set, so a later
+ownership event cannot clear the current-registry pointer.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L54 @ ens_v1@91c966f)
+
+A current-registry `NewResolver` cannot precede that node's current record: `setResolver`
+requires the current record's owner or its operator, while an absent record has the zero
+owner and therefore no caller able to authorize the write. The fallback getter continues
+to serve the old registry until that current owner exists.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L16-L20 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L86-L95 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L156 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L15-L24 @ ens_v1@91c966f)
 
 ### Interpret process memory
 
@@ -828,9 +841,12 @@ database reads, but it has no interpretation meaning and is not part of the
 
 ENSv1 [registry fallback handoff](glossary.md#registry-fallback-handoff)
 tracking is populated only by pointers selected through the old registry. Its
-per-name fan-out is bounded by resources that still carry an unreplaced
-old-registry fallback pointer: a replacement or clear removes that resource,
-and the current-registry handoff drains the remaining name entry.
+per-name fan-out contains at most one entry for each distinct registry, registrar,
+or wrapper resource given an old-registry pointer since the preceding handoff.
+Repeated authority epochs and wrap/unwrap cycles can therefore grow this set without
+a fixed per-name ceiling until handoff. Replacing or clearing the pointer on an exact
+resource removes that resource; a current-registry selection discards the old-source
+set, and the current-registry handoff drains any remaining name entry.
 
 Every cached value is the `after_state` of the latest readable normalized event
 for the exact interpreter state key before the current batch. A cache miss uses
