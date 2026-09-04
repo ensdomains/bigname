@@ -9,7 +9,7 @@ use super::{
     decoders::decode_history_event,
     registration_identity::{push_product_event_kind_predicate, push_product_registration_id},
     selectors::HistorySelector,
-    source::{push_history_canonicality_filter, push_history_source_with_visibility},
+    source::{push_history_canonicality_filter, push_history_source_for_filter},
     summary::load_history_summary,
 };
 use crate::projection_helpers::{
@@ -131,7 +131,13 @@ pub(super) async fn load_history_page(
     if let Some(cursor) = cursor {
         push_history_cursor_cte(&mut builder, cursor);
     }
-    push_history_select(&mut builder, cursor.is_some(), include_candidates);
+    push_history_select(
+        &mut builder,
+        &filter,
+        canonical_only,
+        cursor.is_some(),
+        include_candidates,
+    );
     push_history_filters(&mut builder, &filter, canonical_only);
     if !include_candidates {
         push_product_history_duplicate_filter(&mut builder);
@@ -185,7 +191,7 @@ async fn load_history_internal(
     }
 
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_history_select(&mut builder, false, false);
+    push_history_select(&mut builder, &filter, canonical_only, false, false);
     push_history_filters(&mut builder, &filter, canonical_only);
     push_product_history_duplicate_filter(&mut builder);
     push_history_order(&mut builder);
@@ -203,8 +209,10 @@ async fn load_history_internal(
     rows.into_iter().map(decode_history_event).collect()
 }
 
-fn push_history_select(
-    builder: &mut QueryBuilder<'_, Postgres>,
+pub(super) fn push_history_select<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    filter: &'a EventHistoryReadFilter,
+    canonical_only: bool,
     include_cursor_row: bool,
     include_candidates: bool,
 ) {
@@ -298,7 +306,13 @@ fn push_history_select(
             ) AS coverage
         "#,
     );
-    push_history_source_with_visibility(builder, include_cursor_row, include_candidates);
+    push_history_source_for_filter(
+        builder,
+        filter,
+        canonical_only,
+        include_cursor_row,
+        include_candidates,
+    );
 }
 
 pub(super) fn push_history_filters<'a>(
@@ -350,7 +364,7 @@ pub(super) fn push_product_history_duplicate_filter(builder: &mut QueryBuilder<'
     builder.push(" AND strpos(ne.event_identity, ':ResolverChanged:registry-read:') = 0");
 }
 
-fn push_history_order(builder: &mut QueryBuilder<'_, Postgres>) {
+pub(super) fn push_history_order(builder: &mut QueryBuilder<'_, Postgres>) {
     builder.push(" ORDER BY ");
     push_history_order_terms(builder);
 }
@@ -381,11 +395,17 @@ async fn ensure_history_cursor_exists(
             SELECT 1
         "#,
     );
-    push_history_source_with_visibility(&mut builder, false, include_candidates);
     let mut cursor_filter = filter.clone();
     if !cursor_filter.bind_cursor_anchor_to_event_kinds {
         cursor_filter.event_kinds.clear();
     }
+    push_history_source_for_filter(
+        &mut builder,
+        &cursor_filter,
+        canonical_only,
+        false,
+        include_candidates,
+    );
     push_history_filters(&mut builder, &cursor_filter, canonical_only);
     if !include_candidates {
         push_product_history_duplicate_filter(&mut builder);
@@ -526,6 +546,12 @@ fn push_selector_filter<'a>(
             builder.push(" OR ");
             push_uuid_filter(builder, "ne.resource_id", resource_ids);
             builder.push(")");
+        }
+        HistorySelector::ProductRegistration {
+            logical_name_ids: _,
+            registration_id: _,
+        } => {
+            builder.push("TRUE");
         }
         HistorySelector::None => {
             builder.push("FALSE");

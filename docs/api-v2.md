@@ -119,15 +119,30 @@ plaintext name exists. After plaintext enrichment binds the name to the same reg
 detail exposes the registrar-derived owner and expiry. History with `scope=registration` or
 `scope=both` exposes the linked lifecycle event rows; `scope=name` excludes the earlier rows that
 have no `logical_name_id`. Those earlier events remain registration-scoped and are not rewritten.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L110-L168 @ ens_v1@91c966f)
 
 For a registration that becomes wrapped before it is name-addressable, the later wrapper
-[surface binding](glossary.md#surface-binding) makes the registrar-derived registrant and expiry
-visible while the active registration summary reports `authority_kind = "wrapper"`. The wrapper is
-the currently selected name authority; it does not replace the registrar's
+[surface binding](glossary.md#surface-binding) makes the registrar lifecycle addressable by the
+exact name. The response keeps that registrar resource as `registration_id` while
+`registration_status = "wrapped"` reports the active wrapper. The wrapper is the currently selected
+name authority; it does not replace the registrar's
 [token lineage](glossary.md#token-lineage) or make wrapper expiry authoritative for the lease.
-Immediately after that later wrap, the served registrant is still the registrar holder from before
-the wrap. A subsequent ERC-1155 wrapper transfer changes the served registrant, token holder, and
-address-to-name relations to the new wrapper holder while retaining the registrar-derived expiry.
+Exact-name detail, batch lookup, and registration-scoped history expose the same registrar lifecycle
+handle. Registration-scoped name history follows every retained wrapper-to-registrar identity link,
+so a later re-registration does not hide an older controller-free registrar lifecycle that had been
+made name-addressable by wrapping. Wrapper holder and permission-scope history for that registration
+uses the registrar lifecycle handle as well, and name-filtered event reads follow the same identity
+link back to the registrar rows. Name-filtered permissions remain keyed to the current wrapper authority resource because
+permission rows do not merge predecessor and successor authority resources.
+Upstream mints the wrapped token to the requested wrapper owner during `wrapETH2LD` and emits both
+`TransferSingle` and `NameWrapped`. For a name wrapped in a later transaction, bigname deliberately
+keeps the pre-wrap registrar holder as the served registration registrant until a subsequent
+ERC-1155 wrapper transfer changes the served registrant, token holder, and address-to-name
+relations; registrar-derived expiry is retained throughout. This projection difference is recorded
+in `docs/upstream.md` § Known divergences.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L278 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L250-L258 @ ens_v1@91c966f)
 
 `GET /v2/permissions` and `GET /v2/addresses/{address}/names?include=role_summary`
 read current permission rows and per-resource permission summaries. Canonical

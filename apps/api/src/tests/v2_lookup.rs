@@ -604,6 +604,53 @@ async fn v2_lookup_withholds_retained_inventory_for_released_tombstone() -> Resu
 }
 
 #[tokio::test]
+async fn later_wrapped_lookup_uses_the_registrar_lifecycle_handle() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let wrapper_resource_id = Uuid::from_u128(0x5a_0501);
+    let registrar_resource_id = Uuid::from_u128(0x5a_0502);
+    seed_identity_name(
+        &database,
+        "ens:later-wrapped-lookup.eth",
+        "later-wrapped-lookup.eth",
+        "later-wrapped-lookup.eth",
+        "namehash:later-wrapped-lookup.eth",
+        wrapper_resource_id,
+        Uuid::from_u128(0x5a_0503),
+        Uuid::from_u128(0x5a_0504),
+        "0x0000000000000000000000000000000000000abc",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        38,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE name_current
+         SET declared_summary = jsonb_set(
+             declared_summary,
+             '{registration,resource_id}',
+             to_jsonb($1::text),
+             true
+         )
+         WHERE raw_name = 'later-wrapped-lookup.eth'",
+    )
+    .bind(registrar_resource_id)
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"name": "later-wrapped-lookup.eth"}]}),
+    )
+    .await?;
+    assert_eq!(
+        payload["data"][0]["record"]["registration_id"],
+        json!(registrar_resource_id.to_string()),
+        "batch lookup returned the wrapper resource instead of the registrar lifecycle handle"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_lookup_ignores_stale_audit_inventory_for_reservation() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_identity_name(

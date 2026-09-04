@@ -39,6 +39,7 @@
                        END,
                        'authority_kind', authority_context.authority_kind,
                        'authority_key', authority_context.authority_key,
+                       'resource_id', selected_registration.resource_id,
                        'registrant', registrant.registrant,
                        'expiry', CASE
                            WHEN selected_registration.is_v2_lifecycle

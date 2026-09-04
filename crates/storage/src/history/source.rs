@@ -1,18 +1,56 @@
 use sqlx::{Postgres, QueryBuilder};
 
-pub(super) fn push_history_source(
-    builder: &mut QueryBuilder<'_, Postgres>,
-    include_cursor_row: bool,
-) {
-    push_history_source_with_visibility(builder, include_cursor_row, false);
-}
+use super::{EventHistoryReadFilter, selectors::HistorySelector};
 
-pub(super) fn push_history_source_with_visibility(
-    builder: &mut QueryBuilder<'_, Postgres>,
+pub(super) fn push_history_source_for_filter<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    filter: &'a EventHistoryReadFilter,
+    canonical_only: bool,
     include_cursor_row: bool,
     include_candidates: bool,
 ) {
-    builder.push(" FROM normalized_events ne ");
+    if let Some((logical_name_ids, registration_id)) =
+        filter.selectors.iter().find_map(|selector| match selector {
+            HistorySelector::ProductRegistration {
+                logical_name_ids,
+                registration_id,
+            } => Some((logical_name_ids, registration_id)),
+            _ => None,
+        })
+    {
+        builder.push(" FROM (");
+        if !logical_name_ids.is_empty() {
+            builder.push(
+                "SELECT candidate.*\n\
+                 FROM bigname_phase.normalized_events candidate\n\
+                 WHERE ",
+            );
+            push_string_filter(builder, "candidate.logical_name_id", logical_name_ids);
+            push_bounded_candidate_canonicality(builder, canonical_only);
+            builder.push(
+                "\nUNION ALL\n\
+                 SELECT candidate.*\n\
+                 FROM bigname_phase.normalized_events candidate\n\
+                 WHERE candidate.resource_id = ",
+            );
+        } else {
+            builder.push(
+                "SELECT candidate.*\n\
+                 FROM bigname_phase.normalized_events candidate\n\
+                 WHERE candidate.resource_id = ",
+            );
+        }
+        builder.push_bind(registration_id);
+        push_bounded_candidate_canonicality(builder, canonical_only);
+        if !logical_name_ids.is_empty() {
+            builder.push(" AND (candidate.logical_name_id IS NULL OR NOT (");
+            push_string_filter(builder, "candidate.logical_name_id", logical_name_ids);
+            builder.push("))");
+        }
+        builder.push(") ne ");
+    } else {
+        builder.push(" FROM normalized_events ne ");
+    }
     if include_cursor_row {
         builder.push(" CROSS JOIN history_cursor_row cursor_row ");
     }
@@ -22,6 +60,35 @@ pub(super) fn push_history_source_with_visibility(
     } else {
         builder.push(" WHERE ne.consumer_visibility = 'activated' ");
     }
+}
+
+fn push_bounded_candidate_canonicality(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    canonical_only: bool,
+) {
+    if canonical_only {
+        builder.push(
+            " AND candidate.canonicality_state IN (\n\
+             'canonical'::bigname_phase.canonicality_state,\n\
+             'safe'::bigname_phase.canonicality_state,\n\
+             'finalized'::bigname_phase.canonicality_state\n\
+             )",
+        );
+    }
+}
+
+fn push_string_filter<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    column: &str,
+    values: &'a [String],
+) {
+    builder.push(column);
+    builder.push(" IN (");
+    let mut separated = builder.separated(", ");
+    for value in values {
+        separated.push_bind(value);
+    }
+    separated.push_unseparated(")");
 }
 
 pub(super) fn push_history_lineage_join(builder: &mut QueryBuilder<'_, Postgres>) {
