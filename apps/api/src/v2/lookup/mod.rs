@@ -503,19 +503,27 @@ fn address_lookup_result(
 
 fn result_unsupported_reason<'a>(
     status: Status,
-    mut records: impl Iterator<Item = &'a LookupRecord>,
+    records: impl Iterator<Item = &'a LookupRecord>,
 ) -> Option<String> {
     (status == Status::Unsupported)
-        .then(|| records.find_map(|record| record.unsupported_reason.clone()))
+        .then(|| {
+            records
+                .filter_map(|record| record.unsupported_reason.clone())
+                .next()
+        })
         .flatten()
 }
 
 fn result_failure_reason<'a>(
     status: Status,
-    mut records: impl Iterator<Item = &'a LookupRecord>,
+    records: impl Iterator<Item = &'a LookupRecord>,
 ) -> Option<String> {
     matches!(status, Status::Failed | Status::NotFound | Status::Mismatch)
-        .then(|| records.find_map(|record| record.failure_reason.clone()))
+        .then(|| {
+            records
+                .filter_map(|record| record.failure_reason.clone())
+                .next()
+        })
         .flatten()
 }
 
