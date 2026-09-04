@@ -74,7 +74,7 @@ pub(crate) use params::{
     AtSelector, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, QueryParams, RawQueryParams, RequestSource,
     SortOrder, parse_relation_set_param, validate_latest_collection_selectors,
 };
-pub(crate) use permission_values::{permission_powers_value, permission_scope_value};
+pub(crate) use permission_values::{effective_permission_scope_value, permission_powers_value};
 pub(crate) use permissions::get_permissions;
 pub(crate) use primary_name::get_primary_name;
 pub(crate) use resolvers::get_resolver;
@@ -101,9 +101,9 @@ pub(crate) use subnames::get_subnames;
 #[allow(unused_imports)]
 pub(crate) use vocab::matched_boundary_vocabulary_terms;
 pub(crate) use vocab::{
-    AddressNamesDedupe, AddressNamesSort, Completeness, Finality, HistoryEventType, HistoryScope,
-    OpsStatus, PRODUCT_PIPELINE_TERMS, RegistrationStatus, Relation, RelationSet, Resolver, Source,
-    Status, contains_boundary_vocabulary, shared_product_reason,
+    AddressNamesDedupe, AddressNamesSort, Completeness, Finality, GrantRelation, HistoryEventType,
+    HistoryScope, OpsStatus, PRODUCT_PIPELINE_TERMS, RegistrationStatus, Relation, RelationSet,
+    Resolver, Source, Status, contains_boundary_vocabulary, shared_product_reason,
 };
 
 use axum::Router;

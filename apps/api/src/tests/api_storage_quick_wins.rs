@@ -219,20 +219,17 @@ async fn api_preflight_reports_unreadable_account_permission_state_current() -> 
         .execute(&database.lookup_pool).await?;
     sqlx::query(&format!("REVOKE SELECT ON bigname_phase.account_permission_state_current FROM {role}"))
         .execute(&database.lookup_pool).await?;
-    let mut connection = database.lookup_pool.acquire().await?;
-    sqlx::query(&format!("SET ROLE {role}")).execute(&mut *connection).await?;
-    let unreadable: bool = sqlx::query_scalar(
-        "SELECT NOT has_table_privilege(current_user,
-            'bigname_phase.account_permission_state_current', 'SELECT')",
-    ).fetch_one(&mut *connection).await?;
-    assert!(unreadable);
-    let missing: bool = sqlx::query_scalar(
-        "SELECT to_regclass('bigname_phase.account_permission_state_current') IS NULL
-            OR NOT has_table_privilege(current_user,
-                'bigname_phase.account_permission_state_current', 'SELECT')",
-    ).fetch_one(&mut *connection).await?;
-    assert!(missing, "preflight predicate must reject an unreadable serving table");
-    drop(connection);
+    let config = database.database_config(1)?;
+    let options = PgConnectOptions::from_str(config.database_url.as_deref().context("test URL")?)?;
+    let set_role = format!("SET ROLE {role}");
+    let pool = PgPoolOptions::new().max_connections(1).after_connect(move |connection, _| {
+        let set_role = set_role.clone();
+        Box::pin(async move { sqlx::query(&set_role).execute(connection).await.map(|_| ()) })
+    }).connect_with(options).await?;
+    let missing = bigname_storage::load_missing_api_lookup_ddl(&pool).await?;
+    assert!(missing.iter().any(|object| object.identity
+        == "bigname_phase.account_permission_state_current"));
+    pool.close().await;
     sqlx::query(&format!("DROP OWNED BY {role}"))
         .execute(&database.lookup_pool).await?;
     sqlx::query(&format!("DROP ROLE {role}"))

@@ -1,4 +1,4 @@
-use bigname_storage::PermissionScope;
+use bigname_storage::{EffectivePermissionScope, PermissionScope};
 use serde_json::{Value, json};
 
 use super::{V2Error, V2Result, slug_to_numeric};
@@ -32,6 +32,25 @@ pub(crate) fn permission_scope_value(scope: &PermissionScope) -> V2Result<Value>
         "kind": kind,
         "detail": detail,
     }))
+}
+
+pub(crate) fn effective_permission_scope_value(
+    scope: &EffectivePermissionScope,
+) -> V2Result<Value> {
+    match scope {
+        EffectivePermissionScope::Direct(scope) => permission_scope_value(scope),
+        EffectivePermissionScope::Account {
+            chain_id,
+            authority_kind,
+            authority_contract,
+            owner,
+        } => Ok(json!({"kind":"account","detail":{
+            "chain_id": permission_scope_chain_id(chain_id)?,
+            "authority_kind": authority_kind,
+            "authority_contract": authority_contract.to_ascii_lowercase(),
+            "owner": owner.to_ascii_lowercase(),
+        }})),
+    }
 }
 
 pub(crate) fn permission_powers_value(powers: &Value) -> V2Result<Value> {
@@ -78,8 +97,6 @@ fn permission_scope_chain_id(storage_chain_id: &str) -> V2Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bigname_storage::EffectivePermissionScope;
-
     #[test]
     fn permission_powers_value_preserves_registry_control() {
         assert_eq!(

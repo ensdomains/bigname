@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use axum::{Json, extract::State};
-use bigname_storage::{PermissionsCurrentAccountResourceCursor, PermissionsCurrentRow};
+use bigname_storage::{
+    EffectivePermissionRow, PermissionGrantRelation, PermissionsCurrentAccountResourceCursor,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::types::Uuid;
@@ -11,12 +13,13 @@ use crate::AppState;
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::name_record::wrapper_metadata;
 use super::permission_support::{
-    PermissionSupport, apply_permissions_collection_support_meta, permission_support_for_resources,
+    PermissionRequestScope, PermissionSupport, apply_permissions_collection_support_meta,
+    permission_support_for_resources,
 };
 use super::{
-    AddressNameGrant, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, QueryParams,
-    StrictQueryParams, V2Error, V2Result, decode, encode, permission_powers_value,
-    permission_scope_value, validate_latest_collection_selectors,
+    AddressNameGrant, CursorPayload, Envelope, GrantRelation, Meta, Page, QueryParamAllowlist,
+    QueryParams, StrictQueryParams, V2Error, V2Result, decode, effective_permission_scope_value,
+    encode, permission_powers_value, validate_latest_collection_selectors,
     vocab::{AuthorityContext, WrapperFuses, WrapperState},
 };
 
@@ -109,7 +112,7 @@ pub(crate) async fn get_permissions(
         return Ok(empty_permissions_response(&params, selection));
     }
 
-    let storage_page = bigname_storage::load_permissions_current_account_resource_page(
+    let storage_page = bigname_storage::load_effective_permissions_account_resource_page(
         &state.pool,
         resolved.subject.as_deref(),
         resolved.resource_id,
@@ -168,7 +171,11 @@ pub(crate) async fn get_permissions(
     apply_permissions_collection_support_meta(
         &mut meta,
         permission_support,
-        resolved.resource_id.is_some(),
+        if resolved.resource_id.is_some() {
+            PermissionRequestScope::ResourceBound
+        } else {
+            PermissionRequestScope::AccountWide
+        },
     );
 
     Ok(Json(Envelope {
@@ -192,9 +199,19 @@ fn empty_permissions_response(
 
     match selection {
         EmptyPermissionsSelection::MissingOrUnsupportedNameAnchor => {
-            apply_permissions_collection_support_meta(&mut meta, PermissionSupport::Unknown, false);
+            apply_permissions_collection_support_meta(
+                &mut meta,
+                PermissionSupport::Unknown,
+                PermissionRequestScope::AccountWide,
+            );
         }
-        EmptyPermissionsSelection::SupersededNameRegistrationPair => {}
+        EmptyPermissionsSelection::SupersededNameRegistrationPair => {
+            apply_permissions_collection_support_meta(
+                &mut meta,
+                PermissionSupport::Full,
+                PermissionRequestScope::ResourceBound,
+            );
+        }
     }
 
     Json(Envelope {
@@ -211,7 +228,7 @@ fn empty_permissions_response(
 }
 
 pub(crate) fn build_permission_row(
-    row: &PermissionsCurrentRow,
+    row: &EffectivePermissionRow,
     name: Option<&str>,
     declared_summary: Option<&Value>,
     include_lineage: bool,
@@ -225,7 +242,10 @@ pub(crate) fn build_permission_row(
     Ok(PermissionRow {
         address: row.subject.clone(),
         grant: AddressNameGrant {
-            grant_scope: permission_scope_value(&row.scope)?,
+            grant_relation: row.grant_relation.map(|relation| match relation {
+                PermissionGrantRelation::Operator => GrantRelation::Operator,
+            }),
+            grant_scope: effective_permission_scope_value(&row.scope)?,
             powers: permission_powers_value(&row.effective_powers)?,
         },
         registration_id: row.resource_id.to_string(),
@@ -296,7 +316,7 @@ fn permissions_include_lineage(include: &[String]) -> V2Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use bigname_storage::{PermissionScope, PermissionsCurrentAccountResourceCursor};
+    use bigname_storage::{EffectivePermissionScope, PermissionsCurrentAccountResourceCursor};
     use serde_json::json;
     use sqlx::types::time::OffsetDateTime;
 
@@ -324,14 +344,15 @@ mod tests {
     fn sample_permissions_row(
         inheritance_path: Value,
         transfer_behavior: Value,
-    ) -> PermissionsCurrentRow {
-        PermissionsCurrentRow {
+    ) -> EffectivePermissionRow {
+        EffectivePermissionRow {
             resource_id: Uuid::parse_str(REGISTRATION_ID).expect("uuid literal must parse"),
             subject: ADDRESS.to_owned(),
-            scope: PermissionScope::Resolver {
+            scope: EffectivePermissionScope::Direct(bigname_storage::PermissionScope::Resolver {
                 chain_id: "ethereum-mainnet".to_owned(),
                 resolver_address: "0x0000000000000000000000000000000000000ABC".to_owned(),
-            },
+            }),
+            grant_relation: None,
             effective_powers: json!(["set_resolver"]),
             grant_source: json!({
                 "kind": "raw_log",
@@ -462,6 +483,23 @@ mod tests {
                 transfer_behavior: None,
             })
         );
+    }
+
+    #[test]
+    fn registry_operator_grants_emit_operator_relation() {
+        let mut row = sample_permissions_row(json!([]), json!({"mode": "owner_scoped"}));
+        row.grant_relation = Some(PermissionGrantRelation::Operator);
+        row.scope = EffectivePermissionScope::Account {
+            chain_id: "ethereum-mainnet".to_owned(),
+            authority_kind: "registry".to_owned(),
+            authority_contract: "0x0000000000000000000000000000000000000c33".to_owned(),
+            owner: "0x0000000000000000000000000000000000000a11".to_owned(),
+        };
+        let mapped = build_permission_row(&row, None, None, false, AuthorityContext::ResourceAudit)
+            .expect("registry operator grant must map");
+        let value = serde_json::to_value(mapped).expect("permission row must serialize");
+
+        assert_eq!(value["grant_relation"], json!("operator"));
     }
 
     #[test]

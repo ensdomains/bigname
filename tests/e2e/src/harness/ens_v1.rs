@@ -654,22 +654,6 @@ pub async fn set_registry_approval_for_all(
     .await
 }
 
-pub async fn set_legacy_registry_approval_for_all(
-    rpc: &RpcClient,
-    d: &EnsV1Deployment,
-    owner: Address,
-    operator: Address,
-    approved: bool,
-) -> Result<()> {
-    send_checked(
-        rpc,
-        owner,
-        d.legacy_registry.address,
-        &setApprovalForAllCall { operator, approved }.abi_encode(),
-    )
-    .await
-}
-
 /// Create `<label>` below `parent_node` in the legacy registry. `from` must
 /// control `parent_node` in that legacy registry state.
 pub async fn create_legacy_subname(

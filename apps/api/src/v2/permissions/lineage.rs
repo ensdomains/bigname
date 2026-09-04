@@ -1,11 +1,11 @@
-use bigname_storage::PermissionsCurrentRow;
+use bigname_storage::EffectivePermissionRow;
 use serde_json::{Map, Value, json};
 
 use super::super::{permission_powers_value, slug_to_numeric};
 use super::PermissionLineage;
 use crate::v2::{V2Error, V2Result};
 
-pub(super) fn permission_lineage(row: &PermissionsCurrentRow) -> V2Result<PermissionLineage> {
+pub(super) fn permission_lineage(row: &EffectivePermissionRow) -> V2Result<PermissionLineage> {
     Ok(PermissionLineage {
         grant: map_permission_lineage_value(&row.grant_source)?,
         revocation: row
@@ -84,7 +84,7 @@ fn product_lineage_kind(value: &Value) -> V2Result<String> {
         return Err(lineage_mapping_error());
     };
     let mapped = match kind {
-        "raw_log" | "normalized_event" => "event",
+        "event" | "raw_log" | "normalized_event" => "event",
         "permission_row" => "permission",
         "resource_authority" => "registration_authority",
         "resource_rebound" => "registration_rebound",

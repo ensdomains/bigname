@@ -152,3 +152,15 @@ fn address_names_cursor_token_decodes_to_bound_payload() {
         payload
     );
 }
+
+#[test]
+fn address_name_registry_operator_grant_serializes_relation() {
+    let grant = AddressNameGrant {
+        grant_relation: Some(GrantRelation::Operator),
+        grant_scope: serde_json::json!({"kind": "account", "detail": {}}),
+        powers: serde_json::json!(["registry_control"]),
+    };
+    let value = serde_json::to_value(grant).expect("grant must serialize");
+
+    assert_eq!(value["grant_relation"], serde_json::json!("operator"));
+}

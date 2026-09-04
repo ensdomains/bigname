@@ -1,13 +1,65 @@
-use alloy_primitives::{Address, B256};
+use alloy_primitives::Address;
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
-use uuid::Uuid;
+use sqlx::types::Uuid;
 
 use super::support;
-use crate::harness::{anvil::Anvil, ens_v1, repo_root};
+use crate::harness::{anvil::Anvil, artifacts::Deployed, ens_v1, repo_root};
 
 const NAME: &str = "operatorlife.eth";
 const YEAR: u64 = 365 * 24 * 60 * 60;
+
+struct RealApi {
+    _child: tokio::process::Child,
+    base: String,
+}
+
+impl RealApi {
+    async fn start(run: &support::PipelineRun, anvil: &Anvil) -> Result<Self> {
+        let root = repo_root();
+        ensure!(
+            std::process::Command::new("cargo")
+                .current_dir(&root)
+                .args(["build", "--locked", "-p", "bigname-api"])
+                .status()?
+                .success()
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        drop(listener);
+        let mut command = tokio::process::Command::new(root.join("target/debug/bigname-api"));
+        command
+            .args([
+                "serve",
+                "--bind-addr",
+                &address.to_string(),
+                "--metrics-bind-addr",
+                "127.0.0.1:0",
+                "--database-url",
+                &run.db.url,
+                "--chain-rpc-url",
+                &format!("ethereum-mainnet={}", anvil.url),
+            ])
+            .kill_on_drop(true);
+        let child = command.spawn()?;
+        let base = format!("http://{address}");
+        for _ in 0..200 {
+            if reqwest::get(format!("{base}/healthz")).await.is_ok() {
+                return Ok(Self {
+                    _child: child,
+                    base,
+                });
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        anyhow::bail!("production API did not bind at {address}")
+    }
+
+    async fn get_json(&self, path: &str) -> Result<(u16, Value)> {
+        let response = reqwest::get(format!("{}{path}", self.base)).await?;
+        Ok((response.status().as_u16(), response.json().await?))
+    }
+}
 
 fn operator_rows(body: &Value) -> Vec<&Value> {
     body["data"]
@@ -28,10 +80,12 @@ async fn resource_id(run: &support::PipelineRun) -> Result<Uuid> {
 
 async fn assert_operator(
     run: &support::PipelineRun,
+    anvil: &Anvil,
     owner: Address,
     operator: Address,
     expected: bool,
 ) -> Result<()> {
+    let api = RealApi::start(run, anvil).await?;
     let operator_hex = format!("{operator:#x}");
     let resource = resource_id(run).await?;
     let storage = bigname_storage::load_effective_permissions_account_resource_page(
@@ -56,7 +110,7 @@ async fn assert_operator(
         format!("/v2/permissions?name={NAME}"),
         format!("/v2/permissions?registration_id={resource}"),
     ] {
-        let (status, body) = run.api.get_json(&uri).await?;
+        let (status, body) = api.get_json(&uri).await?;
         ensure!(status == 200, "{uri} failed: {body}");
         assert_eq!(!operator_rows(&body).is_empty(), expected, "{uri}: {body}");
         if expected {
@@ -65,8 +119,7 @@ async fn assert_operator(
             assert_eq!(row["powers"], serde_json::json!(["registry_control"]));
         }
     }
-    let (status, body) = run
-        .api
+    let (status, body) = api
         .get_json(&format!(
             "/v2/addresses/{owner:#x}/names?include=role_summary"
         ))
@@ -94,44 +147,6 @@ async fn registry_operator_approval_serving_lifecycle() -> Result<()> {
     let owner = accounts[1];
     let operator = accounts[2];
 
-    ens_v1::create_legacy_subname(
-        &rpc,
-        &deployment,
-        deployment.deployer,
-        B256::ZERO,
-        "eth",
-        deployment.deployer,
-    )
-    .await?;
-    ens_v1::create_legacy_subname(
-        &rpc,
-        &deployment,
-        deployment.deployer,
-        ens_v1::namehash("eth"),
-        "operatorlife",
-        owner,
-    )
-    .await?;
-    ens_v1::set_legacy_registry_approval_for_all(&rpc, &deployment, owner, operator, true).await?;
-    let grant_run = support::ingest_and_serve(
-        &anvil,
-        &deployment,
-        Some("SELECT EXISTS (SELECT 1 FROM account_permission_state_current WHERE approved)"),
-    )
-    .await?;
-    assert_operator(&grant_run, owner, operator, true).await?;
-    grant_run.db.cleanup().await?;
-
-    ens_v1::set_legacy_registry_approval_for_all(&rpc, &deployment, owner, operator, false).await?;
-    let revoke_run = support::ingest_and_serve(
-        &anvil,
-        &deployment,
-        Some("SELECT EXISTS (SELECT 1 FROM account_permission_state_current WHERE NOT approved)"),
-    )
-    .await?;
-    assert_operator(&revoke_run, owner, operator, false).await?;
-    revoke_run.db.cleanup().await?;
-
     ens_v1::register_eth_name(
         &rpc,
         &deployment,
@@ -141,17 +156,51 @@ async fn registry_operator_approval_serving_lifecycle() -> Result<()> {
         deployment.public_resolver.address,
     )
     .await?;
-    let move_run = support::ingest_and_serve(&anvil, &deployment, None).await?;
-    assert_operator(&move_run, owner, operator, false).await?;
-    move_run.db.cleanup().await?;
-
     ens_v1::set_registry_approval_for_all(&rpc, &deployment, owner, operator, true).await?;
-    let new_run = support::ingest_and_serve(
+    let grant_run = support::ingest_and_serve(
         &anvil,
         &deployment,
-        Some("SELECT count(*) >= 2 FROM account_permission_state_current"),
+        Some("SELECT EXISTS (SELECT 1 FROM account_permission_state_current WHERE approved)"),
     )
     .await?;
-    assert_operator(&new_run, owner, operator, true).await?;
+    assert_operator(&grant_run, &anvil, owner, operator, true).await?;
+    grant_run.db.cleanup().await?;
+
+    ens_v1::set_registry_approval_for_all(&rpc, &deployment, owner, operator, false).await?;
+    let revoke_run = support::ingest_and_serve(
+        &anvil,
+        &deployment,
+        Some("SELECT EXISTS (SELECT 1 FROM account_permission_state_current WHERE NOT approved)"),
+    )
+    .await?;
+    assert_operator(&revoke_run, &anvil, owner, operator, false).await?;
+    revoke_run.db.cleanup().await?;
+
+    let mut next = ens_v1::deploy_ens_v1(&rpc, &repo_root()).await?;
+    next.legacy_registry = Deployed {
+        address: deployment.registry.address,
+        block_number: deployment.registry.block_number,
+    };
+    ens_v1::register_eth_name(
+        &rpc,
+        &next,
+        "operatorlife",
+        owner,
+        YEAR,
+        next.public_resolver.address,
+    )
+    .await?;
+    let move_run = support::ingest_and_serve(&anvil, &next, None).await?;
+    assert_operator(&move_run, &anvil, owner, operator, false).await?;
+    move_run.db.cleanup().await?;
+
+    ens_v1::set_registry_approval_for_all(&rpc, &next, owner, operator, true).await?;
+    let new_run = support::ingest_and_serve(
+        &anvil,
+        &next,
+        Some("SELECT EXISTS (SELECT 1 FROM account_permission_state_current WHERE approved)"),
+    )
+    .await?;
+    assert_operator(&new_run, &anvil, owner, operator, true).await?;
     new_run.db.cleanup().await
 }

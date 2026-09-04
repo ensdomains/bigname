@@ -51,6 +51,7 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
                 ('relation', 'bigname_phase.children_current'),
                 ('relation', 'bigname_phase.permissions_current'),
                 ('relation', 'bigname_phase.permissions_current_resource_summary'),
+                ('relation', 'bigname_phase.account_permission_state_current'),
                 ('relation', 'bigname_phase.primary_names_current'),
                 ('relation', 'bigname_phase.resolver_current'),
                 ('relation', 'bigname_phase.name_surfaces'),
@@ -76,6 +77,7 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
         FROM required
         WHERE CASE kind
             WHEN 'relation' THEN to_regclass(identity) IS NULL
+                OR NOT has_table_privilege(current_user, identity, 'SELECT')
             WHEN 'function' THEN to_regprocedure(identity) IS NULL
             WHEN 'type' THEN to_regtype(identity) IS NULL
         END
