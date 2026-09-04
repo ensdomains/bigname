@@ -140,7 +140,8 @@ the completed group's visibility. The `migration_candidate_*_effects` tables
 remain candidate-only diagnostic source records and are never Project input.
 Refused and incomplete groups remain
 candidate and are excluded from Project staging and product event/history reads.
-An independently admitted existing-family event remains byte-for-byte activated
+An [independently admitted event](glossary.md#independently-admitted-event)
+remains byte-for-byte activated
 and only its diagnostic correlation association changes visibility. After its
 [physical Interpret batch](glossary.md#batch-grid) commits in an ordinary walk,
 the event is product-visible. An active or failed redo stays fenced from serving

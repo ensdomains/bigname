@@ -864,8 +864,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   by this product route. Slice 1 excludes every correlation-dependent normalized
   row with `consumer_visibility=candidate`, including a familiar event kind whose
   existence depends on correlation under an existing source family; diagnostics
-  may expose those rows. An existing-family event admitted independently of the
-  correlation remains byte-for-byte activated and product-visible. Its separate
+  may expose those rows. An [independently admitted
+  event](glossary.md#independently-admitted-event) remains byte-for-byte
+  activated and product-visible. Its separate
   candidate association is diagnostics-only and cannot suppress, duplicate, or
   reclassify that ordinary row. Only slice 2 consumer activation enables the
   per-source-log mapping specified for [`GET /v2/events`](#get-v2events) when an

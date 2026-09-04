@@ -708,6 +708,10 @@ group is complete. Completeness never reconstructs evidence, widens a selector,
 or turns ordinary factory, reservation, or registration evidence into a
 migration boundary.
 
+## Independently admitted event
+
+an ordinary normalized event that an existing ENSv1 or ENSv2 adapter rule derives without an ENSv1→ENSv2 migration correlation; ordinary normalization gives it an empty `migration_correlation_ids` set and `consumer_visibility=activated`, and correlation may attach a separate association without rewriting the event ([`normalized.rs`](../crates/adapters/src/schema_v2/normalized.rs#L76-L95), [`migration/support.rs`](../crates/adapters/src/schema_v2/migration/support.rs#L243-L278)).
+
 Independent admission has precedence: an ordinary normalized event that the
 existing manifest and discovery rules produce without this correlation remains
 byte-for-byte `activated` and product-visible. Slice 1 records its candidate

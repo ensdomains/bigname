@@ -435,7 +435,8 @@ The empty capability table is not a serving barrier: current Project staging
 and product event/history readers do not consult it. Slice 1 therefore marks
 every correlation-dependent effect in the per-name
 [migration correlation group](glossary.md#migration-correlation-group) with
-`consumer_visibility=candidate`; an independently admitted effect retains its
+`consumer_visibility=candidate`; an [independently admitted
+event](glossary.md#independently-admitted-event) retains its
 ordinary activated output and receives a separate candidate association. Every
 consumer staging or direct-history read excludes correlation-dependent candidate
 normalized events and candidate identity/discovery effects until the later

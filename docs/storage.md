@@ -114,8 +114,9 @@ Ordinary binding interval operations use
 predecessor and successor lookups, explicit closes, and implicit predecessor
 caps cannot affect another chain or arm. The existing ordering and interval
 rules are otherwise unchanged within that domain. This permits an ordinary
-ENSv1 row and an independently admitted ordinary ENSv2 row for the exact same
-logical name to remain simultaneously open until an explicit activated
+ENSv1 row and an ordinary ENSv2 row derived from an [independently admitted
+event](glossary.md#independently-admitted-event) for the exact same logical name
+to remain simultaneously open until an explicit activated
 [migration boundary](glossary.md#migration-boundary) selects the successor.
 
 When an ENSv2 registration release, a move away from a registry path, or a
