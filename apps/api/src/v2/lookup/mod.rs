@@ -418,6 +418,7 @@ async fn load_exact_relation_reverse_page(
         if cursor.is_none() {
             break;
         }
+        super::support::prepare_reverse_identity_additional_scan(&state.pool).await?;
     }
 
     let binding = LookupReverseCursorBinding {

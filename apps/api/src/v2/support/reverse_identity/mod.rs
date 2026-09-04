@@ -11,6 +11,102 @@ use sqlx::{PgPool, Row};
 mod page;
 
 #[cfg(test)]
+pub(crate) mod relation_page_test_hooks {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    use anyhow::Result;
+    use bigname_test_support::{
+        ScopedTestHookGuard, ScopedTestHookRegistry, current_test_database,
+    };
+    use sqlx::PgPool;
+    use tokio::sync::Barrier;
+
+    #[derive(Clone)]
+    pub(crate) struct RelationPageHook {
+        calls: Arc<AtomicUsize>,
+        paused: Arc<AtomicBool>,
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    pub(crate) struct RelationPageControl {
+        calls: Arc<AtomicUsize>,
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    impl RelationPageControl {
+        pub(crate) fn page_loader_call_count(&self) -> usize {
+            self.calls.load(Ordering::Relaxed)
+        }
+
+        pub(crate) async fn wait_until_reached(&self) {
+            self.reached.wait().await;
+        }
+
+        pub(crate) async fn resume(&self) {
+            self.resume.wait().await;
+        }
+    }
+
+    static HOOKS: ScopedTestHookRegistry<String, RelationPageHook> = ScopedTestHookRegistry::new();
+
+    pub(crate) async fn install(
+        pool: &PgPool,
+    ) -> Result<(
+        ScopedTestHookGuard<String, RelationPageHook>,
+        RelationPageControl,
+    )> {
+        let database = current_test_database(pool).await?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let reached = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let guard = HOOKS.install(
+            database,
+            RelationPageHook {
+                calls: Arc::clone(&calls),
+                paused: Arc::new(AtomicBool::new(false)),
+                reached: Arc::clone(&reached),
+                resume: Arc::clone(&resume),
+            },
+        );
+        Ok((
+            guard,
+            RelationPageControl {
+                calls,
+                reached,
+                resume,
+            },
+        ))
+    }
+
+    pub(super) async fn record_page_load(pool: &PgPool) -> Result<()> {
+        let database = current_test_database(pool).await?;
+        if let Some(hook) = HOOKS.get_cloned(&database) {
+            hook.calls.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn pause_before_additional_scan(pool: &PgPool) -> Result<()> {
+        let database = current_test_database(pool).await?;
+        if let Some(hook) = HOOKS.get_cloned(&database)
+            && hook
+                .paused
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            hook.reached.wait().await;
+            hook.resume.wait().await;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 pub(crate) mod test_hooks {
     use std::sync::{
         Arc,
@@ -111,6 +207,12 @@ pub(crate) mod primary_coherence_test_hooks {
         Ok((guard, PrimaryCoherenceControl { reached, resume }))
     }
 
+    pub(crate) async fn uninstall(pool: &PgPool) -> Result<()> {
+        let database = current_test_database(pool).await?;
+        HOOKS.take(&database);
+        Ok(())
+    }
+
     pub(super) async fn candidate_read_complete(pool: &PgPool) -> Result<()> {
         let database = current_test_database(pool).await?;
         if let Some(hook) = HOOKS.get_cloned(&database) {
@@ -156,6 +258,8 @@ pub(crate) async fn load_reverse_identity_records_page_live(
     inputs: &[ReverseIdentityStorageInput],
     public_namespaces: &[String],
 ) -> Result<Vec<ReverseIdentityGroup>> {
+    #[cfg(test)]
+    relation_page_test_hooks::record_page_load(pool).await?;
     load_reverse_identity_records_live_with_count_mode(
         pool,
         inputs,
@@ -163,6 +267,16 @@ pub(crate) async fn load_reverse_identity_records_page_live(
         ReverseCountMode::Omit,
     )
     .await
+}
+
+pub(crate) async fn prepare_reverse_identity_additional_scan(
+    _pool: &PgPool,
+) -> crate::v2::V2Result<()> {
+    #[cfg(test)]
+    relation_page_test_hooks::pause_before_additional_scan(_pool)
+        .await
+        .map_err(|_| crate::v2::V2Error::internal_error("failed to run reverse-page test hook"))?;
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
