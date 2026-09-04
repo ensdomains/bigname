@@ -30,8 +30,8 @@ pub(crate) use account_queries::{GeneratedAccountFilter, explain_phase_graphql_a
 pub(crate) use generated_filter_ops::{GeneratedDomainFilter, push_generated_domain_filters};
 #[cfg(test)]
 pub(crate) use name_queries::{
-    GeneratedDomainSort, count_phase_graphql_name_list, explain_phase_graphql_name_list_page,
-    load_phase_graphql_name_list_page_offset,
+    GeneratedDomainSort, count_phase_graphql_name_list, explain_phase_graphql_name_count,
+    explain_phase_graphql_name_list_page, load_phase_graphql_name_list_page_offset,
 };
 #[cfg(test)]
 pub(crate) use resolver_queries::{

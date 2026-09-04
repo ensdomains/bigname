@@ -160,6 +160,22 @@ pub async fn explain_phase_graphql_name_list_page(
     Ok(row.try_get(0)?)
 }
 
+#[cfg(test)]
+pub async fn explain_phase_graphql_name_count(
+    pool: &PgPool,
+    snapshot_chain_ids: &[String],
+) -> Result<Value> {
+    let filter = NameCurrentListFilter {
+        namespace: Some("ens".into()),
+        ..Default::default()
+    };
+    let mut builder = QueryBuilder::<Postgres>::new("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ");
+    push_filtered_names(&mut builder, &filter, None, None, Some(snapshot_chain_ids));
+    builder.push(" SELECT COUNT(*) FROM filtered_names");
+    let row = builder.build().fetch_one(pool).await?;
+    Ok(row.try_get(0)?)
+}
+
 pub async fn count_phase_graphql_name_list(
     pool: &PgPool,
     filter: &NameCurrentListFilter,
