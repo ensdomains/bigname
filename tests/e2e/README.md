@@ -77,6 +77,105 @@ suite cannot satisfy CI.
    dropped. The counted gate retains links only for in-process build sharing
    and removes its run-scoped directory on exit.
 
+## Connected ENSv1→ENSv2 migration
+
+The connected Sepolia fixture starts with the existing local ENSv2 deployment:
+`LabelStore`, `RootRegistry`, the `.eth` registry, its rent-price oracle and
+registrar, mock payment tokens, and the required root-role grants. It then
+deploys the migration address set/namer, `VerifiableFactory`, `ENSV1Resolver`,
+`Graveyard`, `WrapperRegistryImpl`, and the unlocked and locked migration
+controllers. Their constructor wiring follows the pinned upstream contracts
+(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L28-L30 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L73-L75 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L70-L89 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L56-L64 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L42-L57 @ ens_v2@a971bd64).
+The archived `PublicResolverSet.json` artifact names its contract
+`PermissionedAddressSet`; that contract's constructor accepts the root account,
+and it implements `IPermissionedAddressSet` plus `IContractNamer`, while
+`IPermissionedAddressSet` extends `IEnhancedAccessControl` and `IAddressSet`
+(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PublicResolverSet.json:L531 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/utils/PermissionedAddressSet.sol:L21 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/utils/PermissionedAddressSet.sol:L34 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/utils/interfaces/IPermissionedAddressSet.sol:L21 @ ens_v2@a971bd64).
+
+Every ENSv2 contract above is deployed from the top-level `bytecode` read by
+`load_ens_v2_artifact` from
+`.refs/ens_v2/contracts/deployments/sepolia-20260629-r1/<Artifact>.json`; the
+harness appends ABI-encoded constructor arguments before sending the Anvil
+deployment transaction. It does not run a Solidity build or copy an artifact
+into this repository. `ENSV1Resolver` receives a zero gateway-provider address,
+and the locked path receives a zero replacement public-resolver address. These
+scenarios therefore make no ENSv1 CCIP-read functionality claim.
+
+The fixture generates one composite Sepolia
+[deployment profile](../../docs/glossary.md#deployment-profile) containing the
+four ENSv1 intake families except reverse, the four ordinary ENSv2 families,
+and `ens_v2_migration_l1`. It mirrors every shipped `v*.toml` into a scenario
+`TempDir`, then separately substitutes ENSv1, ENSv2, and migration targets and
+the migration family's local `NameWrapper` and `BaseRegistrar` correlation
+addresses. The ordinary Sepolia generator remains ENSv2-only and substitutes
+only roots and contracts. Checked-in `manifests/` is unchanged.
+
+Both paths first register and wrap an ENSv1 `.eth` parent, read its live
+registrar expiry, and reserve the same label in the ENSv2 `.eth` registry with
+zero owner, zero roles, zero subregistry, and zero resolver. Transfer data is
+the ordered `LibMigration.Data` tuple `label`, `owner`, `subregistry`, and
+`resolver` (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L20-L29 @ ens_v2@a971bd64).
+For the unlocked path, the child exists before wrapping; the parent retains an
+unset `CANNOT_UNWRAP` bit, transfers to the unlocked controller, and is then
+followed by an explicit `Graveyard.clear` for the child. The controller rejects
+locked tokens and otherwise clears the resolver, unwraps to Graveyard, and
+claims the reservation
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L139-L140 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L153 @ ens_v2@a971bd64).
+`Graveyard.clear` processes the supplied names, and its `OWNED` descendant
+branch assigns the child to Graveyard with a zero resolver
+(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L98-L102 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L170-L172 @ ens_v2@a971bd64).
+
+For the locked path, the parent first burns `CANNOT_UNWRAP`; two wrapped
+children remain live and ENSv1-owned, but only `bridged` burns
+`PARENT_CANNOT_CONTROL`. The ENSv1 wrapper permits that parent-controlled fuse
+only after the parent has burned `CANNOT_UNWRAP`
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L963-L971 @ ens_v1@91c966f).
+The locked controller transfer moves the parent token to Graveyard, deploys and
+initializes a `WrapperRegistry` proxy through `VerifiableFactory`, and registers
+the parent with that proxy as subregistry
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L129-L188 @ ens_v2@a971bd64).
+An unmigrated child is reachable through that registry only when it has no
+successor registration, has `PARENT_CANNOT_CONTROL` set and `IS_DOT_ETH` clear,
+and retains a nonzero ENSv1 registry owner
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L84-L89 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18-L19 @ ens_v1@91c966f).
+
+The exact scenarios are:
+
+- `registry_migration::connected_ens_v1_v2_migration_paths_emit_expected_facts`,
+  which independently proves both activated `MigrationApplied` paths and their
+  successor bindings;
+- `cross_protocol::unlocked_parent_hides_retained_ens_v1_children`, which proves
+  the retained nonzero-owner ENSv1 child is unreachable after unlocked parent
+  migration; and
+- `cross_protocol::locked_parent_publishes_only_migratable_ens_v1_children`,
+  which proves only the fuse-eligible retained ENSv1 child is reachable.
+
+The two `cross_protocol` scenarios depend on the Project behavior merged in
+#821; the `registry_migration` scenario proves the deployment and interpreted
+facts independently. All logs still pass through ingest, interpret, and project.
+Serving assertions call the route-shaped `ProjectionReader`: exact-name paths
+read `name_current`, children paths read `children_current`, and a missing exact
+projection returns `404`. This is the established projection-serving seam; it
+does not exercise network transport or API-process startup.
+
+`forge` must be on `PATH` before the 65 Foundry-dependent fault scenarios are
+described as runnable. With these three scenarios the counted inventory is 90
+tests: 87 runnable and 3 ignored, split as 43 runnable plus 2 ignored on shard 1
+and 44 runnable plus 1 ignored on shard 2. This coverage changes no production
+rollout, deployment file, Docker configuration, environment file, checked-in
+manifest, or interpreter source.
+
 The executor-only verified-resolution scenario was deleted with the legacy
 execution plane. Public lookup behavior remains covered by API crate tests; no
 runnable e2e scenario claims deleted checkpoint or completeness semantics.
