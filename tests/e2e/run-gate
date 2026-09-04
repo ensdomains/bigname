@@ -19,7 +19,6 @@ expected_ignored_tests=(
     "scenarios::provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback"
     "scenarios::provider_faults::transient_get_code_retries_primary_without_using_configured_fallback"
     "scenarios::registry_preimages::registry_only_non_eth_tree_derives_declared_state"
-    "scenarios::registry_operator_permissions::registry_operator_approval_serving_lifecycle"
 )
 
 shard_1_tests=(
@@ -105,6 +104,7 @@ shard_2_tests=(
     "scenarios::registry_driven_reads::deep_registry_hierarchy_lists_direct_children_only"
     "scenarios::registry_driven_reads::registry_driven_reads"
     "scenarios::registry_driven_reads::same_label_under_two_parents_keeps_children_distinct"
+    "scenarios::registry_operator_permissions::registry_operator_approval_serving_lifecycle"
     "scenarios::registry_preimages::label_preimage_revealed_later_upgrades_child_listing"
     "scenarios::registry_preimages::registry_only_non_eth_tree_derives_declared_state"
     "scenarios::resolver_records::pre_surface_record_attribution_is_node_scoped_and_never_materializes_unknown_names"
