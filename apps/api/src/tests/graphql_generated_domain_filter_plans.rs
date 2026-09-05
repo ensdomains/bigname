@@ -260,6 +260,8 @@ async fn graphql_generated_domain_order_plans_are_index_bounded_or_linear() -> R
         crate::graphql::GeneratedDomainSort::Storage(bigname_storage::NameCurrentListSort::Name),
         bigname_storage::NameCurrentListOrder::Asc, 200, 0,
     ).await?;
+    println!("DOMAIN SELECTIVE ID_GT NAME PLAN {}",
+        serde_json::to_string_pretty(&selective_range)?);
     assert_flat_eligibility(&selective_range, "selective id_gt with name order")?;
 
     let bounded_id = "0x000000000000000000000000000000000000000000000000000000000000176f";

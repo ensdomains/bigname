@@ -745,12 +745,13 @@ PostgreSQL uses the correlated eligibility subquery for ID order, or for ID
 equality or membership with any order. A range combined with equality or
 membership stays bounded by that same candidate set. A range without equality
 or membership uses ordinary joins under a non-ID order so each relation is
-scanned once rather than probed once per matching name. A fresh round-4 run of
-`tests::graphql_generated_domain_order_plans_are_index_bounded_or_linear` on
-the 5,004-row `postgres:16-alpine` review fixture measured the accepted
-selective `id_gt` plus name-order flat plan at cost 537.01 and 34.899 ms instead
-of five correlated probes. The same rule prevents an unselective range from
-making 5,004 probes and triggering JIT compilation.
+scanned once rather than probed once per matching name. The test prints that
+selective EXPLAIN as `DOMAIN SELECTIVE ID_GT NAME PLAN`. A round-5
+`--nocapture` run on the 5,004-row `postgres:16-alpine` review fixture printed
+the accepted selective `id_gt` plus name-order flat plan at cost 537.01 and
+13.319 ms, with one `name_surfaces` loop and no JIT, instead of five correlated
+probes. The same rule prevents an unselective range from making 5,004 probes
+and triggering JIT compilation.
 This API-only slice adds no index or database locale startup gate.
 
 The affected Manager operation set therefore requires two declaration edits:
