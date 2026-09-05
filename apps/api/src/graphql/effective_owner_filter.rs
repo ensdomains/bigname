@@ -206,63 +206,26 @@ fn push_owner_predicates<'a>(builder: &mut QueryBuilder<'a, Postgres>, filter: &
     }
     push_membership(builder, filter.in_values.as_deref(), false);
     push_membership(builder, filter.not_in_values.as_deref(), true);
-    for (value, nocase, negative, pattern) in [
-        (filter.contains.as_deref(), false, false, Pattern::Contains),
-        (
-            filter.contains_nocase.as_deref(),
-            true,
-            false,
-            Pattern::Contains,
-        ),
-        (
-            filter.not_contains.as_deref(),
-            false,
-            true,
-            Pattern::Contains,
-        ),
-        (
-            filter.not_contains_nocase.as_deref(),
-            true,
-            true,
-            Pattern::Contains,
-        ),
-        (filter.starts_with.as_deref(), false, false, Pattern::Starts),
-        (
-            filter.starts_with_nocase.as_deref(),
-            true,
-            false,
-            Pattern::Starts,
-        ),
-        (
-            filter.not_starts_with.as_deref(),
-            false,
-            true,
-            Pattern::Starts,
-        ),
-        (
-            filter.not_starts_with_nocase.as_deref(),
-            true,
-            true,
-            Pattern::Starts,
-        ),
-        (filter.ends_with.as_deref(), false, false, Pattern::Ends),
-        (
-            filter.ends_with_nocase.as_deref(),
-            true,
-            false,
-            Pattern::Ends,
-        ),
-        (filter.not_ends_with.as_deref(), false, true, Pattern::Ends),
-        (
-            filter.not_ends_with_nocase.as_deref(),
-            true,
-            true,
-            Pattern::Ends,
-        ),
-    ] {
-        if let Some(value) = value {
-            push_pattern(builder, pattern.apply(value), nocase, negative);
-        }
+    macro_rules! patterns {
+        ($( $member:ident => ($nocase:literal, $negative:literal, $kind:ident) ),+ $(,)?) => {
+            $(if let Some(value) = filter.$member.as_deref() {
+                push_pattern(builder, Pattern::$kind.apply(value), $nocase, $negative);
+            })+
+        };
+    }
+    patterns! {
+        contains => (false, false, Contains),
+        contains_nocase => (true, false, Contains),
+        not_contains => (false, true, Contains),
+        not_contains_nocase => (true, true, Contains),
+        starts_with => (false, false, Starts),
+        starts_with_nocase => (true, false, Starts),
+        not_starts_with => (false, true, Starts),
+        not_starts_with_nocase => (true, true, Starts),
+        ends_with => (false, false, Ends),
+        ends_with_nocase => (true, false, Ends),
+        not_ends_with => (false, true, Ends),
+        not_ends_with_nocase => (true, true, Ends),
     }
 }
 
