@@ -1976,12 +1976,10 @@ fn assert_restore(owner: &str) -> anyhow::Result<()> {
 fn pre_surface_registry_resolver_surface_promotion_restores_exactly() -> anyhow::Result<()> {
     assert_restore(OWNER)
 }
-
 #[test]
 fn pre_surface_ownerless_resolver_surface_promotion_restores_exactly() -> anyhow::Result<()> {
     assert_restore(REGISTRY)
 }
-
 #[test]
 fn deprecated_registry_manifest_remains_available_for_materialization_provenance()
 -> anyhow::Result<()> {
@@ -2024,7 +2022,6 @@ fn deprecated_registry_manifest_remains_available_for_materialization_provenance
     assert_eq!(live, restored);
     Ok(())
 }
-
 #[test]
 fn unknown_registry_manifest_fails_live_and_cold_restore_with_context() -> anyhow::Result<()> {
     let (manifests, admissions, node) = fixture();
