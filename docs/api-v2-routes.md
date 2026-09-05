@@ -139,7 +139,7 @@ Field ownership:
   source answer entries, and `raw_claim_name` preserves an invalid reverse
   claim exactly as observed for that tuple.
 - Role-summary containers are route-local: `grants` groups
-  `{grant_scope, powers}` entries under one `address` inside
+  `{grant_relation?, grant_scope, powers}` entries under one `address` inside
   `role_summary`.
 - Namespace metadata containers are route-local: `networks` is the
   product-facing list of public chain mappings for one namespace.
@@ -981,15 +981,18 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   scopes share that order. The account key is
   `account:{chain_id}:{authority_kind}:{authority_contract}:{owner}`. The
   opaque cursor binds the exact normalized collection anchor: normalized
-  `address`, resolved `registration_id`, namespace when explicit or implied by
-  a name (and namespace absence for an address-only request),
+  `address`, normalized `name` when supplied, resolved `registration_id`,
+  namespace when explicit or implied by a name (and namespace absence for an
+  address-only request),
   `include=lineage`, the fixed sort, and the last keyset tuple. New cursors carry
   `snapshot=None`; legacy snapshot components are ignored. Malformed cursor
   encoding, a different bound filter anchor or sort, and a missing or malformed
   keyset tuple are rejected. A well-formed edited keyset tuple is accepted as a
   caller-supplied resume position; the cursor is opaque but is not
-  cryptographically signed. Crossing from direct to operator rows neither
-  duplicates nor omits a row.
+  cryptographically signed. A name-anchored cursor is rejected for a different
+  name or a registration-only request, even when both names resolve to the same
+  registration. Crossing from direct to operator rows neither duplicates nor
+  omits a row.
 - Snapshot behavior: a `name` filter resolves its current registration anchor,
   and permission rows come from current state. The response omits `meta.as_of`
   and `meta.as_of_token`; completeness metadata remains available. Its cursor

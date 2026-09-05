@@ -1332,7 +1332,7 @@ Returns surfaces, not backing resources. Each item carries `logical_name_id`, su
 
 ### Address → names with `include=role_summary`
 
-Additive expansion, not a separate route. Adds `role_summary` (one `subjects[*]` entry per distinct current permission subject for the same `resource_id`, with `scope` and `effective_powers`), `subname_count`, `record_count`, `status`, `expiry`. Identity, supported filters, grouping, default sort, cursor, and coverage stay unchanged.
+Additive expansion, not a separate route. Adds `role_summary: [{address, grants: [{grant_relation?, grant_scope, powers}]}]` and `record_count` for the current registration. Address-name membership, supported filters, grouping, default sort, and cursor stay unchanged; role-summary completeness remains partial.
 
 `subname_count` reuses declared-direct-children semantics. `record_count` is the count of distinct stable declared record selectors at the current version boundary.
 
