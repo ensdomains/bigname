@@ -1379,9 +1379,17 @@ fn current_registry_zero_to_nonzero_grants_without_revoking_the_zero_address() -
         .normalized_events
         .iter()
         .filter(|event| event.block_number == Some(5) && event.event_kind == "PermissionChanged")
-        .map(|event| event.after_state["scope"]["resolver_address"].as_str())
         .collect::<Vec<_>>();
-    assert_eq!(resolver_permissions, vec![Some(RESOLVER_B)]);
+    assert_eq!(resolver_permissions.len(), 1);
+    let grant = resolver_permissions[0];
+    assert_eq!(grant.after_state["scope"]["resolver_address"], RESOLVER_B);
+    assert_eq!(grant.before_state["effective_powers"], json!([]));
+    assert_eq!(
+        grant.after_state["effective_powers"],
+        json!(["resolver_control"])
+    );
+    assert!(grant.after_state["grant_source"].is_object());
+    assert!(grant.after_state["revocation_source"].is_null());
     Ok(())
 }
 

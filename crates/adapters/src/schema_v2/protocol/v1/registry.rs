@@ -524,7 +524,7 @@ pub(super) fn interpret(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn push_permission_change(
+pub(super) fn push_permission_change(
     output: &mut Interpreted,
     authority: &V1NameState,
     subject: &str,

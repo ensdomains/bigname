@@ -13263,8 +13263,8 @@ async fn assert_registrar_transfer_matches_full_rebuild(
             .await?;
     }
 
-    let resolver_permissions: Vec<(Value, Value, String, Option<String>)> = sqlx::query_as(
-        "SELECT before_state, after_state, source_family,
+    let resolver_permissions: Vec<(Uuid, Value, Value, String, Option<String>)> = sqlx::query_as(
+        "SELECT resource_id, before_state, after_state, source_family,
                 raw_fact_ref ->> 'emitting_address'
          FROM normalized_events
          WHERE chain_id = $1 AND block_number = 5
@@ -13283,17 +13283,25 @@ async fn assert_registrar_transfer_matches_full_rebuild(
         2,
         "authority change must emit one resolver revoke and one resolver grant"
     );
-    assert!(resolver_permissions.iter().all(|(_, _, family, emitter)| {
-        family == "basenames_base_registrar" && emitter.as_deref() == Some(REGISTRAR)
-    }));
+    assert!(
+        resolver_permissions
+            .iter()
+            .all(|(_, _, _, family, emitter)| {
+                family == "basenames_base_registrar" && emitter.as_deref() == Some(REGISTRAR)
+            })
+    );
     let revoke = resolver_permissions
         .iter()
-        .find(|(before, _, _, _)| before.pointer("/subject").and_then(Value::as_str) == Some(OWNER))
+        .find(|(_, before, _, _, _)| {
+            before.pointer("/subject").and_then(Value::as_str) == Some(OWNER)
+        })
         .expect("old-authority resolver revoke");
     assert_eq!(
-        revoke.0.pointer("/scope/resolver_address"),
+        revoke.1.pointer("/scope/resolver_address"),
         Some(&json!(RESOLVER))
     );
+    assert_eq!(revoke.1["effective_powers"], json!(["resolver_control"]));
+    assert_eq!(revoke.2["effective_powers"], json!([]));
     let expected_grantee = if include_registry_owner {
         OWNER
     } else {
@@ -13301,20 +13309,29 @@ async fn assert_registrar_transfer_matches_full_rebuild(
     };
     let grant = resolver_permissions
         .iter()
-        .find(|(_, after, _, _)| {
+        .find(|(_, _, after, _, _)| {
             after.pointer("/subject").and_then(Value::as_str) == Some(expected_grantee)
                 && after["effective_powers"] == json!(["resolver_control"])
         })
         .expect("new-authority resolver grant");
     assert_eq!(
-        grant.1.pointer("/scope/resolver_address"),
+        grant.2.pointer("/scope/resolver_address"),
         Some(&json!(RESOLVER))
     );
     assert_eq!(
-        grant.1.pointer("/grant_source/source_event_kind"),
+        grant.2.pointer("/grant_source/source_event_kind"),
         Some(&json!("TokenControlTransferred"))
     );
-    assert!(resolver_permissions.iter().all(|(before, after, _, _)| {
+    let registrar_resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM normalized_events
+         WHERE chain_id = $1 AND block_number = 5
+           AND event_kind = 'TokenControlTransferred'",
+    )
+    .bind(chain)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(revoke.0, registrar_resource);
+    assert!(resolver_permissions.iter().all(|(_, before, after, _, _)| {
         before.get("resolver").is_none() && after.get("resolver").is_none()
     }));
 
@@ -13369,8 +13386,8 @@ async fn assert_registrar_transfer_matches_full_rebuild(
     run_project(full.pool(), chain, None, RunMode::Normal, 0, 5).await?;
 
     for pool in [incremental.pool(), full.pool()] {
-        let current_permission: (String, Option<String>) = sqlx::query_as(
-            "SELECT subject, grant_source ->> 'source_event_kind'
+        let current_permission: (Uuid, String, Option<String>) = sqlx::query_as(
+            "SELECT resource_id, subject, grant_source ->> 'source_event_kind'
              FROM permissions_current
              WHERE scope_kind = 'resolver'
                AND resource_id = (
@@ -13383,6 +13400,7 @@ async fn assert_registrar_transfer_matches_full_rebuild(
         .fetch_one(pool)
         .await?;
         let expected_permission = (
+            grant.0,
             expected_grantee.into(),
             Some("TokenControlTransferred".into()),
         );

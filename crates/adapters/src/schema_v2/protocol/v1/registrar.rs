@@ -5,11 +5,10 @@ use serde_json::{Value, json};
 
 use super::super::{
     EventDraft, Interpreted, NameDraft, ResourceDraft, ShadowNameDraft, ensure_declared,
-    permissions::{v1_grant_states, v1_revoke_states},
+    permissions::v1_grant_states,
 };
-use super::authority_transition::{
-    append_authority_transition, append_surface_materialization, authority_kind,
-};
+use super::authority_transition::{append_authority_transition, append_surface_materialization};
+use super::registry::push_permission_change;
 use super::support::{events_linked, single_event};
 use crate::evm_abi::{address_hex, decode_event_log, u256_word_hex};
 use crate::schema_v2::{

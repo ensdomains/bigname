@@ -16,13 +16,15 @@ pub(super) fn append_transfer_permissions(
         return;
     }
     for (grant, subject, action) in [(false, from, "revoke"), (true, to, "grant")] {
-        push_transfer_permission(
+        push_permission_change(
             output,
             after,
             subject,
             json!({"kind":"resource"}),
+            "resource_control",
             grant,
-            action,
+            "TokenControlTransferred",
+            &format!("transfer-resource-{action}"),
         );
     }
     let Some(resolver) = resolver else { return };
@@ -33,13 +35,15 @@ pub(super) fn append_transfer_permissions(
                 [(previous, false, "revoke"), (current, true, "grant")]
             {
                 if let Some(subject) = authority.owner.as_deref() {
-                    push_transfer_permission(
+                    push_permission_change(
                         output,
                         authority,
                         subject,
                         scope.clone(),
+                        "resolver_control",
                         grant,
-                        action,
+                        "TokenControlTransferred",
+                        &format!("transfer-authority-{action}"),
                     );
                 }
             }
@@ -49,55 +53,18 @@ pub(super) fn append_transfer_permissions(
                 && current.resource_id == after.resource_id =>
         {
             for (grant, subject, action) in [(false, from, "revoke"), (true, to, "grant")] {
-                push_transfer_permission(output, after, subject, scope.clone(), grant, action);
+                push_permission_change(
+                    output,
+                    after,
+                    subject,
+                    scope.clone(),
+                    "resolver_control",
+                    grant,
+                    "TokenControlTransferred",
+                    &format!("transfer-resolver-{action}"),
+                );
             }
         }
         _ => {}
     }
-}
-
-fn push_transfer_permission(
-    output: &mut Interpreted,
-    authority: &V1NameState,
-    subject: &str,
-    scope: Value,
-    grant: bool,
-    action: &str,
-) {
-    let Some(authority_key) = authority.authority_key.as_deref() else {
-        return;
-    };
-    let power = if scope["kind"] == "resource" {
-        "resource_control"
-    } else {
-        "resolver_control"
-    };
-    let (before_state, after_state) = if grant {
-        v1_grant_states(
-            subject,
-            scope,
-            power,
-            authority_kind(authority),
-            authority_key,
-            "TokenControlTransferred",
-        )
-    } else {
-        v1_revoke_states(
-            subject,
-            scope,
-            power,
-            authority_kind(authority),
-            authority_key,
-            "TokenControlTransferred",
-        )
-    };
-    output.events.push(EventDraft {
-        event_kind: "PermissionChanged".to_owned(),
-        logical_name_id: Some(authority.logical_name_id.clone()),
-        resource_id: Some(authority.resource_id),
-        identity_suffix: format!("PermissionChanged:transfer:{power}:{action}:{subject}"),
-        explicit_before: Some(before_state),
-        after_state,
-        state_scope: String::new(),
-    });
 }
