@@ -386,8 +386,10 @@ done
 
 # SQLx migrations run before phase-runner installs a fresh schema-v2 baseline.
 # They must leave that namespace empty so init-schema can still accept it.
+# Comment-only upgrades must tolerate that same pre-initialization path.
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    emit_phase_migration "$ROOT/migrations/20260814121000_phase_heartbeat_liveness_comment.sql" empty-schema
     cat <<'SQL'
 DO $$
 BEGIN
@@ -401,6 +403,7 @@ BEGIN
         FROM pg_proc function
         JOIN pg_namespace namespace ON namespace.oid = function.pronamespace
         WHERE namespace.nspname = current_schema()
+        UNION ALL SELECT 1 FROM pg_type type_row JOIN pg_namespace namespace ON namespace.oid = type_row.typnamespace WHERE namespace.nspname = current_schema()
     ) THEN
         RAISE EXCEPTION
             'schema-migrations created objects before fresh schema initialization';
@@ -409,11 +412,6 @@ END
 $$;
 SQL
 } | run_psql
-# Comment-only upgrades must also tolerate SQLx running before init-schema.
-emit_phase_migration \
-    "$ROOT/migrations/20260814121000_phase_heartbeat_liveness_comment.sql" \
-    empty-schema \
-    | run_psql
 report_timing empty-schema
 
 apply_baseline
@@ -772,7 +770,6 @@ INSERT INTO normalized_events (
 );
 SQL
 } | run_psql
-
 assert_migration_refusal \
     authority-arm-offline-reset \
     "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql" \
@@ -788,7 +785,6 @@ INSERT INTO surface_bindings (
     'authority-reset', '0x01', 1, 'canonical'
 );
 SQL
-
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<'SQL'
