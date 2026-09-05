@@ -1290,58 +1290,51 @@ fn current_registry_resolver_replacement_survives_the_ownership_handoff() -> any
 }
 
 #[test]
-fn current_registry_derived_resolver_restores_after_registrar_authority_reconvergence()
--> anyhow::Result<()> {
+fn old_registry_raw_resolver_survives_authority_reconvergence_compaction() -> anyhow::Result<()> {
     let (_, _, node) = fixture();
-    let resolver = resolver_selection(REGISTRY, node, RESOLVER_A, 3)?;
-    let mut diverge = current_new_owner(OWNER, 3)?;
-    diverge.log_index = 1;
-    let mut converge = current_new_owner(OWNER_2, 3)?;
-    converge.log_index = 2;
     let history = vec![
-        current_new_owner(OWNER_2, 1)?,
+        old_new_owner(OWNER_2, 1)?,
         registration(2, 9_999)?,
-        resolver,
-        diverge,
-        converge,
-        wrapped(4)?,
+        resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 3)?,
+        old_new_owner(OWNER, 4)?,
+        old_new_owner(OWNER_2, 5)?,
+        wrapped(6)?,
     ];
-    let (single, live) = assert_four_way_and_restore_parity(&history, 5)?;
+    let (single, _) = assert_four_way_and_restore_parity(&history, 5)?;
     assert_eq!(
         single
             .iter()
             .filter(|event| {
-                event.block_number == Some(4)
+                event.block_number == Some(6)
                     && event.event_kind == "ResolverChanged"
                     && event.after_state["resolver"] == RESOLVER_A
-                    && event.after_state["resolver_source_role"] == "registry"
+                    && event.after_state["resolver_source_role"] == "registry_old"
             })
             .count(),
         1,
-        "wrapper activation omitted the restored current-registry resolver",
+        "wrapper activation omitted the restored old-registry resolver",
     );
 
     let (manifests, admissions, _) = fixture();
     let prefix = interpret_test_batch(input(
-        manifests.clone(),
-        admissions.clone(),
+        manifests,
+        admissions,
         Vec::new(),
         history[..5].to_vec(),
     ))?;
-    let mut role_bearing_compacted = compact_prior(&prefix.normalized_events);
-    role_bearing_compacted.retain(|event| {
-        event.event_kind != "ResolverChanged"
-            || event.after_state["resolver_source_role"].is_string()
-    });
-    let restored = interpret_test_batch(input(
-        manifests,
-        admissions,
-        role_bearing_compacted,
-        history[5..].to_vec(),
-    ))?;
+    let compacted = compact_prior(&prefix.normalized_events);
     assert_eq!(
-        live, restored,
-        "current-registry derived rows did not restore the selected resolver link"
+        compacted
+            .iter()
+            .filter(|event| {
+                event.event_kind == "ResolverChanged"
+                    && event.after_state["emitter_role"] == "registry_old"
+                    && event.after_state["resolver_source_role"].is_null()
+                    && event.retained_state_key.ends_with(":NewResolver")
+            })
+            .count(),
+        2,
+        "compaction discarded raw old-registry NewResolver rows",
     );
     Ok(())
 }
@@ -1494,33 +1487,107 @@ fn wrapper_fallback_registrar_activation_grants_resolver_control() -> anyhow::Re
     inactive_unwrap.log_index = 1;
     let mut inactive_transfer = registrar_transfer(WRAPPER, OWNER_2, 6)?;
     inactive_transfer.log_index = 2;
-    let inactive_history = vec![
+    let registry_activation_history = vec![
         current_transfer(node, WRAPPER, 4)?,
         inactive_wrap,
         resolver_selection(REGISTRY, node, RESOLVER_A, 5)?,
         current_transfer(node, OWNER, 6)?,
         inactive_unwrap,
         inactive_transfer,
+        current_transfer(node, OWNER_2, 7)?,
     ];
-    let inactive = interpret_test_batch(input(
+    let registry_activation = interpret_test_batch(input(
         fixture().0,
         fixture().1,
         Vec::new(),
-        inactive_history,
+        registry_activation_history,
     ))?;
+    let registry_resource = registry_activation
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.block_number == Some(6)
+                && event.event_kind == "AuthorityEpochChanged"
+                && event.after_state["authority_kind"] == "registry_only"
+        })
+        .and_then(|event| event.resource_id)
+        .expect("registry authority resource");
+    for (scope_kind, power) in [
+        ("resolver", "resolver_control"),
+        ("resource", "resource_control"),
+    ] {
+        assert_eq!(
+            registry_activation
+                .normalized_events
+                .iter()
+                .filter(|event| {
+                    event.block_number == Some(6)
+                        && event.event_kind == "PermissionChanged"
+                        && event.resource_id == Some(registry_resource)
+                        && event.after_state["subject"] == OWNER
+                        && event.after_state["scope"]["kind"] == scope_kind
+                        && event.after_state["effective_powers"] == json!([power])
+                })
+                .count(),
+            1,
+            "registrar-driven registry activation omitted the {power} grant",
+        );
+        assert_eq!(
+            registry_activation
+                .normalized_events
+                .iter()
+                .filter(|event| {
+                    event.block_number == Some(7)
+                        && event.event_kind == "PermissionChanged"
+                        && event.resource_id == Some(registry_resource)
+                        && event.after_state["subject"] == OWNER
+                        && event.after_state["scope"]["kind"] == scope_kind
+                        && event.after_state["effective_powers"] == json!([])
+                })
+                .count(),
+            1,
+            "registry transfer did not balance the {power} grant",
+        );
+    }
+
+    let mut ownerless_wrap = wrapped(8)?;
+    ownerless_wrap.log_index = 1;
+    let mut ownerless_unwrap = unwrapped(10)?;
+    ownerless_unwrap.log_index = 1;
+    let mut ownerless_transfer = registrar_transfer(WRAPPER, OWNER_2, 10)?;
+    ownerless_transfer.log_index = 2;
+    let ownerless_history = vec![
+        current_transfer(node, WRAPPER, 8)?,
+        ownerless_wrap,
+        resolver_selection(REGISTRY, node, RESOLVER_A, 9)?,
+        current_transfer(node, ZERO_ADDRESS, 10)?,
+        ownerless_unwrap,
+        ownerless_transfer,
+    ];
+    let ownerless = interpret_test_batch(input(
+        fixture().0,
+        fixture().1,
+        Vec::new(),
+        ownerless_history,
+    ))?;
+    assert!(ownerless.normalized_events.iter().all(|event| {
+        event.block_number != Some(10)
+            || event.event_kind != "AuthorityEpochChanged"
+            || event.after_state["authority_kind"] != "registry_only"
+    }));
     assert_eq!(
-        inactive
+        ownerless
             .normalized_events
             .iter()
             .filter(|event| {
-                event.block_number == Some(6)
+                event.block_number == Some(10)
                     && event.event_kind == "PermissionChanged"
                     && event.after_state["scope"]["resolver_address"] == RESOLVER_A
                     && event.after_state["effective_powers"] == json!(["resolver_control"])
             })
             .count(),
         0,
-        "wrapper fallback granted resolver control without activating its registrar",
+        "wrapper fallback granted resolver control when no authority activated",
     );
 
     let registry_to_registrar = vec![
