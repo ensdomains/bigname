@@ -126,7 +126,7 @@ async fn assert_exact_name_authority(
                          candidate.surface_binding_id DESC
                 LIMIT 1
             ) successor ON TRUE
-            WHERE authority.deployment_profile IN ('mainnet', 'sepolia')
+            WHERE authority.deployment_profile = 'mainnet'
               -- Only the ENSv1->ENSv2 migration transition proof. A positive
               -- ENSv2 child registration
               -- supersedes the retained ENSv1 child binding without closing it,
@@ -317,7 +317,7 @@ async fn assert_child_authority(
               ON predecessor.child_logical_name_id = successor.child_logical_name_id
              AND predecessor.parent_logical_name_id = successor.parent_logical_name_id
              AND predecessor.authority_arm = 'ens_v1'
-            WHERE authority.deployment_profile IN ('mainnet', 'sepolia')
+            WHERE authority.deployment_profile = 'mainnet'
               AND authority.selected_authority_arm = 'ens_v2'
               -- Both ENSv2 child authority proofs: the activated migration boundary
               -- and the positive ENSv2 child registration.

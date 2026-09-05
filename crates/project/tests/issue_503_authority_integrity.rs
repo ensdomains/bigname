@@ -1,8 +1,6 @@
 use alloy_primitives::keccak256;
-use anyhow::{Context, Result};
-use bigname_project::{
-    BatchRequest, DUAL_CURRENT_CHILD_AUTHORITY, DUAL_CURRENT_EXACT_NAME_AUTHORITY, Engine, RunMode,
-};
+use anyhow::Result;
+use bigname_project::{BatchRequest, Engine, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
@@ -364,8 +362,8 @@ async fn reverse_descendants_are_not_shared_infrastructure() -> Result<()> {
 }
 
 #[tokio::test]
-async fn proven_sepolia_dual_current_exact_name_is_fatal() -> Result<()> {
-    let (db, pool) = database("issue503_exact_fatal").await?;
+async fn proven_sepolia_dual_current_exact_name_selects_v2_and_publishes() -> Result<()> {
+    let (db, pool) = database("issue503_exact_publishes").await?;
     let logical = surface(&pool, 30, "proven.eth", &["ens_v1", "ens_v2"]).await?;
     let successor_binding = uuid(4, 30);
     let successor_resource = uuid(2, 30);
@@ -382,27 +380,27 @@ async fn proven_sepolia_dual_current_exact_name_is_fatal() -> Result<()> {
         },
     )
     .await?;
-    let error = run(&pool)
-        .await
-        .expect_err("proven Sepolia conflict must fail");
-    let evidence = error
-        .generation_failure_evidence()
-        .context("failure evidence")?;
-    assert_eq!(evidence.failure_kind, DUAL_CURRENT_EXACT_NAME_AUTHORITY);
-    assert_eq!(evidence.logical_name_id, logical);
+    run(&pool).await?;
+    let selected = authority(&pool, &logical).await?;
+    assert_eq!(selected.0.as_deref(), Some("ens_v2"));
+    assert_eq!(selected.1, None);
     assert_eq!(
-        evidence.payload["boundary"]["event_identity"],
-        "issue503-exact-proof"
+        selected.2.as_deref(),
+        Some("migration_authority_transition")
     );
-    assert_eq!(evidence.payload["target"]["block_number"], 10);
-    assert_eq!(evidence.failure_fingerprint.len(), 64);
+    let evidence = authority_evidence(&pool, &logical).await?;
+    assert_eq!(
+        evidence.0.as_deref(),
+        Some("migration_authority_transition")
+    );
+    assert_eq!(evidence.2.as_deref(), Some("issue503-exact-proof"));
     db.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn proven_sepolia_dual_current_child_is_fatal() -> Result<()> {
-    let (db, pool) = database("issue503_child_fatal").await?;
+async fn proven_sepolia_dual_current_child_selects_v2_and_publishes() -> Result<()> {
+    let (db, pool) = database("issue503_child_publishes").await?;
     let parent = surface(&pool, 40, "parent.eth", &["ens_v2"]).await?;
     let child = surface(&pool, 41, "child.parent.eth", &["ens_v2"]).await?;
     let registry = uuid(8, 40);
@@ -462,14 +460,22 @@ async fn proven_sepolia_dual_current_child_is_fatal() -> Result<()> {
         },
     )
     .await?;
-    let error = run(&pool)
-        .await
-        .expect_err("proven Sepolia child conflict must fail");
-    let evidence = error
-        .generation_failure_evidence()
-        .context("failure evidence")?;
-    assert_eq!(evidence.failure_kind, DUAL_CURRENT_CHILD_AUTHORITY);
-    assert_eq!(evidence.payload["parent_logical_name_id"], parent);
+    run(&pool).await?;
+    let published: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT owner, registrant FROM children_current
+         WHERE parent_logical_name_id = $1 AND child_logical_name_id = $2",
+    )
+    .bind(&parent)
+    .bind(&child)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        published,
+        (
+            None,
+            Some("0x0000000000000000000000000000000000000001".into())
+        )
+    );
     db.cleanup().await?;
     Ok(())
 }
