@@ -227,8 +227,17 @@ Field ownership:
   exact-name consumer slice is activated, `conflicting_current_ens_authority`
   covers Mainnet overlap without a provable boundary.
   `independent_ens_deployments_overlap` covers
-  Sepolia overlap without a proven migration boundary; a proven Sepolia
-  boundary follows the same per-name authority rule. These values replace the
+  ordinary Sepolia overlap without a proven ENSv1→ENSv2 migration boundary; a proven
+  Sepolia boundary follows the same per-name authority rule. The exact
+  [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names—root,
+  `eth`, `reverse`, and `addr.reverse`—instead select ENSv2 when the ENSv2 arm is
+  current and ENSv1 evidence, current or historical, exists without proof.
+  When that shared-infrastructure rule selects ENSv2, it overrides the ordinary
+  no-proof handling below, so those names carry neither Mainnet's
+  `conflicting_current_ens_authority` nor Sepolia's
+  `independent_ens_deployments_overlap`.
+  Historical ENSv2 evidence alone does not qualify, and `.reverse` descendants
+  do not inherit the exception. These values replace the
   blanket mixed-corpus reason; intake from the planned [ENSv2 migration source
   family](glossary.md#source-family) alone does not add them. An address lookup
   returns `409 conflict` when the deployment has no ready public namespace.
@@ -820,8 +829,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   [authority arm](glossary.md#authority-epoch) still chooses between the remaining ENSv1 and ENSv2 candidates.
   An unknown activated migration-path value blocks the Project generation as a
   data-integrity failure instead of silently hiding relations. A child whose
-  arms disagree with no authority proof is omitted entirely. On the Mainnet
-  deployment profile, an ENSv1 relation that survives parent reachability and
+  arms disagree with no authority proof is omitted entirely. On Mainnet, an
+  ENSv1 relation that survives parent reachability and
   was asserted after a proven ENSv2 child authority began blocks Project
   publication for that generation,
   though a positive ENSv2 registration in a locked parent's migration registry
@@ -830,6 +839,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   an unmigrated parent can expose this contradiction, but no ordinary on-chain
   parent-and-child ENSv1→ENSv2 shape reaches it after parent reachability and
   migration-registry history are applied.
+  Sepolia publishes the proof-selected child relation; extending the
+  publication guardrail there is deferred until the connected Interpret→Project
+  path is proven.
   (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L146-L164 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
   This route therefore never chooses one
@@ -865,8 +877,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   by this product route. Slice 1 excludes every correlation-dependent normalized
   row with `consumer_visibility=candidate`, including a familiar event kind whose
   existence depends on correlation under an existing source family; diagnostics
-  may expose those rows. An existing-family event admitted independently of the
-  correlation remains byte-for-byte activated and product-visible. Its separate
+  may expose those rows. An [independently admitted
+  event](glossary.md#independently-admitted-event) remains byte-for-byte
+  activated and product-visible. Its separate
   candidate association is diagnostics-only and cannot suppress, duplicate, or
   reclassify that ordinary row. Only slice 2 consumer activation enables the
   per-source-log mapping specified for [`GET /v2/events`](#get-v2events) when an

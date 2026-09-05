@@ -30,8 +30,10 @@ pub(crate) async fn assert_publishable(
     assert_child_authority(transaction, chain_id, target).await
 }
 
-/// Fail the generation when a Mainnet name still holds current bindings on both
-/// authority arms after its proven activated ENSv1->ENSv2 migration boundary.
+/// Fail the generation on the Mainnet ENS [deployment profile] when a name still holds current
+/// bindings on both authority arms after its proven activated ENSv1->ENSv2 migration boundary.
+///
+/// [deployment profile]: ../../../docs/glossary.md#deployment-profile
 ///
 /// Bindings are evaluated at end-of-target-block, which is the transaction- and
 /// block-level reconciliation tolerance: transients inside one migration
@@ -234,8 +236,10 @@ async fn assert_exact_name_authority(
     ))
 }
 
-/// Fail the generation when a Mainnet parent-child pair still states both an ENSv1
-/// and an ENSv2 relation after the child's own proven ENSv2 authority began.
+/// Fail the generation on the Mainnet ENS [deployment profile] when a parent-child pair still
+/// states both an ENSv1 and an ENSv2 relation after the child's own proven ENSv2 authority began.
+///
+/// [deployment profile]: ../../../docs/glossary.md#deployment-profile
 ///
 /// Raw coexistence is not the anomaly: a migrated or positively registered ENSv2
 /// child normally keeps its ENSv1 relation as residue, because neither migration

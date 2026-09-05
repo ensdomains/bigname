@@ -221,9 +221,11 @@ outcomes, or durable traces.
   input. It excludes candidate normalized events and never reads the planned
   `migration_event_associations` or candidate identity/discovery effect tables.
   Candidate effects therefore cannot change the materialized identity rows that
-  builders join. An independently admitted ordinary event remains activated and
-  byte-for-byte unchanged when an ENSv1→ENSv2 correlation references it; only
-  the ignored association row carries the candidate relationship.
+  builders join. An
+  [independently admitted event](glossary.md#independently-admitted-event)
+  remains activated and byte-for-byte unchanged when an ENSv1→ENSv2 correlation
+  references it; only the ignored association row carries the candidate
+  relationship.
 - The independently admitted `registry_announcement` edge for an ENSv1→ENSv2
   migration-created registry remains ordinary because it drives the watch plan,
   not a product projection. Project ignores every candidate downstream effect.
@@ -250,12 +252,17 @@ outcomes, or durable traces.
 | `primary_names_current` | address, coin type, and namespace | declared primary-name claims |
 
 `surface_bindings` remains identity history rather than a `_current`
-projection. Exact-name reads first select the logical name's
+projection. Exact-name reads ordinarily first select the logical name's
 [`authority epoch`](glossary.md#authority-epoch), then select fields only from
 that epoch's binding and resources at the requested position. An activated
 ENSv1→ENSv2 authority proof may select a closed ENSv2 binding after release;
 that [released v2 authority](glossary.md#released-v2-authority) does not fall
-back to an active retained ENSv1 binding.
+back to an active retained ENSv1 binding. The exact
+[shared ENS infrastructure](glossary.md#shared-ens-infrastructure) no-proof
+exception selects a current ENSv2 arm when ENSv1 evidence is current or
+historical, without establishing an authority epoch, so its epoch start and
+proof fields remain null. Historical ENSv2 evidence without a current ENSv2
+binding does not qualify.
 
 ## Exact-name projection
 
