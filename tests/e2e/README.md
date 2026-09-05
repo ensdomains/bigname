@@ -201,12 +201,13 @@ registry-created child remains in
 [non-name form](../../docs/glossary.md#non-name-form) in the fixture, so that
 route is already absent before ENSv1→ENSv2 migration.
 
-`forge` must be on `PATH` before the 65 Foundry-dependent semantic scenarios are
-described as runnable. With these three scenarios the counted inventory is 90
-tests: 87 runnable and 3 ignored, split as 43 runnable plus 2 ignored on shard 1
-and 44 runnable plus 1 ignored on shard 2. This coverage changes no production
-rollout, deployment file, Docker configuration, environment file, checked-in
-manifest, or interpreter source.
+`forge` must be on `PATH` before the 62 Foundry-dependent semantic scenarios are
+described as runnable; the other 3 semantic scenarios are retired and ignored.
+With these three connected scenarios the counted inventory is 90 tests: 87
+runnable and 3 ignored, split as 43 runnable plus 2 ignored on shard 1 and 44
+runnable plus 1 ignored on shard 2. This coverage changes no production rollout,
+deployment file, Docker configuration, environment file, checked-in manifest,
+or interpreter source.
 
 The executor-only verified-resolution scenario was deleted with the legacy
 execution plane. Public lookup behavior remains covered by API crate tests; no
