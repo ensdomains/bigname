@@ -821,7 +821,7 @@ one `setSubnodeRecord`; its `NewOwner` precedes its `NewResolver`. The fallback 
 serves the old registry only until that current record exists, including when the
 current registry stores itself for a requested zero owner.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L16-L20 @ ens_v1@91c966f)
-(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L49-L56 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L49-L57 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L86-L95 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
