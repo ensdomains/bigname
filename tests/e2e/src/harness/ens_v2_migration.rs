@@ -47,8 +47,8 @@ pub struct EnsV2MigrationDeployment {
     pub locked_migration_controller: Deployed,
 }
 
-/// Deploy the connected migration contracts from the admitted archived
-/// Sepolia artifacts. Constructor wiring is pinned upstream.
+/// Deploy the connected ENSv1→ENSv2 migration contracts from the admitted
+/// archived Sepolia artifacts. Constructor wiring is pinned upstream.
 /// (upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L28-L30 @ ens_v2@a971bd64)
 /// (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L73-L75 @ ens_v2@a971bd64)
 /// (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L70-L89 @ ens_v2@a971bd64)
