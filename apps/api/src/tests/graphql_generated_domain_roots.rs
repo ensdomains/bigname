@@ -81,7 +81,7 @@ async fn graphql_generated_domain_root_signature_matches_pinned_schema() -> Resu
 }
 
 #[tokio::test]
-async fn graphql_generated_domain_filter_has_the_slice_one_members() -> Result<()> {
+async fn graphql_generated_domain_filter_has_slice_1b_owner_members() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let payload = post_graphql(
         database.app_state(),
@@ -106,7 +106,13 @@ async fn graphql_generated_domain_filter_has_the_slice_one_members() -> Result<(
             "name_not_contains_nocase", "name_not_ends_with",
             "name_not_ends_with_nocase", "name_not_in", "name_not_starts_with",
             "name_not_starts_with_nocase", "name_starts_with",
-            "name_starts_with_nocase", "owner", "owner_in"
+            "name_starts_with_nocase", "owner", "owner_contains",
+            "owner_contains_nocase", "owner_ends_with", "owner_ends_with_nocase",
+            "owner_gt", "owner_gte", "owner_in", "owner_lt", "owner_lte", "owner_not",
+            "owner_not_contains", "owner_not_contains_nocase", "owner_not_ends_with",
+            "owner_not_ends_with_nocase", "owner_not_in", "owner_not_starts_with",
+            "owner_not_starts_with_nocase", "owner_starts_with",
+            "owner_starts_with_nocase"
         ]
     );
     database.cleanup().await
@@ -413,6 +419,17 @@ async fn graphql_generated_owner_filters_match_the_served_owner() -> Result<()> 
 }
 
 #[tokio::test]
+async fn graphql_generated_domain_owner_scalar_operators_match_served_owner() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    assert_eq!(
+        generated_domain_owner_rows(&database, json!({"owner_not": GRAPHQL_OWNER})).await?,
+        Vec::<(String, String)>::new()
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn graphql_generated_domains_apply_skip_first_and_direction() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
@@ -557,8 +574,8 @@ async fn graphql_generated_domains_reject_t3_filter_members() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     for (query, variables, member) in [(
         "query Domains($where: Domain_filter!) { domains(where: $where) { id } }",
-        json!({"where": {"owner_contains": "0x"}}),
-        "owner_contains",
+        json!({"where": {"owner_": {"id": "0x"}}}),
+        "owner_",
     )] {
         let payload = post_graphql_allow_errors(database.app_state(), query, variables).await?;
         let error = payload["errors"][0]["message"].as_str().context("validation error")?;
