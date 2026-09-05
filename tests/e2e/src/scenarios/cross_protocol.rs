@@ -113,6 +113,7 @@ async fn unlocked_parent_hides_retained_ens_v1_children() -> Result<()> {
          WHERE source_family = 'ens_v1_registry_l1' \
            AND event_kind = 'SubregistryChanged' \
            AND canonicality_state = 'canonical' \
+           AND consumer_visibility = 'activated' \
            AND after_state->>'source_event' = 'NewOwner' \
            AND after_state->>'child_node' = $1 \
            AND lower(after_state->>'owner') = $2",
@@ -196,12 +197,14 @@ async fn locked_parent_publishes_only_migratable_ens_v1_children() -> Result<()>
              WHERE source_family = 'ens_v1_registry_l1' \
                AND event_kind = 'SubregistryChanged' \
                AND canonicality_state = 'canonical' \
+               AND consumer_visibility = 'activated' \
                AND after_state->>'source_event' = 'NewOwner' \
                AND after_state->>'child_node' = $1), \
            EXISTS (SELECT 1 FROM normalized_events \
              WHERE source_family = 'ens_v1_wrapper_l1' \
                AND event_kind = 'PermissionScopeChanged' \
                AND canonicality_state = 'canonical' \
+               AND consumer_visibility = 'activated' \
                AND logical_name_id = $2 \
                AND after_state->>'source_event' = 'NameWrapped' \
                AND (after_state->>'fuses')::BIGINT = 0)",
