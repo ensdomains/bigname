@@ -397,6 +397,7 @@ pub async fn explain_effective_permissions_account_resource_summary(
     pool: &PgPool,
     subject: Option<&str>,
     resource_id: Option<Uuid>,
+    namespace: Option<&str>,
 ) -> Result<Value> {
     explain(
         pool,
@@ -404,7 +405,7 @@ pub async fn explain_effective_permissions_account_resource_summary(
             "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) ",
             subject,
             resource_id,
-            None,
+            namespace,
             true,
         ),
     )
@@ -413,10 +414,11 @@ pub async fn explain_effective_permissions_account_resource_summary(
 pub async fn explain_effective_permissions_by_resource_ids(
     pool: &PgPool,
     ids: &[Uuid],
+    namespace: Option<&str>,
 ) -> Result<Value> {
     explain(
         pool,
-        build_batch("EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) ", ids, None),
+        build_batch("EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) ", ids, namespace),
     )
     .await
 }

@@ -361,8 +361,13 @@ async fn effective_permissions_resource_page_uses_applicability_index() -> Resul
 async fn effective_permissions_summary_uses_the_anchored_effective_plan() -> Result<()> {
     let (db, _) = fixture().await?;
     assert_plan(
-        explain_effective_permissions_account_resource_summary(db.pool(), Some(SUBJECT), None)
-            .await?,
+        explain_effective_permissions_account_resource_summary(
+            db.pool(),
+            Some(SUBJECT),
+            None,
+            Some("ens"),
+        )
+        .await?,
         &[
             "account_permission_state_current_active_subject_idx",
             "permissions_current_resource_registry_binding_idx",
@@ -377,10 +382,11 @@ async fn effective_permissions_summary_uses_the_anchored_effective_plan() -> Res
 async fn effective_permissions_resource_batch_uses_applicability_index() -> Result<()> {
     let (db, resource) = fixture().await?;
     assert_plan(
-        explain_effective_permissions_by_resource_ids(db.pool(), &[resource]).await?,
+        explain_effective_permissions_by_resource_ids(db.pool(), &[resource], Some("ens")).await?,
         &[
             "account_permission_state_current_applicability_idx",
-            "surface_bindings_resource_idx",
+            "name_surfaces_visibility_idx",
+            "surface_bindings_no_overlap",
         ],
     )
     .await?;

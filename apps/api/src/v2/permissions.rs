@@ -16,10 +16,12 @@ use super::permission_support::{
     PermissionRequestScope, PermissionSupport, apply_permissions_collection_support_meta,
     permission_support_for_resources,
 };
+use super::support::ensure_public_namespace;
 use super::{
     AddressNameGrant, CursorPayload, Envelope, GrantRelation, Meta, Page, QueryParamAllowlist,
-    QueryParams, StrictQueryParams, V2Error, V2Result, decode, effective_permission_scope_value,
-    encode, permission_powers_value, validate_latest_collection_selectors,
+    QueryParams, StrictQueryParams, V2Error, V2Result, api_error_to_v2, decode,
+    effective_permission_scope_value, encode, permission_powers_value,
+    validate_latest_collection_selectors,
     vocab::{AuthorityContext, WrapperFuses, WrapperState},
 };
 
@@ -97,6 +99,9 @@ pub(crate) async fn get_permissions(
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let include_lineage = permissions_include_lineage(&params.include)?;
     let filter_inputs = permissions_filter_inputs(&params)?;
+    if params.namespace.is_some() {
+        ensure_public_namespace(&filter_inputs.namespace).map_err(api_error_to_v2)?;
+    }
 
     let resolved =
         resolve_permissions_filter(&state, &params, include_lineage, &filter_inputs).await?;
