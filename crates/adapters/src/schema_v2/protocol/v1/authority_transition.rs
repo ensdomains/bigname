@@ -238,6 +238,8 @@ pub(super) fn append_surface_materialization_for_trigger(
                 "authority_kind":"registry_only",
                 "authority_key":promoted.authority_key,
                 "owner":promoted.owner,
+                "owner_getter":promoted.owner,
+                "registry_contract":promoted.registry_contract,
                 "binding_kind":"declared_registry_path",
                 "pointer_reason":"surface_materialization_current_resolver",
             });
