@@ -76,11 +76,12 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
         SELECT kind, identity
         FROM required
         WHERE CASE kind
-            WHEN 'relation' THEN CASE WHEN NOT has_schema_privilege(current_user, split_part(identity, '.', 1), 'USAGE') THEN TRUE ELSE
+            WHEN 'relation' THEN CASE WHEN to_regnamespace(split_part(identity, '.', 1)) IS NULL THEN TRUE
+                WHEN NOT has_schema_privilege(current_user, to_regnamespace(split_part(identity, '.', 1)), 'USAGE') THEN TRUE ELSE
                 to_regclass(identity) IS NULL OR (identity <> 'bigname_phase.resolution_divergences'
                     AND NOT has_table_privilege(current_user, identity, 'SELECT')) END
-            WHEN 'function' THEN CASE WHEN NOT has_schema_privilege(current_user, split_part(identity, '.', 1), 'USAGE') THEN TRUE ELSE to_regprocedure(identity) IS NULL END
-            WHEN 'type' THEN CASE WHEN NOT has_schema_privilege(current_user, split_part(identity, '.', 1), 'USAGE') THEN TRUE ELSE to_regtype(identity) IS NULL END
+            WHEN 'function' THEN CASE WHEN to_regnamespace(split_part(identity, '.', 1)) IS NULL THEN TRUE WHEN NOT has_schema_privilege(current_user, to_regnamespace(split_part(identity, '.', 1)), 'USAGE') THEN TRUE ELSE to_regprocedure(identity) IS NULL END
+            WHEN 'type' THEN CASE WHEN to_regnamespace(split_part(identity, '.', 1)) IS NULL THEN TRUE WHEN NOT has_schema_privilege(current_user, to_regnamespace(split_part(identity, '.', 1)), 'USAGE') THEN TRUE ELSE to_regtype(identity) IS NULL END
         END
         ORDER BY kind, identity
         "#,
