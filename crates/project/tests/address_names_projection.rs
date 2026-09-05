@@ -443,7 +443,7 @@ async fn later_wrapper_projection_joins_only_the_wrapped_registrar_lineage() -> 
     let registrants: Vec<String> = sqlx::query_scalar("SELECT address FROM address_names_current WHERE logical_name_id = $1 AND relation = 'registrant' ORDER BY address").bind(OWNERLESS_LOGICAL).fetch_all(&pool).await?;
     assert_eq!(summary, ("active".to_owned(), 5252));
     assert_eq!(registrants, vec![CONTROL_OWNER.to_lowercase()], "the wrapper selected a registrant from a different registrar lineage");
-    seed_blocks(&pool, [10, 11]).await?;
+    seed_blocks(&pool, [11]).await?;
     seed_normalized_event(&pool, "fixture:later-wrapper-holder-transfer", Some(OWNERLESS_LOGICAL), Some(CONTROL_RESOURCE), "TokenControlTransferred", "ens_v1_wrapper_l1", 11, 1, json!({"source_event":"TransferSingle","from":PRIOR_CONTROLLER,"to":LATEST_WRAPPER_OWNER}), json!({})).await?;
     run_project(&pool, 11, 8, None).await?;
     let current_registrant: String = sqlx::query_scalar("SELECT declared_summary #>> '{registration,registrant}' FROM name_current WHERE logical_name_id = $1").bind(OWNERLESS_LOGICAL).fetch_one(&pool).await?;
