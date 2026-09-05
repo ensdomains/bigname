@@ -26,16 +26,16 @@ run without the count assertion:
 scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --test-threads=8
 ```
 
-The default gate requires the exact library-test summary `84 passed; 0 failed;
-3 ignored; 0 filtered out`. CI shard 1 requires `42 passed; 0 failed; 2
-ignored; 43 filtered out`, and shard 2 requires `42 passed; 0 failed; 1
-ignored; 44 filtered out`. The gate checks both Cargo's exit status and every
+The default gate requires the exact library-test summary `89 passed; 0 failed;
+3 ignored; 0 filtered out`. CI shard 1 requires `44 passed; 0 failed; 2
+ignored; 46 filtered out`, and shard 2 requires `45 passed; 0 failed; 1
+ignored; 46 filtered out`. The gate checks both Cargo's exit status and every
 summary count, so a prematurely successful process or an incorrectly filtered
 suite cannot satisfy CI.
 
 ## Harness design
 
-1. `HarnessDb::create` clones an isolated migration template and runs
+1. `HarnessDb::create` clones an isolated schema-migration template and runs
    `phase-runner init-schema`. Scenario pools select only `bigname_phase`.
 2. Each scenario deploys its local ENS or Basenames topology on Anvil and
    generates a temporary [deployment profile](../../docs/glossary.md#deployment-profile)
@@ -76,6 +76,139 @@ suite cannot satisfy CI.
    copies. Direct test runs unlink each one when its last scenario lease is
    dropped. The counted gate retains links only for in-process build sharing
    and removes its run-scoped directory on exit.
+
+## Connected ENSv1→ENSv2 migration
+
+The connected Sepolia fixture starts with the existing local ENSv2 deployment:
+`LabelStore`, `RootRegistry`, the `.eth` registry, its rent-price oracle and
+registrar, mock payment tokens, and the required root-role grants. It then
+deploys the ENSv1→ENSv2 migration address set/namer, `VerifiableFactory`,
+`ENSV1Resolver`, `Graveyard`, `WrapperRegistryImpl`, and the unlocked and locked
+ENSv1→ENSv2 migration controllers. Their constructor argument order follows
+the pinned upstream contracts
+(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L28-L30 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L73-L75 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L70-L89 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L56-L64 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L42-L57 @ ens_v2@a971bd64).
+The archived `WrapperRegistryImpl` bytecode has constructor revision skew from
+the current pinned source: its fifth address is named
+`ApprovedUpgradeGate upgradeGate`, and its metadata includes
+`ApprovedUpgradeGate.sol`
+(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/WrapperRegistryImpl.json:L27-L29 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/WrapperRegistryImpl.json:L3154 @ ens_v2@a971bd64),
+while the current source names that fifth address `IAddressSet upgradeSet`
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L70-L80 @ ens_v2@a971bd64).
+The harness relies only on the common nine-address order and address ABI type;
+these scenarios do not exercise `upgradeToAndCall` or `canUpgradeFrom`.
+The archived `PublicResolverSet.json` artifact names its contract
+`PermissionedAddressSet`. Its deployed source generation inherits
+`EnhancedAccessControl`, `IAddressSet`, and `IContractNamer`, and advertises the
+last two plus inherited interfaces
+(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PublicResolverSet.json:L531 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/utils/PermissionedAddressSet.sol:L25-L26 @ ens_v2_sepolia_20260629@ccaeb58)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/utils/PermissionedAddressSet.sol:L53-L58 @ ens_v2_sepolia_20260629@ccaeb58).
+The current source generation instead implements `IPermissionedAddressSet` plus
+`IContractNamer`; `IPermissionedAddressSet` extends `IEnhancedAccessControl` and
+`IAddressSet`
+(upstream: .refs/ens_v2/contracts/src/utils/PermissionedAddressSet.sol:L21 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/utils/PermissionedAddressSet.sol:L34 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/utils/interfaces/IPermissionedAddressSet.sol:L21 @ ens_v2@a971bd64).
+The harness uses only the address-set and contract-namer dependencies shared by
+both generations.
+
+Every ENSv2 contract above is deployed from the top-level `bytecode` read by
+`load_ens_v2_artifact` from
+`.refs/ens_v2/contracts/deployments/sepolia-20260629-r1/<Artifact>.json`; the
+harness appends ABI-encoded constructor arguments before sending the Anvil
+deployment transaction. It does not run a Solidity build or copy an artifact
+into this repository. `ENSV1Resolver` receives a zero gateway-provider address,
+and the locked path receives a zero replacement public-resolver address. These
+scenarios therefore make no ENSv1 CCIP-read functionality claim.
+
+The fixture generates one composite Sepolia
+[deployment profile](../../docs/glossary.md#deployment-profile) containing the
+four ENSv1 [source families](../../docs/glossary.md#source-family) except
+reverse, the four ordinary ENSv2 source families, and `ens_v2_migration_l1`. It
+mirrors every shipped `v*.toml` into a scenario
+`TempDir`, then separately substitutes ENSv1, ENSv2, and ENSv1→ENSv2 migration
+targets and the ENSv1→ENSv2 migration family's local `NameWrapper` and
+`BaseRegistrar` correlation addresses. The ordinary Sepolia generator remains
+ENSv2-only and substitutes only roots and contracts. Checked-in `manifests/` is
+unchanged.
+Of the ENSv1→ENSv2 migration family's eight roles, `ens_v1_renewal_bridge`,
+`batch_registrar`, and `migration_helper` are deterministic, no-code
+placeholders with start block zero and are inert in this fixture; the other five
+roles are locally deployed ENSv1→ENSv2 migration contracts.
+
+Both paths first register and wrap an ENSv1 `.eth` parent, read its live
+registrar expiry, and reserve the same label in the ENSv2 `.eth` registry with
+zero owner, zero roles, zero subregistry, and zero resolver. Transfer data is
+the ordered `LibMigration.Data` tuple `label`, `owner`, `subregistry`, and
+`resolver` (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L20-L31 @ ens_v2@a971bd64).
+For the unlocked path, the child exists before wrapping; the parent retains an
+unset `CANNOT_UNWRAP` bit, transfers to the unlocked controller, and is then
+followed by an explicit `Graveyard.clear` for the child. The controller rejects
+locked tokens
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L139-L140 @ ens_v2@a971bd64).
+For an accepted token it clears the resolver, unwraps to Graveyard, and claims
+the reservation
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L165 @ ens_v2@a971bd64).
+`Graveyard.clear` processes the supplied names, and its `OWNED` descendant
+branch assigns the child to Graveyard with a zero resolver
+(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L98-L102 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L170-L172 @ ens_v2@a971bd64).
+
+For the locked path, the parent first burns `CANNOT_UNWRAP`; two wrapped
+children remain live and ENSv1-owned, but only `bridged` burns
+`PARENT_CANNOT_CONTROL`. The ENSv1 wrapper permits that parent-controlled fuse
+only after the parent has burned `CANNOT_UNWRAP`
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L963-L975 @ ens_v1@91c966f).
+The locked controller transfer moves the parent token to Graveyard, deploys and
+initializes a `WrapperRegistry` proxy through `VerifiableFactory`, and registers
+the parent with that proxy as subregistry
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L129-L188 @ ens_v2@a971bd64).
+An unmigrated child is reachable through that registry only when it has no
+successor registration, has `PARENT_CANNOT_CONTROL` set and `IS_DOT_ETH` clear,
+and retains a nonzero ENSv1 registry owner
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L84-L89 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18-L19 @ ens_v1@91c966f).
+
+The exact scenarios are:
+
+- `registry_migration::connected_ens_v1_v2_migration_paths_emit_expected_facts`,
+  which independently proves both activated `MigrationApplied` paths and their
+  [successor bindings](../../docs/glossary.md#migration-authority-transition);
+- `cross_protocol::unlocked_parent_hides_retained_ens_v1_children`, which proves
+  the retained nonzero-owner ENSv1 child is unreachable after unlocked parent
+  ENSv1→ENSv2 migration; and
+- `cross_protocol::locked_parent_publishes_only_migratable_ens_v1_children`,
+  which proves only the fuse-eligible retained ENSv1 child is reachable.
+
+The two `cross_protocol` scenarios depend on the Project behavior merged in
+#821; the `registry_migration` scenario proves the deployment and interpreted
+facts independently. The fixture records the Anvil block, transaction, receipt,
+and log snapshot as raw facts, then runs the real Interpret and Project phases;
+it does not exercise provider selection or RPC log acquisition in Ingest.
+Serving assertions call the route-shaped `ProjectionReader`: exact-name paths
+read `name_current`, children paths read `children_current`, and a missing exact
+projection returns `404`. This is the established projection-serving seam; it
+does not exercise network transport or API-process startup.
+The unlocked scenario discriminates on the child's logical name identifier in
+the children response. It makes no exact-name-route assertion because this
+registry-created child remains in
+[non-name form](../../docs/glossary.md#non-name-form) in the fixture, so that
+route is already absent before ENSv1→ENSv2 migration.
+
+`forge` must be on `PATH` before the 64 Foundry-dependent semantic scenarios are
+described as runnable; the other 3 semantic scenarios are retired and ignored.
+Together with the two pre-surface resolver scenarios, these three connected
+scenarios produce a counted inventory of 92 tests: 89 runnable and 3 ignored,
+split as 44 runnable plus 2 ignored on shard 1 and 45 runnable plus 1 ignored on
+shard 2. This coverage changes no production rollout,
+deployment file, Docker configuration, environment file, checked-in manifest,
+or interpreter source.
 
 The executor-only verified-resolution scenario was deleted with the legacy
 execution plane. Public lookup behavior remains covered by API crate tests; no
@@ -125,45 +258,47 @@ scripts/test-db -- bash -euo pipefail -c '
 
 Sort durations descending, seed shard 1 with
 `scenarios::cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage`
-and shard 2 with the second-longest scenario by measured duration, then assign each remaining name
-to the lower predicted load subject to the required final capacities. The
-current runnable split is 42 on shard 1 and 42 on shard 2. Break equal-duration
-or equal-load ties by full test name, keep at most five of the measured top ten
-on either shard, and keep two ignored tests on shard 1 and one on shard 2.
+and shard 2 with the second-longest scenario by measured duration. Assign names
+to the lower predicted load subject to the required final capacities, except
+for an explicitly documented scenario-family grouping. The current inventory
+uses one such grouping: the standalone connected ENSv1→ENSv2 migration facts
+scenario is on shard 1 and both connected `cross_protocol` reachability
+scenarios are on shard 2. The current runnable split is 44 on shard 1 and 45 on
+shard 2. Break
+equal-duration or equal-load ties by full test name, keep at most five of the
+measured top ten on either shard, and keep two ignored tests on shard 1 and one
+on shard 2.
 Update the lists, expected ignored-name set, counts, and predicted totals
 together in the block at the top of `run-gate`, then run its default, shard 1,
 and shard 2 modes. The explicit root-workspace build above removes a one-time
 canonical `phase-runner` compile from the first measured scenario while leaving
 scenario-specific generated builds in the timing sample.
 
-PR #612 adds four runnable scenarios, changing the inventory from 79/3 to
-83/3. Whichever PR merges second must perform this refresh; the set-equality
-gate deliberately fails closed if the inventory changes first.
-
 ## Coverage ledger
 
-The semantic inventory contains 62 scenario tests:
+The semantic inventory contains 67 scenario tests:
 
-- 59 retargeted and runnable;
+- 64 retargeted and runnable;
 - 3 explicitly retired with one-line reasons.
 
-The 59 runnable scenarios include the #154 known-defect reproduction described
+The 64 runnable scenarios include the #154 known-defect reproduction described
 above; it is kept runnable so the provider path and explicit repair remain
 observable rather than being hidden as an ignored test.
 
-The crate contains 87 total tests when 25 harness/support checks are included.
-The pre-retarget crate contained 88; the net change is -1: obsolete
+The crate contains 92 total tests when 25 harness/support checks are included.
+The pre-retarget crate contained 88; the net change is +4: obsolete
 Cargo-artifact tests for the old indexer, worker, v1 API, and execution plane
 were removed, while deployment-profile binary lifecycle and normalized-event
-parity-completeness regression tests and the archived-artifact path check were
-added. The pure in-memory
+parity-completeness regression tests, the archived-artifact path check, the
+three connected ENSv1→ENSv2 migration scenarios, and the two pre-surface
+resolver scenarios were added. The pure in-memory
 `catchup_equivalence::primary_route_normalization_preserves_contract_instance_identity`
 normalization oracle is counted as support rather than as a contract-backed
 semantic scenario. The final worker-coordination stub, verified-resolution
 scenario, and stale observed-code-hash admission scenario were removed
 explicitly with issue #314.
 
-### Retargeted and runnable (59)
+### Retargeted and runnable (64)
 
 - Basenames:
   `basenames::basenames_declared_state_matrix_end_to_end`;
@@ -177,7 +312,9 @@ explicitly with issue #314.
   `catchup_equivalence::upfront_facts_match_rpc_ingest_outputs`;
   `catchup_equivalence::upfront_facts_match_rpc_ingest_wrapper_reverse_outputs`;
   `cross_protocol::base_reorg_leaves_ethereum_canonicality_untouched`;
-  `cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage`.
+  `cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage`;
+  `cross_protocol::locked_parent_publishes_only_migratable_ens_v1_children`;
+  `cross_protocol::unlocked_parent_hides_retained_ens_v1_children`.
 - ENSv2:
   `ens_v2_lifecycle::expiry_passes_then_reregistration_advances_lineage`;
   `ens_v2_lifecycle::renewal_preserves_promoted_coverage_and_registry_edges_follow`;
@@ -197,6 +334,8 @@ explicitly with issue #314.
   `perturbations::rich_chain_projection_and_normalized_event_replay_are_route_stable`;
   `perturbations::rich_chain_rpc_ingest_normalized_events_match_upfront_facts`;
   `perturbations::rich_chain_successive_fixture_replays_match_single_pass`;
+  `pre_surface_resolver::owned_pre_surface_resolver_records_serve_after_late_renewal_without_reselection`;
+  `pre_surface_resolver::ownerless_pre_surface_resolver_records_serve_after_late_renewal_without_reselection`;
   `provider_faults::silently_short_logs_are_accepted_until_explicit_refetch_matches_control`;
   `provider_faults::transient_provider_faults_and_partial_receipts_recover_to_control`.
 - Registrations and record families:
@@ -204,11 +343,12 @@ explicitly with issue #314.
   `record_families::remaining_record_families_derive_normalized_but_stay_unenumerated`;
   `register_eth_name::register_eth_name_end_to_end`;
   `registration_burst::registration_with_records_reverse_and_referrer_derives_single_burst`.
-- Registry and migration:
+- Registry and ENSv1→ENSv2 migration:
   `registry_driven_reads::deep_registry_hierarchy_lists_direct_children_only`;
   `registry_driven_reads::registry_driven_reads`;
   `registry_driven_reads::same_label_under_two_parents_keeps_children_distinct`;
   `registry_driven_reads::zero_owner_subname_leaves_default_children_listing`;
+  `registry_migration::connected_ens_v1_v2_migration_paths_emit_expected_facts`;
   `registry_migration::registry_migration_legacy_to_current_semantics`;
   `registry_preimages::label_preimage_revealed_later_upgrades_child_listing`.
 - Resolver and reverse claims:
@@ -244,15 +384,15 @@ explicitly with issue #314.
 
 | Measure | Historical baseline | Retargeted suite | Delta |
 | --- | ---: | ---: | ---: |
-| Total crate tests | 88 | 87 | -1 |
-| Semantic scenario inventory | 62 at the retarget base, including one pure helper | 62 | -1 reclassified, -3 deleted, +4 added |
-| Runnable passed-count gate | 65 in the historical Anvil gate | 84 | +19 |
-| Anvil-backed semantic inventory | 65 historical gate reference | 62 | -3 |
-| Runnable Anvil-backed semantic scenarios | 65 historical gate reference | 59 | -6 |
+| Total crate tests | 88 | 92 | +4 |
+| Semantic scenario inventory | 62 at the retarget base, including one pure helper | 67 | -1 reclassified, -3 deleted, +9 added |
+| Runnable passed-count gate | 65 in the historical Anvil gate | 89 | +24 |
+| Anvil-backed semantic inventory | 65 historical gate reference | 67 | +2 |
+| Runnable Anvil-backed semantic scenarios | 65 historical gate reference | 64 | -1 |
 
-The two 65 comparisons are reported because that is the historical gate
-reference, but the current passed-count denominator is explicit: 59 runnable
-Anvil scenarios and 25 harness/support checks produce 84 passes. Three semantic
+The 65 comparisons are reported because that is the historical gate reference,
+but the current passed-count denominator is explicit: 64 runnable Anvil
+scenarios and 25 harness/support checks produce 89 passes. Three semantic
 scenarios are explicitly ignored with their retired behavior recorded above.
 
 ## Diagnostics

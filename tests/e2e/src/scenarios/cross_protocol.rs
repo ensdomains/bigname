@@ -1,11 +1,11 @@
 use alloy_primitives::{Address, keccak256};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::support::{self, TempDir};
 use crate::harness::{
-    anvil::Anvil, basenames, db::HarnessDb, ens_v1, manifests, pipeline, repo_root,
-    responses::pointer,
+    anvil::Anvil, basenames, db::HarnessDb, ens_v1, ens_v2_migration, manifests, pipeline,
+    repo_root, responses::pointer,
 };
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
@@ -58,6 +58,207 @@ fn strip_corpus_minted(value: &mut Value) {
 async fn body(run: &support::PipelineRun, path: &str) -> Result<(u16, Value)> {
     let (status, body) = run.api.get_json(path).await?;
     Ok((status.as_u16(), body))
+}
+
+async fn parent_migration_path(run: &support::PipelineRun, parent: &str) -> Result<String> {
+    let logical_name_id = format!("ens:{:#x}", ens_v1::namehash(parent));
+    let rows: Vec<(String, String, String, bool)> = sqlx::query_as(
+        "SELECT after_state->>'migration_path', consumer_visibility, \
+                after_state->>'consumer_visibility', \
+                (after_state->>'candidate_authority_transition')::boolean \
+         FROM normalized_events \
+         WHERE source_family = 'ens_v2_migration_l1' \
+           AND event_kind = 'MigrationApplied' \
+           AND canonicality_state = 'canonical' \
+           AND logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .fetch_all(&run.db.pool)
+    .await?;
+    assert_eq!(
+        rows.len(),
+        1,
+        "expected one activated parent migration for {parent}"
+    );
+    assert_eq!(rows[0].1, "activated");
+    assert_eq!(rows[0].2, "activated");
+    assert!(!rows[0].3);
+    Ok(rows[0].0.clone())
+}
+
+#[tokio::test]
+async fn unlocked_parent_hides_retained_ens_v1_children() -> Result<()> {
+    let harness = support::deploy_connected_migration_harness().await?;
+    let path = support::create_unlocked_migration_path(&harness).await?;
+    assert_eq!(
+        path.child_owner_after_clear,
+        harness.migration.graveyard.address
+    );
+    assert_ne!(path.child_owner_after_clear, Address::ZERO);
+
+    let run = support::ingest_ens_v1_v2_migration_sepolia_and_serve(
+        &harness.anvil,
+        &harness.ens_v1,
+        &harness.ens_v2,
+        &harness.migration,
+        None,
+    )
+    .await?;
+    assert_eq!(
+        parent_migration_path(&run, "unlock-migration.eth").await?,
+        "unlocked_wrapped"
+    );
+    let child_owner_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events \
+         WHERE source_family = 'ens_v1_registry_l1' \
+           AND event_kind = 'SubregistryChanged' \
+           AND canonicality_state = 'canonical' \
+           AND consumer_visibility = 'activated' \
+           AND after_state->>'source_event' = 'NewOwner' \
+           AND after_state->>'child_node' = $1 \
+           AND lower(after_state->>'owner') = $2",
+    )
+    .bind(format!(
+        "{:#x}",
+        ens_v1::namehash("child.unlock-migration.eth")
+    ))
+    .bind(format!("{:#x}", path.child_owner_before_migration))
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(
+        child_owner_events, 1,
+        "the pre-migration ENSv1 child owner fact was not interpreted"
+    );
+    let (children_status, children_body) =
+        body(&run, "/v1/names/ens/unlock-migration.eth/children").await?;
+    assert_eq!(
+        children_status, 200,
+        "children route failed: {children_body}"
+    );
+    let children = children_body
+        .pointer("/data")
+        .and_then(Value::as_array)
+        .context("children response lacks data array")?;
+    assert!(
+        children.iter().all(|child| {
+            child["normalized_name"] != "child.unlock-migration.eth"
+                && child["logical_name_id"]
+                    != format!("ens:{:#x}", ens_v1::namehash("child.unlock-migration.eth"))
+        }),
+        "unlocked migration retained the ENSv1 child: {children_body}"
+    );
+    println!(
+        "unlocked reachability: graveyard={:#x} children_status={} child_listed=false",
+        path.child_owner_after_clear, children_status
+    );
+    run.db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn locked_parent_publishes_only_migratable_ens_v1_children() -> Result<()> {
+    let harness = support::deploy_connected_migration_harness().await?;
+    let path = support::create_locked_migration_path(&harness).await?;
+    let rpc = harness.anvil.client();
+    let bridged_expiry =
+        ens_v2_migration::registry_expiry(&rpc, path.wrapper_registry, "bridged").await?;
+    let blocked_expiry =
+        ens_v2_migration::registry_expiry(&rpc, path.wrapper_registry, "blocked").await?;
+    assert_eq!(bridged_expiry, 0);
+    assert_eq!(blocked_expiry, 0);
+    assert_ne!(path.bridged_owner, Address::ZERO);
+    assert_ne!(path.blocked_owner, Address::ZERO);
+    assert_ne!(path.bridged.fuses & ens_v1::PARENT_CANNOT_CONTROL, 0);
+    assert_eq!(path.blocked.fuses & ens_v1::PARENT_CANNOT_CONTROL, 0);
+    assert_eq!(path.bridged.fuses & ens_v1::IS_DOT_ETH, 0);
+    assert_eq!(path.blocked.fuses & ens_v1::IS_DOT_ETH, 0);
+
+    let run = support::ingest_ens_v1_v2_migration_sepolia_and_serve(
+        &harness.anvil,
+        &harness.ens_v1,
+        &harness.ens_v2,
+        &harness.migration,
+        None,
+    )
+    .await?;
+    assert_eq!(
+        parent_migration_path(&run, "locked-migration.eth").await?,
+        "locked_wrapped"
+    );
+    let bridged_logical_name_id = format!(
+        "ens:{:#x}",
+        ens_v1::namehash("bridged.locked-migration.eth")
+    );
+    let blocked_node = format!("{:#x}", ens_v1::namehash("blocked.locked-migration.eth"));
+    let blocked_logical_name_id = format!("ens:{blocked_node}");
+    let (blocked_registry_input, blocked_wrapper_input): (bool, bool) = sqlx::query_as(
+        "SELECT \
+           EXISTS (SELECT 1 FROM normalized_events \
+             WHERE source_family = 'ens_v1_registry_l1' \
+               AND event_kind = 'SubregistryChanged' \
+               AND canonicality_state = 'canonical' \
+               AND consumer_visibility = 'activated' \
+               AND after_state->>'source_event' = 'NewOwner' \
+               AND after_state->>'child_node' = $1), \
+           EXISTS (SELECT 1 FROM normalized_events \
+             WHERE source_family = 'ens_v1_wrapper_l1' \
+               AND event_kind = 'PermissionScopeChanged' \
+               AND canonicality_state = 'canonical' \
+               AND consumer_visibility = 'activated' \
+               AND logical_name_id = $2 \
+               AND after_state->>'source_event' = 'NameWrapped' \
+               AND (after_state->>'fuses')::BIGINT = 0)",
+    )
+    .bind(&blocked_node)
+    .bind(&blocked_logical_name_id)
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert!(
+        blocked_registry_input && blocked_wrapper_input,
+        "blocked child inputs did not reach normalized events"
+    );
+    let (status, children_body) = body(&run, "/v1/names/ens/locked-migration.eth/children").await?;
+    assert_eq!(status, 200, "children route failed: {children_body}");
+    let children = children_body
+        .pointer("/data")
+        .and_then(Value::as_array)
+        .context("children response lacks data array")?;
+    let tested = children
+        .iter()
+        .filter(|child| {
+            child["logical_name_id"] == bridged_logical_name_id
+                || child["logical_name_id"] == blocked_logical_name_id
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tested.len(),
+        1,
+        "expected exactly one tested child: {children_body}"
+    );
+    let bridged = tested[0];
+    assert_eq!(bridged["normalized_name"], "bridged.locked-migration.eth");
+    let manifest_versions = bridged
+        .pointer("/provenance/manifest_versions")
+        .and_then(Value::as_array)
+        .context("bridged child lacks provenance manifest versions")?;
+    assert!(
+        manifest_versions
+            .iter()
+            .any(|version| version["source_family"] == "ens_v1_registry_l1"),
+        "bridged child lost ENSv1 provenance: {bridged}"
+    );
+    assert!(
+        children
+            .iter()
+            .all(|child| child["logical_name_id"] != blocked_logical_name_id),
+        "blocked child was published: {children_body}"
+    );
+    println!(
+        "locked reachability: proxy={:#x} bridged_expiry={} blocked_expiry={} children_status={} bridged_listed=true blocked_listed=false",
+        path.wrapper_registry, bridged_expiry, blocked_expiry, status
+    );
+    run.db.cleanup().await?;
+    Ok(())
 }
 
 fn collect_diffs(lhs: &Value, rhs: &Value, path: &str, out: &mut Vec<String>) {

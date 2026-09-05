@@ -3,17 +3,17 @@ set -uo pipefail
 
 # Keep the inventory counts and assignments together. Test-list changes should
 # require edits only in this block; the checks below reject every other drift.
-expected_total=89
-expected_runnable=86
+expected_total=92
+expected_runnable=89
 expected_ignored=3
-expected_shard_1_runnable=43
+expected_shard_1_runnable=44
 expected_shard_1_ignored=2
-expected_shard_1_filtered=44
-expected_shard_1_predicted_seconds=1116.629
-expected_shard_2_runnable=43
+expected_shard_1_filtered=46
+expected_shard_1_predicted_seconds=1185.199
+expected_shard_2_runnable=45
 expected_shard_2_ignored=1
-expected_shard_2_filtered=45
-expected_shard_2_predicted_seconds=1135.832
+expected_shard_2_filtered=46
+expected_shard_2_predicted_seconds=1373.503
 
 expected_ignored_tests=(
     "scenarios::provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback"
@@ -51,6 +51,7 @@ shard_1_tests=(
     "scenarios::record_families::pubkey_write_on_admitted_resolver_stays_raw_only"
     "scenarios::registry_driven_reads::zero_owner_subname_leaves_default_children_listing"
     "scenarios::registry_migration::registry_migration_legacy_to_current_semantics"
+    "scenarios::registry_migration::connected_ens_v1_v2_migration_paths_emit_expected_facts"
     "scenarios::resolver_authorization::operator_delegate_writes_match_owner_authorship"
     "scenarios::resolver_records::pre_surface_newowner_record_serves_after_late_surface"
     "scenarios::resolver_records::pre_surface_record_history_follows_current_resolver_and_version_boundary"
@@ -90,6 +91,8 @@ shard_2_tests=(
     "scenarios::catchup_equivalence::upfront_facts_match_rpc_ingest_outputs"
     "scenarios::catchup_equivalence::upfront_facts_match_rpc_ingest_wrapper_reverse_outputs"
     "scenarios::cross_protocol::base_reorg_leaves_ethereum_canonicality_untouched"
+    "scenarios::cross_protocol::locked_parent_publishes_only_migratable_ens_v1_children"
+    "scenarios::cross_protocol::unlocked_parent_hides_retained_ens_v1_children"
     "scenarios::ens_v2_lifecycle::expiry_passes_then_reregistration_advances_lineage"
     "scenarios::ens_v2_lifecycle::reserved_labels_foreign_registrar_and_token_sale"
     "scenarios::ens_v2_lifecycle::resolver_and_subregistry_edges_follow_set_change_zero"
