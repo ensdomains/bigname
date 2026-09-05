@@ -98,6 +98,7 @@ async fn assert_operator(
         Some(&operator_hex),
         Some(resource),
         None,
+        None,
         10,
     )
     .await?;
