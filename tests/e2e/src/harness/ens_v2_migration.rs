@@ -221,7 +221,7 @@ fn placeholder(label: &str) -> Address {
 }
 
 /// ABI encode the exact `LibMigration.Data` tuple.
-/// (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L20-L29 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L20-L31 @ ens_v2@a971bd64)
 pub fn migration_data(label: &str, owner: Address) -> Bytes {
     Bytes::from(
         calls::MigrationData {
