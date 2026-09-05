@@ -7,6 +7,7 @@ use super::support;
 use crate::harness::{anvil::Anvil, artifacts::Deployed, ens_v1, repo_root};
 
 const NAME: &str = "operatorlife.eth";
+const API: &str = "bigname-api";
 const YEAR: u64 = 365 * 24 * 60 * 60;
 
 struct RealApi {
@@ -17,17 +18,21 @@ struct RealApi {
 impl RealApi {
     async fn start(run: &support::PipelineRun, anvil: &Anvil) -> Result<Self> {
         let root = repo_root();
-        ensure!(
-            std::process::Command::new("cargo")
-                .current_dir(&root)
-                .args(["build", "--locked", "-p", "bigname-api"])
-                .status()?
-                .success()
-        );
+        let output = std::process::Command::new("cargo")
+            .current_dir(&root)
+            .args(["build", "--locked", "--message-format=json", "-p", API])
+            .output()?;
+        ensure!(output.status.success(), "bigname-api build failed");
+        let executable = serde_json::Deserializer::from_slice(&output.stdout)
+            .into_iter::<Value>()
+            .filter_map(Result::ok)
+            .find(|message| message["target"]["name"] == API)
+            .and_then(|message| message["executable"].as_str().map(std::path::PathBuf::from))
+            .context("Cargo did not report the bigname-api executable")?;
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
         drop(listener);
-        let mut command = tokio::process::Command::new(root.join("target/debug/bigname-api"));
+        let mut command = tokio::process::Command::new(executable);
         command
             .args([
                 "serve",

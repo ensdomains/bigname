@@ -479,7 +479,7 @@ async fn v2_permissions_operator_lineage_uses_approval_grant() -> Result<()> {
         "/v2/permissions?address={V2_PERMISSIONS_SUBJECT}&include=lineage"
     )).await?;
     let row = operator_row(&payload).expect("operator row");
-    assert_eq!(row["lineage"]["grant"]["kind"], json!("event"));
+    assert_eq!(row["lineage"]["grant"], json!({"kind":"event"}));
     assert!(row["lineage"].get("registry_binding").is_none());
     database.cleanup().await
 }
