@@ -393,6 +393,17 @@ summary is an authoritative permission enumeration. API contract tests inject
 an independently proven full summary to verify that resource-bound public
 requests are not globally forced to partial.
 
+When a registrar `Transfer` changes ENSv1 or Basenames authority between a
+registrar resource and a registry-only resource, `resource_control` and
+`resolver_control` for any selected nonzero resolver are revoked on the retiring
+registry-only resource or granted to its owner when it becomes active. An unchanged
+authority emits no additional registry-only balancing rows; ordinary token-holder permission rows remain unchanged.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L86-L95 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/Registry.sol:L46-L52 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/Registry.sol:L132-L134 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L321-L329 @ basenames@1809bbc)
+
 For ENSv1 wrapper-backed resources, fuse state alone does not manufacture a
 holder grant. A separately observed compatible holder grant is masked by the
 current lifecycle and [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word)
