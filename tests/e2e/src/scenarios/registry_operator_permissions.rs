@@ -8,7 +8,6 @@ use crate::harness::{anvil::Anvil, artifacts::Deployed, ens_v1, repo_root};
 
 const NAME: &str = "operatorlife.eth";
 const API: &str = "bigname-api";
-const YEAR: u64 = 365 * 24 * 60 * 60;
 
 struct RealApi {
     _child: tokio::process::Child,
@@ -101,14 +100,11 @@ async fn assert_operator(
         10,
     )
     .await?;
-    assert_eq!(
-        storage
-            .rows
-            .iter()
-            .any(|row| row.grant_relation
-                == Some(bigname_storage::PermissionGrantRelation::Operator)),
-        expected
-    );
+    let found = storage
+        .rows
+        .iter()
+        .any(|row| row.grant_relation == Some(bigname_storage::PermissionGrantRelation::Operator));
+    assert_eq!(found, expected);
 
     for uri in [
         format!("/v2/permissions?address={operator_hex}"),
@@ -157,7 +153,7 @@ async fn registry_operator_approval_serving_lifecycle() -> Result<()> {
         &deployment,
         "operatorlife",
         owner,
-        YEAR,
+        365 * 24 * 60 * 60,
         deployment.public_resolver.address,
     )
     .await?;
@@ -192,16 +188,14 @@ async fn registry_operator_approval_serving_lifecycle() -> Result<()> {
         &next,
         "operatorlife",
         owner,
-        YEAR,
+        365 * 24 * 60 * 60,
         next.public_resolver.address,
     )
     .await?;
     let move_run = support::ingest_and_serve(&anvil, &next, None).await?;
-    // Manifest reconciliation retires account state for the registry emitter
-    // demoted by the new deployment.
+    // Manifest reconciliation retires account state for the demoted registry emitter.
     let old_registry_state: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM account_permission_state_current \
-         WHERE authority_contract = $1)",
+        "SELECT EXISTS (SELECT 1 FROM account_permission_state_current WHERE authority_contract = $1)",
     )
     .bind(format!("{:#x}", deployment.registry.address))
     .fetch_one(&move_run.db.pool)

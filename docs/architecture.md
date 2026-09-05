@@ -1184,11 +1184,11 @@ restored agreement may clear the matching active row.
 
 ## Permissions
 
-Permissions are first-class projections and explain views. Track grants by scope (root, registry, resource, resolver, record manager/operator). Each grant records source, revocation source, inheritance path, transfer behavior, scope, and effective powers.
+Permissions are first-class projections and explain views. Track grants by scope (root, registry, resource, resolver, record manager/operator, or [account](glossary.md#account-permission-scope)). Each grant records source, revocation source, inheritance path, transfer behavior, scope, and effective powers.
 
 Public reads expose effective powers directly so callers do not reconstruct
 authority from raw role bitmaps. `GET /v2/permissions` is the current
-resource-anchored permission collection; name- and address-centric views
+resource- or account-anchored permission collection; name- and address-centric views
 summarize or filter the same truth.
 
 The current projection interprets admitted ENSv1 and Basenames registry
