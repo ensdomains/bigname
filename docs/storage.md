@@ -1086,7 +1086,8 @@ namespace has a readable binding to the resource, including a closed binding
 with `active_to` set. The surface and binding rows and both of their
 `chain_lineage` anchors must be canonical, safe, or finalized. A resource known
 only from observed registry state, or without a name-surface binding, has no
-namespace membership but remains visible to unscoped address and registration-audit reads.
+namespace membership but remains visible to unscoped address and [resource
+audit](glossary.md#resource-audit-context) reads.
 
 For ENSv2, a latest state-derived `RegistryPathExpired` release removes that resource's effective
 permission rows without removing its partial-coverage summary. A later

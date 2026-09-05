@@ -919,7 +919,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   surface and binding, and both chain-lineage anchors, must be canonical, safe,
   or finalized. A resource known only from observed registry state, or with no
   name-surface binding, belongs to no namespace; it remains available to an
-  unscoped address or registration-audit read.
+  unscoped address or [resource audit](glossary.md#resource-audit-context).
   Query `include=lineage`, `cursor`,
   `page_size`, and optional `finality=latest`. `at` and historical `finality`
   values are rejected by the shared latest-state collection rule.
@@ -988,7 +988,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 
 - Pagination behavior: standard collection pagination with fixed sort
   `address_registration_scope_asc` and keyset
-  `(subject, resource_id, effective_scope_storage_key)`. Direct and account
+  `(subject, resource_id, scope)`. Direct and account
   scopes share that order. The account key is
   `account:{chain_id}:{authority_kind}:{authority_contract}:{owner}`. The
   opaque cursor binds the exact normalized collection anchor: normalized
