@@ -15,6 +15,8 @@ use uuid::Uuid;
 
 const CHAIN: &str = "effective-permissions-test";
 const HASH: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const NAMESPACE_HASH: &str = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const ORPHAN_HASH: &str = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const OWNER: &str = "0x0000000000000000000000000000000000000a11";
 const SUBJECT: &str = "0x0000000000000000000000000000000000000b22";
 const REGISTRY: &str = "0x0000000000000000000000000000000000000c33";
@@ -49,14 +51,14 @@ async fn fixture() -> Result<(TestDatabase, Uuid)> {
     }
     tx.commit().await?;
     let resource = Uuid::from_u128(0x60501);
-    sqlx::query("INSERT INTO bigname_phase.chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,1,now(),'canonical')")
-        .bind(CHAIN).bind(HASH).execute(db.pool()).await?;
+    sqlx::query("INSERT INTO bigname_phase.chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,1,now(),'canonical'),($1,$3,2,now(),'canonical')")
+        .bind(CHAIN).bind(HASH).bind(NAMESPACE_HASH).execute(db.pool()).await?;
     sqlx::query("INSERT INTO bigname_phase.resources (resource_id,chain_id,block_hash,block_number,canonicality_state) VALUES ($1,$2,$3,1,'canonical')")
         .bind(resource).bind(CHAIN).bind(HASH).execute(db.pool()).await?;
-    sqlx::query("INSERT INTO bigname_phase.name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state) VALUES ('ens:fixture','ens','fixture.eth',ARRAY['fixture','eth'],'','fixture',ARRAY['fixture','eth'],'test','active',$1,$2,1,'canonical')")
-        .bind(CHAIN).bind(HASH).execute(db.pool()).await?;
-    sqlx::query("INSERT INTO bigname_phase.surface_bindings (surface_binding_id,logical_name_id,resource_id,binding_kind,authority_arm,active_from,chain_id,block_hash,block_number,canonicality_state) VALUES ('00000000-0000-0000-0000-000000000606','ens:fixture',$1,'declared_registry_path','ens_v1',now(),$2,$3,1,'canonical')")
-        .bind(resource).bind(CHAIN).bind(HASH).execute(db.pool()).await?;
+    sqlx::query("INSERT INTO bigname_phase.name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state) VALUES ('ens:fixture','ens','fixture.eth',ARRAY['fixture','eth'],'','fixture',ARRAY['fixture','eth'],'test','active',$1,$2,2,'canonical')")
+        .bind(CHAIN).bind(NAMESPACE_HASH).execute(db.pool()).await?;
+    sqlx::query("INSERT INTO bigname_phase.surface_bindings (surface_binding_id,logical_name_id,resource_id,binding_kind,authority_arm,active_from,chain_id,block_hash,block_number,canonicality_state) VALUES ('00000000-0000-0000-0000-000000000606','ens:fixture',$1,'declared_registry_path','ens_v1',now(),$2,$3,2,'canonical')")
+        .bind(resource).bind(CHAIN).bind(NAMESPACE_HASH).execute(db.pool()).await?;
     sqlx::query(
         r#"INSERT INTO bigname_phase.permissions_current_resource_summary (
         resource_id,authority_kind,registry_owner,registry_contract,
@@ -176,6 +178,43 @@ async fn effective_permissions_fail_closed_for_orphaned_account_and_binding_line
         db.cleanup().await?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn effective_permissions_namespace_filter_rejects_orphaned_identity_lineage() -> Result<()> {
+    let (db, resource) = fixture().await?;
+    assert_eq!(
+        load_effective_permissions_account_resource_page(
+            db.pool(),
+            Some(SUBJECT),
+            Some(resource),
+            Some("ens"),
+            None,
+            10,
+        )
+        .await?
+        .rows
+        .len(),
+        1
+    );
+    sqlx::query("INSERT INTO bigname_phase.chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,3,now(),'orphaned')")
+        .bind(CHAIN).bind(ORPHAN_HASH).execute(db.pool()).await?;
+    sqlx::query("WITH surface AS (UPDATE bigname_phase.name_surfaces SET block_hash=$1,block_number=3 WHERE logical_name_id='ens:fixture') UPDATE bigname_phase.surface_bindings SET block_hash=$1,block_number=3 WHERE logical_name_id='ens:fixture'")
+        .bind(ORPHAN_HASH).execute(db.pool()).await?;
+    assert!(
+        load_effective_permissions_account_resource_page(
+            db.pool(),
+            Some(SUBJECT),
+            Some(resource),
+            Some("ens"),
+            None,
+            10,
+        )
+        .await?
+        .rows
+        .is_empty()
+    );
+    db.cleanup().await
 }
 
 #[tokio::test]
