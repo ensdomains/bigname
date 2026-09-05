@@ -184,6 +184,36 @@ async fn locked_parent_publishes_only_migratable_ens_v1_children() -> Result<()>
         parent_migration_path(&run, "locked-migration.eth").await?,
         "locked_wrapped"
     );
+    let bridged_logical_name_id = format!(
+        "ens:{:#x}",
+        ens_v1::namehash("bridged.locked-migration.eth")
+    );
+    let blocked_node = format!("{:#x}", ens_v1::namehash("blocked.locked-migration.eth"));
+    let blocked_logical_name_id = format!("ens:{blocked_node}");
+    let (blocked_registry_input, blocked_wrapper_input): (bool, bool) = sqlx::query_as(
+        "SELECT \
+           EXISTS (SELECT 1 FROM normalized_events \
+             WHERE source_family = 'ens_v1_registry_l1' \
+               AND event_kind = 'SubregistryChanged' \
+               AND canonicality_state = 'canonical' \
+               AND after_state->>'source_event' = 'NewOwner' \
+               AND after_state->>'child_node' = $1), \
+           EXISTS (SELECT 1 FROM normalized_events \
+             WHERE source_family = 'ens_v1_wrapper_l1' \
+               AND event_kind = 'PermissionScopeChanged' \
+               AND canonicality_state = 'canonical' \
+               AND logical_name_id = $2 \
+               AND after_state->>'source_event' = 'NameWrapped' \
+               AND (after_state->>'fuses')::BIGINT = 0)",
+    )
+    .bind(&blocked_node)
+    .bind(&blocked_logical_name_id)
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert!(
+        blocked_registry_input && blocked_wrapper_input,
+        "blocked child inputs did not reach normalized events"
+    );
     let (status, children_body) = body(&run, "/v1/names/ens/locked-migration.eth/children").await?;
     assert_eq!(status, 200, "children route failed: {children_body}");
     let children = children_body
@@ -193,10 +223,8 @@ async fn locked_parent_publishes_only_migratable_ens_v1_children() -> Result<()>
     let tested = children
         .iter()
         .filter(|child| {
-            matches!(
-                child["normalized_name"].as_str(),
-                Some("bridged.locked-migration.eth" | "blocked.locked-migration.eth")
-            )
+            child["logical_name_id"] == bridged_logical_name_id
+                || child["logical_name_id"] == blocked_logical_name_id
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -219,7 +247,7 @@ async fn locked_parent_publishes_only_migratable_ens_v1_children() -> Result<()>
     assert!(
         children
             .iter()
-            .all(|child| child["normalized_name"] != "blocked.locked-migration.eth"),
+            .all(|child| child["logical_name_id"] != blocked_logical_name_id),
         "blocked child was published: {children_body}"
     );
     println!(
