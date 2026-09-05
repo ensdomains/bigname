@@ -206,9 +206,13 @@ Field ownership:
   binds the deployment-derived public namespace set and is rejected if that
   set changes. Relation filters that cannot be satisfied by one storage role
   (including exact `owner`, exact `registrant`, and partial relation sets such
-  as `owner,manager`) may return an as-filled page with `has_more=true` when the
-  API reaches its bounded post-filter scan cap; clients continue with the
-  returned `next_cursor`.
+  as `owner,manager`) may require multiple broad candidate batches to assemble
+  one response page. The API retains the selected [projection
+  generation](glossary.md#projection-generation) across those batches. Before
+  issuing a second or later broad batch, it revalidates that generation and
+  returns retryable `409 stale` if it changed. The API may return an as-filled
+  page with `has_more=true` when it reaches the bounded post-filter scan cap;
+  clients continue with the returned `next_cursor`.
 - Status semantics: per-result `status` uses the common result vocabulary.
   Name misses are in-band `not_found`; invalid names are in-band
   `invalid_name`. Name-only and exact-scope latest reads return retryable `409
@@ -236,14 +240,17 @@ Field ownership:
   families rather than presenting either binding as current.
 - Snapshot behavior: lookup selects the current schema-v2 phase head and reads
   `bigname_phase` name, inventory, and address-name projections published for
-  one completed projection-phase generation. Public reverse lookup with no
-  explicit namespace derives its snapshot scope from the namespaces served by
-  the deployment, excluding a namespace while its selected authority chain has
-  Interpret `redo_in_progress=true`, regardless of redo mode. A running
-  Interpret redo rewrites previously served identity history batch by batch, so
-  a page read during the redo can be incomplete even while Project still
-  reports its prior completed head. Because projection publication is
-  incremental, an unchanged
+  one completed projection-phase generation. For each reverse result, the
+  readable name fetched with the candidate row is the common source for the
+  emitted normalized and display names, label-derived fields, primary-name
+  ordering, the `is_primary` result, and the reverse cursor. Public reverse
+  lookup with no explicit namespace derives its snapshot scope from the
+  namespaces served by the deployment, excluding a namespace
+  while its selected authority chain has Interpret `redo_in_progress=true`,
+  regardless of redo mode. A running Interpret redo rewrites previously served
+  identity history batch by batch, so a page read during the redo can be
+  incomplete even while Project still reports its prior completed head. Because
+  projection publication is incremental, an unchanged
   row target may precede the selected head; it may not be ahead, and a
   same-height target must match the selected hash. Lookup revalidates both
   `chain_heads` and that generation after the read. Before that check, public
