@@ -374,11 +374,13 @@ fn domain_entity_filter_to_storage(
     filter: Option<DomainEntityFilter>,
 ) -> Result<(NameCurrentListFilter, GeneratedDomainFilter)> {
     let filter = filter.unwrap_or_default();
+    let owner = filter.owner.clone();
+    let owner_in = filter.owner_in.clone();
     let storage_filter = NameCurrentListFilter {
         namespace: Some(NAMESPACE.to_owned()),
         address: generated_address_membership(
-            filter.owner,
-            filter.owner_in,
+            owner.clone(),
+            owner_in.clone(),
             AddressNameRelation::EffectiveController,
         ),
         ..Default::default()
@@ -469,6 +471,89 @@ fn domain_entity_filter_to_storage(
             not_ends_with_nocase: required_filter_value(
                 filter.name_not_ends_with_nocase,
                 "name_not_ends_with_nocase",
+                std::convert::identity,
+            )?,
+        },
+        owner: StringFilter {
+            eq: owner.map(|value| Some(value.to_lowercase())),
+            not: required_filter_value(filter.owner_not, "owner_not", |value| {
+                value.to_lowercase()
+            })?
+            .map(Some),
+            gt: required_filter_value(filter.owner_gt, "owner_gt", std::convert::identity)?,
+            gte: required_filter_value(filter.owner_gte, "owner_gte", std::convert::identity)?,
+            lt: required_filter_value(filter.owner_lt, "owner_lt", std::convert::identity)?,
+            lte: required_filter_value(filter.owner_lte, "owner_lte", std::convert::identity)?,
+            in_values: owner_in.map(|values| {
+                values
+                    .into_iter()
+                    .map(|value| value.to_lowercase())
+                    .collect()
+            }),
+            not_in_values: required_filter_value(filter.owner_not_in, "owner_not_in", |values| {
+                values
+                    .into_iter()
+                    .map(|value| value.to_lowercase())
+                    .collect()
+            })?,
+            contains: required_filter_value(
+                filter.owner_contains,
+                "owner_contains",
+                std::convert::identity,
+            )?,
+            contains_nocase: required_filter_value(
+                filter.owner_contains_nocase,
+                "owner_contains_nocase",
+                std::convert::identity,
+            )?,
+            not_contains: required_filter_value(
+                filter.owner_not_contains,
+                "owner_not_contains",
+                std::convert::identity,
+            )?,
+            not_contains_nocase: required_filter_value(
+                filter.owner_not_contains_nocase,
+                "owner_not_contains_nocase",
+                std::convert::identity,
+            )?,
+            starts_with: required_filter_value(
+                filter.owner_starts_with,
+                "owner_starts_with",
+                std::convert::identity,
+            )?,
+            starts_with_nocase: required_filter_value(
+                filter.owner_starts_with_nocase,
+                "owner_starts_with_nocase",
+                std::convert::identity,
+            )?,
+            not_starts_with: required_filter_value(
+                filter.owner_not_starts_with,
+                "owner_not_starts_with",
+                std::convert::identity,
+            )?,
+            not_starts_with_nocase: required_filter_value(
+                filter.owner_not_starts_with_nocase,
+                "owner_not_starts_with_nocase",
+                std::convert::identity,
+            )?,
+            ends_with: required_filter_value(
+                filter.owner_ends_with,
+                "owner_ends_with",
+                std::convert::identity,
+            )?,
+            ends_with_nocase: required_filter_value(
+                filter.owner_ends_with_nocase,
+                "owner_ends_with_nocase",
+                std::convert::identity,
+            )?,
+            not_ends_with: required_filter_value(
+                filter.owner_not_ends_with,
+                "owner_not_ends_with",
+                std::convert::identity,
+            )?,
+            not_ends_with_nocase: required_filter_value(
+                filter.owner_not_ends_with_nocase,
+                "owner_not_ends_with_nocase",
                 std::convert::identity,
             )?,
         },

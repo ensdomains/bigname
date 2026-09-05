@@ -30,6 +30,26 @@ fn plan_domain_filter(member: &str, value: &str) -> crate::graphql::GeneratedDom
         "name_ends_with_nocase" => filter.name.ends_with_nocase = Some(value.into()),
         "name_not_ends_with" => filter.name.not_ends_with = Some(value.into()),
         "name_not_ends_with_nocase" => filter.name.not_ends_with_nocase = Some(value.into()),
+        "owner" => filter.owner.eq = Some(Some(value.to_lowercase())),
+        "owner_not" => filter.owner.not = Some(Some(value.to_lowercase())),
+        "owner_gt" => filter.owner.gt = Some(value.into()),
+        "owner_gte" => filter.owner.gte = Some(value.into()),
+        "owner_lt" => filter.owner.lt = Some(value.into()),
+        "owner_lte" => filter.owner.lte = Some(value.into()),
+        "owner_in" => filter.owner.in_values = list(),
+        "owner_not_in" => filter.owner.not_in_values = list(),
+        "owner_contains" => filter.owner.contains = Some(value.into()),
+        "owner_contains_nocase" => filter.owner.contains_nocase = Some(value.into()),
+        "owner_not_contains" => filter.owner.not_contains = Some(value.into()),
+        "owner_not_contains_nocase" => filter.owner.not_contains_nocase = Some(value.into()),
+        "owner_starts_with" => filter.owner.starts_with = Some(value.into()),
+        "owner_starts_with_nocase" => filter.owner.starts_with_nocase = Some(value.into()),
+        "owner_not_starts_with" => filter.owner.not_starts_with = Some(value.into()),
+        "owner_not_starts_with_nocase" => filter.owner.not_starts_with_nocase = Some(value.into()),
+        "owner_ends_with" => filter.owner.ends_with = Some(value.into()),
+        "owner_ends_with_nocase" => filter.owner.ends_with_nocase = Some(value.into()),
+        "owner_not_ends_with" => filter.owner.not_ends_with = Some(value.into()),
+        "owner_not_ends_with_nocase" => filter.owner.not_ends_with_nocase = Some(value.into()),
         _ => panic!("unknown generated Domain member {member}"),
     }
     filter
@@ -41,6 +61,46 @@ fn noncanonical_id_ranges_pin_c_collation() {
     let filter = plan_domain_filter("id_gt", "0xA");
     crate::graphql::push_generated_domain_filters(&mut sql, &filter);
     assert!(sql.sql().contains("(nc.namehash COLLATE \"C\") >"), "{}", sql.sql());
+}
+
+#[tokio::test]
+async fn graphql_generated_domain_owner_positive_plans_are_relation_bounded_or_linear() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    pad_generated_domain_plans(&database).await?;
+    let explain = crate::graphql::explain_phase_graphql_name_list_page(
+        &database.lookup_pool,
+        &["ethereum-mainnet".to_owned()],
+        &plan_domain_filter("owner", GRAPHQL_OWNER),
+        crate::graphql::GeneratedDomainSort::Id,
+        bigname_storage::NameCurrentListOrder::Asc,
+        200,
+        0,
+    )
+    .await?;
+    let text = serde_json::to_string(&explain)?;
+    assert!(text.contains("effective_controller"), "effective-owner relation plan: {explain}");
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_generated_domain_owner_negative_plans_are_page_bounded_anti_joins() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    pad_generated_domain_plans(&database).await?;
+    let explain = crate::graphql::explain_phase_graphql_name_list_page(
+        &database.lookup_pool,
+        &["ethereum-mainnet".to_owned()],
+        &plan_domain_filter("owner_not", GRAPHQL_OWNER),
+        crate::graphql::GeneratedDomainSort::Id,
+        bigname_storage::NameCurrentListOrder::Asc,
+        200,
+        0,
+    )
+    .await?;
+    let text = serde_json::to_string(&explain)?;
+    assert!(text.contains("Anti") || text.contains("NOT EXISTS"), "owner anti-semijoin plan: {explain}");
+    database.cleanup().await
 }
 
 async fn pad_generated_domain_plans(database: &TestDatabase) -> Result<()> {
