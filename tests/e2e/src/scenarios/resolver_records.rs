@@ -56,8 +56,7 @@ pub(super) async fn start_v2_api(
         .unwrap_or_else(|| "cargo".into());
     let status = tokio::process::Command::new(cargo)
         .current_dir(&root)
-        .args(["build", "--locked", "-p", "bigname-api"])
-        .args(["--bin", "bigname-api"])
+        .args("build --locked -p bigname-api --bin=bigname-api".split_whitespace())
         .status()
         .await?;
     ensure!(status.success(), "build real API binary for e2e");
@@ -95,21 +94,23 @@ pub(super) async fn start_v2_api(
         loop {
             let ready = matches!(
                 tokio::time::timeout_at(deadline, api.client.get(&health_url).send()).await,
-                Ok(Ok(_))
+                Ok(Ok(response)) if response.status().is_success()
             );
             ensure!(
                 tokio::time::Instant::now() < deadline,
                 "real API readiness exceeded configured {ready_timeout_secs}s at {}",
                 api.base_url
             );
-            if ready {
-                return Ok(api);
-            }
             if let Some(status) = api.child.try_wait()? {
                 last_exit = Some(status);
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            if ready {
+                return Ok(api);
+            }
+            let _ =
+                tokio::time::timeout_at(deadline, tokio::time::sleep(Duration::from_millis(100)))
+                    .await;
         }
     }
     bail!("real API exited before readiness in 5 attempts; last exit {last_exit:?}")
