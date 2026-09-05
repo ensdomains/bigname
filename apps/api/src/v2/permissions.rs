@@ -35,6 +35,7 @@ use filter::{EmptyPermissionsSelection, permissions_filter_inputs, resolve_permi
 
 const PERMISSIONS_SORT: &str = "address_registration_scope_asc";
 const NAMESPACE_FILTER_KEY: &str = "namespace";
+const NAME_FILTER_KEY: &str = "name";
 const ADDRESS_FILTER_KEY: &str = "address";
 const REGISTRATION_ID_FILTER_KEY: &str = "registration_id";
 const INCLUDE_FILTER_KEY: &str = "include";

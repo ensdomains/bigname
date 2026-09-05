@@ -25,6 +25,7 @@ impl RealApi {
         let executable = serde_json::Deserializer::from_slice(&output.stdout)
             .into_iter::<Value>()
             .filter_map(Result::ok)
+            .filter(|message| message["reason"] == "compiler-artifact")
             .find(|message| message["target"]["name"] == API)
             .and_then(|message| message["executable"].as_str().map(std::path::PathBuf::from))
             .context("Cargo did not report the bigname-api executable")?;

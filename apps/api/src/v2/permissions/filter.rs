@@ -14,8 +14,8 @@ use super::super::{
     vocab::{AuthorityContext, RegistrationStatus},
 };
 use super::{
-    ADDRESS_FILTER_KEY, INCLUDE_FILTER_KEY, NAMESPACE_FILTER_KEY, REGISTRATION_ID_FILTER_KEY,
-    V2Error, load_current_name_row,
+    ADDRESS_FILTER_KEY, INCLUDE_FILTER_KEY, NAME_FILTER_KEY, NAMESPACE_FILTER_KEY,
+    REGISTRATION_ID_FILTER_KEY, V2Error, load_current_name_row,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -130,6 +130,12 @@ pub(super) async fn resolve_permissions_filter(
     let mut cursor_filters = BTreeMap::new();
     if params.namespace.is_some() || inputs.name_filter.is_some() {
         cursor_filters.insert(NAMESPACE_FILTER_KEY.to_owned(), namespace.clone());
+    }
+    if let Some(name_filter) = inputs.name_filter.as_ref() {
+        cursor_filters.insert(
+            NAME_FILTER_KEY.to_owned(),
+            name_filter.normalized_name.clone(),
+        );
     }
     if let Some(address) = params.address.as_ref() {
         cursor_filters.insert(ADDRESS_FILTER_KEY.to_owned(), address.clone());
