@@ -68,55 +68,53 @@ pub(super) async fn start_v2_api(
         .status()
         .await?;
     ensure!(status.success(), "build real API binary for e2e");
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .map(|path| {
-            if path.is_absolute() {
-                path
-            } else {
-                root.join(path)
-            }
-        })
-        .unwrap_or_else(|| root.join("target"));
+    let target = root.join(
+        std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| PathBuf::from("target").into()),
+    );
     let binary = target.join("debug/bigname-api");
     ensure!(binary.is_file(), "API binary missing at {binary:?}");
-    let bind_addr = free_addr()?;
-    let metrics_addr = free_addr()?;
-    let mut command = Command::new(binary);
-    command
-        .current_dir(&root)
-        .args([
-            "serve",
-            "--bind-addr",
-            &bind_addr,
-            "--metrics-bind-addr",
-            &metrics_addr,
-        ])
-        .args(["--database-url", &run.db.url, "--max-connections", "4"])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    for (chain, url) in chain_rpc_urls {
-        command.args(["--chain-rpc-url", &format!("{chain}={url}")]);
-    }
-    let child = command.spawn()?;
-    let api = V2Api {
-        child,
-        base_url: format!("http://{bind_addr}"),
-        client: reqwest::Client::new(),
-    };
-    for _ in 0..100 {
-        if api
-            .client
-            .get(format!("{}/healthz", api.base_url))
-            .send()
-            .await
-            .is_ok()
-        {
-            return Ok(api);
+    let ready_timeout_secs = pipeline::ready_timeout_secs()?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(ready_timeout_secs);
+    let mut last_exit = None;
+    for _ in 0..5 {
+        let _startup_guard = crate::harness::lock_local_server_start().await;
+        let bind_addr = free_addr()?;
+        let mut command = Command::new(&binary);
+        command
+            .current_dir(&root)
+            .args(["serve", "--bind-addr"])
+            .arg(&bind_addr)
+            .args(["--metrics-bind-addr", "127.0.0.1:0", "--database-url"])
+            .arg(&run.db.url)
+            .args(["--max-connections", "4"])
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        for (chain, url) in chain_rpc_urls {
+            command.args(["--chain-rpc-url", &format!("{chain}={url}")]);
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut api = V2Api {
+            child: command.spawn()?,
+            base_url: format!("http://{bind_addr}"),
+            client: reqwest::Client::new(),
+        };
+        let health_url = format!("{}/healthz", api.base_url);
+        loop {
+            if api.client.get(&health_url).send().await.is_ok() {
+                return Ok(api);
+            }
+            if let Some(status) = api.child.try_wait()? {
+                last_exit = Some(status);
+                break;
+            }
+            ensure!(
+                tokio::time::Instant::now() < deadline,
+                "real API readiness exceeded configured {ready_timeout_secs}s at {}",
+                api.base_url
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
-    bail!("real API did not become ready at {}", api.base_url)
+    bail!("real API exited before readiness in 5 attempts; last exit {last_exit:?}")
 }
 
 fn free_addr() -> Result<String> {
