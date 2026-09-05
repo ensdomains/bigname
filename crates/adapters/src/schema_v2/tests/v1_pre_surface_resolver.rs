@@ -1223,7 +1223,7 @@ fn current_registry_handoff_retracts_old_resolver_from_historical_wrapper_resour
 }
 
 #[test]
-fn changed_old_registry_selection_clears_inactive_resources_on_handoff_or_reactivation()
+fn changed_old_registry_selection_restores_inactive_resources_until_handoff_or_reactivation()
 -> anyhow::Result<()> {
     let (_, _, node) = fixture();
     for (replacement, reactivate) in [(RESOLVER_B, false), (ZERO_ADDRESS, true)] {
