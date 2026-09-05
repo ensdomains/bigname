@@ -23786,9 +23786,9 @@ async fn seed_dual_open_cross_arm_fixture(
     Ok(format!("ens:{:#x}", raw_namehash(&[b"alice", b"eth"])))
 }
 
-// Seed Project's post-transition input with historical ENSv1 evidence and a
-// current ENSv2 binding. The closed predecessor is present from insertion,
-// matching the state Interpret writes after a successful authority transition.
+// Hand-seed Project's intended post-transition state: a closed ENSv1 predecessor
+// and current ENSv2 successor. Interpret-driven publication proof is deferred to
+// #822 (`unwrapped`) and the #503 e2e harness (wrapper/locked).
 async fn seed_closed_predecessor_cross_arm_fixture(
     pool: &PgPool,
     chain: &str,

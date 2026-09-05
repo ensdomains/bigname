@@ -296,15 +296,7 @@ pub(super) async fn semantic_end_state(
         } else {
             format!(" - '{generated_id}'")
         };
-        let row = if matches!(table, "name_current" | "children_current") {
-            "jsonb_set(
-                 to_jsonb(value), '{provenance}',
-                 (to_jsonb(value) -> 'provenance')
-                     - 'selected_event_ids' - 'normalized_event_ids'
-             )"
-        } else {
-            "to_jsonb(value)"
-        };
+        let row = "to_jsonb(value)";
         let sql = format!(
             "SELECT COALESCE(jsonb_agg(row ORDER BY row::text), '[]'::jsonb)
              FROM (
