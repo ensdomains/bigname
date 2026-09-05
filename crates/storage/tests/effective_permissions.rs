@@ -205,6 +205,13 @@ async fn effective_permissions_page_direct_and_operator_rows_without_gaps() -> R
             && first.rows[0].scope != second.rows[0].scope,
         "direct/operator boundary duplicated or omitted a row"
     );
+    sqlx::query("UPDATE bigname_phase.permissions_current SET scope='owner'")
+        .execute(db.pool())
+        .await?;
+    let error = load_effective_permissions_by_resource_ids(db.pool(), &[resource])
+        .await
+        .expect_err("effective reads must reject a mismatched direct scope key");
+    ensure!(format!("{error:#}").contains("scope mismatch"));
     db.cleanup().await
 }
 

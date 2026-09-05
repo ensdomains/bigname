@@ -55,6 +55,13 @@ pub(super) fn decode_effective_permission_row(row: PgRow) -> Result<EffectivePer
     } else {
         EffectivePermissionScope::Direct(PermissionScope::parse(&kind, &detail)?)
     };
+    let stored_scope: String = row.try_get("scope_storage_key")?;
+    let expected_scope = scope.storage_key();
+    if stored_scope != expected_scope {
+        bail!(
+            "effective permission scope mismatch: stored {stored_scope}, decoded {expected_scope}"
+        );
+    }
     let relation = match row
         .try_get::<Option<String>, _>("grant_relation")?
         .as_deref()
