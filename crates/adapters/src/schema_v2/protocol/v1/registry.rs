@@ -479,7 +479,9 @@ pub(super) fn interpret(
             && let Some(subject) = authority.owner.as_deref()
             && previous_resolver != resolver
         {
-            if let Some(previous_resolver) = previous_resolver {
+            if let Some(previous_resolver) = previous_resolver
+                && !previous_resolver.eq_ignore_ascii_case(ZERO_ADDRESS)
+            {
                 push_permission_change(
                     &mut output,
                     authority,

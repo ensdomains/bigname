@@ -1375,6 +1375,13 @@ fn current_registry_zero_to_nonzero_grants_without_revoking_the_zero_address() -
         resolver_selection(REGISTRY, node, RESOLVER_B, 5)?,
     ];
     let (_, live) = assert_four_way_and_restore_parity(&history, 4)?;
+    let resolver_change = live
+        .normalized_events
+        .iter()
+        .find(|event| event.block_number == Some(5) && event.event_kind == "ResolverChanged")
+        .expect("zero-to-nonzero resolver change");
+    assert_eq!(resolver_change.before_state["resolver"], ZERO_ADDRESS);
+    assert_eq!(resolver_change.after_state["resolver"], RESOLVER_B);
     let resolver_permissions = live
         .normalized_events
         .iter()

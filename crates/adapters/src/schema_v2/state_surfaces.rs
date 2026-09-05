@@ -31,11 +31,7 @@ impl State {
         source_role: Option<String>,
     ) -> Option<V1ResolverLink> {
         let key = v1_key(namespace, namehash);
-        let previous = self.v1_resolver_links.remove(&key).filter(|link| {
-            !link
-                .resolver_address
-                .eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
-        });
+        let previous = self.v1_resolver_links.remove(&key);
         self.v1_resolvers.remove(&key);
         let retain_linked_resource = source_role.as_deref() == Some("registry_old");
         if !retain_linked_resource {
