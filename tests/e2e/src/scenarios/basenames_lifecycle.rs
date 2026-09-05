@@ -1228,6 +1228,19 @@ async fn third_party_controller_registration_degrades_without_label_events() -> 
 async fn l2_zero_addr60_uses_stubbed_verified_transport() -> Result<()> {
     let eth = Anvil::spawn().await?;
     let base = Anvil::spawn_base_mainnet().await?;
+    let l1_resolver =
+        Address::from_slice(&keccak256("bigname-e2e-placeholder:l1_resolver".as_bytes())[12..]);
+    // Fixed-answer verified transport stub; mine it before either chain advances.
+    eth.client()
+        .set_code(
+            l1_resolver,
+            &[
+                0x60, 0x20, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x20, 0x52, 0x60, 0x60, 0x60, 0x00,
+                0xf3,
+            ],
+        )
+        .await?;
+    eth.client().mine(1).await?;
     let rpc = base.client();
     let ens_deployment = ens_v1::deploy_ens_v1(&eth.client(), &repo_root()).await?;
     let deployment = basenames::deploy_basenames(&rpc, &repo_root()).await?;
@@ -1249,18 +1262,6 @@ async fn l2_zero_addr60_uses_stubbed_verified_transport() -> Result<()> {
     .await?;
     basenames::set_addr_record(&rpc, &deployment, alice, name, nonzero).await?;
     basenames::set_addr_record(&rpc, &deployment, alice, name, Address::ZERO).await?;
-    let l1_resolver =
-        Address::from_slice(&keccak256("bigname-e2e-placeholder:l1_resolver".as_bytes())[12..]);
-    // Fixed-answer verified transport stub: it does not read the stored resolver value.
-    eth.client()
-        .set_code(
-            l1_resolver,
-            &[
-                0x60, 0x20, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x20, 0x52, 0x60, 0x60, 0x60, 0x00,
-                0xf3,
-            ],
-        )
-        .await?;
 
     let zero = format!("{:#x}", Address::ZERO);
     let ready_sql = format!(
