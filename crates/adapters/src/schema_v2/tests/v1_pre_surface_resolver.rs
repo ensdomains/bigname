@@ -642,7 +642,6 @@ fn current_registry_reassignment_preserves_resolver_across_every_replay_shape() 
     assert_current_registry_reassignment_replays(OWNER, false)?;
     assert_current_registry_reassignment_replays(OWNER_2, true)
 }
-
 #[test]
 fn registered_pre_surface_registry_authority_reactivates_after_expiry_in_every_replay_shape()
 -> anyhow::Result<()> {
@@ -750,7 +749,6 @@ fn assert_original_unchanged(prefix: &BatchOutput, complete: &BatchOutput) {
         "surface materialization must not rewrite the raw-derived pointer"
     );
 }
-
 #[test]
 fn pre_surface_registry_resolver_materialization_links_current_authority() -> anyhow::Result<()> {
     let (prefix, output) = run(OWNER, false)?;
@@ -787,7 +785,6 @@ fn pre_surface_registry_resolver_materialization_links_current_authority() -> an
     }));
     Ok(())
 }
-
 #[test]
 fn name_registered_materialization_retains_registration_trigger_provenance() -> anyhow::Result<()> {
     let (manifests, admissions, node) = fixture();
@@ -815,7 +812,6 @@ fn name_registered_materialization_retains_registration_trigger_provenance() -> 
     assert_eq!(pointer.after_state["source_event"], "NameRegistered");
     Ok(())
 }
-
 #[test]
 fn pre_surface_ownerless_resolver_materialization_links_read_anchor_without_control()
 -> anyhow::Result<()> {
@@ -836,7 +832,6 @@ fn pre_surface_ownerless_resolver_materialization_links_read_anchor_without_cont
     }));
     Ok(())
 }
-
 #[test]
 fn old_registry_resolver_is_not_materialized_after_current_registry_migration() -> anyhow::Result<()>
 {
@@ -903,7 +898,6 @@ fn old_registry_resolver_is_not_materialized_after_current_registry_migration() 
     assert_eq!(live, restored);
     Ok(())
 }
-
 #[test]
 fn current_registry_transfer_invalidates_only_old_registry_resolver_links_in_every_replay_shape()
 -> anyhow::Result<()> {
@@ -936,7 +930,6 @@ fn current_registry_transfer_invalidates_only_old_registry_resolver_links_in_eve
     assert_eq!(pointer.after_state["resolver"], RESOLVER_A);
     Ok(())
 }
-
 #[test]
 fn same_owner_transfer_retracts_selected_old_registry_fallback_across_every_replay_shape()
 -> anyhow::Result<()> {
@@ -957,7 +950,6 @@ fn same_owner_transfer_retracts_selected_old_registry_fallback_across_every_repl
     }));
     Ok(())
 }
-
 #[test]
 fn same_owner_transfer_without_a_pointer_still_suppresses_later_old_registry_logs()
 -> anyhow::Result<()> {
@@ -982,7 +974,6 @@ fn same_owner_transfer_without_a_pointer_still_suppresses_later_old_registry_log
     }));
     Ok(())
 }
-
 #[test]
 fn current_registry_record_retracts_a_surfaced_old_registry_resolver() -> anyhow::Result<()> {
     let (_, _, node) = fixture();
@@ -1020,7 +1011,6 @@ fn current_registry_record_retracts_a_surfaced_old_registry_resolver() -> anyhow
     }
     Ok(())
 }
-
 #[test]
 fn current_registry_handoff_retracts_old_resolver_from_every_linked_resource() -> anyhow::Result<()>
 {
@@ -1058,7 +1048,6 @@ fn current_registry_handoff_retracts_old_resolver_from_every_linked_resource() -
     }
     Ok(())
 }
-
 #[test]
 fn same_transaction_registration_keeps_fallback_clear_on_registry_resource() -> anyhow::Result<()> {
     let (_, _, node) = fixture();
@@ -1097,7 +1086,6 @@ fn same_transaction_registration_keeps_fallback_clear_on_registry_resource() -> 
     );
     Ok(())
 }
-
 #[test]
 fn same_transaction_transient_setup_reinserts_each_fallback_clear() -> anyhow::Result<()> {
     let (_, _, node) = fixture();
