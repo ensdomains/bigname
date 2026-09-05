@@ -109,7 +109,7 @@ to the applicable entries below.
 > labelhash (upstream: .refs/ens_subgraph/src/ethRegistrar.ts:L47-L51 @ ens_subgraph@723f1b6),
 > while its wrapper handler stores wrapper ownership separately and keys
 > `WrappedDomain` by the namehash (upstream: .refs/ens_subgraph/src/nameWrapper.ts:L93-L100 @ ens_subgraph@723f1b6).
-> **Our rule**: `docs/api-v2.md` § Field Budgets and `docs/api-v2-routes.md`
+> **Our rule**: `docs/api-v2.md` § Naming Dictionary and `docs/api-v2-routes.md`
 > exact-name detail, batch lookup, and history routes.
 > **Why**: one public handle follows the registrar lifecycle through wrapper
 > custody changes instead of splitting that history between registrar and
