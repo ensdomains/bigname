@@ -128,8 +128,9 @@ scenarios therefore make no ENSv1 CCIP-read functionality claim.
 
 The fixture generates one composite Sepolia
 [deployment profile](../../docs/glossary.md#deployment-profile) containing the
-four ENSv1 intake families except reverse, the four ordinary ENSv2 families,
-and `ens_v2_migration_l1`. It mirrors every shipped `v*.toml` into a scenario
+four ENSv1 [source families](../../docs/glossary.md#source-family) except
+reverse, the four ordinary ENSv2 source families, and `ens_v2_migration_l1`. It
+mirrors every shipped `v*.toml` into a scenario
 `TempDir`, then separately substitutes ENSv1, ENSv2, and ENSv1→ENSv2 migration
 targets and the ENSv1→ENSv2 migration family's local `NameWrapper` and
 `BaseRegistrar` correlation addresses. The ordinary Sepolia generator remains
@@ -196,10 +197,11 @@ projection returns `404`. This is the established projection-serving seam; it
 does not exercise network transport or API-process startup.
 The unlocked scenario discriminates on the child's logical name identifier in
 the children response. It makes no exact-name-route assertion because this
-registry-created child remains hash-only in the fixture, so that route is
-already absent before ENSv1→ENSv2 migration.
+registry-created child remains in
+[non-name form](../../docs/glossary.md#non-name-form) in the fixture, so that
+route is already absent before ENSv1→ENSv2 migration.
 
-`forge` must be on `PATH` before the 65 Foundry-dependent fault scenarios are
+`forge` must be on `PATH` before the 65 Foundry-dependent semantic scenarios are
 described as runnable. With these three scenarios the counted inventory is 90
 tests: 87 runnable and 3 ignored, split as 43 runnable plus 2 ignored on shard 1
 and 44 runnable plus 1 ignored on shard 2. This coverage changes no production
