@@ -69,7 +69,7 @@ pub(super) fn append_transfer_permissions(
                 );
             }
         }
-        (None, Some(current)) => {
+        (None, Some(current)) if current.resource_id == after.resource_id => {
             if let Some(subject) = current.owner.as_deref() {
                 change(current, subject, true, "transfer-authority-grant");
             }
