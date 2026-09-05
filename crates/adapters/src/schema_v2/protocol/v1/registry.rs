@@ -28,12 +28,9 @@ use crate::schema_v2::{
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const ROOT_NODE: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 const LLL_REGISTRY: &str = "0x314159265dd8dbb310642f98f50c066173c1259b";
-mod transfer {
-    use super::*;
-    sol! { event Transfer(bytes32 indexed node, address owner); }
-}
 
 sol! {
+    event Transfer(bytes32 indexed node, address owner);
     event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
     event NewResolver(bytes32 indexed node, address resolver);
     event NewTTL(bytes32 indexed node, uint64 ttl);
@@ -63,12 +60,12 @@ pub(super) fn interpret(
             (vec!["SubregistryChanged"], body, child)
         }
         "Transfer" => {
-            let decoded = unmasked_word::decode_registry_event::<transfer::Transfer>(
+            let decoded = unmasked_word::decode_registry_event::<Transfer>(
                 tolerate_unmasked_words,
                 &raw.topics,
                 &raw.data,
                 "registry Transfer log is malformed",
-                decode_event_log_tolerant_address_word::<transfer::Transfer>,
+                decode_event_log_tolerant_address_word::<Transfer>,
             )?;
             let mut body = json!({"source_event":"Transfer","node":hex_string(decoded.event.node),"owner":address_hex(decoded.event.owner)});
             if let Some(word) = decoded.unmasked_word.as_ref() {

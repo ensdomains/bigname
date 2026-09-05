@@ -37,7 +37,7 @@ justification = "Name-surface materialization distinguishes active from shadow V
 
 [[files]]
 path = "crates/adapters/src/schema_v2/protocol/v1/registry.rs"
-loc = 631
+loc = 630
 justification = "Registry event decoding and its atomic control/read transition remain together while shared owner classification and authority emission live in the bounded authority-transition sibling; the file remains below the review threshold."
 
 [[files]]
