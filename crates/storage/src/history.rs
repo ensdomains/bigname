@@ -536,7 +536,11 @@ async fn event_history_read_filter(
         } else {
             product_registration_history_selector(
                 resource_ids,
-                registration_id_is_public.then_some(logical_name_ids).unwrap_or_default(),
+                if registration_id_is_public {
+                    logical_name_ids
+                } else {
+                    Vec::new()
+                },
             )
         });
     }
