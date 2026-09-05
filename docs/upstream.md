@@ -217,21 +217,12 @@ to the applicable entries below.
 > name lookup and normalization behavior.
 > **Since**: `2026-09-03`
 
-> **Generated Domain owner filters depend on projected registry ownership** — the generated `Domain_filter` serves the
-> 20-member `owner`, `owner_not`, `owner_gt`, `owner_gte`, `owner_lt`, `owner_lte`, `owner_in`, `owner_not_in`,
-> `owner_contains`, `owner_contains_nocase`, `owner_not_contains`, `owner_not_contains_nocase`, `owner_starts_with`,
-> `owner_starts_with_nocase`, `owner_not_starts_with`, `owner_not_starts_with_nocase`, `owner_ends_with`,
-> `owner_ends_with_nocase`, `owner_not_ends_with`, and `owner_not_ends_with_nocase` scalar family over bigname's
-> effective-controller relation. Positive members require a matching relation row. Negative members require an eligible
-> relation witness and use a name-correlated anti-semijoin against the positive counterpart, so a name cannot pass merely
-> because it has no effective-controller relation. Filtered relation targets participate in snapshot revalidation.
-> `owner`, `owner_not`, `owner_in`, and `owner_not_in` lowercase address operands before binding; Graph Node routes the
-> supplied equality and list values directly into its store filters (upstream: .refs/graph_node/graphql/src/store/query.rs:L156-L190
-> @ graph_node@aefe1737), so the address normalization is a deliberate divergence. Ranges and patterns compare the supplied
-> text directly. Explicit null for the retained `owner` and `owner_in` members remains equivalent to omission, while Graph
-> Node emits `IS NULL` for null equality (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1603-L1623
-> @ graph_node@aefe1737); this deliberate divergence is filed as `#862`. Every newly served owner member rejects explicit
-> null as `Domain_filter.<member> must not be null`. Empty
+> **Generated Domain owner filters depend on projected registry ownership** — the generated `Domain_filter` serves the 20-member `owner`, `owner_not`, `owner_gt`, `owner_gte`, `owner_lt`, `owner_lte`, `owner_in`, `owner_not_in`,
+> `owner_contains`, `owner_contains_nocase`, `owner_not_contains`, `owner_not_contains_nocase`, `owner_starts_with`, `owner_starts_with_nocase`, `owner_not_starts_with`, `owner_not_starts_with_nocase`, `owner_ends_with`, `owner_ends_with_nocase`, `owner_not_ends_with`, and `owner_not_ends_with_nocase` scalar family over bigname's effective-controller relation.
+> Positive members require a matching relation row. Negative members require an eligible relation witness and use a name-correlated anti-semijoin against the positive counterpart, so a name cannot pass merely because it has no effective-controller relation.
+> Filtered relation targets participate in snapshot revalidation.
+> `owner`, `owner_not`, `owner_in`, and `owner_not_in` lowercase address operands before binding; Graph Node routes supplied equality and list values directly into store filters (upstream: .refs/graph_node/graphql/src/store/query.rs:L156-L190 @ graph_node@aefe1737), so address normalization is a deliberate divergence.
+> Ranges and patterns compare supplied text directly. Explicit null for retained `owner` and `owner_in` remains equivalent to omission, while Graph Node emits `IS NULL` for null equality (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1603-L1623 @ graph_node@aefe1737); this deliberate divergence is filed as `#862`. Every newly served owner member rejects explicit null as `Domain_filter.<member> must not be null`. Empty
 > `owner_in` and `owner_not_in` lists both return an empty page, while duplicate list entries are tolerated. A bounded
 > positive equality or membership uses the relation-driven address-membership plan; an owner filter without that anchor
 > uses a page-driven name-correlated relation probe. The effective controller agrees with `Domain.owner`
@@ -256,26 +247,22 @@ to the applicable entries below.
 > **Our rule**: this GraphQL section; task `#670/T5` owns the four residual classes.
 > **Why**: the effective-controller and served-owner projections intentionally answer different authority questions in
 > those classes, so the partial filter contract names the boundary instead of claiming universal field/filter equality.
-> **Planner evidence**: `pad_resolver_planner_statistics` inserts 5,000 `name_surfaces` and `name_current` rows; the owner
-> plan fixture adds matching surface bindings and effective-controller rows, distributes those rows across populations of
-> 4,796, 200, and six including the two base-fixture owners, and analyzes all seven participating tables. The following
-> values are from PostgreSQL 16 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` with ID ascending, limit 200, 5,004 eligible
-> Domain rows, no JIT, and zero temporary read/write blocks. `outer` is the ordered outer-row count, `removed` is its
-> filter-removal count, and `anti blocks` is the cumulative shared-buffer count of the anti subtree.
+> **Planner evidence**: `pad_resolver_planner_statistics` inserts 5,000 `name_surfaces` and `name_current` rows; the owner plan fixture adds matching surface bindings and effective-controller rows plus two eligible sentinel names, distributed across owner populations of 4,797, 201, and six including the two base-fixture owners. It analyzes all seven participating tables.
+> These PostgreSQL 16 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` values use ID ascending, limit 200, and 5,004 eligible Domain rows, with no JIT or temporary blocks. `outer` is the ordered outer-row count, `removed` its filter-removal count, and `anti blocks` the cumulative shared-buffer count of the anti subtree.
 >
 > | operator | total cost | outer | removed | max loops | relation index | anti blocks | full blocks |
 > | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: |
-> | `owner` | 516.92 | 200 | 0 | 200 | `address_names_current_pkey` | — | 6,036 |
-> | `owner_in` | 516.67 | 200 | 0 | 200 | `address_names_current_pkey` | — | 5,637 |
-> | `owner_gt` | 12,481.74 | 204 | 0 | 204 | `address_names_current_name_idx` | — | 6,068 |
-> | `owner_contains` | 12,481.74 | 204 | 0 | 204 | `address_names_current_name_idx` | — | 5,463 |
-> | `owner_contains_nocase` | 12,481.74 | 204 | 0 | 204 | `address_names_current_name_idx` | — | 5,463 |
-> | `owner_not` | 18,896.33 | 200 | 0 | 200 | `address_names_current_name_idx` | 4,000 | 7,022 |
-> | `owner_not_in` | 18,896.07 | 200 | 0 | 200 | `address_names_current_name_idx` | 4,000 | 6,386 |
-> | `owner_not_contains` | 18,896.33 | 200 | 0 | 200 | `address_names_current_name_idx` | 4,000 | 6,383 |
-> | `owner_not_contains_nocase` | 18,896.33 | 200 | 0 | 200 | `address_names_current_name_idx` | 4,000 | 6,383 |
-> | `owner_not_starts_with` | 18,896.33 | 200 | 0 | 200 | `address_names_current_name_idx` | 4,000 | 6,383 |
-> | `owner_not_ends_with` | 18,896.33 | 200 | 0 | 200 | `address_names_current_name_idx` | 4,000 | 6,383 |
+> | `owner` | 520.01 | 201 | 0 | 201 | `address_names_current_pkey` | — | 6,269 |
+> | `owner_in` | 519.76 | 201 | 0 | 201 | `address_names_current_pkey` | — | 6,269 |
+> | `owner_gt` | 12,747.36 | 200 | 0 | 200 | `address_names_current_name_idx` | — | 6,214 |
+> | `owner_contains` | 12,747.36 | 200 | 0 | 200 | `address_names_current_name_idx` | — | 6,214 |
+> | `owner_contains_nocase` | 12,747.36 | 200 | 0 | 200 | `address_names_current_name_idx` | — | 6,211 |
+> | `owner_not` | 19,285.98 | 200 | 0 | 200 | `address_names_current_name_idx` | 4,001 | 6,782 |
+> | `owner_not_in` | 19,285.73 | 200 | 0 | 200 | `address_names_current_name_idx` | 4,000 | 6,780 |
+> | `owner_not_contains` | 19,285.98 | 200 | 0 | 200 | `address_names_current_name_idx` | 4,000 | 6,780 |
+> | `owner_not_contains_nocase` | 19,285.98 | 200 | 0 | 200 | `address_names_current_name_idx` | 4,001 | 6,782 |
+> | `owner_not_starts_with` | 19,285.98 | 200 | 0 | 200 | `address_names_current_name_idx` | 4,000 | 6,780 |
+> | `owner_not_ends_with` | 19,285.98 | 200 | 0 | 200 | `address_names_current_name_idx` | 4,000 | 6,780 |
 > **Since**: `2026-09-02`
 
 > **Generated Domain patterns preserve SQL wildcards** — generated contains patterns are left unchanged when they start or
@@ -283,16 +270,13 @@ to the applicable entries below.
 > normalization and does not escape `%`, `_`, or backslash. The legacy `DomainFilter` retains its existing normalization
 > and escaped-pattern behavior. These rules apply to both generated name patterns and generated owner-ID patterns:
 > starts-with appends `%`, ends-with prepends `%`, case-sensitive members use `LIKE`, and `_nocase` members use `ILIKE`.
-> **Upstream**: Graph Node constructs contains patterns this way and passes them to `LIKE`/`ILIKE`
-> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1432-L1476 @ graph_node@aefe173)
-> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1532-L1545 @ graph_node@aefe173), including the
-> ends-with variants (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1547-L1555 @ graph_node@aefe173).
+> **Upstream**: Graph Node constructs contains patterns this way and passes them to `LIKE`/`ILIKE` (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1432-L1476 @ graph_node@aefe173)
+> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1532-L1545 @ graph_node@aefe173), including ends-with variants (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1547-L1555 @ graph_node@aefe173).
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
 > **Since**: `2026-09-03`
 
-> **Generated GraphQL text uses C collation only when it changes semantics** — Graph Node rejects a store database whose collation or
-> character classification is not `C` (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L152-L158 @
-> graph_node@aefe173) (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L159-L163 @ graph_node@aefe173). Bigname applies `COLLATE "C"` to generated raw-name comparisons, name ordering, noncanonical ID ranges,
+> **Generated GraphQL text uses C collation only when it changes semantics** — Graph Node rejects a store database whose collation or character classification is not `C` (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L152-L158 @ graph_node@aefe173)
+> (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L159-L163 @ graph_node@aefe173). Bigname applies `COLLATE "C"` to generated raw-name comparisons, name ordering, noncanonical ID ranges,
 > generated owner-ID ranges, and case-sensitive owner-ID patterns, but deliberately leaves fixed-width lowercase
 > hexadecimal namehash predicates and order/tie-break expressions unwrapped so
 > `name_current_lookup_idx` remains usable. The deployment contract requires a collation that orders those canonical

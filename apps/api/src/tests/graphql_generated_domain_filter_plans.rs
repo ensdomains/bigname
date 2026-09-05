@@ -190,6 +190,13 @@ async fn pad_generated_domain_plans(database: &TestDatabase) -> Result<()> {
 
 async fn pad_generated_owner_plans(database: &TestDatabase) -> Result<()> {
     pad_generated_domain_plans(database).await?;
+    for (index, owner) in ["0x0000000000000000000000000000000000000671", "0x0000000000000000000000000000000000000672"].into_iter().enumerate() {
+        let name = format!("owner-plan-extra-{index}.eth");
+        seed_identity_name(database, &format!("ens:{name}"), &name, &name,
+            &bigname_lookup::ens_namehash_hex(&name)?, Uuid::from_u128(0x670_4001 + index as u128 * 3),
+            Uuid::from_u128(0x670_4002 + index as u128 * 3), Uuid::from_u128(0x670_4003 + index as u128 * 3),
+            owner, bigname_storage::AddressNameRelation::EffectiveController, 740 + index as i64).await?;
+    }
     let bindings = sqlx::query(
         r#"WITH source AS (
               SELECT binding.* FROM bigname_phase.surface_bindings binding
@@ -244,6 +251,8 @@ async fn pad_generated_owner_plans(database: &TestDatabase) -> Result<()> {
     .execute(&database.lookup_pool)
     .await?;
     assert_eq!(relations.rows_affected(), 5_000);
+    let eligible_relations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bigname_phase.address_names_current WHERE relation = 'effective_controller'").fetch_one(&database.lookup_pool).await?;
+    assert_eq!(eligible_relations, 5_004);
     sqlx::query(
         r#"UPDATE bigname_phase.name_current SET
               surface_binding_id = NULL, resource_id = NULL, token_lineage_id = NULL, binding_kind = NULL
