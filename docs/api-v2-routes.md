@@ -913,12 +913,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   address-only request without `namespace` continues to span all namespaces.
   An explicit namespace must be public; an unknown value returns `404 not_found`
   before cursor decoding.
-  A resource belongs to a namespace when it has a readable name-surface binding
+  A resource belongs to a namespace when it has a readable [surface
+  binding](glossary.md#surface-binding)
   to that namespace, even if the binding has a non-null `active_to`. Both the
   surface and binding, and both chain-lineage anchors, must be canonical, safe,
   or finalized. A resource known only from observed registry state, or with no
-  name-surface binding, belongs to no namespace and appears only in an unscoped
-  address read.
+  name-surface binding, belongs to no namespace; it remains available to an
+  unscoped address or registration-audit read.
   Query `include=lineage`, `cursor`,
   `page_size`, and optional `finality=latest`. `at` and historical `finality`
   values are rejected by the shared latest-state collection rule.
