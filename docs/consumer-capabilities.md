@@ -184,7 +184,9 @@ select ENSv2 when the ENSv2 arm is current and ENSv1 evidence, current or
 historical, exists, without fabricating a proof or extending the exception to
 descendants. Historical ENSv2 evidence without a current binding does not
 qualify. When that shared-infrastructure rule selects ENSv2, it overrides the
-ordinary no-proof result, so those names do not carry `independent_ens_deployments_overlap`. Complete
+ordinary no-proof result, so those names carry neither Mainnet's
+`conflicting_current_ens_authority` nor Sepolia's
+`independent_ens_deployments_overlap`. Complete
 direct-child groups now supply production input
 to the activated-boundary branch; a refused or unmigrated child reaches ENSv2
 authority only through a current positive ENSv2 registration.

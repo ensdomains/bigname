@@ -229,7 +229,9 @@ Field ownership:
   `eth`, `reverse`, and `addr.reverse`—instead select ENSv2 when the ENSv2 arm is
   current and ENSv1 evidence, current or historical, exists without proof.
   When that shared-infrastructure rule selects ENSv2, it overrides the ordinary
-  no-proof handling below, so those names do not carry `independent_ens_deployments_overlap`.
+  no-proof handling below, so those names carry neither Mainnet's
+  `conflicting_current_ens_authority` nor Sepolia's
+  `independent_ens_deployments_overlap`.
   Historical ENSv2 evidence alone does not qualify, and `.reverse` descendants
   do not inherit the exception. These values replace the
   blanket mixed-corpus reason; intake from the planned [ENSv2 migration source
