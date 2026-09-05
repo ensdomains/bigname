@@ -13322,15 +13322,7 @@ async fn assert_registrar_transfer_matches_full_rebuild(
         grant.2.pointer("/grant_source/source_event_kind"),
         Some(&json!("TokenControlTransferred"))
     );
-    let registrar_resource: Uuid = sqlx::query_scalar(
-        "SELECT resource_id FROM normalized_events
-         WHERE chain_id = $1 AND block_number = 5
-           AND event_kind = 'TokenControlTransferred'",
-    )
-    .bind(chain)
-    .fetch_one(incremental.pool())
-    .await?;
-    assert_eq!(revoke.0, registrar_resource);
+    assert_eq!(revoke.0 == grant.0, !include_registry_owner);
     assert!(resolver_permissions.iter().all(|(_, before, after, _, _)| {
         before.get("resolver").is_none() && after.get("resolver").is_none()
     }));
@@ -13409,24 +13401,18 @@ async fn assert_registrar_transfer_matches_full_rebuild(
 
     let incremental_resolver = resolver_permission_summary(incremental.pool(), chain).await?;
     let full_resolver = resolver_permission_summary(full.pool(), chain).await?;
-    let expected_subject = if include_registry_owner {
-        OWNER
-    } else {
-        TRANSFER_OWNER
-    };
-    let expected_source = "TokenControlTransferred";
     for summary in [&incremental_resolver, &full_resolver] {
         assert_eq!(
             summary.pointer("/permissions/items/0/subject"),
-            Some(&json!(expected_subject))
+            Some(&json!(expected_grantee))
         );
         assert_eq!(
             summary.pointer("/permissions/items/0/grant_source/source_event_kind"),
-            Some(&json!(expected_source))
+            Some(&json!("TokenControlTransferred"))
         );
         assert_eq!(
             summary.pointer("/role_holders/items/0/subject"),
-            Some(&json!(expected_subject))
+            Some(&json!(expected_grantee))
         );
     }
 

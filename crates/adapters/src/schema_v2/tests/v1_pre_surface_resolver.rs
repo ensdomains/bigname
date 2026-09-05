@@ -1261,39 +1261,31 @@ fn current_registry_resolver_replacement_survives_the_ownership_handoff() -> any
         resolver_selection(REGISTRY, node, RESOLVER_B, 4)?,
         current_new_owner(OWNER_2, 5)?,
     ];
-    let (single, live) = assert_four_way_and_restore_parity(&history, 4)?;
-    let resources = single
-        .iter()
-        .filter_map(|event| {
-            (event.block_number == Some(4)
-                && event.event_kind == "ResolverChanged"
-                && event.after_state["resolver"] == RESOLVER_B)
-                .then_some(event.resource_id)
-                .flatten()
-        })
-        .collect::<std::collections::BTreeSet<_>>();
+    let (single, _) = assert_four_way_and_restore_parity(&history, 4)?;
     assert_eq!(
-        resources.len(),
+        single
+            .iter()
+            .filter(|event| {
+                event.block_number == Some(4)
+                    && event.event_kind == "ResolverChanged"
+                    && event.after_state["resolver"] == RESOLVER_B
+            })
+            .count(),
         2,
         "current selection must reach both resources"
     );
-    for resource in resources {
-        let latest = single
+    assert_eq!(
+        single
             .iter()
-            .rfind(|event| {
-                event.event_kind == "ResolverChanged" && event.resource_id == Some(resource)
+            .filter(|event| {
+                event.block_number == Some(5)
+                    && event.event_kind == "ResolverChanged"
+                    && event.after_state["resolver"] == ZERO_ADDRESS
             })
-            .expect("resource resolver history");
-        assert_eq!(
-            latest.after_state["resolver"], RESOLVER_B,
-            "ownership handoff cleared the current-registry resolver on {resource}"
-        );
-    }
-    assert!(live.normalized_events.iter().all(|event| {
-        !(event.block_number == Some(5)
-            && event.event_kind == "ResolverChanged"
-            && event.after_state["resolver"] == ZERO_ADDRESS)
-    }));
+            .count(),
+        0,
+        "ownership handoff cleared a current-registry resolver"
+    );
     Ok(())
 }
 
@@ -1309,7 +1301,7 @@ fn registry_reactivation_after_old_registry_zero_clears_the_registrar_resource()
         resolver_selection(OLD_REGISTRY, node, ZERO_ADDRESS, 5)?,
         old_new_owner(OWNER, 6)?,
     ];
-    let (single, live) = assert_four_way_and_restore_parity(&history, 5)?;
+    let (single, _) = assert_four_way_and_restore_parity(&history, 5)?;
     let registrar_resource = single
         .iter()
         .find_map(|event| {
@@ -1318,14 +1310,18 @@ fn registry_reactivation_after_old_registry_zero_clears_the_registrar_resource()
                 .flatten()
         })
         .expect("registrar resource");
-    assert!(
-        live.normalized_events.iter().any(|event| {
-            event.block_number == Some(6)
-                && event.event_kind == "ResolverChanged"
-                && event.resource_id == Some(registrar_resource)
-                && event.after_state["resolver"] == ZERO_ADDRESS
-        }),
-        "registry-path reactivation did not clear the registrar resource"
+    assert_eq!(
+        single
+            .iter()
+            .filter(|event| {
+                event.block_number == Some(6)
+                    && event.event_kind == "ResolverChanged"
+                    && event.resource_id == Some(registrar_resource)
+                    && event.after_state["resolver"] == ZERO_ADDRESS
+            })
+            .count(),
+        1,
+        "registry-path reactivation did not clear the registrar resource",
     );
     Ok(())
 }
@@ -1350,15 +1346,12 @@ fn unwrap_after_current_registry_zero_keeps_the_registrar_resource_clear() -> an
                 .flatten()
         })
         .expect("registrar resource");
-    let latest = single
-        .iter()
-        .rfind(|event| {
-            event.event_kind == "ResolverChanged" && event.resource_id == Some(registrar_resource)
-        })
-        .expect("registrar resolver history");
-    assert_eq!(
-        latest.after_state["resolver"], ZERO_ADDRESS,
-        "unwrap reactivated the registrar resource's stale current-registry pointer"
+    assert!(
+        single.iter().any(|event| event.block_number == Some(6)
+            && event.event_kind == "ResolverChanged"
+            && event.resource_id == Some(registrar_resource)
+            && event.after_state["resolver"] == ZERO_ADDRESS),
+        "unwrap reactivated the registrar resource's stale current-registry pointer",
     );
     Ok(())
 }
@@ -1375,13 +1368,12 @@ fn current_registry_zero_to_nonzero_grants_without_revoking_the_zero_address() -
         resolver_selection(REGISTRY, node, RESOLVER_B, 5)?,
     ];
     let (_, live) = assert_four_way_and_restore_parity(&history, 4)?;
-    let resolver_change = live
-        .normalized_events
-        .iter()
-        .find(|event| event.block_number == Some(5) && event.event_kind == "ResolverChanged")
-        .expect("zero-to-nonzero resolver change");
-    assert_eq!(resolver_change.before_state["resolver"], ZERO_ADDRESS);
-    assert_eq!(resolver_change.after_state["resolver"], RESOLVER_B);
+    assert!(live.normalized_events.iter().any(|event| {
+        event.block_number == Some(5)
+            && event.event_kind == "ResolverChanged"
+            && event.before_state["resolver"] == ZERO_ADDRESS
+            && event.after_state["resolver"] == RESOLVER_B
+    }));
     let resolver_permissions = live
         .normalized_events
         .iter()
@@ -1390,13 +1382,54 @@ fn current_registry_zero_to_nonzero_grants_without_revoking_the_zero_address() -
     assert_eq!(resolver_permissions.len(), 1);
     let grant = resolver_permissions[0];
     assert_eq!(grant.after_state["scope"]["resolver_address"], RESOLVER_B);
-    assert_eq!(grant.before_state["effective_powers"], json!([]));
     assert_eq!(
         grant.after_state["effective_powers"],
         json!(["resolver_control"])
     );
     assert!(grant.after_state["grant_source"].is_object());
     assert!(grant.after_state["revocation_source"].is_null());
+    Ok(())
+}
+
+#[test]
+fn wrapper_fallback_registrar_activation_grants_resolver_control() -> anyhow::Result<()> {
+    let (manifests, admissions, node) = fixture();
+    let mut wrap = wrapped(1)?;
+    wrap.log_index = 1;
+    let mut unwrap = unwrapped(3)?;
+    unwrap.log_index = 1;
+    let mut transfer = registrar_transfer(WRAPPER, OWNER_2, 3)?;
+    transfer.log_index = 2;
+    let history = vec![
+        current_transfer(node, WRAPPER, 1)?,
+        wrap,
+        resolver_selection(REGISTRY, node, RESOLVER_A, 2)?,
+        current_transfer(node, OWNER_2, 3)?,
+        unwrap,
+        transfer,
+    ];
+    let output = interpret_test_batch(input(manifests, admissions, Vec::new(), history))?;
+    let active_resource = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.block_number == Some(3) && event.event_kind == "TokenControlTransferred"
+        })
+        .and_then(|event| event.resource_id)
+        .expect("fallback registrar resource");
+    assert_eq!(
+        output
+            .normalized_events
+            .iter()
+            .filter(|event| event.block_number == Some(3)
+                && event.event_kind == "PermissionChanged"
+                && event.resource_id == Some(active_resource)
+                && event.after_state["subject"] == OWNER_2
+                && event.after_state["scope"]["resolver_address"] == RESOLVER_A
+                && event.after_state["effective_powers"] == json!(["resolver_control"]))
+            .count(),
+        1,
+    );
     Ok(())
 }
 

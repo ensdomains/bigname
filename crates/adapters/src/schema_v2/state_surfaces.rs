@@ -4,6 +4,8 @@ use super::{
     State, V1NameState, V1RegistryReadAnchor, V1ResolverLink, v1_key, v1_registration_is_live,
 };
 
+const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::schema_v2) enum V1SurfaceMaterialization {
     RegistryAuthority {
@@ -60,7 +62,7 @@ impl State {
                 self.v1_resolver_links.insert(
                     key.clone(),
                     V1ResolverLink {
-                        resolver_address: "0x0000000000000000000000000000000000000000".to_owned(),
+                        resolver_address: ZERO_ADDRESS.to_owned(),
                         resource_id: Some(registrar.resource_id),
                         logical_name_id: registrar
                             .surface_known
@@ -162,11 +164,7 @@ impl State {
     ) -> Option<V1ResolverLink> {
         self.v1_resolver_links
             .get(&v1_key(namespace, namehash))
-            .filter(|link| {
-                !link
-                    .resolver_address
-                    .eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
-            })
+            .filter(|link| !link.resolver_address.eq_ignore_ascii_case(ZERO_ADDRESS))
             .cloned()
     }
 
@@ -184,26 +182,21 @@ impl State {
         self.v1_resolver_link(namespace, namehash)
             .or_else(|| {
                 retained.map(|link| V1ResolverLink {
-                    resolver_address: "0x0000000000000000000000000000000000000000".to_owned(),
+                    resolver_address: ZERO_ADDRESS.to_owned(),
                     resource_id: Some(resource_id),
                     logical_name_id: link.logical_name_id.clone(),
                     source_role: link.source_role.clone(),
                 })
             })
             .or_else(|| {
-                self.v1_resolver_links.get(&key).and_then(|link| {
-                    (link.source_role.as_deref() == Some("registry")
-                        && link.resource_id == Some(resource_id)
-                        && link
-                            .resolver_address
-                            .eq_ignore_ascii_case("0x0000000000000000000000000000000000000000"))
-                    .then(|| V1ResolverLink {
-                        resolver_address: link.resolver_address.clone(),
-                        resource_id: Some(resource_id),
-                        logical_name_id: link.logical_name_id.clone(),
-                        source_role: link.source_role.clone(),
+                self.v1_resolver_links
+                    .get(&key)
+                    .filter(|link| {
+                        link.source_role.as_deref() == Some("registry")
+                            && link.resource_id == Some(resource_id)
+                            && link.resolver_address.eq_ignore_ascii_case(ZERO_ADDRESS)
                     })
-                })
+                    .cloned()
             })
     }
 
@@ -241,7 +234,7 @@ impl State {
             .is_some_and(|authority| authority.resource_id == registrar.resource_id);
         let registry_owner = self.v1_registry_owner(namespace, namehash);
         let registrar_matches_registry = registry_owner.as_deref().is_none_or(|owner| {
-            if owner.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000") {
+            if owner.eq_ignore_ascii_case(ZERO_ADDRESS) {
                 registrar_was_current
             } else {
                 registrar

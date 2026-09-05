@@ -29,20 +29,28 @@ pub(super) fn append_transfer_permissions(
     }
     let Some(resolver) = resolver else { return };
     let scope = json!({"kind":"resolver","chain_id":chain_id,"resolver_address":resolver});
+    let mut change = |authority: &V1NameState, subject: &str, grant, action: &str| {
+        push_permission_change(
+            output,
+            authority,
+            subject,
+            scope.clone(),
+            "resolver_control",
+            grant,
+            "TokenControlTransferred",
+            action,
+        );
+    };
     match (previous_authority, current_authority) {
         (Some(previous), Some(current)) if previous.resource_id != current.resource_id => {
             for (authority, grant, action) in
                 [(previous, false, "revoke"), (current, true, "grant")]
             {
                 if let Some(subject) = authority.owner.as_deref() {
-                    push_permission_change(
-                        output,
+                    change(
                         authority,
                         subject,
-                        scope.clone(),
-                        "resolver_control",
                         grant,
-                        "TokenControlTransferred",
                         &format!("transfer-authority-{action}"),
                     );
                 }
@@ -53,16 +61,17 @@ pub(super) fn append_transfer_permissions(
                 && current.resource_id == after.resource_id =>
         {
             for (grant, subject, action) in [(false, from, "revoke"), (true, to, "grant")] {
-                push_permission_change(
-                    output,
+                change(
                     after,
                     subject,
-                    scope.clone(),
-                    "resolver_control",
                     grant,
-                    "TokenControlTransferred",
                     &format!("transfer-resolver-{action}"),
                 );
+            }
+        }
+        (None, Some(current)) => {
+            if let Some(subject) = current.owner.as_deref() {
+                change(current, subject, true, "transfer-authority-grant");
             }
         }
         _ => {}
