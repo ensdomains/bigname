@@ -987,8 +987,8 @@ Both exact-name and child assertions apply only to the Mainnet
 an admitted proof: exact-name failures require an activated
 `migration_authority_transition`, and child failures require the selected
 ENSv2 authority and its admitted proof
-([`crates/project/src/integrity.rs:127-135`](../../crates/project/src/integrity.rs#L127-L135),
-[`crates/project/src/integrity.rs:309-327`](../../crates/project/src/integrity.rs#L309-L327)).
+([`assert_exact_name_authority`](../../crates/project/src/integrity.rs#L41),
+[`assert_child_authority`](../../crates/project/src/integrity.rs#L260)).
 Ethereum Sepolia carries distinct ENSv1 and ENSv2 test deployments on the same
 chain: the pinned ENSv1 registry is
 `0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e`
@@ -1030,8 +1030,10 @@ underlying relation events remain diagnostic history. Neither shape creates a
 `project_generation_failures` row, fails the Project phase, or makes
 `/v2/status` stale for this reason. This runbook therefore does not route a
 Sepolia incident through the Mainnet halt procedure. Extending the guardrail to
-Sepolia is deferred until the #503 e2e harness proves an Interpret-activated
-boundary through Project publication.
+Sepolia is deferred until [PR #852](https://github.com/ensdomains/bigname/pull/852),
+the #503 e2e harness, proves an Interpret-activated boundary through Project
+publication; [issue #851](https://github.com/ensdomains/bigname/issues/851)
+tracks re-applying the guardrail.
 
 ## Closure and escalation record
 

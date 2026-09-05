@@ -191,7 +191,8 @@ direct-child groups now supply production input
 to the activated-boundary branch; a refused or unmigrated child reaches ENSv2
 authority only through a current positive ENSv2 registration.
 
-The dual-current assertions run only for the Mainnet ENS deployment profile,
+The dual-current assertions run only for the Mainnet ENS
+[deployment profile](glossary.md#deployment-profile),
 after transaction- and block-level
 reconciliation; a transient intra-transaction overlap is not a publication
 failure. For the exact-name invariant, a dual-current result after the applicable
@@ -219,7 +220,10 @@ assertion. On Sepolia, a proven boundary selects and publishes ENSv2, while an
 ordinary overlap without proof remains refused with
 `independent_ens_deployments_overlap`; neither shape causes a dual-current
 generation failure. Extending the publication guardrail to Sepolia is deferred
-until a checked-in test drives an Interpret-activated boundary through Project.
+until [PR #852](https://github.com/ensdomains/bigname/pull/852), the #503 e2e
+harness, drives an Interpret-activated boundary through Project;
+[issue #851](https://github.com/ensdomains/bigname/issues/851) tracks re-applying
+the guardrail.
 
 ## ENSv1→ENSv2 delivery slices
 

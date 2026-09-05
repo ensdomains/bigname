@@ -850,10 +850,12 @@ dual-current integrity assertions apply to activated proofs on the configured
 Mainnet ENS deployment profile. Sepolia publishes a proof-selected result, and
 ordinary unproven Sepolia ENSv1/ENSv2 overlap remains a per-name refusal rather
 than a publication block. Extending the guardrail to Sepolia is deferred until
-the connected Interpret→Project path is proven by the #503 e2e harness. There
-is no production interval serving candidate-only data. The ordinary
-announcement edge above remains a watch-plan input and this activation creates
-no ingest gap.
+[PR #852](https://github.com/ensdomains/bigname/pull/852), the #503 e2e harness,
+proves the connected Interpret→Project path;
+[issue #851](https://github.com/ensdomains/bigname/issues/851) tracks re-applying
+the guardrail. There is no production interval serving candidate-only data.
+The ordinary announcement edge above remains a watch-plan input and this
+activation creates no ingest gap.
 
 Other artifacts of the admitted 2026-06-29 Sepolia deployment — including
 universal/reverse resolution,
