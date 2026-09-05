@@ -685,11 +685,20 @@ graph_node@aefe1737) (upstream:
 `registrationDate` extension remains; every other upstream order value is
 assigned an exact upstream-only disposition and is absent from the local enum.
 The default and explicit `id` order use `name_current_lookup_idx` without a
-sort. ID equality and membership use a B-tree scan with every order because
-their candidate count is bounded by the supplied operands. Canonical ranges use
-that scan only with ID ordering, where `LIMIT` bounds the returned rows near the
-requested page size plus skipped rows. A range with a non-ID order instead keeps
-the ordinary joins even when the range is selective, because its operand alone
+sort. ID equality and membership use a B-tree scan with every order. Equality
+yields at most one candidate; membership is bounded only by the operand count,
+which the client controls and the API does not cap. With a non-ID order, each
+member may therefore cause one correlated probe, and a very large list can
+cross PostgreSQL's JIT cost threshold. On the 5,004-row review fixture,
+`id_in` lists of 10, 1,000, and 5,000 values produced 10, 1,000, and 5,000
+probes at estimated costs 519, 46,682, and 227,149 respectively; the 5,000-value
+case enabled JIT. With ID ordering, `LIMIT` bounded the same 5,000-value list to
+200 probes at cost 18,456 without JIT. An explicitly empty `id_in` still selects
+the correlated query shape, but its `AND FALSE` predicate becomes a cost-0.02
+one-time filter and performs no probes. Canonical ranges use the B-tree scan
+only with ID ordering, where `LIMIT` bounds the returned rows near the requested
+page size plus skipped rows. A range with a non-ID order instead keeps the
+ordinary joins even when the range is selective, because its operand alone
 cannot bound the number of matching rows. ID negations, noncanonical ranges,
 every name operator, and the other served order values therefore have cost
 linear in the eligible names table, although filtering and sorting still occur
@@ -730,17 +739,18 @@ least 5,000 eligible rows spanning at least two effective owners and two
 resolver addresses, with fixed reviewed EXPLAIN bounds for ID equality,
 membership, canonical ranges, and the ID order. Operators and orders that scan
 the eligible names table instead require their predicate below `LIMIT`, a match
-near the end of the 6,000-row fixture, and bounded sort memory; fixture-sized
+near the end of the 5,004-row fixture, and bounded sort memory; fixture-sized
 row, loop, and buffer ceilings are not treated as scalability proof.
 PostgreSQL uses the correlated eligibility subquery for ID order, or for ID
 equality or membership with any order. A range combined with equality or
 membership stays bounded by that same candidate set. A range without equality
 or membership uses ordinary joins under a non-ID order so each relation is
-scanned once rather than probed once per matching name. On the 5,004-row review
-fixture, the accepted selective `id_gt` plus name-order trade-off used the flat
-plan at estimated cost 537 in about 24 ms instead of five correlated probes;
-the same rule prevents an unselective range from making 5,004 probes and
-triggering JIT compilation.
+scanned once rather than probed once per matching name. A fresh round-4 run of
+`tests::graphql_generated_domain_order_plans_are_index_bounded_or_linear` on
+the 5,004-row `postgres:16-alpine` review fixture measured the accepted
+selective `id_gt` plus name-order flat plan at cost 537.01 and 34.899 ms instead
+of five correlated probes. The same rule prevents an unselective range from
+making 5,004 probes and triggering JIT compilation.
 This API-only slice adds no index or database locale startup gate.
 
 The affected Manager operation set therefore requires two declaration edits:
