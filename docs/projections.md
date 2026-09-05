@@ -574,10 +574,8 @@ default entry. ENSv1 `ContenthashChanged` normalized state uses
 `address_bytes_hex`, and `value_retained=false`, except that coin type 60 with
 an exactly 20-byte payload preserves the scalar `value` envelope used by the
 legacy `AddrChanged` event.
-(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L22-L24 @ ens_v1@91c966f)
-(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L70 @ ens_v1@91c966f)
-(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L43-L66 @ basenames@1809bbc)
-(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L106-L110 @ basenames@1809bbc)
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L22-L24 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L70 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L43-L66 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L106-L110 @ basenames@1809bbc)
 (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L116-L121 @ basenames@1809bbc)
 Project reconstructs a retained contenthash entry as
 `value={"encoding":"hex","bytes":"0x..."}` and retains an address entry as
@@ -586,16 +584,11 @@ payload becomes an exact `not_found` entry with `value` omitted. The nested
 `value.bytes` address compatibility shape receives the same empty-value
 classification.
 
-Project also classifies an exact `addr:60` value of exactly 20 zero bytes as
-`not_found`, with `value` omitted, when the resolver event is behind an ENSv1
-registry, registrar, or wrapper resolver pointer, or a Basenames registry
-resolver pointer. Both the scalar envelope used by current `AddressChanged` and
-`AddrChanged` events and the retained nested `value.bytes` compatibility
-envelope receive this classification. ENSv2-origin attribution, another coin
-type, another nonempty byte length, and a nonzero value remain stored successes.
-Project keeps the entry and selector, does not change raw facts or normalized
-events, and applies the existing `addr:2147483648` derived rule afterward
-without changing that source record.
+Project classifies an exact 20-byte-zero `addr:60` as `not_found`, with `value` omitted, behind an
+ENSv1 registry, registrar, or wrapper resolver pointer, or a Basenames registry resolver pointer.
+This covers current scalar and retained nested `value.bytes` envelopes; other origins, types,
+lengths, and nonzero values remain stored successes. Project keeps the entry and selector, changes
+no raw facts or normalized events, and applies the unchanged `addr:2147483648` rule afterward.
 
 Rows produced under an earlier [interpreter content
 hash](glossary.md#interpreter-content-hash) may retain the nested `value` object

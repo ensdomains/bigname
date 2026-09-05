@@ -607,22 +607,17 @@ Field ownership:
   verified decode: for coin type `60`, a 20-byte zero default becomes derived
   `not_found`; for EVM-range multicoin selectors, the same non-empty bytes remain
   an `ok` value. Exact stored records retain their stored value except that an
-  ENSv1 or Basenames `addr:60` value of exactly 20 zero bytes is normalized to
-  `not_found` before this derived rule runs. That exception covers
-  `AddressChanged(node,60,zero20)` and a retained legacy-only normalized
-  `AddrChanged(node,address(0))` behind an ENSv1 registry, registrar, or wrapper
-  resolver pointer, or a Basenames registry resolver pointer. It does not cover
-  ENSv2-origin attribution, another coin type, another nonempty byte length, or
-  a nonzero address. The exact entry remains present but omits `value`;
-  `addresses["60"]` and `primary_address` are omitted unless the unchanged
-  `addr:2147483648` rule supplies a replacement. When it does not, indexed and
-  verified exact `addr:60` reads both return `not_found` for this stored zero
-  address, and agreement creates no [resolution divergence
-  ledger](glossary.md#resolution-divergence-ledger) row.
-  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L22-L24 @ ens_v1@91c966f)
-  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L70 @ ens_v1@91c966f)
-  (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L43-L66 @ basenames@1809bbc)
-  (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L106-L110 @ basenames@1809bbc)
+  ENSv1 or Basenames `addr:60` value of exactly 20 zero bytes is normalized to `not_found`
+  before this derived rule runs. That covers `AddressChanged(node,60,zero20)` and a retained
+  legacy-only normalized `AddrChanged(node,address(0))` behind an ENSv1 registry, registrar,
+  or wrapper resolver pointer, or a Basenames registry resolver pointer. ENSv2-origin
+  attribution, another coin type, another nonempty byte length, and nonzero addresses retain
+  their values. The exact entry remains but omits `value`; `addresses["60"]` and
+  `primary_address` are omitted unless the unchanged `addr:2147483648` rule supplies a
+  replacement. Without one, indexed and verified reads agree on `not_found` and create no
+  [resolution divergence ledger](glossary.md#resolution-divergence-ledger) row.
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L22-L24 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L70 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L43-L66 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L106-L110 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L116-L121 @ basenames@1809bbc)
   Other
   default-source `ok` values yield the requested-key value, while authoritative
