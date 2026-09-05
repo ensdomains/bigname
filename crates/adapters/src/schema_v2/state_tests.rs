@@ -46,6 +46,41 @@ fn resolver_linked_resources_only_tracks_old_registry_selection() {
 }
 
 #[test]
+fn restore_keys_authority_derived_resolver_links_by_child() {
+    let mut state = State::new(Vec::new(), Vec::new());
+    let event = PriorEventInput {
+        retained_state_key: "derived-resolver".to_owned(),
+        chain_id: "test-chain".to_owned(),
+        namespace: NAMESPACE.to_owned(),
+        logical_name_id: Some("test:child".to_owned()),
+        resource_id: Some(Uuid::from_u128(1)),
+        event_kind: "ResolverChanged".to_owned(),
+        source_family: "ens_v1_registry_l1".to_owned(),
+        manifest_version: 1,
+        source_manifest_id: Some(1),
+        state_scope: None,
+        block_timestamp: None,
+        after_state: json!({
+            "source_event": "AuthorityEpochChanged",
+            "node": "parent",
+            "child_node": "child",
+            "resolver": "0x0000000000000000000000000000000000000001",
+            "resolver_source_role": "registry_old",
+        }),
+    };
+    crate::schema_v2::state_restore::v1(&mut state, &event);
+    assert_eq!(
+        state
+            .v1_resolver_linked_resources
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["test:child"],
+        "authority-derived resolver row was not keyed only by the affected child name",
+    );
+}
+
+#[test]
 fn wrapper_preimage_restore_derives_registry_labelhash_from_raw_label() {
     const NODE: &str = "node";
     const OWNER: &str = "0x0000000000000000000000000000000000000001";

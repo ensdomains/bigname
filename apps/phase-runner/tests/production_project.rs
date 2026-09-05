@@ -13326,7 +13326,6 @@ async fn assert_registrar_transfer_matches_full_rebuild(
     assert!(resolver_permissions.iter().all(|(_, before, after, _, _)| {
         before.get("resolver").is_none() && after.get("resolver").is_none()
     }));
-
     let surface_event_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events
          WHERE chain_id = $1 AND block_number = 5
@@ -13378,8 +13377,15 @@ async fn assert_registrar_transfer_matches_full_rebuild(
     run_project(full.pool(), chain, None, RunMode::Normal, 0, 5).await?;
 
     for pool in [incremental.pool(), full.pool()] {
-        let current_permission: (Uuid, String, Option<String>) = sqlx::query_as(
-            "SELECT resource_id, subject, grant_source ->> 'source_event_kind'
+        let current_permission: (Uuid, String, Option<String>, bool) = sqlx::query_as(
+            "SELECT resource_id, subject, grant_source ->> 'source_event_kind', (NOT EXISTS (
+                 SELECT 1 FROM permissions_current retired WHERE retired.resource_id = $2
+                   AND lower(retired.subject) = lower($3)
+                   AND retired.effective_powers ? 'resource_control') AND EXISTS (
+                 SELECT 1 FROM permissions_current active
+                 WHERE active.resource_id = permissions_current.resource_id
+                   AND lower(active.subject) = lower(permissions_current.subject)
+                   AND active.effective_powers ? 'resource_control'))
              FROM permissions_current
              WHERE scope_kind = 'resolver'
                AND resource_id = (
@@ -13389,12 +13395,15 @@ async fn assert_registrar_transfer_matches_full_rebuild(
                AND lower(scope_detail ->> 'resolver_address') = lower($1)",
         )
         .bind(RESOLVER)
+        .bind(revoke.0)
+        .bind(OWNER)
         .fetch_one(pool)
         .await?;
         let expected_permission = (
             grant.0,
             expected_grantee.into(),
             Some("TokenControlTransferred".into()),
+            true,
         );
         assert_eq!(current_permission, expected_permission);
     }

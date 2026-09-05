@@ -469,6 +469,7 @@ fn run_batches(
     Ok(events)
 }
 
+/// Splits replay only at physical block boundaries.
 fn assert_four_way_and_restore_parity(
     history: &[RawLogInput],
     prefix_len: usize,
@@ -478,8 +479,18 @@ fn assert_four_way_and_restore_parity(
     let per_block = run_batches(
         &manifests,
         &admissions,
-        history.iter().cloned().map(|event| vec![event]).collect(),
+        history
+            .chunk_by(|left, right| {
+                left.block_number == right.block_number && left.block_hash == right.block_hash
+            })
+            .map(<[_]>::to_vec)
+            .collect(),
     )?;
+    assert!(
+        prefix_len == history.len()
+            || history[prefix_len - 1].block_hash != history[prefix_len].block_hash,
+        "restore prefix must end at a physical block boundary"
+    );
     let split_at_prefix = run_batches(
         &manifests,
         &admissions,
@@ -488,10 +499,17 @@ fn assert_four_way_and_restore_parity(
             history[prefix_len..].to_vec(),
         ],
     )?;
+    let alternate_at = history
+        .iter()
+        .position(|event| event.block_hash != history[0].block_hash)
+        .unwrap_or(history.len());
     let alternate_split = run_batches(
         &manifests,
         &admissions,
-        vec![history[..1].to_vec(), history[1..].to_vec()],
+        vec![
+            history[..alternate_at].to_vec(),
+            history[alternate_at..].to_vec(),
+        ],
     )?;
     assert_eq!(single, per_block, "per-block replay drift");
     assert_eq!(single, split_at_prefix, "prefix/suffix replay drift");
@@ -1590,67 +1608,90 @@ fn wrapper_fallback_registrar_activation_grants_resolver_control() -> anyhow::Re
         "wrapper fallback granted resolver control when no authority activated",
     );
 
-    let registry_to_registrar = vec![
+    Ok(())
+}
+
+#[test]
+fn registrar_transfer_retires_registry_resource_control() -> anyhow::Result<()> {
+    let (_, _, node) = fixture();
+    let history = vec![
         current_new_owner(OWNER_2, 7)?,
         registration(8, 9_999)?,
         resolver_selection(REGISTRY, node, RESOLVER_A, 9)?,
         current_new_owner(OWNER, 10)?,
         registrar_transfer(OWNER_2, OWNER, 11)?,
     ];
-    let moved = interpret_test_batch(input(
-        fixture().0,
-        fixture().1,
-        Vec::new(),
-        registry_to_registrar,
-    ))?;
-    let registrar_resource = moved
-        .normalized_events
+    let (events, _) = assert_four_way_and_restore_parity(&history, 4)?;
+    let registry_resource =
+        super::common::stable_uuid(&format!("resource:registry-only:{CHAIN}:{node:#x}"));
+    let registrar_resource = events
         .iter()
         .find(|event| event.block_number == Some(8) && event.event_kind == "RegistrationGranted")
         .and_then(|event| event.resource_id)
         .expect("registrar resource");
-    let registry_resource = moved
-        .normalized_events
-        .iter()
-        .find(|event| {
-            event.block_number == Some(10)
-                && event.event_kind == "AuthorityEpochChanged"
-                && event.after_state["authority_kind"] == "registry_only"
-        })
-        .and_then(|event| event.resource_id)
-        .expect("registry authority resource");
-    let authority_permissions = moved
-        .normalized_events
-        .iter()
-        .filter(|event| {
-            event.block_number == Some(11)
-                && event.event_kind == "PermissionChanged"
-                && event.after_state["scope"]["resolver_address"] == RESOLVER_A
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(authority_permissions.len(), 2);
-    assert_eq!(
-        authority_permissions
-            .iter()
-            .filter(|event| {
-                event.resource_id == Some(registry_resource)
-                    && event.after_state["effective_powers"] == json!([])
-            })
-            .count(),
-        1,
-        "registry authority must be revoked exactly once",
-    );
-    assert_eq!(
-        authority_permissions
-            .iter()
-            .filter(|event| {
-                event.resource_id == Some(registrar_resource)
-                    && event.after_state["effective_powers"] == json!(["resolver_control"])
-            })
-            .count(),
-        1,
-        "registrar authority must be granted exactly once",
-    );
+    for (resource, kind, powers) in [
+        (registry_resource, "resource", json!([])),
+        (registry_resource, "resolver", json!([])),
+        (registrar_resource, "resource", json!(["resource_control"])),
+        (registrar_resource, "resolver", json!(["resolver_control"])),
+    ] {
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.block_number == Some(11)
+                    && event.event_kind == "PermissionChanged"
+                    && event.resource_id == Some(resource)
+                    && event.after_state["subject"] == OWNER
+                    && event.after_state["scope"]["kind"] == kind
+                    && event.after_state["effective_powers"] == powers)
+                .count(),
+            1,
+            "registrar-driven registry-to-registrar permission transition was not emitted exactly once"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn registrar_transfer_grants_registry_resource_control() -> anyhow::Result<()> {
+    let (_, _, node) = fixture();
+    let history = vec![
+        current_new_owner(OWNER_2, 7)?,
+        registration(8, 9_999)?,
+        resolver_selection(REGISTRY, node, RESOLVER_A, 9)?,
+        registrar_transfer(OWNER_2, OWNER, 10)?,
+        current_transfer(node, OWNER, 11)?,
+    ];
+    assert_four_way_and_restore_parity(&history[..4], 3)?;
+    let (events, _) = assert_four_way_and_restore_parity(&history, 4)?;
+    let registry_resource =
+        super::common::stable_uuid(&format!("resource:registry-only:{CHAIN}:{node:#x}"));
+    for (block, powers, message) in [
+        (
+            10,
+            json!(["resource_control"]),
+            "registrar-driven registrar-to-registry transition did not grant resource_control on the registry resource",
+        ),
+        (
+            11,
+            json!([]),
+            "registry-driven registry-to-registrar transition did not revoke resource_control on the registry resource",
+        ),
+    ] {
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.block_number == Some(block)
+                    && event.event_kind == "PermissionChanged"
+                    && event.resource_id == Some(registry_resource)
+                    && event.after_state["subject"] == OWNER_2
+                    && event.after_state["scope"]["kind"] == "resource"
+                    && event.after_state["effective_powers"] == powers)
+                .count(),
+            1,
+            "{message}",
+        );
+    }
     Ok(())
 }
 
@@ -1699,6 +1740,42 @@ fn registrar_transfer_preserves_explicit_ownerless_registry_state() -> anyhow::R
     assert!(
         session.v1_name("ens", &format!("{node:#x}")).is_none(),
         "registrar transfer made the retained registrar current"
+    );
+    Ok(())
+}
+
+#[test]
+fn parent_resolver_does_not_capture_child_authority_link() -> anyhow::Result<()> {
+    let (_, _, child) = fixture();
+    let parent = super::common::namehash(&["eth".to_owned()]).parse()?;
+    let mut child_divergence = old_new_owner(OWNER, 5)?;
+    child_divergence.log_index = 0;
+    let mut parent_handoff = current_transfer(parent, OWNER, 5)?;
+    parent_handoff.log_index = 1;
+    let history = vec![
+        resolver_selection(OLD_REGISTRY, parent, RESOLVER_A, 1)?,
+        old_new_owner(OWNER_2, 2)?,
+        registration(3, 9_999)?,
+        resolver_selection(OLD_REGISTRY, child, RESOLVER_A, 4)?,
+        child_divergence,
+        parent_handoff,
+    ];
+    let (events, _) = assert_four_way_and_restore_parity(&history, 4)?;
+    let child_resource = events
+        .iter()
+        .find(|event| {
+            event.block_number == Some(5)
+                && event.log_index == Some(0)
+                && event.event_kind == "AuthorityEpochChanged"
+        })
+        .and_then(|event| event.resource_id)
+        .expect("child authority resource");
+    assert!(
+        events.iter().all(|event| event.block_number != Some(5)
+            || event.event_kind != "ResolverChanged"
+            || event.resource_id != Some(child_resource)
+            || event.after_state["registry_fallback_handoff"] != true),
+        "parent handoff cleared a child authority resolver"
     );
     Ok(())
 }
