@@ -1208,8 +1208,7 @@ async fn born_wrapped_detail_and_history_keep_the_wrapper_registration_handle() 
     let registrar_history = v2_history_payload_for_database(&database, &format!("/v2/events?registration_id={registrar}&page_size=20")).await?; assert!(registrar_history["data"].as_array().is_some_and(Vec::is_empty), "registrar-scoped rows leaked under a second registration handle: {registrar_history:?}");
     let rewrapper_history = v2_history_payload_for_database(&database, &format!("/v2/events?registration_id={rewrapper}&page_size=20")).await?; assert!(rewrapper_history["data"].as_array().is_some_and(Vec::is_empty), "later-wrapper rows leaked under a second registration handle: {rewrapper_history:?}");
     let plan = bigname_storage::explain_registration_history_filter_for_test(&database.pool, wrapper, LOGICAL, "ethereum-mainnet", "ens", &namehash).await?;
-    assert!(!plan.contains("Index Cond: (event_kind = 'SurfaceBound'::text)"), "registration identity must not scan every SurfaceBound row per history result:\n{plan}");
-    assert!(!plan.contains("Index Cond: (chain_id = wrapper_binding"), "registration identity must not scan every registrar event on the chain per wrapper candidate:\n{plan}");
+    assert_registration_history_plan_is_page_keyed(&plan);
     let orphan_grant = v2_history_event("born-wrap-orphan-grant", None, Some(registrar), "RegistrationGranted", 136); let mut orphan_binding = v2_history_event("born-wrap-orphan-binding", Some(LOGICAL), Some(orphan_wrapper), "SurfaceBound", 136); orphan_binding.source_family = "ens_v1_wrapper_l1".to_owned(); orphan_binding.after_state = json!({"source_event":"NameWrapped","node":namehash,"wrapped_registrar_resource_id":registrar});
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[orphan_grant, orphan_binding]).await?; sqlx::query("UPDATE chain_lineage SET canonicality_state = 'orphaned' WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xhistory136'").execute(&database.pool).await?;
     let canonical = v2_history_payload_for_database(&database, &format!("/v2/events?registration_id={wrapper}&page_size=20")).await?; let canonical_rows = canonical["data"].as_array().expect("canonical history data"); assert_eq!(history_types(canonical_rows), vec!["record", "permission", "transfer", "transfer", "transfer", "authority", "registration"], "orphaned born-wrap evidence hid canonical registration history: {canonical_rows:?}"); assert!(canonical_rows.iter().filter(|row| matches!(row["type"].as_str(), Some("registration" | "transfer" | "authority" | "permission"))).all(|row| row["registration_id"] == json!(wrapper.to_string())), "orphaned born-wrap evidence changed canonical registration identity: {canonical_rows:?}");
@@ -1468,14 +1467,7 @@ async fn later_wrapped_name_keeps_one_followable_registrar_lifecycle_handle() ->
         !plan.contains("Seq Scan on normalized_events"),
         "registration history and association discovery must not scan the complete normalized-event table:\n{plan}"
     );
-    assert!(
-        !plan.contains("Index Cond: (event_kind = 'SurfaceBound'::text)"),
-        "registration identity must not scan every SurfaceBound row per history result:\n{plan}"
-    );
-    assert!(
-        !plan.contains("Index Cond: (chain_id = wrapper_binding"),
-        "registration identity must not scan every registrar event on the chain per wrapper candidate:\n{plan}"
-    );
+    assert_registration_history_plan_is_page_keyed(&plan);
     let older_registration_payload = v2_history_payload_for_database(
         &database,
         &format!(
@@ -2101,6 +2093,65 @@ fn history_types(rows: &[Value]) -> Vec<&str> {
     rows.iter()
         .map(|row| row["type"].as_str().expect("history row type"))
         .collect()
+}
+
+fn assert_registration_history_plan_is_page_keyed(plan: &str) {
+    let history_plan = plan
+        .split_once("history page:\n")
+        .map(|(_, history_plan)| history_plan)
+        .expect("combined plan must contain the history page section");
+    let lines = history_plan.lines().collect::<Vec<_>>();
+    let scans = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(" on normalized_events "))
+        .filter_map(|(index, node)| {
+            lines[index + 1..]
+                .iter()
+                .take_while(|line| !line.trim_start().starts_with("->"))
+                .find(|line| line.trim_start().starts_with("Index Cond:"))
+                .map(|condition| (*node, *condition))
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        !scans.iter().any(|(_, condition)| {
+            condition.contains("chain_id =") && !condition.contains(" AND ")
+        }),
+        "no normalized-events history scan may be keyed only by chain_id:\n{history_plan}"
+    );
+    assert!(
+        !scans.iter().any(|(_, condition)| {
+            condition.contains("event_kind =") && !condition.contains(" AND ")
+        }),
+        "no normalized-events history scan may be keyed only by event_kind:\n{history_plan}"
+    );
+
+    let born_wrapper_scans = scans
+        .iter()
+        .filter(|(node, _)| node.contains(" born_wrapper_candidate"))
+        .collect::<Vec<_>>();
+    assert!(
+        !born_wrapper_scans.is_empty()
+            && born_wrapper_scans
+                .iter()
+                .all(|(_, condition)| condition.contains("logical_name_id =")),
+        "every born-wrapper candidate scan must be keyed by logical_name_id:\n{history_plan}"
+    );
+
+    for alias in [" registrar_grant", " wrapper_binding"] {
+        let resource_scans = scans
+            .iter()
+            .filter(|(node, _)| node.contains(alias))
+            .collect::<Vec<_>>();
+        assert!(
+            !resource_scans.is_empty()
+                && resource_scans
+                    .iter()
+                    .all(|(_, condition)| condition.contains("resource_id =")),
+            "every {alias} scan must be keyed by resource_id:\n{history_plan}"
+        );
+    }
 }
 
 fn history_transaction_hashes(payload: &Value) -> Vec<&str> {
