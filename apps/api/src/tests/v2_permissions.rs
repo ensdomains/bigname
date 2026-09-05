@@ -818,6 +818,60 @@ async fn v2_get_permissions_paginates_and_rejects_mismatched_cursor() -> Result<
 }
 
 #[tokio::test]
+async fn v2_permissions_cursor_binds_name_selection() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let other_resource_id = Uuid::from_u128(0xe300);
+    let other_lineage_id = Uuid::from_u128(0xe301);
+    let other_binding_id = Uuid::from_u128(0xe302);
+    database
+        .seed_name_current_binding_migrated(
+            "ens:other.eth",
+            other_resource_id,
+            other_lineage_id,
+            other_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(address_name_name_current_row(
+            "ens:other.eth",
+            "other.eth",
+            "other.eth",
+            "node:other.eth",
+            other_binding_id,
+            other_resource_id,
+            Some(other_lineage_id),
+            131,
+            json!({"registration": {"status": "active"}}),
+        ))
+        .await?;
+
+    let first = v2_permissions_payload_for_database(
+        &database,
+        "/v2/permissions?name=Perms.eth&page_size=1",
+    )
+    .await?;
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .expect("name page must have a cursor");
+    let replay = v2_permissions_response_for_database(
+        &database,
+        &format!(
+            "/v2/permissions?name=other.eth&registration_id={}&page_size=1&cursor={cursor}",
+            v2_permissions_current_resource_id()
+        ),
+    )
+    .await?;
+
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        read_json::<Value>(replay).await?["error"]["code"],
+        json!("invalid_input")
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_permissions_empty_results_return_empty_page() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database
