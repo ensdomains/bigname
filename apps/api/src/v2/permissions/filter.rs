@@ -28,6 +28,7 @@ pub(super) enum EmptyPermissionsSelection {
 pub(super) struct ResolvedPermissionsFilter {
     pub(super) subject: Option<String>,
     pub(super) resource_id: Option<Uuid>,
+    pub(super) namespace: Option<String>,
     pub(super) empty_selection: Option<EmptyPermissionsSelection>,
     pub(super) authority_context: AuthorityContext,
     pub(super) cursor_filters: BTreeMap<String, String>,
@@ -127,8 +128,10 @@ pub(super) async fn resolve_permissions_filter(
     } else {
         AuthorityContext::ResourceAudit
     };
+    let namespace_filter =
+        (params.namespace.is_some() || inputs.name_filter.is_some()).then_some(namespace.clone());
     let mut cursor_filters = BTreeMap::new();
-    if params.namespace.is_some() || inputs.name_filter.is_some() {
+    if let Some(namespace) = namespace_filter.as_ref() {
         cursor_filters.insert(NAMESPACE_FILTER_KEY.to_owned(), namespace.clone());
     }
     if let Some(name_filter) = inputs.name_filter.as_ref() {
@@ -153,6 +156,7 @@ pub(super) async fn resolve_permissions_filter(
     Ok(ResolvedPermissionsFilter {
         subject: params.address.clone(),
         resource_id,
+        namespace: namespace_filter,
         empty_selection,
         authority_context,
         cursor_filters,

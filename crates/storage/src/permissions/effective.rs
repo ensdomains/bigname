@@ -91,6 +91,18 @@ pub(super) fn push_effective_permission_filters<'a>(
     }
 }
 
+fn push_namespace_filter<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    resource: &str,
+    namespace: Option<&'a str>,
+) {
+    if let Some(namespace) = namespace {
+        builder.push(" AND EXISTS (SELECT 1 FROM bigname_phase.surface_bindings sb JOIN bigname_phase.name_surfaces ns ON ns.logical_name_id=sb.logical_name_id WHERE sb.resource_id=")
+            .push(resource).push(" AND ns.namespace=").push_bind(namespace)
+            .push(" AND sb.canonicality_state IN ('canonical','safe','finalized') AND ns.canonicality_state IN ('canonical','safe','finalized'))");
+    }
+}
+
 pub(super) fn push_effective_permission_cursor<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     alias: &str,
@@ -120,12 +132,14 @@ fn build_page<'a>(
     prefix: &str,
     subject: Option<&'a str>,
     resource_id: Option<Uuid>,
+    namespace: Option<&'a str>,
     cursor: Option<&'a PermissionsCurrentAccountResourceCursor>,
     limit: i64,
 ) -> QueryBuilder<'a, Postgres> {
     let mut b = QueryBuilder::new(prefix);
     push_union_start(&mut b);
     push_effective_permission_filters(&mut b, "pc", subject, resource_id);
+    push_namespace_filter(&mut b, "pc.resource_id", namespace);
     push_effective_permission_cursor(&mut b, "pc", "pc.resource_id", "pc.scope", cursor);
     b.push(DEFAULT_PERMISSIONS_CURRENT_READ_FILTER)
         .push(r#" ORDER BY pc.subject COLLATE "C",pc.resource_id,pc.scope COLLATE "C" LIMIT "#)
@@ -135,6 +149,7 @@ fn build_page<'a>(
     if let Some(resource_id) = resource_id {
         b.push(" AND summary.resource_id=").push_bind(resource_id);
     }
+    push_namespace_filter(&mut b, "summary.resource_id", namespace);
     let account_scope = "('account:'||aps.chain_id||':'||aps.authority_kind||':'||aps.authority_contract||':'||aps.owner)";
     push_effective_permission_cursor(&mut b, "aps", "summary.resource_id", account_scope, cursor);
     b.push(r#" ORDER BY aps.subject COLLATE "C",summary.resource_id,"#)
@@ -149,27 +164,31 @@ fn build_page<'a>(
 pub(super) fn build_effective_permissions_account_resource_page_query<'a>(
     subject: Option<&'a str>,
     resource_id: Option<Uuid>,
+    namespace: Option<&'a str>,
     cursor: Option<&'a PermissionsCurrentAccountResourceCursor>,
     limit: i64,
 ) -> QueryBuilder<'a, Postgres> {
-    build_page("", subject, resource_id, cursor, limit)
+    build_page("", subject, resource_id, namespace, cursor, limit)
 }
 
 fn build_summary<'a>(
     prefix: &str,
     subject: Option<&'a str>,
     resource_id: Option<Uuid>,
+    namespace: Option<&'a str>,
     full: bool,
 ) -> QueryBuilder<'a, Postgres> {
     let mut b = QueryBuilder::new(prefix);
     push_union_start(&mut b);
     push_effective_permission_filters(&mut b, "pc", subject, resource_id);
+    push_namespace_filter(&mut b, "pc.resource_id", namespace);
     b.push(DEFAULT_PERMISSIONS_CURRENT_READ_FILTER);
     push_operator_start(&mut b);
     push_effective_permission_filters(&mut b, "aps", subject, None);
     if let Some(resource_id) = resource_id {
         b.push(" AND summary.resource_id=").push_bind(resource_id);
     }
+    push_namespace_filter(&mut b, "summary.resource_id", namespace);
     push_union_end(&mut b);
     if full {
         b.push(r#"SELECT COUNT(*)::bigint AS row_count,
@@ -186,25 +205,33 @@ fn build_summary<'a>(
 pub(super) fn build_effective_permissions_account_resource_summary_query<'a>(
     subject: Option<&'a str>,
     resource_id: Option<Uuid>,
+    namespace: Option<&'a str>,
 ) -> QueryBuilder<'a, Postgres> {
-    build_summary("", subject, resource_id, true)
+    build_summary("", subject, resource_id, namespace, true)
 }
 
-fn build_batch<'a>(prefix: &'static str, resource_ids: &'a [Uuid]) -> QueryBuilder<'a, Postgres> {
+fn build_batch<'a>(
+    prefix: &'static str,
+    resource_ids: &'a [Uuid],
+    namespace: Option<&'a str>,
+) -> QueryBuilder<'a, Postgres> {
     let mut b = QueryBuilder::new(prefix);
     push_union_start(&mut b);
     push_ids(&mut b, "pc.resource_id", resource_ids);
+    push_namespace_filter(&mut b, "pc.resource_id", namespace);
     b.push(DEFAULT_PERMISSIONS_CURRENT_READ_FILTER);
     push_operator_start(&mut b);
     push_ids(&mut b, "summary.resource_id", resource_ids);
+    push_namespace_filter(&mut b, "summary.resource_id", namespace);
     push_union_end(&mut b);
     b.push(r#"SELECT * FROM effective_permissions ORDER BY resource_id,subject COLLATE "C",scope_storage_key COLLATE "C""#);
     b
 }
-pub(super) fn build_effective_permissions_by_resource_ids_query(
-    resource_ids: &[Uuid],
-) -> QueryBuilder<'_, Postgres> {
-    build_batch("", resource_ids)
+pub(super) fn build_effective_permissions_by_resource_ids_query<'a>(
+    resource_ids: &'a [Uuid],
+    namespace: Option<&'a str>,
+) -> QueryBuilder<'a, Postgres> {
+    build_batch("", resource_ids, namespace)
 }
 
 fn push_ids(builder: &mut QueryBuilder<'_, Postgres>, column: &str, ids: &[Uuid]) {
@@ -220,24 +247,45 @@ pub async fn load_effective_permissions_account_resource_page(
     pool: &PgPool,
     subject: Option<&str>,
     resource_id: Option<Uuid>,
+    namespace: Option<&str>,
     cursor: Option<&PermissionsCurrentAccountResourceCursor>,
     page_size: u64,
 ) -> Result<EffectivePermissionsAccountResourcePage> {
-    load_page(pool, subject, resource_id, cursor, page_size, false).await
+    load_page(
+        pool,
+        subject,
+        resource_id,
+        namespace,
+        cursor,
+        page_size,
+        false,
+    )
+    .await
 }
 pub async fn load_effective_permissions_account_resource_page_count_summary(
     pool: &PgPool,
     subject: Option<&str>,
     resource_id: Option<Uuid>,
+    namespace: Option<&str>,
     cursor: Option<&PermissionsCurrentAccountResourceCursor>,
     page_size: u64,
 ) -> Result<EffectivePermissionsAccountResourcePage> {
-    load_page(pool, subject, resource_id, cursor, page_size, true).await
+    load_page(
+        pool,
+        subject,
+        resource_id,
+        namespace,
+        cursor,
+        page_size,
+        true,
+    )
+    .await
 }
 async fn load_page(
     pool: &PgPool,
     subject: Option<&str>,
     resource_id: Option<Uuid>,
+    namespace: Option<&str>,
     cursor: Option<&PermissionsCurrentAccountResourceCursor>,
     page_size: u64,
     count: bool,
@@ -258,6 +306,7 @@ async fn load_page(
     let rows = build_effective_permissions_account_resource_page_query(
         subject,
         resource_id,
+        namespace,
         cursor,
         limit,
     )
@@ -272,7 +321,7 @@ async fn load_page(
         PermissionsCurrentAccountResourceCursor::from(row)
     });
     let summary = if count {
-        Some(load_summary(pool, subject, resource_id, false).await?)
+        Some(load_summary(pool, subject, resource_id, namespace, false).await?)
     } else {
         None
     };
@@ -286,12 +335,13 @@ async fn load_summary(
     pool: &PgPool,
     subject: Option<&str>,
     resource_id: Option<Uuid>,
+    namespace: Option<&str>,
     full: bool,
 ) -> Result<PermissionsCurrentFullFilterSummary> {
     let mut builder = if full {
-        build_effective_permissions_account_resource_summary_query(subject, resource_id)
+        build_effective_permissions_account_resource_summary_query(subject, resource_id, namespace)
     } else {
-        build_summary("", subject, resource_id, false)
+        build_summary("", subject, resource_id, namespace, false)
     };
     let row = builder.build().fetch_one(pool).await?;
     decode_permissions_current_full_filter_summary(row)
@@ -299,11 +349,12 @@ async fn load_summary(
 pub async fn load_effective_permissions_by_resource_ids(
     pool: &PgPool,
     ids: &[Uuid],
+    namespace: Option<&str>,
 ) -> Result<Vec<EffectivePermissionRow>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    build_effective_permissions_by_resource_ids_query(ids)
+    build_effective_permissions_by_resource_ids_query(ids, namespace)
         .build()
         .fetch_all(pool)
         .await?
@@ -324,6 +375,7 @@ pub async fn explain_effective_permissions_account_resource_page(
     pool: &PgPool,
     subject: Option<&str>,
     resource_id: Option<Uuid>,
+    namespace: Option<&str>,
     cursor: Option<&PermissionsCurrentAccountResourceCursor>,
     page_size: u64,
 ) -> Result<Value> {
@@ -334,6 +386,7 @@ pub async fn explain_effective_permissions_account_resource_page(
             "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) ",
             subject,
             resource_id,
+            namespace,
             cursor,
             limit,
         ),
@@ -351,6 +404,7 @@ pub async fn explain_effective_permissions_account_resource_summary(
             "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) ",
             subject,
             resource_id,
+            None,
             true,
         ),
     )
@@ -362,7 +416,7 @@ pub async fn explain_effective_permissions_by_resource_ids(
 ) -> Result<Value> {
     explain(
         pool,
-        build_batch("EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) ", ids),
+        build_batch("EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) ", ids, None),
     )
     .await
 }

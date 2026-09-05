@@ -53,6 +53,10 @@ async fn fixture() -> Result<(TestDatabase, Uuid)> {
         .bind(CHAIN).bind(HASH).execute(db.pool()).await?;
     sqlx::query("INSERT INTO bigname_phase.resources (resource_id,chain_id,block_hash,block_number,canonicality_state) VALUES ($1,$2,$3,1,'canonical')")
         .bind(resource).bind(CHAIN).bind(HASH).execute(db.pool()).await?;
+    sqlx::query("INSERT INTO bigname_phase.name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state) VALUES ('ens:fixture','ens','fixture.eth',ARRAY['fixture','eth'],'','fixture',ARRAY['fixture','eth'],'test','active',$1,$2,1,'canonical')")
+        .bind(CHAIN).bind(HASH).execute(db.pool()).await?;
+    sqlx::query("INSERT INTO bigname_phase.surface_bindings (surface_binding_id,logical_name_id,resource_id,binding_kind,authority_arm,active_from,chain_id,block_hash,block_number,canonicality_state) VALUES ('00000000-0000-0000-0000-000000000606','ens:fixture',$1,'declared_registry_path','ens_v1',now(),$2,$3,1,'canonical')")
+        .bind(resource).bind(CHAIN).bind(HASH).execute(db.pool()).await?;
     sqlx::query(
         r#"INSERT INTO bigname_phase.permissions_current_resource_summary (
         resource_id,authority_kind,registry_owner,registry_contract,
@@ -97,6 +101,7 @@ async fn operator_count(pool: &PgPool, resource: Uuid) -> Result<usize> {
         pool,
         Some(SUBJECT),
         Some(resource),
+        None,
         None,
         10,
     )
@@ -184,6 +189,7 @@ async fn effective_permissions_page_direct_and_operator_rows_without_gaps() -> R
         Some(SUBJECT),
         Some(resource),
         None,
+        None,
         1,
     )
     .await?;
@@ -195,6 +201,7 @@ async fn effective_permissions_page_direct_and_operator_rows_without_gaps() -> R
         db.pool(),
         Some(SUBJECT),
         Some(resource),
+        None,
         first.next_cursor.as_ref(),
         1,
     )
@@ -208,7 +215,7 @@ async fn effective_permissions_page_direct_and_operator_rows_without_gaps() -> R
     sqlx::query("UPDATE bigname_phase.permissions_current SET scope='owner'")
         .execute(db.pool())
         .await?;
-    let error = load_effective_permissions_by_resource_ids(db.pool(), &[resource])
+    let error = load_effective_permissions_by_resource_ids(db.pool(), &[resource], None)
         .await
         .expect_err("effective reads must reject a mismatched direct scope key");
     ensure!(format!("{error:#}").contains("scope mismatch"));
@@ -223,6 +230,7 @@ async fn effective_permissions_summary_uses_the_same_relation() -> Result<()> {
         Some(SUBJECT),
         Some(resource),
         None,
+        None,
         10,
     )
     .await?;
@@ -233,7 +241,7 @@ async fn effective_permissions_summary_uses_the_same_relation() -> Result<()> {
 #[tokio::test]
 async fn effective_permissions_resource_batch_uses_one_read() -> Result<()> {
     let (db, resource) = fixture().await?;
-    let rows = load_effective_permissions_by_resource_ids(db.pool(), &[resource]).await?;
+    let rows = load_effective_permissions_by_resource_ids(db.pool(), &[resource], None).await?;
     assert_eq!(rows.len(), 1);
     assert!(matches!(
         rows[0].scope,
@@ -245,9 +253,10 @@ async fn effective_permissions_resource_batch_uses_one_read() -> Result<()> {
 #[tokio::test]
 async fn effective_permissions_require_an_account_or_resource_anchor() -> Result<()> {
     let (db, _) = fixture().await?;
-    let error = load_effective_permissions_account_resource_page(db.pool(), None, None, None, 10)
-        .await
-        .expect_err("an unanchored effective permission scan must be rejected");
+    let error =
+        load_effective_permissions_account_resource_page(db.pool(), None, None, None, None, 10)
+            .await
+            .expect_err("an unanchored effective permission scan must be rejected");
     assert!(format!("{error:#}").contains("subject or resource_id"));
     db.cleanup().await
 }
@@ -286,6 +295,7 @@ async fn effective_permissions_address_page_uses_active_subject_and_binding_inde
             db.pool(),
             Some(SUBJECT),
             None,
+            Some("ens"),
             None,
             2,
         )
@@ -293,6 +303,7 @@ async fn effective_permissions_address_page_uses_active_subject_and_binding_inde
         &[
             "account_permission_state_current_active_subject_idx",
             "permissions_current_resource_registry_binding_idx",
+            "surface_bindings_resource_idx",
         ],
     )
     .await?;
@@ -307,6 +318,7 @@ async fn effective_permissions_resource_page_uses_applicability_index() -> Resul
             db.pool(),
             None,
             Some(resource),
+            None,
             None,
             2,
         )

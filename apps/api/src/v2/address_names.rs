@@ -8,7 +8,7 @@ use axum::{
 use bigname_storage::{
     AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe,
     AddressNamesCurrentOrder, AddressNamesCurrentSort, EffectivePermissionRow, NameCurrentRow,
-    PermissionGrantRelation, PrimaryNameClaimStatus,
+    PermissionGrantRelation, PrimaryNameClaimStatus, load_effective_permissions_by_resource_ids,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -207,8 +207,9 @@ pub(crate) async fn get_address_names(
             .into_iter()
             .collect::<Vec<_>>()
     });
+    let permission_namespace = namespace_filter.as_deref();
     let permissions_by_resource = if let Some(resource_ids) = role_resource_ids.as_deref() {
-        bigname_storage::load_effective_permissions_by_resource_ids(&state.pool, resource_ids)
+        load_effective_permissions_by_resource_ids(&state.pool, resource_ids, permission_namespace)
             .await
             .map_err(|_| {
                 V2Error::internal_error(format!(

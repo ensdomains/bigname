@@ -110,13 +110,24 @@ pub(crate) async fn get_permissions(
         .transpose()?;
 
     if let Some(selection) = resolved.empty_selection {
-        return Ok(empty_permissions_response(&params, selection));
+        let support = if selection == EmptyPermissionsSelection::SupersededNameRegistrationPair {
+            let ids = resolved.resource_id.into_iter().collect::<Vec<_>>();
+            let summaries =
+                bigname_storage::load_permissions_current_resource_summaries(&state.pool, &ids)
+                    .await
+                    .map_err(|_| V2Error::internal_error("failed to load permission support"))?;
+            permission_support_for_resources(&ids, &summaries)
+        } else {
+            PermissionSupport::Unknown
+        };
+        return Ok(empty_permissions_response(&params, selection, support));
     }
 
     let storage_page = bigname_storage::load_effective_permissions_account_resource_page(
         &state.pool,
         resolved.subject.as_deref(),
         resolved.resource_id,
+        resolved.namespace.as_deref(),
         storage_cursor.as_ref(),
         params.page_size,
     )
@@ -195,6 +206,7 @@ pub(crate) async fn get_permissions(
 fn empty_permissions_response(
     params: &QueryParams,
     selection: EmptyPermissionsSelection,
+    support: PermissionSupport,
 ) -> Json<Envelope<Vec<PermissionRow>>> {
     let mut meta = Meta::default();
 
@@ -209,7 +221,7 @@ fn empty_permissions_response(
         EmptyPermissionsSelection::SupersededNameRegistrationPair => {
             apply_permissions_collection_support_meta(
                 &mut meta,
-                PermissionSupport::Full,
+                support,
                 PermissionRequestScope::ResourceBound,
             );
         }
