@@ -1103,8 +1103,8 @@ rows remain in the current-state table so losing-fork grants and losing-fork
 revocations both rebuild from surviving canonical history. Interpret re-walks
 retained raw facts through the [`standard_approval`
 derivation](glossary.md#standard-approval-derivation); Project then rebuilds both state legs without a provider
-refetch. App-facing synthesis from those two state legs is deferred to the
-follow-up serving change.
+refetch. Storage serving combines those two state legs into effective
+registry-operator permission rows without persisting per-resource fan-out.
 
 For ENSv2, a latest state-derived `RegistryPathExpired` release removes that resource's effective
 permission rows without removing its partial-coverage summary. A later
@@ -1124,9 +1124,11 @@ ens_v2@a971bd64)
 Coverage wording is not an exhaustiveness claim. `support_status` and
 `unsupported_reason` carry admission separately from projection completeness.
 `operator_approval_surfaces_not_ingested` maps to partial, best-effort
-permission coverage. This interpretation-and-projection change retains that
-broad reason for every authority class; the follow-up serving change owns any
-request-relative narrowing based on a proven registry-owner binding.
+permission coverage. The stored projection retains that broad reason for every
+authority class. The serving layer narrows it to the documented request-relative
+registrar/resolver reason, widening that reason to include wrapper permissions
+for account-wide, wrapper-resource, or mixed role-summary reads. Every such
+permissions response remains partial.
 `ensv1_wrapper_holder_permissions_not_projected`
 remains a separate unsupported class. Readers reject inconsistent typed combinations and
 map an unrecognized persisted unsupported reason to unknown partial product

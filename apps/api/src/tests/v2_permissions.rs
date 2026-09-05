@@ -65,6 +65,11 @@ async fn v2_get_permissions_empties_a_superseded_name_and_registration_pair() ->
     let database = TestDatabase::new_migrated().await?;
     seed_v2_permissions_fixture(&database).await?;
     let stale_resource_id = v2_permissions_stale_resource_id();
+    upsert_phase_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(stale_resource_id, Some("wrapper")),
+    )
+    .await?;
 
     let paired = v2_permissions_payload_for_database(
         &database,
@@ -72,8 +77,8 @@ async fn v2_get_permissions_empties_a_superseded_name_and_registration_pair() ->
     )
     .await?;
     assert_eq!(paired["data"], json!([]));
-    assert!(paired["meta"].get("completeness").is_none());
-    assert!(paired["meta"].get("unsupported_reason").is_none());
+    assert_eq!(paired["meta"]["completeness"], json!("partial"));
+    assert_eq!(paired["meta"]["unsupported_reason"], json!(V2_ACCOUNT_PERMISSION_REASON));
 
     // Anti-vacuity: the same superseded registration is still readable as a resource audit.
     let audited = v2_permissions_payload_for_database(
@@ -293,7 +298,7 @@ async fn v2_get_permissions_maps_rows_and_lineage() -> Result<()> {
     assert_eq!(payload["meta"]["completeness"], json!("partial"));
     assert_eq!(
         payload["meta"]["unsupported_reason"],
-        json!("approval_and_delegation_permissions_not_supported")
+        json!(V2_ACCOUNT_PERMISSION_REASON)
     );
     assert!(payload["meta"].get("unsupported_fields").is_none());
 
@@ -394,6 +399,179 @@ async fn v2_get_permissions_maps_rows_and_lineage() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_permissions_serves_registry_operator_for_address_name_and_registration() -> Result<()> {
+    let database = seed_v2_registry_operator_fixture().await?;
+    let resource_id = v2_permissions_current_resource_id();
+    for uri in [
+        format!("/v2/permissions?address={V2_PERMISSIONS_SUBJECT}"),
+        "/v2/permissions?name=perms.eth".to_owned(),
+        format!("/v2/permissions?registration_id={resource_id}"),
+    ] {
+        let payload = v2_permissions_payload_for_database(&database, &uri).await?;
+        assert!(operator_row(&payload).is_some(), "operator row missing for {uri}");
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_permissions_combined_filters_intersect_operator_rows() -> Result<()> {
+    let database = seed_v2_registry_operator_fixture().await?;
+    let resource_id = v2_permissions_current_resource_id();
+    let matched = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v2/permissions?name=perms.eth&registration_id={resource_id}&address={V2_PERMISSIONS_SUBJECT}"),
+    ).await?;
+    assert!(operator_row(&matched).is_some());
+    let missed = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v2/permissions?name=perms.eth&registration_id={resource_id}&address={V2_PERMISSIONS_OTHER_SUBJECT}"),
+    ).await?;
+    assert!(operator_row(&missed).is_none());
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_permissions_omits_direct_grant_relation() -> Result<()> {
+    let (database, payload) = v2_permissions_payload(&format!(
+        "/v2/permissions?address={V2_PERMISSIONS_SUBJECT}"
+    )).await?;
+    assert!(payload["data"].as_array().unwrap().iter().all(|row| row.get("grant_relation").is_none()));
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_permissions_serves_revocation_as_absence() -> Result<()> {
+    let database = seed_v2_registry_operator_fixture().await?;
+    sqlx::query("UPDATE bigname_phase.account_permission_state_current SET approved=false, effective_powers='[]', revocation_source='{}'")
+        .execute(&database.pool).await?;
+    let payload = v2_permissions_payload_for_database(&database, &format!(
+        "/v2/permissions?address={V2_PERMISSIONS_SUBJECT}"
+    )).await?;
+    assert!(operator_row(&payload).is_none());
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_permissions_does_not_carry_operator_across_registry_generations() -> Result<()> {
+    let database = seed_v2_registry_operator_fixture().await?;
+    sqlx::query("UPDATE bigname_phase.permissions_current_resource_summary SET registry_contract='0x0000000000000000000000000000000000000d44' WHERE resource_id=$1")
+        .bind(v2_permissions_current_resource_id()).execute(&database.pool).await?;
+    let payload = v2_permissions_payload_for_database(&database, &format!(
+        "/v2/permissions?address={V2_PERMISSIONS_SUBJECT}"
+    )).await?;
+    assert!(operator_row(&payload).is_none());
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_permissions_emits_account_scope_and_registry_control() -> Result<()> {
+    let database = seed_v2_registry_operator_fixture().await?;
+    let payload = v2_permissions_payload_for_database(&database, &format!(
+        "/v2/permissions?address={V2_PERMISSIONS_SUBJECT}"
+    )).await?;
+    let row = operator_row(&payload).expect("operator row");
+    assert_eq!(row["grant_scope"], json!({"kind":"account","detail":{
+        "chain_id":1,"authority_kind":"registry","authority_contract":V2_OPERATOR_REGISTRY,
+        "owner":V2_OPERATOR_OWNER}}));
+    assert_eq!(row["powers"], json!(["registry_control"]));
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_permissions_operator_lineage_uses_approval_grant() -> Result<()> {
+    let database = seed_v2_registry_operator_fixture().await?;
+    let payload = v2_permissions_payload_for_database(&database, &format!(
+        "/v2/permissions?address={V2_PERMISSIONS_SUBJECT}&include=lineage"
+    )).await?;
+    let row = operator_row(&payload).expect("operator row");
+    assert_eq!(row["lineage"]["grant"], json!({"kind":"event"}));
+    assert!(row["lineage"].get("registry_binding").is_none());
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_permissions_cursor_crosses_direct_operator_boundary() -> Result<()> {
+    let database = seed_v2_registry_operator_fixture().await?;
+    let base = format!("/v2/permissions?address={V2_PERMISSIONS_SUBJECT}&page_size=1");
+    let first = v2_permissions_payload_for_database(&database, &base).await?;
+    let cursor = first["page"]["next_cursor"].as_str().expect("second row");
+    let second = v2_permissions_payload_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
+    let rows = [first["data"][0].clone(), second["data"][0].clone()];
+    assert_eq!(rows.iter().filter(|row| row.get("grant_relation").is_some()).count(), 1);
+    assert_ne!(rows[0]["grant_scope"], rows[1]["grant_scope"]);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_permissions_cursor_binds_account_collection_anchor() -> Result<()> {
+    let database = seed_v2_registry_operator_fixture().await?;
+    let first = v2_permissions_payload_for_database(&database, &format!(
+        "/v2/permissions?address={V2_PERMISSIONS_SUBJECT}&page_size=1"
+    )).await?;
+    let cursor = first["page"]["next_cursor"].as_str().expect("cursor");
+    let response = v2_permissions_response_for_database(&database, &format!(
+        "/v2/permissions?address={V2_PERMISSIONS_OTHER_SUBJECT}&page_size=1&cursor={cursor}"
+    )).await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_permissions_namespace_filters_before_operator_paging() -> Result<()> {
+    let database = seed_v2_registry_operator_fixture().await?;
+    let resource_id = Uuid::from_u128(0xf100);
+    database.seed_name_current_binding(
+        "basenames:base-perms.base.eth", "basenames", "base-perms.base.eth", "base-perms.base.eth",
+        "base-perms", resource_id, Uuid::from_u128(0xf101), Uuid::from_u128(0xf102),
+    ).await?;
+    upsert_phase_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(resource_id, Some("registrar")),
+    ).await?;
+    upsert_phase_permissions_current_rows(&database.pool, &[permission_current_row(
+        resource_id, V2_PERMISSIONS_SUBJECT, PermissionScope::Resource, 1, 112,
+    )]).await?;
+    seed_registry_operator(&database, resource_id).await?;
+
+    let base = format!("/v2/permissions?address={V2_PERMISSIONS_SUBJECT}&namespace=basenames&page_size=1");
+    let first = v2_permissions_payload_for_database(&database, &base).await?;
+    let cursor = first["page"]["next_cursor"].as_str().expect("second Basenames row");
+    let second = v2_permissions_payload_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
+    for row in [&first["data"][0], &second["data"][0]] {
+        assert_eq!(row["registration_id"], json!(resource_id.to_string()));
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_permissions_resource_reason_names_registrar_and_resolver_gaps() -> Result<()> {
+    let (database, payload) = v2_permissions_payload("/v2/permissions?name=perms.eth").await?;
+    assert_eq!(payload["meta"]["unsupported_reason"], json!(V2_RESOURCE_PERMISSION_REASON));
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_permissions_account_reason_names_registrar_resolver_and_wrapper_gaps() -> Result<()> {
+    let (database, payload) = v2_permissions_payload(&format!(
+        "/v2/permissions?address={V2_PERMISSIONS_SUBJECT}"
+    )).await?;
+    assert_eq!(payload["meta"]["unsupported_reason"], json!(V2_ACCOUNT_PERMISSION_REASON));
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_permissions_empty_account_result_remains_request_relative_partial() -> Result<()> {
+    let (database, payload) = v2_permissions_payload(
+        "/v2/permissions?address=0x0000000000000000000000000000000000000eee",
+    )
+    .await?;
+    assert_eq!(payload["data"], json!([]));
+    assert_eq!(payload["meta"]["completeness"], json!("partial"));
+    assert_eq!(payload["meta"]["unsupported_reason"], json!(V2_ACCOUNT_PERMISSION_REASON));
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_permissions_exposes_atomic_wrapper_state_and_fuses() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_permissions_fixture(&database).await?;
@@ -461,7 +639,7 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
     assert_eq!(by_name["meta"]["completeness"], json!("partial"));
     assert_eq!(
         by_name["meta"]["unsupported_reason"],
-        json!("approval_and_delegation_permissions_not_supported")
+        json!(V2_RESOURCE_PERMISSION_REASON)
     );
 
     let by_registration = v2_permissions_payload_for_database(
@@ -481,7 +659,7 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
     assert_eq!(by_registration["meta"]["completeness"], json!("partial"));
     assert_eq!(
         by_registration["meta"]["unsupported_reason"],
-        json!("approval_and_delegation_permissions_not_supported")
+        json!(V2_RESOURCE_PERMISSION_REASON)
     );
 
     let by_address_and_registration = v2_permissions_payload_for_database(
@@ -508,7 +686,7 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
     );
     assert_eq!(
         by_address_and_registration["meta"]["unsupported_reason"],
-        json!("approval_and_delegation_permissions_not_supported")
+        json!(V2_RESOURCE_PERMISSION_REASON)
     );
 
     database.cleanup().await?;
@@ -672,6 +850,60 @@ async fn v2_get_permissions_paginates_and_rejects_mismatched_cursor() -> Result<
 }
 
 #[tokio::test]
+async fn v2_permissions_cursor_binds_name_selection() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let other_resource_id = Uuid::from_u128(0xe300);
+    let other_lineage_id = Uuid::from_u128(0xe301);
+    let other_binding_id = Uuid::from_u128(0xe302);
+    database
+        .seed_name_current_binding_migrated(
+            "ens:other.eth",
+            other_resource_id,
+            other_lineage_id,
+            other_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(address_name_name_current_row(
+            "ens:other.eth",
+            "other.eth",
+            "other.eth",
+            "node:other.eth",
+            other_binding_id,
+            other_resource_id,
+            Some(other_lineage_id),
+            131,
+            json!({"registration": {"status": "active"}}),
+        ))
+        .await?;
+
+    let first = v2_permissions_payload_for_database(
+        &database,
+        "/v2/permissions?name=Perms.eth&page_size=1",
+    )
+    .await?;
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .expect("name page must have a cursor");
+    let replay = v2_permissions_response_for_database(
+        &database,
+        &format!(
+            "/v2/permissions?name=other.eth&registration_id={}&page_size=1&cursor={cursor}",
+            v2_permissions_current_resource_id()
+        ),
+    )
+    .await?;
+
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        read_json::<Value>(replay).await?["error"]["code"],
+        json!("invalid_input")
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_permissions_empty_results_return_empty_page() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database
@@ -689,7 +921,7 @@ async fn v2_get_permissions_empty_results_return_empty_page() -> Result<()> {
     assert_eq!(by_address["meta"]["completeness"], json!("partial"));
     assert_eq!(
         by_address["meta"]["unsupported_reason"],
-        json!("approval_and_delegation_permissions_not_supported")
+        json!(V2_ACCOUNT_PERMISSION_REASON)
     );
 
     let by_missing_name =
@@ -756,7 +988,7 @@ async fn v2_permissions_empty_resource_fails_closed_from_typed_support_summary()
     assert_eq!(partial["meta"]["completeness"], json!("partial"));
     assert_eq!(
         partial["meta"]["unsupported_reason"],
-        json!("approval_and_delegation_permissions_not_supported")
+        json!(V2_RESOURCE_PERMISSION_REASON)
     );
 
     sqlx::query(
@@ -769,8 +1001,8 @@ async fn v2_permissions_empty_resource_fails_closed_from_typed_support_summary()
     .await?;
     let synthetic_full = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(synthetic_full["data"], json!([]));
-    assert!(synthetic_full["meta"].get("completeness").is_none());
-    assert!(synthetic_full["meta"].get("unsupported_reason").is_none());
+    assert_eq!(synthetic_full["meta"]["completeness"], json!("partial"));
+    assert_eq!(synthetic_full["meta"]["unsupported_reason"], json!(V2_RESOURCE_PERMISSION_REASON));
 
     upsert_phase_permissions_current_resource_summary(
         &database.pool,
@@ -779,10 +1011,10 @@ async fn v2_permissions_empty_resource_fails_closed_from_typed_support_summary()
     .await?;
     let wrapper = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(wrapper["data"], json!([]));
-    assert_eq!(wrapper["meta"]["completeness"], json!("unsupported"));
+    assert_eq!(wrapper["meta"]["completeness"], json!("partial"));
     assert_eq!(
         wrapper["meta"]["unsupported_reason"],
-        json!("wrapper_holder_permissions_not_supported")
+        json!(V2_ACCOUNT_PERMISSION_REASON)
     );
 
     database.cleanup().await
@@ -854,7 +1086,7 @@ async fn v2_permissions_admit_project_vocabulary_and_exclude_orphaned_projection
     assert_eq!(readable["meta"]["completeness"], json!("partial"));
     assert_eq!(
         readable["meta"]["unsupported_reason"],
-        json!("approval_and_delegation_permissions_not_supported")
+        json!(V2_RESOURCE_PERMISSION_REASON)
     );
 
     sqlx::query(
@@ -891,6 +1123,66 @@ async fn v2_permissions_admit_project_vocabulary_and_exclude_orphaned_projection
 
 const V2_PERMISSIONS_SUBJECT: &str = "0x0000000000000000000000000000000000000cc1";
 const V2_PERMISSIONS_OTHER_SUBJECT: &str = "0x0000000000000000000000000000000000000cc2";
+const V2_OPERATOR_OWNER: &str = "0x0000000000000000000000000000000000000a11";
+const V2_OPERATOR_REGISTRY: &str = "0x0000000000000000000000000000000000000c33";
+const V2_RESOURCE_PERMISSION_REASON: &str =
+    "registrar_erc721_approvals_and_resolver_approvals_delegates_not_supported";
+const V2_ACCOUNT_PERMISSION_REASON: &str =
+    "registrar_erc721_approvals_resolver_approvals_delegates_and_wrapper_permissions_not_supported";
+
+fn operator_row(payload: &Value) -> Option<&Value> {
+    payload["data"].as_array()?.iter().find(|row| {
+        row.get("grant_relation").and_then(Value::as_str) == Some("operator")
+    })
+}
+
+async fn seed_v2_registry_operator_fixture() -> Result<TestDatabase> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    seed_registry_operator(&database, v2_permissions_current_resource_id()).await?;
+    Ok(database)
+}
+
+async fn seed_registry_operator(database: &TestDatabase, resource_id: Uuid) -> Result<()> {
+    sqlx::query(
+        "UPDATE bigname_phase.permissions_current_resource_summary
+         SET registry_owner = $2, registry_contract = $3,
+             registry_binding_provenance = jsonb_build_object(
+                 'source', 'raw_log', 'chain_id', provenance->>'chain_id'),
+             registry_binding_chain_positions = jsonb_build_object(
+                 'block_number', chain_positions->>'target_block_number',
+                 'block_hash', chain_positions->>'target_block_hash')
+         WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .bind(V2_OPERATOR_OWNER)
+    .bind(V2_OPERATOR_REGISTRY)
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        r#"INSERT INTO bigname_phase.account_permission_state_current (
+            chain_id, authority_kind, authority_contract, authority_contract_instance_id,
+            owner, subject, relation_kind, approved, effective_powers, grant_source,
+            revocation_source, inheritance_path, transfer_behavior, provenance,
+            chain_positions, canonicality_summary, manifest_version
+        ) SELECT provenance->>'chain_id', 'registry', $2,
+            '00000000-0000-0000-0000-000000000605', $3, $4, 'operator', true,
+            '["registry_control"]',
+            '{"kind":"event","source_event":"ApprovalForAll"}', NULL, '[]',
+            '{"mode":"owner_scoped"}', jsonb_build_object(
+                'chain_id', provenance->>'chain_id'), chain_positions,
+            '{"state":"canonical"}', manifest_version
+        FROM bigname_phase.permissions_current_resource_summary
+        WHERE resource_id = $1"#,
+    )
+    .bind(resource_id)
+    .bind(V2_OPERATOR_REGISTRY)
+    .bind(V2_OPERATOR_OWNER)
+    .bind(V2_PERMISSIONS_SUBJECT)
+    .execute(&database.pool)
+    .await?;
+    Ok(())
+}
 
 async fn v2_permissions_payload(uri: &str) -> Result<(TestDatabase, Value)> {
     let database = TestDatabase::new_migrated().await?;

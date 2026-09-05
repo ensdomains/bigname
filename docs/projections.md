@@ -245,7 +245,7 @@ outcomes, or durable traces.
 | `address_names_current` | `(address, logical_name_id, relation)` | address-to-names and reverse lookup |
 | `children_current` | parent/child identity plus class | direct and classified child collections |
 | `permissions_current` | resource, subject, and scope | resource permissions and role summaries |
-| `account_permission_state_current` | (`chain_id`, `authority_kind`, `authority_contract`, `owner`, `subject`, `relation_kind`) | no serving reader yet; a follow-up change adds storage and API readers |
+| `account_permission_state_current` | (`chain_id`, `authority_kind`, `authority_contract`, `owner`, `subject`, `relation_kind`) | effective registry-operator permissions by account or resource |
 | `permissions_current_resource_summary` | `resource_id` | permission support and authority summary |
 | `resolver_current` | chain and resolver address | resolver overview |
 | `record_inventory_current` | resource plus record boundary key | indexed record inventory and values |
@@ -458,15 +458,32 @@ contract remembered at transition time, not the registrar token owner, so the ne
 current authority receives the binding without attribution to the registrar
 emitter; wrapper-family authority transitions remain outside this rule.
 
+The serving read combines direct `permissions_current` rows with effective
+registry-operator rows; it does not persist account approvals once per
+resource. An account row is effective only when it is approved, has
+`authority_kind=registry` and `relation_kind=operator`, and its chain,
+`authority_contract`, and owner equal the resource summary's binding chain,
+`registry_contract`, and `registry_owner`. Both the account row and binding
+must point to current canonical, safe, or finalized chain lineage, and the
+resource summary must pass its ordinary current-lineage filter. The join uses
+the emitter-derived registry contract address because one admitted address on
+one chain identifies one contract instance across manifest epochs; the account
+row retains `authority_contract_instance_id` as the corresponding admitted
+instance evidence. A binding move to a different registry address therefore
+isolates generations and makes the old approval inapplicable. A retained
+revocation (`approved=false`), a cleared binding, or orphaned account or binding
+evidence is served as absence.
+
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/Registry.sol:L46-L52 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/Registry.sol:L148-L158 @ basenames@1809bbc)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
 (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L70-L84 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) Known
 owner-derived rows remain available, but neither those rows nor a zero-row
-summary is an authoritative permission enumeration. API contract tests inject
-an independently proven full summary to verify that resource-bound public
-requests are not globally forced to partial.
+summary is an authoritative permission enumeration. Every permissions response
+remains partial; request scope selects the documented absent-surface reason.
 
 When a state-derived ENSv2 path-expiry release remains the resource's terminal
 lifecycle event and retires effective permission rows, the resource summary

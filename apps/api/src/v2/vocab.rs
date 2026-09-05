@@ -52,6 +52,12 @@ pub(crate) enum Source {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub(crate) enum GrantRelation {
+    Operator,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum Finality {
     Latest,
     Safe,
@@ -151,9 +157,7 @@ pub(crate) enum RegistrationStatus {
     Unregistered,
 }
 
-/// How a permission row may be read. `CurrentForName` is claimed only when a
-/// `name` filter selected the row's current registration for that name;
-/// everything else is a resource-keyed read that makes no current-name claim.
+/// How a permission row is anchored for serving.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AuthorityContext {

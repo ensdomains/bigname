@@ -19,7 +19,7 @@ pub(crate) async fn ensure_verified_lookup_ddl_available(pool: &PgPool) -> Resul
             .collect::<Vec<_>>()
             .join("\n");
         bail!(
-            "API verified-lookup DDL preflight failed: required lookup DDL is missing\n{diagnostics}"
+            "API verified-lookup DDL preflight failed: required lookup objects are missing or serving relations are unreadable\n{diagnostics}"
         );
     }
 

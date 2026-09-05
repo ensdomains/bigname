@@ -588,6 +588,49 @@ async fn v2_product_routes_hide_pipeline_vocabulary_family_wide() -> Result<()> 
     Ok(())
 }
 
+#[test]
+fn v2_permission_additive_vocabulary_census_rejects_unknown_relation_and_malformed_account_scope() {
+    let unknown = json!({"grant_relation":"delegate","grant_scope":{"kind":"account","detail":{
+        "chain_id":1,"authority_kind":"registry","authority_contract":"0xregistry","owner":"0xowner"
+    }},"powers":["registry_control"]});
+    assert!(assert_permission_additive_vocabulary(&unknown).is_err());
+    let malformed = json!({"grant_relation":"operator","grant_scope":{"kind":"account","detail":{
+        "chain_id":1,"authority_kind":"registry","owner":"0xowner"
+    }},"powers":["registry_control"]});
+    assert!(assert_permission_additive_vocabulary(&malformed).is_err());
+}
+
+fn assert_permission_additive_vocabulary(value: &Value) -> std::result::Result<(), String> {
+    match value {
+        Value::Object(object) => {
+            if let Some(relation) = object.get("grant_relation") {
+                if relation != "operator" {
+                    return Err(format!("unknown grant_relation {relation}"));
+                }
+                let scope = object.get("grant_scope").ok_or("missing grant_scope")?;
+                if scope["kind"] != "account" {
+                    return Err("operator must use account scope".to_owned());
+                }
+                let detail = scope["detail"].as_object().ok_or("account detail must be object")?;
+                for key in ["chain_id", "authority_kind", "authority_contract", "owner"] {
+                    if !detail.contains_key(key) {
+                        return Err(format!("account detail missing {key}"));
+                    }
+                }
+                if detail.len() != 4 || object.get("powers") != Some(&json!(["registry_control"])) {
+                    return Err("operator scope or powers are outside the additive vocabulary".to_owned());
+                }
+            }
+            for child in object.values() {
+                assert_permission_additive_vocabulary(child)?;
+            }
+        }
+        Value::Array(items) => for item in items { assert_permission_additive_vocabulary(item)?; },
+        _ => {}
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -961,14 +1004,18 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         V2SuccessFixture::Permissions => {
             let uri =
                 format!("/v2/permissions?address={V2_PERMISSIONS_SUBJECT}&include=lineage&page_size=10");
-            let (database, payload) = v2_permissions_payload(&uri).await?;
+            let database = seed_v2_registry_operator_fixture().await?;
+            let payload = v2_permissions_payload_for_database(&database, &uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, &uri, &payload).await?;
             database.cleanup().await?;
             Ok(payload)
         }
         V2SuccessFixture::AddressNames => {
             let uri = format!("/v2/addresses/{V2_ADDRESS}/names?include=role_summary");
-            let (database, payload) = v2_address_names_payload(&uri).await?;
+            let database = TestDatabase::new_migrated().await?;
+            seed_v2_address_names_fixture(&database).await?;
+            seed_v2_address_registry_operator(&database).await?;
+            let payload = v2_address_names_payload_for_database(&database, &uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, &uri, &payload).await?;
             database.cleanup().await?;
             Ok(payload)
@@ -1673,6 +1720,11 @@ fn assert_v2_exercised_expansions_non_empty(route: &V2ConformanceRoute, payload:
                 "{} include=lineage must populate at least one non-empty lineage section",
                 route.label
             );
+            let operator = rows.iter().find(|row| row.get("grant_relation") == Some(&json!("operator")))
+                .expect("permissions fixture must exercise the operator vocabulary");
+            assert_eq!(operator["grant_scope"]["kind"], json!("account"));
+            assert_eq!(operator["powers"], json!(["registry_control"]));
+            assert_permission_additive_vocabulary(payload).expect("permissions additive vocabulary");
         }
         V2SuccessFixture::AddressNames => {
             let rows = payload["data"]
@@ -1684,6 +1736,7 @@ fn assert_v2_exercised_expansions_non_empty(route: &V2ConformanceRoute, payload:
                 "{} include=role_summary must populate at least one non-empty role_summary section",
                 route.label
             );
+            assert_permission_additive_vocabulary(payload).expect("role-summary additive vocabulary");
         }
         V2SuccessFixture::Resolver => {
             for key in ["nodes", "aliases", "roles", "events"] {

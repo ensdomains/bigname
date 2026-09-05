@@ -555,9 +555,10 @@ projection relations.
 API startup tolerates a wholly absent phase schema so `/v2/status` can return
 its empty, `degraded` response. Once the phase schema exists, startup checks
 every phase-schema relation, function, and type its serving paths read:
-relations by name, both guarded functions by exact signature, and the
-`canonicality_state` type. If any are missing, the API refuses to start and its
-diagnostic names every missing identity.
+relations by name and `SELECT` privilege, both guarded functions by exact
+signature, and the `canonicality_state` type. If an object is missing or a
+serving relation is unreadable, the API refuses to start and its diagnostic
+names every unavailable identity.
 
 After the phase schema exists, the schema owner provisions the dedicated login
 with these privileges (substitute
@@ -581,6 +582,7 @@ GRANT SELECT ON TABLE
     bigname_phase.address_names_current,
     bigname_phase.children_current,
     bigname_phase.permissions_current,
+    bigname_phase.account_permission_state_current,
     bigname_phase.permissions_current_resource_summary,
     bigname_phase.resolver_current,
     bigname_phase.name_surfaces,

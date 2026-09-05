@@ -3,17 +3,17 @@ set -uo pipefail
 
 # Keep the inventory counts and assignments together. Test-list changes should
 # require edits only in this block; the checks below reject every other drift.
-expected_total=87
-expected_runnable=84
+expected_total=88
+expected_runnable=85
 expected_ignored=3
 expected_shard_1_runnable=42
 expected_shard_1_ignored=2
-expected_shard_1_filtered=43
+expected_shard_1_filtered=44
 expected_shard_1_predicted_seconds=1093.991
-expected_shard_2_runnable=42
+expected_shard_2_runnable=43
 expected_shard_2_ignored=1
 expected_shard_2_filtered=44
-expected_shard_2_predicted_seconds=1093.382
+expected_shard_2_predicted_seconds=1213.382
 
 expected_ignored_tests=(
     "scenarios::provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback"
@@ -104,6 +104,7 @@ shard_2_tests=(
     "scenarios::registry_driven_reads::deep_registry_hierarchy_lists_direct_children_only"
     "scenarios::registry_driven_reads::registry_driven_reads"
     "scenarios::registry_driven_reads::same_label_under_two_parents_keeps_children_distinct"
+    "scenarios::registry_operator_permissions::registry_operator_approval_serving_lifecycle"
     "scenarios::registry_preimages::label_preimage_revealed_later_upgrades_child_listing"
     "scenarios::registry_preimages::registry_only_non_eth_tree_derives_declared_state"
     "scenarios::resolver_records::pre_surface_record_attribution_is_node_scoped_and_never_materializes_unknown_names"

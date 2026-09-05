@@ -119,8 +119,7 @@ by the canonical
 `record_inventory_current`, `resolver_current`, `address_names_current`, and
 `primary_names_current` are the current-state tables written by the project
 phase. The project phase is their single writer. The API and GraphQL read the
-existing serving families; `account_permission_state_current` has no serving
-reader until the follow-up storage and API change. The [historical
+existing serving families; `/v2/permissions` and address-name role summaries read `account_permission_state_current` through storage's effective-permission readers. The [historical
 simplification census](../simplification-audit-20260730.md#appsworker--cratesexecution-fable)
 and the [storage
 census](../simplification-audit-20260730.md#cratesstorage-fable) authorize this
