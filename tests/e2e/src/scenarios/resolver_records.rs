@@ -1,5 +1,4 @@
 use std::net::TcpListener;
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -57,27 +56,22 @@ pub(super) async fn start_v2_api(
         .unwrap_or_else(|| "cargo".into());
     let status = tokio::process::Command::new(cargo)
         .current_dir(&root)
-        .args([
-            "build",
-            "--locked",
-            "-p",
-            "bigname-api",
-            "--bin",
-            "bigname-api",
-        ])
+        .args(["build", "--locked", "-p", "bigname-api"])
+        .args(["--bin", "bigname-api"])
         .status()
         .await?;
     ensure!(status.success(), "build real API binary for e2e");
-    let target = root.join(
-        std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| PathBuf::from("target").into()),
-    );
+    let target = root.join(std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into()));
     let binary = target.join("debug/bigname-api");
     ensure!(binary.is_file(), "API binary missing at {binary:?}");
     let ready_timeout_secs = pipeline::ready_timeout_secs()?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(ready_timeout_secs);
     let mut last_exit = None;
     for _ in 0..5 {
-        let _startup_guard = crate::harness::lock_local_server_start().await;
+        let _startup_guard =
+            tokio::time::timeout_at(deadline, crate::harness::lock_local_server_start())
+                .await
+                .context("local-server startup lock exceeded the API readiness deadline")?;
         let bind_addr = free_addr()?;
         let mut command = Command::new(&binary);
         command
@@ -99,18 +93,22 @@ pub(super) async fn start_v2_api(
         };
         let health_url = format!("{}/healthz", api.base_url);
         loop {
-            if api.client.get(&health_url).send().await.is_ok() {
+            let ready = matches!(
+                tokio::time::timeout_at(deadline, api.client.get(&health_url).send()).await,
+                Ok(Ok(_))
+            );
+            ensure!(
+                tokio::time::Instant::now() < deadline,
+                "real API readiness exceeded configured {ready_timeout_secs}s at {}",
+                api.base_url
+            );
+            if ready {
                 return Ok(api);
             }
             if let Some(status) = api.child.try_wait()? {
                 last_exit = Some(status);
                 break;
             }
-            ensure!(
-                tokio::time::Instant::now() < deadline,
-                "real API readiness exceeded configured {ready_timeout_secs}s at {}",
-                api.base_url
-            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
