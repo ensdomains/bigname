@@ -30,6 +30,26 @@ fn plan_domain_filter(member: &str, value: &str) -> crate::graphql::GeneratedDom
         "name_ends_with_nocase" => filter.name.ends_with_nocase = Some(value.into()),
         "name_not_ends_with" => filter.name.not_ends_with = Some(value.into()),
         "name_not_ends_with_nocase" => filter.name.not_ends_with_nocase = Some(value.into()),
+        "owner" => filter.owner.eq = Some(Some(value.to_lowercase())),
+        "owner_not" => filter.owner.not = Some(Some(value.to_lowercase())),
+        "owner_gt" => filter.owner.gt = Some(value.into()),
+        "owner_gte" => filter.owner.gte = Some(value.into()),
+        "owner_lt" => filter.owner.lt = Some(value.into()),
+        "owner_lte" => filter.owner.lte = Some(value.into()),
+        "owner_in" => filter.owner.in_values = list(),
+        "owner_not_in" => filter.owner.not_in_values = list(),
+        "owner_contains" => filter.owner.contains = Some(value.into()),
+        "owner_contains_nocase" => filter.owner.contains_nocase = Some(value.into()),
+        "owner_not_contains" => filter.owner.not_contains = Some(value.into()),
+        "owner_not_contains_nocase" => filter.owner.not_contains_nocase = Some(value.into()),
+        "owner_starts_with" => filter.owner.starts_with = Some(value.into()),
+        "owner_starts_with_nocase" => filter.owner.starts_with_nocase = Some(value.into()),
+        "owner_not_starts_with" => filter.owner.not_starts_with = Some(value.into()),
+        "owner_not_starts_with_nocase" => filter.owner.not_starts_with_nocase = Some(value.into()),
+        "owner_ends_with" => filter.owner.ends_with = Some(value.into()),
+        "owner_ends_with_nocase" => filter.owner.ends_with_nocase = Some(value.into()),
+        "owner_not_ends_with" => filter.owner.not_ends_with = Some(value.into()),
+        "owner_not_ends_with_nocase" => filter.owner.not_ends_with_nocase = Some(value.into()),
         _ => panic!("unknown generated Domain member {member}"),
     }
     filter
@@ -43,23 +63,208 @@ fn noncanonical_id_ranges_pin_c_collation() {
     assert!(sql.sql().contains("(nc.namehash COLLATE \"C\") >"), "{}", sql.sql());
 }
 
+#[tokio::test]
+async fn graphql_generated_domain_owner_positive_plans_are_relation_bounded_or_linear() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    pad_generated_owner_plans(&database).await?;
+    let chains = ["ethereum-mainnet".to_owned()];
+    for (member, value) in [
+        ("owner", "0x0000000000000000000000000000000000000672"),
+        ("owner_in", "0x0000000000000000000000000000000000000672"),
+        ("owner_gt", "0x0000000000000000000000000000000000000671"),
+        ("owner_gte", "0x0000000000000000000000000000000000000671"),
+        ("owner_lt", "z"), ("owner_lte", "0x0000000000000000000000000000000000000672"),
+        ("owner_contains", "067"), ("owner_contains_nocase", "067"),
+        ("owner_starts_with", "0x0000"), ("owner_starts_with_nocase", "0X0000"),
+        ("owner_ends_with", "672"), ("owner_ends_with_nocase", "672"),
+    ] {
+        let filter = plan_domain_filter(member, value);
+        let explain = crate::graphql::explain_phase_graphql_name_list_page(
+            &database.lookup_pool, &chains, &filter, crate::graphql::GeneratedDomainSort::Id,
+            bigname_storage::NameCurrentListOrder::Asc, 200, 0,
+        ).await?;
+        println!("OWNER POSITIVE {member} PLAN {}", serde_json::to_string_pretty(&explain)?);
+        assert_owner_plan_limits(&explain, member)?;
+        let nodes = plan_nodes(&explain);
+        if matches!(member, "owner" | "owner_in") {
+            let scan = nodes.iter().find(|node| node["Index Name"].as_str()
+                .is_some_and(|index| index == "address_names_current_pkey" || index == "address_names_current_address_idx"))
+                .with_context(|| format!("address-indexed relation scan: {member}"))?;
+            assert_eq!(scan["Actual Loops"], 1, "{member}: {scan}");
+            assert!(scan["Index Cond"].as_str().is_some_and(|condition| condition.contains("address")), "{member}: {scan}");
+            let returned = crate::graphql::load_phase_graphql_name_list_page_offset(
+                &database.lookup_pool,
+                &bigname_storage::NameCurrentListFilter { namespace: Some("ens".into()), ..Default::default() },
+                &chains, &filter, crate::graphql::GeneratedDomainSort::Id,
+                bigname_storage::NameCurrentListOrder::Asc, 200, 0,
+            ).await?;
+            assert!(returned.iter().any(|row| row.row.row.namehash == format!("0x{:064x}", 1_199)), "late second-owner target: {member}");
+        } else {
+            assert!(nodes.iter().any(|node| node["Relation Name"] == "address_names_current"
+                && node["Actual Loops"].as_u64().unwrap_or(0) <= 204), "page-driven relation probe: {member}");
+        }
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_generated_domain_owner_negative_plans_are_page_bounded_anti_joins() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    pad_generated_owner_plans(&database).await?;
+    let chains = ["ethereum-mainnet".to_owned()];
+    for (member, value) in [
+        ("owner_not", GRAPHQL_OWNER), ("owner_not_in", GRAPHQL_OWNER),
+        ("owner_not_contains", "000a"), ("owner_not_contains_nocase", "000A"),
+        ("owner_not_starts_with", GRAPHQL_OWNER),
+        ("owner_not_starts_with_nocase", "0X000000000000000000000000000000000000000A"),
+        ("owner_not_ends_with", "00a"), ("owner_not_ends_with_nocase", "00A"),
+    ] {
+        let filter = plan_domain_filter(member, value);
+        let explain = crate::graphql::explain_phase_graphql_name_list_page(
+            &database.lookup_pool, &chains, &filter, crate::graphql::GeneratedDomainSort::Id,
+            bigname_storage::NameCurrentListOrder::Asc, 200, 0,
+        ).await?;
+        println!("OWNER NEGATIVE {member} PLAN {}", serde_json::to_string_pretty(&explain)?);
+        assert_owner_plan_limits(&explain, member)?;
+        let nodes = plan_nodes(&explain);
+        let anti = nodes.iter().find(|node| node["Join Type"] == "Anti")
+            .with_context(|| format!("anti-semijoin: {member}"))?;
+        assert!(anti["Actual Loops"].as_u64().unwrap_or(u64::MAX) <= 204, "{member}: {anti}");
+        assert!(anti["Shared Hit Blocks"].as_u64().unwrap_or(0) + anti["Shared Read Blocks"].as_u64().unwrap_or(0) <= 4_096, "{member}: {anti}");
+        let outer = nodes.iter().find(|node| node["Relation Name"] == "name_current" && node["Alias"] == "nc")
+            .with_context(|| format!("ordered outer name_current scan: {member}"))?;
+        assert!(outer["Actual Rows"].as_u64().unwrap_or(u64::MAX) <= 204, "{member}: {outer}");
+        assert!(outer["Rows Removed by Filter"].as_u64().unwrap_or(0) <= 4, "{member}: {outer}");
+        let probe = nodes.iter().find(|node| node["Index Name"] == "address_names_current_name_idx")
+            .with_context(|| format!("name-keyed anti probe: {member}"))?;
+        assert!(probe["Actual Loops"].as_u64().unwrap_or(u64::MAX) <= 204, "{member}: {probe}");
+        let returned = crate::graphql::load_phase_graphql_name_list_page_offset(&database.lookup_pool, &bigname_storage::NameCurrentListFilter { namespace: Some("ens".into()), ..Default::default() }, &chains, &filter, crate::graphql::GeneratedDomainSort::Id, bigname_storage::NameCurrentListOrder::Asc, 200, 0).await?;
+        assert!(returned.iter().any(|row| row.row.row.namehash == format!("0x{:064x}", 1_199)), "late second-owner target: {member}");
+    }
+    database.cleanup().await
+}
+
+fn assert_owner_plan_limits(explain: &Value, member: &str) -> Result<()> {
+    let plan = &explain[0]["Plan"];
+    assert_eq!(plan["Node Type"], "Limit", "{member}");
+    assert_eq!(plan["Actual Rows"], 200, "{member}: requested page");
+    assert!(plan["Total Cost"].as_f64().unwrap_or(f64::MAX) < 100_000.0, "{member}: {plan}");
+    assert!(explain[0].get("JIT").is_none(), "{member}: {explain}");
+    assert_eq!(plan["Temp Read Blocks"].as_u64().unwrap_or(0), 0, "{member}");
+    assert_eq!(plan["Temp Written Blocks"].as_u64().unwrap_or(0), 0, "{member}");
+    assert!(plan["Shared Hit Blocks"].as_u64().unwrap_or(0) + plan["Shared Read Blocks"].as_u64().unwrap_or(0) <= 8_192, "{member}: {plan}");
+    assert!(plan_nodes(explain).iter().all(|node| node["Actual Loops"].as_u64().unwrap_or(0) < 5_000), "{member}: {explain}");
+    let text = serde_json::to_string(plan)?;
+    assert!(text.contains("effective_controller") && text.contains("canonical_lineage"), "eligible effective owner below Limit: {member}");
+    Ok(())
+}
+
 async fn pad_generated_domain_plans(database: &TestDatabase) -> Result<()> {
     pad_resolver_planner_statistics(database).await?;
+    let primary_owner = "0x0000000000000000000000000000000000000671";
     let alternate_owner = "0x0000000000000000000000000000000000000672";
     let alternate_resolver = "0x0000000000000000000000000000000000000673";
     let changed = sqlx::query(
         r#"UPDATE bigname_phase.name_current
               SET declared_summary = JSONB_SET(
-                    JSONB_SET(declared_summary, '{control,registry_owner}', TO_JSONB($1::TEXT)),
-                    '{resolver,address}', TO_JSONB($2::TEXT))
-            WHERE namehash >= '0x0000000000000000000000000000000000000000000000000000000000000dac'"#,
+                    JSONB_SET(declared_summary, '{control,registry_owner}', TO_JSONB(
+                        CASE WHEN namehash >= '0x000000000000000000000000000000000000000000000000000000000000176c'
+                             THEN $1::TEXT
+                             WHEN namehash < '0x00000000000000000000000000000000000000000000000000000000000004b0'
+                             THEN $3::TEXT ELSE $2::TEXT END)),
+                    '{resolver,address}', TO_JSONB($4::TEXT))
+            WHERE namehash BETWEEN '0x00000000000000000000000000000000000000000000000000000000000003e8'
+                               AND '0x000000000000000000000000000000000000000000000000000000000000176f'"#,
     )
+    .bind(GRAPHQL_OWNER)
+    .bind(primary_owner)
     .bind(alternate_owner)
     .bind(alternate_resolver)
     .execute(&database.lookup_pool)
     .await?;
-    assert!(changed.rows_affected() >= 2_500);
+    assert_eq!(changed.rows_affected(), 5_000);
     sqlx::query("ANALYZE bigname_phase.name_current")
+        .execute(&database.lookup_pool)
+        .await?;
+    Ok(())
+}
+
+async fn pad_generated_owner_plans(database: &TestDatabase) -> Result<()> {
+    pad_generated_domain_plans(database).await?;
+    for (index, owner) in ["0x0000000000000000000000000000000000000671", "0x0000000000000000000000000000000000000672"].into_iter().enumerate() {
+        let name = format!("owner-plan-extra-{index}.eth");
+        seed_identity_name(database, &format!("ens:{name}"), &name, &name,
+            &bigname_lookup::ens_namehash_hex(&name)?, Uuid::from_u128(0x670_4001 + index as u128 * 3),
+            Uuid::from_u128(0x670_4002 + index as u128 * 3), Uuid::from_u128(0x670_4003 + index as u128 * 3),
+            owner, bigname_storage::AddressNameRelation::EffectiveController, 740 + index as i64).await?;
+    }
+    let bindings = sqlx::query(
+        r#"WITH source AS (
+              SELECT binding.* FROM bigname_phase.surface_bindings binding
+              JOIN bigname_phase.name_current nc
+                ON nc.surface_binding_id = binding.surface_binding_id
+              WHERE nc.raw_name = 'alice.eth'
+            ), generated AS (
+              SELECT * FROM bigname_phase.name_surfaces
+              WHERE namehash BETWEEN '0x00000000000000000000000000000000000000000000000000000000000003e8'
+                                 AND '0x000000000000000000000000000000000000000000000000000000000000176f'
+            ) INSERT INTO bigname_phase.surface_bindings (
+              surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm,
+              active_from, active_to, chain_id, block_hash, block_number, provenance, canonicality_state
+            ) SELECT MD5('owner-plan-' || generated.logical_name_id)::UUID,
+                generated.logical_name_id, source.resource_id, source.binding_kind, source.authority_arm,
+                source.active_from, source.active_to, generated.chain_id, generated.block_hash,
+                generated.block_number, source.provenance, source.canonicality_state
+              FROM generated CROSS JOIN source"#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(bindings.rows_affected(), 5_000);
+    sqlx::query(
+        r#"UPDATE bigname_phase.name_current nc SET
+              surface_binding_id = binding.surface_binding_id, resource_id = binding.resource_id,
+              token_lineage_id = resource.token_lineage_id, binding_kind = binding.binding_kind
+            FROM bigname_phase.surface_bindings binding
+            JOIN bigname_phase.resources resource ON resource.resource_id = binding.resource_id
+            WHERE binding.logical_name_id = nc.logical_name_id
+              AND binding.surface_binding_id = MD5('owner-plan-' || nc.logical_name_id)::UUID"#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let relations = sqlx::query(
+        r#"WITH source AS (
+              SELECT * FROM bigname_phase.address_names_current
+              WHERE raw_name = 'alice.eth' AND relation = 'effective_controller'
+            ) INSERT INTO bigname_phase.address_names_current (
+              address, logical_name_id, relation, namespace, raw_name, namehash,
+              surface_binding_id, resource_id, token_lineage_id, binding_kind,
+              support_status, unsupported_reason, provenance, chain_positions,
+              canonicality_summary, manifest_version
+            ) SELECT nc.declared_summary #>> '{control,registry_owner}', nc.logical_name_id,
+                'effective_controller', nc.namespace, nc.raw_name, nc.namehash,
+                nc.surface_binding_id, nc.resource_id, nc.token_lineage_id, nc.binding_kind,
+                source.support_status, source.unsupported_reason, source.provenance,
+                source.chain_positions, source.canonicality_summary, source.manifest_version
+              FROM bigname_phase.name_current nc CROSS JOIN source
+              WHERE nc.namehash BETWEEN '0x00000000000000000000000000000000000000000000000000000000000003e8'
+                                    AND '0x000000000000000000000000000000000000000000000000000000000000176f'"#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(relations.rows_affected(), 5_000);
+    let eligible_relations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bigname_phase.address_names_current WHERE relation = 'effective_controller'").fetch_one(&database.lookup_pool).await?;
+    assert_eq!(eligible_relations, 5_004);
+    sqlx::query(
+        r#"UPDATE bigname_phase.name_current SET
+              surface_binding_id = NULL, resource_id = NULL, token_lineage_id = NULL, binding_kind = NULL
+            WHERE namehash BETWEEN '0x00000000000000000000000000000000000000000000000000000000000003e8'
+                               AND '0x000000000000000000000000000000000000000000000000000000000000176f'"#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query("ANALYZE bigname_phase.name_current, bigname_phase.address_names_current, bigname_phase.name_surfaces, bigname_phase.resources, bigname_phase.surface_bindings, bigname_phase.chain_lineage, bigname_phase.token_lineages")
         .execute(&database.lookup_pool)
         .await?;
     Ok(())

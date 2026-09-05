@@ -11,6 +11,7 @@ use bigname_storage::{
 };
 
 use super::convert::ZERO_ADDRESS;
+use super::effective_owner_filter as owner;
 use super::generated_filter_ops::{GeneratedDomainFilter, push_generated_domain_filters};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PhaseGraphqlNameListRow {
@@ -254,7 +255,9 @@ pub(crate) fn push_filtered_names<'a>(
     indexed_page: bool,
 ) {
     builder.push("WITH ");
-    if let Some(address) = filter.address.as_ref() {
+    let owner_filter = owner::active_owner_filter(generated_filter);
+    owner::push_effective_owner_cte_predicates(builder, owner_filter, snapshot_chain_ids);
+    if let Some(address) = owner::legacy_address_filter(owner_filter, filter.address.as_ref()) {
         builder.push(
             "address_membership AS (SELECT anc.logical_name_id, \
              JSONB_AGG( \
@@ -369,12 +372,9 @@ pub(crate) fn push_filtered_names<'a>(
         r#") AS expiry_date,
            NULLIF(LOWER(nc.declared_summary #>> '{resolver,address}'), '') AS resolver_address,"#,
     );
-    if filter.address.is_some() {
-        builder.push(" address_membership.membership_targets");
-    } else {
-        builder.push(" '[]'::JSONB AS membership_targets");
-    }
+    owner::push_effective_owner_membership_targets(builder, owner_filter, filter.address.is_some());
     builder.push(" FROM bigname_phase.name_current nc ");
+    owner::push_effective_owner_lateral_join(builder, owner_filter);
     if indexed_page {
         builder.push(" JOIN LATERAL (SELECT 1 FROM bigname_phase.name_surfaces surface ");
     } else {
@@ -394,7 +394,7 @@ pub(crate) fn push_filtered_names<'a>(
         builder.push(DEFAULT_NAME_CURRENT_READ_FILTER);
         builder.push(" OFFSET 0) name_guard ON TRUE");
     }
-    if filter.address.is_some() {
+    if owner_filter.is_none() && filter.address.is_some() {
         builder.push(
             " JOIN address_membership \
                ON address_membership.logical_name_id = nc.logical_name_id",
