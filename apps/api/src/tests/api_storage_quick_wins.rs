@@ -69,7 +69,7 @@ async fn api_serve_refuses_a_schema_missing_normalized_events() -> Result<()> {
 
     assert!(
         diagnostic.starts_with(
-            "API verified-lookup DDL preflight failed: required lookup DDL is missing"
+            "API verified-lookup DDL preflight failed: required lookup objects are missing or serving relations are unreadable"
         ),
         "unexpected startup error: {diagnostic}"
     );
@@ -98,7 +98,7 @@ async fn api_verified_lookup_ddl_preflight_reports_missing_relation() -> Result<
         crate::startup_preflight::ensure_verified_lookup_ddl_available(&database.lookup_pool)
             .await
             .expect_err("startup diagnostics must be repeatable");
-    let expected = "API verified-lookup DDL preflight failed: required lookup DDL is missing\n\
+    let expected = "API verified-lookup DDL preflight failed: required lookup objects are missing or serving relations are unreadable\n\
                     relation: bigname_phase.record_inventory_current";
 
     assert_eq!(format!("{first_error:#}"), expected);
@@ -124,7 +124,7 @@ async fn api_verified_lookup_ddl_preflight_reports_missing_guard_function() -> R
 
     assert_eq!(
         format!("{error:#}"),
-        "API verified-lookup DDL preflight failed: required lookup DDL is missing\n\
+        "API verified-lookup DDL preflight failed: required lookup objects are missing or serving relations are unreadable\n\
          function: bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)"
     );
     database.cleanup().await
@@ -233,6 +233,12 @@ async fn api_preflight_reports_unreadable_account_permission_state_current() -> 
         == "bigname_phase.account_permission_state_current"));
     assert!(!missing.iter().any(|object| object.identity
         == "bigname_phase.resolution_divergences"));
+    let error = crate::startup_preflight::ensure_verified_lookup_ddl_available(&pool)
+        .await
+        .expect_err("startup must reject an unreadable serving relation");
+    assert!(format!("{error:#}").starts_with(
+        "API verified-lookup DDL preflight failed: required lookup objects are missing or serving relations are unreadable"
+    ));
     pool.close().await;
     sqlx::query(&format!("DROP OWNED BY {role}"))
         .execute(&database.lookup_pool).await?;
