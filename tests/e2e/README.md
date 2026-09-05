@@ -35,7 +35,7 @@ suite cannot satisfy CI.
 
 ## Harness design
 
-1. `HarnessDb::create` clones an isolated migration template and runs
+1. `HarnessDb::create` clones an isolated schema-migration template and runs
    `phase-runner init-schema`. Scenario pools select only `bigname_phase`.
 2. Each scenario deploys its local ENS or Basenames topology on Anvil and
    generates a temporary [deployment profile](../../docs/glossary.md#deployment-profile)
@@ -82,9 +82,10 @@ suite cannot satisfy CI.
 The connected Sepolia fixture starts with the existing local ENSv2 deployment:
 `LabelStore`, `RootRegistry`, the `.eth` registry, its rent-price oracle and
 registrar, mock payment tokens, and the required root-role grants. It then
-deploys the migration address set/namer, `VerifiableFactory`, `ENSV1Resolver`,
-`Graveyard`, `WrapperRegistryImpl`, and the unlocked and locked migration
-controllers. Their constructor argument order follows the pinned upstream contracts
+deploys the ENSv1→ENSv2 migration address set/namer, `VerifiableFactory`,
+`ENSV1Resolver`, `Graveyard`, `WrapperRegistryImpl`, and the unlocked and locked
+ENSv1→ENSv2 migration controllers. Their constructor argument order follows
+the pinned upstream contracts
 (upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L28-L30 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L73-L75 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L70-L89 @ ens_v2@a971bd64)
@@ -101,13 +102,20 @@ while the current source names that fifth address `IAddressSet upgradeSet`
 The harness relies only on the common nine-address order and address ABI type;
 these scenarios do not exercise `upgradeToAndCall` or `canUpgradeFrom`.
 The archived `PublicResolverSet.json` artifact names its contract
-`PermissionedAddressSet`; that contract's constructor accepts the root account,
-and it implements `IPermissionedAddressSet` plus `IContractNamer`, while
-`IPermissionedAddressSet` extends `IEnhancedAccessControl` and `IAddressSet`
+`PermissionedAddressSet`. Its deployed source generation inherits
+`EnhancedAccessControl`, `IAddressSet`, and `IContractNamer`, and advertises the
+last two plus inherited interfaces
 (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PublicResolverSet.json:L531 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/utils/PermissionedAddressSet.sol:L25-L26 @ ens_v2_sepolia_20260629@ccaeb58)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/utils/PermissionedAddressSet.sol:L53-L58 @ ens_v2_sepolia_20260629@ccaeb58).
+The current source generation instead implements `IPermissionedAddressSet` plus
+`IContractNamer`; `IPermissionedAddressSet` extends `IEnhancedAccessControl` and
+`IAddressSet`
 (upstream: .refs/ens_v2/contracts/src/utils/PermissionedAddressSet.sol:L21 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/utils/PermissionedAddressSet.sol:L34 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/utils/interfaces/IPermissionedAddressSet.sol:L21 @ ens_v2@a971bd64).
+The harness uses only the address-set and contract-namer dependencies shared by
+both generations.
 
 Every ENSv2 contract above is deployed from the top-level `bytecode` read by
 `load_ens_v2_artifact` from
@@ -122,14 +130,15 @@ The fixture generates one composite Sepolia
 [deployment profile](../../docs/glossary.md#deployment-profile) containing the
 four ENSv1 intake families except reverse, the four ordinary ENSv2 families,
 and `ens_v2_migration_l1`. It mirrors every shipped `v*.toml` into a scenario
-`TempDir`, then separately substitutes ENSv1, ENSv2, and migration targets and
-the migration family's local `NameWrapper` and `BaseRegistrar` correlation
-addresses. The ordinary Sepolia generator remains ENSv2-only and substitutes
-only roots and contracts. Checked-in `manifests/` is unchanged.
-Of the migration family's eight roles, `ens_v1_renewal_bridge`,
+`TempDir`, then separately substitutes ENSv1, ENSv2, and ENSv1→ENSv2 migration
+targets and the ENSv1→ENSv2 migration family's local `NameWrapper` and
+`BaseRegistrar` correlation addresses. The ordinary Sepolia generator remains
+ENSv2-only and substitutes only roots and contracts. Checked-in `manifests/` is
+unchanged.
+Of the ENSv1→ENSv2 migration family's eight roles, `ens_v1_renewal_bridge`,
 `batch_registrar`, and `migration_helper` are deterministic, no-code
 placeholders with start block zero and are inert in this fixture; the other five
-roles are locally deployed migration contracts.
+roles are locally deployed ENSv1→ENSv2 migration contracts.
 
 Both paths first register and wrap an ENSv1 `.eth` parent, read its live
 registrar expiry, and reserve the same label in the ENSv2 `.eth` registry with
@@ -172,7 +181,7 @@ The exact scenarios are:
   [successor bindings](../../docs/glossary.md#migration-authority-transition);
 - `cross_protocol::unlocked_parent_hides_retained_ens_v1_children`, which proves
   the retained nonzero-owner ENSv1 child is unreachable after unlocked parent
-  migration; and
+  ENSv1→ENSv2 migration; and
 - `cross_protocol::locked_parent_publishes_only_migratable_ens_v1_children`,
   which proves only the fuse-eligible retained ENSv1 child is reachable.
 
@@ -188,7 +197,7 @@ does not exercise network transport or API-process startup.
 The unlocked scenario discriminates on the child's logical name identifier in
 the children response. It makes no exact-name-route assertion because this
 registry-created child remains hash-only in the fixture, so that route is
-already absent before migration.
+already absent before ENSv1→ENSv2 migration.
 
 `forge` must be on `PATH` before the 65 Foundry-dependent fault scenarios are
 described as runnable. With these three scenarios the counted inventory is 90
@@ -248,9 +257,10 @@ Sort durations descending, seed shard 1 with
 and shard 2 with the second-longest scenario by measured duration. Assign names
 to the lower predicted load subject to the required final capacities, except
 for an explicitly documented scenario-family grouping. The current inventory
-uses one such grouping: the standalone connected-migration facts scenario is on
-shard 1 and both connected `cross_protocol` reachability scenarios are on shard
-2. The current runnable split is 43 on shard 1 and 44 on shard 2. Break
+uses one such grouping: the standalone connected ENSv1→ENSv2 migration facts
+scenario is on shard 1 and both connected `cross_protocol` reachability
+scenarios are on shard 2. The current runnable split is 43 on shard 1 and 44 on
+shard 2. Break
 equal-duration or equal-load ties by full test name, keep at most five of the
 measured top ten on either shard, and keep two ignored tests on shard 1 and one
 on shard 2.
@@ -276,7 +286,7 @@ The pre-retarget crate contained 88; the net change is +2: obsolete
 Cargo-artifact tests for the old indexer, worker, v1 API, and execution plane
 were removed, while deployment-profile binary lifecycle and normalized-event
 parity-completeness regression tests, the archived-artifact path check, and the
-three connected migration scenarios were added. The pure in-memory
+three connected ENSv1→ENSv2 migration scenarios were added. The pure in-memory
 `catchup_equivalence::primary_route_normalization_preserves_contract_instance_identity`
 normalization oracle is counted as support rather than as a contract-backed
 semantic scenario. The final worker-coordination stub, verified-resolution
@@ -326,7 +336,7 @@ explicitly with issue #314.
   `record_families::remaining_record_families_derive_normalized_but_stay_unenumerated`;
   `register_eth_name::register_eth_name_end_to_end`;
   `registration_burst::registration_with_records_reverse_and_referrer_derives_single_burst`.
-- Registry and migration:
+- Registry and ENSv1→ENSv2 migration:
   `registry_driven_reads::deep_registry_hierarchy_lists_direct_children_only`;
   `registry_driven_reads::registry_driven_reads`;
   `registry_driven_reads::same_label_under_two_parents_keeps_children_distinct`;
