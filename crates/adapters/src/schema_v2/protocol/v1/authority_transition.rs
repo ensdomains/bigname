@@ -343,6 +343,7 @@ pub(super) fn append_authority_transition(
     authority_arm: &str,
     previous: Option<&V1NameState>,
     linked: Option<&V1NameState>,
+    registry_binding: Option<(String, String)>,
     raw: &RawLogInput,
     observation_state: &Value,
     resolver: Option<V1ResolverLink>,
@@ -417,6 +418,11 @@ pub(super) fn append_authority_transition(
         });
     }
     if let Some(linked) = linked.filter(|authority| authority.surface_known) {
+        let mut linked_observation = observation_state.clone();
+        if let Some((owner, contract)) = registry_binding {
+            linked_observation["owner_getter"] = json!(owner);
+            linked_observation["registry_contract"] = json!(contract);
+        }
         output.events.push(EventDraft {
             event_kind: "SurfaceBound".to_owned(),
             logical_name_id: Some(logical_name_id.clone()),
@@ -424,7 +430,7 @@ pub(super) fn append_authority_transition(
             identity_suffix: format!("SurfaceBound:{source_event}:{}", linked.resource_id),
             explicit_before: Some(json!({})),
             after_state: merge_observation(
-                observation_state,
+                &linked_observation,
                 json!({
                     "source_event":source_event,
                     "authority_kind":authority_kind(linked),

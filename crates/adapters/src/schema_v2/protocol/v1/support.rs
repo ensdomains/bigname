@@ -2,6 +2,10 @@ use serde_json::Value;
 
 use super::super::{EventDraft, Interpreted};
 
+pub(super) const ROOT_NODE: &str =
+    "0x0000000000000000000000000000000000000000000000000000000000000000";
+pub(super) const LLL_REGISTRY: &str = "0x314159265dd8dbb310642f98f50c066173c1259b";
+
 pub(super) fn single_event(
     kind: &str,
     logical_name_id: Option<String>,

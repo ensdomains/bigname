@@ -194,6 +194,22 @@ Field ownership:
   serializes as `owner,manager,registrant` and reordered sets use canonical
   dictionary order. `profile=feed` returns a documented core-field subset of
   the same record object; it does not introduce another DTO.
+  A name result classified as `registration_status=unregistered` always omits
+  `registration_id`. It also omits `resolver` and resolver-record fields unless
+  it is
+  an ownerless ENSv1 or Basenames registry row whose current registry resolver
+  pointer is retained (a [serving resource](glossary.md#serving-resource)).
+  That classified row serves its resolver without acquiring registration
+  identity or control. Indexed records are served when its serving resource has
+  inventory.
+  See [registration status](api-v2.md#status-vocabulary) for the upstream
+  basis.
+  An ownerless ENSv2 reservation does not meet this exception, even if identity
+  attached to a resource or record inventory was retained for audit. This
+  intentionally differs from ENSv2, which stores and returns a reservation
+  resolver until expiry.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
 - Pagination behavior: top-level `page` is absent. Reverse inputs use the
   standard `page` object inside each result. Detail and feed use identical
   pagination semantics; feed only reduces returned fields. Reverse inputs
@@ -201,9 +217,13 @@ Field ownership:
   binds the deployment-derived public namespace set and is rejected if that
   set changes. Relation filters that cannot be satisfied by one storage role
   (including exact `owner`, exact `registrant`, and partial relation sets such
-  as `owner,manager`) may return an as-filled page with `has_more=true` when the
-  API reaches its bounded post-filter scan cap; clients continue with the
-  returned `next_cursor`.
+  as `owner,manager`) may require multiple broad candidate batches to assemble
+  one response page. The API retains the selected [projection
+  generation](glossary.md#projection-generation) across those batches. Before
+  issuing a second or later broad batch, it revalidates that generation and
+  returns retryable `409 stale` if it changed. The API may return an as-filled
+  page with `has_more=true` when it reaches the bounded post-filter scan cap;
+  clients continue with the returned `next_cursor`.
 - Status semantics: per-result `status` uses the common result vocabulary.
   Name misses are in-band `not_found`; invalid names are in-band
   `invalid_name`. Name-only and exact-scope latest reads return retryable `409
@@ -218,8 +238,17 @@ Field ownership:
   exact-name consumer slice is activated, `conflicting_current_ens_authority`
   covers Mainnet overlap without a provable boundary.
   `independent_ens_deployments_overlap` covers
-  Sepolia overlap without a proven migration boundary; a proven Sepolia
-  boundary follows the same per-name authority rule. These values replace the
+  ordinary Sepolia overlap without a proven ENSv1→ENSv2 migration boundary; a proven
+  Sepolia boundary follows the same per-name authority rule. The exact
+  [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names—root,
+  `eth`, `reverse`, and `addr.reverse`—instead select ENSv2 when the ENSv2 arm is
+  current and ENSv1 evidence, current or historical, exists without proof.
+  When that shared-infrastructure rule selects ENSv2, it overrides the ordinary
+  no-proof handling below, so those names carry neither Mainnet's
+  `conflicting_current_ens_authority` nor Sepolia's
+  `independent_ens_deployments_overlap`.
+  Historical ENSv2 evidence alone does not qualify, and `.reverse` descendants
+  do not inherit the exception. These values replace the
   blanket mixed-corpus reason; intake from the planned [ENSv2 migration source
   family](glossary.md#source-family) alone does not add them. An address lookup
   returns `409 conflict` when the deployment has no ready public namespace.
@@ -231,14 +260,17 @@ Field ownership:
   families rather than presenting either binding as current.
 - Snapshot behavior: lookup selects the current schema-v2 phase head and reads
   `bigname_phase` name, inventory, and address-name projections published for
-  one completed projection-phase generation. Public reverse lookup with no
-  explicit namespace derives its snapshot scope from the namespaces served by
-  the deployment, excluding a namespace while its selected authority chain has
-  Interpret `redo_in_progress=true`, regardless of redo mode. A running
-  Interpret redo rewrites previously served identity history batch by batch, so
-  a page read during the redo can be incomplete even while Project still
-  reports its prior completed head. Because projection publication is
-  incremental, an unchanged
+  one completed projection-phase generation. For each reverse result, the
+  readable name fetched with the candidate row is the common source for the
+  emitted normalized and display names, label-derived fields, primary-name
+  ordering, the `is_primary` result, and the reverse cursor. Public reverse
+  lookup with no explicit namespace derives its snapshot scope from the
+  namespaces served by the deployment, excluding a namespace
+  while its selected authority chain has Interpret `redo_in_progress=true`,
+  regardless of redo mode. A running Interpret redo rewrites previously served
+  identity history batch by batch, so a page read during the redo can be
+  incomplete even while Project still reports its prior completed head. Because
+  projection publication is incremental, an unchanged
   row target may precede the selected head; it may not be ahead, and a
   same-height target must match the selected hash. Lookup revalidates both
   `chain_heads` and that generation after the read. Before that check, public
@@ -434,13 +466,32 @@ Field ownership:
   `namehash`, `status`, and `unsupported_reason`; registration, control,
   lifecycle, resolver, record, relation, permission, and primary-name fields
   from both source families are omitted.
+  A row classified as `registration_status=unregistered` always omits
+  `registration_id`. It also omits `resolver` and resolver-record fields unless
+  it is
+  an ownerless ENSv1 or Basenames registry row whose current registry resolver
+  pointer is retained (a [serving resource](glossary.md#serving-resource)).
+  For that classified row, indexed name detail serves the resolver and records
+  present in its serving resource's inventory. `source=verified` executes lookup
+  through the surviving resolver when the ordinary lookup capability supports
+  it. Neither path acquires registration identity or control. An ownerless ENSv2
+  reservation does not meet this exception, even if identity attached to a
+  resource or record inventory was retained for audit. This intentionally
+  differs from ENSv2, which stores and returns a reservation resolver until
+  expiry.
+  See [registration status](api-v2.md#status-vocabulary) for the upstream
+  basis.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
   For `source=indexed`, a row classified as
   `current_authority_not_projected` remains `status=ok` for the identity and
   registration fields that can be served, but omits `resolver`; retained
   resolver-pointer evidence is not presented as current authority.
-  A registry-only V1 name whose [getter-visible owner](glossary.md#getter-visible-owner) is zero is instead supported and
-  unregistered. When a current event-linked nonzero registry resolver pointer survives, name
-  detail includes that resolver while registration and control fields remain absent.
+  An ownerless ENSv1 or Basenames registry row with a zero [getter-visible
+  owner](glossary.md#getter-visible-owner) is instead supported and unregistered.
+  When a current event-linked nonzero registry resolver pointer survives, name
+  detail includes that resolver while registration and control fields remain
+  absent.
 - Pagination behavior: none.
 - Status semantics: valid names with no name-profile data return `404 not_found`.
   Invalid path names return `400 invalid_input`.
@@ -484,6 +535,21 @@ Field ownership:
   connect, DNS, TLS, connection-reset, and other transport
   failures abort the whole request with `500 internal_error`; they are not
   per-key stale answers and `source=auto` does not return a partial blend.
+  A name with no current registration returns no declared resolver or retained
+  record values and does not execute verified lookup unless it is
+  an ownerless ENSv1 or Basenames registry row whose current registry resolver
+  pointer is retained (a [serving resource](glossary.md#serving-resource)).
+  That classified row serves its resolver and any records present in its serving
+  resource's inventory. Verified lookup runs through the surviving resolver
+  when the ordinary lookup capability supports it. An ownerless ENSv2
+  reservation does not meet this exception. `include=inventory` does not expose
+  inventory retained for a former or audit-only resource. This intentionally
+  omits the resolver that ENSv2 can store and return for an unexpired
+  reservation.
+  See [registration status](api-v2.md#status-vocabulary) for the upstream
+  basis.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
   Product records use product reason vocabulary: retained-selector misses use
   `value_not_retained`, and phase-unsupported record families use
   `record_family_not_supported`.
@@ -752,13 +818,38 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   to the revision-bound storage follow-up.
 - Status semantics: no direct subnames returns `200` with empty `data`.
   Missing parent names return `404 not_found`. Each child appears at most once,
-  from the relation its own selected authority names. An unmigrated protected
-  child can remain ENSv1-backed; a migrated or otherwise currently registered
-  ENSv2 child is ENSv2-backed. A child whose arms disagree with no authority
-  proof is omitted entirely, and on the Mainnet deployment profile an ENSv1
-  relation asserted after a proven ENSv2 child authority began blocks Project
+  from the relation its own selected authority names. ENSv1 relations that are
+  unreachable through the parent's ENSv1→ENSv2 migration path are omitted. A
+  parent on the `unwrapped`, `unlocked_wrapped`, or `emancipated_child` path
+  retains no ENSv1 children. A parent on the `locked_wrapped` or `locked_child`
+  path retains only a [migratable child](glossary.md#migratable-child): one
+  whose label has never had a reserved, registered, or renewed entry in that
+  parent's [migration `WrapperRegistry`](glossary.md#migration-registry-wrapperregistry), whose current
+  expiry-effective fuse word has `PARENT_CANNOT_CONTROL` set and `IS_DOT_ETH`
+  clear, and whose current ENSv1 registry owner is nonzero. The wrapper fuse
+  and expiry evidence remains effective across an ENSv1 binding rotation.
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276-L277 @ ens_v1@91c966f)
+  The child's own
+  [authority arm](glossary.md#authority-epoch) still chooses between the remaining ENSv1 and ENSv2 candidates.
+  An unknown activated migration-path value blocks the Project generation as a
+  data-integrity failure instead of silently hiding relations. A child whose
+  arms disagree with no authority proof is omitted entirely. On Mainnet, an
+  ENSv1 relation that survives parent reachability and
+  was asserted after a proven ENSv2 child authority began blocks Project
   publication for that generation,
-  so this route never chooses one by recency, emits two rows for one logical
+  though a positive ENSv2 registration in a locked parent's migration registry
+  is itself entry history and therefore filters the ENSv1 relation before this
+  assertion. The dual-current assertion remains a defensive generation check:
+  an unmigrated parent can expose this contradiction, but no ordinary on-chain
+  parent-and-child ENSv1→ENSv2 shape reaches it after parent reachability and
+  migration-registry history are applied.
+  Sepolia publishes the proof-selected child relation; extending the
+  publication guardrail there is deferred until the connected Interpret→Project
+  path is proven.
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L146-L164 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
+  This route therefore never chooses one
+  by recency, emits two rows for one logical
   child, or adds a row-local unsupported shape.
   A V1 child with getter-visible owner zero is omitted unless a current
   event-linked nonzero resolver independently establishes read reachability.
@@ -790,8 +881,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   by this product route. Slice 1 excludes every correlation-dependent normalized
   row with `consumer_visibility=candidate`, including a familiar event kind whose
   existence depends on correlation under an existing source family; diagnostics
-  may expose those rows. An existing-family event admitted independently of the
-  correlation remains byte-for-byte activated and product-visible. Its separate
+  may expose those rows. An [independently admitted
+  event](glossary.md#independently-admitted-event) remains byte-for-byte
+  activated and product-visible. Its separate
   candidate association is diagnostics-only and cannot suppress, duplicate, or
   reclassify that ordinary row. Only slice 2 consumer activation enables the
   per-source-log mapping specified for [`GET /v2/events`](#get-v2events) when an
@@ -913,7 +1005,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   per-registration permission summary classifies the result. Independently
   proven full support adds no completeness metadata. A non-wrapper resource
   whose standard operator, token-approval, or resolver-delegation paths are not
-  indexed returns `meta.completeness=partial` with
+  fully served returns `meta.completeness=partial` with
   `unsupported_reason=approval_and_delegation_permissions_not_supported`.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
@@ -935,7 +1027,15 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) A `name` filter
   resolves only the selected current registration: a migrated name returns its
   ENSv2 permission rows, while an explicit `registration_id` can still select a
-  retained historical ENSv1 registration for audit. Every
+  retained historical ENSv1 registration for audit. An ENSv2 reservation does
+  not select permission rows by `name` because current-registration
+  classification has no owner evidence: the owner-zero branch emits
+  `LabelReserved`, while minting the owner token and granting resource roles
+  occur only in the registered branch.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464-L472 @ ens_v2@a971bd64)
+  If bigname retains permission evidence attached to a resource for audit, an explicit
+  `registration_id` read remains available with `resource_audit`; that marker
+  does not claim the evidence is live for the reserved name. Every
   permission row carries the required `authority_context` field.
   `current_for_name` means a `name` filter selected the row's current
   registration for that requested name. A row admitted without a `name` filter,
@@ -1455,8 +1555,16 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   resolver listings rather than forced to `ok`. This nested collection adds no
   row-local mixed-authority status, so callers use name detail or batch lookup
   for the explicit coverage reason. A row classified as
-  `current_authority_not_projected` is absent from `bound_names`. A positively
-  classified ownerless registry row is different: its event-derived resolver
+  `current_authority_not_projected` is also absent from `bound_names`; retained
+  resolver-pointer evidence does not establish listing membership.
+  An ownerless ENSv2 reservation is likewise absent: a retained reservation
+  resolver or former-resource pointer is not a resolver selected by a current
+  registration. This intentionally narrows ENSv2, which stores and returns a
+  reservation resolver until expiry.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
+  A positively classified ownerless ENSv1 or Basenames registry row is
+  different: its event-derived resolver
   binding is eligible for `bound_names` only where that resolver family's
   existing binding-enumeration capability is supported.
   `counts.nodes`, `counts.aliases`, and `counts.role_holders` are total counts,
@@ -1623,7 +1731,9 @@ so there is no persisted artifact to explain. See
   carries side-by-side `{indexed, verified}` record answers for the former
   `mode=both` workflow. Without `keys`, `comparison` defaults to the first 16
   inventory-derived supported record keys in deterministic order. The indexed
-  `record_inventory` and `record_cache` sections remain complete. When more
+  `record_inventory` and `record_cache` sections remain complete, including
+  retained audit state that product name routes omit when no current
+  registration exists. When more
   than 16 default comparison keys are available, `comparison_explicit_gaps`
   lists each uncompared selector as
   `{record_key, record_family, selector_key, gap_reason}` with

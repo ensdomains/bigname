@@ -60,17 +60,24 @@ table. The [adapter census](../simplification-audit-20260730.md#cratesadapters-f
 and the [storage census](../simplification-audit-20260730.md#cratesstorage-fable)
 authorize this table.
 
-Before deleting normalized rows for a bounded redo, Interpret copies only the
+Before deleting normalized rows for a bounded redo, Interpret copies the
 `PermissionChanged`, `ResolverChanged`, and `AliasChanged` references needed by
-Project into `project_redo_resolver_evidence`. Project uses that small handoff
-to select resolver rows and affected permission resources, then deletes the
-handoff rows inside its publication transaction. Interpret preserves the first
-copy across a restarted redo, so a retry cannot replace the original deleted
-suffix with only the prefix that has already been re-derived. If Project is
-behind the Interpret redo target, its later normal catch-up consumes the rows
-above the earlier Project head. The table is redo
-coordination, not event history or serving state; raw facts and re-derived
-`normalized_events` remain the replay authority.
+Project into `project_redo_resolver_evidence`. It separately copies the available
+logical-name or permission-resource identifiers from state-derived ENSv2
+path-expiry releases into
+`project_redo_expiry_roots`, because an earlier expiry publication may already
+have deleted every descendant projection that cited the ancestor. It also copies
+entry-creating child events from an ENSv1→ENSv2 [migration registry](../docs/glossary.md#migration-registry-wrapperregistry) into
+`project_redo_child_registration_history`. Project uses these small handoffs to
+select resolver rows, affected permission resources, and bounded child or
+descendant scope, then deletes the handoff rows inside its publication
+transaction. Interpret preserves the first copy across a restarted redo, so a
+retry cannot replace the original deleted suffix with only the prefix that has
+already been re-derived. Project consumes a row only when its publication covers
+the recorded block; a redo endpoint below an existing Project head can leave
+later rows until a covering redo or full rebuild. All three
+tables are redo coordination, not event history or serving state; raw facts and
+re-derived `normalized_events` remain the replay authority.
 
 For chain-derived rows, `raw_fact_ref.interpreter_state_key` is an opaque,
 adapter-owned key used to compact prior interpreter state between batches. The
@@ -100,13 +107,26 @@ upstream event. The admitted values are `ens_v1_reverse_claim`,
 `ens_v1_unwrapped_authority`, `ens_v2_migration`, `ens_v2_permissions`, `ens_v2_registrar`,
 `ens_v2_registry_resource_surface`, `ens_v2_resolver`, `manifest_sync`,
 `proxy_upgrade`, `raw_log_preimage_observation`, and
-`raw_block_preimage_observation`. Their meanings and write owners are defined
+`raw_block_preimage_observation`, and `standard_approval`. Their meanings and
+write owners are defined
 by the canonical
-[normalized-event contract](../docs/architecture.md#derivation-kinds).
+[derivation-kind definitions](../docs/glossary.md#derivation-kind).
 
 ## Current projections
 
-`name_current`, `children_current`, `permissions_current`, `permissions_current_resource_summary`, `record_inventory_current`, `resolver_current`, `address_names_current`, and `primary_names_current` are the current-state tables written by the seven project-phase builders. The project phase is their single writer; the API and GraphQL read them now. The [historical simplification census](../simplification-audit-20260730.md#appsworker--cratesexecution-fable) and the [storage census](../simplification-audit-20260730.md#cratesstorage-fable) authorize this enumerated set. The [support-status decision](../simplification-audit-20260730.md#kimi-k3-second-opinion-lenses--adjudicated) keeps explicit support fields and removes exhaustiveness accounting.
+`name_current`, `children_current`, `permissions_current`,
+`permissions_current_resource_summary`, `account_permission_state_current`,
+`record_inventory_current`, `resolver_current`, `address_names_current`, and
+`primary_names_current` are the current-state tables written by the project
+phase. The project phase is their single writer. The API and GraphQL read the
+existing serving families; `account_permission_state_current` has no serving
+reader until the follow-up storage and API change. The [historical
+simplification census](../simplification-audit-20260730.md#appsworker--cratesexecution-fable)
+and the [storage
+census](../simplification-audit-20260730.md#cratesstorage-fable) authorize this
+enumerated set. The [support-status
+decision](../simplification-audit-20260730.md#kimi-k3-second-opinion-lenses--adjudicated)
+keeps explicit support fields and removes exhaustiveness accounting.
 
 Each run reads canonical-lineage identity rows and normalized events into
 connection-local stages. It builds all retained families before one database

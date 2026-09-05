@@ -306,10 +306,13 @@ mod tests {
                     namehash: "namehash:alice.eth".to_owned(),
                     labelhash: None,
                     labelhash_count: None,
+                    surface_binding_id: None,
                     resource_id: Some(Uuid::from_u128(0x5a0301)),
                     serving_resource_id: None,
+                    binding_kind: None,
                     record_inventory_boundary_key: None,
                     declared_summary: serde_json::json!({}),
+                    provenance: serde_json::json!({}),
                     coverage: serde_json::json!({}),
                     chain_positions: serde_json::json!({}),
                     last_recomputed_at: OffsetDateTime::from_unix_timestamp(1)

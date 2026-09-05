@@ -192,6 +192,18 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
         &cfg_test_sources,
         &mut inputs,
     )?;
+    let project_source_root = workspace_root.join(PROJECT_SOURCE_ROOT);
+    if project_source_root.exists() {
+        let mut project_sql_sources = Vec::new();
+        collect_files_with_extension(
+            &project_source_root,
+            OsStr::new("sql"),
+            &mut project_sql_sources,
+        )?;
+        for path in project_sql_sources {
+            collect_file(workspace_root, &path, &mut inputs)?;
+        }
+    }
     collect_rust_sources(
         workspace_root,
         &workspace_root.join(INTERPRET_WRITE_SOURCE_ROOT),

@@ -143,6 +143,26 @@ fn hash_changes_for_sources_and_manifest_event_mappings() {
 }
 
 #[test]
+fn hash_changes_for_project_sql_sources() {
+    let tree = SampleTree::new();
+    tree.write(
+        "crates/project/src/builders/name_current/build.sql",
+        "SELECT 'first';\n",
+    );
+    let first = interpreter_content_hash(tree.path()).expect("project SQL baseline must hash");
+
+    tree.write(
+        "crates/project/src/builders/name_current/build.sql",
+        "SELECT 'second';\n",
+    );
+    let changed = interpreter_content_hash(tree.path()).expect("project SQL change must hash");
+    assert_ne!(
+        first, changed,
+        "Project SQL source changes must alter the hash"
+    );
+}
+
+#[test]
 fn projection_and_whole_manifest_event_blocks_change_the_hash() {
     let tree = SampleTree::new();
     let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
@@ -769,20 +789,51 @@ fn every_project_source_on_disk_is_hash_covered() {
         .into_iter()
         .collect::<BTreeSet<_>>();
     let mut disk_sources = Vec::new();
-    collect_rust_files(
+    collect_project_source_files(
         &workspace_root.join("crates/project/src"),
         &mut disk_sources,
     );
 
     for source in disk_sources {
         let relative_path = workspace_relative(&workspace_root, &source);
-        let excluded = excluded_source_reason(&workspace_root, &source)
-            .expect("source exclusion must be inspectable");
+        let excluded = if source
+            .extension()
+            .is_some_and(|extension| extension == "rs")
+        {
+            excluded_source_reason(&workspace_root, &source)
+                .expect("source exclusion must be inspectable")
+        } else {
+            None
+        };
         if excluded.is_none() {
             assert!(
                 hashed.contains(&relative_path),
                 "project source {relative_path} is not content-hash covered"
             );
+        }
+    }
+}
+
+fn collect_project_source_files(directory: &Path, files: &mut Vec<PathBuf>) {
+    let mut entries = fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", directory.display()))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to read an entry in {}: {error}",
+                directory.display()
+            )
+        });
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_project_source_files(&path, files);
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "rs" || extension == "sql")
+        {
+            files.push(path);
         }
     }
 }

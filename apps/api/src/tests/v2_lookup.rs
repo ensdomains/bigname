@@ -604,6 +604,88 @@ async fn v2_lookup_withholds_retained_inventory_for_released_tombstone() -> Resu
 }
 
 #[tokio::test]
+async fn v2_lookup_ignores_stale_audit_inventory_for_reservation() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        "ens:reserved.eth",
+        "reserved.eth",
+        "reserved.eth",
+        "namehash:reserved.eth",
+        Uuid::from_u128(0x5a0411),
+        Uuid::from_u128(0x5a0412),
+        Uuid::from_u128(0x5a0413),
+        "0x0000000000000000000000000000000000000abc",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        38,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE name_current
+         SET declared_summary = jsonb_set(
+             jsonb_set(
+                 declared_summary
+                     #- '{control,owner}'
+                     #- '{control,registry_owner}'
+                     #- '{control,registrant}'
+                     #- '{registration,registrant}'
+                     #- '{registration,registered_at}',
+                 '{registration,status}',
+                 '\"reserved\"'
+             ),
+             '{registration,authority_kind}',
+             '\"ens_v2_registry\"'
+         )
+         WHERE raw_name = 'reserved.eth'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage
+             (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES
+             ('ethereum-mainnet', '0xorphaned-audit-inventory', 39,
+              '2026-04-17T00:00:39Z', 'canonical')",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let updated = sqlx::query(
+        "UPDATE record_inventory_current inventory
+         SET chain_positions = inventory.chain_positions || jsonb_build_object(
+             'target_block_number', 39,
+             'target_block_hash', '0xorphaned-audit-inventory'
+         ),
+         canonicality_summary = inventory.canonicality_summary || jsonb_build_object(
+             'target_block_number', 39,
+             'target_block_hash', '0xorphaned-audit-inventory'
+         )
+         FROM name_current name
+         WHERE name.resource_id = inventory.resource_id
+           AND name.raw_name = 'reserved.eth'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(updated.rows_affected(), 1);
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"name": "reserved.eth"}]}),
+    )
+    .await?;
+    let record = &payload["data"][0]["record"];
+    assert_eq!(record["registration_status"], json!("unregistered"));
+    assert!(record.get("registration_id").is_none());
+    assert!(record.get("resolver").is_none());
+    assert!(record.get("addresses").is_none());
+    assert!(record.get("text_records").is_none());
+    assert!(record.get("content_hash").is_none());
+    assert!(record.get("primary_address").is_none());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_lookup_flattens_phase_writer_byte_values() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_identity_name(
@@ -1548,6 +1630,104 @@ async fn v2_lookup_reverse_keeps_primary_order_and_flag_coherent_across_projecti
         json!(true),
         "the page must emit the same primary-name generation that ordered it"
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_reverse_uses_candidate_name_for_order_flag_and_cursor_across_name_rewrite()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    let (guard, control) =
+        crate::v2::support::identity_facade_primary_coherence_test_hooks::install(
+            &database.lookup_pool,
+        )
+        .await?;
+    let state = database.app_state();
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v2/lookup")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "profile": "detail",
+                            "inputs": [{"address": address, "page_size": 1}]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("lookup request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    let rewrite = sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET raw_name = 'rewritten-alice.eth'
+         WHERE raw_name = 'alice.eth'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(rewrite.rows_affected(), 1);
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("reverse lookup request task panicked")?
+        .context("reverse lookup request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET raw_name = 'alice.eth'
+         WHERE raw_name = 'rewritten-alice.eth'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    crate::v2::support::identity_facade_primary_coherence_test_hooks::uninstall(
+        &database.lookup_pool,
+    )
+    .await?;
+    drop(guard);
+
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
+    assert_eq!(
+        json!({
+            "name": payload["data"][0]["records"][0]["name"],
+            "display_name": payload["data"][0]["records"][0]["display_name"],
+            "token_id": payload["data"][0]["records"][0]["token_id"],
+            "is_primary": payload["data"][0]["records"][0]["is_primary"],
+        }),
+        json!({
+            "name": "alice.eth",
+            "display_name": "alice.eth",
+            "token_id": "70564938991660933374592024341600875602376452319261984317470407481576058979585",
+            "is_primary": true
+        })
+    );
+    assert_eq!(payload["data"][0]["page"]["has_more"], json!(true));
+    let cursor = payload["data"][0]["page"]["next_cursor"]
+        .as_str()
+        .expect("first page must include next_cursor");
+
+    let next_page = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "inputs": [{
+                "address": address,
+                "page_size": 1,
+                "cursor": cursor
+            }]
+        }),
+    )
+    .await?;
+    assert_eq!(lookup_record_names(&next_page), vec!["bob.eth"]);
 
     database.cleanup().await
 }
@@ -2823,6 +3003,59 @@ async fn v2_lookup_reverse_relation_filter_resumes_across_scan_boundaries() -> R
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_reverse_relation_page_revalidates_generation_before_second_scan() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_relation_scan_fixture(&database, address, 125, &[101]).await?;
+    let (_guard, control) = crate::v2::support::identity_facade_relation_page_test_hooks::install(
+        &database.lookup_pool,
+    )
+    .await?;
+    let state = database.app_state();
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v2/lookup")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "profile": "detail",
+                            "inputs": [{
+                                "address": address,
+                                "relation": "owner",
+                                "page_size": 1
+                            }]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("lookup request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    advance_v2_lookup_ethereum_head(&database, 10_001, "0xlookup-scan-advanced").await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("reverse relation lookup request task panicked")?
+        .context("reverse relation lookup request failed")?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("stale"));
+    assert_eq!(
+        control.page_loader_call_count(),
+        1,
+        "a changed Project publication must be rejected before another broad page load"
+    );
+
+    database.cleanup().await
 }
 
 #[tokio::test]

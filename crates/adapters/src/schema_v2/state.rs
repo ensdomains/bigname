@@ -19,7 +19,6 @@ mod wrapper;
 
 #[path = "state_surfaces.rs"]
 mod surfaces;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct V1NameState {
     pub logical_name_id: String,
@@ -31,10 +30,10 @@ pub(super) struct V1NameState {
     pub labelhash: Option<String>,
     pub expiry: Option<i64>,
     pub owner: Option<String>,
+    pub registry_contract: Option<String>,
     pub authority_key: Option<String>,
     pub wrapper_fallback: bool,
 }
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct V1RegistryReadAnchor {
     pub logical_name_id: String,
@@ -42,8 +41,8 @@ pub(super) struct V1RegistryReadAnchor {
     pub surface_known: bool,
     pub source_family: String,
     pub source_manifest_id: Option<i64>,
+    pub registry_contract: Option<String>,
 }
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct V1ResolverLink {
     pub resolver_address: String,
@@ -51,13 +50,11 @@ pub(super) struct V1ResolverLink {
     pub logical_name_id: Option<String>,
     pub source_role: Option<String>,
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct V1WrapperData {
     pub fuses: u32,
     pub expiry: u64,
 }
-
 #[path = "state_v2.rs"]
 mod v2;
 
@@ -149,7 +146,6 @@ impl State {
             .insert(token_lineage_id)
             .is_none()
     }
-
     #[allow(clippy::too_many_arguments)]
     pub(super) fn observe_v1_name(
         &mut self,
@@ -182,6 +178,7 @@ impl State {
                 labelhash: None,
                 expiry,
                 owner,
+                registry_contract: None,
                 authority_key,
                 wrapper_fallback: false,
             },
@@ -213,6 +210,7 @@ impl State {
             self.active_resources
                 .insert(logical_name_id.clone(), resource_id);
         }
+        let key = v1_key(namespace, namehash);
         let value = V1NameState {
             logical_name_id,
             surface_known,
@@ -223,10 +221,10 @@ impl State {
             labelhash,
             expiry,
             owner,
+            registry_contract: None,
             authority_key,
             wrapper_fallback,
         };
-        let key = v1_key(namespace, namehash);
         let previous_expiry = self
             .v1_registrars
             .insert(key.clone(), value.clone())
@@ -236,11 +234,9 @@ impl State {
             self.v1_names.insert(key, value);
         }
     }
-
     pub(super) fn v1_name(&self, namespace: &str, namehash: &str) -> Option<V1NameState> {
         self.v1_names.get(&v1_key(namespace, namehash)).cloned()
     }
-
     #[allow(clippy::too_many_arguments)]
     #[cfg(test)]
     pub(super) fn observe_v1_registry(
@@ -252,6 +248,7 @@ impl State {
         resource_id: Uuid,
         authority_source_family: String,
         owner: Option<String>,
+        registry_contract: Option<String>,
         authority_key: Option<String>,
     ) {
         let key = v1_key(namespace, namehash);
@@ -265,13 +262,13 @@ impl State {
             labelhash: None,
             expiry: None,
             owner,
+            registry_contract,
             authority_key,
             wrapper_fallback: false,
         };
         self.v1_registry_authorities.insert(key, authority.clone());
         self.activate_v1_authority(namespace, namehash, Some(authority));
     }
-
     pub(super) fn remember_v1_registry_authority(
         &mut self,
         namespace: &str,
@@ -309,13 +306,12 @@ impl State {
     }
 
     fn v1_registry_authority_if_authentic(&self, key: &str) -> Option<V1NameState> {
-        self.v1_registry_owners
-            .get(key)
-            .filter(|owner| {
-                !owner.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
-            })
-            .and_then(|_| self.v1_registry_authorities.get(key))
-            .cloned()
+        let owner = self.v1_registry_owners.get(key).filter(|owner| {
+            !owner.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
+        })?;
+        let mut authority = self.v1_registry_authorities.get(key)?.clone();
+        authority.owner = Some(owner.clone());
+        Some(authority)
     }
 
     pub(super) fn set_v1_registry_owner_views(

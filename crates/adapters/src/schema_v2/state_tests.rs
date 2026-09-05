@@ -58,6 +58,7 @@ fn restore_keys_authority_derived_resolver_links_by_child() {
         source_family: "ens_v1_registry_l1".to_owned(),
         manifest_version: 1,
         source_manifest_id: Some(1),
+        emitting_address: None,
         state_scope: None,
         block_timestamp: None,
         after_state: json!({
@@ -98,6 +99,7 @@ fn wrapper_preimage_restore_derives_registry_labelhash_from_raw_label() {
             labelhash: None,
             expiry: None,
             owner: Some(OWNER.to_owned()),
+            registry_contract: None,
             authority_key: Some("registry-only:node".to_owned()),
             wrapper_fallback: false,
         },
@@ -111,6 +113,7 @@ fn wrapper_preimage_restore_derives_registry_labelhash_from_raw_label() {
             surface_known: false,
             source_family: "ens_v1_registry_l1".to_owned(),
             source_manifest_id: Some(1),
+            registry_contract: None,
         },
     );
     state.set_v1_registry_owner_views(NAMESPACE, NODE, OWNER.to_owned(), OWNER.to_owned(), None);
@@ -127,6 +130,7 @@ fn wrapper_preimage_restore_derives_registry_labelhash_from_raw_label() {
             labelhash: Some(crate::schema_v2::common::hash_hex(b"pointer")),
             expiry: Some(9_999),
             owner: Some(OWNER.to_owned()),
+            registry_contract: None,
             authority_key: Some("wrapper:node".to_owned()),
             wrapper_fallback: false,
         }),
@@ -141,6 +145,7 @@ fn wrapper_preimage_restore_derives_registry_labelhash_from_raw_label() {
         source_family: "ens_v1_wrapper_l1".to_owned(),
         manifest_version: 1,
         source_manifest_id: Some(2),
+        emitting_address: None,
         state_scope: None,
         block_timestamp: None,
         after_state: json!({
@@ -174,6 +179,7 @@ fn observed_v1_active_surface_upgrades_an_existing_registry_read_anchor() {
             surface_known: false,
             source_family: "ens_v1_registry_l1".to_owned(),
             source_manifest_id: Some(1),
+            registry_contract: None,
         },
     );
 
@@ -183,6 +189,30 @@ fn observed_v1_active_surface_upgrades_an_existing_registry_read_anchor() {
         state
             .v1_registry_read_anchor(NAMESPACE, "node")
             .is_some_and(|anchor| anchor.surface_known)
+    );
+}
+
+#[test]
+fn registrar_state_does_not_snapshot_registry_contract() {
+    let mut state = State::new(Vec::new(), Vec::new());
+    state.observe_v1_registry(
+        NAMESPACE,
+        "node",
+        "test:node".to_owned(),
+        true,
+        Uuid::from_u128(3),
+        "ens_v1_registry_l1".to_owned(),
+        Some("0x0000000000000000000000000000000000000001".to_owned()),
+        Some("0x0000000000000000000000000000000000000066".to_owned()),
+        None,
+    );
+    observe_registrar(&mut state, "node", Some(100));
+    assert_eq!(
+        state
+            .v1_registrar(NAMESPACE, "node")
+            .unwrap()
+            .registry_contract,
+        None
     );
 }
 
@@ -223,6 +253,7 @@ fn zero_getter_blocks_stale_registry_authority_fallback_during_registrar_transfe
         Uuid::from_u128(3),
         "ens_v1_registry_l1".to_owned(),
         Some(OWNER.to_owned()),
+        None,
         Some(format!("registry-only:{NODE}")),
     );
     assert!(

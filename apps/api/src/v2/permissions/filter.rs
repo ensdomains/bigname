@@ -7,9 +7,12 @@ use sqlx::types::Uuid;
 
 use crate::AppState;
 
-use super::super::name_record::string_field;
+use super::super::name_record::{name_registration_fields, string_field};
 use super::super::support::normalize_inferred_route_name;
-use super::super::{QueryParams, V2Result, vocab::AuthorityContext};
+use super::super::{
+    QueryParams, V2Result,
+    vocab::{AuthorityContext, RegistrationStatus},
+};
 use super::{
     ADDRESS_FILTER_KEY, INCLUDE_FILTER_KEY, NAMESPACE_FILTER_KEY, REGISTRATION_ID_FILTER_KEY,
     V2Error, load_current_name_row,
@@ -93,6 +96,14 @@ pub(super) async fn resolve_permissions_filter(
         .as_ref()
         .and_then(|row| row.as_ref())
         .filter(|row| string_field(row.coverage.get("status")).as_deref() != Some("unsupported"))
+        .filter(|row| {
+            matches!(
+                name_registration_fields(Some(row), &row.namespace).registration_status,
+                RegistrationStatus::Active
+                    | RegistrationStatus::Wrapped
+                    | RegistrationStatus::Registered
+            )
+        })
         .and_then(|row| row.resource_id);
 
     // A registration the name filter did not select is a superseded pair: queryable on its own as

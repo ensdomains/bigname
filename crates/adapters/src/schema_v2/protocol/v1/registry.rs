@@ -13,7 +13,11 @@ use super::authority_transition::{
 pub(super) use super::authority_transition::{
     append_authority_transition, authority_kind, child_node,
 };
-use super::{is_registry_ownership_event, support::events, unmasked_word};
+use super::{
+    is_registry_ownership_event,
+    support::{self, events},
+    unmasked_word,
+};
 use crate::evm_abi::{
     address_hex, decode_event_log_tolerant_address_word, decode_event_log_tolerant_uint64_word,
     hex_string,
@@ -26,9 +30,6 @@ use crate::schema_v2::{
 };
 
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
-const ROOT_NODE: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
-const LLL_REGISTRY: &str = "0x314159265dd8dbb310642f98f50c066173c1259b";
-
 sol! {
     event Transfer(bytes32 indexed node, address owner);
     event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
@@ -106,7 +107,7 @@ pub(super) fn interpret(
     let emitter_role = selected.emitter_role.as_deref();
     if emitter_role == Some("registry_old")
         && state.v1_is_migrated(&selected.source.namespace, &affected_node)
-        && !(selected.event.name == "NewResolver" && affected_node == ROOT_NODE)
+        && !(selected.event.name == "NewResolver" && affected_node == support::ROOT_NODE)
     {
         return Ok(Interpreted::new());
     }
@@ -129,7 +130,8 @@ pub(super) fn interpret(
             owner,
             &raw.emitting_address,
             unmasked_word::body_has_unmasked_owner_word(&after),
-            !raw.emitting_address.eq_ignore_ascii_case(LLL_REGISTRY),
+            !raw.emitting_address
+                .eq_ignore_ascii_case(support::LLL_REGISTRY),
         )
     });
     if let Some(view) = owner_view.as_ref() {
@@ -170,7 +172,7 @@ pub(super) fn interpret(
         .is_some_and(|view| !matches!(view, RegistryOwnerView::UnavailableUnmasked))
         || selected.event.name == "NewResolver")
         .then(|| {
-            let anchor = state
+            let mut anchor = state
                 .v1_registry_read_anchor(&selected.source.namespace, &affected_node)
                 .unwrap_or_else(|| V1RegistryReadAnchor {
                     logical_name_id: format!("{}:{affected_node}", selected.source.namespace),
@@ -181,7 +183,11 @@ pub(super) fn interpret(
                     surface_known,
                     source_family: selected.source.source_family.clone(),
                     source_manifest_id: Some(selected.source.manifest_id),
+                    registry_contract: Some(raw.emitting_address.to_lowercase()),
                 });
+            if owner_view.is_some() {
+                anchor.registry_contract = Some(raw.emitting_address.to_lowercase());
+            }
             state.remember_v1_registry_read_anchor(
                 &selected.source.namespace,
                 &affected_node,
@@ -241,6 +247,7 @@ pub(super) fn interpret(
                         .map(str::to_owned),
                     expiry: None,
                     owner: Some(owner.to_owned()),
+                    registry_contract: Some(raw.emitting_address.to_lowercase()),
                     authority_key: Some(format!("registry-only:{}:{affected_node}", raw.chain_id)),
                     wrapper_fallback: false,
                 };
@@ -397,6 +404,7 @@ pub(super) fn interpret(
         super::authority_arm(&selected.source.namespace),
         previous.as_ref(),
         linked.as_ref(),
+        state.v1_registry_binding(&selected.source.namespace, &affected_node),
         raw,
         &after,
         state

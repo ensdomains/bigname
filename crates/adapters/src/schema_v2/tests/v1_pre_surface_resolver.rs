@@ -2127,6 +2127,7 @@ fn surfaced_transfer_fallback_without_manifest_never_requires_materialization_pr
         labelhash: Some(format!("{:#x}", B256::ZERO)),
         expiry: None,
         owner: Some(OWNER.to_owned()),
+        registry_contract: None,
         authority_key: Some("transfer-fallback".to_owned()),
         wrapper_fallback: false,
     };

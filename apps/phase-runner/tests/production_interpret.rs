@@ -1043,6 +1043,15 @@ async fn restarted_interpret_redo_preserves_retracted_resolver_evidence_for_proj
     .bind(chain)
     .fetch_one(scratch.pool())
     .await?;
+    let registry_instance: Uuid = sqlx::query_scalar(
+        "SELECT contract_instance_id FROM manifest_contract_instances WHERE manifest_id = $1",
+    )
+    .bind(registry_manifest_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    sqlx::query("INSERT INTO migration_discovery_associations (logical_edge_identity, migration_correlation_id, correlation_kind, registry_contract_instance_id, registry_address, source_manifest_id, evidence_refs, chain_id, block_number, block_hash, transaction_hash, transaction_index, log_index, canonicality_state, consumer_visibility, interpreter_content_hash) VALUES ('redo-child-edge', 'redo-child-correlation', 'migration_registry_creation', $1, lower($2), $3, '[{\"event_identity\":\"redo-child-association\"}]', $4, 501, $5, 'redo-child-association-tx', 0, 0, 'canonical', 'candidate', $6)")
+        .bind(registry_instance).bind(CONTRACT).bind(registry_manifest_id).bind(chain)
+        .bind(block_hash(chain, 501)).bind(INTERPRETER_CONTENT_HASH).execute(scratch.pool()).await?;
     sqlx::query(
         "INSERT INTO normalized_events (
              event_identity, namespace, event_kind, source_family,
@@ -1060,6 +1069,85 @@ async fn restarted_interpret_redo_preserves_retracted_resolver_evidence_for_proj
     .bind(chain)
     .bind(block_hash(chain, 501))
     .bind(DISCOVERED_RESOLVER)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+             namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state
+         ) VALUES (
+             'ens:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+             'ens', 'expired.eth', ARRAY['expired','eth'], decode('00','hex'),
+             '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+             ARRAY['0xexpired','0xeth'], $1, 'active', $2, $3, 501, 'canonical'
+         )",
+    )
+    .bind(NORMALIZER)
+    .bind(chain)
+    .bind(block_hash(chain, 501))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query("INSERT INTO normalized_events (event_identity, namespace, logical_name_id, event_kind, source_family, manifest_version, source_manifest_id, chain_id, block_number, block_hash, raw_fact_ref, derivation_kind, canonicality_state, after_state) VALUES ('retracted-child-history-suffix', 'ens', 'ens:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'RegistrationReserved', 'ens_v2_registry_l1', 1, $1, $2, 501, $3, '{}'::jsonb, 'ens_v2_registry_resource_surface', 'canonical', jsonb_build_object('registry_contract_instance_id', $4))")
+        .bind(registry_manifest_id).bind(chain).bind(block_hash(chain, 501))
+        .bind(registry_instance.to_string()).execute(scratch.pool()).await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, event_kind, source_family,
+             manifest_version, source_manifest_id, chain_id,
+             block_number, block_hash, raw_fact_ref, derivation_kind,
+             canonicality_state, after_state
+         ) VALUES (
+             'retracted-expiry-root-suffix', 'ens',
+             'ens:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+             'RegistrationReleased', 'ens_v2_registry_l1', 1, $1, $2, 501, $3,
+             '{}'::jsonb, 'ens_v2_registry_resource_surface', 'canonical',
+             jsonb_build_object(
+                 'source_event', 'RegistryPathExpired',
+                 'derived_from', 'interpreter_state',
+                 'terminal_reason', 'registry_name_binding_expired',
+                 'status', 'released'
+             )
+         )",
+    )
+    .bind(registry_manifest_id)
+    .bind(chain)
+    .bind(block_hash(chain, 501))
+    .execute(scratch.pool())
+    .await?;
+    let resource_only_expiry = Uuid::parse_str("00000000-0000-0000-0000-000000000501")?;
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, $2, $3, 501, 'canonical')",
+    )
+    .bind(resource_only_expiry)
+    .bind(chain)
+    .bind(block_hash(chain, 501))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, resource_id, event_kind, source_family,
+             manifest_version, source_manifest_id, chain_id,
+             block_number, block_hash, raw_fact_ref, derivation_kind,
+             canonicality_state, after_state
+         ) VALUES (
+             'retracted-resource-only-expiry', 'ens', $1,
+             'RegistrationReleased', 'ens_v2_registry_l1', 1, $2, $3, 501, $4,
+             '{}'::jsonb, 'ens_v2_registry_resource_surface', 'canonical',
+             jsonb_build_object(
+                 'source_event', 'RegistryPathExpired',
+                 'derived_from', 'interpreter_state',
+                 'terminal_reason', 'registry_name_binding_expired',
+                 'status', 'released'
+             )
+         )",
+    )
+    .bind(resource_only_expiry)
+    .bind(registry_manifest_id)
+    .bind(chain)
+    .bind(block_hash(chain, 501))
     .execute(scratch.pool())
     .await?;
     run_project(scratch.pool(), chain, 501, 0, 501).await?;
@@ -1098,6 +1186,47 @@ async fn restarted_interpret_redo_preserves_retracted_resolver_evidence_for_proj
         .await?;
     assert!(!first.complete);
     assert_eq!(first.current.number, 499);
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+             namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state
+         ) VALUES (
+             'ens:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+             'ens', 'retry.eth', ARRAY['retry','eth'], decode('00','hex'),
+             '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+             ARRAY['0xretry','0xeth'], $1, 'active', $2, $3, 501, 'canonical'
+         )",
+    )
+    .bind(NORMALIZER)
+    .bind(chain)
+    .bind(block_hash(chain, 501))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, event_kind, source_family,
+             manifest_version, source_manifest_id, chain_id,
+             block_number, block_hash, raw_fact_ref, derivation_kind,
+             canonicality_state, after_state
+         ) VALUES (
+             'retracted-expiry-root-suffix', 'ens',
+             'ens:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+             'RegistrationReleased', 'ens_v2_registry_l1', 1, $1, $2, 501, $3,
+             '{}'::jsonb, 'ens_v2_registry_resource_surface', 'canonical',
+             jsonb_build_object(
+                 'source_event', 'RegistryPathExpired',
+                 'derived_from', 'interpreter_state',
+                 'terminal_reason', 'registry_name_binding_expired',
+                 'status', 'released'
+             )
+         )",
+    )
+    .bind(registry_manifest_id)
+    .bind(chain)
+    .bind(block_hash(chain, 501))
+    .execute(scratch.pool())
+    .await?;
     let restarted_engine = Engine::new(scratch.pool().clone());
     let restarted = restarted_engine
         .run_batch(BatchRequest {
@@ -1122,6 +1251,30 @@ async fn restarted_interpret_redo_preserves_retracted_resolver_evidence_for_proj
         suffix_evidence_survived,
         "redo restart replaced the original handoff with the re-derived prefix"
     );
+    let expiry_name_survived: String = sqlx::query_scalar(
+        "SELECT logical_name_id FROM project_redo_expiry_roots
+         WHERE chain_id = $1 AND event_identity = 'retracted-expiry-root-suffix'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        expiry_name_survived,
+        "ens:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "redo restart replaced the first captured path-expiry name"
+    );
+    let resource_only_survived: Option<Uuid> = sqlx::query_scalar(
+        "SELECT resource_id FROM project_redo_expiry_roots
+         WHERE chain_id = $1 AND event_identity = 'retracted-resource-only-expiry'",
+    )
+    .bind(chain)
+    .fetch_optional(scratch.pool())
+    .await?;
+    assert_eq!(
+        resource_only_survived,
+        Some(resource_only_expiry),
+        "redo omitted a resource-only path-expiry release from the Project handoff"
+    );
     let finished = restarted_engine
         .run_batch(BatchRequest {
             chain_id: chain.into(),
@@ -1132,6 +1285,14 @@ async fn restarted_interpret_redo_preserves_retracted_resolver_evidence_for_proj
         })
         .await?;
     assert!(finished.complete);
+    let child_handoff: Option<String> = sqlx::query_scalar(
+        "SELECT logical_name_id FROM project_redo_child_registration_history WHERE chain_id = $1 AND event_identity = 'retracted-child-history-suffix'",
+    )
+    .bind(chain).fetch_optional(scratch.pool()).await?;
+    assert_eq!(
+        child_handoff.as_deref(),
+        Some("ens:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
     let projected = ProjectEngine::new(scratch.pool().clone())
         .run_batch(ProjectBatchRequest {
             chain_id: chain.into(),
@@ -1163,12 +1324,17 @@ async fn restarted_interpret_redo_preserves_retracted_resolver_evidence_for_proj
         "Project did not rebuild the discovered resolver after suffix evidence retracted"
     );
     let handoff_rows: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM project_redo_resolver_evidence WHERE chain_id = $1",
+        "SELECT (SELECT count(*) FROM project_redo_resolver_evidence WHERE chain_id = $1)
+              + (SELECT count(*) FROM project_redo_expiry_roots WHERE chain_id = $1)
+              + (SELECT count(*) FROM project_redo_child_registration_history WHERE chain_id = $1)",
     )
     .bind(chain)
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(handoff_rows, 0, "Project did not consume the redo handoff");
+    assert_eq!(
+        handoff_rows, 0,
+        "Project did not consume both redo handoffs"
+    );
 
     scratch.cleanup().await
 }

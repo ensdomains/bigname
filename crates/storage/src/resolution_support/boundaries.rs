@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use crate::{
-    identity::SurfaceBindingKind, name_current::NameCurrentRow,
+    IdentityNameCurrentRow, identity::SurfaceBindingKind, name_current::NameCurrentRow,
     record_inventory::RecordInventoryCurrentRow,
 };
 
@@ -44,7 +44,7 @@ pub fn resolution_record_inventory_lookup_key(row: &NameCurrentRow) -> Option<(U
 pub fn resolution_record_inventory_lookup_key_any_chain(
     row: &NameCurrentRow,
 ) -> Option<(Uuid, Value)> {
-    let binding_supported = event_linked_ownerless_registry_serving(row)
+    let binding_supported = name_current_has_event_linked_ownerless_registry_serving(row)
         || match row.namespace.as_str() {
             ENS_NAMESPACE => matches!(
                 row.binding_kind,
@@ -307,7 +307,7 @@ fn build_legacy_basenames_verified_support_boundary(
 fn can_derive_legacy_basenames_direct_topology(row: &NameCurrentRow) -> bool {
     if row.namespace != BASENAMES_NAMESPACE
         || !(row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath)
-            || event_linked_ownerless_registry_serving(row))
+            || name_current_has_event_linked_ownerless_registry_serving(row))
         || row.record_serving_resource_id().is_none()
         || !row_has_basenames_execution_v2_manifest(row)
     {
@@ -353,7 +353,7 @@ fn build_supported_resolution_verified_boundary(row: &NameCurrentRow) -> Option<
         || !(matches!(
             row.binding_kind,
             Some(SurfaceBindingKind::DeclaredRegistryPath | SurfaceBindingKind::ResolverAliasPath)
-        ) || event_linked_ownerless_registry_serving(row))
+        ) || name_current_has_event_linked_ownerless_registry_serving(row))
         || row.record_serving_resource_id().is_none()
     {
         return None;
@@ -368,7 +368,7 @@ fn build_supported_resolution_verified_boundary(row: &NameCurrentRow) -> Option<
 }
 
 fn build_supported_resolution_declared_boundary(row: &NameCurrentRow) -> Option<Value> {
-    let binding_supported = event_linked_ownerless_registry_serving(row)
+    let binding_supported = name_current_has_event_linked_ownerless_registry_serving(row)
         || match row.namespace.as_str() {
             ENS_NAMESPACE => matches!(
                 row.binding_kind,
@@ -399,7 +399,7 @@ fn build_supported_resolution_declared_boundary(row: &NameCurrentRow) -> Option<
 fn build_supported_resolution_declared_boundary_for_revalidation(
     row: &NameCurrentRow,
 ) -> Option<Value> {
-    let binding_supported = event_linked_ownerless_registry_serving(row)
+    let binding_supported = name_current_has_event_linked_ownerless_registry_serving(row)
         || match row.namespace.as_str() {
             ENS_NAMESPACE => matches!(
                 row.binding_kind,
@@ -476,13 +476,28 @@ fn build_resolution_version_boundary(
     Value::Object(boundary)
 }
 
-fn event_linked_ownerless_registry_serving(row: &NameCurrentRow) -> bool {
+pub fn name_current_has_event_linked_ownerless_registry_serving(row: &NameCurrentRow) -> bool {
     row.resource_id.is_none()
         && row.surface_binding_id.is_none()
         && row.binding_kind.is_none()
         && row.serving_resource_id.is_some()
+        && has_event_linked_ownerless_registry_provenance(&row.namespace, &row.provenance)
+}
+
+pub fn identity_name_current_has_event_linked_ownerless_registry_serving(
+    row: &IdentityNameCurrentRow,
+) -> bool {
+    row.resource_id.is_none()
+        && row.surface_binding_id.is_none()
+        && row.binding_kind.is_none()
+        && row.serving_resource_id.is_some()
+        && has_event_linked_ownerless_registry_provenance(&row.namespace, &row.provenance)
+}
+
+fn has_event_linked_ownerless_registry_provenance(namespace: &str, provenance: &Value) -> bool {
+    matches!(namespace, ENS_NAMESPACE | BASENAMES_NAMESPACE)
         && json_string_field(
-            json_field(&row.provenance, "read_reachability")
+            json_field(provenance, "read_reachability")
                 .and_then(|value| json_field(value, "basis")),
         )
         .as_deref()

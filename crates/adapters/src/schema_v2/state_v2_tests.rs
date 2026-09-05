@@ -15,6 +15,31 @@ mod expiry_tests;
 #[path = "state_v2_pointer_tests.rs"]
 mod pointer_tests;
 #[test]
+fn v2_named_expiry_retains_registration_state() {
+    let mut state = anchored_state();
+    install_token(&mut state, ROOT, "0x01", b"alpha", 10);
+    state.link_v2_resource(
+        ROOT,
+        "0x01",
+        "resource".to_owned(),
+        Uuid::from_u128(9),
+        None,
+    );
+    state.refresh_dirty_v2_names(9);
+    let retired = state
+        .refresh_dirty_v2_names(10)
+        .into_iter()
+        .next()
+        .expect("named registration retires");
+    assert!(retired.previous.is_some());
+    assert!(retired.registration.is_some());
+    let retained = state
+        .v2_token(ROOT, "0x01")
+        .expect("expired token remains retained");
+    assert!(retained.name.is_none());
+    assert!(retained.registration.is_some());
+}
+#[test]
 fn v2_dirty_refresh_deduplicates_one_token_and_isolates_irrelevant_tokens() {
     let mut state = anchored_state();
     install_token(&mut state, ROOT, "0x01", b"alpha", 100);
@@ -128,7 +153,6 @@ fn v2_changed_away_winner_hands_the_surface_to_the_surviving_holder() {
     );
     assert_v2_indexes_are_derived(&state);
 }
-
 #[test]
 fn v2_contested_surface_expiry_reasserts_the_surviving_holder() {
     let mut state = claim_path_contested_state();
@@ -138,9 +162,7 @@ fn v2_contested_surface_expiry_reasserts_the_surviving_holder() {
         .v2_token(ROOT, "0x01")
         .and_then(|token| token.name)
         .expect("surviving holder names the contested surface");
-
     let transitions = state.refresh_dirty_v2_names(2);
-
     assert!(transitions.iter().any(|transition| {
         transition.registry == ROOT
             && transition.previous == transition.current
@@ -497,6 +519,7 @@ fn prior_event(
         source_family: "ens_v2_registry_l1".to_owned(),
         manifest_version: 1,
         source_manifest_id: Some(1),
+        emitting_address: None,
         state_scope,
         block_timestamp: Some(OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1)),
         after_state,

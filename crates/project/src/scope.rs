@@ -6,6 +6,7 @@ use crate::{
 
 mod authority;
 mod classification;
+mod expiry;
 mod inventory;
 mod labels;
 mod primary;
@@ -53,7 +54,8 @@ pub(crate) async fn initialize(
     .await?;
     wrapper::include_time_boundaries(transaction, chain_id, window.previous, target).await?;
     if window.retain_retracted {
-        retracted::seed(transaction, chain_id, window.from_block, window.to_block).await?;
+        retracted::seed(transaction, chain_id, &window, target.number).await?;
+        wrapper::include_effect_resources(transaction, chain_id, target.number).await?;
         // Resource citations retain the losing projected pointer while canonical history supplies
         // its replacement; both resolver keys must expand before redo rebuilds either row family.
         resolver::include_resource_pointers(transaction, chain_id, target.number).await?;
@@ -89,8 +91,10 @@ pub(crate) async fn initialize(
 async fn create_scope_tables(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     for statement in [
         "CREATE TEMP TABLE project_scope_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
+        "CREATE TEMP TABLE project_scope_expiry_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_children (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
+        "CREATE TEMP TABLE project_scope_account_permissions (chain_id text, authority_kind text, authority_contract text, owner text, subject text, relation_kind text, PRIMARY KEY (chain_id, authority_kind, authority_contract, owner, subject, relation_kind)) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_permission_effect_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_resolvers (resolver_address text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_resolver_permission_history (resolver_address text PRIMARY KEY) ON COMMIT DROP",
@@ -216,6 +220,22 @@ async fn seed_direct_scope(
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to derive direct resource scope", error))?;
+
+    sqlx::query(
+        "INSERT INTO project_scope_account_permissions
+         SELECT chain_id,
+                after_state #>> '{scope,authority_kind}',
+                lower(after_state #>> '{scope,authority_contract}'),
+                lower(after_state #>> '{scope,owner}'),
+                lower(after_state ->> 'subject'),
+                after_state ->> 'relation_kind'
+         FROM project_changed_events
+         WHERE event_kind = 'AccountPermissionChanged'
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to derive account permission scope", error))?;
 
     sqlx::query(
         "INSERT INTO project_scope_permission_effect_resources

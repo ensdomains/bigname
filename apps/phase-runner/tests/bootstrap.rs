@@ -85,6 +85,126 @@ async fn serving_resource_reference_migrates_an_initialized_phase_schema() -> Re
 }
 
 #[tokio::test]
+async fn expiry_scope_indexes_migration_repairs_an_initialized_phase_schema() -> Result<()> {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_expiry_scope_index_migration")
+            .pool_max_connections(2)
+            .parse_context("failed to parse expiry index schema-migration test database URL")
+            .admin_connect_context(
+                "failed to connect expiry index schema-migration test admin pool",
+            )
+            .pool_connect_context("failed to connect expiry index schema-migration test pool"),
+    )
+    .await?;
+    initialize_schema_v2(database.pool()).await?;
+    sqlx::query("DROP INDEX bigname_phase.normalized_events_v2_expiry_scope_idx")
+        .execute(database.pool())
+        .await?;
+    sqlx::query("DROP INDEX bigname_phase.normalized_events_subregistry_registration_history_idx")
+        .execute(database.pool())
+        .await?;
+    let absent_before: bool = sqlx::query_scalar(
+        "SELECT to_regclass('bigname_phase.normalized_events_v2_expiry_scope_idx') IS NULL",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(absent_before);
+
+    bigname_storage::MIGRATOR.run(database.pool()).await?;
+    let ready_and_valid: bool = sqlx::query_scalar(
+        "SELECT COALESCE(bool_and(index_state.indisready AND index_state.indisvalid), false)
+         FROM pg_index index_state
+         WHERE index_state.indexrelid =
+               to_regclass('bigname_phase.normalized_events_v2_expiry_scope_idx')",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(ready_and_valid);
+    let reserved_history_ready: bool = sqlx::query_scalar(
+        "SELECT COALESCE(
+             index_state.indisready
+             AND index_state.indisvalid
+             AND pg_get_expr(
+                     index_state.indpred,
+                     index_state.indrelid,
+                     true
+                 ) LIKE '%RegistrationReserved%',
+             false
+         )
+         FROM pg_index index_state
+         WHERE index_state.indexrelid = to_regclass(
+             'bigname_phase.normalized_events_subregistry_registration_history_idx'
+         )",
+    )
+    .fetch_optional(database.pool())
+    .await?
+    .unwrap_or(false);
+    assert!(reserved_history_ready);
+    let mut planner = database.pool().begin().await?;
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *planner)
+        .await?;
+    let plan = sqlx::query_scalar::<_, String>(
+        "EXPLAIN (COSTS OFF)
+         SELECT logical_name_id
+         FROM bigname_phase.normalized_events
+         WHERE chain_id = 'planner-probe'
+           AND after_state ->> 'registry_contract_instance_id' = 'probe-instance'
+           AND block_number <= 1
+           AND event_kind IN (
+               'RegistrationGranted', 'RegistrationReserved',
+               'RegistrationRenewed', 'RegistrationReleased'
+           )
+           AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND logical_name_id IS NOT NULL",
+    )
+    .fetch_all(&mut *planner)
+    .await?
+    .join("\n");
+    assert!(
+        plan.contains("normalized_events_subregistry_registration_history_idx"),
+        "reserved topology history query lost its bounded index:\n{plan}"
+    );
+    planner.rollback().await?;
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn expiry_scope_migration_preserves_a_prebuilt_reserved_history_index() -> Result<()> {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_prebuilt_reserved_history_index")
+            .pool_max_connections(2)
+            .parse_context("failed to parse prebuilt index schema-migration test database URL")
+            .admin_connect_context(
+                "failed to connect prebuilt index schema-migration test admin pool",
+            )
+            .pool_connect_context("failed to connect prebuilt index schema-migration test pool"),
+    )
+    .await?;
+    initialize_schema_v2(database.pool()).await?;
+    let before_oid: i64 = sqlx::query_scalar(
+        "SELECT 'bigname_phase.normalized_events_subregistry_registration_history_idx'::regclass::oid::bigint",
+    )
+    .fetch_one(database.pool())
+    .await?;
+
+    bigname_storage::MIGRATOR.run(database.pool()).await?;
+    let after_oid: i64 = sqlx::query_scalar(
+        "SELECT 'bigname_phase.normalized_events_subregistry_registration_history_idx'::regclass::oid::bigint",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        after_oid, before_oid,
+        "schema-migration rebuilt the production-prebuilt reserved history index"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn manifest_change_counter_migrates_existing_history_with_baseline_parity() -> Result<()> {
     let migrated = TestDatabase::create(
         TestDatabaseConfig::new("phase_runner_manifest_change_counter_migration")
@@ -759,6 +879,91 @@ async fn interpret_decode_skip_audit_matches_between_baseline_and_schema_migrati
     assert_eq!(
         migrated_structure, installed_structure,
         "the schema migration and the baseline define one identical table"
+    );
+
+    installed.cleanup().await?;
+    migrated.cleanup().await
+}
+
+#[tokio::test]
+async fn expiry_root_handoff_matches_between_baseline_and_schema_migration() -> Result<()> {
+    let migrated = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_expiry_root_handoff_migration")
+            .pool_max_connections(2),
+    )
+    .await?;
+    sqlx::raw_sql(
+        "CREATE SCHEMA bigname_phase;
+         CREATE TABLE bigname_phase.normalized_events (stub bigint)",
+    )
+    .execute(migrated.pool())
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/20260902140000_project_redo_expiry_roots.sql"
+    ))
+    .execute(migrated.pool())
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/20260902150000_project_redo_expiry_resources.sql"
+    ))
+    .execute(migrated.pool())
+    .await?;
+    let migrated_structure =
+        load_table_structure(migrated.pool(), "project_redo_expiry_roots").await?;
+
+    let installed = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_expiry_root_handoff_baseline")
+            .pool_max_connections(2),
+    )
+    .await?;
+    initialize_schema_v2(installed.pool()).await?;
+    let installed_structure =
+        load_table_structure(installed.pool(), "project_redo_expiry_roots").await?;
+
+    assert!(!installed_structure.is_empty());
+    assert_eq!(
+        migrated_structure, installed_structure,
+        "the expiry-root handoff migration and baseline must stay identical"
+    );
+
+    installed.cleanup().await?;
+    migrated.cleanup().await
+}
+
+#[tokio::test]
+async fn child_history_handoff_matches_baseline_migration() -> Result<()> {
+    let migrated = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_child_history_handoff_migration")
+            .pool_max_connections(2),
+    )
+    .await?;
+    sqlx::raw_sql(
+        "CREATE SCHEMA bigname_phase;
+         CREATE TABLE bigname_phase.normalized_events (stub bigint)",
+    )
+    .execute(migrated.pool())
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/20260904120000_project_redo_child_registration_history.sql"
+    ))
+    .execute(migrated.pool())
+    .await?;
+    let migrated_structure =
+        load_table_structure(migrated.pool(), "project_redo_child_registration_history").await?;
+
+    let installed = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_child_history_handoff_baseline")
+            .pool_max_connections(2),
+    )
+    .await?;
+    initialize_schema_v2(installed.pool()).await?;
+    let installed_structure =
+        load_table_structure(installed.pool(), "project_redo_child_registration_history").await?;
+
+    assert!(!installed_structure.is_empty());
+    assert_eq!(
+        migrated_structure, installed_structure,
+        "the child-registration-history schema-migration and baseline must stay identical"
     );
 
     installed.cleanup().await?;

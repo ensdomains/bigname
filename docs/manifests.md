@@ -201,15 +201,23 @@ ABI entries use Alloy-parseable human-readable Solidity fragments, not handwritt
 - `notes` — optional reviewer-facing context.
 
 An [intake-only event](glossary.md#intake-only-event) may be declared for raw
-intake without promising normalized-event production by declaring an empty
-`normalized_events` list. This is not an
-unrestricted adapter-admission bypass. Supported intake-only events retain
-their declared ABI validation and produce no normalized events. Standard
-approval events are watched only at explicitly declared, role-eligible
+intake without promising a manifest-owned normalized-event mapping by declaring
+an empty `normalized_events` list. This is not an unrestricted
+adapter-admission bypass. [Standard approval](glossary.md#standard-approval-derivation) declarations must retain the empty
+list: their ABI decoding is declaration-backed, while any normalized output is
+an adapter-owned mapping versioned by the
+[interpreter content hash](glossary.md#interpreter-content-hash). The admitted
+ENSv1 and Basenames registry `ApprovalForAll` declarations map to
+`AccountPermissionChanged`; registrar, resolver, and NameWrapper approvals
+remain decoded with no normalized output. Standard approval events are watched
+only at explicitly declared, role-eligible
 contract addresses and their declared historical intervals; they are not added
 to generic resolver [all-emitter watches](glossary.md#watch-plan--watched-tuple).
-Raw capture does not imply permission
-interpretation or complete permission coverage.
+The admitted Sepolia legacy registry artifact declares that exact
+`ApprovalForAll(owner, operator, approved)` event.
+(upstream: .refs/ens_v1/deployments/sepolia/LegacyENSRegistry.json:L2-L32 @ ens_v1@91c966f)
+Raw capture does not by itself imply permission interpretation or complete
+permission coverage.
 
 ABI fragments should cite upstream in nearby manifest comments or in the public doc section that admits the source family. If an adapter still has an in-code selector or `sol!` definition for a manifest-declared fragment, that code is a compatibility bridge until the adapter consumes the manifest ABI directly.
 
@@ -349,7 +357,7 @@ bridges from, in `deployment_epoch = "ens_v1"`:
 
 The two zero values are conservative watch lower bounds, not asserted deployment blocks; they use the existing [retired automatic-bootstrap divergence](upstream.md#known-divergences). Reverse resolvers, `ExtendedDNSResolver` / `OffchainDNSResolver`, and `UniversalResolver` are excluded. `OwnedResolver` is also outside the closed family: the pinned Mainnet deployment set records `EthOwnedResolver` and its `.eth`-level setup, but Mainnet's resolver manifest does not admit it; Sepolia's deployment artifact identifies `0x15222A1C2Bf3A4c24eAd1634B8Ee399fd95c3aaf` at block `3790128`, and that address is absent from the app's approved resolver list.[^v1-mainnet-owned-resolver][^v1-sepolia-owned-resolver]
 
-The normalized ENSv1 resolver address set is disjoint from every address-bearing field in the active Sepolia `ens_v2_resolver_l1` manifest; its complete resolver-side set is the `permissioned_resolver` implementation metadata address `0x7e4b2d59938930168024201752ee5503df402303`. That implementation is v2 classification metadata, not an ENSv1 direct-address admission. The connected deployment's premigration registrar assigns the separate `ENSV1Resolver` mirror at `0x5339161a7896ca9841ecc034a49edca40f7b9491`; that mirror finds the selected resolver through the ENSv1 registry and forwards resolution there. The serving-side mirror stays in the connected ENSv2 deployment, while v1 record ingestion and exact resolver classification stay in `ens_v1_resolver_l1`.[^v2-sepolia-v1-mirror]
+The normalized ENSv1 resolver address set is disjoint from every address-bearing field in the active Sepolia `ens_v2_resolver_l1` manifest; its complete resolver-side set is the `permissioned_resolver` implementation metadata address `0x7e4b2d59938930168024201752ee5503df402303`. That implementation is v2 classification metadata, not an ENSv1 direct-address admission. The ENSv2 deployment's premigration registrar assigns the separate `ENSV1Resolver` mirror at `0x5339161a7896ca9841ecc034a49edca40f7b9491`; that mirror finds the selected resolver through the ENSv1 registry and forwards resolution there. The serving-side mirror stays in the ENSv2 deployment, while v1 record ingestion and exact resolver classification stay in `ens_v1_resolver_l1`.[^v2-sepolia-v1-mirror]
 
 The latest resolver declares `read_features = ["ensip19_default_address"]`, matching its app metadata and inherited `AddrResolver` fallback behavior. Project therefore publishes the ENSIP-19 default-address read rule for `0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5`; the other three generations remain unflagged.[^v1-sepolia-app-resolvers]
 
@@ -368,12 +376,23 @@ No ENSv1 registrar-controller contract is admitted on this deployment profile. T
 The pins also carry a tracked Sepolia v1-reference address for `WrappedETHRegistrarController`, `0xFED6a969AaA60E4961FCD3EBF1A2e8913ac65B72`, and the ENSv2 `ETHRenewerV1` constructor data names the same controller. That reference artifact contains only the address and ABI, however: it has no deployment transaction, receipt, or historical start block. The ENS subgraph and ENSNode cross-check references both pair the address with block `3790244`, but those references do not supply authoritative deployment provenance. Unlike the explicit BaseRegistrar exception above, bigname does not elevate that cross-check metadata into a controller watch-plan floor, so the controller remains unadmitted and its admission remains deferred.[^v1-sepolia-wrapped-controller-gap]
 Registrar-controller coverage remains a known asymmetry against the mainnet deployment profile; resolver-log coverage for the approved four-address set is no longer one.
 
-A name that carries both ENSv1 and ENSv2 evidence on this profile is
+An ordinary active name that carries both current ENSv1 and ENSv2 arms on this
+deployment profile, without an admitted authority proof, qualifying release, or
+deployment-wide ENSv2 release-threshold decision, is
 [`independent_ens_deployments_overlap`](architecture.md) rather than a chosen
-authority, because the two Sepolia deployments are independent except where a
-proven migration boundary joins a single name. Admitting ENSv1 sources here
-makes that shape reachable in production for the first time; it does not make
-it a migration.
+authority. The runtime admits evidence from both protocol eras, but only an
+admitted ENSv1→ENSv2 migration boundary establishes per-name authority between
+them.
+The exact [shared ENS infrastructure](glossary.md#shared-ens-infrastructure)
+names—root, `eth`, `reverse`, and `addr.reverse`—instead select ENSv2 when the
+ENSv2 arm is current, ENSv1 evidence exists as either a current binding or
+historical events, and none of those higher-precedence decisions applies.
+Historical ENSv2 evidence alone does not qualify, and descendants do not
+inherit the exception. A current ENSv2 arm without ENSv1 evidence remains the
+ordinary single-arm ENSv2 case.
+Admitting ENSv1 sources here
+makes ordinary overlap reachable in production for the first time; it does not
+establish an ENSv1→ENSv2 migration boundary.
 
 `exact_name_profile` [capability promotion](glossary.md) is deployment-profile-scoped: only `exact_name_profile = "supported"` on the active `ens_v2_registrar_l1` version in the `sepolia` root promotes `.eth` exact-name declared reads to supported, backed by `ETHRegistry` resource/token state and `ETHRegistrar` lifecycle facts.[^v2-iperm-l22][^v2-events-l15][^v2-iethreg-l32] The admitted ENSv1 registrar remains `shadow` because registrar-controller label coverage is absent, so the product namespace route aggregates the two declarations as `name_profile.completeness = "partial"`; this does not demote the ENSv2 family-level support. The capability promotion does not apply to mainnet, another deployment profile, or any runtime that has not selected `manifests/sepolia`. Active rollout, raw preimage observations, resolver admission, or backfill completion promote no other capability.
 
@@ -416,15 +435,16 @@ The empty capability table is not a serving barrier: current Project staging
 and product event/history readers do not consult it. Slice 1 therefore marks
 every correlation-dependent effect in the per-name
 [migration correlation group](glossary.md#migration-correlation-group) with
-`consumer_visibility=candidate`; an independently admitted effect retains its
+`consumer_visibility=candidate`; an [independently admitted
+event](glossary.md#independently-admitted-event) retains its
 ordinary activated output and receives a separate candidate association. Every
 consumer staging or direct-history read excludes correlation-dependent candidate
 normalized events and candidate identity/discovery effects until the later
 consumer-activation slice activates the group. Slice 2A added no capability,
 runtime, or manifest flag and left production correlations candidate. The final
 activation slice now activates [complete groups](glossary.md#complete-group) in production without changing
-that capability table, runtime configuration, or manifest authority; incomplete
-and refused correlations remain candidate.
+that capability table, runtime configuration, or manifest authority. A [physical Interpret batch](glossary.md#batch-grid) containing a registrar-token `unwrapped` group affected by
+[issue #822](https://github.com/ensdomains/bigname/issues/822) rolls back every write from that attempt, including complete sibling groups. During redo, range preparation can already have deleted previously stored candidate rows in an earlier committed physical batch; failure in a later batch therefore leaves partial, fenced redo state rather than restoring the pre-redo rows. Failure in the initial physical redo batch rolls its preparation back with that batch.
 `migration_event_associations` remains diagnostics-only before and after
 activation.
 
@@ -659,11 +679,13 @@ reclassify an effect: a `ParentUpdated`, role, registration, renewal, topology,
 or normalized-event output that `ens_v2_registry_l1` derives from the ordinary
 edge and raw event without ENSv1→ENSv2 migration correlation remains ordinary and
 byte-for-byte unchanged. Only the additional meaning that depends on the
-correlation follows candidate-to-activated complete-group visibility. The
-exact-name Project read has one narrow exception: after
+correlation follows candidate-to-activated complete-group visibility. Beyond
+that rebuild-scope use, Project has two narrow semantic reads: after
 an activated parent boundary, the exact-name authority selector may require the
 readable ordinary edge and its canonical `migration_registry_creation`
-association to classify the emitter of a positive child registration. Neither
+association to classify a positive child-registration emitter, while child
+reachability may require them to prove the current parent subregistry is the
+migration-created `WrapperRegistry`. Neither
 row is authority proof by itself, and no product route consumes either row
 directly. A later
 `SubregistryUpdated` remains the bidirectional parent-child topology edge and
@@ -749,7 +771,7 @@ and there is nothing for correlation to key on.
 
 Diagnostic correlation output does not mean zero effect on Project. Admitting a child
 registry writes a `migration_registry_creation` discovery association, and
-Project's rebuild scope reads that table without a `consumer_visibility` filter,
+Project's rebuild scope and parent-reachability selector read that table without a `consumer_visibility` filter,
 so names registered into a newly-admitted child registry enter delete-and-rebuild
 candidacy. What those rebuilds publish is unchanged: the child-registration
 authority proof also requires an activated parent boundary. Complete parent and
@@ -765,8 +787,8 @@ correlation kind. Every correlation-dependent downstream effect keeps that
 group's `migration_correlation_ids` and `consumer_visibility` even though it
 interprets under `ens_v2_registry_l1`. Candidate effects do not update ordinary
 identity, topology, or consumer state; the ordinary indexability edge is the
-explicit slice-1 exception because the watch plan consumes it. Slice 2C's
-authority-selector read above does not expose the edge or association as a
+explicit slice-1 exception because the watch plan consumes it. The authority-selector
+and parent-reachability reads above do not expose the edge or association as a
 product row.
 
 Independent admission takes precedence. An existing-family normalized event
@@ -823,11 +845,16 @@ source authority: fixed contracts, `manifests/mainnet/`, `manifests/sepolia/`,
 and the generated watch plans remain byte-for-byte unchanged. The new
 [interpreter content hash](glossary.md#interpreter-content-hash) therefore
 requires one complete retained-range Interpret re-walk followed by Project,
-with publication blocked until the completed generation is coherent. Mainnet
-integrity assertions apply to activated proofs in that completed generation;
-Sepolia selects a proven arm but independent unproven ENSv1/ENSv2 overlap never
-blocks its publication. There is no production interval serving candidate-only
-data. The ordinary announcement edge above remains a watch-plan input and this
+with publication blocked until the completed generation is coherent. The
+dual-current integrity assertions apply to activated proofs on the configured
+Mainnet ENS deployment profile. Sepolia publishes a proof-selected result, and
+ordinary unproven Sepolia ENSv1/ENSv2 overlap remains a per-name refusal rather
+than a publication block. Extending the guardrail to Sepolia is deferred until
+[PR #852](https://github.com/ensdomains/bigname/pull/852), the #503 e2e harness,
+proves the connected Interpret→Project path;
+[issue #851](https://github.com/ensdomains/bigname/issues/851) tracks re-applying
+the guardrail. There is no production interval serving candidate-only data.
+The ordinary announcement edge above remains a watch-plan input and this
 activation creates no ingest gap.
 
 Other artifacts of the admitted 2026-06-29 Sepolia deployment — including
