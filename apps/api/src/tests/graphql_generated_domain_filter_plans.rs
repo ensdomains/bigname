@@ -140,6 +140,8 @@ async fn graphql_generated_domain_owner_negative_plans_are_page_bounded_anti_joi
         let probe = nodes.iter().find(|node| node["Index Name"] == "address_names_current_name_idx")
             .with_context(|| format!("name-keyed anti probe: {member}"))?;
         assert!(probe["Actual Loops"].as_u64().unwrap_or(u64::MAX) <= 204, "{member}: {probe}");
+        let returned = crate::graphql::load_phase_graphql_name_list_page_offset(&database.lookup_pool, &bigname_storage::NameCurrentListFilter { namespace: Some("ens".into()), ..Default::default() }, &chains, &filter, crate::graphql::GeneratedDomainSort::Id, bigname_storage::NameCurrentListOrder::Asc, 200, 0).await?;
+        assert!(returned.iter().any(|row| row.row.row.namehash == format!("0x{:064x}", 1_199)), "late second-owner target: {member}");
     }
     database.cleanup().await
 }
@@ -147,6 +149,7 @@ async fn graphql_generated_domain_owner_negative_plans_are_page_bounded_anti_joi
 fn assert_owner_plan_limits(explain: &Value, member: &str) -> Result<()> {
     let plan = &explain[0]["Plan"];
     assert_eq!(plan["Node Type"], "Limit", "{member}");
+    assert_eq!(plan["Actual Rows"], 200, "{member}: requested page");
     assert!(plan["Total Cost"].as_f64().unwrap_or(f64::MAX) < 100_000.0, "{member}: {plan}");
     assert!(explain[0].get("JIT").is_none(), "{member}: {explain}");
     assert_eq!(plan["Temp Read Blocks"].as_u64().unwrap_or(0), 0, "{member}");

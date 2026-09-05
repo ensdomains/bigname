@@ -46,11 +46,9 @@ ownership rules above; the command-line capture and verification tool does not d
 Broader entity/event fixtures, the remaining filter matrix, historical reads,
 errors, and reports are deferred. The Domain point and name-equality responses
 remain the claimed response cases; schema coverage additionally claims the
-generated-style Domain roots and the 48-member partial `Domain_filter`. The complete effective-owner scalar family retains the two `owner` and `owner_in` claims and adds 18
-exact `input:` claims. This changes the exact `#670/T3` remainder from 197 to 179 without
-changing any enum claim. Its four residual classes remain wrapper-authority names, zero
-or masked registry owners, names without a projected ownership event, and state-derived
-effective-controller changes from resource-scoped `PermissionChanged` or owner-less `AuthorityEpochChanged`; both positive and negative members exclude them.
+generated-style Domain roots and the 48-member partial `Domain_filter`. The complete effective-owner scalar family retains `owner` and `owner_in`, adds 18 exact `input:` claims, and changes the exact `#670/T3` remainder from 197 to 179 without changing enum claims.
+Its four residual classes remain wrapper-authority names, zero or masked registry owners, names without a projected ownership event, and state-derived effective-controller changes from resource-scoped `PermissionChanged` or owner-less `AuthorityEpochChanged`;
+both positive and negative members exclude them.
 
 Coverage also claims the generated `account`, `accounts`, `resolver`, and
 `resolvers` roots and every argument in their captured signatures. It claims
