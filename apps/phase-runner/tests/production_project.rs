@@ -13278,45 +13278,42 @@ async fn assert_registrar_transfer_matches_full_rebuild(
     .bind(chain)
     .fetch_all(incremental.pool())
     .await?;
-    let expected_transfer_permissions = if include_registry_owner { 0 } else { 2 };
     assert_eq!(
         resolver_permissions.len(),
-        expected_transfer_permissions,
-        "a registrar transfer must move resolver control only when registrar authority remains active"
+        2,
+        "authority change must emit one resolver revoke and one resolver grant"
     );
     assert!(resolver_permissions.iter().all(|(_, _, family, emitter)| {
         family == "basenames_base_registrar" && emitter.as_deref() == Some(REGISTRAR)
     }));
-    if !include_registry_owner {
-        let revoke = resolver_permissions
-            .iter()
-            .find(|(before, _, _, _)| {
-                before.pointer("/subject").and_then(Value::as_str) == Some(OWNER)
-            })
-            .expect("old-owner resolver revoke");
-        assert_eq!(
-            revoke.0.pointer("/scope/resolver_address"),
-            Some(&json!(RESOLVER))
-        );
-        assert_eq!(
-            revoke.0.pointer("/effective_powers"),
-            Some(&json!(["resolver_control"]))
-        );
-        let grant = resolver_permissions
-            .iter()
-            .find(|(_, after, _, _)| {
-                after.pointer("/subject").and_then(Value::as_str) == Some(TRANSFER_OWNER)
-            })
-            .expect("new-owner resolver grant");
-        assert_eq!(
-            grant.1.pointer("/scope/resolver_address"),
-            Some(&json!(RESOLVER))
-        );
-        assert_eq!(
-            grant.1.pointer("/grant_source/source_event_kind"),
-            Some(&json!("TokenControlTransferred"))
-        );
-    }
+    let revoke = resolver_permissions
+        .iter()
+        .find(|(before, _, _, _)| before.pointer("/subject").and_then(Value::as_str) == Some(OWNER))
+        .expect("old-authority resolver revoke");
+    assert_eq!(
+        revoke.0.pointer("/scope/resolver_address"),
+        Some(&json!(RESOLVER))
+    );
+    let expected_grantee = if include_registry_owner {
+        OWNER
+    } else {
+        TRANSFER_OWNER
+    };
+    let grant = resolver_permissions
+        .iter()
+        .find(|(_, after, _, _)| {
+            after.pointer("/subject").and_then(Value::as_str) == Some(expected_grantee)
+                && after["effective_powers"] == json!(["resolver_control"])
+        })
+        .expect("new-authority resolver grant");
+    assert_eq!(
+        grant.1.pointer("/scope/resolver_address"),
+        Some(&json!(RESOLVER))
+    );
+    assert_eq!(
+        grant.1.pointer("/grant_source/source_event_kind"),
+        Some(&json!("TokenControlTransferred"))
+    );
     assert!(resolver_permissions.iter().all(|(before, after, _, _)| {
         before.get("resolver").is_none() && after.get("resolver").is_none()
     }));
@@ -13376,19 +13373,19 @@ async fn assert_registrar_transfer_matches_full_rebuild(
             "SELECT subject, grant_source ->> 'source_event_kind'
              FROM permissions_current
              WHERE scope_kind = 'resolver'
+               AND resource_id = (
+                   SELECT resource_id FROM name_current
+                   WHERE raw_name = 'alice.base.eth'
+               )
                AND lower(scope_detail ->> 'resolver_address') = lower($1)",
         )
         .bind(RESOLVER)
         .fetch_one(pool)
         .await?;
-        let expected_permission = if include_registry_owner {
-            (OWNER.into(), Some("ResolverChanged".into()))
-        } else {
-            (
-                TRANSFER_OWNER.into(),
-                Some("TokenControlTransferred".into()),
-            )
-        };
+        let expected_permission = (
+            expected_grantee.into(),
+            Some("TokenControlTransferred".into()),
+        );
         assert_eq!(current_permission, expected_permission);
     }
 
@@ -13399,11 +13396,7 @@ async fn assert_registrar_transfer_matches_full_rebuild(
     } else {
         TRANSFER_OWNER
     };
-    let expected_source = if include_registry_owner {
-        "ResolverChanged"
-    } else {
-        "TokenControlTransferred"
-    };
+    let expected_source = "TokenControlTransferred";
     for summary in [&incremental_resolver, &full_resolver] {
         assert_eq!(
             summary.pointer("/permissions/items/0/subject"),

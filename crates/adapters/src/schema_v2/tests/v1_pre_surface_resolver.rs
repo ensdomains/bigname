@@ -1364,6 +1364,28 @@ fn unwrap_after_current_registry_zero_keeps_the_registrar_resource_clear() -> an
 }
 
 #[test]
+fn current_registry_zero_to_nonzero_grants_without_revoking_the_zero_address() -> anyhow::Result<()>
+{
+    let (_, _, node) = fixture();
+    let history = vec![
+        current_new_owner(OWNER_2, 1)?,
+        registration(2, 9_999)?,
+        resolver_selection(REGISTRY, node, RESOLVER_A, 3)?,
+        resolver_selection(REGISTRY, node, ZERO_ADDRESS, 4)?,
+        resolver_selection(REGISTRY, node, RESOLVER_B, 5)?,
+    ];
+    let (_, live) = assert_four_way_and_restore_parity(&history, 4)?;
+    let resolver_permissions = live
+        .normalized_events
+        .iter()
+        .filter(|event| event.block_number == Some(5) && event.event_kind == "PermissionChanged")
+        .map(|event| event.after_state["scope"]["resolver_address"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(resolver_permissions, vec![Some(RESOLVER_B)]);
+    Ok(())
+}
+
+#[test]
 fn registrar_transfer_preserves_explicit_ownerless_registry_state() -> anyhow::Result<()> {
     let (manifests, admissions, node) = fixture();
     let history = vec![

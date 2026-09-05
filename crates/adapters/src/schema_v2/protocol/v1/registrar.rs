@@ -7,7 +7,9 @@ use super::super::{
     EventDraft, Interpreted, NameDraft, ResourceDraft, ShadowNameDraft, ensure_declared,
     permissions::{v1_grant_states, v1_revoke_states},
 };
-use super::authority_transition::{append_authority_transition, append_surface_materialization};
+use super::authority_transition::{
+    append_authority_transition, append_surface_materialization, authority_kind,
+};
 use super::support::{events_linked, single_event};
 use crate::evm_abi::{address_hex, decode_event_log, u256_word_hex};
 use crate::schema_v2::{
@@ -204,17 +206,13 @@ fn transfer(
         resource_id: linked.resource_id,
         token_lineage_id: linked.token_lineage_id,
     });
-    let registrar_remains_current = active_after
-        .as_ref()
-        .is_some_and(|authority| authority.resource_id == linked.resource_id);
-    let permission_resolver = registrar_remains_current
-        .then(|| state.v1_resolver(&selected.source.namespace, &raw_namehash))
-        .flatten();
     append_transfer_permissions(
         &mut output,
         &from,
         &linked,
-        permission_resolver,
+        previous_active.as_ref(),
+        active_after.as_ref(),
+        state.v1_resolver(&selected.source.namespace, &raw_namehash),
         &raw.chain_id,
     );
     let linked_resolver = state.v1_resolver_for_activation(
