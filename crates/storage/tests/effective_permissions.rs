@@ -114,6 +114,20 @@ async fn operator_count(pool: &PgPool, resource: Uuid) -> Result<usize> {
     .count())
 }
 
+async fn namespaced_count(pool: &PgPool, resource: Uuid) -> Result<usize> {
+    Ok(load_effective_permissions_account_resource_page(
+        pool,
+        Some(SUBJECT),
+        Some(resource),
+        Some("ens"),
+        None,
+        10,
+    )
+    .await?
+    .rows
+    .len())
+}
+
 #[tokio::test]
 async fn effective_permissions_require_matching_chain_contract_and_owner() -> Result<()> {
     for column in ["registry_owner", "registry_contract"] {
@@ -183,37 +197,12 @@ async fn effective_permissions_fail_closed_for_orphaned_account_and_binding_line
 #[tokio::test]
 async fn effective_permissions_namespace_filter_rejects_orphaned_identity_lineage() -> Result<()> {
     let (db, resource) = fixture().await?;
-    assert_eq!(
-        load_effective_permissions_account_resource_page(
-            db.pool(),
-            Some(SUBJECT),
-            Some(resource),
-            Some("ens"),
-            None,
-            10,
-        )
-        .await?
-        .rows
-        .len(),
-        1
-    );
+    assert_eq!(namespaced_count(db.pool(), resource).await?, 1);
     sqlx::query("INSERT INTO bigname_phase.chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,3,now(),'orphaned')")
         .bind(CHAIN).bind(ORPHAN_HASH).execute(db.pool()).await?;
     sqlx::query("WITH surface AS (UPDATE bigname_phase.name_surfaces SET block_hash=$1,block_number=3 WHERE logical_name_id='ens:fixture') UPDATE bigname_phase.surface_bindings SET block_hash=$1,block_number=3 WHERE logical_name_id='ens:fixture'")
         .bind(ORPHAN_HASH).execute(db.pool()).await?;
-    assert!(
-        load_effective_permissions_account_resource_page(
-            db.pool(),
-            Some(SUBJECT),
-            Some(resource),
-            Some("ens"),
-            None,
-            10,
-        )
-        .await?
-        .rows
-        .is_empty()
-    );
+    assert_eq!(namespaced_count(db.pool(), resource).await?, 0);
     db.cleanup().await
 }
 

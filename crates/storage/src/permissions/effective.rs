@@ -97,9 +97,9 @@ fn push_namespace_filter<'a>(
     namespace: Option<&'a str>,
 ) {
     if let Some(namespace) = namespace {
-        builder.push(" AND EXISTS (SELECT 1 FROM bigname_phase.surface_bindings sb JOIN bigname_phase.name_surfaces ns ON ns.logical_name_id=sb.logical_name_id WHERE sb.resource_id=")
+        builder.push(" AND EXISTS (SELECT 1 FROM bigname_phase.surface_bindings sb JOIN bigname_phase.name_surfaces ns ON ns.logical_name_id=sb.logical_name_id JOIN bigname_phase.chain_lineage ns_binding_lineage ON ns_binding_lineage.chain_id=sb.chain_id AND ns_binding_lineage.block_hash=sb.block_hash JOIN bigname_phase.chain_lineage ns_surface_lineage ON ns_surface_lineage.chain_id=ns.chain_id AND ns_surface_lineage.block_hash=ns.block_hash WHERE sb.resource_id=")
             .push(resource).push(" AND ns.namespace=").push_bind(namespace)
-            .push(" AND sb.canonicality_state IN ('canonical','safe','finalized') AND ns.canonicality_state IN ('canonical','safe','finalized'))");
+            .push(" AND sb.canonicality_state IN ('canonical','safe','finalized') AND ns.canonicality_state IN ('canonical','safe','finalized') AND ns_binding_lineage.canonicality_state IN ('canonical','safe','finalized') AND ns_surface_lineage.canonicality_state IN ('canonical','safe','finalized'))");
     }
 }
 
