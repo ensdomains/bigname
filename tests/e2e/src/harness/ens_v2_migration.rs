@@ -10,6 +10,10 @@ use super::ens_v1::{self, EnsV1Deployment};
 use super::ens_v2::{self, EnsV2Deployment};
 use super::rpc::{RpcClient, TxReceipt};
 
+// The archived controller requires ROLE_REGISTER_RESERVED, whose deployed
+// generation defines it as 1 << 4.
+// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/UnlockedMigrationController.sol:L18-L22 @ ens_v2_sepolia_20260629@ccaeb58)
+// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/libraries/RegistryRolesLib.sol:L13-L16 @ ens_v2_sepolia_20260629@ccaeb58)
 const ROLE_REGISTER_RESERVED_BIT: usize = 4;
 
 mod calls {
