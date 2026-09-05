@@ -385,6 +385,11 @@ fn domain_entity_filter_to_storage(
         ),
         ..Default::default()
     };
+    macro_rules! owner_value {
+        ($member:ident) => {
+            required_filter_value(filter.$member, stringify!($member), std::convert::identity)?
+        };
+    }
     let generated_filter = GeneratedDomainFilter {
         id: IdFilter {
             eq: nullable_filter_value(filter.id, |id| id.0),
@@ -480,10 +485,10 @@ fn domain_entity_filter_to_storage(
                 value.to_lowercase()
             })?
             .map(Some),
-            gt: required_filter_value(filter.owner_gt, "owner_gt", std::convert::identity)?,
-            gte: required_filter_value(filter.owner_gte, "owner_gte", std::convert::identity)?,
-            lt: required_filter_value(filter.owner_lt, "owner_lt", std::convert::identity)?,
-            lte: required_filter_value(filter.owner_lte, "owner_lte", std::convert::identity)?,
+            gt: owner_value!(owner_gt),
+            gte: owner_value!(owner_gte),
+            lt: owner_value!(owner_lt),
+            lte: owner_value!(owner_lte),
             in_values: owner_in.map(|values| {
                 values
                     .into_iter()
@@ -496,66 +501,18 @@ fn domain_entity_filter_to_storage(
                     .map(|value| value.to_lowercase())
                     .collect()
             })?,
-            contains: required_filter_value(
-                filter.owner_contains,
-                "owner_contains",
-                std::convert::identity,
-            )?,
-            contains_nocase: required_filter_value(
-                filter.owner_contains_nocase,
-                "owner_contains_nocase",
-                std::convert::identity,
-            )?,
-            not_contains: required_filter_value(
-                filter.owner_not_contains,
-                "owner_not_contains",
-                std::convert::identity,
-            )?,
-            not_contains_nocase: required_filter_value(
-                filter.owner_not_contains_nocase,
-                "owner_not_contains_nocase",
-                std::convert::identity,
-            )?,
-            starts_with: required_filter_value(
-                filter.owner_starts_with,
-                "owner_starts_with",
-                std::convert::identity,
-            )?,
-            starts_with_nocase: required_filter_value(
-                filter.owner_starts_with_nocase,
-                "owner_starts_with_nocase",
-                std::convert::identity,
-            )?,
-            not_starts_with: required_filter_value(
-                filter.owner_not_starts_with,
-                "owner_not_starts_with",
-                std::convert::identity,
-            )?,
-            not_starts_with_nocase: required_filter_value(
-                filter.owner_not_starts_with_nocase,
-                "owner_not_starts_with_nocase",
-                std::convert::identity,
-            )?,
-            ends_with: required_filter_value(
-                filter.owner_ends_with,
-                "owner_ends_with",
-                std::convert::identity,
-            )?,
-            ends_with_nocase: required_filter_value(
-                filter.owner_ends_with_nocase,
-                "owner_ends_with_nocase",
-                std::convert::identity,
-            )?,
-            not_ends_with: required_filter_value(
-                filter.owner_not_ends_with,
-                "owner_not_ends_with",
-                std::convert::identity,
-            )?,
-            not_ends_with_nocase: required_filter_value(
-                filter.owner_not_ends_with_nocase,
-                "owner_not_ends_with_nocase",
-                std::convert::identity,
-            )?,
+            contains: owner_value!(owner_contains),
+            contains_nocase: owner_value!(owner_contains_nocase),
+            not_contains: owner_value!(owner_not_contains),
+            not_contains_nocase: owner_value!(owner_not_contains_nocase),
+            starts_with: owner_value!(owner_starts_with),
+            starts_with_nocase: owner_value!(owner_starts_with_nocase),
+            not_starts_with: owner_value!(owner_not_starts_with),
+            not_starts_with_nocase: owner_value!(owner_not_starts_with_nocase),
+            ends_with: owner_value!(owner_ends_with),
+            ends_with_nocase: owner_value!(owner_ends_with_nocase),
+            not_ends_with: owner_value!(owner_not_ends_with),
+            not_ends_with_nocase: owner_value!(owner_not_ends_with_nocase),
         },
     };
     Ok((storage_filter, generated_filter))

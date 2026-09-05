@@ -252,6 +252,26 @@ to the applicable entries below.
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T5` owns the four residual classes.
 > **Why**: the effective-controller and served-owner projections intentionally answer different authority questions in
 > those classes, so the partial filter contract names the boundary instead of claiming universal field/filter equality.
+> **Planner evidence**: `pad_resolver_planner_statistics` inserts 5,000 `name_surfaces` and `name_current` rows; the owner
+> plan fixture adds matching surface bindings and effective-controller rows, distributes those rows across populations of
+> 4,796, 200, and six including the two base-fixture owners, and analyzes all seven participating tables. The following
+> values are from PostgreSQL 16 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` with ID ascending, limit 200, 5,004 eligible
+> Domain rows, no JIT, and zero temporary read/write blocks. `outer` is the ordered outer-row count, `removed` is its
+> filter-removal count, and `anti blocks` is the cumulative shared-buffer count of the anti subtree.
+>
+> | operator | total cost | outer | removed | max loops | relation index | anti blocks | full blocks |
+> | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: |
+> | `owner` | 516.92 | 200 | 0 | 200 | `address_names_current_pkey` | — | 6,036 |
+> | `owner_in` | 516.67 | 200 | 0 | 200 | `address_names_current_pkey` | — | 5,637 |
+> | `owner_gt` | 12,481.74 | 204 | 0 | 204 | `address_names_current_name_idx` | — | 6,068 |
+> | `owner_contains` | 12,481.74 | 204 | 0 | 204 | `address_names_current_name_idx` | — | 5,463 |
+> | `owner_contains_nocase` | 12,481.74 | 204 | 0 | 204 | `address_names_current_name_idx` | — | 5,463 |
+> | `owner_not` | 18,896.33 | 200 | 0 | 200 | `address_names_current_name_idx` | 4,000 | 7,022 |
+> | `owner_not_in` | 18,896.07 | 200 | 0 | 200 | `address_names_current_name_idx` | 4,000 | 6,386 |
+> | `owner_not_contains` | 18,896.33 | 200 | 0 | 200 | `address_names_current_name_idx` | 4,000 | 6,383 |
+> | `owner_not_contains_nocase` | 18,896.33 | 200 | 0 | 200 | `address_names_current_name_idx` | 4,000 | 6,383 |
+> | `owner_not_starts_with` | 18,896.33 | 200 | 0 | 200 | `address_names_current_name_idx` | 4,000 | 6,383 |
+> | `owner_not_ends_with` | 18,896.33 | 200 | 0 | 200 | `address_names_current_name_idx` | 4,000 | 6,383 |
 > **Since**: `2026-09-02`
 
 > **Generated Domain patterns preserve SQL wildcards** — generated contains patterns are left unchanged when they start or
