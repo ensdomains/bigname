@@ -67,7 +67,7 @@ fn noncanonical_id_ranges_pin_c_collation() {
 async fn graphql_generated_domain_owner_positive_plans_are_relation_bounded_or_linear() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
-    pad_generated_domain_plans(&database).await?;
+    pad_generated_owner_plans(&database).await?;
     let chains = ["ethereum-mainnet".to_owned()];
     for (member, value) in [
         ("owner", "0x0000000000000000000000000000000000000672"),
@@ -112,7 +112,7 @@ async fn graphql_generated_domain_owner_positive_plans_are_relation_bounded_or_l
 async fn graphql_generated_domain_owner_negative_plans_are_page_bounded_anti_joins() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
-    pad_generated_domain_plans(&database).await?;
+    pad_generated_owner_plans(&database).await?;
     let chains = ["ethereum-mainnet".to_owned()];
     for (member, value) in [
         ("owner_not", GRAPHQL_OWNER), ("owner_not_in", GRAPHQL_OWNER),
@@ -182,6 +182,14 @@ async fn pad_generated_domain_plans(database: &TestDatabase) -> Result<()> {
     .execute(&database.lookup_pool)
     .await?;
     assert_eq!(changed.rows_affected(), 5_000);
+    sqlx::query("ANALYZE bigname_phase.name_current")
+        .execute(&database.lookup_pool)
+        .await?;
+    Ok(())
+}
+
+async fn pad_generated_owner_plans(database: &TestDatabase) -> Result<()> {
+    pad_generated_domain_plans(database).await?;
     let bindings = sqlx::query(
         r#"WITH source AS (
               SELECT binding.* FROM bigname_phase.surface_bindings binding
