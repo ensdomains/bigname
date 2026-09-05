@@ -1,3 +1,4 @@
+use async_graphql::{MaybeUndefined, Result};
 use sqlx::{Postgres, QueryBuilder};
 
 use bigname_storage::{
@@ -6,12 +7,78 @@ use bigname_storage::{
 };
 
 use super::generated_filter_ops::{GeneratedDomainFilter, StringFilter};
+use super::inputs::DomainEntityFilter;
 
 const TARGETS: &str = r#"JSONB_AGG(
     owner_witness.chain_positions || JSONB_BUILD_OBJECT(
         'chain_id', owner_witness.provenance ->> 'chain_id'
     ) ORDER BY owner_witness.address, owner_witness.relation
 )"#;
+
+pub(crate) fn domain_effective_owner_filter(filter: &DomainEntityFilter) -> Result<StringFilter> {
+    macro_rules! value {
+        ($member:ident) => {
+            required_owner_value(
+                filter.$member.clone(),
+                stringify!($member),
+                std::convert::identity,
+            )?
+        };
+    }
+    Ok(StringFilter {
+        eq: filter.owner.clone().map(|value| Some(value.to_lowercase())),
+        not: required_owner_value(filter.owner_not.clone(), "owner_not", |value| {
+            value.to_lowercase()
+        })?
+        .map(Some),
+        gt: value!(owner_gt),
+        gte: value!(owner_gte),
+        lt: value!(owner_lt),
+        lte: value!(owner_lte),
+        in_values: filter.owner_in.clone().map(|values| {
+            values
+                .into_iter()
+                .map(|value| value.to_lowercase())
+                .collect()
+        }),
+        not_in_values: required_owner_value(
+            filter.owner_not_in.clone(),
+            "owner_not_in",
+            |values| {
+                values
+                    .into_iter()
+                    .map(|value| value.to_lowercase())
+                    .collect()
+            },
+        )?,
+        contains: value!(owner_contains),
+        contains_nocase: value!(owner_contains_nocase),
+        not_contains: value!(owner_not_contains),
+        not_contains_nocase: value!(owner_not_contains_nocase),
+        starts_with: value!(owner_starts_with),
+        starts_with_nocase: value!(owner_starts_with_nocase),
+        not_starts_with: value!(owner_not_starts_with),
+        not_starts_with_nocase: value!(owner_not_starts_with_nocase),
+        ends_with: value!(owner_ends_with),
+        ends_with_nocase: value!(owner_ends_with_nocase),
+        not_ends_with: value!(owner_not_ends_with),
+        not_ends_with_nocase: value!(owner_not_ends_with_nocase),
+    })
+}
+
+fn required_owner_value<T, U>(
+    value: MaybeUndefined<T>,
+    member: &str,
+    map: impl FnOnce(T) -> U,
+) -> Result<Option<U>> {
+    match value {
+        MaybeUndefined::Undefined => Ok(None),
+        MaybeUndefined::Null => Err(async_graphql::Error::new(format!(
+            "Domain_filter.{member} must not be null"
+        ))),
+        MaybeUndefined::Value(value) => Ok(Some(map(value))),
+    }
+}
 
 pub(crate) fn owner_filter_is_active(filter: &StringFilter) -> bool {
     filter != &StringFilter::default()

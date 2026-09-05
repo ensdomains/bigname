@@ -9,6 +9,7 @@ use crate::state::AppState;
 use super::account_queries::{
     account_entity_filter_to_storage, load_phase_graphql_account_page_offset, resolve_account,
 };
+use super::effective_owner_filter::domain_effective_owner_filter;
 use super::enums::{
     AccountOrderBy, DomainOrderBy, OrderDirection, ResolverOrderBy, SubgraphErrorPolicy,
     generated_order,
@@ -374,6 +375,7 @@ fn domain_entity_filter_to_storage(
     filter: Option<DomainEntityFilter>,
 ) -> Result<(NameCurrentListFilter, GeneratedDomainFilter)> {
     let filter = filter.unwrap_or_default();
+    let generated_owner = domain_effective_owner_filter(&filter)?;
     let owner = filter.owner.clone();
     let owner_in = filter.owner_in.clone();
     let storage_filter = NameCurrentListFilter {
@@ -385,11 +387,6 @@ fn domain_entity_filter_to_storage(
         ),
         ..Default::default()
     };
-    macro_rules! owner_value {
-        ($member:ident) => {
-            required_filter_value(filter.$member, stringify!($member), std::convert::identity)?
-        };
-    }
     let generated_filter = GeneratedDomainFilter {
         id: IdFilter {
             eq: nullable_filter_value(filter.id, |id| id.0),
@@ -479,41 +476,7 @@ fn domain_entity_filter_to_storage(
                 std::convert::identity,
             )?,
         },
-        owner: StringFilter {
-            eq: owner.map(|value| Some(value.to_lowercase())),
-            not: required_filter_value(filter.owner_not, "owner_not", |value| {
-                value.to_lowercase()
-            })?
-            .map(Some),
-            gt: owner_value!(owner_gt),
-            gte: owner_value!(owner_gte),
-            lt: owner_value!(owner_lt),
-            lte: owner_value!(owner_lte),
-            in_values: owner_in.map(|values| {
-                values
-                    .into_iter()
-                    .map(|value| value.to_lowercase())
-                    .collect()
-            }),
-            not_in_values: required_filter_value(filter.owner_not_in, "owner_not_in", |values| {
-                values
-                    .into_iter()
-                    .map(|value| value.to_lowercase())
-                    .collect()
-            })?,
-            contains: owner_value!(owner_contains),
-            contains_nocase: owner_value!(owner_contains_nocase),
-            not_contains: owner_value!(owner_not_contains),
-            not_contains_nocase: owner_value!(owner_not_contains_nocase),
-            starts_with: owner_value!(owner_starts_with),
-            starts_with_nocase: owner_value!(owner_starts_with_nocase),
-            not_starts_with: owner_value!(owner_not_starts_with),
-            not_starts_with_nocase: owner_value!(owner_not_starts_with_nocase),
-            ends_with: owner_value!(owner_ends_with),
-            ends_with_nocase: owner_value!(owner_ends_with_nocase),
-            not_ends_with: owner_value!(owner_not_ends_with),
-            not_ends_with_nocase: owner_value!(owner_not_ends_with_nocase),
-        },
+        owner: generated_owner,
     };
     Ok((storage_filter, generated_filter))
 }
