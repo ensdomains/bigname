@@ -911,6 +911,14 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   supplied, and `address` then restricts the permission subject. An explicit or
   name-implied `namespace` filters registrations before pagination; an
   address-only request without `namespace` continues to span all namespaces.
+  An explicit namespace must be public; an unknown value returns `404 not_found`
+  before cursor decoding.
+  A resource belongs to a namespace when it has a readable name-surface binding
+  to that namespace, even if the binding has a non-null `active_to`. Both the
+  surface and binding, and both chain-lineage anchors, must be canonical, safe,
+  or finalized. A resource known only from observed registry state, or with no
+  name-surface binding, belongs to no namespace and appears only in an unscoped
+  address read.
   Query `include=lineage`, `cursor`,
   `page_size`, and optional `finality=latest`. `at` and historical `finality`
   values are rejected by the shared latest-state collection rule.
@@ -1005,16 +1013,19 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   current state. Unsupported filter combinations return `422 unsupported`;
   pairing `name` with a `registration_id` that is not that name's selected
   current registration is not one of them. It is a supported query that selects
-  nothing, so it returns `200` with empty `data` and the resource-bound partial
-  reason.
+  nothing, so it returns `200` with empty `data`; its reason is the explicitly
+  requested registration's support classification under the resource-bound
+  rule.
   A supplied `name` that is missing or unrecognized, whose current name is
   marked unsupported, or that resolves to a current name not bound to a
   registration resource cannot select a supported current registration. Its
   request-relative empty result returns `meta.completeness=partial` with
   `unsupported_reason=permission_support_unknown`; it does not prove that the
   name has no permission rows. A resolved current name paired with an explicitly
-  different `registration_id` is a supported empty intersection, but its empty
-  page still carries the resource-bound partial reason.
+  different `registration_id` is a supported empty intersection. Its empty page
+  uses that explicit registration's resource-bound support classification,
+  including the wrapper-inclusive reason or `permission_support_unknown` when
+  applicable.
   The route reads current permission rows and summaries without claiming a
   request-wide immutable projection generation; current-state generation changes
   do not produce `409 stale`. When `name` or `registration_id` binds the read to a

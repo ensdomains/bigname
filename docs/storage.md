@@ -1081,6 +1081,12 @@ retained raw facts through the [`standard_approval`
 derivation](glossary.md#standard-approval-derivation); Project then rebuilds both state legs without a provider
 refetch. Storage serving combines those two state legs into effective
 registry-operator permission rows without persisting per-resource fan-out.
+For namespace-scoped reads, a resource is a member when a name surface in that
+namespace has a readable binding to the resource, including a closed binding
+with `active_to` set. The surface and binding rows and both of their
+`chain_lineage` anchors must be canonical, safe, or finalized. A resource known
+only from observed registry state, or without a name-surface binding, has no
+namespace membership and is visible only to an unscoped address read.
 
 For ENSv2, a latest state-derived `RegistryPathExpired` release removes that resource's effective
 permission rows without removing its partial-coverage summary. A later

@@ -163,8 +163,10 @@ resource returns an empty result relative to that request with `meta.completenes
 that the API could not select a supported current registration; it does not
 establish that the name has no permission rows. A supplied current name paired
 with an explicitly different `registration_id` is a supported empty
-intersection, but that zero-row result still uses the resource-bound partial
-reason and does not claim complete permission coverage.
+intersection. That zero-row result uses the explicitly requested registration's
+support classification under the resource-bound rule—including the
+wrapper-inclusive reason or `permission_support_unknown` when applicable—and
+does not claim complete permission coverage.
 
 An address-only permissions read always uses the account-wide partial reason,
 including when it returns zero rows or its current page contains no wrapper

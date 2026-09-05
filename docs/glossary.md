@@ -1387,8 +1387,15 @@ read time through that resource's current
 ## Grant relation
 
 the optional public classification of how a permission subject relates to its
-authority. `operator` identifies the registry-wide `ApprovalForAll` relation.
-Direct resource permission rows have no classified relation and omit the field.
+authority. `operator` identifies the owner-scoped, registry-wide—not
+per-name—`ApprovalForAll` relation. Direct resource permission rows have no
+classified relation and omit the field. (upstream:
+.refs/ens_v1/contracts/registry/ENS.sol:L18-L21 @ ens_v1@91c966f) (upstream:
+.refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L117 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L159-L167 @
+ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L150-L157 @
+basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L202-L207 @
+basenames@1809bbc)
 
 ## Registry-owner binding
 

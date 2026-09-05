@@ -434,7 +434,7 @@ the emitter-derived registry contract address because one admitted address on
 one chain identifies one contract instance across manifest epochs; the account
 row retains `authority_contract_instance_id` as the corresponding admitted
 instance evidence. A binding move to a different registry address therefore
-isolates generations and makes the old approval inapplicable. A retained
+isolates registry-contract generations and makes the old approval inapplicable. A retained
 revocation (`approved=false`), a cleared binding, or orphaned account or binding
 evidence is served as absence.
 

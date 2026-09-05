@@ -1334,7 +1334,7 @@ Returns surfaces, not backing resources. Each item carries `logical_name_id`, su
 
 Additive expansion, not a separate route. Adds `role_summary: [{address, grants: [{grant_relation?, grant_scope, powers}]}]` and `record_count` for the current registration. Address-name membership, supported filters, grouping, default sort, and cursor stay unchanged; role-summary completeness remains partial.
 
-`subname_count` reuses declared-direct-children semantics. `record_count` is the count of distinct stable declared record selectors at the current version boundary.
+`record_count` is the count of distinct stable declared record selectors at the current version boundary.
 
 ### Name → children
 
