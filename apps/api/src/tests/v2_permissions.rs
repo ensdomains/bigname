@@ -17,6 +17,17 @@ async fn v2_get_permissions_requires_at_least_one_filter() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_permissions_rejects_non_public_namespace_before_cursor_decoding() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let path = "/v2/permissions?address=0x0000000000000000000000000000000000000eee&namespace=bogus";
+    let response = v2_permissions_response_for_database(&database, path).await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let response = v2_permissions_response_for_database(&database, &format!("{path}&cursor=bogus")).await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_permissions_preserves_stored_ensip15_normalized_name_bytes() -> Result<()> {
     const NORMALIZED_NAME: &str = "ᏣᎳᎩ.eth";
 
@@ -79,6 +90,16 @@ async fn v2_get_permissions_empties_a_superseded_name_and_registration_pair() ->
     assert_eq!(paired["data"], json!([]));
     assert_eq!(paired["meta"]["completeness"], json!("partial"));
     assert_eq!(paired["meta"]["unsupported_reason"], json!(V2_ACCOUNT_PERMISSION_REASON));
+
+    upsert_phase_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(stale_resource_id, Some("registrar")),
+    ).await?;
+    let paired = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v2/permissions?name=perms.eth&registration_id={stale_resource_id}"),
+    ).await?;
+    assert_eq!(paired["meta"]["unsupported_reason"], json!(V2_RESOURCE_PERMISSION_REASON));
 
     // Anti-vacuity: the same superseded registration is still readable as a resource audit.
     let audited = v2_permissions_payload_for_database(

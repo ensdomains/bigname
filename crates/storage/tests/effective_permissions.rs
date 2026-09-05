@@ -366,6 +366,7 @@ async fn effective_permissions_summary_uses_the_anchored_effective_plan() -> Res
         &[
             "account_permission_state_current_active_subject_idx",
             "permissions_current_resource_registry_binding_idx",
+            "surface_bindings_resource_idx",
         ],
     )
     .await?;
@@ -377,7 +378,10 @@ async fn effective_permissions_resource_batch_uses_applicability_index() -> Resu
     let (db, resource) = fixture().await?;
     assert_plan(
         explain_effective_permissions_by_resource_ids(db.pool(), &[resource]).await?,
-        &["account_permission_state_current_applicability_idx"],
+        &[
+            "account_permission_state_current_applicability_idx",
+            "surface_bindings_resource_idx",
+        ],
     )
     .await?;
     db.cleanup().await
