@@ -609,9 +609,11 @@ BEGIN
         WHERE conrelid = 'primary_names_current'::regclass
           AND conname = 'primary_names_current_reverse_hydration_attempt_check'
           AND NOT convalidated
+          AND pg_get_expr(conbin, conrelid) =
+              '(((reverse_hydration_attempted_block_number IS NULL) AND (reverse_hydration_attempted_block_hash IS NULL) AND (reverse_hydration_attempt_ordinal IS NULL)) OR ((reverse_hydration_attempted_block_number IS NOT NULL) AND (reverse_hydration_attempted_block_number >= 0) AND (reverse_hydration_attempted_block_hash IS NOT NULL) AND (btrim(reverse_hydration_attempted_block_hash) <> ''''::text) AND (reverse_hydration_attempt_ordinal IS NOT NULL) AND (reverse_hydration_attempt_ordinal > 0)))'
     ) THEN
         RAISE EXCEPTION
-            'reverse_hydration_attempt_state_upgrade constraint is missing or already validated';
+            'reverse_hydration_attempt_state_upgrade constraint is missing, already validated, or has the wrong tuple predicate';
     END IF;
     IF col_description(
         'primary_names_current'::regclass,
