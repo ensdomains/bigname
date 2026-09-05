@@ -66,9 +66,8 @@ suite cannot satisfy CI.
    The rich-chain case also pins the #305 production history-loader fix: its
    canonical read excludes the losing event before redo and returns the winning
    event after redo through the chain-lineage join.
-6. Schema-v2 projections are queried directly. Route-shaped helper inputs are
-   retained only to keep each scenario's semantic assertions recognizable;
-   no network API server or legacy public-schema read occurs.
+6. Schema-v2 projections are usually queried directly; the two #682 scenarios start the
+   production API, while other helpers avoid legacy public-schema reads.
 7. A scenario readiness predicate is evaluated once after its synchronous
    phase-runner commands. A false result fails the scenario instead of being
    treated as an asynchronous retry condition.
