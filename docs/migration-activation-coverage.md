@@ -31,7 +31,8 @@ R-02, R-04, P-02, P-03, P-06, P-07, P-08, and P-11—is deferred by the same
 blocker named below. The 15 rows that remain marked `activated` carry wrapper- or
 child-path boundaries without that registrar-token cleanup sequence. No row requires
 new schema, manifest, event, selector, or public vocabulary. Each scenario links its exact
-immutable catalog result rather than inferring it from another scenario. The
+immutable catalog result. A `blocked` disposition infers the production failure from that exact
+log shape plus current writer behavior; it is not an exact-prestate conformance claim. The
 final column separately names the exact checked-in test when the repository
 imports that scenario shape or pins the production rule it exercises; `exact
 catalog result only` states plainly that the external artifact is not itself a
