@@ -84,6 +84,11 @@ async fn graphql_generated_account_filters_match_served_id() -> Result<()> {
     assert!(generated_account_ids(&database, json!({"id": GRAPHQL_OWNER, "id_in": [GRAPHQL_REGISTRANT]})).await?.is_empty());
     assert!(generated_account_ids(&database, json!({"id_in": []})).await?.is_empty());
     let point = post_graphql(database.app_state(), "query Account($id: ID!) { account(id: $id) { id } }", json!({"id": mixed})).await?;
+    assert!(point["data"]["account"].is_null());
+    let uppercase_prefix = GRAPHQL_OWNER.replacen("0x", "0X", 1);
+    let point = post_graphql(database.app_state(), "query Account($id: ID!) { account(id: $id) { id } }", json!({"id": uppercase_prefix})).await?;
+    assert!(point["data"]["account"].is_null());
+    let point = post_graphql(database.app_state(), "query Account($id: ID!) { account(id: $id) { id } }", json!({"id": GRAPHQL_OWNER})).await?;
     assert_eq!(point["data"]["account"]["id"], json!(GRAPHQL_OWNER));
     database.cleanup().await
 }
@@ -167,17 +172,25 @@ async fn graphql_generated_resolver_filters_match_served_values() -> Result<()> 
     let mixed_address = GRAPHQL_RESOLVER.to_ascii_uppercase().replacen("0X", "0x", 1);
     let mixed_domain = GRAPHQL_ALICE_NAMEHASH.to_ascii_uppercase().replacen("0X", "0x", 1);
     for filter in [
-        json!({"id": mixed_id}),
         json!({"address": mixed_address}),
         json!({"domain": mixed_domain}),
-        json!({"id": mixed_id, "address": mixed_address, "domain": mixed_domain}),
+        json!({"id": mixed_id.clone()}),
     ] {
         let rows = generated_resolver_rows(&database, filter).await?;
         assert!(rows.iter().any(|row| row["id"] == id));
     }
     assert!(generated_resolver_rows(&database, json!({"id": id, "domain": GRAPHQL_BOB_NAMEHASH})).await?.is_empty());
-    let point = post_graphql(database.app_state(), "query Resolver($id: ID!) { resolver(id: $id) { id address } }", json!({"id": mixed_id})).await?;
+    let uppercase_prefix = id.replacen("0x", "0X", 1);
+    assert!(generated_resolver_rows(&database, json!({"id": uppercase_prefix})).await?.is_empty());
+    for noncanonical in [mixed_id, uppercase_prefix] {
+        let point = post_graphql(database.app_state(), "query Resolver($id: ID!) { resolver(id: $id) { id address } }", json!({"id": noncanonical})).await?;
+        assert!(point["data"]["resolver"].is_null());
+    }
+    let point = post_graphql(database.app_state(), "query Resolver($id: ID!) { resolver(id: $id) { id address } }", json!({"id": id})).await?;
     assert_eq!(point["data"]["resolver"]["id"], json!(id));
+
+    let bad_bytes = post_graphql_allow_errors(database.app_state(), "query { resolvers(where: { address: \"0X000000000000000000000000000000000000000A\" }) { id } }", json!({})).await?;
+    assert!(bad_bytes["errors"][0]["message"].as_str().is_some_and(|message| message.contains("Bytes")), "{bad_bytes}");
     database.cleanup().await
 }
 

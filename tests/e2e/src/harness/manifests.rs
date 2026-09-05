@@ -101,6 +101,13 @@ const ENS_V2_SEPOLIA_FAMILIES: &[&str] = &[
     "ens_v2_resolver_l1",
 ];
 
+const ENS_V1_SEPOLIA_MIGRATION_FAMILIES: &[&str] = &[
+    "ens_v1_registry_l1",
+    "ens_v1_registrar_l1",
+    "ens_v1_resolver_l1",
+    "ens_v1_wrapper_l1",
+];
+
 struct FamilySpec {
     profile_root: &'static str,
     chain_combo: &'static str,
@@ -129,6 +136,7 @@ pub fn generate_local_profile(
         "manifests-e2e",
         repo_root,
         local_targets,
+        None,
         families,
     )
 }
@@ -150,6 +158,7 @@ pub fn generate_local_basenames_profile(
         "manifests-e2e",
         repo_root,
         local_targets,
+        None,
         families,
     )
 }
@@ -175,6 +184,7 @@ pub fn generate_local_mainnet_composed_profile(
         "manifests-e2e",
         repo_root,
         ens_targets,
+        None,
         FAMILIES.iter().map(|family| FamilySpec {
             profile_root: "mainnet",
             chain_combo: "ethereum",
@@ -187,6 +197,7 @@ pub fn generate_local_mainnet_composed_profile(
         "manifests-e2e",
         repo_root,
         basenames_targets,
+        None,
         BASE_NAMESPACES.iter().map(|family| FamilySpec {
             profile_root: "mainnet",
             chain_combo: "base",
@@ -200,6 +211,7 @@ pub fn generate_local_mainnet_composed_profile(
         "manifests-e2e",
         repo_root,
         &glue_targets,
+        None,
         MAINNET_GLUE_FAMILIES.iter().map(|family| FamilySpec {
             profile_root: "mainnet",
             chain_combo: "ethereum",
@@ -227,8 +239,53 @@ pub fn generate_local_sepolia_profile(
         "manifests-sepolia",
         repo_root,
         local_targets,
+        None,
         families,
     )
+}
+
+pub fn generate_local_sepolia_migration_profile(
+    scratch_dir: &Path,
+    repo_root: &Path,
+    ens_v1_targets: &HashMap<&str, (Address, u64)>,
+    ens_v2_targets: &HashMap<&str, (Address, u64)>,
+    migration_targets: &HashMap<&str, (Address, u64)>,
+    correlation_addresses: &HashMap<&str, Address>,
+) -> Result<LocalProfile> {
+    let family = |family| FamilySpec {
+        profile_root: "sepolia",
+        chain_combo: "ethereum",
+        namespace_group: "ens",
+        family,
+    };
+    let profile = generate_profile_from_families(
+        scratch_dir,
+        "manifests-sepolia",
+        repo_root,
+        ens_v1_targets,
+        None,
+        ENS_V1_SEPOLIA_MIGRATION_FAMILIES
+            .iter()
+            .copied()
+            .map(family),
+    )?;
+    generate_profile_from_families(
+        scratch_dir,
+        "manifests-sepolia",
+        repo_root,
+        ens_v2_targets,
+        None,
+        ENS_V2_SEPOLIA_FAMILIES.iter().copied().map(family),
+    )?;
+    generate_profile_from_families(
+        scratch_dir,
+        "manifests-sepolia",
+        repo_root,
+        migration_targets,
+        Some(correlation_addresses),
+        std::iter::once(family("ens_v2_migration_l1")),
+    )?;
+    Ok(profile)
 }
 
 fn generate_profile_from_families(
@@ -236,6 +293,7 @@ fn generate_profile_from_families(
     generated_root: &str,
     repo_root: &Path,
     local_targets: &HashMap<&str, (Address, u64)>,
+    correlation_addresses: Option<&HashMap<&str, Address>>,
     families: impl IntoIterator<Item = FamilySpec>,
 ) -> Result<LocalProfile> {
     let root = scratch_dir.join(generated_root);
@@ -266,6 +324,12 @@ fn generate_profile_from_families(
                 .with_context(|| format!("read shipped manifest {path:?}"))?;
             let mut doc: Value = raw.parse().with_context(|| format!("parse {path:?}"))?;
             patch_targets(&mut doc, local_targets)?;
+            if spec.family == "ens_v2_migration_l1" {
+                let correlations = correlation_addresses.context(
+                    "ens_v2_migration_l1 requires local correlation-address substitutions",
+                )?;
+                patch_correlation_addresses(&mut doc, correlations)?;
+            }
             std::fs::write(out_dir.join(file_name), toml::to_string(&doc)?)?;
             mirrored += 1;
         }
@@ -276,6 +340,29 @@ fn generate_profile_from_families(
         );
     }
     Ok(LocalProfile { root })
+}
+
+fn patch_correlation_addresses(
+    doc: &mut Value,
+    substitutions: &HashMap<&str, Address>,
+) -> Result<()> {
+    for required in ["ens_v1_name_wrapper", "ens_v1_base_registrar"] {
+        anyhow::ensure!(
+            substitutions.contains_key(required),
+            "missing required migration correlation address {required}"
+        );
+    }
+    let table = doc
+        .get_mut("correlation_addresses")
+        .context("migration manifest is missing [correlation_addresses]")?
+        .as_table_mut()
+        .context("migration manifest [correlation_addresses] is not a table")?;
+    for (key, address) in substitutions {
+        if table.contains_key(*key) {
+            table.insert((*key).to_owned(), Value::String(format!("{address:#x}")));
+        }
+    }
+    Ok(())
 }
 
 fn patch_targets(doc: &mut Value, local_targets: &HashMap<&str, (Address, u64)>) -> Result<()> {

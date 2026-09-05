@@ -11,9 +11,6 @@ use bigname_adapters::{
     },
 };
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
-use bigname_project::{
-    BatchRequest as ProjectBatchRequest, Engine as ProjectEngine, RunMode as ProjectRunMode,
-};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use sqlx::{PgPool, types::Uuid};
 
@@ -43,13 +40,16 @@ mod ens_registry {
     sol! {
         event Transfer(bytes32 indexed node, address owner);
         event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
+        event NewResolver(bytes32 indexed node, address resolver);
     }
 }
 
 mod base_registrar {
     use alloy_sol_types::sol;
 
-    sol! { event Transfer(address indexed from, address indexed to, uint256 indexed tokenId); }
+    sol! {
+        event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
+    }
 }
 
 sol! {
@@ -60,6 +60,9 @@ sol! {
     event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
     event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender);
     event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
+    event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
+    event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap);
+    event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender);
     event RegistryCreated();
     event ProxyDeployed(address indexed sender, address indexed proxyAddress, uint256 salt, address implementation);
 }
@@ -195,32 +198,85 @@ async fn checked_in_sepolia_manifests_materialize_exactly_one_transition_predece
     .await?;
     assert_eq!(successor_count, 1);
 
-    ProjectEngine::new(pool.clone())
-        .run_batch(ProjectBatchRequest {
+    // This reduced transition-writer fixture omits the ENSv1→ENSv2 migration transaction's
+    // user-to-controller registrar `Transfer`, registry `NewOwner` reclaim,
+    // registry `Transfer` to the Graveyard, conditional `NewResolver`, ENSv2
+    // `TransferSingle`, `EACRolesChanged`, and `ResolverUpdated` logs, while it
+    // injects `RegistryCreated` and `ProxyDeployed` logs absent from U-01. It
+    // proves exactly-one predecessor materialization, not a production
+    // publication path. The faithful path remains ignored below until #822 is
+    // resolved.
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "#822: activated ENSv1→ENSv2 migration boundary has 0 active ENSv1 predecessors matching its resource selector; expected exactly one"]
+async fn faithful_unwrapped_migration_reaches_predecessor_refusal() -> TestResult {
+    let database = database("interpret_faithful_unwrapped_predecessor").await?;
+    let pool = database.pool();
+    let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/sepolia");
+    sync_schema_v2_repository(pool, &load_repository(manifest_root)?).await?;
+
+    let label = b"activation-gate";
+    let labelhash = keccak256(label);
+    let namehash = eth_namehash(labelhash);
+    seed_lineage(pool).await?;
+    seed_predecessor_facts(pool, labelhash, namehash).await?;
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
             chain_id: CHAIN.to_owned(),
-            target_block: MIGRATION_BLOCK,
-            affected_from_block: SETUP_BLOCK,
-            affected_to_block: MIGRATION_BLOCK,
+            from_block: SETUP_BLOCK,
+            to_block: PREDECESSOR_BLOCK,
             resume_current: None,
-            mode: ProjectRunMode::Normal,
+            mode: RunMode::Normal,
         })
         .await?;
-    let projected: (Uuid, serde_json::Value) = sqlx::query_as(
-        "SELECT surface_binding_id, provenance FROM name_current WHERE logical_name_id = $1",
+
+    let logical_name_id = format!("ens:{namehash:#x}");
+    let predecessor_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM surface_bindings
+         WHERE chain_id = $1 AND logical_name_id = $2
+           AND authority_arm = 'ens_v1' AND active_to IS NULL",
     )
+    .bind(CHAIN)
     .bind(&logical_name_id)
     .fetch_one(pool)
     .await?;
-    assert_eq!(
-        projected.0,
-        output.migration_authority_transitions[0].successor_surface_binding_id
-    );
-    assert_eq!(
-        projected.1.pointer("/authority_selection/proof_kind"),
-        Some(&serde_json::json!("migration_authority_transition")),
-        "Project must publish the successor selected by the production ENSv1→ENSv2 migration authority proof"
-    );
+    assert_eq!(predecessor_count, 1);
 
+    // The ENSv1→ENSv2 migration block has the same ordered ten-event shape as
+    // U-01 logs 0-9, using the checked-in Sepolia deployment and fixture values.
+    // The pre-state is a wrapped-then-unwrapped name held by the eventual
+    // ENSv1→ENSv2 migration sender; U-01 instead uses a plain registration with resolver
+    // state, so plain-registration predecessor materialization remains a
+    // separate open question. This test flips to an activation and publication
+    // assertion when #822 lands.
+    stamp_interpreter_hash(pool, bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
+    seed_faithful_unwrapped_migration(pool, label, labelhash, namehash).await?;
+    let error = Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            from_block: MIGRATION_BLOCK,
+            to_block: MIGRATION_BLOCK,
+            resume_current: Some(Marker {
+                number: PREDECESSOR_BLOCK,
+                hash: block_hash(PREDECESSOR_BLOCK),
+            }),
+            mode: RunMode::Normal,
+        })
+        .await
+        .expect_err("the faithful unwrapped sequence currently reaches the known refusal");
+    let message = error.to_string();
+    assert!(
+        message.contains(
+            "has 0 active ENSv1 predecessors matching its resource selector; expected exactly one"
+        ),
+        "unexpected faithful-path failure: {message}"
+    );
     database.cleanup().await?;
     Ok(())
 }
@@ -306,7 +362,6 @@ async fn seed_lineage(pool: &PgPool) -> TestResult {
 
 async fn seed_predecessor_facts(pool: &PgPool, labelhash: B256, namehash: B256) -> TestResult {
     let owner = OWNER.parse::<Address>()?;
-    let controller = UNLOCKED_CONTROLLER.parse::<Address>()?;
     insert_transaction(pool, SETUP_BLOCK, ENS_REGISTRY).await?;
     insert_log(
         pool,
@@ -357,7 +412,7 @@ async fn seed_predecessor_facts(pool: &PgPool, labelhash: B256, namehash: B256) 
         ENS_REGISTRY,
         ens_registry::Transfer {
             node: namehash,
-            owner: controller,
+            owner,
         }
         .encode_log_data(),
     )
@@ -369,7 +424,7 @@ async fn seed_predecessor_facts(pool: &PgPool, labelhash: B256, namehash: B256) 
         NAME_WRAPPER,
         NameUnwrapped {
             node: namehash,
-            owner: controller,
+            owner,
         }
         .encode_log_data(),
     )
@@ -381,8 +436,164 @@ async fn seed_predecessor_facts(pool: &PgPool, labelhash: B256, namehash: B256) 
         BASE_REGISTRAR,
         base_registrar::Transfer {
             from: NAME_WRAPPER.parse()?,
+            to: owner,
+            tokenId: U256::from_be_bytes(labelhash.0),
+        }
+        .encode_log_data(),
+    )
+    .await
+}
+
+async fn seed_faithful_unwrapped_migration(
+    pool: &PgPool,
+    label: &[u8],
+    labelhash: B256,
+    namehash: B256,
+) -> TestResult {
+    let controller = UNLOCKED_CONTROLLER.parse::<Address>()?;
+    let graveyard = GRAVEYARD.parse::<Address>()?;
+    let owner = OWNER.parse::<Address>()?;
+    let mut versioned = labelhash.0;
+    versioned[28..].fill(0);
+    let token = U256::from_be_bytes(versioned);
+    insert_transaction(pool, MIGRATION_BLOCK, UNLOCKED_CONTROLLER).await?;
+
+    // U-01's validated block-236 transaction order follows the controller's
+    // reclaim, ENSv1 record cleanup, registrar cleanup, and ENSv2 injection.
+    // The registry calls and emitted events are fixed by the pinned contracts.
+    // (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L33-L41 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L82 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174-L186 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L182-L208 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L250-L274 @ ens_v2@a971bd64)
+    insert_log(
+        pool,
+        MIGRATION_BLOCK,
+        0,
+        BASE_REGISTRAR,
+        base_registrar::Transfer {
+            from: owner,
             to: controller,
             tokenId: U256::from_be_bytes(labelhash.0),
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_log(
+        pool,
+        MIGRATION_BLOCK,
+        1,
+        ENS_REGISTRY,
+        ens_registry::NewOwner {
+            node: eth_node(),
+            label: labelhash,
+            owner: controller,
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_log(
+        pool,
+        MIGRATION_BLOCK,
+        2,
+        ENS_REGISTRY,
+        ens_registry::Transfer {
+            node: namehash,
+            owner: graveyard,
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_log(
+        pool,
+        MIGRATION_BLOCK,
+        3,
+        ENS_REGISTRY,
+        ens_registry::NewResolver {
+            node: namehash,
+            resolver: Address::ZERO,
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_log(
+        pool,
+        MIGRATION_BLOCK,
+        4,
+        BASE_REGISTRAR,
+        base_registrar::Transfer {
+            from: controller,
+            to: graveyard,
+            tokenId: U256::from_be_bytes(labelhash.0),
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_log(
+        pool,
+        MIGRATION_BLOCK,
+        5,
+        ETH_REGISTRY,
+        LabelRegistered {
+            tokenId: token,
+            labelHash: labelhash,
+            label: std::str::from_utf8(label)?.to_owned(),
+            owner,
+            expiry: 1_900_000_000,
+            sender: controller,
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_log(
+        pool,
+        MIGRATION_BLOCK,
+        6,
+        ETH_REGISTRY,
+        TransferSingle {
+            operator: controller,
+            from: Address::ZERO,
+            to: owner,
+            id: token,
+            value: U256::from(1_u64),
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_log(
+        pool,
+        MIGRATION_BLOCK,
+        7,
+        ETH_REGISTRY,
+        TokenResource {
+            tokenId: token,
+            resource: token,
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_log(
+        pool,
+        MIGRATION_BLOCK,
+        8,
+        ETH_REGISTRY,
+        EACRolesChanged {
+            resource: token,
+            account: owner,
+            oldRoleBitmap: U256::ZERO,
+            newRoleBitmap: "97409655027181761882228017414928043062435250176".parse()?,
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_log(
+        pool,
+        MIGRATION_BLOCK,
+        9,
+        ETH_REGISTRY,
+        ResolverUpdated {
+            tokenId: token,
+            resolver: "0x922D6956C99E12DFeB3224DEA977D0939758A1Fe".parse()?,
+            sender: controller,
         }
         .encode_log_data(),
     )
@@ -511,8 +722,11 @@ async fn insert_log(
 }
 
 fn eth_namehash(labelhash: B256) -> B256 {
-    let parent = keccak256([B256::ZERO.as_slice(), keccak256(b"eth").as_slice()].concat());
-    keccak256([parent.as_slice(), labelhash.as_slice()].concat())
+    keccak256([eth_node().as_slice(), labelhash.as_slice()].concat())
+}
+
+fn eth_node() -> B256 {
+    keccak256([B256::ZERO.as_slice(), keccak256(b"eth").as_slice()].concat())
 }
 
 fn block_hash(number: i64) -> String {

@@ -206,9 +206,13 @@ Field ownership:
   binds the deployment-derived public namespace set and is rejected if that
   set changes. Relation filters that cannot be satisfied by one storage role
   (including exact `owner`, exact `registrant`, and partial relation sets such
-  as `owner,manager`) may return an as-filled page with `has_more=true` when the
-  API reaches its bounded post-filter scan cap; clients continue with the
-  returned `next_cursor`.
+  as `owner,manager`) may require multiple broad candidate batches to assemble
+  one response page. The API retains the selected [projection
+  generation](glossary.md#projection-generation) across those batches. Before
+  issuing a second or later broad batch, it revalidates that generation and
+  returns retryable `409 stale` if it changed. The API may return an as-filled
+  page with `has_more=true` when it reaches the bounded post-filter scan cap;
+  clients continue with the returned `next_cursor`.
 - Status semantics: per-result `status` uses the common result vocabulary.
   Name misses are in-band `not_found`; invalid names are in-band
   `invalid_name`. Name-only and exact-scope latest reads return retryable `409
@@ -223,8 +227,17 @@ Field ownership:
   exact-name consumer slice is activated, `conflicting_current_ens_authority`
   covers Mainnet overlap without a provable boundary.
   `independent_ens_deployments_overlap` covers
-  Sepolia overlap without a proven migration boundary; a proven Sepolia
-  boundary follows the same per-name authority rule. These values replace the
+  ordinary Sepolia overlap without a proven ENSv1→ENSv2 migration boundary; a proven
+  Sepolia boundary follows the same per-name authority rule. The exact
+  [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names—root,
+  `eth`, `reverse`, and `addr.reverse`—instead select ENSv2 when the ENSv2 arm is
+  current and ENSv1 evidence, current or historical, exists without proof.
+  When that shared-infrastructure rule selects ENSv2, it overrides the ordinary
+  no-proof handling below, so those names carry neither Mainnet's
+  `conflicting_current_ens_authority` nor Sepolia's
+  `independent_ens_deployments_overlap`.
+  Historical ENSv2 evidence alone does not qualify, and `.reverse` descendants
+  do not inherit the exception. These values replace the
   blanket mixed-corpus reason; intake from the planned [ENSv2 migration source
   family](glossary.md#source-family) alone does not add them. An address lookup
   returns `409 conflict` when the deployment has no ready public namespace.
@@ -236,14 +249,17 @@ Field ownership:
   families rather than presenting either binding as current.
 - Snapshot behavior: lookup selects the current schema-v2 phase head and reads
   `bigname_phase` name, inventory, and address-name projections published for
-  one completed projection-phase generation. Public reverse lookup with no
-  explicit namespace derives its snapshot scope from the namespaces served by
-  the deployment, excluding a namespace while its selected authority chain has
-  Interpret `redo_in_progress=true`, regardless of redo mode. A running
-  Interpret redo rewrites previously served identity history batch by batch, so
-  a page read during the redo can be incomplete even while Project still
-  reports its prior completed head. Because projection publication is
-  incremental, an unchanged
+  one completed projection-phase generation. For each reverse result, the
+  readable name fetched with the candidate row is the common source for the
+  emitted normalized and display names, label-derived fields, primary-name
+  ordering, the `is_primary` result, and the reverse cursor. Public reverse
+  lookup with no explicit namespace derives its snapshot scope from the
+  namespaces served by the deployment, excluding a namespace
+  while its selected authority chain has Interpret `redo_in_progress=true`,
+  regardless of redo mode. A running Interpret redo rewrites previously served
+  identity history batch by batch, so a page read during the redo can be
+  incomplete even while Project still reports its prior completed head. Because
+  projection publication is incremental, an unchanged
   row target may precede the selected head; it may not be ahead, and a
   same-height target must match the selected hash. Lookup revalidates both
   `chain_heads` and that generation after the read. Before that check, public
@@ -798,13 +814,38 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   to the revision-bound storage follow-up.
 - Status semantics: no direct subnames returns `200` with empty `data`.
   Missing parent names return `404 not_found`. Each child appears at most once,
-  from the relation its own selected authority names. An unmigrated protected
-  child can remain ENSv1-backed; a migrated or otherwise currently registered
-  ENSv2 child is ENSv2-backed. A child whose arms disagree with no authority
-  proof is omitted entirely, and on the Mainnet deployment profile an ENSv1
-  relation asserted after a proven ENSv2 child authority began blocks Project
+  from the relation its own selected authority names. ENSv1 relations that are
+  unreachable through the parent's ENSv1→ENSv2 migration path are omitted. A
+  parent on the `unwrapped`, `unlocked_wrapped`, or `emancipated_child` path
+  retains no ENSv1 children. A parent on the `locked_wrapped` or `locked_child`
+  path retains only a [migratable child](glossary.md#migratable-child): one
+  whose label has never had a reserved, registered, or renewed entry in that
+  parent's [migration `WrapperRegistry`](glossary.md#migration-registry-wrapperregistry), whose current
+  expiry-effective fuse word has `PARENT_CANNOT_CONTROL` set and `IS_DOT_ETH`
+  clear, and whose current ENSv1 registry owner is nonzero. The wrapper fuse
+  and expiry evidence remains effective across an ENSv1 binding rotation.
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276-L277 @ ens_v1@91c966f)
+  The child's own
+  [authority arm](glossary.md#authority-epoch) still chooses between the remaining ENSv1 and ENSv2 candidates.
+  An unknown activated migration-path value blocks the Project generation as a
+  data-integrity failure instead of silently hiding relations. A child whose
+  arms disagree with no authority proof is omitted entirely. On Mainnet, an
+  ENSv1 relation that survives parent reachability and
+  was asserted after a proven ENSv2 child authority began blocks Project
   publication for that generation,
-  so this route never chooses one by recency, emits two rows for one logical
+  though a positive ENSv2 registration in a locked parent's migration registry
+  is itself entry history and therefore filters the ENSv1 relation before this
+  assertion. The dual-current assertion remains a defensive generation check:
+  an unmigrated parent can expose this contradiction, but no ordinary on-chain
+  parent-and-child ENSv1→ENSv2 shape reaches it after parent reachability and
+  migration-registry history are applied.
+  Sepolia publishes the proof-selected child relation; extending the
+  publication guardrail there is deferred until the connected Interpret→Project
+  path is proven.
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L146-L164 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
+  This route therefore never chooses one
+  by recency, emits two rows for one logical
   child, or adds a row-local unsupported shape.
   A V1 child with getter-visible owner zero is omitted unless a current
   event-linked nonzero resolver independently establishes read reachability.
@@ -836,8 +877,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   by this product route. Slice 1 excludes every correlation-dependent normalized
   row with `consumer_visibility=candidate`, including a familiar event kind whose
   existence depends on correlation under an existing source family; diagnostics
-  may expose those rows. An existing-family event admitted independently of the
-  correlation remains byte-for-byte activated and product-visible. Its separate
+  may expose those rows. An [independently admitted
+  event](glossary.md#independently-admitted-event) remains byte-for-byte
+  activated and product-visible. Its separate
   candidate association is diagnostics-only and cannot suppress, duplicate, or
   reclassify that ordinary row. Only slice 2 consumer activation enables the
   per-source-log mapping specified for [`GET /v2/events`](#get-v2events) when an

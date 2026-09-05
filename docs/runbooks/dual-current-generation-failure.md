@@ -1,13 +1,15 @@
-# Mainnet dual-current projection-generation halt
+# ENS dual-current projection-generation halt
 
 This runbook is for the on-call operator responding when the
-[Project phase](../glossary.md#projection-generation)
-refuses to publish a Mainnet name because both its ENSv1 and ENSv2
-[authority arms](../glossary.md#authority-epoch) still have a
+[Project phase](../glossary.md#projection-generation) refuses to publish on
+Mainnet for either dual-current invariant. An exact-name halt means
+both ENSv1 and ENSv2 [authority arms](../glossary.md#authority-epoch) retain a
 current [surface binding](../glossary.md#surface-name-surface) after a proven,
-activated [ENSv1→ENSv2 migration boundary](../glossary.md#migration-boundary)
-has been reconciled through the end of the target block
-([`crates/project/src/integrity.rs:33-50`](../../crates/project/src/integrity.rs#L33-L50)).
+activated [ENSv1→ENSv2 migration boundary](../glossary.md#migration-boundary).
+A child halt means both arms retain a current parent-child relation after the
+child's ENSv2 authority began; its admitted proof can instead be a positive
+ENSv2 child registration
+([`crates/project/src/integrity.rs:309-327`](../../crates/project/src/integrity.rs#L309-L327)).
 This is a
 [projection generation failure](../glossary.md#projection-generation-failure):
 Project rolls back the whole attempted publication, and the phase runner then
@@ -16,9 +18,10 @@ attempts to write durable evidence. The assertion runs before publication
 and only the phase runner writes the post-rollback audit
 ([`apps/phase-runner/src/project_phase.rs:143-163`](../../apps/phase-runner/src/project_phase.rs#L143-L163)).
 
-Do not use this play for `dual_current_child_authority`, an ordinary database
-error, or a Verify failure. Do not start recovery until the evidence-capture
-steps below are complete.
+For `dual_current_child_authority`, use the stop-and-capture steps below, do not
+run the exact-name repair queries, and escalate to the Project owner. Do not use
+this play for an ordinary database error or a Verify failure. Do not start
+recovery until the evidence-capture steps below are complete.
 
 ## Failure signature
 
@@ -31,14 +34,24 @@ long-running supervisor. The audit signature is the same in all three cases.
 1. The phase-runner log has the terminal message
    `chain supervisor stopped after a terminal error`, with the affected
    `chain_id`, `error_kind=DataIntegrity`, and an `error` that begins with this
-   exact text, with the bracketed values filled in:
+   exact text for the reported failure kind, with the bracketed values filled
+   in. For an exact-name failure:
 
    ```text
    chain [chain-id] name [logical-name-id] holds current bindings on both authority arms after its activated ENSv1→ENSv2 migration boundary; projection generation for block [target-block] is not publishable
    ```
 
-   The assertion constructs that text and attaches the audit evidence at
-   [`crates/project/src/integrity.rs:219-234`](../../crates/project/src/integrity.rs#L219-L234).
+   For a child failure:
+
+   ```text
+   chain [chain-id] parent [parent-logical-name-id] and child [child-logical-name-id] state current relations on both authority arms after the child's ENSv2 authority began; projection generation for block [target-block] is not publishable
+   ```
+
+   The exact-name and child assertions construct those texts and attach their
+   audit evidence at
+   [`crates/project/src/integrity.rs:219-234`](../../crates/project/src/integrity.rs#L219-L234)
+   and
+   [`crates/project/src/integrity.rs:445-458`](../../crates/project/src/integrity.rs#L445-L458).
    A data-integrity error is non-retryable, so the chain supervisor stops rather
    than backing off and retrying
    ([`apps/phase-runner/src/runner.rs:193-232`](../../apps/phase-runner/src/runner.rs#L193-L232));
@@ -61,27 +74,31 @@ long-running supervisor. The audit signature is the same in all three cases.
    ([`apps/phase-runner/src/runner.rs:417-433`](../../apps/phase-runner/src/runner.rs#L417-L433),
    [`apps/phase-runner/src/error.rs:60-69`](../../apps/phase-runner/src/error.rs#L60-L69)).
 
-3. `bigname_phase.project_generation_failures` has
-   `failure_kind = 'dual_current_exact_name_authority'` for the same chain,
-   target block, and logical name. The row includes the two binding/resource
-   pairs and the activated boundary position
-   ([`crates/project/src/integrity.rs:159-194`](../../crates/project/src/integrity.rs#L159-L194)).
+3. `bigname_phase.project_generation_failures` has the matching
+   `failure_kind`: `dual_current_exact_name_authority` or
+   `dual_current_child_authority`, for the same chain, target block, and logical
+   name (the child logical name for a child failure). The exact-name row includes
+   the two binding/resource pairs and activated boundary position
+   ([`crates/project/src/integrity.rs:159-194`](../../crates/project/src/integrity.rs#L159-L194));
+   the child row includes the parent, authority proof, and both relation-event
+   witnesses
+   ([`crates/project/src/integrity.rs:345-419`](../../crates/project/src/integrity.rs#L345-L419)).
    It is append-only, and retrying the same conflict does not add a duplicate
    ([`apps/phase-runner/src/project_failure_audit.rs:6-24`](../../apps/phase-runner/src/project_failure_audit.rs#L6-L24)).
 
    Exception: if the audit insert itself fails, the terminal error and
-   `last_error` keep the exact primary text above and append
+   `last_error` keep the matching primary text above and append
    `; additionally failed to record projection generation failure: [database error]`.
    The Project phase still fails with `DataIntegrity`, but a new audit row is
-   not guaranteed. Capture the complete secondary database error, query for a
-   row without assuming one exists, file the incident, and hold the chain; do
-   not infer evidence or begin a redo. The
+   not guaranteed for either failure kind. Capture the complete secondary
+   database error, query for a row without assuming one exists, file the
+   incident, and hold the chain; do not infer evidence or begin a redo. The
    runner deliberately preserves the primary error when adding the audit-write
    failure
    ([`apps/phase-runner/src/project_phase.rs:143-163`](../../apps/phase-runner/src/project_phase.rs#L143-L163),
    [`apps/phase-runner/src/error.rs:60-69`](../../apps/phase-runner/src/error.rs#L60-L69)).
 
-4. `GET /v2/status` reports the Mainnet chain (`data.chains["1"]`) as
+4. `GET /v2/status` reports the affected Mainnet chain (`data.chains["1"]`) as
    `status: "stale"` and keeps `indexed_block` at the most recent successful
    Project publication. A failed Project phase maps directly to `stale`
    ([`apps/api/src/v2/status.rs:175-226`](../../apps/api/src/v2/status.rs#L175-L226)).
@@ -97,11 +114,17 @@ and API signatures in items 2–4. Determine item 1 from how the redo was invoke
 1. **CLI-driven redo:** an explicit Project redo and the automatic Project
    cascade inside `phase-runner redo` are one-shot work. The command exits
    nonzero with an aggregate error containing the affected chain,
-   `(DataIntegrity)`, and the exact primary assertion text above. For one
-   affected chain its shape is:
+   `(DataIntegrity)`, and the matching primary assertion text above. For one
+   affected chain, the exact-name shape is:
 
    ```text
    Error: 1 chain supervisor(s) stopped on terminal errors: [chain-id] (DataIntegrity): chain [chain-id] name [logical-name-id] holds current bindings on both authority arms after its activated ENSv1→ENSv2 migration boundary; projection generation for block [target-block] is not publishable
+   ```
+
+   The child shape is:
+
+   ```text
+   Error: 1 chain supervisor(s) stopped on terminal errors: [chain-id] (DataIntegrity): chain [chain-id] parent [parent-logical-name-id] and child [child-logical-name-id] state current relations on both authority arms after the child's ENSv2 authority began; projection generation for block [target-block] is not publishable
    ```
 
    `redo_chains` returns each terminal error in `SupervisorReport`; it does not
@@ -167,10 +190,10 @@ and API signatures in items 2–4. Determine item 1 from how the redo was invoke
    ([`apps/phase-runner/src/redo_state.rs:191-215`](../../apps/phase-runner/src/redo_state.rs#L191-L215),
    [`apps/phase-runner/src/runner.rs:371-389`](../../apps/phase-runner/src/runner.rs#L371-L389),
    [`apps/phase-runner/src/error.rs:60-69`](../../apps/phase-runner/src/error.rs#L60-L69)).
-3. The audit row still has the exact-name failure kind and complete audit key
-   described above. If its independent insert fails, use the same
-   evidence-preserving file-and-hold exception; the phase row alone does not
-   authorize recovery.
+3. The audit row still has the matching exact-name or child failure kind and
+   complete audit key described above. If its independent insert fails, use the
+   same evidence-preserving file-and-hold exception; the phase row alone does
+   not authorize recovery.
 4. With a fresh phase-runner heartbeat and no other stale condition,
    `GET /v2/status` reports the chain as `degraded`, because an active Project
    redo is an explicit degraded condition. After the one-shot runner exits and
@@ -181,16 +204,18 @@ and API signatures in items 2–4. Determine item 1 from how the redo was invoke
    ([`apps/api/src/v2/status.rs:175-225`](../../apps/api/src/v2/status.rs#L175-L225)).
    The status route still does not expose the underlying error or audit key.
 
-Distinguish this halt from other Project failures by the exact primary message,
-whether it is the whole `last_error` or the `last attempt failed:` suffix, and
-an audit row with the exact-name failure kind. Normal execution has a failed
-Project row; redo execution has the active running redo row described above.
+Distinguish this halt from other Project failures by the matching primary
+message above, whether it is the whole `last_error` or the
+`last attempt failed:` suffix, and an audit row with the corresponding
+exact-name or child failure kind. Normal execution has a failed Project row;
+redo execution has the active running redo row described above.
 Either documented secondary write failure stops at
 evidence-preserving escalation. Other Project errors carry no
 projection-generation evidence, so the runner does not call the audit writer for them
 ([`apps/phase-runner/src/project_phase.rs:143-156`](../../apps/phase-runner/src/project_phase.rs#L143-L156)).
-The same table also admits `dual_current_child_authority`; that different kind
-is outside this runbook and must be escalated to the Project owner
+The same table also admits `dual_current_child_authority`. That kind enters this
+runbook for evidence preservation only: skip the exact-name repair queries and
+escalate to the Project owner
 ([`schema-v2/baseline/12_project_generation_failures.sql:19-22`](../../schema-v2/baseline/12_project_generation_failures.sql#L19-L22)).
 
 ## Stop and capture evidence
@@ -209,13 +234,19 @@ restart, deploy, or code change, attach all of the following to the incident:
   redo ranges, redo modes, `last_error`, and timestamps, plus any active
   [manifest-authority marker](../glossary.md#manifest-authority-marker)
   invalidation token and its reviewed coverage decision;
-- every exact-name audit row for the affected chain and logical name, including
-  the complete JSON evidence and failure fingerprint;
-- the boundary event identity, ENSv1 and ENSv2 binding IDs, resource IDs, block
-  hashes, block/transaction/log positions, current lineage states, ENSv1→ENSv2
-  migration correlation IDs, and transaction hashes; and
-- the raw transaction, receipt, and logs for every captured transaction hash.
-  Preserve log order and emitting addresses.
+- every dual-current audit row for the affected chain and logical name (the
+  child logical name for a child failure), including the failure kind, complete
+  JSON evidence, and failure fingerprint;
+- for an exact-name failure, the boundary event identity, ENSv1 and ENSv2
+  binding IDs, resource IDs, block hashes, block/transaction/log positions,
+  current lineage states, ENSv1→ENSv2 migration correlation IDs, and
+  transaction hashes;
+- for a child failure, the parent logical name, authority-proof identity and
+  position, and both child-relation event identities, source families,
+  normalized event IDs, positions, and failure-time canonicality recorded in
+  the audit JSON; and
+- for an exact-name failure, the raw transaction, receipt, and logs for every
+  captured transaction hash. Preserve log order and emitting addresses.
 
 The audit schema makes the chain/target/hash/interpreter/failure/fingerprint key
 and the evidence payload durable
@@ -259,7 +290,9 @@ SELECT chain_id,
        last_error,
        COALESCE(
            last_error LIKE
-               '%holds current bindings on both authority arms after its activated ENSv1→ENSv2 migration boundary; projection generation for block % is not publishable%',
+               '%holds current bindings on both authority arms after its activated ENSv1→ENSv2 migration boundary; projection generation for block % is not publishable%'
+           OR last_error LIKE
+               '%state current relations on both authority arms after the child''s ENSv2 authority began; projection generation for block % is not publishable%',
            false
        ) AS has_dual_current_failure_signature,
        started_at,
@@ -300,15 +333,26 @@ SELECT chain_id,
        jsonb_pretty(evidence) AS evidence
 FROM bigname_phase.project_generation_failures
 WHERE chain_id = :'chain_id'
-  AND failure_kind = 'dual_current_exact_name_authority'
+  AND failure_kind IN (
+      'dual_current_exact_name_authority',
+      'dual_current_child_authority'
+  )
 ORDER BY detected_at DESC, logical_name_id;
 
 ROLLBACK;
 ```
 
-Select the row being investigated by its complete audit key for the remaining
-queries. The same semantic conflict can have the same fingerprint at more than
-one target, so the fingerprint alone is not a row selector. The next query
+For `dual_current_child_authority`, preserve the matching row and its complete
+audit JSON, then stop and escalate. The child candidate can combine a
+registration event identity and transaction/log position with a later parent
+subregistry block. Its durable audit payload therefore is not an authorized raw
+transaction selector and this runbook does not guess the missing composite raw
+evidence. The remaining evidence and repair queries are only for
+`dual_current_exact_name_authority`.
+
+Select an exact-name row by its complete audit key. The same semantic conflict
+can have the same fingerprint at more than one target, so the fingerprint alone
+is not a row selector. The next query
 resolves the target and boundary lineage directly from the block coordinates in
 the audit. The normalized-event join is only a secondary signal that the current
 Interpret derivation still contains that exact boundary; a covering Interpret
@@ -936,15 +980,17 @@ production recovery rules also prohibit hand-editing identity and normalized
 event rows
 ([production interpreter-mismatch procedure](production-docker.md#stop-and-escalate-an-interpreter-mismatch)).
 
-## Sepolia carve-out
+## Deployment-profile scope
 
-This exact-name assertion is Mainnet-scoped by the staged
-[deployment profile](../glossary.md#deployment-profile):
-it requires `deployment_profile = 'mainnet'` and an activated
-`migration_authority_transition` proof
-([`crates/project/src/integrity.rs:127-135`](../../crates/project/src/integrity.rs#L127-L135)).
-That scope is deliberate. Ethereum Sepolia carries distinct ENSv1 and ENSv2
-test deployments on the same chain: the pinned ENSv1 registry is
+Both exact-name and child assertions apply only to the Mainnet
+[deployment profile](../glossary.md#deployment-profile). They remain gated by
+an admitted proof: exact-name failures require an activated
+`migration_authority_transition`, and child failures require the selected
+ENSv2 authority and its admitted proof
+([`assert_exact_name_authority`](../../crates/project/src/integrity.rs#L41),
+[`assert_child_authority`](../../crates/project/src/integrity.rs#L260)).
+Ethereum Sepolia carries distinct ENSv1 and ENSv2 test deployments on the same
+chain: the pinned ENSv1 registry is
 `0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e`
 (upstream: .refs/ens_v1/deployments/sepolia/ENSRegistry.json:L2 @ ens_v1@91c966f),
 while the pinned ENSv2 RootRegistry and ETHRegistry are
@@ -954,12 +1000,16 @@ while the pinned ENSv2 RootRegistry and ETHRegistry are
 (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRegistry.json:L2 @ ens_v2@a971bd64).
 
 Genuine Sepolia overlap therefore means that the same logical name has readable
-ENSv1 and ENSv2 evidence from those independent deployments **without** an
+ENSv1 and ENSv2 evidence **without** an
 activated `MigrationApplied` boundary connecting that name. Project leaves that
 shape unsupported with `independent_ens_deployments_overlap`; it does not raise
-this halt
-([`crates/project/src/builders/name_authority.rs:495-503`](../../crates/project/src/builders/name_authority.rs#L495-L503),
-[`crates/project/src/builders/name_authority.rs:617-628`](../../crates/project/src/builders/name_authority.rs#L617-L628)).
+this halt. The exact
+[shared ENS infrastructure](../glossary.md#shared-ens-infrastructure) names—root,
+`eth`, `reverse`, and `addr.reverse`—instead select a current ENSv2 arm when
+ENSv1 evidence is current or historical, without fabricating a proof, so they
+also do not raise this halt
+([`crates/project/src/builders/name_authority.rs:459-480`](../../crates/project/src/builders/name_authority.rs#L459-L480),
+[`crates/project/src/builders/name_authority.rs:619-630`](../../crates/project/src/builders/name_authority.rs#L619-L630)).
 Do not interpret mere cross-era Sepolia evidence as a missed ENSv1→ENSv2
 migration.
 
@@ -972,10 +1022,18 @@ The unlocked-wrapped path instead clears the wrapper resolver, unwraps the name
 to the Graveyard, and then performs the same ENSv2 injection
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L160 @ ens_v2@a971bd64).
 Only a proven per-name boundary derived from such admitted evidence connects the
-two arms. If Sepolia has that proof and an open predecessor, capture and file it
-as an indexing or authority-selection defect; do not label it the Mainnet
-`dual_current_exact_name_authority` emergency, because the assertion cannot
-produce that failure under the Sepolia deployment profile.
+two arms. If Sepolia has that proof while both bindings remain open, Project
+still publishes the proof-selected ENSv2 row in `name_current`; the retained
+ENSv1 binding remains visible in `surface_bindings`. The equivalent child shape
+publishes the proof-selected ENSv2 relation in `children_current`, while its
+underlying relation events remain diagnostic history. Neither shape creates a
+`project_generation_failures` row, fails the Project phase, or makes
+`/v2/status` stale for this reason. This runbook therefore does not route a
+Sepolia incident through the Mainnet halt procedure. Extending the guardrail to
+Sepolia is deferred until [PR #852](https://github.com/ensdomains/bigname/pull/852),
+the #503 e2e harness, proves an Interpret-activated boundary through Project
+publication; [issue #851](https://github.com/ensdomains/bigname/issues/851)
+tracks re-applying the guardrail.
 
 ## Closure and escalation record
 
@@ -990,7 +1048,7 @@ Keep the incident and linked bigname issue updated with:
 - the post-recovery phase rows, new audit query result, and `/v2/status` result.
 
 Close the incident only after the repaired target publishes, the affected chain
-advances beyond it, no exact-name failure with new evidence appears on the next
-attempt, all required redo markers are clear, and the linked defect or
-on-chain-assumption issue records the durable resolution. Leave all audit rows
-in place.
+advances beyond it, no dual-current exact-name or child failure with new
+evidence appears on the next attempt, all required redo markers are clear, and
+the linked defect or on-chain-assumption issue records the durable resolution.
+Leave all audit rows in place.

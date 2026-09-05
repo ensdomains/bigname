@@ -2,6 +2,9 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result, scope::Window};
 
+mod handoffs;
+use handoffs::seed_child_registration_history;
+
 /// Retain keys whose cited events Interpret deleted during redo so Project can retract losing-fork output.
 pub(super) async fn seed(
     transaction: &mut Transaction<'_, Postgres>,
@@ -18,7 +21,10 @@ pub(super) async fn seed(
     )
     .await?;
     seed_children(transaction, chain_id).await?;
+    seed_child_registration_history(transaction, chain_id, window.from_block, window.to_block)
+        .await?;
     seed_resources(transaction, chain_id, window.from_block, window.to_block).await?;
+    handoffs::seed_wrapper_effect_resources(transaction, chain_id).await?;
     seed_account_permissions(transaction, chain_id).await?;
     seed_resolvers(transaction, chain_id, window.from_block, window.to_block).await?;
     seed_primary(transaction, chain_id).await?;
@@ -527,6 +533,21 @@ pub(super) async fn consume(
     .map_err(|error| {
         ProjectError::database(
             "failed to consume path-expiry logical names during Project publication",
+            error,
+        )
+    })?;
+    sqlx::query(
+        "DELETE FROM project_redo_child_registration_history
+         WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3",
+    )
+    .bind(chain_id)
+    .bind(from_block)
+    .bind(to_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database(
+            "failed to consume child registration history during Project publication",
             error,
         )
     })?;

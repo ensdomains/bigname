@@ -72,10 +72,24 @@ on each binding. It makes ordinary interval conflicts arm-specific and is
 supplied by adapters, never inferred in SQL. Project stages the selected arm,
 binding, resource, start position, lifecycle state, and proof together; field
 selection cannot rank events from different arms or combine them in one
-`name_current` row. The related `AuthorityEpochChanged`
+`name_current` row. The exact [shared ENS
+infrastructure](#shared-ens-infrastructure) no-proof exception is not an
+authority epoch: it selects the ENSv2 arm for current fields while its
+epoch start and proof fields remain null. The related `AuthorityEpochChanged`
 normalized event is broader than an era flip: it records every move of a
 name's authority anchor (registry-, registrar-, or wrapper-held), so most such
 rows — millions on Basenames alone — mark within-era anchor transitions.
+
+<a id="shared-ens-infrastructure"></a>
+## Shared ENS infrastructure
+
+the exact ENS root, `eth`, `reverse`, and `addr.reverse` names. When an active
+surface has a current ENSv2 arm and ENSv1 evidence from a current binding or
+historical events, but no higher-precedence authority evidence, Project selects
+the ENSv2 arm for these four names without creating an authority proof or epoch.
+Historical ENSv2 evidence without a current ENSv2 binding does not qualify, and
+descendants are not included in the exception. A current ENSv2 binding with no
+ENSv1 evidence remains the ordinary single-arm ENSv2 case.
 
 ## Authority proof
 
@@ -106,9 +120,9 @@ repair path, or checkpoint-promotion consumer for these records.
 the partition of one interpret walk into consecutive physical
 batches (today 500-block ranges). Grids never split a block: the block is the
 atomic unit every grid loads. Where the boundaries fall is an execution
-detail, not an input to interpretation — surviving identity rows, discovery
-edges, and normalized events must be identical across grids over identical
-input. That identity is verified for the ENSv1 divergence classes
+detail, not an input to interpretation. After a walk completes, surviving identity rows,
+discovery edges, and normalized events must be identical across grids over identical input.
+A failed ordinary walk may retain earlier committed physical batches whose normalized events direct history reads can see; a failed [redo run shape](#run-shape) remains fenced from serving. In either case Project cannot advance to the failed target. Completed-walk identity is verified for the ENSv1 divergence classes
 [#336](https://github.com/ensdomains/bigname/issues/336) catalogued and the
 ENSv2 resolver attribution classes
 [#348](https://github.com/ensdomains/bigname/issues/348) and
@@ -616,9 +630,8 @@ later ENSv2 registration. Ordinary interpretation of the unlocked wrapped
 path's earlier `NameUnwrapped` closes the wrapper binding and reactivates that
 registrar position. The `locked_wrapped` path resolves its wrapper predecessor
 immediately before the boundary. Zero or multiple matching predecessors are
-integrity errors; it never ranks candidates. The zero case is corruption
-because both the registrar-token and wrapper-token migration entries require a
-transferable live ENSv1 token.
+integrity errors; it never ranks candidates. A genuine zero is corruption because both entries require a transferable live ENSv1 token.
+For registrar-token `unwrapped`, [issue #822](https://github.com/ensdomains/bigname/issues/822) currently makes otherwise valid input present a false zero when Interpret tries to commit activation, so production refuses before Project; the repair must resolve the predecessor rather than admit zero, then apply the exact-cleanup rule above.
 If the deployment profile had not materialized the registrar identity before
 the unwrap, the exact following BaseRegistrar transfer confirms the fallback
 identity with a binding effective from `NameUnwrapped`; it is therefore still
@@ -694,6 +707,10 @@ A row carrying several correlation IDs is complete only when every referenced
 group is complete. Completeness never reconstructs evidence, widens a selector,
 or turns ordinary factory, reservation, or registration evidence into a
 migration boundary.
+
+## Independently admitted event
+
+an ordinary normalized event that an existing ENSv1 or ENSv2 adapter rule derives without an ENSv1→ENSv2 migration correlation; ordinary normalization gives it an empty `migration_correlation_ids` set and `consumer_visibility=activated`, and correlation may attach a separate association without rewriting the event ([`normalized.rs`](../crates/adapters/src/schema_v2/normalized.rs#L76-L95), [`migration/support.rs`](../crates/adapters/src/schema_v2/migration/support.rs#L243-L278)).
 
 Independent admission has precedence: an ordinary normalized event that the
 existing manifest and discovery rules produce without this correlation remains
@@ -1017,8 +1034,8 @@ so the child cannot be taken on the ENSv2 side and keeps resolving through
 ENSv1 for as long as it stays unmigrated. Three conditions must hold at once,
 and failing each one means something different:
 
-1. *Never registered on ENSv2* — the label has never had an entry, live or
-   lapsed, in the parent's ENSv2 registry
+1. *Never entered on ENSv2* — the label has never had a reserved, registered,
+   or renewed entry, live or lapsed, in the parent's migration `WrapperRegistry`
    (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L296 @ ens_v2@a971bd64).
    Failing this is permanent: once the label has had an entry, ENSv2 is its
    authority and the protection never comes back. What becomes of the label is
@@ -1033,6 +1050,8 @@ and failing each one means something different:
    (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L442 @ ens_v2@a971bd64),
    and only an expired ENSv2 entry can be registered again
    (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L431 @ ens_v2@a971bd64).
+   Project therefore treats `RegistrationReserved`, `RegistrationGranted`, and `RegistrationRenewed` as permanent entry history. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L410-L480 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @ ens_v2@a971bd64)
+   For `locked_child`, the proxy deployed from `WRAPPER_REGISTRY_IMPL` is the name's migration registry, so the same rule governs its descendants. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L146-L164 @ ens_v2@a971bd64)
 2. *`PARENT_CANNOT_CONTROL` burned* — the child is *helper-positive* under
    `LibMigration.isEmancipatedChild`, the superset the three-way split below is
    built on
@@ -1834,7 +1853,7 @@ how one interpret walk executes over its input: fresh (from
 the start of the chain), incremental (continuing from retained prior events),
 or resumed (continuing from a persisted progress marker after an interruption,
 including an interrupted redo's persisted intermediate state).
-Batch-independence rules require identical surviving rows in every run shape
+Batch-independence rules require identical surviving rows in every completed run shape
 over identical input. That identity is verified for the ENSv1 divergence
 classes [#336](https://github.com/ensdomains/bigname/issues/336) and the ENSv2
 resolver attribution classes

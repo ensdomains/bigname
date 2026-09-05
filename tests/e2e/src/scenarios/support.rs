@@ -1,10 +1,16 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use alloy_primitives::Address;
 use anyhow::Result;
 
 use crate::harness::{
-    anvil::Anvil, basenames::BasenamesDeployment, db::HarnessDb, ens_v1::EnsV1Deployment,
-    ens_v2::EnsV2Deployment, manifests, perturb, pipeline, repo_root,
+    anvil::Anvil,
+    basenames::BasenamesDeployment,
+    db::HarnessDb,
+    ens_v1::{self, EnsV1Deployment},
+    ens_v2::{self, EnsV2Deployment},
+    ens_v2_migration::{self, EnsV2MigrationDeployment},
+    manifests, perturb, pipeline, repo_root,
 };
 
 pub struct PipelineRun {
@@ -17,6 +23,282 @@ pub struct PipelineRun {
 pub struct DerivedRun {
     pub db: HarnessDb,
     _scratch: TempDir,
+}
+
+pub struct ConnectedMigrationHarness {
+    pub anvil: Anvil,
+    pub ens_v1: EnsV1Deployment,
+    pub ens_v2: EnsV2Deployment,
+    pub migration: EnsV2MigrationDeployment,
+}
+
+pub struct UnlockedMigrationPath {
+    pub target_owner: Address,
+    pub expiry: u64,
+    pub child_owner_before_migration: Address,
+    pub child_owner_after_clear: Address,
+}
+
+pub struct LockedMigrationPath {
+    pub target_owner: Address,
+    pub expiry: u64,
+    pub wrapper_registry: Address,
+    pub bridged: ens_v1::WrappedNameData,
+    pub blocked: ens_v1::WrappedNameData,
+    pub bridged_owner: Address,
+    pub blocked_owner: Address,
+}
+
+pub async fn deploy_connected_migration_harness() -> Result<ConnectedMigrationHarness> {
+    let anvil = Anvil::spawn_ethereum_sepolia().await?;
+    let rpc = anvil.client();
+    let root = repo_root();
+    let ens_v1 = ens_v1::deploy_ens_v1(&rpc, &root).await?;
+    let ens_v2 = ens_v2::deploy_ens_v2(&rpc, &root).await?;
+    let migration =
+        ens_v2_migration::deploy_ens_v2_migration(&rpc, &root, &ens_v1, &ens_v2).await?;
+    Ok(ConnectedMigrationHarness {
+        anvil,
+        ens_v1,
+        ens_v2,
+        migration,
+    })
+}
+
+pub async fn create_unlocked_migration_path(
+    harness: &ConnectedMigrationHarness,
+) -> Result<UnlockedMigrationPath> {
+    const LABEL: &str = "unlock-migration";
+    const CHILD: &str = "child.unlock-migration.eth";
+    let rpc = harness.anvil.client();
+    let accounts = rpc.accounts().await?;
+    let target_owner = accounts[1];
+    let child_owner = accounts[2];
+    ens_v1::register_eth_name(
+        &rpc,
+        &harness.ens_v1,
+        LABEL,
+        target_owner,
+        365 * 24 * 60 * 60,
+        harness.ens_v1.public_resolver.address,
+    )
+    .await?;
+    ens_v1::create_subname(
+        &rpc,
+        &harness.ens_v1,
+        target_owner,
+        "unlock-migration.eth",
+        "child",
+        child_owner,
+    )
+    .await?;
+    let expiry = ens_v1::eth_name_expiry(&rpc, &harness.ens_v1, LABEL).await?;
+    ens_v1::wrap_eth_2ld(
+        &rpc,
+        &harness.ens_v1,
+        target_owner,
+        LABEL,
+        target_owner,
+        0,
+        harness.ens_v1.public_resolver.address,
+    )
+    .await?;
+    let wrapped = ens_v1::wrapped_name_data(&rpc, &harness.ens_v1, "unlock-migration.eth").await?;
+    assert_eq!(wrapped.fuses & ens_v1::CANNOT_UNWRAP, 0);
+    ens_v2_migration::reserve_eth_label(&rpc, &harness.ens_v2, LABEL, expiry).await?;
+    ens_v2_migration::migrate_unlocked_wrapped(
+        &rpc,
+        &harness.ens_v1,
+        &harness.migration,
+        target_owner,
+        LABEL,
+        target_owner,
+    )
+    .await?;
+    ens_v2_migration::graveyard_clear(&rpc, &harness.migration, harness.ens_v2.deployer, &[CHILD])
+        .await?;
+
+    assert_eq!(
+        ens_v2_migration::registry_owner(&rpc, harness.ens_v2.eth_registry.address, LABEL,).await?,
+        target_owner
+    );
+    assert_eq!(
+        ens_v2_migration::registry_subregistry(&rpc, harness.ens_v2.eth_registry.address, LABEL,)
+            .await?,
+        Address::ZERO
+    );
+    assert_eq!(
+        ens_v2_migration::ens_v1_registry_owner(&rpc, &harness.ens_v1, "unlock-migration.eth",)
+            .await?,
+        harness.migration.graveyard.address
+    );
+    let child_owner_after_clear =
+        ens_v2_migration::ens_v1_registry_owner(&rpc, &harness.ens_v1, CHILD).await?;
+    assert_eq!(child_owner_after_clear, harness.migration.graveyard.address);
+    assert_eq!(
+        ens_v2_migration::ens_v1_registry_resolver(&rpc, &harness.ens_v1, CHILD).await?,
+        Address::ZERO
+    );
+    Ok(UnlockedMigrationPath {
+        target_owner,
+        expiry,
+        child_owner_before_migration: child_owner,
+        child_owner_after_clear,
+    })
+}
+
+pub async fn create_locked_migration_path(
+    harness: &ConnectedMigrationHarness,
+) -> Result<LockedMigrationPath> {
+    const LABEL: &str = "locked-migration";
+    const PARENT: &str = "locked-migration.eth";
+    let rpc = harness.anvil.client();
+    let accounts = rpc.accounts().await?;
+    let target_owner = accounts[3];
+    let child_owner = accounts[4];
+    ens_v1::register_eth_name(
+        &rpc,
+        &harness.ens_v1,
+        LABEL,
+        target_owner,
+        365 * 24 * 60 * 60,
+        harness.ens_v1.public_resolver.address,
+    )
+    .await?;
+    let expiry = ens_v1::eth_name_expiry(&rpc, &harness.ens_v1, LABEL).await?;
+    ens_v1::wrap_eth_2ld(
+        &rpc,
+        &harness.ens_v1,
+        target_owner,
+        LABEL,
+        target_owner,
+        0,
+        harness.ens_v1.public_resolver.address,
+    )
+    .await?;
+    ens_v1::set_wrapper_fuses(
+        &rpc,
+        &harness.ens_v1,
+        target_owner,
+        PARENT,
+        ens_v1::CANNOT_UNWRAP as u16,
+    )
+    .await?;
+    assert_ne!(
+        ens_v1::wrapped_name_data(&rpc, &harness.ens_v1, PARENT)
+            .await?
+            .fuses
+            & ens_v1::CANNOT_UNWRAP,
+        0
+    );
+    for label in ["bridged", "blocked"] {
+        ens_v1::set_wrapped_subnode_owner(
+            &rpc,
+            &harness.ens_v1,
+            target_owner,
+            ens_v1::WrappedSubnodeOwner {
+                parent: PARENT,
+                label,
+                owner: child_owner,
+                fuses: 0,
+                expiry,
+            },
+        )
+        .await?;
+    }
+    ens_v1::set_child_fuses(
+        &rpc,
+        &harness.ens_v1,
+        target_owner,
+        PARENT,
+        "bridged",
+        ens_v1::PARENT_CANNOT_CONTROL,
+        expiry,
+    )
+    .await?;
+    let bridged =
+        ens_v1::wrapped_name_data(&rpc, &harness.ens_v1, "bridged.locked-migration.eth").await?;
+    let blocked =
+        ens_v1::wrapped_name_data(&rpc, &harness.ens_v1, "blocked.locked-migration.eth").await?;
+    assert_ne!(bridged.fuses & ens_v1::PARENT_CANNOT_CONTROL, 0);
+    assert_eq!(bridged.fuses & ens_v1::IS_DOT_ETH, 0);
+    assert_eq!(blocked.fuses & ens_v1::PARENT_CANNOT_CONTROL, 0);
+    assert_eq!(blocked.fuses & ens_v1::IS_DOT_ETH, 0);
+    assert!(bridged.expiry > rpc.block_timestamp().await? as u64);
+    assert!(blocked.expiry > rpc.block_timestamp().await? as u64);
+    let bridged_owner = ens_v2_migration::ens_v1_registry_owner(
+        &rpc,
+        &harness.ens_v1,
+        "bridged.locked-migration.eth",
+    )
+    .await?;
+    let blocked_owner = ens_v2_migration::ens_v1_registry_owner(
+        &rpc,
+        &harness.ens_v1,
+        "blocked.locked-migration.eth",
+    )
+    .await?;
+    assert_ne!(bridged_owner, Address::ZERO);
+    assert_ne!(blocked_owner, Address::ZERO);
+    ens_v2_migration::reserve_eth_label(&rpc, &harness.ens_v2, LABEL, expiry).await?;
+    let receipt = ens_v2_migration::migrate_locked_wrapped(
+        &rpc,
+        &harness.ens_v1,
+        &harness.migration,
+        target_owner,
+        LABEL,
+        target_owner,
+    )
+    .await?;
+    let wrapper_registry = ens_v2_migration::proxy_deployed_address(&rpc, &receipt).await?;
+    assert_eq!(
+        ens_v2_migration::registry_owner(&rpc, harness.ens_v2.eth_registry.address, LABEL,).await?,
+        target_owner
+    );
+    assert_eq!(
+        ens_v2_migration::registry_subregistry(&rpc, harness.ens_v2.eth_registry.address, LABEL,)
+            .await?,
+        wrapper_registry
+    );
+    assert_eq!(
+        ens_v2_migration::wrapper_registry_node(&rpc, wrapper_registry).await?,
+        ens_v1::namehash(PARENT)
+    );
+    assert_eq!(
+        ens_v2_migration::registry_expiry(&rpc, wrapper_registry, "bridged").await?,
+        0
+    );
+    assert_eq!(
+        ens_v2_migration::registry_expiry(&rpc, wrapper_registry, "blocked").await?,
+        0
+    );
+    assert_ne!(
+        ens_v2_migration::ens_v1_registry_owner(
+            &rpc,
+            &harness.ens_v1,
+            "bridged.locked-migration.eth",
+        )
+        .await?,
+        Address::ZERO
+    );
+    assert_ne!(
+        ens_v2_migration::ens_v1_registry_owner(
+            &rpc,
+            &harness.ens_v1,
+            "blocked.locked-migration.eth",
+        )
+        .await?,
+        Address::ZERO
+    );
+    Ok(LockedMigrationPath {
+        target_owner,
+        expiry,
+        wrapper_registry,
+        bridged,
+        blocked,
+        bridged_owner,
+        blocked_owner,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -308,6 +590,30 @@ pub async fn ingest_ens_v2_sepolia_and_serve(
             scratch,
             repo_root,
             &deployment.manifest_targets(),
+        )
+    })
+    .await
+}
+
+pub async fn ingest_ens_v1_v2_migration_sepolia_and_serve(
+    sepolia_anvil: &Anvil,
+    ens_v1: &EnsV1Deployment,
+    ens_v2: &EnsV2Deployment,
+    migration: &EnsV2MigrationDeployment,
+    ready_sql: Option<&str>,
+) -> Result<PipelineRun> {
+    let chains = [LocalChain {
+        anvil: sepolia_anvil,
+        id: "ethereum-sepolia",
+    }];
+    ingest_local_chains(&chains, true, ready_sql, |scratch, repo_root| {
+        manifests::generate_local_sepolia_migration_profile(
+            scratch,
+            repo_root,
+            &ens_v1.manifest_targets(),
+            &ens_v2.manifest_targets(),
+            &ens_v2_migration::migration_manifest_targets(migration),
+            &ens_v2_migration::migration_correlation_addresses(ens_v1),
         )
     })
     .await

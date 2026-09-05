@@ -10,7 +10,7 @@ use super::{
 };
 
 /// Non-null `owner` fallback for ownerless names (all-zero address).
-const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+pub(super) const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
 /// Mirrors the REST row→fields mapping (`responses/app_facing/names_collection.rs`) so GraphQL and
 /// REST agree on the derived `owner`/`tokenId`/dates/`resolver`. `owner` resolves the non-null

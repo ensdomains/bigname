@@ -96,6 +96,8 @@ mod tests {
     fn bytes_requires_prefixed_complete_hex_bytes() {
         assert!(is_prefixed_bytes("0x"));
         assert!(is_prefixed_bytes("0x00aB"));
+        assert!(is_prefixed_bytes("0xAB"));
+        assert!(!is_prefixed_bytes("0X00ab"));
         assert!(!is_prefixed_bytes("00ab"));
         assert!(!is_prefixed_bytes("0x0"));
         assert!(!is_prefixed_bytes("0xzz"));

@@ -123,7 +123,7 @@ pub fn resolver_entity_filter_to_storage(
 ) -> Option<GeneratedResolverFilter> {
     let filter = filter.unwrap_or_default();
     let id = match filter.id {
-        Some(id) => Some(parse_resolver_id(id.as_str())?),
+        Some(id) => Some(parse_resolver_filter_id(id.as_str())?),
         None => None,
     };
     Some(GeneratedResolverFilter {
@@ -135,9 +135,9 @@ pub fn resolver_entity_filter_to_storage(
     })
 }
 
-pub fn parse_resolver_id(value: &str) -> Option<ParsedResolverId> {
+fn parse_resolver_filter_id(value: &str) -> Option<ParsedResolverId> {
     let (address, namehash) = value.split_once('-')?;
-    if namehash.contains('-') || !canonical_hex(address, 40) || !canonical_hex(namehash, 64) {
+    if namehash.contains('-') || !filter_hex(address, 40) || !filter_hex(namehash, 64) {
         return None;
     }
     Some(ParsedResolverId {
@@ -146,10 +146,30 @@ pub fn parse_resolver_id(value: &str) -> Option<ParsedResolverId> {
     })
 }
 
-fn canonical_hex(value: &str, digits: usize) -> bool {
+fn filter_hex(value: &str, digits: usize) -> bool {
     value
         .strip_prefix("0x")
         .is_some_and(|hex| hex.len() == digits && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+pub fn parse_resolver_id(value: &str) -> Option<ParsedResolverId> {
+    let (address, namehash) = value.split_once('-')?;
+    if namehash.contains('-') || !canonical_hex(address, 40) || !canonical_hex(namehash, 64) {
+        return None;
+    }
+    Some(ParsedResolverId {
+        address: address.to_owned(),
+        namehash: namehash.to_owned(),
+    })
+}
+
+fn canonical_hex(value: &str, digits: usize) -> bool {
+    value.strip_prefix("0x").is_some_and(|hex| {
+        hex.len() == digits
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 pub async fn load_phase_graphql_resolver_by_id(
@@ -347,11 +367,21 @@ mod tests {
 
     #[test]
     fn composite_resolver_id_parser_is_exact_and_canonical() {
-        let address = "0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD";
-        let namehash = format!("0x{}", "AB".repeat(32));
+        let address = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+        let namehash = format!("0x{}", "ab".repeat(32));
         let parsed = parse_resolver_id(&format!("{address}-{namehash}")).unwrap();
-        assert_eq!(parsed.address, address.to_ascii_lowercase());
-        assert_eq!(parsed.namehash, namehash.to_ascii_lowercase());
+        assert_eq!(parsed.address, address);
+        assert_eq!(parsed.namehash, namehash);
+        assert!(
+            parse_resolver_id(&format!(
+                "{}-{namehash}",
+                address.to_uppercase().replacen("0X", "0x", 1)
+            ))
+            .is_none()
+        );
+        assert!(
+            parse_resolver_id(&format!("{}-{namehash}", address.replacen("0x", "0X", 1))).is_none()
+        );
         assert!(parse_resolver_id(&format!("{address}-{namehash}-extra")).is_none());
         assert!(parse_resolver_id("not-an-id").is_none());
     }

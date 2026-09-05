@@ -44,14 +44,14 @@ async fn semantic_end_state_keeps_surface_deactivated_at() -> TestResult {
 }
 
 #[tokio::test]
-async fn fresh_activation_and_candidate_state_redo_publish_identical_end_state() -> TestResult {
+async fn fresh_activation_and_candidate_state_redo_retain_identical_interpret_end_state()
+-> TestResult {
     let fresh = database("interpret_activation_fresh_equivalence").await?;
     let redo = database("interpret_activation_redo_equivalence").await?;
     seed_activation_corpus(fresh.pool()).await?;
     seed_activation_corpus(redo.pool()).await?;
 
     write_migration_range(fresh.pool(), false, false).await?;
-    project_full(fresh.pool()).await?;
 
     // Post-#526 main retained the candidate ENSv1→ENSv2 migration derivation
     // unchanged; stamp that state with main's hash.
@@ -65,7 +65,7 @@ async fn fresh_activation_and_candidate_state_redo_publish_identical_end_state()
     .fetch_all(redo.pool())
     .await?;
     assert_eq!(candidate_hashes, [OLD_CANDIDATE_INTERPRETER_HASH]);
-    let logical_name_id = format!("ens:{:#x}", eth_namehash(keccak256(b"activation-gate")));
+    let logical_name_id = logical_name_id();
     let successor: Uuid = sqlx::query_scalar(
         "SELECT surface_binding_id FROM surface_bindings
          WHERE chain_id = $1 AND logical_name_id = $2
@@ -75,23 +75,15 @@ async fn fresh_activation_and_candidate_state_redo_publish_identical_end_state()
     .bind(&logical_name_id)
     .fetch_one(redo.pool())
     .await?;
-    project_full(redo.pool()).await?;
-    let candidate_proof: Option<String> = sqlx::query_scalar(
-        "SELECT provenance #>> '{authority_selection,proof_kind}'
-         FROM name_current WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .fetch_one(redo.pool())
-    .await?;
-    assert_ne!(
-        candidate_proof.as_deref(),
-        Some("migration_authority_transition"),
-        "the old candidate-only generation must not give Project an activated proof"
-    );
     plant_valid_replay_marker(redo.pool(), &logical_name_id, successor).await?;
     stamp_interpreter_hash(redo.pool(), bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
     write_migration_range(redo.pool(), false, true).await?;
-    project_full(redo.pool()).await?;
+
+    // The reduced corpus omits the registry reclaim, Graveyard transfer, and
+    // resolver clear from the production unwrapped sequence. This test proves
+    // fresh-versus-redo Interpret equivalence only; publication is blocked on
+    // the faithful path by #822. Working-path Project fresh/redo parity is
+    // covered by the issue_503_children reclassification tests.
 
     let fresh_state = semantic_end_state(fresh.pool()).await?;
     let redo_state = semantic_end_state(redo.pool()).await?;
@@ -100,9 +92,6 @@ async fn fresh_activation_and_candidate_state_redo_publish_identical_end_state()
         "migration_discovery_associations",
         "migration_candidate_identity_effects",
         "binding_closure_positions",
-        "activation_project_stage_capture",
-        "name_current",
-        "children_current",
     ] {
         let rows = fresh_state
             .iter()
@@ -126,6 +115,10 @@ async fn fresh_activation_and_candidate_state_redo_publish_identical_end_state()
     fresh.cleanup().await?;
     redo.cleanup().await?;
     Ok(())
+}
+
+fn logical_name_id() -> String {
+    format!("ens:{:#x}", eth_namehash(keccak256(b"activation-gate")))
 }
 
 async fn seed_activation_corpus(pool: &PgPool) -> TestResult {
@@ -214,23 +207,6 @@ async fn write_migration_range(
     Ok(output)
 }
 
-async fn project_full(pool: &PgPool) -> TestResult {
-    sqlx::query("DELETE FROM activation_project_stage_capture")
-        .execute(pool)
-        .await?;
-    ProjectEngine::new(pool.clone())
-        .run_batch(ProjectBatchRequest {
-            chain_id: CHAIN.to_owned(),
-            target_block: MIGRATION_BLOCK,
-            affected_from_block: SETUP_BLOCK,
-            affected_to_block: MIGRATION_BLOCK,
-            resume_current: None,
-            mode: ProjectRunMode::Normal,
-        })
-        .await?;
-    Ok(())
-}
-
 pub(super) async fn install_stage_capture(pool: &PgPool) -> TestResult {
     sqlx::raw_sql(
         "CREATE TABLE activation_project_stage_capture (
@@ -312,9 +288,6 @@ pub(super) async fn semantic_end_state(
         ("token_lineages", ""),
         ("resources", ""),
         ("surface_bindings", ""),
-        ("activation_project_stage_capture", ""),
-        ("name_current", ""),
-        ("children_current", ""),
     ];
     let mut snapshot = Vec::new();
     for (table, generated_id) in tables {
@@ -323,15 +296,7 @@ pub(super) async fn semantic_end_state(
         } else {
             format!(" - '{generated_id}'")
         };
-        let row = if matches!(table, "name_current" | "children_current") {
-            "jsonb_set(
-                 to_jsonb(value), '{provenance}',
-                 (to_jsonb(value) -> 'provenance')
-                     - 'selected_event_ids' - 'normalized_event_ids'
-             )"
-        } else {
-            "to_jsonb(value)"
-        };
+        let row = "to_jsonb(value)";
         let sql = format!(
             "SELECT COALESCE(jsonb_agg(row ORDER BY row::text), '[]'::jsonb)
              FROM (

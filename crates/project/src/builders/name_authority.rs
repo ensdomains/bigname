@@ -1,17 +1,13 @@
-use sqlx::{Postgres, Transaction};
-
 use crate::{Marker, ProjectError, Result};
-
+use sqlx::{Postgres, Transaction};
 mod stage;
-
 pub(super) async fn build(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
     stage::ownerless_registry(transaction).await?;
-    sqlx::query(
-        r#"
+    sqlx::query(r#"
         CREATE TEMP TABLE project_name_authority ON COMMIT DROP AS
         WITH target_time AS (
             SELECT block_timestamp + interval '1 second' AS cutoff
@@ -460,12 +456,17 @@ pub(super) async fn build(
                 SELECT 1 FROM transition_proof transition
                 WHERE transition.logical_name_id = child.logical_name_id
             )
+        ), shared_ens_infrastructure AS (
+            -- ENSv2 deploys root and canonically parented eth, then registers or preserves reverse. (upstream: .refs/ens_v2/contracts/deploy/00_RootRegistry.ts:L15-L29 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deploy/01_ETHRegistry.ts:L23-L64 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deploy/01_ReverseMirror.ts:L13-L34 @ ens_v2@a971bd64) ENSv1 defines addr.reverse as its reverse registrar node and assigns it directly on testnets. (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L15-L37 @ ens_v1@91c966f) (upstream: .refs/ens_v1/deploy/reverseregistrar/00_deploy_reverse_registrar.ts:L30-L48 @ ens_v1@91c966f)
+            SELECT logical_name_id FROM project_surfaces WHERE namespace = 'ens' AND visibility_state = 'active' AND raw_name IN ('', 'eth', 'reverse', 'addr.reverse')
         ), decision AS (
             SELECT surface.logical_name_id,
                    CASE
                        WHEN proof.logical_name_id IS NOT NULL THEN 'ens_v2'
                        WHEN released.logical_name_id IS NOT NULL THEN 'ens_v2'
                        WHEN regime.logical_name_id IS NOT NULL THEN 'ens_v2'
+                       WHEN shared.logical_name_id IS NOT NULL
+                        AND COALESCE(summary.has_ens_v2, false) THEN 'ens_v2'
                        WHEN (
                            COALESCE(summary.has_ens_v1, false)
                            OR COALESCE(event_summary.has_ens_v1, false)
@@ -487,6 +488,9 @@ pub(super) async fn build(
                        OR COALESCE(event_summary.has_ens_v1, false) AS has_ens_v1,
                    COALESCE(summary.has_ens_v2, false)
                        OR COALESCE(event_summary.has_ens_v2, false) AS has_ens_v2,
+                   (shared.logical_name_id IS NOT NULL
+                    AND COALESCE(summary.has_ens_v2, false)
+                    AND proof.logical_name_id IS NULL AND released.logical_name_id IS NULL AND regime.logical_name_id IS NULL) AS shared_infrastructure_authority,
                    COALESCE(
                        proof.logical_name_id IS NULL
                            AND summary.logical_name_id IS NULL
@@ -508,6 +512,7 @@ pub(super) async fn build(
             LEFT JOIN proof USING (logical_name_id)
             LEFT JOIN released_v2_authority released USING (logical_name_id)
             LEFT JOIN released_v2_regime regime USING (logical_name_id)
+            LEFT JOIN shared_ens_infrastructure shared USING (logical_name_id)
         ), selected AS (
             SELECT decision.*, binding.surface_binding_id AS selected_binding_id,
                    binding.resource_id AS selected_resource_id,
@@ -599,10 +604,8 @@ pub(super) async fn build(
                (ownerless.logical_name_id IS NOT NULL AND selected.selected_binding_id IS NULL
                 AND NOT (selected.has_ens_v1 AND selected.has_ens_v2)) AS known_ownerless_registry,
                ownerless.resource_id AS ownerless_registry_resource_id, ownerless.owner_getter_reason,
-               jsonb_strip_nulls(jsonb_build_object('block_number',
-                   selected.selected_epoch_block_number, 'transaction_index',
-                   selected.selected_epoch_transaction_index, 'log_index',
-                   selected.selected_epoch_log_index)) AS authority_epoch_start_position,
+               CASE WHEN selected.shared_infrastructure_authority AND selected.has_ens_v1 THEN NULL ELSE jsonb_strip_nulls(jsonb_build_object(
+                   'block_number', selected.selected_epoch_block_number, 'transaction_index', selected.selected_epoch_transaction_index, 'log_index', selected.selected_epoch_log_index)) END AS authority_epoch_start_position,
                selected.proof_kind AS authority_proof_kind, selected.proof_event_id AS authority_proof_event_id,
                selected.proof_event_identity AS authority_proof_event_identity, selected.transition_id AS authority_transition_id,
                CASE
@@ -664,20 +667,17 @@ pub(super) async fn build(
                       COALESCE(selected.selected_epoch_log_index, -1)
                   )
               )
-            ORDER BY event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST,
+            ORDER BY event.block_number DESC NULLS LAST, event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
             LIMIT 1
         ) lifecycle ON TRUE
-        "#,
-    )
+        "#)
     .bind(chain_id)
     .bind(target.number)
     .bind(&target.hash)
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to select name authority", error))?;
-
     stage::build(transaction).await
 }

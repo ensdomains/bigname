@@ -1018,6 +1018,15 @@ async fn restarted_interpret_redo_preserves_retracted_resolver_evidence_for_proj
     .bind(chain)
     .fetch_one(scratch.pool())
     .await?;
+    let registry_instance: Uuid = sqlx::query_scalar(
+        "SELECT contract_instance_id FROM manifest_contract_instances WHERE manifest_id = $1",
+    )
+    .bind(registry_manifest_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    sqlx::query("INSERT INTO migration_discovery_associations (logical_edge_identity, migration_correlation_id, correlation_kind, registry_contract_instance_id, registry_address, source_manifest_id, evidence_refs, chain_id, block_number, block_hash, transaction_hash, transaction_index, log_index, canonicality_state, consumer_visibility, interpreter_content_hash) VALUES ('redo-child-edge', 'redo-child-correlation', 'migration_registry_creation', $1, lower($2), $3, '[{\"event_identity\":\"redo-child-association\"}]', $4, 501, $5, 'redo-child-association-tx', 0, 0, 'canonical', 'candidate', $6)")
+        .bind(registry_instance).bind(CONTRACT).bind(registry_manifest_id).bind(chain)
+        .bind(block_hash(chain, 501)).bind(INTERPRETER_CONTENT_HASH).execute(scratch.pool()).await?;
     sqlx::query(
         "INSERT INTO normalized_events (
              event_identity, namespace, event_kind, source_family,
@@ -1054,6 +1063,9 @@ async fn restarted_interpret_redo_preserves_retracted_resolver_evidence_for_proj
     .bind(block_hash(chain, 501))
     .execute(scratch.pool())
     .await?;
+    sqlx::query("INSERT INTO normalized_events (event_identity, namespace, logical_name_id, event_kind, source_family, manifest_version, source_manifest_id, chain_id, block_number, block_hash, raw_fact_ref, derivation_kind, canonicality_state, after_state) VALUES ('retracted-child-history-suffix', 'ens', 'ens:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'RegistrationReserved', 'ens_v2_registry_l1', 1, $1, $2, 501, $3, '{}'::jsonb, 'ens_v2_registry_resource_surface', 'canonical', jsonb_build_object('registry_contract_instance_id', $4))")
+        .bind(registry_manifest_id).bind(chain).bind(block_hash(chain, 501))
+        .bind(registry_instance.to_string()).execute(scratch.pool()).await?;
     sqlx::query(
         "INSERT INTO normalized_events (
              event_identity, namespace, logical_name_id, event_kind, source_family,
@@ -1248,6 +1260,14 @@ async fn restarted_interpret_redo_preserves_retracted_resolver_evidence_for_proj
         })
         .await?;
     assert!(finished.complete);
+    let child_handoff: Option<String> = sqlx::query_scalar(
+        "SELECT logical_name_id FROM project_redo_child_registration_history WHERE chain_id = $1 AND event_identity = 'retracted-child-history-suffix'",
+    )
+    .bind(chain).fetch_optional(scratch.pool()).await?;
+    assert_eq!(
+        child_handoff.as_deref(),
+        Some("ens:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
     let projected = ProjectEngine::new(scratch.pool().clone())
         .run_batch(ProjectBatchRequest {
             chain_id: chain.into(),
@@ -1280,7 +1300,8 @@ async fn restarted_interpret_redo_preserves_retracted_resolver_evidence_for_proj
     );
     let handoff_rows: i64 = sqlx::query_scalar(
         "SELECT (SELECT count(*) FROM project_redo_resolver_evidence WHERE chain_id = $1)
-              + (SELECT count(*) FROM project_redo_expiry_roots WHERE chain_id = $1)",
+              + (SELECT count(*) FROM project_redo_expiry_roots WHERE chain_id = $1)
+              + (SELECT count(*) FROM project_redo_child_registration_history WHERE chain_id = $1)",
     )
     .bind(chain)
     .fetch_one(scratch.pool())
