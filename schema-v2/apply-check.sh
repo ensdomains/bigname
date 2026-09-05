@@ -57,6 +57,10 @@ render_phase_migration() {
     local migration_file="$1"
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file"
 }
+# Inventory membership requires the whole quoted or bare literal bigname_phase token
+# after stripping -- line comments. Search-path-relative phase SQL would be silently
+# excluded. Today only the two public-schema service-loop files are outside the inventory;
+# block comments are not stripped, so a token-only mention is included and fails loud.
 phase_migration_uses_production_schema() {
     awk '
         { sub(/--.*$/, "") }
@@ -73,7 +77,7 @@ report_timing() {
 }
 emit_phase_migration() {
     local migration_file="$1"
-    local context="${2:-specialized}"
+    local context="$2"
     if [ ! -f "$migration_file" ]; then
         printf '%s\n' "schema-migration path does not exist: $migration_file" >&2
         exit 1
@@ -100,7 +104,7 @@ assert_migration_context_count() {
         exit 1
     fi
 }
-assert_reviewed_phase_migrations_exercised() {
+assert_reviewed_phase_migrations_applied() {
     local migration_file
     local migration_basename
     local skip_entry
@@ -108,6 +112,7 @@ assert_reviewed_phase_migrations_exercised() {
     local skip_reason
     local skip_count=0
     local -a expected_migrations=()
+    local -a without_predecessor_shape_proof=()
     local -A expected_lookup=()
     local -A skipped_lookup=()
     while IFS= read -r migration_file; do
@@ -151,10 +156,33 @@ assert_reviewed_phase_migrations_exercised() {
             "$migration_application_log"
         then
             printf '%s\n' \
-                "unexercised reviewed phase schema-migration on empty-schema path: $migration_basename" >&2
+                "reviewed phase schema-migration was not applied on empty-schema path: $migration_basename" >&2
             exit 1
         fi
+        if ! awk -F '|' -v migration="$migration_basename" \
+            '($1 == "baseline-first" || $1 == "preceding-shape" || $1 == "specialized") && $2 == migration { found = 1 } END { exit !found }' \
+            "$migration_application_log"
+        then
+            printf '%s\n' \
+                "reviewed phase schema-migration was not applied on an initialized-schema path: $migration_basename" >&2
+            exit 1
+        fi
+        if awk -F '|' -v migration="$migration_basename" \
+            '($1 == "preceding-shape" || $1 == "specialized") && $2 == migration { found = 1 } END { exit !found }' \
+            "$migration_application_log"; then
+            predecessor_shape_proof_count=$((predecessor_shape_proof_count + 1))
+        else
+            without_predecessor_shape_proof+=("$migration_basename")
+        fi
     done
+    if [ "$predecessor_shape_proof_count" -ne "$expected_predecessor_shape_proof_count" ]; then
+        printf '%s\n' "exact-predecessor-shape proof count: expected $expected_predecessor_shape_proof_count, observed $predecessor_shape_proof_count" >&2
+        exit 1
+    fi
+    if [ "${SCHEMA_V2_APPLY_CHECK_VERBOSE:-0}" = 1 ]; then
+        printf 'phase schema-migrations without exact-predecessor-shape proof (%s):\n' "${#without_predecessor_shape_proof[@]}" >&2
+        printf '  %s\n' "${without_predecessor_shape_proof[@]}" >&2
+    fi
     expected_reviewed_phase_migration_count="${#expected_migrations[@]}"
     unique_successful_migration_count="$(
         cut -d '|' -f 2 "$migration_application_log" | sort -u | wc -l \
@@ -271,9 +299,12 @@ fi
 migration_application_log="$(
     mktemp "${TMPDIR:-/tmp}/schema-v2-migration-applications.XXXXXX"
 )"
+# Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=7
+predecessor_shape_proof_count=0
+expected_predecessor_shape_proof_count=24
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -588,27 +619,27 @@ BEGIN
          WHERE attrelid = 'primary_names_current'::regclass
            AND attname = 'reverse_hydration_attempted_block_number'
            AND NOT attisdropped)
-    ) <> 'This internal reverse-name polling selection value identifies the head height of the latest attempt. Readers never use it as serving data.'
+    ) IS DISTINCT FROM 'This internal reverse-name polling selection value identifies the head height of the latest attempt. Readers never use it as serving data.'
        OR col_description(
         'primary_names_current'::regclass,
         (SELECT attnum FROM pg_attribute
          WHERE attrelid = 'primary_names_current'::regclass
            AND attname = 'reverse_hydration_attempted_block_hash'
            AND NOT attisdropped)
-    ) <> 'This internal reverse-name polling selection value identifies the head hash of the latest attempt. Readers never use it as serving data.'
+    ) IS DISTINCT FROM 'This internal reverse-name polling selection value identifies the head hash of the latest attempt. Readers never use it as serving data.'
        OR col_description(
         'primary_names_current'::regclass,
         (SELECT attnum FROM pg_attribute
          WHERE attrelid = 'primary_names_current'::regclass
            AND attname = 'reverse_hydration_attempt_ordinal'
            AND NOT attisdropped)
-    ) <> 'This internal value orders reverse-name polling attempts for fair rolling selection. It never records or validates a provider result.'
+    ) IS DISTINCT FROM 'This internal value orders reverse-name polling attempts for fair rolling selection. It never records or validates a provider result.'
        OR obj_description(
         'reverse_hydration_attempt_ordinal_seq'::regclass, 'pg_class'
-    ) <> 'This sequence assigns durable order to reverse-name polling batches; its values are not serving data.'
+    ) IS DISTINCT FROM 'This sequence assigns durable order to reverse-name polling batches; its values are not serving data.'
     THEN
         RAISE EXCEPTION
-            'reverse_hydration_attempt_state_upgrade did not restore checked-in comments';
+            'reverse_hydration_attempt_state_upgrade is missing an expected primary_names_current column or reverse_hydration_attempt_ordinal_seq comment';
     END IF;
 END
 $$;
@@ -6701,7 +6732,7 @@ SQL
 
 report_timing specialized-predecessor "$refusal_probe_seconds"
 if [ "${SCHEMA_V2_APPLY_CHECK_TIMING:-0}" = 1 ]; then printf 'schema-v2 timing: refusal-probes=%ss\n' "$refusal_probe_seconds"; fi
-assert_reviewed_phase_migrations_exercised
+assert_reviewed_phase_migrations_applied
 if [ "$refusal_assertions_passed" -ne "$expected_refusal_assertions" ]; then
     printf '%s\n' \
         "refusal assertions: $refusal_assertions_passed/$expected_refusal_assertions" >&2
@@ -6711,4 +6742,4 @@ report_timing final-assertions
 printf '%s\n' \
     "schema-v2 baseline applied twice and passed structural and behavior checks"
 printf '%s\n' \
-    "schema-migration coverage: expected reviewed phase schema-migrations=$expected_reviewed_phase_migration_count; unique exercised schema-migrations=$unique_successful_migration_count; total successful applications=$total_successful_migration_applications; intentional skips=$intentional_phase_migration_skip_count; refusal assertions=$refusal_assertions_passed/$expected_refusal_assertions"
+    "schema-migration coverage: expected reviewed phase schema-migrations=$expected_reviewed_phase_migration_count; applied on maintained paths=$unique_successful_migration_count; exact-predecessor-shape proofs=$predecessor_shape_proof_count/$expected_reviewed_phase_migration_count; without exact-predecessor-shape proof=$((expected_reviewed_phase_migration_count - predecessor_shape_proof_count)); total successful applications=$total_successful_migration_applications; intentional skips=$intentional_phase_migration_skip_count; refusal assertions=$refusal_assertions_passed/$expected_refusal_assertions"
