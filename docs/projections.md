@@ -587,7 +587,7 @@ classification.
 Project classifies an exact 20-byte-zero `addr:60` as `not_found`, with `value` omitted, behind an
 ENSv1 registry, registrar, or wrapper resolver pointer, or a Basenames registry resolver pointer.
 This covers current scalar and retained nested `value.bytes` envelopes; other origins, types,
-lengths, and nonzero values remain stored successes. Project keeps the entry and selector, changes
+nonempty lengths, and nonzero values remain stored successes. Project keeps the entry and selector, changes
 no raw facts or normalized events, and applies the unchanged `addr:2147483648` rule afterward.
 
 Rows produced under an earlier [interpreter content
