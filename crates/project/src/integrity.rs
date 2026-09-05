@@ -30,7 +30,7 @@ pub(crate) async fn assert_publishable(
     assert_child_authority(transaction, chain_id, target).await
 }
 
-/// Fail the generation on every ENS [deployment profile] when a name still holds current
+/// Fail the generation on the Mainnet ENS [deployment profile] when a name still holds current
 /// bindings on both authority arms after its proven activated ENSv1->ENSv2 migration boundary.
 ///
 /// [deployment profile]: ../../../docs/glossary.md#deployment-profile
@@ -236,7 +236,7 @@ async fn assert_exact_name_authority(
     ))
 }
 
-/// Fail the generation on every ENS [deployment profile] when a parent-child pair still
+/// Fail the generation on the Mainnet ENS [deployment profile] when a parent-child pair still
 /// states both an ENSv1 and an ENSv2 relation after the child's own proven ENSv2 authority began.
 ///
 /// [deployment profile]: ../../../docs/glossary.md#deployment-profile
