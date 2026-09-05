@@ -480,6 +480,8 @@ async fn graphql_generated_domain_owner_scalar_operators_match_served_owner() ->
     }
     for (filter, expected) in [
         (json!({"owner": OWNER_SCALAR_A.to_uppercase(), "owner_in": [OWNER_SCALAR_A, OWNER_SCALAR_B]}), vec!["owner-scalar-a.eth"]),
+        (json!({"owner_not": OWNER_SCALAR_A.to_uppercase()}), vec!["owner-scalar-b.eth", "owner-scalar-c.eth"]),
+        (json!({"owner_not_in": [OWNER_SCALAR_A.to_uppercase()]}), vec!["owner-scalar-b.eth", "owner-scalar-c.eth"]),
         (json!({"owner": OWNER_SCALAR_A, "owner_in": [OWNER_SCALAR_B]}), vec![]),
         (json!({"owner_gte": OWNER_SCALAR_A, "owner_lt": OWNER_SCALAR_B, "name": "owner-scalar-a.eth"}), vec!["owner-scalar-a.eth"]),
     ] {

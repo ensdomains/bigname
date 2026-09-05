@@ -225,9 +225,13 @@ to the applicable entries below.
 > effective-controller relation. Positive members require a matching relation row. Negative members require an eligible
 > relation witness and use a name-correlated anti-semijoin against the positive counterpart, so a name cannot pass merely
 > because it has no effective-controller relation. Filtered relation targets participate in snapshot revalidation.
-> `owner` and `owner_in` continue to lowercase address operands; ranges and patterns compare the supplied text directly.
-> Explicit null for those retained members remains equivalent to omission, a deliberate divergence from Graph Node filed
-> as `#862`; every newly served owner member rejects explicit null as `Domain_filter.<member> must not be null`. Empty
+> `owner`, `owner_not`, `owner_in`, and `owner_not_in` lowercase address operands before binding; Graph Node routes the
+> supplied equality and list values directly into its store filters (upstream: .refs/graph_node/graphql/src/store/query.rs:L156-L190
+> @ graph_node@aefe1737), so the address normalization is a deliberate divergence. Ranges and patterns compare the supplied
+> text directly. Explicit null for the retained `owner` and `owner_in` members remains equivalent to omission, while Graph
+> Node emits `IS NULL` for null equality (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1603-L1623
+> @ graph_node@aefe1737); this deliberate divergence is filed as `#862`. Every newly served owner member rejects explicit
+> null as `Domain_filter.<member> must not be null`. Empty
 > `owner_in` and `owner_not_in` lists both return an empty page, while duplicate list entries are tolerated. A bounded
 > positive equality or membership uses the relation-driven address-membership plan; an owner filter without that anchor
 > uses a page-driven name-correlated relation probe. The effective controller agrees with `Domain.owner`
@@ -244,12 +248,12 @@ to the applicable entries below.
 > ownership is unchanged by either `PermissionChanged`. A release can also co-emit an owner-less `AuthorityEpochChanged`,
 > which clears the served registry owner so `Domain.owner` falls back to the registrant or zero address, while the epoch
 > event is excluded from the effective-controller fold and the release's `resource_control` grant keeps the registry owner
-> there. `docs/consumer-capabilities.md` § GraphQL compatibility states each class explicitly.
+> there. This GraphQL section states each class explicitly and carries the served scalar-family contract.
 > **Upstream**: the ENS subgraph defines `Domain.owner` as the account that owns the domain and updates it from registry
 > ownership events (upstream: .refs/ens_subgraph/schema.graphql:L29-L32 @ ens_subgraph@723f1b6)
 > (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L131-L138 @ ens_subgraph@723f1b6)
 > (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L151-L158 @ ens_subgraph@723f1b6).
-> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T5` owns the four residual classes.
+> **Our rule**: this GraphQL section; task `#670/T5` owns the four residual classes.
 > **Why**: the effective-controller and served-owner projections intentionally answer different authority questions in
 > those classes, so the partial filter contract names the boundary instead of claiming universal field/filter equality.
 > **Planner evidence**: `pad_resolver_planner_statistics` inserts 5,000 `name_surfaces` and `name_current` rows; the owner
@@ -281,14 +285,15 @@ to the applicable entries below.
 > starts-with appends `%`, ends-with prepends `%`, case-sensitive members use `LIKE`, and `_nocase` members use `ILIKE`.
 > **Upstream**: Graph Node constructs contains patterns this way and passes them to `LIKE`/`ILIKE`
 > (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1432-L1476 @ graph_node@aefe173)
-> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1532-L1545 @ graph_node@aefe173).
+> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1532-L1545 @ graph_node@aefe173), including the
+> ends-with variants (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1547-L1555 @ graph_node@aefe173).
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
 > **Since**: `2026-09-03`
 
 > **Generated GraphQL text uses C collation only when it changes semantics** — Graph Node rejects a store database whose collation or
 > character classification is not `C` (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L152-L158 @
-> graph_node@aefe173) (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L159-L163 @ graph_node@aefe173). Bigname applies `COLLATE "C"` to generated raw-name comparisons, name ordering, and noncanonical ID ranges, but deliberately
-> generated owner-ID ranges and case-sensitive owner-ID patterns, and deliberately leaves fixed-width lowercase
+> graph_node@aefe173) (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L159-L163 @ graph_node@aefe173). Bigname applies `COLLATE "C"` to generated raw-name comparisons, name ordering, noncanonical ID ranges,
+> generated owner-ID ranges, and case-sensitive owner-ID patterns, but deliberately leaves fixed-width lowercase
 > hexadecimal namehash predicates and order/tie-break expressions unwrapped so
 > `name_current_lookup_idx` remains usable. The deployment contract requires a collation that orders those canonical
 > hexadecimal keys byte-lexically like C. Alpine/musl CI and default deployment images satisfy that rule by construction;
