@@ -127,26 +127,6 @@ impl State {
             self.remove_v1_resolver_linked_resource(&key, resource_id);
             return;
         }
-        if source_role == "registry" {
-            let (resource_id, logical_name_id) = self
-                .v1_registry_read_anchors
-                .get(&key)
-                .filter(|anchor| anchor.surface_known)
-                .map(|anchor| (anchor.resource_id, Some(anchor.logical_name_id.clone())))
-                .unwrap_or((resource_id, logical_name_id));
-            self.v1_resolvers.insert(key.clone(), resolver.to_owned());
-            self.v1_resolver_links.insert(
-                key.clone(),
-                V1ResolverLink {
-                    resolver_address: resolver.to_owned(),
-                    resource_id: Some(resource_id),
-                    logical_name_id,
-                    source_role: Some(source_role.to_owned()),
-                },
-            );
-            self.v1_resolver_linked_resources.remove(&key);
-            return;
-        }
         if source_role != "registry_old" {
             return;
         }

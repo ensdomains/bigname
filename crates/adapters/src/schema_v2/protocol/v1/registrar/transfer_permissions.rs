@@ -27,6 +27,22 @@ pub(super) fn append_transfer_permissions(
             &format!("transfer-resource-{action}"),
         );
     }
+    if previous_authority.is_none()
+        && let Some(current) = current_authority
+        && current.resource_id != after.resource_id
+        && let Some(subject) = current.owner.as_deref()
+    {
+        push_permission_change(
+            output,
+            current,
+            subject,
+            json!({"kind":"resource"}),
+            "resource_control",
+            true,
+            "TokenControlTransferred",
+            "transfer-authority-resource-grant",
+        );
+    }
     let Some(resolver) = resolver else { return };
     let scope = json!({"kind":"resolver","chain_id":chain_id,"resolver_address":resolver});
     let mut change = |authority: &V1NameState, subject: &str, grant, action: &str| {
@@ -69,7 +85,7 @@ pub(super) fn append_transfer_permissions(
                 );
             }
         }
-        (None, Some(current)) if current.resource_id == after.resource_id => {
+        (None, Some(current)) => {
             if let Some(subject) = current.owner.as_deref() {
                 change(current, subject, true, "transfer-authority-grant");
             }

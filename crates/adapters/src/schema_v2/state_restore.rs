@@ -299,9 +299,8 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
     }
     if event.event_kind == "ResolverChanged"
         && let (Some(namehash), Some(resolver), Some(resource_id)) = (
-            event.after_state["child_node"]
+            event.after_state["node"]
                 .as_str()
-                .or_else(|| event.after_state["node"].as_str())
                 .or_else(|| event.after_state["namehash"].as_str()),
             event.after_state.get("resolver").and_then(Value::as_str),
             event.resource_id,
