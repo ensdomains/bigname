@@ -1722,21 +1722,30 @@ async fn pre_surface_resolver_materialization_matches_fresh_resume_and_redo() ->
     assert_eq!(fresh_snapshot["pointer_count"], 1);
     assert_eq!(fresh_snapshot["binding_count"], 1);
     run_project(redone.pool(), "ethereum-mainnet", 2, 0, 2).await?;
-    let projected_control: (Option<String>, Option<String>, Option<String>, bool, bool) =
-        sqlx::query_as(
-            "SELECT declared_summary #>> '{control,registry_owner}',
+    let projected_control: (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        bool,
+        bool,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT declared_summary #>> '{control,registry_owner}',
                 declared_summary #>> '{control,status}',
                 declared_summary #>> '{registration,authority_kind}',
                 declared_summary #>> '{registration,authority_key}' IS NOT NULL,
                 EXISTS (SELECT 1 FROM address_names_current address
                         WHERE address.logical_name_id = name_current.logical_name_id
                           AND address.relation = 'effective_controller'
-                          AND address.address = $1)
-         FROM name_current WHERE raw_name = 'pointer.eth'",
-        )
-        .bind(REGISTRANT)
-        .fetch_one(redone.pool())
-        .await?;
+                          AND address.address = $1),
+                summary.registry_owner, summary.registry_contract
+         FROM name_current JOIN permissions_current_resource_summary summary USING (resource_id)
+         WHERE raw_name = 'pointer.eth'",
+    )
+    .bind(REGISTRANT)
+    .fetch_one(redone.pool())
+    .await?;
     assert_eq!(
         projected_control,
         (
@@ -1744,9 +1753,11 @@ async fn pre_surface_resolver_materialization_matches_fresh_resume_and_redo() ->
             None,
             Some("registry_only".to_owned()),
             true,
-            true
+            true,
+            Some(REGISTRANT.to_owned()),
+            Some("0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned())
         ),
-        "owned surface materialization must match release-rebound control fields"
+        "owned surface materialization must retain control and registry-owner binding fields"
     );
     fresh.cleanup().await?;
     resumed.cleanup().await?;

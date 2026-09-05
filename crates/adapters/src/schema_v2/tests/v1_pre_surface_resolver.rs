@@ -634,7 +634,6 @@ fn assert_current_registry_reassignment_replays(
     assert_eq!(live, restored_compacted, "compacted restore drift");
     Ok(())
 }
-
 #[test]
 fn current_registry_reassignment_preserves_resolver_across_every_replay_shape() -> anyhow::Result<()>
 {
@@ -893,7 +892,7 @@ fn old_registry_resolver_is_not_materialized_after_current_registry_migration() 
         interpret_test_batch_incremental(input(manifests, admissions, prior, vec![suffix]), None)?;
     assert!(
         state_derived_pointer(&live).is_none(),
-        "the old fallback registry resolver must not surface after current-registry migration"
+        "the old fallback registry resolver must not surface after current-registry handoff"
     );
     assert_eq!(live, restored);
     Ok(())
@@ -1133,7 +1132,6 @@ fn same_transaction_transient_setup_reinserts_each_fallback_clear() -> anyhow::R
     }
     Ok(())
 }
-
 #[test]
 fn current_registry_handoff_retracts_old_resolver_from_wrapper_resource_across_replay_shapes()
 -> anyhow::Result<()> {
@@ -1169,7 +1167,6 @@ fn current_registry_handoff_retracts_old_resolver_from_wrapper_resource_across_r
     }));
     Ok(())
 }
-
 #[test]
 fn current_registry_handoff_retracts_old_resolver_from_historical_wrapper_resource()
 -> anyhow::Result<()> {
@@ -1209,7 +1206,6 @@ fn current_registry_handoff_retracts_old_resolver_from_historical_wrapper_resour
     );
     Ok(())
 }
-
 #[test]
 fn changed_old_registry_selection_restores_inactive_resources_until_handoff_or_reactivation()
 -> anyhow::Result<()> {
@@ -1256,7 +1252,6 @@ fn changed_old_registry_selection_restores_inactive_resources_until_handoff_or_r
     }
     Ok(())
 }
-
 #[test]
 fn current_registry_resolver_replacement_survives_the_ownership_handoff() -> anyhow::Result<()> {
     let (_, _, node) = fixture();
@@ -1294,7 +1289,6 @@ fn current_registry_resolver_replacement_survives_the_ownership_handoff() -> any
     );
     Ok(())
 }
-
 #[test]
 fn old_registry_raw_resolver_survives_authority_reconvergence_compaction() -> anyhow::Result<()> {
     let (_, _, node) = fixture();
@@ -1344,7 +1338,6 @@ fn old_registry_raw_resolver_survives_authority_reconvergence_compaction() -> an
     );
     Ok(())
 }
-
 #[test]
 fn registry_reactivation_after_old_registry_zero_clears_the_registrar_resource()
 -> anyhow::Result<()> {
@@ -1381,7 +1374,6 @@ fn registry_reactivation_after_old_registry_zero_clears_the_registrar_resource()
     );
     Ok(())
 }
-
 #[test]
 fn unwrap_after_current_registry_zero_keeps_the_registrar_resource_clear() -> anyhow::Result<()> {
     let (_, _, node) = fixture();
@@ -1411,7 +1403,6 @@ fn unwrap_after_current_registry_zero_keeps_the_registrar_resource_clear() -> an
     );
     Ok(())
 }
-
 #[test]
 fn current_registry_zero_to_nonzero_grants_without_revoking_the_zero_address() -> anyhow::Result<()>
 {
@@ -1446,7 +1437,6 @@ fn current_registry_zero_to_nonzero_grants_without_revoking_the_zero_address() -
     assert!(grant.after_state["revocation_source"].is_null());
     Ok(())
 }
-
 #[test]
 fn wrapper_fallback_registrar_activation_grants_resolver_control() -> anyhow::Result<()> {
     let (manifests, admissions, node) = fixture();
@@ -1598,7 +1588,6 @@ fn wrapper_fallback_registrar_activation_grants_resolver_control() -> anyhow::Re
 
     Ok(())
 }
-
 #[test]
 fn registrar_transfer_retires_registry_resource_control() -> anyhow::Result<()> {
     let (_, _, node) = fixture();
@@ -1639,7 +1628,6 @@ fn registrar_transfer_retires_registry_resource_control() -> anyhow::Result<()> 
     }
     Ok(())
 }
-
 #[test]
 fn registrar_transfer_grants_registry_resource_control() -> anyhow::Result<()> {
     let (_, _, node) = fixture();
@@ -1682,7 +1670,6 @@ fn registrar_transfer_grants_registry_resource_control() -> anyhow::Result<()> {
     }
     Ok(())
 }
-
 #[test]
 fn registrar_transfer_preserves_explicit_ownerless_registry_state() -> anyhow::Result<()> {
     let (manifests, admissions, node) = fixture();
@@ -1731,7 +1718,6 @@ fn registrar_transfer_preserves_explicit_ownerless_registry_state() -> anyhow::R
     );
     Ok(())
 }
-
 #[test]
 fn parent_resolver_does_not_capture_child_authority_link() -> anyhow::Result<()> {
     let (_, _, child) = fixture();
@@ -1767,7 +1753,6 @@ fn parent_resolver_does_not_capture_child_authority_link() -> anyhow::Result<()>
     );
     Ok(())
 }
-
 #[test]
 fn wrapper_first_surface_links_the_retained_registry_read_resource() -> anyhow::Result<()> {
     let (_, _, node) = fixture();
@@ -1803,7 +1788,6 @@ fn wrapper_first_surface_links_the_retained_registry_read_resource() -> anyhow::
     );
     Ok(())
 }
-
 #[test]
 fn same_transaction_registration_keeps_wrapper_surface_pointer_on_registry_resource()
 -> anyhow::Result<()> {
@@ -1988,7 +1972,6 @@ fn assert_restore(owner: &str) -> anyhow::Result<()> {
     assert_eq!(live, restored);
     Ok(())
 }
-
 #[test]
 fn pre_surface_registry_resolver_surface_promotion_restores_exactly() -> anyhow::Result<()> {
     assert_restore(OWNER)
