@@ -81,6 +81,7 @@ async fn enable_basenames_verified_route(
     l1_resolver: Address,
 ) -> Result<()> {
     let l1_resolver = format!("{l1_resolver:#x}");
+    // #857 workaround: without scenario topology/provenance, verified/auto are unsupported.
     let topology = sqlx::query(
         r#"
         UPDATE name_current name
@@ -1224,7 +1225,7 @@ async fn third_party_controller_registration_degrades_without_label_events() -> 
 }
 
 #[tokio::test]
-async fn l2_zero_addr60_agrees_between_indexed_and_verified() -> Result<()> {
+async fn l2_zero_addr60_uses_stubbed_verified_transport() -> Result<()> {
     let eth = Anvil::spawn().await?;
     let base = Anvil::spawn_base_mainnet().await?;
     let rpc = base.client();
@@ -1250,6 +1251,7 @@ async fn l2_zero_addr60_agrees_between_indexed_and_verified() -> Result<()> {
     basenames::set_addr_record(&rpc, &deployment, alice, name, Address::ZERO).await?;
     let l1_resolver =
         Address::from_slice(&keccak256("bigname-e2e-placeholder:l1_resolver".as_bytes())[12..]);
+    // Fixed-answer verified transport stub: it does not read the stored resolver value.
     eth.client()
         .set_code(
             l1_resolver,

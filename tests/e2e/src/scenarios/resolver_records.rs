@@ -166,6 +166,7 @@ async fn enable_ens_verified_route(
     logical_name_id: &str,
     universal: Address,
 ) -> Result<()> {
+    // #857 workaround: without this scenario-local execution manifest, verified/auto are unsupported.
     let manifest_id: i64 = sqlx::query_scalar(
         "INSERT INTO manifest_versions \
              (manifest_version, namespace, source_family, chain_id, deployment_label, \
@@ -178,6 +179,7 @@ async fn enable_ens_verified_route(
     )
     .fetch_one(&run.db.pool)
     .await?;
+    // #857 workaround: the local execution declaration needs an addressable instance.
     sqlx::query(
         "INSERT INTO contract_instances \
              (contract_instance_id, chain_id, contract_kind) \
@@ -186,6 +188,7 @@ async fn enable_ens_verified_route(
     )
     .execute(&run.db.pool)
     .await?;
+    // #857 workaround: without this role row, verified lookup has no local entrypoint.
     sqlx::query(
         "INSERT INTO manifest_contract_instances \
              (manifest_id, chain_id, declaration_kind, declaration_name, \
@@ -199,6 +202,7 @@ async fn enable_ens_verified_route(
     .bind(format!("{universal:#x}"))
     .execute(&run.db.pool)
     .await?;
+    // #857 workaround: Project does not publish this executable scenario topology.
     let topology = sqlx::query(
         r#"
         UPDATE name_current name
@@ -288,6 +292,7 @@ pub(super) async fn normalize_v2_snapshot_timestamp(
     logical_name_id: &str,
 ) -> Result<()> {
     if logical_name_id.starts_with("basenames:") {
+        // #857 workaround: without an Ethereum execution position, verified reads are stale.
         sqlx::query(
             "UPDATE name_current SET chain_positions = chain_positions || jsonb_build_object( \
                  'ethereum', (SELECT jsonb_build_object( \
@@ -308,6 +313,7 @@ pub(super) async fn normalize_v2_snapshot_timestamp(
         .execute(&run.db.pool)
         .await?;
     }
+    // #857 workaround: Project writes +00:00; the API requires Z or returns 409 stale.
     sqlx::query(
         "UPDATE name_current SET chain_positions = \
          replace(chain_positions::text, '+00:00\"', 'Z\"')::jsonb \
@@ -1174,7 +1180,7 @@ async fn shared_resolver_keeps_per_name_records_and_projection_marks_fan_in_unsu
 }
 
 #[tokio::test]
-async fn exact_zero_addr60_agrees_between_indexed_and_verified() -> Result<()> {
+async fn exact_zero_addr60_uses_stubbed_verified_transport() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
     let deployment = ens_v1::deploy_ens_v1(&rpc, &repo_root()).await?;
@@ -1204,6 +1210,7 @@ async fn exact_zero_addr60_agrees_between_indexed_and_verified() -> Result<()> {
     let universal = Address::from_slice(
         &alloy_primitives::keccak256("bigname-e2e-placeholder:universal_resolver".as_bytes())[12..],
     );
+    // Fixed-answer verified transport stub: it does not read the stored resolver value.
     rpc.set_code(
         universal,
         &universal_zero_runtime(deployment.public_resolver.address),
