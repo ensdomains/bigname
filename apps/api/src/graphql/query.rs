@@ -1,4 +1,4 @@
-use async_graphql::{Context, ID, Object, Result};
+use async_graphql::{Context, ID, MaybeUndefined, Object, Result};
 use bigname_storage::{
     AddressNameRelation, NameCurrentAddressFilter, NameCurrentAddressRelationFilter,
     NameCurrentListFilter, NameCurrentListOrder, NameCurrentListSort,
@@ -14,15 +14,15 @@ use super::enums::{
     generated_order,
 };
 use super::error::internal_error;
+use super::generated_filter_ops::{GeneratedDomainFilter, IdFilter, StringFilter};
 use super::inputs::{
     AccountEntityFilter, BlockHeight, DomainEntityFilter, DomainFilter, RegistrationFilter,
     ResolverEntityFilter,
 };
 use super::meta::{SubgraphMeta, resolve_meta};
 use super::name_queries::{
-    GeneratedDomainIdFilter, GeneratedDomainSort, count_phase_graphql_name_list,
-    load_phase_graphql_name_list_page_offset, load_phase_graphql_name_row_by_name,
-    load_phase_graphql_name_row_by_namehash,
+    GeneratedDomainSort, count_phase_graphql_name_list, load_phase_graphql_name_list_page_offset,
+    load_phase_graphql_name_row_by_name, load_phase_graphql_name_row_by_namehash,
 };
 use super::objects::{Account, Domain, DomainConnection, RegistrationConnection, Resolver};
 use super::resolver_queries::{
@@ -133,7 +133,7 @@ impl Query {
         block: Option<BlockHeight>,
         #[graphql(name = "subgraphError", default)] subgraph_error: SubgraphErrorPolicy,
     ) -> Result<Vec<Domain>> {
-        let (storage_filter, id_filter) = domain_entity_filter_to_storage(filter)?;
+        let (storage_filter, generated_filter) = domain_entity_filter_to_storage(filter)?;
         let state = ctx.data::<AppState>()?;
         let head = load_graphql_entity_head(ctx, block.as_ref(), subgraph_error, "domains").await?;
         let limit = match first {
@@ -151,7 +151,7 @@ impl Query {
             &state.pool,
             &storage_filter,
             &snapshot_chain_ids,
-            &id_filter,
+            &generated_filter,
             sort,
             order,
             limit,
@@ -359,6 +359,9 @@ fn generated_domain_sort(
             GeneratedDomainSort::Storage(NameCurrentListSort::RegistrationDate)
         }
         DomainOrderBy::Name => GeneratedDomainSort::Storage(NameCurrentListSort::Name),
+        DomainOrderBy::Owner => GeneratedDomainSort::Owner,
+        DomainOrderBy::OwnerId => GeneratedDomainSort::OwnerId,
+        DomainOrderBy::Resolver => GeneratedDomainSort::Resolver,
     };
     let order = match order_direction.unwrap_or(OrderDirection::Asc) {
         OrderDirection::Asc => NameCurrentListOrder::Asc,
@@ -369,24 +372,10 @@ fn generated_domain_sort(
 
 fn domain_entity_filter_to_storage(
     filter: Option<DomainEntityFilter>,
-) -> Result<(NameCurrentListFilter, GeneratedDomainIdFilter)> {
+) -> Result<(NameCurrentListFilter, GeneratedDomainFilter)> {
     let filter = filter.unwrap_or_default();
-    let contains = filter
-        .name_contains
-        .as_deref()
-        .map(crate::name_filter::normalize_name_contains)
-        .transpose()
-        .map_err(|error| {
-            async_graphql::Error::new(format!(
-                "name_contains must be a valid ENSIP-15 name substring: {}",
-                error.message()
-            ))
-        })?;
-    let id_filter = generated_domain_id_filter(filter.id, filter.id_in);
     let storage_filter = NameCurrentListFilter {
         namespace: Some(NAMESPACE.to_owned()),
-        name: filter.name,
-        contains,
         address: generated_address_membership(
             filter.owner,
             filter.owner_in,
@@ -394,17 +383,121 @@ fn domain_entity_filter_to_storage(
         ),
         ..Default::default()
     };
-    Ok((storage_filter, id_filter))
+    let generated_filter = GeneratedDomainFilter {
+        id: IdFilter {
+            eq: nullable_filter_value(filter.id, |id| id.0),
+            not: nullable_filter_value(filter.id_not, |id| id.0),
+            gt: required_filter_value(filter.id_gt, "id_gt", |id| id.0)?,
+            gte: required_filter_value(filter.id_gte, "id_gte", |id| id.0)?,
+            lt: required_filter_value(filter.id_lt, "id_lt", |id| id.0)?,
+            lte: required_filter_value(filter.id_lte, "id_lte", |id| id.0)?,
+            in_values: required_filter_value(filter.id_in, "id_in", |ids| {
+                ids.into_iter().map(|id| id.0).collect()
+            })?,
+            not_in_values: required_filter_value(filter.id_not_in, "id_not_in", |ids| {
+                ids.into_iter().map(|id| id.0).collect()
+            })?,
+        },
+        name: StringFilter {
+            eq: nullable_filter_value(filter.name, std::convert::identity),
+            not: nullable_filter_value(filter.name_not, std::convert::identity),
+            gt: required_filter_value(filter.name_gt, "name_gt", std::convert::identity)?,
+            gte: required_filter_value(filter.name_gte, "name_gte", std::convert::identity)?,
+            lt: required_filter_value(filter.name_lt, "name_lt", std::convert::identity)?,
+            lte: required_filter_value(filter.name_lte, "name_lte", std::convert::identity)?,
+            in_values: required_filter_value(filter.name_in, "name_in", std::convert::identity)?,
+            not_in_values: required_filter_value(
+                filter.name_not_in,
+                "name_not_in",
+                std::convert::identity,
+            )?,
+            contains: required_filter_value(
+                filter.name_contains,
+                "name_contains",
+                std::convert::identity,
+            )?,
+            contains_nocase: required_filter_value(
+                filter.name_contains_nocase,
+                "name_contains_nocase",
+                std::convert::identity,
+            )?,
+            not_contains: required_filter_value(
+                filter.name_not_contains,
+                "name_not_contains",
+                std::convert::identity,
+            )?,
+            not_contains_nocase: required_filter_value(
+                filter.name_not_contains_nocase,
+                "name_not_contains_nocase",
+                std::convert::identity,
+            )?,
+            starts_with: required_filter_value(
+                filter.name_starts_with,
+                "name_starts_with",
+                std::convert::identity,
+            )?,
+            starts_with_nocase: required_filter_value(
+                filter.name_starts_with_nocase,
+                "name_starts_with_nocase",
+                std::convert::identity,
+            )?,
+            not_starts_with: required_filter_value(
+                filter.name_not_starts_with,
+                "name_not_starts_with",
+                std::convert::identity,
+            )?,
+            not_starts_with_nocase: required_filter_value(
+                filter.name_not_starts_with_nocase,
+                "name_not_starts_with_nocase",
+                std::convert::identity,
+            )?,
+            ends_with: required_filter_value(
+                filter.name_ends_with,
+                "name_ends_with",
+                std::convert::identity,
+            )?,
+            ends_with_nocase: required_filter_value(
+                filter.name_ends_with_nocase,
+                "name_ends_with_nocase",
+                std::convert::identity,
+            )?,
+            not_ends_with: required_filter_value(
+                filter.name_not_ends_with,
+                "name_not_ends_with",
+                std::convert::identity,
+            )?,
+            not_ends_with_nocase: required_filter_value(
+                filter.name_not_ends_with_nocase,
+                "name_not_ends_with_nocase",
+                std::convert::identity,
+            )?,
+        },
+    };
+    Ok((storage_filter, generated_filter))
 }
 
-fn generated_domain_id_filter(id: Option<ID>, id_in: Option<Vec<ID>>) -> GeneratedDomainIdFilter {
-    GeneratedDomainIdFilter {
-        id: id.map(|id| bigname_storage::normalize_evm_b256(id.as_str())),
-        id_in: id_in.map(|ids| {
-            ids.into_iter()
-                .map(|id| bigname_storage::normalize_evm_b256(id.as_str()))
-                .collect()
-        }),
+fn nullable_filter_value<T, U>(
+    value: MaybeUndefined<T>,
+    map: impl FnOnce(T) -> U,
+) -> Option<Option<U>> {
+    match value {
+        MaybeUndefined::Undefined => None,
+        MaybeUndefined::Null => Some(None),
+        MaybeUndefined::Value(value) => Some(Some(map(value))),
+    }
+}
+
+fn required_filter_value<T, U>(
+    value: MaybeUndefined<T>,
+    member: &str,
+    map: impl FnOnce(T) -> U,
+) -> Result<Option<U>> {
+    match value {
+        MaybeUndefined::Undefined => Ok(None),
+        MaybeUndefined::Null => Err(async_graphql::Error::new(format!(
+            "Domain_filter.{member} must not be null"
+        ))),
+        MaybeUndefined::Value(value) => Ok(Some(map(value))),
     }
 }
 

@@ -84,7 +84,34 @@
     "type:Resolver_filter",
     "type:Resolver_orderBy",
     "type:_Block_",
-    "type:_Meta_"
+    "type:_Meta_",
+    "input:Domain_filter.id_not",
+    "input:Domain_filter.id_gt",
+    "input:Domain_filter.id_gte",
+    "input:Domain_filter.id_lt",
+    "input:Domain_filter.id_lte",
+    "input:Domain_filter.id_not_in",
+    "input:Domain_filter.name_not",
+    "input:Domain_filter.name_gt",
+    "input:Domain_filter.name_gte",
+    "input:Domain_filter.name_lt",
+    "input:Domain_filter.name_lte",
+    "input:Domain_filter.name_in",
+    "input:Domain_filter.name_not_in",
+    "input:Domain_filter.name_contains_nocase",
+    "input:Domain_filter.name_not_contains",
+    "input:Domain_filter.name_not_contains_nocase",
+    "input:Domain_filter.name_starts_with",
+    "input:Domain_filter.name_starts_with_nocase",
+    "input:Domain_filter.name_not_starts_with",
+    "input:Domain_filter.name_not_starts_with_nocase",
+    "input:Domain_filter.name_ends_with",
+    "input:Domain_filter.name_ends_with_nocase",
+    "input:Domain_filter.name_not_ends_with",
+    "input:Domain_filter.name_not_ends_with_nocase",
+    "enum:Domain_orderBy.owner",
+    "enum:Domain_orderBy.owner__id",
+    "enum:Domain_orderBy.resolver"
   ],
   "known_upstream_types": {
     "AbiChanged": {
@@ -1071,42 +1098,6 @@
     },
     {
       "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.id_gt",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.id_gte",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.id_lt",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.id_lte",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.id_not",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.id_not_in",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
       "owner": "#670/T10",
       "scope": "input:Domain_filter.isMigrated",
       "status": "deferred"
@@ -1307,114 +1298,6 @@
       "docs": "consumer-capabilities.md#graphql-compatibility",
       "owner": "#670/T3",
       "scope": "input:Domain_filter.labelhash_not_in",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.name_contains_nocase",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.name_ends_with",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.name_ends_with_nocase",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.name_gt",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.name_gte",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.name_in",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.name_lt",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.name_lte",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.name_not",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.name_not_contains",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.name_not_contains_nocase",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.name_not_ends_with",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.name_not_ends_with_nocase",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.name_not_in",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.name_not_starts_with",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.name_not_starts_with_nocase",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.name_starts_with",
-      "status": "deferred"
-    },
-    {
-      "docs": "consumer-capabilities.md#graphql-compatibility",
-      "owner": "#670/T3",
-      "scope": "input:Domain_filter.name_starts_with_nocase",
       "status": "deferred"
     },
     {
@@ -2778,6 +2661,348 @@
       "owner": "#670/T9",
       "scope": "type:Transfer",
       "status": "deferred"
+    },
+    {
+      "scope": "enum:Account_orderBy.domains",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Account_orderBy.registrations",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Account_orderBy.wrappedDomains",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.events",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.isMigrated",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.labelName",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.labelhash",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.parent",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.parent__createdAt",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.parent__expiryDate",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.parent__id",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.parent__isMigrated",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.parent__labelName",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.parent__labelhash",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.parent__name",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.parent__subdomainCount",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.parent__ttl",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.registrant",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.registrant__id",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.registration",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.registration__cost",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.registration__expiryDate",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.registration__id",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.registration__labelName",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.registration__registrationDate",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.resolvedAddress",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.resolvedAddress__id",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.resolver__address",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.resolver__contentHash",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.resolver__id",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.subdomainCount",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.subdomains",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.ttl",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.wrappedDomain",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.wrappedDomain__expiryDate",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.wrappedDomain__fuses",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.wrappedDomain__id",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.wrappedDomain__name",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.wrappedOwner",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Domain_orderBy.wrappedOwner__id",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Resolver_orderBy.addr",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Resolver_orderBy.addr__id",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Resolver_orderBy.address",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Resolver_orderBy.coinTypes",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Resolver_orderBy.contentHash",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Resolver_orderBy.domain",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Resolver_orderBy.domain__createdAt",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Resolver_orderBy.domain__expiryDate",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Resolver_orderBy.domain__id",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Resolver_orderBy.domain__isMigrated",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Resolver_orderBy.domain__labelName",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Resolver_orderBy.domain__labelhash",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Resolver_orderBy.domain__name",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Resolver_orderBy.domain__subdomainCount",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Resolver_orderBy.domain__ttl",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Resolver_orderBy.events",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
+    },
+    {
+      "scope": "enum:Resolver_orderBy.texts",
+      "status": "deferred",
+      "owner": "#670/T3",
+      "docs": "consumer-capabilities.md#graphql-compatibility"
     }
   ]
 }

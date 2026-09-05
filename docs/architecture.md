@@ -45,22 +45,24 @@ compatibility layer for this contract.
 
 Alongside the REST contract, bigname serves a narrow, deliberately scoped subgraph-compatible read surface at `POST /graphql`. It is **not** general subgraph parity: it implements `account`, `accounts`, `domain`, `domains`, `resolver`, `resolvers`, `registrationConnection`, and `domainConnection` over `bigname_phase.name_current`, `bigname_phase.address_names_current`, and `bigname_phase.record_inventory_current` [projections](glossary.md), plus `_meta` for the served publication. Entity reads accept the subgraph-shaped `block` and `subgraphError` arguments, while the current execution boundary remains the [served head](glossary.md#served-head) rather than historical projection reads. All root fields in one HTTP GraphQL request share one served-head selection. Reads admit unchanged rows whose target is at or before that position, carry the same selection into nested record-inventory fields, and verify before returning that the matching completed `project` phase row did not change. Rows whose projection support status is `unsupported` are not exposed; an unsupported record inventory maps to the compatibility surface's existing empty record shapes. GraphQL `createdAt` uses a declared registration or history timestamp; when neither exists, it preserves the non-null response field with Unix epoch `0` because the current phase projection has no legacy surface-creation timestamp. `createdAt` and `expiryDate` are decimal-string `BigInt` values. The GraphQL surface is a compatibility adapter, not a consumer-replacement declaration.
 
-Manager name inputs have ENS name semantics rather than display-string equality.
-`domain(id: ...)`, generated-root `Domain_filter.name`, and legacy-connection
-`DomainFilter.name` normalize a name, compute its namehash, and match that hash,
-so `ALICE.eth` resolves the same ENS name as `alice.eth`. An `id` already shaped
-as a namehash is matched only within the `ens` namespace. `name_contains` is
-ENSIP-15 normalized at the GraphQL boundary and then compared byte-for-byte with
-the stored normalized name; invalid input returns a GraphQL error. A single
-trailing dot remains preserved after normalization as a label boundary. One
-leading dot is also accepted when it is
+The `domain(id: ...)` point root and legacy-connection `DomainFilter.name` have
+ENS name semantics: they normalize a name, compute its namehash, and match that
+hash, so `ALICE.eth` resolves the same ENS name as `alice.eth`. An `id` already
+shaped as a namehash is matched only within the `ens` namespace. Legacy
+`DomainFilter.name_contains` is ENSIP-15 normalized at the GraphQL boundary and
+then compared byte-for-byte with the stored normalized name; invalid input
+returns a GraphQL error. A single trailing dot remains preserved after
+normalization as a label boundary. One leading dot is also accepted when it is
 followed by a nonempty fragment that does not begin with another dot. The
 following fragment is normalized as usual, and the leading dot is preserved for
 matching. Thus `.eth`, `eth.`, `.eth.`, and `th.e` are accepted contains
 fragments, while `.` and `..` return a GraphQL error. Leading-boundary support is
-specific to contains filters; REST `match=prefix` fragment behavior is unchanged
-and does not accept a leading dot. `orderBy: name` uses byte-wise stored
-normalized-name order.
+specific to the legacy contains filter; REST `match=prefix` fragment behavior is
+unchanged and does not accept a leading dot. Generated `Domain_filter.name`
+members instead compare the served display-name bytes directly, preserve SQL
+wildcards for pattern operators, and use explicit `COLLATE "C"`.
+`Domain_orderBy.name` orders the served display name with that collation. The
+complete split is defined in [`consumer-capabilities.md`](consumer-capabilities.md#graphql-compatibility).
 Resolver record fields select the sole projected inventory for the name's
 current control resource or, for an ownerless V1 registry name, its retained
 [serving resource](glossary.md#serving-resource), without coupling the

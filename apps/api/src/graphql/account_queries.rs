@@ -72,7 +72,7 @@ pub async fn load_phase_graphql_account_by_id(
         namespace,
         snapshot_chain_ids,
         &GeneratedAccountFilter {
-            id: Some(id.to_ascii_lowercase()),
+            id: Some(id.to_owned()),
             id_in: None,
         },
         NameCurrentListOrder::Asc,

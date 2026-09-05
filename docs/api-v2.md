@@ -33,6 +33,24 @@ not the public-edge rollout state.
 including its generated-style roots, local extensions, and explicit unsupported
 behavior. This document does not define a second GraphQL contract.
 
+The generated `Domain_filter` serves the complete upstream ID and name operator
+families with conjunctive semantics, direct comparison against the served
+`Domain.id` and `Domain.name` values, and separate case-sensitive and nocase
+pattern operators. Raw-name comparisons and name ordering use expression-local
+PostgreSQL `COLLATE "C"`; canonical fixed-width namehash operands use the
+database-collation index, while noncanonical ID ranges retain C semantics on a
+linear path. Pattern input retains SQL `%`, `_`, and backslash semantics. For
+the generated ID/name families, explicit null equality is
+distinct from omission, while explicit null on the other operators is rejected.
+Generated order ties use the Domain ID in the requested direction. The generated
+`Domain_orderBy` exposes only the exact values listed
+in the capability contract. The legacy `DomainFilter` behavior and local
+`registrationDate` ordering remain separate extensions.
+Graph Node generates these ID and String operator families (upstream:
+.refs/graph_node/graph/src/schema/api.rs:L872-L912 @ graph_node@aefe173), and the
+pinned ENS subgraph declares `Domain.id` as `ID!` and `Domain.name` as `String`
+(upstream: .refs/ens_subgraph/schema.graphql:L1-L7 @ ens_subgraph@723f1b6).
+
 ## Naming Dictionary
 
 Normative one-name-per-concept dictionary from ADR 0006, extended with the
