@@ -53,6 +53,151 @@ run_psql() {
     esac
 }
 
+render_phase_migration() {
+    local migration_file="$1"
+    sed "s/bigname_phase/$scratch_schema/g" "$migration_file"
+}
+phase_migration_uses_production_schema() {
+    awk '
+        { sub(/--.*$/, "") }
+        /(^|[^[:alnum:]_])"?bigname_phase"?([^[:alnum:]_]|$)/ { found = 1 }
+        END { exit !found }
+    ' "$1"
+}
+report_timing() {
+    local elapsed=$((SECONDS - timing_started - ${2:-0}))
+    if [ "${SCHEMA_V2_APPLY_CHECK_TIMING:-0}" = 1 ]; then
+        printf 'schema-v2 timing: %s=%ss\n' "$1" "$elapsed"
+    fi
+    timing_started=$SECONDS
+}
+emit_phase_migration() {
+    local migration_file="$1"
+    local context="${2:-specialized}"
+    if [ ! -f "$migration_file" ]; then
+        printf '%s\n' "schema-migration path does not exist: $migration_file" >&2
+        exit 1
+    fi
+    printf '%s|%s\n' "$context" "$(basename "$migration_file")" \
+        >> "$migration_application_log"
+    render_phase_migration "$migration_file"
+}
+assert_migration_context_count() {
+    local migration_file="$1"
+    local context="$2"
+    local expected_count="$3"
+    local migration_basename
+    local observed_count
+    migration_basename="$(basename "$migration_file")"
+    observed_count="$(
+        awk -F '|' -v context="$context" -v migration="$migration_basename" \
+            '$1 == context && $2 == migration { count += 1 } END { print count + 0 }' \
+            "$migration_application_log"
+    )"
+    if [ "$observed_count" -ne "$expected_count" ]; then
+        printf '%s\n' \
+            "$migration_basename in $context: expected $expected_count, observed $observed_count successful applications" >&2
+        exit 1
+    fi
+}
+assert_reviewed_phase_migrations_exercised() {
+    local migration_file
+    local migration_basename
+    local skip_entry
+    local skip_basename
+    local skip_reason
+    local skip_count=0
+    local -a expected_migrations=()
+    local -A expected_lookup=()
+    local -A skipped_lookup=()
+    while IFS= read -r migration_file; do
+        migration_basename="$(basename "$migration_file")"
+        expected_migrations+=("$migration_basename")
+        expected_lookup["$migration_basename"]=1
+    done < <(
+        for migration_file in "$ROOT"/migrations/*.sql; do
+            if phase_migration_uses_production_schema "$migration_file"; then
+                printf '%s\n' "$migration_file"
+            fi
+        done | sort
+    )
+    for skip_entry in "${intentional_phase_migration_skips[@]}"; do
+        skip_basename="${skip_entry%%|*}"
+        skip_reason="${skip_entry#*|}"
+        if [ "$skip_basename" = "$skip_entry" ] || [ -z "$skip_reason" ]; then
+            printf '%s\n' \
+                "intentional schema-migration skip lacks a one-line reason: $skip_entry" >&2
+            exit 1
+        fi
+        if [ -z "${expected_lookup[$skip_basename]:-}" ]; then
+            printf '%s\n' \
+                "intentional schema-migration skip names an unreviewed or missing file: $skip_basename" >&2
+            exit 1
+        fi
+        if [ -n "${skipped_lookup[$skip_basename]:-}" ]; then
+            printf '%s\n' \
+                "duplicate intentional schema-migration skip: $skip_basename" >&2
+            exit 1
+        fi
+        skipped_lookup["$skip_basename"]="$skip_reason"
+        skip_count=$((skip_count + 1))
+    done
+    for migration_basename in "${expected_migrations[@]}"; do
+        if [ -n "${skipped_lookup[$migration_basename]:-}" ]; then
+            continue
+        fi
+        if ! awk -F '|' -v migration="$migration_basename" \
+            '$1 == "empty-schema" && $2 == migration { found = 1 } END { exit !found }' \
+            "$migration_application_log"
+        then
+            printf '%s\n' \
+                "unexercised reviewed phase schema-migration on empty-schema path: $migration_basename" >&2
+            exit 1
+        fi
+    done
+    expected_reviewed_phase_migration_count="${#expected_migrations[@]}"
+    unique_successful_migration_count="$(
+        cut -d '|' -f 2 "$migration_application_log" | sort -u | wc -l \
+            | tr -d ' '
+    )"
+    total_successful_migration_applications="$(wc -l < "$migration_application_log")"
+    intentional_phase_migration_skip_count="$skip_count"
+}
+assert_migration_refusal() {
+    local label="$1"
+    local migration_file="$2"
+    local exact_message="$3"
+    local setup_sql
+    local refusal_stderr
+    local observed_error
+    local refusal_started=$SECONDS
+    setup_sql="$(cat)"
+    if refusal_stderr="$({
+        printf 'BEGIN;\n'
+        printf 'SET LOCAL search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' "$setup_sql"
+        render_phase_migration "$migration_file"
+        printf 'ROLLBACK;\n'
+    } | run_psql 2>&1 >/dev/null)"; then
+        printf '%s\n' "$label: migration unexpectedly succeeded" >&2
+        exit 1
+    fi
+    observed_error="$(
+        printf '%s\n' "$refusal_stderr" \
+            | sed -n 's/^ERROR:[[:space:]]*//p' \
+            | sed -n '1p'
+    )"
+    if [ "$observed_error" != "$exact_message" ]; then
+        printf '%s\n' \
+            "$label: expected PostgreSQL error: $exact_message" \
+            "$label: observed PostgreSQL error: $observed_error" \
+            "$label: complete stderr:" \
+            "$refusal_stderr" >&2
+        exit 1
+    fi
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    refusal_probe_seconds=$((refusal_probe_seconds + SECONDS - refusal_started))
+}
 assert_unconfigured_settlement_constraint() {
     local provenance="$1"
     local false_error
@@ -123,6 +268,14 @@ if [[ ! "$scratch_schema" =~ ^[a-z0-9_]+$ ]]; then
     printf '%s\n' "invalid scratch schema name" >&2
     exit 1
 fi
+migration_application_log="$(
+    mktemp "${TMPDIR:-/tmp}/schema-v2-migration-applications.XXXXXX"
+)"
+intentional_phase_migration_skips=()
+refusal_assertions_passed=0
+expected_refusal_assertions=7
+refusal_probe_seconds=0
+timing_started=$SECONDS
 
 cleanup() {
     if [ -n "${schema_v2_race_pid:-}" ] \
@@ -132,6 +285,9 @@ cleanup() {
     fi
     if [ -n "${schema_v2_race_log:-}" ]; then
         rm -f -- "$schema_v2_race_log"
+    fi
+    if [ -n "${migration_application_log:-}" ]; then
+        rm -f -- "$migration_application_log"
     fi
     printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\n' "$scratch_schema" \
         | run_psql >/dev/null 2>&1 || true
@@ -154,10 +310,16 @@ apply_baseline() {
 # A schema-migration database can exist before phase-runner installs the phase
 # baseline. Every reviewed phase schema-migration must be a no-op on that empty path.
 for migration_file in \
+    "$ROOT/migrations/20260809120000_manifest_authority_attestation_audit.sql" \
+    "$ROOT/migrations/20260810120000_remove_l2_migration_remnants.sql" \
     "$ROOT/migrations/20260811120000_ens_v2_migration_slice_1.sql" \
     "$ROOT/migrations/20260811120100_ens_v2_migration_slice_1_validate.sql" \
     "$ROOT/migrations/20260811120200_ens_v2_migration_slice_1_constraints.sql" \
+    "$ROOT/migrations/20260813120000_reverse_hydration_attempt_state.sql" \
+    "$ROOT/migrations/20260813120100_reverse_hydration_attempt_state_validate.sql" \
     "$ROOT/migrations/20260814120000_project_redo_resolver_evidence.sql" \
+    "$ROOT/migrations/20260814122000_verify_unconfigured_settlement.sql" \
+    "$ROOT/migrations/20260814122100_verify_unconfigured_settlement_validate.sql" \
     "$ROOT/migrations/20260814123000_ingest_redo_source_boundary_markers.sql" \
     "$ROOT/migrations/20260814124000_redo_attempt_generation.sql" \
     "$ROOT/migrations/20260814125000_ingest_redo_manifest_authority.sql" \
@@ -170,8 +332,17 @@ for migration_file in \
     "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql" \
     "$ROOT/migrations/20260826120000_interpret_decode_skip_audit.sql" \
     "$ROOT/migrations/20260826120100_manifest_applied_change_count.sql" \
+    "$ROOT/migrations/20260827120000_normalized_events_ens_v1_record_node_resolver_idx.sql" \
+    "$ROOT/migrations/20260827130000_normalized_events_v1_after_node_scope_idx.sql" \
+    "$ROOT/migrations/20260827130100_normalized_events_v1_after_child_scope_idx.sql" \
+    "$ROOT/migrations/20260827130200_normalized_events_v1_before_node_scope_idx.sql" \
+    "$ROOT/migrations/20260827130300_normalized_events_v1_before_child_scope_idx.sql" \
+    "$ROOT/migrations/20260827130400_normalized_events_v2_subregistry_pointer_scope_idx.sql" \
+    "$ROOT/migrations/20260828120000_name_current_serving_resource.sql" \
     "$ROOT/migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql" \
     "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
+    "$ROOT/migrations/20260831150000_normalized_events_v2_expiry_scope_idx.sql" \
+    "$ROOT/migrations/20260902120000_normalized_events_basenames_record_node_resolver_idx.sql" \
     "$ROOT/migrations/20260902140000_project_redo_expiry_roots.sql" \
     "$ROOT/migrations/20260902150000_project_redo_expiry_resources.sql" \
     "$ROOT/migrations/20260902160000_registry_operator_account_permissions.sql" \
@@ -179,7 +350,7 @@ for migration_file in \
     "$ROOT/migrations/20260902160200_registry_operator_account_permissions_swap.sql" \
     "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql"
 do
-    sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
+    emit_phase_migration "$migration_file" empty-schema | run_psql
 done
 
 # SQLx migrations run before phase-runner installs a fresh schema-v2 baseline.
@@ -208,12 +379,15 @@ $$;
 SQL
 } | run_psql
 # Comment-only upgrades must also tolerate SQLx running before init-schema.
-sed "s/bigname_phase/$scratch_schema/g" \
+emit_phase_migration \
     "$ROOT/migrations/20260814121000_phase_heartbeat_liveness_comment.sql" \
+    empty-schema \
     | run_psql
+report_timing empty-schema
 
 apply_baseline
 apply_baseline
+report_timing baseline-install
 
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
@@ -302,9 +476,14 @@ SQL
 # migrations. The same reviewed files must be idempotent on that baseline-first
 # path, including the validation and metadata-swap steps.
 for migration_file in \
+    "$ROOT/migrations/20260809120000_manifest_authority_attestation_audit.sql" \
     "$ROOT/migrations/20260811120000_ens_v2_migration_slice_1.sql" \
     "$ROOT/migrations/20260811120100_ens_v2_migration_slice_1_validate.sql" \
     "$ROOT/migrations/20260811120200_ens_v2_migration_slice_1_constraints.sql" \
+    "$ROOT/migrations/20260813120000_reverse_hydration_attempt_state.sql" \
+    "$ROOT/migrations/20260813120000_reverse_hydration_attempt_state.sql" \
+    "$ROOT/migrations/20260813120100_reverse_hydration_attempt_state_validate.sql" \
+    "$ROOT/migrations/20260813120100_reverse_hydration_attempt_state_validate.sql" \
     "$ROOT/migrations/20260814120000_project_redo_resolver_evidence.sql" \
     "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql" \
     "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql" \
@@ -322,10 +501,20 @@ for migration_file in \
     "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql" \
     "$ROOT/migrations/20260826120000_interpret_decode_skip_audit.sql" \
     "$ROOT/migrations/20260826120000_interpret_decode_skip_audit.sql" \
+    "$ROOT/migrations/20260826120100_manifest_applied_change_count.sql" \
+    "$ROOT/migrations/20260827120000_normalized_events_ens_v1_record_node_resolver_idx.sql" \
+    "$ROOT/migrations/20260827130000_normalized_events_v1_after_node_scope_idx.sql" \
+    "$ROOT/migrations/20260827130100_normalized_events_v1_after_child_scope_idx.sql" \
+    "$ROOT/migrations/20260827130200_normalized_events_v1_before_node_scope_idx.sql" \
+    "$ROOT/migrations/20260827130300_normalized_events_v1_before_child_scope_idx.sql" \
+    "$ROOT/migrations/20260827130400_normalized_events_v2_subregistry_pointer_scope_idx.sql" \
+    "$ROOT/migrations/20260828120000_name_current_serving_resource.sql" \
     "$ROOT/migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql" \
     "$ROOT/migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql" \
     "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
     "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
+    "$ROOT/migrations/20260831150000_normalized_events_v2_expiry_scope_idx.sql" \
+    "$ROOT/migrations/20260902120000_normalized_events_basenames_record_node_resolver_idx.sql" \
     "$ROOT/migrations/20260902140000_project_redo_expiry_roots.sql" \
     "$ROOT/migrations/20260902140000_project_redo_expiry_roots.sql" \
     "$ROOT/migrations/20260902150000_project_redo_expiry_resources.sql" \
@@ -339,8 +528,161 @@ for migration_file in \
     "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql" \
     "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql"
 do
-    sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
+    emit_phase_migration "$migration_file" baseline-first | run_psql
 done
+report_timing baseline-first
+# Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor
+# shape, then validate the additive tuple invariant independently. Both files
+# must remain idempotent after the upgrade completes.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+ALTER TABLE primary_names_current
+    DROP CONSTRAINT primary_names_current_reverse_hydration_attempt_check,
+    DROP COLUMN reverse_hydration_attempted_block_number,
+    DROP COLUMN reverse_hydration_attempted_block_hash,
+    DROP COLUMN reverse_hydration_attempt_ordinal;
+DROP SEQUENCE reverse_hydration_attempt_ordinal_seq;
+SQL
+    emit_phase_migration \
+        "$ROOT/migrations/20260813120000_reverse_hydration_attempt_state.sql" \
+        preceding-shape
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF to_regclass(
+        current_schema() || '.reverse_hydration_attempt_ordinal_seq'
+    ) IS NULL THEN
+        RAISE EXCEPTION
+            'reverse_hydration_attempt_state_upgrade did not restore the sequence';
+    END IF;
+    IF (
+        SELECT count(*)
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'primary_names_current'
+          AND (
+              (column_name = 'reverse_hydration_attempted_block_number'
+               AND data_type = 'bigint' AND is_nullable = 'YES')
+              OR (column_name = 'reverse_hydration_attempted_block_hash'
+                  AND data_type = 'text' AND is_nullable = 'YES')
+              OR (column_name = 'reverse_hydration_attempt_ordinal'
+                  AND data_type = 'bigint' AND is_nullable = 'YES')
+          )
+    ) <> 3 THEN
+        RAISE EXCEPTION
+            'reverse_hydration_attempt_state_upgrade did not restore all three columns';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'primary_names_current'::regclass
+          AND conname = 'primary_names_current_reverse_hydration_attempt_check'
+          AND NOT convalidated
+    ) THEN
+        RAISE EXCEPTION
+            'reverse_hydration_attempt_state_upgrade constraint is missing or already validated';
+    END IF;
+    IF col_description(
+        'primary_names_current'::regclass,
+        (SELECT attnum FROM pg_attribute
+         WHERE attrelid = 'primary_names_current'::regclass
+           AND attname = 'reverse_hydration_attempted_block_number'
+           AND NOT attisdropped)
+    ) <> 'This internal reverse-name polling selection value identifies the head height of the latest attempt. Readers never use it as serving data.'
+       OR col_description(
+        'primary_names_current'::regclass,
+        (SELECT attnum FROM pg_attribute
+         WHERE attrelid = 'primary_names_current'::regclass
+           AND attname = 'reverse_hydration_attempted_block_hash'
+           AND NOT attisdropped)
+    ) <> 'This internal reverse-name polling selection value identifies the head hash of the latest attempt. Readers never use it as serving data.'
+       OR col_description(
+        'primary_names_current'::regclass,
+        (SELECT attnum FROM pg_attribute
+         WHERE attrelid = 'primary_names_current'::regclass
+           AND attname = 'reverse_hydration_attempt_ordinal'
+           AND NOT attisdropped)
+    ) <> 'This internal value orders reverse-name polling attempts for fair rolling selection. It never records or validates a provider result.'
+       OR obj_description(
+        'reverse_hydration_attempt_ordinal_seq'::regclass, 'pg_class'
+    ) <> 'This sequence assigns durable order to reverse-name polling batches; its values are not serving data.'
+    THEN
+        RAISE EXCEPTION
+            'reverse_hydration_attempt_state_upgrade did not restore checked-in comments';
+    END IF;
+END
+$$;
+SQL
+} | run_psql
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    emit_phase_migration \
+        "$ROOT/migrations/20260813120100_reverse_hydration_attempt_state_validate.sql" \
+        preceding-shape
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'primary_names_current'::regclass
+          AND conname = 'primary_names_current_reverse_hydration_attempt_check'
+          AND convalidated
+    ) THEN
+        RAISE EXCEPTION
+            'reverse_hydration_attempt_state_upgrade constraint was not validated';
+    END IF;
+END
+$$;
+SQL
+} | run_psql
+emit_phase_migration \
+    "$ROOT/migrations/20260813120000_reverse_hydration_attempt_state.sql" \
+    preceding-shape | run_psql
+emit_phase_migration \
+    "$ROOT/migrations/20260813120100_reverse_hydration_attempt_state_validate.sql" \
+    preceding-shape | run_psql
+for migration_file in \
+    "$ROOT/migrations/20260813120000_reverse_hydration_attempt_state.sql" \
+    "$ROOT/migrations/20260813120100_reverse_hydration_attempt_state_validate.sql"
+do
+    assert_migration_context_count "$migration_file" empty-schema 1
+    assert_migration_context_count "$migration_file" baseline-first 2
+    assert_migration_context_count "$migration_file" preceding-shape 2
+done
+report_timing reverse-hydration
+# Exercise the service-loop upgrade's exact predecessor constraint discovery.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    render_phase_migration \
+        "$ROOT/migrations/20260721130000_service_loop_heartbeats.sql"
+} | run_psql
+assert_migration_refusal \
+    service-loop-scope-constraint \
+    "$ROOT/migrations/20260721140000_service_loop_phase_heartbeats.sql" \
+    'service_loop_heartbeats scope constraint was not found' <<'SQL'
+DO $$
+DECLARE
+    scope_constraint text;
+BEGIN
+    SELECT constraint_row.conname
+    INTO scope_constraint
+    FROM pg_constraint AS constraint_row
+    WHERE constraint_row.conrelid = 'service_loop_heartbeats'::regclass
+      AND constraint_row.contype = 'c'
+      AND pg_get_constraintdef(constraint_row.oid) LIKE '%scope_kind%'
+    ORDER BY constraint_row.conname
+    LIMIT 1;
+    EXECUTE format(
+        'ALTER TABLE service_loop_heartbeats DROP CONSTRAINT %I',
+        scope_constraint
+    );
+END
+$$;
+SQL
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' 'DROP TABLE service_loop_heartbeats;'
+} | run_psql
 
 # Exercise the authority-arm upgrade from its exact preceding empty binding
 # shape. Applying the reviewed file twice must retain one required column, its
@@ -387,6 +729,21 @@ INSERT INTO resources (
     '00000000-0000-0000-0000-000000000001',
     'authority-reset', '0x01', 1, 'canonical'
 );
+INSERT INTO normalized_events (
+    event_identity, namespace, event_kind, source_family, manifest_version,
+    chain_id, derivation_kind, canonicality_state
+) VALUES (
+    'authority-reset-normalized-sentinel', 'schema-v2-check',
+    'SourceManifestUpdated', 'authority-reset-sentinel', 1,
+    'authority-reset', 'manifest_sync', 'canonical'
+);
+SQL
+} | run_psql
+
+assert_migration_refusal \
+    authority-arm-offline-reset \
+    "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql" \
+    'surface binding authority-arm upgrade requires the reviewed offline binding reset before migration apply' <<'SQL'
 INSERT INTO surface_bindings (
     surface_binding_id, logical_name_id, resource_id, binding_kind,
     active_from, chain_id, block_hash, block_number, canonicality_state
@@ -397,15 +754,21 @@ INSERT INTO surface_bindings (
     'declared_registry_path', to_timestamp(1),
     'authority-reset', '0x01', 1, 'canonical'
 );
-INSERT INTO normalized_events (
-    event_identity, namespace, event_kind, source_family, manifest_version,
-    chain_id, derivation_kind, canonicality_state
-) VALUES (
-    'authority-reset-normalized-sentinel', 'schema-v2-check',
-    'SourceManifestUpdated', 'authority-reset-sentinel', 1,
-    'authority-reset', 'manifest_sync', 'canonical'
-);
+SQL
 
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+INSERT INTO surface_bindings (
+    surface_binding_id, logical_name_id, resource_id, binding_kind,
+    active_from, chain_id, block_hash, block_number, canonicality_state
+) VALUES (
+    '00000000-0000-0000-0000-000000000002',
+    'schema-v2-check:0xreset',
+    '00000000-0000-0000-0000-000000000001',
+    'declared_registry_path', to_timestamp(1),
+    'authority-reset', '0x01', 1, 'canonical'
+);
 TRUNCATE TABLE
     name_current,
     address_names_current,
@@ -429,10 +792,12 @@ BEGIN
 END
 $$;
 SQL
-    sed "s/bigname_phase/$scratch_schema/g" \
-        "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql"
-    sed "s/bigname_phase/$scratch_schema/g" \
-        "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql"
+    emit_phase_migration \
+        "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql" \
+        preceding-shape
+    emit_phase_migration \
+        "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql" \
+        preceding-shape
     cat <<'SQL'
 DO $$
 DECLARE
@@ -487,8 +852,9 @@ INSERT INTO normalized_events (
 );
 DROP TABLE project_redo_resolver_evidence;
 SQL
-    sed "s/bigname_phase/$scratch_schema/g" \
-        "$ROOT/migrations/20260814120000_project_redo_resolver_evidence.sql"
+    emit_phase_migration \
+        "$ROOT/migrations/20260814120000_project_redo_resolver_evidence.sql" \
+        preceding-shape
     cat <<'SQL'
 DO $$
 DECLARE
@@ -554,12 +920,15 @@ INSERT INTO normalized_events (
 );
 DROP TABLE project_redo_expiry_roots;
 SQL
-    sed "s/bigname_phase/$scratch_schema/g" \
-        "$ROOT/migrations/20260902140000_project_redo_expiry_roots.sql"
-    sed "s/bigname_phase/$scratch_schema/g" \
-        "$ROOT/migrations/20260902150000_project_redo_expiry_resources.sql"
-    sed "s/bigname_phase/$scratch_schema/g" \
-        "$ROOT/migrations/20260902150000_project_redo_expiry_resources.sql"
+    emit_phase_migration \
+        "$ROOT/migrations/20260902140000_project_redo_expiry_roots.sql" \
+        preceding-shape
+    emit_phase_migration \
+        "$ROOT/migrations/20260902150000_project_redo_expiry_resources.sql" \
+        preceding-shape
+    emit_phase_migration \
+        "$ROOT/migrations/20260902150000_project_redo_expiry_resources.sql" \
+        preceding-shape
     cat <<'SQL'
 DO $$
 DECLARE
@@ -644,8 +1013,9 @@ SQL
         "    'This time records the latest completed work unit.';"
 } | run_psql
 for ignored in 1 2; do
-    sed "s/bigname_phase/$scratch_schema/g" \
+    emit_phase_migration \
         "$ROOT/migrations/20260814121000_phase_heartbeat_liveness_comment.sql" \
+        preceding-shape \
         | run_psql
 done
 heartbeat_comment_check="$({
@@ -682,7 +1052,7 @@ for ignored in 1 2; do
         "$ROOT/migrations/20260814122000_verify_unconfigured_settlement.sql" \
         "$ROOT/migrations/20260814122100_verify_unconfigured_settlement_validate.sql"
     do
-        sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
+        emit_phase_migration "$migration_file" preceding-shape | run_psql
     done
 done
 assert_unconfigured_settlement_constraint migration
@@ -741,8 +1111,9 @@ fi
         "    DROP COLUMN redo_source_boundary_markers;"
 } | run_psql
 for ignored in 1 2; do
-    sed "s/bigname_phase/$scratch_schema/g" \
+    emit_phase_migration \
         "$ROOT/migrations/20260814123000_ingest_redo_source_boundary_markers.sql" \
+        preceding-shape \
         | run_psql
 done
 redo_source_boundary_upgrade_check="$({
@@ -805,14 +1176,17 @@ fi
         "    DROP COLUMN redo_attempt_generation;"
 } | run_psql
 for ignored in 1 2; do
-    sed "s/bigname_phase/$scratch_schema/g" \
+    emit_phase_migration \
         "$ROOT/migrations/20260814124000_redo_attempt_generation.sql" \
+        preceding-shape \
         | run_psql
-    sed "s/bigname_phase/$scratch_schema/g" \
+    emit_phase_migration \
         "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql" \
+        preceding-shape \
         | run_psql
-    sed "s/bigname_phase/$scratch_schema/g" \
+    emit_phase_migration \
         "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
+        preceding-shape \
         | run_psql
 done
 redo_attempt_generation_upgrade_check="$({
@@ -878,8 +1252,9 @@ fi
         "    DROP COLUMN redo_manifest_authority_fingerprint;"
 } | run_psql
 for ignored in 1 2; do
-    sed "s/bigname_phase/$scratch_schema/g" \
+    emit_phase_migration \
         "$ROOT/migrations/20260814125000_ingest_redo_manifest_authority.sql" \
+        preceding-shape \
         | run_psql
 done
 migration_redo_manifest_authority_constraint="$({
@@ -998,49 +1373,98 @@ ALTER TABLE permissions_current
             )
         );
 INSERT INTO normalized_events (
-    event_identity,
-    namespace,
-    event_kind,
-    source_family,
-    manifest_version,
-    chain_id,
-    derivation_kind,
-    after_state
-)
-VALUES (
-    'removed-permission-scope-upgrade-check',
-    'schema-v2-check',
-    'PermissionChanged',
-    'schema-check',
-    1,
-    'schema-v2-check',
-    'ens_v2_permissions',
-    '{"scope":{"kind":"migration_derived"}}'::jsonb
+    event_identity, namespace, event_kind, source_family, manifest_version,
+    chain_id, derivation_kind, after_state
+) VALUES (
+    'remove-l2-safe-event', 'schema-v2-check', 'PermissionChanged',
+    'schema-check', 1, 'schema-v2-check', 'ens_v2_permissions',
+    '{"scope":{"kind":"resource"}}'::jsonb
+);
+INSERT INTO surface_bindings (
+    surface_binding_id, logical_name_id, resource_id, binding_kind,
+    authority_arm, active_from, chain_id, block_hash, block_number,
+    canonicality_state
+) VALUES
+    ('00000000-0000-0000-0000-000000000030', 'schema-v2-check:0xreset',
+     '00000000-0000-0000-0000-000000000001', 'declared_registry_path',
+     'ens_v1', to_timestamp(2), 'authority-reset', '0x01', 1, 'canonical'),
+    ('00000000-0000-0000-0000-000000000031', 'schema-v2-check:0xreset',
+     '00000000-0000-0000-0000-000000000001', 'declared_registry_path',
+     'ens_v2', to_timestamp(2), 'authority-reset', '0x01', 1, 'canonical');
+INSERT INTO name_current (
+    logical_name_id, namespace, raw_name, namehash, surface_binding_id,
+    resource_id, binding_kind, support_status, manifest_version
+) VALUES (
+    'schema-v2-check:0xreset', 'schema-v2-check', 'reset', '0xreset',
+    '00000000-0000-0000-0000-000000000031',
+    '00000000-0000-0000-0000-000000000001',
+    'declared_registry_path', 'supported', 1
+);
+INSERT INTO address_names_current (
+    address, logical_name_id, relation, namespace, raw_name, namehash,
+    surface_binding_id, resource_id, binding_kind, support_status,
+    manifest_version
+) VALUES (
+    'remove-l2-address', 'schema-v2-check:0xreset', 'registrant',
+    'schema-v2-check', 'reset', '0xreset',
+    '00000000-0000-0000-0000-000000000031',
+    '00000000-0000-0000-0000-000000000001',
+    'declared_registry_path', 'supported', 1
+);
+INSERT INTO permissions_current (
+    resource_id, subject, scope, scope_kind, manifest_version
+) VALUES (
+    '00000000-0000-0000-0000-000000000001',
+    'remove-l2-subject', 'remove-l2-scope', 'resource', 1
 );
 SQL
 } | run_psql
 
-if migration_error="$({
-    sed "s/bigname_phase/$scratch_schema/g" \
-        "$ROOT/migrations/20260810120000_remove_l2_migration_remnants.sql"
-} | run_psql 2>&1)"; then
-    printf '%s\n' \
-        'schema-v2 upgrade check failed: removed normalized-event scope was accepted' >&2
-    exit 1
-fi
-if [[ "$migration_error" != *"normalized events still use removed values"* ]]; then
-    printf '%s\n%s\n' \
-        'schema-v2 upgrade check failed for an unexpected reason:' \
-        "$migration_error" >&2
-    exit 1
-fi
+remove_l2_migration="$ROOT/migrations/20260810120000_remove_l2_migration_remnants.sql"
+assert_migration_refusal remove-l2-normalized-events "$remove_l2_migration" \
+    'cannot remove permission scopes: normalized events still use removed values' <<'SQL'
+UPDATE normalized_events SET after_state = '{"scope":{"kind":"migration_derived"}}'
+WHERE event_identity = 'remove-l2-safe-event';
+SQL
+assert_migration_refusal remove-l2-surface-bindings "$remove_l2_migration" \
+    'cannot remove migration_rebind: surface bindings still use it' <<'SQL'
+UPDATE surface_bindings SET binding_kind = 'migration_rebind'
+WHERE surface_binding_id = '00000000-0000-0000-0000-000000000030';
+SQL
+assert_migration_refusal remove-l2-name-current "$remove_l2_migration" \
+    'cannot remove migration_rebind: current names still use it' <<'SQL'
+ALTER TABLE name_current ALTER CONSTRAINT
+    name_current_surface_binding_id_logical_name_id_resource_i_fkey
+    DEFERRABLE INITIALLY DEFERRED;
+UPDATE name_current SET binding_kind = 'migration_rebind'
+WHERE logical_name_id = 'schema-v2-check:0xreset';
+SQL
+assert_migration_refusal remove-l2-address-names-current "$remove_l2_migration" \
+    'cannot remove migration_rebind: current address-name rows still use it' <<'SQL'
+ALTER TABLE address_names_current ALTER CONSTRAINT
+    address_names_current_surface_binding_id_logical_name_id_r_fkey
+    DEFERRABLE INITIALLY DEFERRED;
+UPDATE address_names_current SET binding_kind = 'migration_rebind'
+WHERE address = 'remove-l2-address';
+SQL
+assert_migration_refusal remove-l2-permissions-current "$remove_l2_migration" \
+    'cannot remove permission scopes: current rows still use removed values' <<'SQL'
+UPDATE permissions_current SET scope_kind = 'migration_derived'
+WHERE subject = 'remove-l2-subject';
+SQL
 
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     printf '%s\n' \
-        "DELETE FROM normalized_events WHERE event_identity = 'removed-permission-scope-upgrade-check';"
-    sed "s/bigname_phase/$scratch_schema/g" \
-        "$ROOT/migrations/20260810120000_remove_l2_migration_remnants.sql"
+        "DELETE FROM address_names_current WHERE address = 'remove-l2-address';" \
+        "DELETE FROM name_current WHERE logical_name_id = 'schema-v2-check:0xreset';" \
+        "DELETE FROM permissions_current WHERE subject = 'remove-l2-subject';" \
+        "DELETE FROM surface_bindings WHERE surface_binding_id IN (" \
+        "    '00000000-0000-0000-0000-000000000030'," \
+        "    '00000000-0000-0000-0000-000000000031'" \
+        ");" \
+        "DELETE FROM normalized_events WHERE event_identity = 'remove-l2-safe-event';"
+    emit_phase_migration "$remove_l2_migration" preceding-shape
     cat <<'SQL'
 DO $$
 DECLARE
@@ -1159,7 +1583,7 @@ SQL
         "$ROOT/migrations/20260902160100_registry_operator_account_permissions_validate.sql" \
         "$ROOT/migrations/20260902160200_registry_operator_account_permissions_swap.sql"
     do
-        sed "s/bigname_phase/$scratch_schema/g" "$migration_file"
+        emit_phase_migration "$migration_file" preceding-shape
     done
 } | run_psql
 
@@ -6275,5 +6699,16 @@ $$;
 SQL
 } | run_psql
 
+report_timing specialized-predecessor "$refusal_probe_seconds"
+if [ "${SCHEMA_V2_APPLY_CHECK_TIMING:-0}" = 1 ]; then printf 'schema-v2 timing: refusal-probes=%ss\n' "$refusal_probe_seconds"; fi
+assert_reviewed_phase_migrations_exercised
+if [ "$refusal_assertions_passed" -ne "$expected_refusal_assertions" ]; then
+    printf '%s\n' \
+        "refusal assertions: $refusal_assertions_passed/$expected_refusal_assertions" >&2
+    exit 1
+fi
+report_timing final-assertions
 printf '%s\n' \
     "schema-v2 baseline applied twice and passed structural and behavior checks"
+printf '%s\n' \
+    "schema-migration coverage: expected reviewed phase schema-migrations=$expected_reviewed_phase_migration_count; unique exercised schema-migrations=$unique_successful_migration_count; total successful applications=$total_successful_migration_applications; intentional skips=$intentional_phase_migration_skip_count; refusal assertions=$refusal_assertions_passed/$expected_refusal_assertions"
