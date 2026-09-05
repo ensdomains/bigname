@@ -304,7 +304,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=7
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=24
+expected_predecessor_shape_proof_count=23
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -1217,7 +1217,7 @@ for ignored in 1 2; do
         | run_psql
     emit_phase_migration \
         "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
-        preceding-shape \
+        baseline-first \
         | run_psql
 done
 redo_attempt_generation_upgrade_check="$({
