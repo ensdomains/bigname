@@ -217,8 +217,20 @@ to the applicable entries below.
 > name lookup and normalization behavior.
 > **Since**: `2026-09-03`
 
-> **Generated Domain owner filters depend on projected registry ownership** — the partial `Domain_filter.owner` and
-> `owner_in` members use bigname's effective-controller relation. The effective controller agrees with `Domain.owner`
+> **Generated Domain owner filters depend on projected registry ownership** — the generated `Domain_filter` serves the
+> 20-member `owner`, `owner_not`, `owner_gt`, `owner_gte`, `owner_lt`, `owner_lte`, `owner_in`, `owner_not_in`,
+> `owner_contains`, `owner_contains_nocase`, `owner_not_contains`, `owner_not_contains_nocase`, `owner_starts_with`,
+> `owner_starts_with_nocase`, `owner_not_starts_with`, `owner_not_starts_with_nocase`, `owner_ends_with`,
+> `owner_ends_with_nocase`, `owner_not_ends_with`, and `owner_not_ends_with_nocase` scalar family over bigname's
+> effective-controller relation. Positive members require a matching relation row. Negative members require an eligible
+> relation witness and use a name-correlated anti-semijoin against the positive counterpart, so a name cannot pass merely
+> because it has no effective-controller relation. Filtered relation targets participate in snapshot revalidation.
+> `owner` and `owner_in` continue to lowercase address operands; ranges and patterns compare the supplied text directly.
+> Explicit null for those retained members remains equivalent to omission, a deliberate divergence from Graph Node filed
+> as `#862`; every newly served owner member rejects explicit null as `Domain_filter.<member> must not be null`. Empty
+> `owner_in` and `owner_not_in` lists both return an empty page, while duplicate list entries are tolerated. A bounded
+> positive equality or membership uses the relation-driven address-membership plan; an owner filter without that anchor
+> uses a page-driven name-correlated relation probe. The effective controller agrees with `Domain.owner`
 > when the latest projected registry-ownership event is an owner-bearing `AuthorityTransferred` to a non-zero address on
 > a non-wrapper-authority name and no later resource-scoped `PermissionChanged` event exists on the selected resource.
 > A zero registry owner is served as the zero address; a masked owner word is served as the registrant fallback, or the
@@ -245,7 +257,8 @@ to the applicable entries below.
 > **Generated Domain patterns preserve SQL wildcards** — generated contains patterns are left unchanged when they start or
 > end with `%` and otherwise gain `%` at both ends. Generated pattern input does not perform ENSIP-15 substring
 > normalization and does not escape `%`, `_`, or backslash. The legacy `DomainFilter` retains its existing normalization
-> and escaped-pattern behavior.
+> and escaped-pattern behavior. These rules apply to both generated name patterns and generated owner-ID patterns:
+> starts-with appends `%`, ends-with prepends `%`, case-sensitive members use `LIKE`, and `_nocase` members use `ILIKE`.
 > **Upstream**: Graph Node constructs contains patterns this way and passes them to `LIKE`/`ILIKE`
 > (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1432-L1476 @ graph_node@aefe173)
 > (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1532-L1545 @ graph_node@aefe173).
@@ -255,7 +268,8 @@ to the applicable entries below.
 > **Generated GraphQL text uses C collation only when it changes semantics** — Graph Node rejects a store database whose collation or
 > character classification is not `C` (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L152-L158 @
 > graph_node@aefe173) (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L159-L163 @ graph_node@aefe173). Bigname applies `COLLATE "C"` to generated raw-name comparisons, name ordering, and noncanonical ID ranges, but deliberately
-> leaves fixed-width lowercase hexadecimal namehash predicates and order/tie-break expressions unwrapped so
+> generated owner-ID ranges and case-sensitive owner-ID patterns, and deliberately leaves fixed-width lowercase
+> hexadecimal namehash predicates and order/tie-break expressions unwrapped so
 > `name_current_lookup_idx` remains usable. The deployment contract requires a collation that orders those canonical
 > hexadecimal keys byte-lexically like C. Alpine/musl CI and default deployment images satisfy that rule by construction;
 > glibc deployments rely on the separately verified lowercase-hexadecimal property, while local C collation remains
