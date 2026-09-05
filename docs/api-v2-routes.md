@@ -1056,8 +1056,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   [`projections.md`](projections.md#permissions), rather than
   deriving it from events. A registry-contract generation move, owner change,
   zero owner, revocation, or orphaned account or binding lineage makes the row
-  absent. `include=lineage` exposes the approval event as the grant source and
-  does not expose registry-binding provenance.
+  absent. `include=lineage` exposes only the bare `lineage.grant={"kind":"event"}`
+  marker and does not expose registry-binding provenance.
   `current_for_name` means a `name` filter selected the row's current
   registration for that requested name. A row admitted without a `name` filter,
   including an explicit-`registration_id` or address-filtered resource read, is

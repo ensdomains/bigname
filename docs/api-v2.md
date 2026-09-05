@@ -130,8 +130,7 @@ rule](projections.md#permissions); it does not derive applicability again from
 events. The matched row is returned with `grant_relation=operator`,
 `grant_scope={"kind":"account","detail":{"chain_id":...,"authority_kind":"registry","authority_contract":...,"owner":...}}`,
 and `powers=["registry_control"]`. Direct rows keep their existing wire shape
-and omit `grant_relation`. `include=lineage` uses the account row's approval
-event as `lineage.grant`; the binding evidence remains internal.
+and omit `grant_relation`. `include=lineage` emits only the bare `lineage.grant={"kind":"event"}` marker; the binding evidence remains internal.
 (upstream: .refs/basenames/src/L2/Registry.sol:L46-L52 @ basenames@1809bbc)
 (upstream: .refs/basenames/src/L2/Registry.sol:L148-L158 @ basenames@1809bbc)
 
