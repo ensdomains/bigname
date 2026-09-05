@@ -7,6 +7,11 @@ use anyhow::{Context, Result, bail};
 use super::artifacts::{Deployed, deploy, load_ens_v1_artifact};
 use super::rpc::{RpcClient, TxReceipt};
 
+pub const CANNOT_UNWRAP: u32 = 1;
+pub const CANNOT_SET_RESOLVER: u32 = 8;
+pub const PARENT_CANNOT_CONTROL: u32 = 1 << 16;
+pub const IS_DOT_ETH: u32 = 1 << 17;
+
 // Call fragments match the pinned upstream sources:
 // (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L39 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L45 @ ens_v1@91c966f)
@@ -1245,6 +1250,21 @@ pub async fn transfer_wrapped_name(
     to: Address,
     name: &str,
 ) -> Result<String> {
+    Ok(
+        transfer_wrapped_name_with_data(rpc, d, from, to, name, Bytes::new())
+            .await?
+            .tx_hash,
+    )
+}
+
+pub async fn transfer_wrapped_name_with_data(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    to: Address,
+    name: &str,
+    data: Bytes,
+) -> Result<TxReceipt> {
     let receipt = send_checked_receipt(
         rpc,
         from,
@@ -1254,12 +1274,12 @@ pub async fn transfer_wrapped_name(
             to,
             id: U256::from_be_bytes(namehash(name).0),
             amount: U256::from(1u8),
-            data: Bytes::new(),
+            data,
         }
         .abi_encode(),
     )
     .await?;
-    Ok(receipt.tx_hash)
+    Ok(receipt)
 }
 
 pub async fn batch_transfer_wrapped_names(

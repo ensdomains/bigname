@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::support;
-use crate::harness::{anvil::Anvil, ens_v1, repo_root};
+use crate::harness::{anvil::Anvil, ens_v1, perturb, repo_root};
 
 const DURATION_SECS: u64 = 365 * 24 * 60 * 60;
 
@@ -32,6 +32,115 @@ fn account(accounts: &[Address], index: usize) -> Result<Address> {
         .get(index)
         .copied()
         .with_context(|| format!("anvil account {index} is missing"))
+}
+
+#[tokio::test]
+async fn connected_ens_v1_v2_migration_paths_emit_expected_facts() -> Result<()> {
+    let harness = support::deploy_connected_migration_harness().await?;
+    let unlocked = support::create_unlocked_migration_path(&harness).await?;
+    let locked = support::create_locked_migration_path(&harness).await?;
+    let run = support::ingest_ens_v1_v2_migration_sepolia_and_serve(
+        &harness.anvil,
+        &harness.ens_v1,
+        &harness.ens_v2,
+        &harness.migration,
+        None,
+    )
+    .await?;
+    assert!(
+        run.manifests_root
+            .join("ethereum/ens/ens_v2_migration_l1/v1.toml")
+            .is_file(),
+        "generated Sepolia profile is missing ens_v2_migration_l1/v1.toml"
+    );
+
+    let unlocked_boundary = migration_boundary(&run, "unlock-migration.eth").await?;
+    let locked_boundary = migration_boundary(&run, "locked-migration.eth").await?;
+    for boundary in [&unlocked_boundary, &locked_boundary] {
+        assert_eq!(boundary["source_event"], "MigrationApplied");
+        assert_eq!(boundary["successor_binding"]["authority_epoch"], "ens_v2");
+        assert!(boundary["successor_binding"]["binding_id"].is_string());
+        assert!(boundary["successor_binding"]["resource_id"].is_string());
+    }
+    assert_eq!(unlocked_boundary["migration_path"], "unlocked_wrapped");
+    assert_eq!(locked_boundary["migration_path"], "locked_wrapped");
+    assert_ne!(locked.bridged_owner, Address::ZERO);
+    assert_ne!(locked.blocked_owner, Address::ZERO);
+    assert_ne!(locked.bridged.fuses & ens_v1::PARENT_CANNOT_CONTROL, 0);
+    assert_eq!(locked.blocked.fuses & ens_v1::PARENT_CANNOT_CONTROL, 0);
+
+    let stable_instances = perturb::contract_instance_stable_keys(&run.db.pool).await?;
+    let locked_instance = locked_boundary["successor_registry_contract_instance_id"]
+        .as_str()
+        .context("locked migration boundary lacks successor registry instance")?;
+    let expected_successor_registry = format!(
+        "ethereum-sepolia:{:#x}",
+        harness.ens_v2.eth_registry.address
+    );
+    assert_eq!(
+        stable_instances.get(locked_instance).map(String::as_str),
+        Some(expected_successor_registry.as_str())
+    );
+    let association: (String, String, String) = sqlx::query_as(
+        "SELECT registry_contract_instance_id::text, lower(registry_address), \
+                consumer_visibility \
+         FROM migration_discovery_associations \
+         WHERE chain_id = 'ethereum-sepolia' \
+           AND correlation_kind = 'migration_registry_creation' \
+           AND lower(registry_address) = lower($1)",
+    )
+    .bind(format!("{:#x}", locked.wrapper_registry))
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(association.1, format!("{:#x}", locked.wrapper_registry));
+    assert_eq!(association.2, "activated");
+    let expected_migration_registry = format!("ethereum-sepolia:{:#x}", locked.wrapper_registry);
+    assert_eq!(
+        stable_instances.get(&association.0).map(String::as_str),
+        Some(expected_migration_registry.as_str())
+    );
+    println!(
+        "connected migration: name_wrapper={:#x} base_registrar={:#x} unlocked_controller={:#x} locked_controller={:#x} graveyard={:#x} wrapper_implementation={:#x} unlocked_owner={:#x} unlocked_expiry={} locked_owner={:#x} locked_expiry={} wrapper_proxy={:#x}",
+        harness.ens_v1.name_wrapper.address,
+        harness.ens_v1.base_registrar.address,
+        harness.migration.unlocked_migration_controller.address,
+        harness.migration.locked_migration_controller.address,
+        harness.migration.graveyard.address,
+        harness.migration.wrapper_registry_implementation.address,
+        unlocked.target_owner,
+        unlocked.expiry,
+        locked.target_owner,
+        locked.expiry,
+        locked.wrapper_registry,
+    );
+    run.db.cleanup().await?;
+    Ok(())
+}
+
+async fn migration_boundary(run: &support::PipelineRun, name: &str) -> Result<Value> {
+    let logical_name_id = format!("ens:{:#x}", ens_v1::namehash(name));
+    let rows: Vec<(String, String, String, bool)> = sqlx::query_as(
+        "SELECT after_state::text, consumer_visibility, \
+                after_state->>'consumer_visibility', \
+                (after_state->>'candidate_authority_transition')::boolean \
+         FROM normalized_events \
+         WHERE source_family = 'ens_v2_migration_l1' \
+           AND event_kind = 'MigrationApplied' \
+           AND canonicality_state = 'canonical' \
+           AND logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .fetch_all(&run.db.pool)
+    .await?;
+    assert_eq!(
+        rows.len(),
+        1,
+        "expected one activated MigrationApplied transition for {name}"
+    );
+    assert_eq!(rows[0].1, "activated");
+    assert_eq!(rows[0].2, "activated");
+    assert!(!rows[0].3);
+    serde_json::from_str(&rows[0].0).context("parse MigrationApplied after_state")
 }
 
 #[tokio::test]
