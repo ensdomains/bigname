@@ -233,6 +233,11 @@ async fn api_preflight_reports_unreadable_account_permission_state_current() -> 
         == "bigname_phase.account_permission_state_current"));
     assert!(!missing.iter().any(|object| object.identity
         == "bigname_phase.resolution_divergences"));
+    sqlx::query(&format!("REVOKE USAGE ON SCHEMA bigname_phase FROM {role}"))
+        .execute(&database.lookup_pool).await?;
+    let missing = bigname_storage::load_missing_api_lookup_ddl(&pool).await?;
+    assert!(missing.iter().any(|object| object.identity
+        == "bigname_phase.account_permission_state_current"));
     let error = crate::startup_preflight::ensure_verified_lookup_ddl_available(&pool)
         .await
         .expect_err("startup must reject an unreadable serving relation");

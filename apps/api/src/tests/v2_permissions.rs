@@ -65,6 +65,11 @@ async fn v2_get_permissions_empties_a_superseded_name_and_registration_pair() ->
     let database = TestDatabase::new_migrated().await?;
     seed_v2_permissions_fixture(&database).await?;
     let stale_resource_id = v2_permissions_stale_resource_id();
+    upsert_phase_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(stale_resource_id, Some("wrapper")),
+    )
+    .await?;
 
     let paired = v2_permissions_payload_for_database(
         &database,
@@ -73,7 +78,7 @@ async fn v2_get_permissions_empties_a_superseded_name_and_registration_pair() ->
     .await?;
     assert_eq!(paired["data"], json!([]));
     assert_eq!(paired["meta"]["completeness"], json!("partial"));
-    assert_eq!(paired["meta"]["unsupported_reason"], json!(V2_RESOURCE_PERMISSION_REASON));
+    assert_eq!(paired["meta"]["unsupported_reason"], json!(V2_ACCOUNT_PERMISSION_REASON));
 
     // Anti-vacuity: the same superseded registration is still readable as a resource audit.
     let audited = v2_permissions_payload_for_database(
@@ -508,6 +513,33 @@ async fn v2_permissions_cursor_binds_account_collection_anchor() -> Result<()> {
         "/v2/permissions?address={V2_PERMISSIONS_OTHER_SUBJECT}&page_size=1&cursor={cursor}"
     )).await?;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_permissions_namespace_filters_before_operator_paging() -> Result<()> {
+    let database = seed_v2_registry_operator_fixture().await?;
+    let resource_id = Uuid::from_u128(0xf100);
+    database.seed_name_current_binding(
+        "basenames:base-perms.base.eth", "basenames", "base-perms.base.eth", "base-perms.base.eth",
+        "base-perms", resource_id, Uuid::from_u128(0xf101), Uuid::from_u128(0xf102),
+    ).await?;
+    upsert_phase_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(resource_id, Some("registrar")),
+    ).await?;
+    upsert_phase_permissions_current_rows(&database.pool, &[permission_current_row(
+        resource_id, V2_PERMISSIONS_SUBJECT, PermissionScope::Resource, 1, 112,
+    )]).await?;
+    seed_registry_operator(&database, resource_id).await?;
+
+    let base = format!("/v2/permissions?address={V2_PERMISSIONS_SUBJECT}&namespace=basenames&page_size=1");
+    let first = v2_permissions_payload_for_database(&database, &base).await?;
+    let cursor = first["page"]["next_cursor"].as_str().expect("second Basenames row");
+    let second = v2_permissions_payload_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
+    for row in [&first["data"][0], &second["data"][0]] {
+        assert_eq!(row["registration_id"], json!(resource_id.to_string()));
+    }
     database.cleanup().await
 }
 
@@ -1107,7 +1139,11 @@ fn operator_row(payload: &Value) -> Option<&Value> {
 async fn seed_v2_registry_operator_fixture() -> Result<TestDatabase> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_permissions_fixture(&database).await?;
-    let resource_id = v2_permissions_current_resource_id();
+    seed_registry_operator(&database, v2_permissions_current_resource_id()).await?;
+    Ok(database)
+}
+
+async fn seed_registry_operator(database: &TestDatabase, resource_id: Uuid) -> Result<()> {
     sqlx::query(
         "UPDATE bigname_phase.permissions_current_resource_summary
          SET registry_owner = $2, registry_contract = $3,
@@ -1145,7 +1181,7 @@ async fn seed_v2_registry_operator_fixture() -> Result<TestDatabase> {
     .bind(V2_PERMISSIONS_SUBJECT)
     .execute(&database.pool)
     .await?;
-    Ok(database)
+    Ok(())
 }
 
 async fn v2_permissions_payload(uri: &str) -> Result<(TestDatabase, Value)> {
