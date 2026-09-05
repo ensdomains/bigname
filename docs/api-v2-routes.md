@@ -908,8 +908,10 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Request parameters: at least one of `name`, `registration_id`, or `address`;
   filters are combinable intersections. A `name` resolves its current
   `registration_id`; an explicit `registration_id` must match it when both are
-  supplied, and `address` then restricts the permission subject. Query
-  `namespace`, `include=lineage`, `cursor`,
+  supplied, and `address` then restricts the permission subject. An explicit or
+  name-implied `namespace` filters registrations before pagination; an
+  address-only request without `namespace` continues to span all namespaces.
+  Query `include=lineage`, `cursor`,
   `page_size`, and optional `finality=latest`. `at` and historical `finality`
   values are rejected by the shared latest-state collection rule.
 - Response shape: `data` is an array of permission rows
@@ -983,7 +985,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   opaque cursor binds the exact normalized collection anchor: normalized
   `address`, normalized `name` when supplied, resolved `registration_id`,
   namespace when explicit or implied by a name (and namespace absence for an
-  address-only request),
+  address-only request, matching its all-namespace result set),
   `include=lineage`, the fixed sort, and the last keyset tuple. New cursors carry
   `snapshot=None`; legacy snapshot components are ignored. Malformed cursor
   encoding, a different bound filter anchor or sort, and a missing or malformed
