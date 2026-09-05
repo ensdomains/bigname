@@ -84,12 +84,22 @@ The connected Sepolia fixture starts with the existing local ENSv2 deployment:
 registrar, mock payment tokens, and the required root-role grants. It then
 deploys the migration address set/namer, `VerifiableFactory`, `ENSV1Resolver`,
 `Graveyard`, `WrapperRegistryImpl`, and the unlocked and locked migration
-controllers. Their constructor wiring follows the pinned upstream contracts
+controllers. Their constructor argument order follows the pinned upstream contracts
 (upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L28-L30 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L73-L75 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L70-L89 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L56-L64 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L42-L57 @ ens_v2@a971bd64).
+The archived `WrapperRegistryImpl` bytecode has constructor revision skew from
+the current pinned source: its fifth address is named
+`ApprovedUpgradeGate upgradeGate`, and its metadata includes
+`ApprovedUpgradeGate.sol`
+(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/WrapperRegistryImpl.json:L27-L29 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/WrapperRegistryImpl.json:L3154 @ ens_v2@a971bd64),
+while the current source names that fifth address `IAddressSet upgradeSet`
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L70-L80 @ ens_v2@a971bd64).
+The harness relies only on the common nine-address order and address ABI type;
+these scenarios do not exercise `upgradeToAndCall` or `canUpgradeFrom`.
 The archived `PublicResolverSet.json` artifact names its contract
 `PermissionedAddressSet`; that contract's constructor accepts the root account,
 and it implements `IPermissionedAddressSet` plus `IContractNamer`, while
@@ -116,12 +126,16 @@ and `ens_v2_migration_l1`. It mirrors every shipped `v*.toml` into a scenario
 the migration family's local `NameWrapper` and `BaseRegistrar` correlation
 addresses. The ordinary Sepolia generator remains ENSv2-only and substitutes
 only roots and contracts. Checked-in `manifests/` is unchanged.
+Of the migration family's eight roles, `ens_v1_renewal_bridge`,
+`batch_registrar`, and `migration_helper` are deterministic, no-code
+placeholders with start block zero and are inert in this fixture; the other five
+roles are locally deployed migration contracts.
 
 Both paths first register and wrap an ENSv1 `.eth` parent, read its live
 registrar expiry, and reserve the same label in the ENSv2 `.eth` registry with
 zero owner, zero roles, zero subregistry, and zero resolver. Transfer data is
 the ordered `LibMigration.Data` tuple `label`, `owner`, `subregistry`, and
-`resolver` (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L20-L29 @ ens_v2@a971bd64).
+`resolver` (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L20-L31 @ ens_v2@a971bd64).
 For the unlocked path, the child exists before wrapping; the parent retains an
 unset `CANNOT_UNWRAP` bit, transfers to the unlocked controller, and is then
 followed by an explicit `Graveyard.clear` for the child. The controller rejects
@@ -171,6 +185,10 @@ Serving assertions call the route-shaped `ProjectionReader`: exact-name paths
 read `name_current`, children paths read `children_current`, and a missing exact
 projection returns `404`. This is the established projection-serving seam; it
 does not exercise network transport or API-process startup.
+The unlocked scenario discriminates on the child's logical name identifier in
+the children response. It makes no exact-name-route assertion because this
+registry-created child remains hash-only in the fixture, so that route is
+already absent before migration.
 
 `forge` must be on `PATH` before the 65 Foundry-dependent fault scenarios are
 described as runnable. With these three scenarios the counted inventory is 90
@@ -227,20 +245,20 @@ scripts/test-db -- bash -euo pipefail -c '
 
 Sort durations descending, seed shard 1 with
 `scenarios::cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage`
-and shard 2 with the second-longest scenario by measured duration, then assign each remaining name
-to the lower predicted load subject to the required final capacities. The
-current runnable split is 43 on shard 1 and 44 on shard 2. Break equal-duration
-or equal-load ties by full test name, keep at most five of the measured top ten
-on either shard, and keep two ignored tests on shard 1 and one on shard 2.
+and shard 2 with the second-longest scenario by measured duration. Assign names
+to the lower predicted load subject to the required final capacities, except
+for an explicitly documented scenario-family grouping. The current inventory
+uses one such grouping: the standalone connected-migration facts scenario is on
+shard 1 and both connected `cross_protocol` reachability scenarios are on shard
+2. The current runnable split is 43 on shard 1 and 44 on shard 2. Break
+equal-duration or equal-load ties by full test name, keep at most five of the
+measured top ten on either shard, and keep two ignored tests on shard 1 and one
+on shard 2.
 Update the lists, expected ignored-name set, counts, and predicted totals
 together in the block at the top of `run-gate`, then run its default, shard 1,
 and shard 2 modes. The explicit root-workspace build above removes a one-time
 canonical `phase-runner` compile from the first measured scenario while leaving
 scenario-specific generated builds in the timing sample.
-
-PR #612 adds four runnable scenarios, changing the inventory from 79/3 to
-83/3. Whichever PR merges second must perform this refresh; the set-equality
-gate deliberately fails closed if the inventory changes first.
 
 ## Coverage ledger
 
