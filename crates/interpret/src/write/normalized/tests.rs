@@ -54,7 +54,7 @@ fn event(identity: &str, after_state: serde_json::Value) -> NormalizedEvent {
 }
 
 #[tokio::test]
-async fn duplicate_identity_failure_rolls_back_and_retry_keeps_sequence_semantics() -> TestResult {
+async fn duplicate_identity_failure_rolls_back_and_accepts_corrected_retry() -> TestResult {
     let database = database("interpret_normalized_batch_duplicate").await?;
     let mut transaction = database.pool().begin().await?;
     let error = events(
@@ -90,29 +90,36 @@ async fn duplicate_identity_failure_rolls_back_and_retry_keeps_sequence_semantic
     )
     .await?;
     retry.commit().await?;
-    let rows: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT normalized_event_id, event_identity
+    let rows: Vec<(i64, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT normalized_event_id, event_identity, after_state
              FROM normalized_events ORDER BY normalized_event_id",
     )
     .fetch_all(database.pool())
     .await?;
     assert_eq!(
-        rows,
-        vec![(3, "duplicate".to_owned()), (4, "not-attempted".to_owned())]
+        rows.iter().map(|row| row.1.as_str()).collect::<Vec<_>>(),
+        ["duplicate", "not-attempted"]
     );
+    assert!(rows[0].0 < rows[1].0);
+    assert_eq!(rows[0].2, json!({"value": 1}));
+    assert_eq!(rows[1].2, json!({"value": 3}));
     database.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn stored_divergence_stops_before_suffix_and_retry_keeps_sequence_semantics() -> TestResult {
+async fn stored_divergence_rolls_back_and_preserves_retained_identity() -> TestResult {
     let database = database("interpret_normalized_batch_stored_divergence").await?;
     let mut seed = database.pool().begin().await?;
     events(&mut seed, &[event("stored", json!({"value":1}))]).await?;
     seed.commit().await?;
+    let retained: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(row) FROM normalized_events row")
+            .fetch_one(database.pool())
+            .await?;
 
     let mut transaction = database.pool().begin().await?;
-    events(
+    let error = events(
         &mut transaction,
         &[
             event("stored", json!({"value":2})),
@@ -120,8 +127,15 @@ async fn stored_divergence_stops_before_suffix_and_retry_keeps_sequence_semantic
         ],
     )
     .await
-    .expect_err("stored divergent identity must fail before the suffix");
+    .expect_err("stored divergent identity must fail");
+    assert_eq!(error.kind(), crate::ErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("0=stored"));
     transaction.rollback().await?;
+    let persisted: Vec<serde_json::Value> =
+        sqlx::query_scalar("SELECT to_jsonb(row) FROM normalized_events row")
+            .fetch_all(database.pool())
+            .await?;
+    assert_eq!(persisted, [retained]);
 
     let mut retry = database.pool().begin().await?;
     events(
@@ -133,16 +147,18 @@ async fn stored_divergence_stops_before_suffix_and_retry_keeps_sequence_semantic
     )
     .await?;
     retry.commit().await?;
-    let rows: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT normalized_event_id, event_identity
+    let rows: Vec<(i64, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT normalized_event_id, event_identity, after_state
              FROM normalized_events ORDER BY normalized_event_id",
     )
     .fetch_all(database.pool())
     .await?;
-    assert_eq!(
-        rows,
-        vec![(1, "stored".to_owned()), (4, "suffix".to_owned())]
-    );
+    assert_eq!((rows[0].0, rows[0].1.as_str()), (1, "stored"));
+    assert_eq!(rows[0].2, json!({"value": 1}));
+    assert_eq!(rows[1].2, json!({"value": 3}));
+    assert_eq!(rows[1].1, "suffix");
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].0 < rows[1].0);
     database.cleanup().await?;
     Ok(())
 }
@@ -150,6 +166,9 @@ async fn stored_divergence_stops_before_suffix_and_retry_keeps_sequence_semantic
 #[tokio::test]
 async fn values_boundary_persists_every_column_and_sequential_id() -> TestResult {
     let database = database("interpret_normalized_batch_values_boundary").await?;
+    let mut empty = database.pool().begin().await?;
+    events(&mut empty, &[]).await?;
+    empty.commit().await?;
     sqlx::raw_sql(
         "INSERT INTO name_surfaces (
                  logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
@@ -280,77 +299,156 @@ async fn constraint_error_names_writer_batch_and_every_submitted_row() -> TestRe
 }
 
 #[tokio::test]
-async fn constraint_failure_stops_before_suffix_and_retry_keeps_sequence_semantics() -> TestResult {
-    let database = database("interpret_normalized_batch_constraint_retry").await?;
-    let mut invalid = event("invalid", json!({"value": 1}));
-    invalid.logical_name_id = Some("ens:missing".to_owned());
-    let mut transaction = database.pool().begin().await?;
-    let error = events(
-        &mut transaction,
-        &[
-            event("prefix", json!({"value": 0})),
-            invalid,
-            event("suffix", json!({"value": 2})),
-        ],
-    )
-    .await
-    .expect_err("the invalid row must stop before the suffix row");
-    assert_eq!(error.kind(), crate::ErrorKind::DataIntegrity);
-    assert!(
-        error
-            .to_string()
-            .contains("normalized-event batch; batch rows [1=invalid]"),
-        "{error}"
-    );
-    transaction.rollback().await?;
+async fn missing_references_reject_whole_transaction_and_allow_corrected_retry() -> TestResult {
+    for reference in ["name", "resource", "manifest", "lineage"] {
+        let database = database("interpret_normalized_missing_reference").await?;
+        let mut invalid = event("invalid", json!({"value": 1}));
+        let mut corrected = invalid.clone();
+        match reference {
+            "name" => invalid.logical_name_id = Some("ens:missing".to_owned()),
+            "resource" => invalid.resource_id = Some(sqlx::types::Uuid::from_u128(99)),
+            "manifest" => {
+                let id = sqlx::query_scalar::<_, i64>(
+                    "INSERT INTO manifest_versions (manifest_version, namespace, source_family,
+                     chain_id, deployment_label, rollout_status, normalizer_version, file_path, manifest_payload)
+                     VALUES (1, 'other', 'batch_test', 'batch-test', 'test', 'active', 'test', 'test', '{}')
+                     RETURNING manifest_id",
+                ).fetch_one(database.pool()).await?;
+                invalid.source_manifest_id = Some(id);
+                corrected.source_manifest_id = Some(id);
+                corrected.namespace = "other".to_owned();
+            }
+            _ => invalid.block_hash = Some("0xmissing".to_owned()),
+        }
+        let prefix = if reference == "name" { 500 } else { 1 };
+        let mut submitted = (0..prefix)
+            .map(|i| event(&format!("prefix-{i}"), json!({"value": i})))
+            .collect::<Vec<_>>();
+        submitted.push(invalid);
+        submitted.push(event("suffix", json!({"value": 2})));
+        let mut transaction = database.pool().begin().await?;
+        let error = events(&mut transaction, &submitted)
+            .await
+            .expect_err(reference);
+        assert_eq!(error.kind(), crate::ErrorKind::DataIntegrity, "{error}");
+        assert!(
+            error.to_string().contains("foreign key constraint"),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains(&format!("{prefix}=invalid")),
+            "{error}"
+        );
+        transaction.rollback().await?;
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM normalized_events")
+            .fetch_one(database.pool())
+            .await?;
+        assert_eq!(
+            count, 0,
+            "{reference}: earlier statements must also roll back"
+        );
+        submitted[prefix] = corrected;
+        let mut retry = database.pool().begin().await?;
+        events(&mut retry, &submitted).await?;
+        retry.commit().await?;
+        let rows: Vec<(i64, String, serde_json::Value)> = sqlx::query_as(
+            "SELECT normalized_event_id, event_identity, after_state FROM normalized_events ORDER BY normalized_event_id",
+        ).fetch_all(database.pool()).await?;
+        assert_eq!(rows.len(), submitted.len());
+        assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        for (row, expected) in rows.iter().zip(&submitted) {
+            assert_eq!(
+                (&row.1, &row.2),
+                (&expected.event_identity, &expected.after_state)
+            );
+        }
+        database.cleanup().await?;
+    }
+    Ok(())
+}
 
-    let mut retry = database.pool().begin().await?;
-    events(
-        &mut retry,
-        &[
-            event("prefix", json!({"value": 0})),
-            event("invalid", json!({"value": 1})),
-            event("suffix", json!({"value": 2})),
-        ],
+#[tokio::test]
+async fn compatible_replay_and_repeated_identities_preserve_order() -> TestResult {
+    let database = database("interpret_normalized_mixed_success").await?;
+    let mut seed = database.pool().begin().await?;
+    events(&mut seed, &[event("stored", json!({"value": "stored"}))]).await?;
+    seed.commit().await?;
+    let keys = [
+        "fresh-a", "stored", "repeat", "repeat", "fresh-b", "repeat", "fresh-c",
+    ];
+    let mut submitted = keys
+        .iter()
+        .map(|key| event(key, json!({"value": key})))
+        .collect::<Vec<_>>();
+    submitted[1].canonicality_state = "safe".to_owned();
+    submitted[3].canonicality_state = "safe".to_owned();
+    submitted[5].canonicality_state = "finalized".to_owned();
+    let mut previous = None;
+    for _ in 0..2 {
+        let mut transaction = database.pool().begin().await?;
+        events(&mut transaction, &submitted).await?;
+        transaction.commit().await?;
+        let rows: Vec<serde_json::Value> = sqlx::query_scalar(
+            "SELECT to_jsonb(row) - 'observed_at' FROM normalized_events row ORDER BY normalized_event_id",
+        ).fetch_all(database.pool()).await?;
+        let expected = [
+            (1, "stored", "safe"),
+            (2, "fresh-a", "canonical"),
+            (4, "repeat", "finalized"),
+            (6, "fresh-b", "canonical"),
+            (8, "fresh-c", "canonical"),
+        ];
+        assert_eq!(rows.len(), expected.len());
+        for (row, (id, key, state)) in rows.iter().zip(expected) {
+            assert_eq!(row["normalized_event_id"], id);
+            assert_eq!(row["event_identity"], key);
+            assert_eq!(row["canonicality_state"], state);
+            assert_eq!(row["after_state"], json!({"value": key}));
+        }
+        if let Some(previous) = previous {
+            assert_eq!(rows, previous);
+        }
+        previous = Some(rows);
+    }
+    let mut sentinel = database.pool().begin().await?;
+    events(&mut sentinel, &[event("sentinel", json!({}))]).await?;
+    sentinel.commit().await?;
+    let id: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = 'sentinel'",
     )
-    .await?;
-    retry.commit().await?;
-    let rows: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT normalized_event_id, event_identity
-             FROM normalized_events ORDER BY normalized_event_id",
-    )
-    .fetch_all(database.pool())
+    .fetch_one(database.pool())
     .await?;
     assert_eq!(
-        rows,
-        vec![
-            (3, "prefix".to_owned()),
-            (4, "invalid".to_owned()),
-            (5, "suffix".to_owned()),
-        ]
+        id, 16,
+        "successful replay consumes the same IDs as successful insertion attempts"
     );
     database.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn preflight_error_caps_row_identities_and_reports_total() -> TestResult {
-    let database = database("interpret_normalized_preflight_context_cap").await?;
+async fn insert_error_identifies_only_the_attempted_slice() -> TestResult {
+    let database = database("interpret_normalized_insert_context").await?;
     sqlx::query("DROP TABLE normalized_events")
         .execute(database.pool())
         .await?;
     let submitted = (0..501)
-        .map(|index| event(&format!("preflight-{index:03}"), json!({})))
+        .map(|index| event(&format!("insert-{index:03}"), json!({})))
         .collect::<Vec<_>>();
     let mut transaction = database.pool().begin().await?;
     let error = events(&mut transaction, &submitted)
         .await
-        .expect_err("missing normalized table must fail preflight");
+        .expect_err("missing normalized table must fail INSERT");
+    assert_eq!(error.kind(), crate::ErrorKind::Transient);
     let message = error.to_string();
-    assert!(message.contains("0=preflight-000"), "{message}");
-    assert!(message.contains("499=preflight-499"), "{message}");
-    assert!(!message.contains("500=preflight-500"), "{message}");
-    assert!(message.contains("1 more; 501 total"), "{message}");
+    assert!(
+        message.contains("failed to write normalized-event batch"),
+        "{message}"
+    );
+    assert!(message.contains("0=insert-000"), "{message}");
+    assert!(message.contains("499=insert-499"), "{message}");
+    assert!(!message.contains("500=insert-500"), "{message}");
+    assert!(!message.contains("501 total"), "{message}");
     transaction.rollback().await?;
     database.cleanup().await?;
     Ok(())

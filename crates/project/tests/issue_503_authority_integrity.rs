@@ -495,3 +495,253 @@ async fn shared_infrastructure_without_proof_is_not_integrity_fatal() -> Result<
     db.cleanup().await?;
     Ok(())
 }
+
+fn ops_event(family: &'static str, kind: &'static str, log: i64, after: Value) -> Event<'static> {
+    Event {
+        family,
+        kind,
+        log,
+        after,
+    }
+}
+
+// These are explicit normalized fixtures, not an RPC or adapter replay proof.
+async fn ops_project(
+    pool: &PgPool,
+    target: i64,
+    previous: Option<bigname_project::Marker>,
+    mode: RunMode,
+) -> Result<bigname_project::Marker> {
+    let request = BatchRequest {
+        chain_id: CHAIN.into(),
+        target_block: target,
+        affected_from_block: previous.as_ref().map_or(10, |_| 11),
+        affected_to_block: target,
+        resume_current: previous,
+        mode,
+    };
+    Ok(Engine::new(pool.clone()).run_batch(request).await?.current)
+}
+
+async fn ops_summary(pool: &PgPool, logical: &str) -> Result<Value> {
+    let query = "SELECT declared_summary FROM name_current WHERE logical_name_id = $1";
+    Ok(sqlx::query_scalar(query)
+        .bind(logical)
+        .fetch_one(pool)
+        .await?)
+}
+
+#[tokio::test]
+async fn selected_v2_token_owner_incremental_rebuild_and_fixture_redo() -> Result<()> {
+    let (db, pool) = database("ops_owner_project").await?;
+    let logical = surface(&pool, 70, "ops-owner.eth", &["ens_v2"]).await?;
+    let resource = uuid(1, 70);
+    let alice = "0x0000000000000000000000000000000000000001";
+    let bob = "0x0000000000000000000000000000000000000002";
+    for (log, (kind, after)) in [
+        (
+            "RegistrationGranted",
+            json!({"status":"registered","registrant":alice,"token_id":"70"}),
+        ),
+        (
+            "AuthorityTransferred",
+            json!({"owner":alice,"token_id":"70"}),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        event(
+            &pool,
+            kind,
+            &logical,
+            Some(&resource),
+            ops_event("ens_v2_registry_l1", kind, log as i64 + 1, after),
+        )
+        .await?;
+    }
+    let prefix = ops_project(&pool, 10, None, RunMode::Normal).await?;
+    let before = ops_summary(&pool, &logical).await?;
+    assert_eq!(before["control"]["registry_owner"], alice);
+    assert_eq!(before["registration"]["registrant"], alice);
+    sqlx::query("INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state) VALUES ($1, '0x50311', 11, '2026-08-26T00:00:12Z', 'canonical')")
+        .bind(CHAIN).execute(&pool).await?;
+    let sale = event(
+        &pool,
+        "ops-sale",
+        &logical,
+        Some(&resource),
+        ops_event(
+            "ens_v2_registry_l1",
+            "TokenControlTransferred",
+            3,
+            json!({"from":alice,"to":bob,"token_id":"70"}),
+        ),
+    )
+    .await?;
+    // Place the fixture suffix before Project consumes it; never repair a projection.
+    sqlx::query("UPDATE normalized_events SET block_number = 11, block_hash = '0x50311' WHERE normalized_event_id = $1")
+        .bind(sale).execute(&pool).await?;
+    let current = ops_project(&pool, 11, Some(prefix.clone()), RunMode::Normal).await?;
+    let transferred = ops_summary(&pool, &logical).await?;
+    assert_eq!(transferred["registration"]["registrant"], bob);
+    let owner = &transferred["control"]["registry_owner"];
+    assert_eq!(owner, bob, "selected ENSv2 buyer must own the name");
+    let selected: Option<String> =
+        sqlx::query_scalar("SELECT resource_id::text FROM name_current WHERE logical_name_id = $1")
+            .bind(&logical)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(selected.as_deref(), Some(resource.as_str()));
+    ops_project(&pool, 11, None, RunMode::Normal).await?;
+    assert_eq!(ops_summary(&pool, &logical).await?, transferred);
+    // Explicit normalized-fixture retraction/reapplication exercises Project Redo,
+    // not a claim about RPC reorg handling or adapter restoration.
+    sqlx::query("UPDATE normalized_events SET canonicality_state = 'orphaned' WHERE normalized_event_id = $1")
+        .bind(sale).execute(&pool).await?;
+    ops_project(&pool, 11, Some(current.clone()), RunMode::Redo).await?;
+    let retracted = ops_summary(&pool, &logical).await?;
+    assert_eq!(retracted["registration"]["registrant"], alice);
+    assert_eq!(retracted["control"]["registry_owner"], alice);
+    sqlx::query("UPDATE normalized_events SET canonicality_state = 'canonical' WHERE normalized_event_id = $1")
+        .bind(sale).execute(&pool).await?;
+    ops_project(&pool, 11, Some(current), RunMode::Redo).await?;
+    assert_eq!(ops_summary(&pool, &logical).await?, transferred);
+    db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn token_owner_selection_preserves_authority_and_lifecycle_boundaries() -> Result<()> {
+    let (db, pool) = database("ops_owner_controls").await?;
+    let alice = "0x0000000000000000000000000000000000000001";
+    let bob = "0x0000000000000000000000000000000000000002";
+    for (index, mode) in "role rival orphan v1 same release reserved replacement order"
+        .split_whitespace()
+        .enumerate()
+    {
+        let index = 80 + index as u16;
+        let family = if mode == "v1" {
+            "ens_v1_registrar_l1"
+        } else {
+            "ens_v2_registry_l1"
+        };
+        let logical = surface(
+            &pool,
+            index,
+            &format!("ops-{mode}.eth"),
+            &[if mode == "v1" { "ens_v1" } else { "ens_v2" }],
+        )
+        .await?;
+        let resource = uuid(1, index);
+        event(&pool, &format!("{mode}-grant"), &logical, Some(&resource), Event {
+            family, kind: "RegistrationGranted", log: 1,
+            after: json!({"status":"registered","registrant":alice,"token_id":index.to_string()}),
+        }).await?;
+        event(
+            &pool,
+            &format!("{mode}-owner"),
+            &logical,
+            Some(&resource),
+            ops_event(
+                if mode == "v1" {
+                    "ens_v1_registry_l1"
+                } else {
+                    family
+                },
+                "AuthorityTransferred",
+                2,
+                json!({"owner":alice}),
+            ),
+        )
+        .await?;
+        let rival = uuid(9, index);
+        if matches!(mode, "rival" | "replacement") {
+            sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+                .bind(&rival).bind(CHAIN).bind(HASH).execute(&pool).await?;
+        }
+        let (kind, after) = match mode {
+            "role" => (
+                "PermissionChanged",
+                json!({"subject":bob,"roles":["owner"]}),
+            ),
+            "release" => ("RegistrationReleased", json!({"status":"unregistered"})),
+            "reserved" => (
+                "RegistrationReserved",
+                json!({"status":"reserved","token_id":index.to_string()}),
+            ),
+            _ => (
+                "TokenControlTransferred",
+                json!({"from":alice,"to":if mode == "same" { alice } else { bob },"token_id":index.to_string()}),
+            ),
+        };
+        let suffix = event(
+            &pool,
+            &format!("{mode}-suffix"),
+            &logical,
+            Some(if mode == "rival" { &rival } else { &resource }),
+            ops_event(family, kind, 3, after),
+        )
+        .await?;
+        if mode == "orphan" {
+            sqlx::query("UPDATE normalized_events SET canonicality_state = 'orphaned' WHERE normalized_event_id = $1")
+                .bind(suffix).execute(&pool).await?;
+        }
+        if mode == "replacement" {
+            sqlx::query(
+                "UPDATE surface_bindings SET resource_id = $1::uuid WHERE logical_name_id = $2",
+            )
+            .bind(&rival)
+            .bind(&logical)
+            .execute(&pool)
+            .await?;
+            event(&pool, "replacement-next-grant", &logical, Some(&rival), Event {
+                family, kind: "RegistrationGranted", log: 4,
+                after: json!({"status":"registered","registrant":alice,"token_id":"replacement"}),
+            }).await?;
+            sqlx::query(
+                "UPDATE normalized_events SET log_index = 6 WHERE normalized_event_id = $1",
+            )
+            .bind(suffix)
+            .execute(&pool)
+            .await?;
+        }
+        if matches!(mode, "replacement" | "order") {
+            let (target, kind, log, after) = if mode == "replacement" {
+                (&rival, "AuthorityTransferred", 5, json!({"owner":alice}))
+            } else {
+                (
+                    &resource,
+                    "TokenControlTransferred",
+                    3,
+                    json!({"from":bob,"to":alice,"token_id":index.to_string()}),
+                )
+            };
+            event(
+                &pool,
+                &format!("{mode}-last"),
+                &logical,
+                Some(target),
+                ops_event(family, kind, log, after),
+            )
+            .await?;
+        }
+        run(&pool).await?;
+        let summary = ops_summary(&pool, &logical).await?;
+        if mode == "release" {
+            assert_eq!(summary["registration"]["status"], "released");
+            assert!(summary["control"]["registry_owner"].is_null());
+        } else {
+            let owner = &summary["control"]["registry_owner"];
+            assert_eq!(owner, alice, "{mode}: {summary}");
+            if mode == "v1" {
+                assert_eq!(summary["registration"]["registrant"], bob);
+            }
+            if mode == "reserved" {
+                assert_eq!(summary["registration"]["status"], "reserved");
+            }
+        }
+    }
+    db.cleanup().await?;
+    Ok(())
+}

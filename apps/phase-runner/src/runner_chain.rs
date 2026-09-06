@@ -32,7 +32,18 @@ impl PhaseRunner {
         config: &RuntimeConfig,
         cancellation: CancellationToken,
     ) -> RunnerResult<SupervisorReport> {
-        self.settle_unconfigured_phases(config).await?;
+        // Settlement issues database updates that can block on a row lock, so
+        // sampling the token between statements is not enough: race the whole of it.
+        // The process exits straight after a stop, so abandoning a statement
+        // mid-flight costs nothing.
+        let settled = crate::shutdown::until_cancelled(
+            &cancellation,
+            self.settle_unconfigured_phases(config),
+        )
+        .await?;
+        if settled.is_none() || cancellation.is_cancelled() {
+            return Ok(SupervisorReport::default());
+        }
         crate::supervisor::run(self, config, cancellation).await
     }
 
@@ -88,10 +99,20 @@ impl PhaseRunner {
         chain: &ChainConfig,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
+        if cancellation.is_cancelled() {
+            return Ok(());
+        }
         chain.require_intake_sources()?;
         self.record_loop_progress(&chain.chain_id);
-        self.store.initialize_chain(&chain.chain_id).await?;
-        self.recover_stopped_phases(chain).await?;
+        // Same reasoning as `run`: both of these block on the database.
+        let recovered = crate::shutdown::until_cancelled(&cancellation, async {
+            self.store.initialize_chain(&chain.chain_id).await?;
+            self.recover_stopped_phases(chain).await
+        })
+        .await?;
+        if recovered.is_none() {
+            return Ok(());
+        }
         self.run_spine_phase(chain, PhaseName::Ingest, cancellation.clone())
             .await?;
         self.repair_discovery_coverage(chain, cancellation.clone())

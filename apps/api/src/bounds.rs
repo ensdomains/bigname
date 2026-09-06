@@ -46,6 +46,8 @@ pub(crate) struct ApiBoundsConfig {
         default_value_t = DEFAULT_REQUEST_TIMEOUT_MS
     )]
     pub(crate) request_timeout_ms: u64,
+    #[arg(long, env = "BIGNAME_API_STOP_GRACE_MS")]
+    pub(crate) stop_grace_ms: Option<u64>,
     #[arg(
         long,
         env = "BIGNAME_API_DB_STATEMENT_TIMEOUT_MS",
@@ -100,6 +102,7 @@ impl Default for ApiBoundsConfig {
     fn default() -> Self {
         Self {
             request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
+            stop_grace_ms: None,
             db_statement_timeout_ms: DEFAULT_DB_STATEMENT_TIMEOUT_MS,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
             health_max_in_flight: DEFAULT_HEALTH_MAX_IN_FLIGHT,
@@ -118,6 +121,12 @@ impl ApiBoundsConfig {
             self.request_timeout_ms > 0,
             "BIGNAME_API_REQUEST_TIMEOUT_MS must be greater than zero"
         );
+        if let Some(grace) = self.stop_grace_ms {
+            ensure!(
+                grace.saturating_sub(self.request_timeout_ms) >= 5_000,
+                "BIGNAME_API_STOP_GRACE_MS must exceed BIGNAME_API_REQUEST_TIMEOUT_MS by at least 5000 ms"
+            );
+        }
         ensure!(
             self.db_statement_timeout_ms > 0,
             "BIGNAME_API_DB_STATEMENT_TIMEOUT_MS must be greater than zero"

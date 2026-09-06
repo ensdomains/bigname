@@ -21,12 +21,158 @@ docker compose --env-file .env.server \
 docker compose --env-file .env.server \
   -f docker-compose.server.yml \
   -f docker-compose.reth-db.yml config
+
+docker compose --env-file .env.server \
+  -f docker-compose.server.yml \
+  -f docker-compose.public.yml \
+  -f docker-compose.reth-db.yml config
 ```
 
 The reth overlay attaches the API and phase runner to the external
 `eth-archive-node_default` network and bind-mounts the configured
 `RETH_DATA_DIR` into the phase runner read-only. Create or start that network
 and make the canonical reth database path readable before using the overlay.
+
+## Capacity preflight
+
+Complete this before adopting the server configuration or recreating the runner.
+The required floor/path inputs intentionally make older incomplete configurations
+fail. Editing Compose does not change an already running container. This is part
+of #639: it selects no fixed 100 GB reserve, database-size default or production
+host measurement, and changes no direct CLI defaults or backup policy (#329).
+
+1. Choose a positive `BIGNAME_PHASE_RUNNER_MINIMUM_FREE_DISK_BYTES` for the
+   deployment. It must be a decimal unsigned 64-bit integer (at most
+   `18446744073709551615`). Reject zero operationally: it disables the configured
+   reserve, although rendering and the unchanged CLI accept it. Do not copy a
+   development host's free-space figure. The optional
+   `BIGNAME_PHASE_RUNNER_DATABASE_MAX_BYTES` must be unset in operator inputs
+   when unused; remove its assignment instead of leaving it empty. Empty, malformed
+   and overflowing values must fail the real CLI parser. Ceiling zero is a limit.
+2. Select a dedicated, pre-created directory on the Docker daemon host as
+   `BIGNAME_PHASE_RUNNER_WRITABLE_PATH`. It must be absolute; Compose binds that
+   same source and target read/write and does not create a missing host path.
+   Use a separate sibling on the database filesystem, never the data directory,
+   its parent/child, a Docker volume parent, or a directory containing database,
+   WAL, tablespace, socket, backup or other service content. It must contain only
+   disposable probe content and no links into those trees. Reject overlap with
+   every effective mount, including `RETH_DATA_DIR`.
+3. Record Docker/Compose versions, daemon host/context, Docker data root, volume
+   driver/options, rootless/user-namespace settings and applicable security policy.
+   Inspect PostgreSQL's effective mount rather than guessing from `postgres-data`:
+
+   ```sh
+   docker version
+   docker compose version
+   docker context show
+   docker info --format '{{json .SecurityOptions}} {{.DockerRootDir}}'
+   # Use the exact project and every active overlay for this and later commands.
+   pg_container=$(docker compose --env-file .env.server -f docker-compose.server.yml ps -q postgres)
+   docker inspect "$pg_container" --format '{{json .Mounts}}'
+   docker volume inspect NAME_FROM_POSTGRES_MOUNT
+   ```
+
+   Preserve `postgres-data:/var/lib/postgresql/data` and its existing volume
+   identity. The runner receives only the dedicated bind, never that volume or
+   a host path exposing it. Resolve canonical paths on the daemon host; record
+   `findmnt -T`, `stat` device/ownership/mode, applicable ACLs and `df -Pk` for
+   both the actual database storage and probe. Require matching actual mounted
+   filesystem/device, not merely matching path prefixes or equal free-byte counts.
+   Check corresponding mount/device/`df -Pk` observations inside both containers.
+4. Prepare permissions for the effective service identity, including rootless,
+   user-namespace, ACL and SELinux mappings. The image's nominal UID/GID is 10001;
+   do not blindly `chown 10001:10001` on the host. Verify required diagnostic
+   tools on the actual host/image rather than assuming they are installed.
+   From the actual candidate container as its normal service user, require a
+   successful create/remove operation. Also observe the real runner creating and
+   deleting `.phase-runner-capacity-probe-*` with a host filesystem event observer,
+   leaving no file behind. A manual touch by a different user is insufficient.
+5. Inspect effective settings before any recreation. Shell variables override
+   `--env-file`; clear unintended overrides. Capture outputs privately and redact
+   credentials before sharing. For each of server only, server/public,
+   server/Reth and server/public/Reth, run the corresponding command above with
+   both `config --format json` and `config --environment`. Require the exact floor
+   and path, and an exact decimal ceiling assignment when set. A null model key
+   alone does not prove runtime behavior. Inspect the actual container: an unset
+   ceiling may appear as a bare variable name without `=`; `KEY=` is invalid empty.
+   Confirm no configured ceiling through the CLI control below. Relative paths
+   can render; their creation-time rejection remains a required control below.
+   Require one dedicated read/write bind, identical absolute source/target and
+   `create_host_path: false`. Both Reth sets must retain their separate read-only
+   mount. No unrelated service environment, command, port, network or volume may
+   change. Inspect the created container as well; the env file alone is not proof:
+
+   ```sh
+   runner_container=$(docker compose --env-file .env.server -f docker-compose.server.yml ps -q phase-runner)
+   docker inspect "$runner_container" --format '{{json .Config.Env}}'
+   docker inspect "$runner_container" --format '{{json .Mounts}}'
+   docker inspect "$runner_container" --format '{{json .Config.User}} {{json .Config.Entrypoint}} {{json .Config.Cmd}}'
+   docker top "$runner_container"
+   ```
+
+   Check the actual process environment/argv and effective UID/GID. The shipped
+   `phases` command executes `phase-runner run` without synthesizing capacity
+   arguments. Confirm PostgreSQL files such as `PG_VERSION` are unreachable from
+   the runner, including through the bind or symlinks. Record immutable image
+   identity, source identity and the complete effective overlay configuration.
+
+### Disposable acceptance before adoption
+
+Use newly owned project, volume, container and directory names, with an explicit
+runtime allocation. Preserve existing proof/production resources. Use the shipped
+PostgreSQL named-volume definition, an immutable candidate image, initialized
+scratch database and documented writer/verifier logins. A temporary override may
+pin the image, isolate ports/restart behavior and select a byte-identical compiled
+manifest deployment profile with supported sources and admitted chain names.
+Respect the single-ENS-chain restriction. Do not invent an uncompiled manifest,
+replace database storage, alter the probe bind or add a helper service. Attach all
+temporary overrides/fixtures to evidence; keep connection secrets separate.
+
+Run the following controls through the effective configuration and real service:
+
+| Control | Required observation |
+| --- | --- |
+| Floor or path missing, then empty | Each render fails nonzero. |
+| Relative path | Render or container creation rejects the nonabsolute target. |
+| Missing bind source | Container creation fails; the host directory is not created. |
+| Conflicting shell and env-file settings | Shell wins; effective values match the intended inputs. |
+| Ceiling unset | Accept a bare variable name without `=` in Docker inspection; no ceiling assignment or generated argument. Reach the actual probe with no configured ceiling. |
+| Valid integer ceiling | Exact string forwarded; reach the actual database-size breach below. |
+| Empty/text/overflow ceiling or malformed/overflow floor | Actual CLI rejects that capacity input before unrelated prerequisites mask it. |
+| Floor zero | Render/parser accept it, but operational admission rejects it. |
+| Probe not writable | Capture `failed to write capacity probe under …`; it is retryable, not a capacity pause. Bound observation and cancel, then restore fixture permissions. |
+| Writable probe on a safe second filesystem | Probe can succeed, but device mismatch fails admission. |
+
+Supply the other required CLI inputs; `--help` and container creation alone do not
+prove parsing. For accepted values, reach the intended later capacity observation.
+With no ceiling, set a disposable floor just above observed free bytes and require
+only `free_disk`. With a positive floor below free bytes and a tiny valid ceiling,
+require only `database_size`. Record database/free/reserved-write bytes, reconcile
+free bytes against contemporaneous `df -Pk` available KiB times 1024, and account
+for intervening filesystem activity. Observe actual probe create/delete events.
+No pressure file or material disk consumption is needed. Startup must first pass
+manifest/database/verifier prerequisites. For this fresh immediately breached
+fixture, require first reserve zero and observe no provider requests; do not infer
+that property for arbitrary resumed state. Pause permits heartbeat/startup writes.
+
+One logical database-size query and one filesystem probe cannot certify remote
+PostgreSQL, opaque volume drivers, separate WAL, tablespaces, Docker metadata or
+other constrained devices. Stop admission if the storage relationship cannot be
+proved. This is a pre-batch floor with the preceding batch's write estimate, not
+an absolute ENOSPC guarantee. Existing startup-below-floor/same-PID raw recovery
+proof does not establish this wiring, mid-run pressure transition, full Verify,
+normalized publication, API correctness, restore or production serving acceptance.
+
+### Apply or roll back the wiring
+
+After the effective configuration and filesystem/permission checks pass, follow
+the approved deployment boundary and recreate only the intended phase-runner with
+all active overlays. Settings are read at startup. Changing the floor/ceiling does
+not require phase-row edits; genuine capacity breaches resume automatically after
+capacity recovers. Preserve the PostgreSQL volume during rollback: never use
+`down -v`. Restore the reviewed configuration/image and inspect the effective
+settings again. The harmless dedicated probe directory may remain, but reverting
+this wiring restores the old disabled/misdirected defaults and loses its protection.
 
 ## Before a from-zero or full-source walk
 
@@ -639,25 +785,49 @@ docker compose --env-file .env.server \
 The API remains reachable while indexing is paused, but health and status must
 continue to report the stale or absent loop honestly.
 
-Both binaries handle SIGTERM, which is what `docker compose stop` sends and
-what `tini` forwards, so a stop is a clean stop rather than a kill. The phase
-runner observes the request at the next batch boundary: the batch already in
-flight finishes and commits, then the loop exits. The API stops accepting new
-connections and drains the requests already in flight.
+The phase runner handles SIGTERM, which is what `docker compose stop` sends and
+what `tini` forwards, so a stop is a clean stop rather than a kill. It observes
+the request at the next batch boundary: the batch already in flight finishes
+and commits, then the loop exits. One case exits nonzero on purpose. A stop that
+lands while a chain is working through automatically required redo cannot leave
+that redo looking finished, so the runner converts the cancellation into an
+error, the supervisor records the chain as stopped, and the process exits
+nonzero (`apps/phase-runner/src/runner.rs`, `apps/phase-runner/src/main.rs`).
+That is the incomplete-redo signal, not a failed shutdown: the redo stamp
+survives, the next start resumes it, and the exit code should not be read as
+corruption. Expect it whenever you stop a runner mid-redo, and distinguish it
+from an exit `137`, which is the grace period expiring into SIGKILL. The API's own stop path, its validated
+`BIGNAME_API_STOP_GRACE_MS` bound, and what counts as graceful success are
+documented under [Stop the API](#stop-the-api).
 
-Each service therefore needs a stop grace period longer than the unit of work
-it has to finish, and Compose's 10s default is not that. `stop_grace_period` is
-set explicitly on both services and is tunable per deployment:
+The runner therefore needs a stop grace period longer than one batch, and
+Compose's 10s default is not that. `stop_grace_period` is set explicitly on the
+`phase-runner` service and is tunable per deployment:
 
-- `BIGNAME_API_STOP_GRACE_PERIOD` (default `40s`) — keep it above
-  `BIGNAME_API_REQUEST_TIMEOUT_MS`, or the drain is killed part-way and the
-  deploy severs requests it was about to finish.
 - `BIGNAME_PHASE_RUNNER_STOP_GRACE_PERIOD` (default `120s`) — raise it if a
   single batch at this deployment's block range and hydration settings
-  routinely takes longer.
+  routinely takes longer. Nothing in the runner bounds a batch's wall time, so
+  this is a starting value, not a derived limit.
 
-A grace period that expires is a SIGKILL. Nothing is corrupted — the batch runs
-in one transaction and rolls back — but the work is lost and the phase lock is
+A grace period that expires is a SIGKILL. Nothing is corrupted, but a batch is
+not one transaction. Each phase commits its own writes before the runner
+records progress: Project commits the projection swap
+(`crates/project/src/engine.rs`) and may then commit a separate canonical-head
+hydration transaction (`apps/phase-runner/src/project_phase.rs`); Interpret
+commits its normalized-event and identity writes
+(`crates/interpret/src/write.rs`); Ingest commits raw facts
+(`crates/ingest/src/write/mod.rs`) and the runner then publishes chain heads.
+Only after the phase returns does the runner write
+`chain_phase_state.current_block_*` and the ingest source cursors
+(`apps/phase-runner/src/runner.rs`). A kill inside any of those gaps leaves
+committed phase output whose progress marker still points at the previous
+batch. That is safe by design: the next start resumes from the durable marker
+and re-executes the batch, and every write path is replay-safe — raw facts
+insert if absent and are verified immutable, Interpret rows upsert on their
+identities and fail closed on divergent data, and Project's publication is a
+set-based delete-and-reinsert of the affected scope — so the redo costs the
+batch's wall time plus fresh `observed_at` timestamps and a new hydration
+attempt ordinal, and produces no duplicate or orphaned rows. The phase lock is
 only released when PostgreSQL reaps the dead session, so the next start can
 find the phase still held.
 
@@ -854,7 +1024,18 @@ The restore-or-re-roll decision was validated on 2026-07-29.
 
 Use the bounded `phase-runner inspect` commands for stored lineage, block
 canonicality, and raw-event evidence. Use `phase-runner rewind` only after
-identifying an exact stored readable ancestor. Verification mismatches require
+identifying an exact stored readable ancestor. If rewind reports an interrupted
+Ingest redo whose retained end is above that ancestor, leave the retained state
+intact. Complete the covering `phase-runner redo --chain <chain> --phase ingest
+--from-block <retained-start> --to-block <retained-end>` command reported by the
+refusal, using the same configured sources and deployment profile. A retained
+checkpoint lets that repair resume without restarting the completed prefix.
+After successful repair, retry the original rewind. Do not clear redo markers,
+edit cursors, or lower the range end to force it through. Required Ingest work
+keeps its documented Live recovery path when rewind moves its end above the
+readable head; this refusal applies to operator Ingest redo.
+
+Verification mismatches require
 the chain-scoped repair procedure in
 [`deployment.md`](../deployment.md#verification-mismatch-repair); do not edit
 immutable raw facts or mark a phase complete manually.
@@ -872,3 +1053,26 @@ the owner-approved rollback and restoration path required by the
 
 Keep the public edge on its maintainer-approved policy throughout rollback and
 re-run `scripts/public-edge-smoke` before restoring traffic.
+
+## Stop the API
+
+```sh
+docker compose --env-file .env.server -f docker-compose.server.yml stop api
+```
+
+Docker sends SIGTERM to Tini, which forwards it to the `exec`-replaced
+`bigname-api serve` child. Docker waits `BIGNAME_API_STOP_GRACE_MS` (default
+45000 ms) before SIGKILL. The same value is validated at API startup: it must
+exceed the request timeout by at least 5000 ms. Raise both for longer requests;
+external stop-timeout overrides must preserve this margin. Graceful success
+requires the application's accepted-signal
+log and exit 0. Exit 137 or 143, missing signal acceptance, or a grace overrun
+is not graceful success.
+
+Use disposable services for shutdown experiments, never the active production
+API or database. Fixture and container tests are not rollout, restore, or
+beta-launch evidence. The runner's stop command and `stop_grace_period` are
+documented under [Pause and resume indexing](#pause-and-resume-indexing); the
+container shutdown job checks the runner's rendered Compose stop contract but
+drains only the API, so runner settlement, heartbeat, restart, and redo
+behaviour under SIGTERM are not covered by that evidence.

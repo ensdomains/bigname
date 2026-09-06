@@ -449,6 +449,11 @@ impl PhaseRunner {
             let context = self
                 .phase_context(chain, phase_name, mode.clone(), redo_attempt)
                 .await?;
+            // The checks above are separated from this batch by several awaits, so a
+            // stop that arrived in between would otherwise still run a full batch.
+            if cancellation.is_cancelled() {
+                return Ok(PhaseLoopResult::Cancelled);
+            }
             let progress_token = self.phase_progress.begin_batch(&context);
             let retained_verification_level = context.resume.verification_level;
             let batch = phase.run_batch(context.clone());

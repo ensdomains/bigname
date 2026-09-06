@@ -399,14 +399,18 @@ impl PhaseRunner {
             if let Some(heartbeat) = &self.loop_heartbeat {
                 heartbeat.record_progress(&chain.chain_id);
             }
-            let preflight = self
-                .preflight_watch_set_coverage_attestation(chain, selection)
-                .await;
+            // Raced, not sampled: a stop must not go on to create redo state.
+            let preflight = crate::shutdown::until_cancelled(
+                &cancellation,
+                self.preflight_watch_set_coverage_attestation(chain, selection),
+            )
+            .await;
             if let Some(heartbeat) = &self.loop_heartbeat {
                 heartbeat.remove_progress(&chain.chain_id);
             }
             match preflight {
-                Ok(generation_token) => generation_tokens.push(generation_token),
+                Ok(Some(generation_token)) => generation_tokens.push(generation_token),
+                Ok(None) => return Ok(report),
                 Err(error) => report.stopped_chains.push((chain.chain_id.clone(), error)),
             }
         }
@@ -414,6 +418,9 @@ impl PhaseRunner {
             return Ok(report);
         }
         for (chain, generation_token) in chains.iter().zip(generation_tokens) {
+            if cancellation.is_cancelled() {
+                break;
+            }
             if let Some(heartbeat) = &self.loop_heartbeat {
                 heartbeat.record_progress(&chain.chain_id);
             }
