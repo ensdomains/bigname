@@ -700,9 +700,9 @@ hydration values are execution-derived current-state enrichment layered into
 rebuildable event-derived publication; they are never raw facts, identity rows,
 or normalized events.
 
-"Rebuildable" describes where projection data comes from, not that a projection
-table can be emptied on its own. Six projection tables hold foreign keys into
-the identity layer — `name_current`, `address_names_current`,
+"Rebuildable" describes where projection data comes from, and the identity rows
+underneath are what cannot be emptied on their own. Six projection tables hold
+foreign keys into the identity layer — `name_current`, `address_names_current`,
 `children_current`, `permissions_current`,
 `permissions_current_resource_summary`, and `record_inventory_current` reference
 `name_surfaces`, `surface_bindings`, `resources`, and `token_lineages`. So the
