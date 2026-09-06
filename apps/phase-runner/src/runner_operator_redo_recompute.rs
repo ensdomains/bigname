@@ -6,6 +6,7 @@ use crate::{
     phase::{BlockRange, PhaseName, RunMode},
     phase_lock::PhaseLock,
     runner_support::{cancelled_redo_error, resumable_recompute_marker},
+    state_persistence::load_redo_marker,
 };
 
 use super::{PendingProjectRedoRow, PhaseRunner};
@@ -36,9 +37,7 @@ impl PhaseRunner {
         })
         .await?;
         let Some(setup) = setup else {
-            return Err(
-                cancelled_redo_error(&self.store, &chain.chain_id, PhaseName::Interpret).await?,
-            );
+            return Err(self.recompute_setup_cancelled(chain).await?);
         };
         let Some((run_project_now, project_range)) = setup else {
             return self
@@ -67,6 +66,28 @@ impl PhaseRunner {
         }
         self.run_recompute_interpret_with_project_lock(chain, mode, cancellation)
             .await
+    }
+
+    /// The race above is biased toward the stop, so a refresh whose commit
+    /// reached PostgreSQL can still lose it. The durable marker decides what is
+    /// reported, not the race: a stamped refresh blocks Project and resumes on a
+    /// rerun of this command; without one, nothing was recorded.
+    async fn recompute_setup_cancelled(&self, chain: &ChainConfig) -> RunnerResult<RunnerError> {
+        let project =
+            load_redo_marker(self.store.pool(), &chain.chain_id, PhaseName::Project).await?;
+        let Some((_, from, to)) = project else {
+            return cancelled_redo_error(&self.store, &chain.chain_id, PhaseName::Interpret).await;
+        };
+        Ok(RunnerError::new(
+            ErrorKind::InvalidTransition,
+            format!(
+                "recompute-flags for chain {} stopped after its scoped Project refresh was \
+                 stamped; the refresh blocks Project until it is resumed; rerun \
+                 `phase-runner redo --chain {} --phase recompute-flags --from-block {from} \
+                 --to-block {to}`",
+                chain.chain_id, chain.chain_id
+            ),
+        ))
     }
 
     async fn run_recompute_interpret_with_project_lock(
