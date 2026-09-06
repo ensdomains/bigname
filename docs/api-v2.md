@@ -724,6 +724,19 @@ request, the target route's served snapshot scope can be narrower than that
 chain scope; every additional in-scope chain is reported under
 `meta.as_of_completeness` and is not added to the token.
 
+Chain-position timestamps are RFC 3339 instants. Inputs and stored projection
+positions may use `Z` or a numeric UTC offset (`+HH:MM` or `-HH:MM`) and may
+carry one to nine fractional-second digits; readers normalize the instant to
+UTC before comparison. Because `+` is decoded as a space in query strings,
+clients must percent-encode it as `%2B` in an `at=` query value. For example,
+`at=2025-06-15T17:37:42%2B02:30` selects the same instant as
+`at=2025-06-15T15:07:42Z`. Different accepted spellings of the same instant do
+not make a projection stale.
+
+Successful v2 metadata and snapshot tokens serialize timestamps in UTC with
+`Z`. They retain non-zero fractional seconds; whole-second timestamps keep the
+existing `YYYY-MM-DDTHH:MM:SSZ` spelling.
+
 The API selects current `latest`, `safe`, and `finalized` positions from
 `bigname_phase.chain_heads` and obtains their timestamps from readable
 `bigname_phase.chain_lineage`. Every selection is available only when the current
@@ -865,7 +878,29 @@ evidence; issue #529 retains a surface observed only by resolver
 diagnostics and product history. A cursor issued before that change has no
 continuation guarantee and may be rejected. Consumers must discard
 pre-#348/#529 cursors and restart from the first page; fresh post-publication cursors
-continue normally. This boundary does not claim fresh/resumed parity for the
+continue normally.
+
+The [#613](https://github.com/ensdomains/bigname/issues/613) interpreter change
+keeps the original [pre-surface](glossary.md#pre-surface) ENSv1 registry `ResolverChanged` row unchanged,
+then adds a name- and resource-linked, [state-derived](glossary.md#state-derived-normalized-event) `ResolverChanged` when the
+first active [name surface](glossary.md#surface-name-surface) is learned. Product
+events or name history may therefore gain one historical resolver row, while
+diagnostics may gain each linked resource copy. When current-registry ownership
+ends old-registry fallback, its resource-specific resolver-clear copies represent
+one ownership-log/node transition. Product history selects the lexically first
+stable event identity among the activated copies matching the request and its
+canonicality filters. Selection happens before pagination and is shared by
+counts, summaries, and cursor validation. A resource-only request therefore
+retains its matching clear even when another resource has the globally first
+copy; a sole matching clear is never suppressed. All normalized copies remain
+available to diagnostics, projection, and replay.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
+A cursor issued before this
+change has no continuation guarantee and may be rejected. Consumers must
+discard pre-#613 cursors and restart from the first page; fresh post-publication
+cursors continue normally.
+
+These boundaries do not claim fresh/resumed parity for the
 known pre-existing exception: when a resolver-emitted resource equals
 `namehash(N)`, named-resource and alias preimages can share one retained
 [interpreter state key](glossary.md#interpreter-state-key), so resumed
