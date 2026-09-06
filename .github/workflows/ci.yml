@@ -1078,13 +1078,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/shutdown-image-cache
-          # Keyed on the dependency graph, not the commit: the dependency layer is what
-          # is worth carrying, and the first-party layers change every commit anyway.
-          # A per-commit key would write a multi-gigabyte entry every run and evict the
-          # Cargo caches the other jobs depend on. A member manifest edit that leaves
-          # the lockfile alone restores a cache whose dependency layer no longer
-          # matches, which costs a cold build and nothing else.
-          key: v1-shutdown-image-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'Dockerfile') }}
+          # Keyed on every input of the dependency layer and nothing else: the
+          # manifests the Dockerfile copies ahead of it, the lockfile, the toolchain
+          # and cargo config, and the Dockerfile itself. Not the commit, because the
+          # first-party layers change every commit anyway, and a per-commit key would
+          # write a multi-gigabyte entry every run and evict the Cargo caches the other
+          # jobs depend on. The manifests are in the key because an entry is immutable
+          # once saved: keyed on the lockfile alone, a feature change that leaves the
+          # lockfile untouched would rebuild cold on every run and never save.
+          key: v1-shutdown-image-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/*/Cargo.toml', 'crates/*/Cargo.toml', 'tools/*/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml', 'Dockerfile') }}
           restore-keys: |
             v1-shutdown-image-${{ env.RUST_VERSION }}-
 
