@@ -727,21 +727,21 @@ For `C` configured chains, one phase-runner process opens at most:
 
 | Pool | Size | Where |
 | --- | --- | --- |
-| Phase pool | `max(2C, 4)` | `apps/phase-runner/src/main.rs:64-68` |
-| Verification pool | `max(C, 1)` | `apps/phase-runner/src/main.rs:85-91` |
+| Phase pool | `max(2C, 4)` | `apps/phase-runner/src/main.rs`, `RunnerDatabase::connect` in the `Run` arm |
+| Verification pool | `max(C, 1)` | `apps/phase-runner/src/main.rs`, `VerificationDatabase::connect` in the `Run` arm |
 | Advisory phase locks, peak | `3C` | see below |
 
 Each lock is a dedicated connection outside both pools, because it holds a
-session-scoped `pg_try_advisory_lock` (`apps/phase-runner/src/phase_lock.rs:33`).
+session-scoped `pg_try_advisory_lock` (`PhaseLock::acquire`, `apps/phase-runner/src/phase_lock.rs`).
 How many are held at once depends on where the chain is in its cycle, and the
 budget has to cover the peak, not the common case:
 
 | Situation | Locks per chain | Where |
 | --- | --- | --- |
-| Serial path: Verify runs before Live (`verify_before_live`) | `1` | `apps/phase-runner/src/runner_chain.rs:130` |
-| Combined path: Verify and Live polled concurrently, each holding its own lock | `2` | `apps/phase-runner/src/runner_live_follow.rs:262` |
+| Serial path: Verify runs before Live (`verify_before_live`) | `1` | `PhaseRunner::run_chain`, `apps/phase-runner/src/runner_chain.rs` |
+| Combined path: Verify and Live polled concurrently, each holding its own lock | `2` | `apps/phase-runner/src/runner_live_follow.rs` |
 | Post-Live discovery repair: a Verify fence, then an Ingest fence inside it, then one phase lock inside that | `3` | `runner_live_follow.rs:70`, `:112`, `:143` |
-| `rewind` (separate operator process): the four writer-phase locks, no Verify lock | `4`, plus its own pool | `apps/phase-runner/src/rewind.rs:40`, `apps/phase-runner/src/main.rs:229` |
+| `rewind` (separate operator process): the four writer-phase locks, no Verify lock | `4`, plus its own pool | `rewind::acquire_writer_locks`, `apps/phase-runner/src/rewind.rs`; `RunnerDatabase::connect` in the `Rewind` arm |
 
 A fence is an ordinary phase lock on that phase's name, so it excludes the
 phase itself rather than adding to it — the post-Live Verify fence waits for the
@@ -752,13 +752,13 @@ So budget `max(2C, 4) + max(C, 1) + 3C` for the running service: a one-chain
 deployment peaks at `4 + 1 + 3 = 8` connections and settles at `6` or `7`
 depending on the path; three chains peak at `6 + 3 + 9 = 18`. A start that
 finds phases recorded against chains no longer configured takes one lock at a
-time to close them out (`apps/phase-runner/src/runner_chain.rs:50`) and does
+time to close them out (`settle_unconfigured_phases`, `apps/phase-runner/src/runner_chain.rs`) and does
 not raise the peak.
 
 `phase-runner rewind` is not part of that figure: it is a separate process
-with its own pool of up to `2` connections (`apps/phase-runner/src/main.rs:229`)
+with its own pool of up to `2` connections (`RunnerDatabase::connect` in the `Rewind` arm)
 that takes the Ingest, Interpret, Project, and Live locks for one chain and
-never the Verify lock (`apps/phase-runner/src/rewind.rs:40`). It therefore
+never the Verify lock (`rewind::acquire_writer_locks`, `apps/phase-runner/src/rewind.rs`). It therefore
 succeeds while the supervised runner is alive whenever that chain is not in a
 writer phase — during its serial Verify phase, for instance — so the two
 processes can hold connections at the same time. Either stop the supervised
@@ -767,12 +767,12 @@ runner before a rewind, or budget `6` more connections for the duration:
 phase is running fails on the held lock rather than waiting.
 
 `phase-runner redo` is likewise a separate, and potentially long-running,
-process: a writer pool of up to `4` (`apps/phase-runner/src/main.rs:146`), a
+process: a writer pool of up to `4` (`RunnerDatabase::connect` in the `Redo` arm), a
 verifier pool of `1` opened at start whenever the requested redo includes
-Verify (`apps/phase-runner/src/main.rs:180-188`), and up to two locks at once — the Project
+Verify (`VerificationDatabase::connect` under `phase.requires_verify()`), and up to two locks at once — the Project
 lock is held while the Interpret phase runs beneath it
-(`apps/phase-runner/src/runner_operator_redo.rs:131-141`), and every phase run
-takes its own lock (`apps/phase-runner/src/runner.rs:223`). The advisory locks
+(`run_recompute_interpret_with_project_lock`, `apps/phase-runner/src/runner_operator_redo.rs`), and every phase run
+takes its own lock (`PhaseRunner::run_phase`, `apps/phase-runner/src/runner.rs`). The advisory locks
 let it run beside a supervised runner that holds a non-conflicting phase such as
 Live. Either stop the supervised runner before an explicit redo, or budget `7`
 more for its duration.
@@ -780,7 +780,7 @@ more for its duration.
 The advisory locks do **not** serialize explicit processes against each other:
 they only prevent the same phase from running twice on the same chain. A
 Verify-only redo holds the Verify lock alone
-(`apps/phase-runner/src/runner_operator_redo.rs:369-386`), rewind never takes
+(`redo_phase_only`, `apps/phase-runner/src/runner_operator_redo.rs`), rewind never takes
 Verify, and lock keys are per chain, so a redo and a rewind — or two redos on
 different chains — can run at the same time and each brings its own pools and
 locks: up to `7` for a redo, `6` for a rewind. Run one explicit process at a
