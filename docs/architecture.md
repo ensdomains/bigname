@@ -708,10 +708,14 @@ foreign keys into the identity layer — `name_current`, `address_names_current`
 `name_surfaces`, `surface_bindings`, `resources`, and `token_lineages`. So the
 dependency runs projections → identity, and a rebuild that drops or truncates
 identity first fails on those constraints rather than cascading. Rebuild
-projections against retained identity, or replace identity through an
-`interpret` redo that republishes projections in the same operation; a rebuild
-that truncates projections and then fails partway leaves the system unable to
-serve until it is rerun to completion.
+projections against retained identity, or replace identity with an `interpret`
+redo: once Interpret completes, the same command runs a Project redo over
+whatever range Interpret left required, so the projections are republished
+before it returns. Project stays the only writer of those rows; the redo
+sequences it after Interpret rather than letting Interpret write them. A redo
+of `--phase all` sequences Ingest, Interpret, Project, and Verify explicitly.
+A rebuild that truncates projections and then fails partway leaves the system
+unable to serve until it is rerun to completion.
 Provider lookup responses are request-scoped and are not persisted as reusable
 outcomes or durable execution traces. Guarded resolution disagreements may be
 recorded in the [resolution divergence ledger](glossary.md#resolution-divergence-ledger).
