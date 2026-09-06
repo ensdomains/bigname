@@ -100,5 +100,5 @@ justification = "Redo marker state owns the atomic redo-begin transition and its
 
 [[files]]
 path = "apps/phase-runner/src/runner_operator_redo.rs"
-loc = 604
-justification = "Explicit-redo orchestration: the attestation preflight, the per-chain dispatch, and the phase-selection arms share one cancellation token and one SupervisorReport, so splitting them would thread both through a second module for no behavioural gain. Racing the preflight and dispatch against the token (#876) added eleven lines over the 593-line base. Split on the next substantive touch."
+loc = 625
+justification = "Explicit-redo orchestration: the attestation preflight, the per-chain dispatch, and the phase-selection arms share one cancellation token and one SupervisorReport, so splitting them would thread both through a second module for no behavioural gain. Making the pre-batch setup cancellation-aware without wrapping the batch itself (#876) added thirty-two lines over the 593-line base. Split on the next substantive touch."
