@@ -1069,6 +1069,20 @@ jobs:
         run: |
           cargo build --locked --package phase-runner --bin phase-runner
           sha256sum target/debug/phase-runner
+      # The Dockerfile names its base images by tag, and both tags are republished
+      # upstream without any file here changing. A republish invalidates every layer
+      # built on it, so the digests belong in the cache key below: an entry is
+      # immutable once saved, and a key that stayed the same across a republish
+      # would restore the stale layers and rebuild cold on every run, never saving.
+      - name: Resolve the image build's base digests
+        id: base_images
+        run: |
+          builder="$(docker buildx imagetools inspect "rust:${RUST_VERSION}-bookworm" --format '{{ .Manifest.Digest }}')"
+          runtime="$(docker buildx imagetools inspect "ubuntu:24.04" --format '{{ .Manifest.Digest }}')"
+          echo "builder=${builder#sha256:}" >>"$GITHUB_OUTPUT"
+          echo "runtime=${runtime#sha256:}" >>"$GITHUB_OUTPUT"
+          echo "rust:${RUST_VERSION}-bookworm is ${builder}; ubuntu:24.04 is ${runtime}"
+
       # The image build compiles the whole workspace in release mode on the pinned
       # single-CPU builder. Its builder is per-run, so without this the compile starts
       # cold every time. The Dockerfile builds third-party dependencies in their own
@@ -1078,16 +1092,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/shutdown-image-cache
-          # Keyed on every input of the dependency layer and nothing else: the
-          # manifests the Dockerfile copies ahead of it, the lockfile, the toolchain
-          # and cargo config, and the Dockerfile itself. Not the commit, because the
-          # first-party layers change every commit anyway, and a per-commit key would
-          # write a multi-gigabyte entry every run and evict the Cargo caches the other
-          # jobs depend on. The manifests are in the key because an entry is immutable
-          # once saved: keyed on the lockfile alone, a feature change that leaves the
-          # lockfile untouched would rebuild cold on every run and never save.
-          key: v1-shutdown-image-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/*/Cargo.toml', 'crates/*/Cargo.toml', 'tools/*/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml', 'Dockerfile') }}
+          # Keyed on every input of the dependency layer and nothing else: the base
+          # image digests, the manifests the Dockerfile copies ahead of it, the
+          # lockfile, the toolchain and cargo config, and the Dockerfile itself. Not
+          # the commit, because the first-party layers change every commit anyway,
+          # and a per-commit key would write a multi-gigabyte entry every run and
+          # evict the Cargo caches the other jobs depend on. Every input is in the
+          # key for the same reason the digests are: a change that left the key
+          # alone could never save its rebuilt layers.
+          key: v1-shutdown-image-${{ env.RUST_VERSION }}-${{ steps.base_images.outputs.builder }}-${{ steps.base_images.outputs.runtime }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/*/Cargo.toml', 'crates/*/Cargo.toml', 'tools/*/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml', 'Dockerfile') }}
           restore-keys: |
+            v1-shutdown-image-${{ env.RUST_VERSION }}-${{ steps.base_images.outputs.builder }}-
             v1-shutdown-image-${{ env.RUST_VERSION }}-
 
       - name: Prove exact-image API shutdown
