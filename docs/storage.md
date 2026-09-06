@@ -560,9 +560,20 @@ bigname declares its own `ens_names` inside the phase schema
 `search_path = bigname_phase` and no `public` fallback, so the import reads
 `bigname_phase.ens_names` only. Applying the upstream dump unmodified therefore
 fills a table the importer never reads, and the run reports zero scanned rows
-rather than failing — the phase table exists, it is just empty. Rewrite the
-dump's schema qualification, or `\copy` into `bigname_phase.ens_names`, before
-running the import, and check the logged scanned-row counter against the dump's
+rather than failing — the phase table exists, it is just empty. Load the dump's
+rows into `bigname_phase.ens_names` without letting the rest of the dump run
+against that table: `\copy` the data section, or extract the dump's `COPY`
+statement and retarget only that. Do not rewrite the dump's schema
+qualification globally, because the same rewrite also redirects the dump's
+`DROP TABLE`
+(upstream: .refs/ens_rainbow/src/main.rs:L33 @ ens_rainbow@bc44492)
+and `CREATE TABLE`
+(upstream: .refs/ens_rainbow/src/main.rs:L36 @ ens_rainbow@bc44492)
+at the phase table. That drops it along with any rows already imported and
+rebuilds it from upstream's two-column `character varying` definition, losing
+the baseline's `text` types, both `CHECK` constraints, its comments, and the
+`bigname_verify` SELECT grant, which is not restored by default privileges.
+Then run the import and check the logged scanned-row counter against the dump's
 row count.
 
 `phase-runner label-preimages import-ens-rainbow` walks `ens_names` in

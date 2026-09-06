@@ -1467,16 +1467,21 @@ assert exhaustiveness: every projection emits the constant `not_asserted`
 alongside `status = "projected"`, and support is carried separately in
 `support_status` / `unsupported_reason`. That is a deliberate decision recorded
 in [`schema-v2/README.md`](../schema-v2/README.md) § Current projections, not a
-gap. The one path that reports a richer value is the permissions
-resource-summary read, which derives `authoritative`, `best_effort`, or
-`not_applicable` from `support_status` at read time
-(`PermissionCoverageExhaustiveness`).
+gap. Two read paths still report a richer value, and both derive it at read
+time rather than reading it from a projection. The permissions resource-summary
+read derives `authoritative`, `best_effort`, or `not_applicable` from
+`support_status` (`PermissionCoverageExhaustiveness`). `GET
+/v2/diagnostics/events` reports `not_applicable` on every row: normalized
+events carry no coverage object, so the route fills the whole object from its
+defaults (`apps/api/src/v2/diag_events.rs`).
 
 So the statements below describe which classes *are* enumerable in the protocol,
 not a value the field will hand you. Read `support_status` to decide whether an
-answer is usable; do not branch on `exhaustiveness` expecting one of the richer
-values outside the permissions resource summary, and do not key monitoring on a
-transition to one.
+answer is usable; do not branch on a stored projection's `exhaustiveness`
+expecting one of the richer values, and do not key monitoring on a transition
+to one. The two read paths above are the exception: their values come from the
+read that builds the response, so a diagnostics consumer sees a richer value
+there without any projection having asserted it.
 
 - Exact-name lookup is authoritative for supported source classes. Route-level coverage may still be authoritative when individual declared summary subdocuments are unsupported.
 - Address-to-name enumeration is exhaustive only for enumerable source classes.
