@@ -370,8 +370,10 @@ never duplicates, suppresses, or reclassifies the independently admitted event.
 The event identity is a plain value rather than a foreign key. A redo deletes
 normalized events in its range before replay, but retains association rows whose
 lineage is already orphaned as fork evidence; such a row may therefore have no
-normalized-event parent. Replay re-creates the canonical-path event under the
-same identity. Project and product history readers ignore event-association rows;
+normalized-event parent. Replay of the same block re-creates that event under
+the same identity; a block replaced by a competing fork does not, because every
+event identity carries the block hash, so a row retained from the replaced fork
+stays parentless. Project and product history readers ignore event-association rows;
 diagnostic readers treat the normalized-event join as optional and can read a
 retained association from its own position and `chain_lineage` anchor.
 
@@ -426,15 +428,25 @@ scoping — all anchor on `chain_lineage` today; two scope-widening reads —
 `capture_child_registration_history` in `crates/interpret/src/write/redo.rs` —
 do not, which can only enlarge a rebuild's scope, never publish a row.
 
-In the runner's own reorg path the children builder's association-lineage
-predicate is defence in depth rather than the only guard: head publication
-orphans the lineage and stamps the required Interpret redo in one transaction,
-Project cannot start until Interpret has completed, and Interpret's redo orphans
-the announcement edge the builder also requires. The path is pinned end to end
-by `reorg_retains_a_migration_association_that_still_reads_canonical_and_publishes_nothing_from_it`
-in `apps/phase-runner/tests/production_project.rs`: after a real head
-publication and redo cascade the retained row still reads `canonical` on an
-orphaned anchor, the edge is orphaned, and no child is published from it.
+In today's two publishing readers the association-lineage predicate is
+redundant rather than separately load-bearing, and no test isolates it. The
+children builder (`crates/project/src/builders/children.rs`) and the
+name-authority child proof (`crates/project/src/builders/name_authority.rs`)
+each also require the `registry_announcement` edge, joined on the association's
+own `(block_number, block_hash)`, to be readable. An edge pinned to that block is
+orphaned by the same Interpret redo that orphans the block, so the edge check and
+the lineage anchor always agree; deleting the lineage anchor from the children
+builder leaves the reorg test below green. Nor can a runner-driven run see the
+two disagree: head publication orphans the lineage and stamps the required
+Interpret redo in one transaction, and Project cannot start until Interpret has
+completed. What
+`reorg_retains_a_migration_association_that_still_reads_canonical_and_publishes_nothing_from_it`
+in `apps/phase-runner/tests/production_project.rs` pins is that runner-level
+outcome, not the predicate: after a real head publication and redo cascade the
+retained row still reads `canonical` on an orphaned anchor, the edge is
+orphaned, and no child is published from it. The anchor rule above still governs
+any reader that reaches these rows without an edge join, which is where it is
+the only guard.
 
 The one place the identity-only attach is used is raw diagnostics, and it
 never surfaces an orphaned row. `GET /v2/diagnostics/events` reads with the
