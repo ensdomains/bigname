@@ -800,8 +800,11 @@ stop that arrives while start-up settlement or stopped-phase recovery is blocked
 on its rows: recovery is required cleanup, so it is not abandoned, but it is
 given a bounded ten seconds from the stop and then reports a transient error
 (`apps/phase-runner/src/runner_chain.rs`, `bounded_recovery`). Nothing is
-corrupted and the next start retries the same cleanup; it means another process
-held those rows.
+corrupted and the next start retries the same cleanup. Row contention is one
+cause — another process holding `chain_phase_state` — but not the only one:
+the same deadline covers opening the lock's own connection and waiting on the
+pool, so a stalled database or a saturated pool reports the same way. Check
+connectivity before hunting for a lock holder.
 
 An explicit `phase-runner redo` exits nonzero on a stop for the same reason, but
 it needs a different response. A stop during its setup, or at a batch boundary
@@ -809,14 +812,19 @@ once it is running, becomes an `InvalidTransition` error rather than a silent
 success, so the incomplete redo cannot look finished
 (`apps/phase-runner/src/runner_operator_redo.rs`, `prepared_for_redo`;
 `apps/phase-runner/src/runner.rs`). Unlike the supervised runner there is no next
-start to resume it: the redo stamp survives and blocks the phase from normal
-restart until the command is run again. The error says which command, built from
-the stamped mode and range — `rerun \`phase-runner redo --chain <chain>
---phase <phase> --from-block <n> --to-block <n>\` with the chain's --source
-options` — because the stamp records neither the sources nor the verifier URL
-and the CLI rejects the bare command without them: add back the `--source`
-options the chain runs with, and `--verification-database-url` when the phase
-is Verify. A redo over several chains that is stopped between two of them exits
+start to resume it. Which response is needed depends on how far it got, and
+the error says which. A stop that wins before the redo was stamped reports
+that it was *cancelled before it started* and that no unfinished redo was
+recorded: nothing blocks, nothing was changed, and rerunning is a choice, not a
+repair. A stop after the stamp exists reports the redo as *incomplete*: the
+stamp survives and blocks the phase from normal restart until the command is
+run again. That error says which command, built from the stamped mode and
+range — `rerun \`phase-runner redo --chain <chain> --phase <phase>
+--from-block <n> --to-block <n>\` with the chain's --source options` —
+because the stamp records neither the sources nor the verifier URL and the CLI
+rejects the bare command without them: add back the `--source` options the
+chain runs with, and `--verification-database-url` when the phase is Verify
+or `all`. A redo over several chains that is stopped between two of them exits
 nonzero as well, reporting each chain it never started, since only a prefix
 was redone and nothing was stamped for the rest; rerun the command for those
 chains. Distinguish all of these from an exit `137`, which

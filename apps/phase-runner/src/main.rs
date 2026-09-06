@@ -46,7 +46,8 @@ async fn main() -> Result<()> {
             // Only the supervised run and an explicit redo poll the token; the
             // one-shot commands keep the default SIGTERM disposition.
             let cancellation = CancellationToken::new();
-            phase_runner::shutdown::cancel_on_signal(&cancellation);
+            phase_runner::shutdown::cancel_on_signal(&cancellation)
+                .context("register the stop signals before starting")?;
             let startup = async {
                 let (manifest_repository, manifest_profile) =
                     hash_manifests_off_runtime(manifests_root.clone()).await??;
@@ -134,7 +135,8 @@ async fn main() -> Result<()> {
             hydration_rpc_urls,
         } => {
             let cancellation = CancellationToken::new();
-            phase_runner::shutdown::cancel_on_signal(&cancellation);
+            phase_runner::shutdown::cancel_on_signal(&cancellation)
+                .context("register the stop signals before starting")?;
             let startup = async {
                 let database = RunnerDatabase::connect(&database_url, 4).await?;
                 let chains = match chains {

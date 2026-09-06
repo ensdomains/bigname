@@ -6,8 +6,8 @@
 /// The stop signals this process listens on, registered up front.
 #[cfg(unix)]
 struct StopSignals {
-    terminate: Option<tokio::signal::unix::Signal>,
-    interrupt: Option<tokio::signal::unix::Signal>,
+    terminate: tokio::signal::unix::Signal,
+    interrupt: tokio::signal::unix::Signal,
 }
 #[cfg(not(unix))]
 struct StopSignals;
@@ -15,57 +15,54 @@ struct StopSignals;
 /// Register the stop signals with the runtime. Both streams have to exist before
 /// the caller returns to its own work: until one does, that signal keeps its
 /// default disposition and terminates the process, so registering inside a
-/// spawned task would leave the whole start-up window unprotected.
-fn register() -> StopSignals {
+/// spawned task would leave the whole start-up window unprotected. A stream
+/// that cannot be installed is a start-up failure for the same reason: the
+/// process would run without the stop path its deployment relies on.
+fn register() -> std::io::Result<StopSignals> {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::SignalKind;
+        use tokio::signal::unix::{SignalKind, signal};
 
-        StopSignals {
-            terminate: install(SignalKind::terminate(), "SIGTERM"),
-            interrupt: install(SignalKind::interrupt(), "SIGINT"),
-        }
+        registered(
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        )
     }
     // Non-Unix is a compile fallback, not a supported deployment: the runner ships
     // in Docker with `tini` forwarding SIGTERM, and CI and deployment are Linux.
     // Ctrl-C there is still registered on first poll of the waiter rather than here.
     #[cfg(not(unix))]
-    StopSignals
+    Ok(StopSignals)
 }
 
 #[cfg(unix)]
-fn install(
-    kind: tokio::signal::unix::SignalKind,
-    name: &str,
-) -> Option<tokio::signal::unix::Signal> {
-    match tokio::signal::unix::signal(kind) {
-        Ok(stream) => Some(stream),
-        Err(error) => {
-            tracing::warn!(
-                error = ?error,
-                signal = name,
-                "failed to install a stop-signal handler; this signal will not stop the process cleanly"
-            );
-            None
-        }
-    }
+fn registered(
+    terminate: std::io::Result<tokio::signal::unix::Signal>,
+    interrupt: std::io::Result<tokio::signal::unix::Signal>,
+) -> std::io::Result<StopSignals> {
+    let name = |kind: &str, error: std::io::Error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("failed to install the {kind} stop-signal handler: {error}"),
+        )
+    };
+    Ok(StopSignals {
+        terminate: terminate.map_err(|error| name("SIGTERM", error))?,
+        interrupt: interrupt.map_err(|error| name("SIGINT", error))?,
+    })
 }
 
 /// Resolve when one of the registered signals arrives. Returns whether a signal
-/// was actually observed, so a failed listener does not read as a stop request.
+/// was actually observed, so a closed stream does not read as a stop request.
 #[cfg(unix)]
 async fn wait(signals: StopSignals) -> bool {
     let StopSignals {
-        terminate,
-        interrupt,
+        mut terminate,
+        mut interrupt,
     } = signals;
-    match (terminate, interrupt) {
-        (Some(mut terminate), Some(mut interrupt)) => tokio::select! {
-            received = terminate.recv() => received.is_some(),
-            received = interrupt.recv() => received.is_some(),
-        },
-        (Some(mut only), None) | (None, Some(mut only)) => only.recv().await.is_some(),
-        (None, None) => tokio::signal::ctrl_c().await.is_ok(),
+    tokio::select! {
+        received = terminate.recv() => received.is_some(),
+        received = interrupt.recv() => received.is_some(),
     }
 }
 
@@ -79,14 +76,15 @@ async fn wait(_signals: StopSignals) -> bool {
 /// replaces the default disposition for the whole process, so a one-shot
 /// command that never reads the token would absorb the signal and keep running
 /// until its supervisor escalates to SIGKILL.
-pub fn cancel_on_signal(cancellation: &tokio_util::sync::CancellationToken) {
-    let signals = register();
+pub fn cancel_on_signal(cancellation: &tokio_util::sync::CancellationToken) -> std::io::Result<()> {
+    let signals = register()?;
     let cancellation = cancellation.clone();
     tokio::spawn(async move {
         if wait(signals).await {
             cancellation.cancel();
         }
     });
+    Ok(())
 }
 
 /// Run `startup` unless the process is asked to stop first, returning `None`
@@ -109,9 +107,9 @@ pub async fn until_cancelled<T, E>(
 /// Resolve when the process is asked to stop. Registration happens when this is
 /// called rather than when the returned future is first polled, so a caller that
 /// spawns or selects over it is covered from the call onwards.
-pub fn requested() -> impl std::future::Future<Output = bool> {
-    let signals = register();
-    async move { wait(signals).await }
+pub fn requested() -> std::io::Result<impl std::future::Future<Output = bool>> {
+    let signals = register()?;
+    Ok(async move { wait(signals).await })
 }
 
 #[cfg(all(test, unix))]
@@ -125,7 +123,7 @@ mod tests {
     async fn cancel_on_signal_cancels_the_token_on_sigterm() {
         let _installed = signal(SignalKind::terminate()).expect("install SIGTERM handler");
         let cancellation = CancellationToken::new();
-        super::cancel_on_signal(&cancellation);
+        super::cancel_on_signal(&cancellation).expect("register stop signals");
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let killed = Command::new("kill")
@@ -140,11 +138,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_stream_that_cannot_be_installed_is_a_registration_error() {
+        let refused = || Err(std::io::Error::other("no signal fd"));
+        let error = super::registered(refused(), signal(SignalKind::interrupt()))
+            .err()
+            .expect("a missing SIGTERM stream must not register");
+        assert!(error.to_string().contains("SIGTERM"), "{error}");
+        let error = super::registered(signal(SignalKind::terminate()), refused())
+            .err()
+            .expect("a missing SIGINT stream must not register");
+        assert!(error.to_string().contains("SIGINT"), "{error}");
+    }
+
+    #[tokio::test]
     async fn a_sigterm_is_observed_as_a_stop_request() {
         // Register first: an unhandled SIGTERM would kill the whole test binary,
         // and tokio delivers the signal to every stream registered for the kind.
         let _installed = signal(SignalKind::terminate()).expect("install SIGTERM handler");
-        let requested = tokio::spawn(super::requested());
+        let requested = tokio::spawn(super::requested().expect("register stop signals"));
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let killed = Command::new("kill")

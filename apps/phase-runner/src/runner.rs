@@ -149,10 +149,19 @@ impl PhaseRunner {
         automatic_discovery_ingest: bool,
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
-        let mut phase_lock =
-            PhaseLock::acquire(self.database.connect_options(), &chain.chain_id, phase_name)
-                .await?;
-        phase_lock.check_alive().await?;
+        // The lock opens its own connection and probes it, both of which can stall
+        // on the network; a stop accepted meanwhile must not wait for them.
+        let acquired = until_cancelled(&cancellation, async {
+            let mut phase_lock =
+                PhaseLock::acquire(self.database.connect_options(), &chain.chain_id, phase_name)
+                    .await?;
+            phase_lock.check_alive().await?;
+            Ok(phase_lock)
+        })
+        .await?;
+        let Some(mut phase_lock) = acquired else {
+            return self.stopped_before_start(chain, phase_name, &mode).await;
+        };
         let result = self
             .run_locked_phase(
                 chain,
@@ -193,10 +202,11 @@ impl PhaseRunner {
         phase_lock: &mut PhaseLock,
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
-        // Start-up is raced like the batch loop: the identity check, the phase
-        // transition and the heartbeat all wait on rows without a timeout, and a
-        // stop accepted during them must not be held until the grace period ends.
-        // A transition that loses the race is dropped before it commits.
+        // Start-up is raced like the batch loop, from the lock in `run_phase_once`
+        // through the identity check, the phase transition and the heartbeat: all
+        // wait on rows without a timeout, and a stop accepted during them must not
+        // be held until the grace period ends. A transition that loses the race is
+        // dropped before it commits.
         let identity = until_cancelled(
             &cancellation,
             self.check_ingest_identity(phase_name, chain, &mode),

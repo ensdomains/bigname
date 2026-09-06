@@ -20,7 +20,7 @@ fn cancel_on_signal_registers_sigint_before_it_returns() {
         .expect("build a current-thread runtime");
     runtime.block_on(async {
         let cancellation = CancellationToken::new();
-        phase_runner::shutdown::cancel_on_signal(&cancellation);
+        phase_runner::shutdown::cancel_on_signal(&cancellation).expect("register stop signals");
 
         let killed = Command::new("kill")
             .args(["-INT", &std::process::id().to_string()])
