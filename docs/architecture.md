@@ -65,9 +65,11 @@ wildcards for pattern operators, and use explicit `COLLATE "C"`.
 complete split is defined in [`consumer-capabilities.md`](consumer-capabilities.md#graphql-compatibility).
 `DomainFilter.isMigrated` reuses the upstream field name for a different
 protocol event and is a [documented
-divergence](upstream.md#known-divergences): upstream it records the 2019 ENS
-registry migration, while here `isMigrated: true` restricts to names whose
-declared registration authority is the ENSv2 registry — the ENSv1→ENSv2
+divergence](upstream.md#known-divergences): upstream the subgraph sets it in its
+current-registry `NewOwner` handler, recording the 2019 ENS registry migration
+(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L131-L135 @ ens_subgraph@723f1b6),
+while here `isMigrated: true` restricts to names
+whose declared registration authority is the ENSv2 registry — the ENSv1→ENSv2
 migration. Only `true` filters; `false` and an omitted value apply no
 predicate, because the negation of an ENSv2-authority test does not answer the
 upstream question either. `DomainFilter.id` is accepted and applies no
