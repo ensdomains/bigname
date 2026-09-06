@@ -57,6 +57,28 @@ impl PhaseRunner {
         }
     }
 
+    /// Race the pre-batch setup against a stop. The batch loop that follows handles
+    /// cancellation itself and records the incomplete redo, so only this setup is
+    /// raced: wrapping the batch would drop it before it could report. Returns
+    /// `false` when the stop won and the caller should return without running.
+    async fn prepared_for_redo(
+        &self,
+        chain_id: &str,
+        range: BlockRange,
+        reject_pending_ingest: bool,
+        cancellation: &CancellationToken,
+    ) -> RunnerResult<bool> {
+        let prepared = crate::shutdown::until_cancelled(cancellation, async {
+            self.store.initialize_chain(chain_id).await?;
+            if reject_pending_ingest {
+                self.reject_pending_required_ingest(chain_id).await?;
+            }
+            self.require_readable_redo_end(chain_id, range).await
+        })
+        .await?;
+        Ok(prepared.is_some())
+    }
+
     async fn redo_recompute_flags(
         &self,
         chain: &ChainConfig,
@@ -69,10 +91,12 @@ impl PhaseRunner {
                 .get(phase)
                 .preflight(&chain.chain_id, &chain.sources, &mode)?;
         }
-        self.store.initialize_chain(&chain.chain_id).await?;
-        self.reject_pending_required_ingest(&chain.chain_id).await?;
-        self.require_readable_redo_end(&chain.chain_id, range)
-            .await?;
+        if !self
+            .prepared_for_redo(&chain.chain_id, range, true, &cancellation)
+            .await?
+        {
+            return Ok(());
+        }
 
         if let Some((redo_mode, from, to)) =
             load_redo_marker(self.store.pool(), &chain.chain_id, PhaseName::Interpret).await?
@@ -377,12 +401,13 @@ impl PhaseRunner {
         self.phases
             .get(phase)
             .preflight(&chain.chain_id, &chain.sources, &mode)?;
-        self.store.initialize_chain(&chain.chain_id).await?;
-        if matches!(phase, PhaseName::Interpret | PhaseName::Project) {
-            self.reject_pending_required_ingest(&chain.chain_id).await?;
+        let reject_pending_ingest = matches!(phase, PhaseName::Interpret | PhaseName::Project);
+        if !self
+            .prepared_for_redo(&chain.chain_id, range, reject_pending_ingest, &cancellation)
+            .await?
+        {
+            return Ok(());
         }
-        self.require_readable_redo_end(&chain.chain_id, range)
-            .await?;
         self.run_phase_with_restart(chain, phase, mode, cancellation)
             .await
     }
@@ -421,25 +446,21 @@ impl PhaseRunner {
             if let Some(heartbeat) = &self.loop_heartbeat {
                 heartbeat.record_progress(&chain.chain_id);
             }
-            // Setup before the batch loop -- `initialize_chain` and the queries each
-            // redo runs first -- is not cancellation-aware, so race the whole dispatch
-            // instead of sampling the token before it.
-            let dispatch = self.scope_manifest_attestation(
-                &chain.chain_id,
-                generation_token,
-                self.redo_after_attestation_preflight(
-                    chain,
-                    selection,
-                    range,
-                    cancellation.clone(),
-                ),
-            );
-            let Some(result) = crate::shutdown::until_cancelled(&cancellation, dispatch)
-                .await
-                .transpose()
-            else {
+            if cancellation.is_cancelled() {
                 break;
-            };
+            }
+            let result = self
+                .scope_manifest_attestation(
+                    &chain.chain_id,
+                    generation_token,
+                    self.redo_after_attestation_preflight(
+                        chain,
+                        selection,
+                        range,
+                        cancellation.clone(),
+                    ),
+                )
+                .await;
             if let Some(heartbeat) = &self.loop_heartbeat {
                 heartbeat.remove_progress(&chain.chain_id);
             }

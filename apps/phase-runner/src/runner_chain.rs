@@ -32,16 +32,14 @@ impl PhaseRunner {
         config: &RuntimeConfig,
         cancellation: CancellationToken,
     ) -> RunnerResult<SupervisorReport> {
-        // Settlement issues database updates that can block on a row lock, so
-        // sampling the token between statements is not enough: race the whole of it.
-        // The process exits straight after a stop, so abandoning a statement
-        // mid-flight costs nothing.
-        let settled = crate::shutdown::until_cancelled(
-            &cancellation,
-            self.settle_unconfigured_phases(config),
-        )
-        .await?;
-        if settled.is_none() || cancellation.is_cancelled() {
+        // Settlement closes out phases recorded against chains this start no longer
+        // configures. It is required cleanup, not new work: abandoning it midway
+        // leaves those phases active and blocks the next start, so it runs to
+        // completion even when a stop is already pending. The work is bounded --
+        // one row per stranded phase, each under a try-lock -- and the token is read
+        // immediately afterwards.
+        self.settle_unconfigured_phases(config).await?;
+        if cancellation.is_cancelled() {
             return Ok(SupervisorReport::default());
         }
         crate::supervisor::run(self, config, cancellation).await
@@ -99,18 +97,16 @@ impl PhaseRunner {
         chain: &ChainConfig,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
-        if cancellation.is_cancelled() {
-            return Ok(());
-        }
         chain.require_intake_sources()?;
         self.record_loop_progress(&chain.chain_id);
-        // Same reasoning as `run`: both of these block on the database.
-        let recovered = crate::shutdown::until_cancelled(&cancellation, async {
-            self.store.initialize_chain(&chain.chain_id).await?;
-            self.recover_stopped_phases(chain).await
-        })
-        .await?;
-        if recovered.is_none() {
+        self.store.initialize_chain(&chain.chain_id).await?;
+        // Recovery settles phases a previous run left `running`. Callers restart a
+        // chain with an already-cancelled token precisely to run this cleanup, so it
+        // must not be skipped or abandoned on a pending stop: doing so leaves those
+        // phases stuck and the next phase start refuses. Bounded work, four phases
+        // under try-locks, and the token is read immediately afterwards.
+        self.recover_stopped_phases(chain).await?;
+        if cancellation.is_cancelled() {
             return Ok(());
         }
         self.run_spine_phase(chain, PhaseName::Ingest, cancellation.clone())
