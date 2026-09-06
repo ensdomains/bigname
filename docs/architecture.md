@@ -717,9 +717,13 @@ referencing `token_lineages`. So the dependency runs projections, normalized
 events, and the divergence ledger → identity, and a rebuild that drops or
 truncates identity first fails on those constraints rather than cascading. Rebuild
 projections against retained identity, or replace identity with an `interpret`
-redo: once Interpret completes, the same command runs a Project redo over
-whatever range Interpret left required, so the projections are republished
-before it returns. Project stays the only writer of those rows; the redo
+redo: when Interpret's resulting status is `completed`, the same command runs a
+Project redo over whatever range Interpret left required, so the projections are
+republished before it returns. That follow-on is conditional — if Interpret ends
+`failed`, `running`, or `paused`, the command returns with Project still stamped
+for redo and the projections not republished, so check the phase state and run
+the Project redo yourself before serving.
+Project stays the only writer of those rows; the redo
 sequences it after Interpret rather than letting Interpret write them. A redo
 of `--phase all` sequences Ingest, Interpret, Project, and Verify explicitly.
 A rebuild that truncates projections and then fails partway leaves the system

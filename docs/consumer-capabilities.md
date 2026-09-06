@@ -866,7 +866,12 @@ values as `<parent>__<child>` (upstream: .refs/graph_node/graph/src/schema/api.r
 
 Of the declared `DomainFilter` arguments, `owner`, `owner_in`, `name`, and
 `name_contains` filter storage. `isMigrated` filters only on `true`, and it
-answers a different question than the upstream field of the same name — see the
+answers a different question than the upstream field of the same name: the
+subgraph sets that field in its current-registry `NewOwner` handler, recording
+the 2019 ENS registry migration
+(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L131-L135 @ ens_subgraph@723f1b6),
+while this filter selects names whose declared registration authority is the
+ENSv2 registry — see the
 [subgraph `isMigrated` divergence](upstream.md#known-divergences). `id` is
 accepted and applies no predicate; `domain(id:)` is the namehash lookup. The two
 inert cases are declared so subgraph-shaped variables validate against the
