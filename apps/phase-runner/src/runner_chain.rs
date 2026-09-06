@@ -32,17 +32,28 @@ impl PhaseRunner {
         config: &RuntimeConfig,
         cancellation: CancellationToken,
     ) -> RunnerResult<SupervisorReport> {
-        self.settle_unconfigured_phases(config).await?;
+        self.settle_unconfigured_phases(config, &cancellation)
+            .await?;
         crate::supervisor::run(self, config, cancellation).await
     }
 
-    async fn settle_unconfigured_phases(&self, config: &RuntimeConfig) -> RunnerResult<()> {
+    /// Recovery runs before the supervisor loop and issues database updates that
+    /// can wait on row locks, so it has to read the token itself: a stop here would
+    /// otherwise be absorbed until the supervisor escalates to SIGKILL.
+    async fn settle_unconfigured_phases(
+        &self,
+        config: &RuntimeConfig,
+        cancellation: &CancellationToken,
+    ) -> RunnerResult<()> {
         let configured = config
             .chains
             .iter()
             .map(|chain| chain.chain_id.as_str())
             .collect::<BTreeSet<_>>();
         for (chain_id, phase, observed_updated_at) in self.store.active_normal_phases().await? {
+            if cancellation.is_cancelled() {
+                return Ok(());
+            }
             if configured.contains(chain_id.as_str()) {
                 continue;
             }
@@ -91,7 +102,10 @@ impl PhaseRunner {
         chain.require_intake_sources()?;
         self.record_loop_progress(&chain.chain_id);
         self.store.initialize_chain(&chain.chain_id).await?;
-        self.recover_stopped_phases(chain).await?;
+        if cancellation.is_cancelled() {
+            return Ok(());
+        }
+        self.recover_stopped_phases(chain, &cancellation).await?;
         self.run_spine_phase(chain, PhaseName::Ingest, cancellation.clone())
             .await?;
         self.repair_discovery_coverage(chain, cancellation.clone())
