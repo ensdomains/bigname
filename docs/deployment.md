@@ -727,8 +727,8 @@ For `C` configured chains, one phase-runner process opens at most:
 
 | Pool | Size | Where |
 | --- | --- | --- |
-| Phase pool | `max(2C, 4)` | `apps/phase-runner/src/main.rs:59` |
-| Verification pool | `max(C, 1)` | `apps/phase-runner/src/main.rs:83` |
+| Phase pool | `max(2C, 4)` | `apps/phase-runner/src/main.rs:64-68` |
+| Verification pool | `max(C, 1)` | `apps/phase-runner/src/main.rs:85-91` |
 | Advisory phase locks, peak | `3C` | see below |
 
 Each lock is a dedicated connection outside both pools, because it holds a
@@ -738,10 +738,10 @@ budget has to cover the peak, not the common case:
 
 | Situation | Locks per chain | Where |
 | --- | --- | --- |
-| Serial path: Verify runs before Live (`verify_before_live`) | `1` | `apps/phase-runner/src/runner_chain.rs:109` |
+| Serial path: Verify runs before Live (`verify_before_live`) | `1` | `apps/phase-runner/src/runner_chain.rs:130` |
 | Combined path: Verify and Live polled concurrently, each holding its own lock | `2` | `apps/phase-runner/src/runner_live_follow.rs:262` |
 | Post-Live discovery repair: a Verify fence, then an Ingest fence inside it, then one phase lock inside that | `3` | `runner_live_follow.rs:70`, `:112`, `:143` |
-| `rewind` (separate operator process): the four writer-phase locks, no Verify lock | `4`, plus its own pool | `apps/phase-runner/src/rewind.rs:40`, `apps/phase-runner/src/main.rs:203` |
+| `rewind` (separate operator process): the four writer-phase locks, no Verify lock | `4`, plus its own pool | `apps/phase-runner/src/rewind.rs:40`, `apps/phase-runner/src/main.rs:229` |
 
 A fence is an ordinary phase lock on that phase's name, so it excludes the
 phase itself rather than adding to it — the post-Live Verify fence waits for the
@@ -756,7 +756,7 @@ time to close them out (`apps/phase-runner/src/runner_chain.rs:50`) and does
 not raise the peak.
 
 `phase-runner rewind` is not part of that figure: it is a separate process
-with its own pool of up to `2` connections (`apps/phase-runner/src/main.rs:203`)
+with its own pool of up to `2` connections (`apps/phase-runner/src/main.rs:229`)
 that takes the Ingest, Interpret, Project, and Live locks for one chain and
 never the Verify lock (`apps/phase-runner/src/rewind.rs:40`). It therefore
 succeeds while the supervised runner is alive whenever that chain is not in a
@@ -767,9 +767,9 @@ runner before a rewind, or budget `6` more connections for the duration:
 phase is running fails on the held lock rather than waiting.
 
 `phase-runner redo` is likewise a separate, and potentially long-running,
-process: a writer pool of up to `4` (`apps/phase-runner/src/main.rs:131`), a
+process: a writer pool of up to `4` (`apps/phase-runner/src/main.rs:146`), a
 verifier pool of `1` opened at start whenever the requested redo includes
-Verify (`apps/phase-runner/src/main.rs:165-173`), and up to two locks at once — the Project
+Verify (`apps/phase-runner/src/main.rs:180-188`), and up to two locks at once — the Project
 lock is held while the Interpret phase runs beneath it
 (`apps/phase-runner/src/runner_operator_redo.rs:131-141`), and every phase run
 takes its own lock (`apps/phase-runner/src/runner.rs:223`). The advisory locks
