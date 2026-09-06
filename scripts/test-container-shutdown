@@ -105,7 +105,11 @@ printf '%s\n' 'fn main() {}' > "$scratch/src/main.rs"
 printf '%s\n' 'fn main() { assert_eq!(std::env::var("NUM_JOBS").unwrap(),"1"); assert_eq!(std::thread::available_parallelism().unwrap().get(),1); }' > "$scratch/build.rs"
 printf '%s\n' 'FROM rust:1.93.1-bookworm' 'WORKDIR /probe' 'COPY . .' 'RUN cargo build --offline -vv' > "$scratch/Dockerfile"
 docker buildx build --builder "$builder" --load -t "bigname-shutdown-probe:$$" "$scratch"
-export CARGO_BUILD_JOBS=1 BIGNAME_BUILD_SHA="$sha"
+# Only BIGNAME_BUILD_SHA is exported: the image build takes its single-job
+# constraint from the builder's pinned CPU above, which the probe verifies, and
+# buildx forwards no host environment into it. Exporting CARGO_BUILD_JOBS here
+# would only throttle the host test build below.
+export BIGNAME_BUILD_SHA="$sha"
 # The builder is created and destroyed per run, so its `--mount=type=cache` mounts
 # start empty every time and the release build recompiles the whole workspace. When
 # a cache directory is supplied, carry the layers across runs instead. This changes

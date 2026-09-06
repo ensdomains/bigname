@@ -1013,10 +1013,10 @@ jobs:
           --health-retries 10
     env:
       # sccache is off here for the same reason as `build (e2e phase-runner)`: the
-      # dependency cache below covers this build instead. The image build keeps its
-      # own single-job constraint, which `scripts/test-container-shutdown` exports
-      # alongside the one-CPU builder it verifies; the host build has no such
-      # requirement and uses the runner's cores.
+      # dependency cache below covers this build instead. The image build takes its
+      # single-job constraint from the pinned one-CPU builder that
+      # `scripts/test-container-shutdown` creates and verifies, not from this job's
+      # environment, so the host build is free to use the runner's cores.
       RUSTC_WRAPPER: ""
       BIGNAME_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
       BIGNAME_E2E_SHUTDOWN_SOURCE_SHA: ${{ github.sha }}
@@ -1071,15 +1071,19 @@ jobs:
           sha256sum target/debug/phase-runner
       # The image build compiles the whole workspace in release mode on the pinned
       # single-CPU builder. Its builder is per-run, so without this the compile starts
-      # cold every time.
+      # cold every time. The Dockerfile builds third-party dependencies in their own
+      # layer, ahead of any first-party source, so an ordinary commit reuses that layer
+      # and recompiles only this workspace's crates.
       - name: Cache exact-image build layers
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/shutdown-image-cache
-          # Keyed on the dependency graph, not the commit: the dependency layers are
-          # what is worth carrying, and first-party layers change every commit anyway.
+          # Keyed on the dependency graph, not the commit: the dependency layer is what
+          # is worth carrying, and the first-party layers change every commit anyway.
           # A per-commit key would write a multi-gigabyte entry every run and evict the
-          # Cargo caches the other jobs depend on.
+          # Cargo caches the other jobs depend on. A member manifest edit that leaves
+          # the lockfile alone restores a cache whose dependency layer no longer
+          # matches, which costs a cold build and nothing else.
           key: v1-shutdown-image-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'Dockerfile') }}
           restore-keys: |
             v1-shutdown-image-${{ env.RUST_VERSION }}-
