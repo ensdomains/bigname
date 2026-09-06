@@ -428,18 +428,25 @@ scoping — all anchor on `chain_lineage` today; two scope-widening reads —
 `capture_child_registration_history` in `crates/interpret/src/write/redo.rs` —
 do not, which can only enlarge a rebuild's scope, never publish a row.
 
-In today's two publishing readers the association-lineage predicate is
-redundant rather than separately load-bearing, and no test isolates it. The
-children builder (`crates/project/src/builders/children.rs`) and the
-name-authority child proof (`crates/project/src/builders/name_authority.rs`)
-each also require the `registry_announcement` edge, joined on the association's
-own `(block_number, block_hash)`, to be readable. An edge pinned to that block is
-orphaned by the same Interpret redo that orphans the block, so the edge check and
-the lineage anchor always agree; deleting the lineage anchor from the children
-builder leaves the reorg test below green. Nor can a runner-driven run see the
-two disagree: head publication orphans the lineage and stamps the required
-Interpret redo in one transaction, and Project cannot start until Interpret has
-completed. What
+In today's two publishing readers the association-lineage predicate cannot be
+the reason a row is withheld, so no test isolates it. Both the children builder
+(`crates/project/src/builders/children.rs`) and the name-authority child proof
+(`crates/project/src/builders/name_authority.rs`) reach a correlation row only
+through rows that sit at or after its block: the parent's migration boundary
+names the registry-creation event as its evidence, and the child registration
+follows that boundary. A reorg that orphans the association's block orphans
+every later block with it, so those rows fail their own lineage checks in the
+same pass. The registry has to exist before the migration that consumes it, so
+there is no chain ordering in which the association's anchor is unreadable while
+its consumers are still readable. Both readers also require the
+`registry_announcement` edge, joined on the association's own
+`(block_number, block_hash)`, and an edge pinned to that block is orphaned by
+the same Interpret redo. Deleting the lineage anchor from the children builder
+therefore leaves the reorg test below green, both after the redo cascade and in
+the window head publication opens before Interpret runs. Nor can a
+runner-driven run see the checks disagree: head publication orphans the lineage
+and stamps the required Interpret redo in one transaction, and Project cannot
+start until Interpret has completed. What
 `reorg_retains_a_migration_association_that_still_reads_canonical_and_publishes_nothing_from_it`
 in `apps/phase-runner/tests/production_project.rs` pins is that runner-level
 outcome, not the predicate: after a real head publication and redo cascade the
