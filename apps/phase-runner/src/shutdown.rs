@@ -53,27 +53,25 @@ fn install(
 
 /// Resolve when one of the registered signals arrives. Returns whether a signal
 /// was actually observed, so a failed listener does not read as a stop request.
+#[cfg(unix)]
 async fn wait(signals: StopSignals) -> bool {
-    #[cfg(unix)]
-    {
-        let StopSignals {
-            terminate,
-            interrupt,
-        } = signals;
-        return match (terminate, interrupt) {
-            (Some(mut terminate), Some(mut interrupt)) => tokio::select! {
-                received = terminate.recv() => received.is_some(),
-                received = interrupt.recv() => received.is_some(),
-            },
-            (Some(mut only), None) | (None, Some(mut only)) => only.recv().await.is_some(),
-            (None, None) => tokio::signal::ctrl_c().await.is_ok(),
-        };
+    let StopSignals {
+        terminate,
+        interrupt,
+    } = signals;
+    match (terminate, interrupt) {
+        (Some(mut terminate), Some(mut interrupt)) => tokio::select! {
+            received = terminate.recv() => received.is_some(),
+            received = interrupt.recv() => received.is_some(),
+        },
+        (Some(mut only), None) | (None, Some(mut only)) => only.recv().await.is_some(),
+        (None, None) => tokio::signal::ctrl_c().await.is_ok(),
     }
-    #[cfg(not(unix))]
-    {
-        let StopSignals = signals;
-        tokio::signal::ctrl_c().await.is_ok()
-    }
+}
+
+#[cfg(not(unix))]
+async fn wait(_signals: StopSignals) -> bool {
+    tokio::signal::ctrl_c().await.is_ok()
 }
 
 /// Cancel `cancellation` when the process is asked to stop. Install this only
