@@ -26,6 +26,9 @@ fn register() -> StopSignals {
             interrupt: install(SignalKind::interrupt(), "SIGINT"),
         }
     }
+    // Non-Unix is a compile fallback, not a supported deployment: the runner ships
+    // in Docker with `tini` forwarding SIGTERM, and CI and deployment are Linux.
+    // Ctrl-C there is still registered on first poll of the waiter rather than here.
     #[cfg(not(unix))]
     StopSignals
 }
