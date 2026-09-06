@@ -1797,7 +1797,11 @@ BEGIN
         RAISE EXCEPTION 'unexpected schema-v2 tables: %', unexpected_tables;
     END IF;
 
-    -- Add exact exceptions only after maintainer authorization.
+    -- Add exact exceptions only after maintainer authorization. An entry here is
+    -- a carve-out under docs/adrs/0007-v1-schema-freeze.md: a table that trips the
+    -- forbidden-name policy and was authorized anyway. If a schema change fails
+    -- above with a forbidden-table error, that ADR is where the exception is
+    -- argued, not this list.
     -- `project_generation_failures` is the contracted name of the append-only
     -- projection-generation failure audit (docs/storage.md, table ownership and
     -- "Projection publication"); it is not retention-generation state.
