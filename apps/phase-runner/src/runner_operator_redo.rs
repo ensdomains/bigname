@@ -5,6 +5,7 @@ use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
     phase::{BlockRange, PhaseName, RunMode},
     phase_lock::PhaseLock,
+    runner_support::cancelled_redo_error,
     state_persistence::load_redo_marker,
 };
 
@@ -61,13 +62,17 @@ impl PhaseRunner {
     /// cancellation itself and records the incomplete redo, so only this setup is
     /// raced: wrapping the batch would drop it before it could report. Returns
     /// `false` when the stop won and the caller should return without running.
+    /// A stop during setup still leaves the redo unfinished, so losing the race
+    /// reports the same incomplete-redo error the batch loop would have raised.
     async fn prepared_for_redo(
         &self,
-        chain_id: &str,
+        chain: &ChainConfig,
+        phase: PhaseName,
         range: BlockRange,
         reject_pending_ingest: bool,
         cancellation: &CancellationToken,
-    ) -> RunnerResult<bool> {
+    ) -> RunnerResult<()> {
+        let chain_id = chain.chain_id.as_str();
         let prepared = crate::shutdown::until_cancelled(cancellation, async {
             self.store.initialize_chain(chain_id).await?;
             if reject_pending_ingest {
@@ -76,7 +81,10 @@ impl PhaseRunner {
             self.require_readable_redo_end(chain_id, range).await
         })
         .await?;
-        Ok(prepared.is_some())
+        match prepared {
+            Some(()) => Ok(()),
+            None => Err(cancelled_redo_error(&self.store, chain_id, phase).await?),
+        }
     }
 
     async fn redo_recompute_flags(
@@ -91,12 +99,8 @@ impl PhaseRunner {
                 .get(phase)
                 .preflight(&chain.chain_id, &chain.sources, &mode)?;
         }
-        if !self
-            .prepared_for_redo(&chain.chain_id, range, true, &cancellation)
-            .await?
-        {
-            return Ok(());
-        }
+        self.prepared_for_redo(chain, PhaseName::Interpret, range, true, &cancellation)
+            .await?;
 
         if let Some((redo_mode, from, to)) =
             load_redo_marker(self.store.pool(), &chain.chain_id, PhaseName::Interpret).await?
@@ -402,12 +406,8 @@ impl PhaseRunner {
             .get(phase)
             .preflight(&chain.chain_id, &chain.sources, &mode)?;
         let reject_pending_ingest = matches!(phase, PhaseName::Interpret | PhaseName::Project);
-        if !self
-            .prepared_for_redo(&chain.chain_id, range, reject_pending_ingest, &cancellation)
-            .await?
-        {
-            return Ok(());
-        }
+        self.prepared_for_redo(chain, phase, range, reject_pending_ingest, &cancellation)
+            .await?;
         self.run_phase_with_restart(chain, phase, mode, cancellation)
             .await
     }

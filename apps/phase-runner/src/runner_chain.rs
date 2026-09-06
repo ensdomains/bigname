@@ -37,7 +37,13 @@ impl PhaseRunner {
         // leaves those phases active and blocks the next start, so it runs to
         // completion even when a stop is already pending. It is bounded in time
         // instead, so an accepted stop cannot wait on it past the grace period.
-        bounded_recovery("settlement", "", self.settle_unconfigured_phases(config)).await?;
+        bounded_recovery(
+            "settlement",
+            "",
+            &cancellation,
+            self.settle_unconfigured_phases(config),
+        )
+        .await?;
         if cancellation.is_cancelled() {
             return Ok(SupervisorReport::default());
         }
@@ -104,7 +110,7 @@ impl PhaseRunner {
         // on a pending stop: doing so leaves those phases stuck and the next phase
         // start refuses. Both are bounded in time instead, so an accepted stop cannot
         // wait on them past the grace period.
-        bounded_recovery("recovery", &chain.chain_id, async {
+        bounded_recovery("recovery", &chain.chain_id, &cancellation, async {
             self.store.initialize_chain(&chain.chain_id).await?;
             self.recover_stopped_phases(chain).await
         })
@@ -181,12 +187,23 @@ const RECOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_millis(
 async fn bounded_recovery(
     what: &str,
     chain_id: &str,
+    cancellation: &CancellationToken,
     work: impl std::future::Future<Output = RunnerResult<()>>,
 ) -> RunnerResult<()> {
+    tokio::pin!(work);
+    tokio::select! {
+        result = &mut work => return result,
+        () = cancellation.cancelled() => {}
+    }
+    // A stop is pending from here on. Recovery is required cleanup, so it still runs
+    // to completion -- but only within the deadline, because an accepted stop must not
+    // wait it out past the supervisor's grace period. With no stop pending there is no
+    // deadline at all: ordinary contention on a `chain_phase_state` row should delay a
+    // start, not truncate its settlement pass.
     match tokio::time::timeout(RECOVERY_DEADLINE, work).await {
         Ok(result) => result,
         Err(_elapsed) => Err(RunnerError::transient(format!(
-            "start-up {what}{} did not finish within {} s; another process may hold its rows",
+            "start-up {what}{} did not finish within {} s of an accepted stop; another process may hold its rows",
             if chain_id.is_empty() {
                 String::new()
             } else {
@@ -199,9 +216,13 @@ async fn bounded_recovery(
 
 #[cfg(test)]
 mod recovery_deadline_tests {
+    use tokio_util::sync::CancellationToken;
+
     #[tokio::test]
-    async fn recovery_that_never_finishes_fails_at_the_deadline() {
-        let error = super::bounded_recovery("recovery", "some-chain", async {
+    async fn recovery_that_never_finishes_fails_once_a_stop_is_accepted() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let error = super::bounded_recovery("recovery", "some-chain", &cancellation, async {
             std::future::pending::<super::RunnerResult<()>>().await
         })
         .await
@@ -212,8 +233,21 @@ mod recovery_deadline_tests {
     }
 
     #[tokio::test]
+    async fn recovery_outlasts_the_deadline_when_no_stop_is_pending() {
+        // No stop, so contention must delay the start rather than truncate it.
+        super::bounded_recovery("recovery", "some-chain", &CancellationToken::new(), async {
+            tokio::time::sleep(super::RECOVERY_DEADLINE * 3).await;
+            Ok(())
+        })
+        .await
+        .expect("without a stop there is no deadline");
+    }
+
+    #[tokio::test]
     async fn recovery_that_finishes_inside_the_deadline_is_untouched() {
-        super::bounded_recovery("recovery", "some-chain", async {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        super::bounded_recovery("recovery", "some-chain", &cancellation, async {
             tokio::time::sleep(super::RECOVERY_DEADLINE / 5).await;
             Ok(())
         })
