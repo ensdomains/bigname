@@ -705,9 +705,15 @@ underneath are what cannot be emptied on their own. Six projection tables hold
 foreign keys into the identity layer — `name_current`, `address_names_current`,
 `children_current`, `permissions_current`,
 `permissions_current_resource_summary`, and `record_inventory_current` reference
-`name_surfaces`, `surface_bindings`, `resources`, and `token_lineages`. So the
-dependency runs projections → identity, and a rebuild that drops or truncates
-identity first fails on those constraints rather than cascading. Rebuild
+`name_surfaces`, `surface_bindings`, `resources`, and `token_lineages`.
+Projections are not the only dependants: `normalized_events` references
+`name_surfaces` and `resources`, and `resolution_divergences` references
+`name_surfaces`, so clearing the six projection tables alone still does not make
+identity removable. The identity layer is ordered internally too, with
+`surface_bindings` referencing `name_surfaces` and `resources`, and `resources`
+referencing `token_lineages`. So the dependency runs projections, normalized
+events, and the divergence ledger → identity, and a rebuild that drops or
+truncates identity first fails on those constraints rather than cascading. Rebuild
 projections against retained identity, or replace identity with an `interpret`
 redo: once Interpret completes, the same command runs a Project redo over
 whatever range Interpret left required, so the projections are republished
@@ -1463,17 +1469,23 @@ None of these introduces a separate truth system or ledger.
 Coverage is contractual.
 
 **What `exhaustiveness` actually carries today.** The project phase does not
-assert exhaustiveness: every projection emits the constant `not_asserted`
-alongside `status = "projected"`, and support is carried separately in
-`support_status` / `unsupported_reason`. That is a deliberate decision recorded
+assert exhaustiveness: every projection that carries a coverage object emits the
+constant `not_asserted` alongside `status = "projected"`, and support is carried
+separately in `support_status` / `unsupported_reason`.
+`account_permission_state_current` is the exception: it builds no coverage object at all, so it emits neither value
+and a consumer must not probe it for one. That is a deliberate decision recorded
 in [`schema-v2/README.md`](../schema-v2/README.md) § Current projections, not a
 gap. Two read paths still report a richer value, and both derive it at read
 time rather than reading it from a projection. The permissions resource-summary
 read derives `authoritative`, `best_effort`, or `not_applicable` from
 `support_status` (`PermissionCoverageExhaustiveness`). `GET
-/v2/diagnostics/events` reports `not_applicable` on every row: normalized
-events carry no coverage object, so the route fills the whole object from its
-defaults (`apps/api/src/v2/diag_events.rs`).
+/v2/diagnostics/events` reports `not_applicable` on every row today, but as a
+fallback rather than a fixed value: the history read lifts a `coverage` object
+out of an event's `after_state` or `before_state` when one is present
+(`crates/storage/src/history/paging.rs`) and the route passes its
+`exhaustiveness` through, filling in the defaults only for the keys that are
+missing (`apps/api/src/v2/diag_events.rs`). No interpreter writes that object
+today, which is why every row currently falls back.
 
 So the statements below describe which classes *are* enumerable in the protocol,
 not a value the field will hand you. Read `support_status` to decide whether an
