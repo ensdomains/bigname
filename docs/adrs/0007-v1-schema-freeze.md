@@ -47,13 +47,13 @@ the day it was signed.
 The V1 schema contract is the pair:
 
 - the `schema-v2/baseline/` tree, and
-- the migration head at
+- the schema-migration head at
   `migrations/20260906120000_exact_zero_addr60_default_derivation.sql`.
 
 The draft named `20260811120200_ens_v2_migration_slice_1_constraints.sql`, which
-was the head when it was written. The 38 migrations that landed between the two
-carried slices 2 and 3, whose schema work this ADR anticipated rather than
-forbade; the head is restated here so the frozen artifact is the tree the
+was the head when it was written. The 38 schema-migrations that landed between
+the two carried slices 2 and 3, whose schema work this ADR anticipated rather
+than forbade; the head is restated here so the frozen artifact is the tree the
 milestone actually builds on.
 
 `schema-v2/apply-check.sh` is the conformance test for that contract. It already
@@ -93,9 +93,12 @@ values the system already documents as unstable across a boundary.
 ### Pre-authorized carve-outs
 
 1. **`project_generation_failures`** — the append-only audit for a
-   projection-blocking invariant failure. It is already described in
-   [`storage.md`](../storage.md) and [`architecture.md`](../architecture.md) as
-   part of the ownership map but does not exist. Additive; no re-derivation.
+   projection-blocking invariant failure. When this ADR was drafted it was
+   already described in [`storage.md`](../storage.md) and
+   [`architecture.md`](../architecture.md) as part of the ownership map but did
+   not exist; the baseline now carries it as
+   `schema-v2/baseline/12_project_generation_failures.sql`. Additive; no
+   re-derivation.
    Landing it requires three things beyond the table itself: entries in both
    expected-table lists in `apply-check.sh`, and an entry in the maintainer
    allowlist, because the table name matches the forbidden-name regex on
@@ -140,28 +143,42 @@ values the system already documents as unstable across a boundary.
    own block, and the same Interpret redo orphans both. The rule governs new
    readers, which is where it is the only guard.
 
-4. **Label-preimage indexes** — **decided: out, because the two paths this
-   names are already covered.** `label_preimages.labelhash` is the primary key,
-   and both named paths reach rows through it: the children join is
+4. **Label-preimage indexes** — **decided: out of the freeze, pending a
+   measurement; no index is pre-authorized and none is ruled out.** The two
+   named paths differ. The children join reaches rows through the primary key:
    `preimage.labelhash = lower(...)` (`crates/project/src/builders/children.rs`,
-   which lowers the other side precisely so the PK stays usable), and the
-   post-normalizer-bump recompute selects by `labelhash` under an EXISTS
-   (`crates/interpret/src/recompute.rs`). The bump's own scan is served by
-   `label_preimages_normalization_idx (normalizer_version,
-   normalized_under_version, labelhash)`, which already exists in the baseline.
+   which lowers the other side precisely so the PK stays usable). The
+   post-normalizer-bump recompute does not. Its `load_labels` query
+   (`crates/interpret/src/recompute.rs`) selects every `label_preimages` row
+   matching any of four `OR` branches — three correlated `EXISTS` lookups
+   scoped to the chain and block range, and `source_kind =
+   'ens_rainbow_import'` outright — then orders the union by `labelhash` and
+   locks it `FOR UPDATE`. It carries no `normalizer_version` predicate, so the
+   baseline's `label_preimages_normalization_idx (normalizer_version,
+   normalized_under_version, labelhash)` cannot serve it, and the PK is not its
+   access path either. `source_kind` is therefore on this path, and after a bulk
+   rainbow import that branch alone returns the whole import on every recompute
+   range.
 
-   The remaining gap is `source_kind`, which `crates/project/src/scope/labels.rs`
-   filters after a PK join over a bounded array — not a scan, and not on either
-   path this carve-out names. It is tracked as #364 and needs no pre-authorization
-   here. A bulk import during the milestone therefore does not require a schema
-   change; if profiling later shows one, it is additive and can be authorized
-   then.
+   What that costs is a question for `EXPLAIN` against an imported table, not
+   for this ADR: if the import dominates, the cost is row volume and no index
+   changes it; if it does not, an index is additive and can be authorized when
+   the measurement says so. #364 tracks the `source_kind` filter in
+   `crates/project/src/scope/labels.rs`, which is a PK join over a bounded array
+   and not the concern here. A bulk import during the milestone does not by
+   itself require a schema change.
 
-5. **Serving indexes lost in the `public` schema cutover** — no index in
+5. **Serving indexes the projections never had** — no index in
    `bigname_phase` supports a name-text filter or a name sort, so `/v2/search`
    and the GraphQL `name_contains` and name-ordered paths are sequential scans
-   plus external sorts. The equivalent index existed on the dropped
-   `public.address_names_current` and was never recreated. Separately,
+   plus external sorts. This is not an index lost in the `public` schema
+   cutover: every index the retired `public.address_names_current` carried led
+   with `address`, including the one prefix index that named
+   `normalized_name` (`address_names_current_address_normalized_name_prefix_idx`,
+   `migrations/20260627120000_address_names_q_sort_read_indexes.sql`), so the
+   predecessor served name text only within one address and never globally.
+   A global name-text index is new work, to be shaped by the query it serves and
+   justified by a benchmark rather than by a predecessor. Separately,
    `normalized_events` has no index leading with `namespace`, so an unfiltered
    `/v2/events` page cannot use one. Both are additive; no re-derivation.
 
@@ -177,17 +194,24 @@ values the system already documents as unstable across a boundary.
 ### Derivation-side changes that are not schema changes
 
 These rotate the interpreter content hash rather than touching DDL, so the
-freeze does not cover them — but they should be sequenced against the same
-boundaries rather than landing ad hoc:
+freeze does not cover them — but they had to be sequenced against the same
+boundaries rather than landing ad hoc. Both were open when this ADR was drafted,
+which proposed slice 2's boundary as their carrier. Neither made it: both landed
+after slice 3, each as its own content-hash rotation (#745 on 2026-08-31 and
+#813 on 2026-09-02). They are recorded here as outcomes, not as pending work:
 
-- Adding `ROLE_WAS_RESERVED` (bit 32) to the ENSv2 registry role vocabulary. It
-  is the one upstream registry role constant with no entry in the adapter table.
-- Correcting the empty-value guard for ENSv1 and Basenames `contenthash` and
-  non-ETH `addr` records, which currently publish a cleared record as
-  `status: "success"`.
+- `ROLE_WAS_RESERVED` (bit 32) is in the ENSv2 registry role vocabulary. It was
+  the one registry role constant upstream declares (upstream:
+  .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L48 @
+  ens_v2@a971bd64) with no entry in the adapter table; `REGISTRY_ROLE_BITS` in
+  `crates/adapters/src/schema_v2/protocol/permissions.rs` now carries
+  `(32, "was_reserved")`.
+- The empty-value guard for ENSv1 and Basenames `contenthash` and non-ETH `addr`
+  records, which published a cleared record as `status: "success"`, is
+  corrected: `crates/project/src/builders/record_inventory.rs` classifies those
+  as `not_found`, pinned by the `v1-record-clears.json` interpreter fixture.
 
-Both change derived output and therefore belong **at** a re-derivation boundary,
-not between them. Slice 2's boundary is the natural carrier.
+Neither needs scheduling again.
 
 ### Explicitly out of scope
 
@@ -243,12 +267,12 @@ semantics while leaving the schema free — the inverse of what is needed. It al
 rotates at both slice boundaries, which would make the freeze appear violated by
 planned work.
 
-**Freeze the migration head alone.** Simpler, but a migration head does not
-describe schema *shape*, so a baseline edit could pass unnoticed. Pairing it with
-`apply-check.sh` closes that.
+**Freeze the schema-migration head alone.** Simpler, but a schema-migration
+head does not describe schema *shape*, so a baseline edit could pass unnoticed.
+Pairing it with `apply-check.sh` closes that.
 
 **No freeze; rely on review.** This is the status quo, and it is what produced a
-table documented in the authoritative ownership map that does not exist. Review
+table documented in the authoritative ownership map that did not yet exist. Review
 catches changes; it does not catch omissions.
 
 **Sign off V1 and V2 together.** Not possible while the V2 spec is shaping. The
@@ -258,5 +282,4 @@ combined statement would be unfalsifiable.
 
 - [ADR 0006](0006-api-v2-product-surface.md) — v2 product surface
 - [`consumer-capabilities.md`](../consumer-capabilities.md) — slice definitions
-- [`data-model.md`](../data-model.md) — the model this freezes
 - [`storage.md`](../storage.md) — table families and replay classification
