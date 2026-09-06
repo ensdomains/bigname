@@ -5,32 +5,47 @@
 
 /// The stop signals this process listens on, registered up front.
 #[cfg(unix)]
-struct StopSignals(Option<tokio::signal::unix::Signal>);
+struct StopSignals {
+    terminate: Option<tokio::signal::unix::Signal>,
+    interrupt: Option<tokio::signal::unix::Signal>,
+}
 #[cfg(not(unix))]
 struct StopSignals;
 
-/// Register the stop signals with the runtime. This has to finish before the
-/// caller returns to its own work: until the SIGTERM stream exists the signal
-/// keeps its default disposition and terminates the process, so registering
-/// inside a spawned task would leave the whole start-up window unprotected.
+/// Register the stop signals with the runtime. Both streams have to exist before
+/// the caller returns to its own work: until one does, that signal keeps its
+/// default disposition and terminates the process, so registering inside a
+/// spawned task would leave the whole start-up window unprotected.
 fn register() -> StopSignals {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{SignalKind, signal};
+        use tokio::signal::unix::SignalKind;
 
-        match signal(SignalKind::terminate()) {
-            Ok(terminate) => StopSignals(Some(terminate)),
-            Err(error) => {
-                tracing::warn!(
-                    error = ?error,
-                    "failed to install a SIGTERM handler; only SIGINT will stop this process cleanly"
-                );
-                StopSignals(None)
-            }
+        StopSignals {
+            terminate: install(SignalKind::terminate(), "SIGTERM"),
+            interrupt: install(SignalKind::interrupt(), "SIGINT"),
         }
     }
     #[cfg(not(unix))]
     StopSignals
+}
+
+#[cfg(unix)]
+fn install(
+    kind: tokio::signal::unix::SignalKind,
+    name: &str,
+) -> Option<tokio::signal::unix::Signal> {
+    match tokio::signal::unix::signal(kind) {
+        Ok(stream) => Some(stream),
+        Err(error) => {
+            tracing::warn!(
+                error = ?error,
+                signal = name,
+                "failed to install a stop-signal handler; this signal will not stop the process cleanly"
+            );
+            None
+        }
+    }
 }
 
 /// Resolve when one of the registered signals arrives. Returns whether a signal
@@ -38,22 +53,28 @@ fn register() -> StopSignals {
 async fn wait(signals: StopSignals) -> bool {
     #[cfg(unix)]
     {
-        let StopSignals(terminate) = signals;
-        if let Some(mut terminate) = terminate {
-            return tokio::select! {
-                result = tokio::signal::ctrl_c() => result.is_ok(),
+        let StopSignals {
+            terminate,
+            interrupt,
+        } = signals;
+        return match (terminate, interrupt) {
+            (Some(mut terminate), Some(mut interrupt)) => tokio::select! {
                 received = terminate.recv() => received.is_some(),
-            };
-        }
+                received = interrupt.recv() => received.is_some(),
+            },
+            (Some(mut only), None) | (None, Some(mut only)) => only.recv().await.is_some(),
+            (None, None) => tokio::signal::ctrl_c().await.is_ok(),
+        };
     }
     #[cfg(not(unix))]
-    let StopSignals = signals;
-
-    tokio::signal::ctrl_c().await.is_ok()
+    {
+        let StopSignals = signals;
+        tokio::signal::ctrl_c().await.is_ok()
+    }
 }
 
 /// Cancel `cancellation` when the process is asked to stop. Install this only
-/// for commands that actually poll the token: registering a SIGTERM listener
+/// for commands that actually poll the token: registering a stop-signal listener
 /// replaces the default disposition for the whole process, so a one-shot
 /// command that never reads the token would absorb the signal and keep running
 /// until its supervisor escalates to SIGKILL.
