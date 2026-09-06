@@ -393,8 +393,12 @@ key again, in a repeated batch or a redo replay, with every stored column but
 the stamps unchanged (position, kind, and evidence set, plus the registry,
 manifest, and proposed effect on the discovery and candidate-effect tables),
 `ON CONFLICT ... DO UPDATE` re-stamps `canonicality_state` from the re-derived
-parent event, `consumer_visibility` from the re-derived group's activation
-state, and the writing session's content hash. A same-key row that differs in
+parent event, `consumer_visibility`, and the writing session's content hash.
+Only three of the four tables can see that visibility change: completed-group
+activation raises it on normalized events and the two association tables
+(`crates/adapters/src/schema_v2/migration/activation.rs`), while both
+candidate-effect tables stay `candidate` and a schema `CHECK` rejects any other
+value, so their re-stamp never moves that column. A same-key row that differs in
 any of those columns is refused: the Interpret write fails with a
 data-integrity error and the batch rolls back. The re-stamp is a re-derivation
 on the same block, never lineage maintenance. A retained losing-fork row
@@ -432,14 +436,19 @@ In today's two publishing readers the association-lineage predicate cannot be
 the reason a row is withheld, so no test isolates it. Both the children builder
 (`crates/project/src/builders/children.rs`) and the name-authority child proof
 (`crates/project/src/builders/name_authority.rs`) reach a correlation row only
-through rows that sit at or after its block: the parent's migration boundary
-names the registry-creation event as its evidence, and the child registration
-follows that boundary. A reorg that orphans the association's block orphans
-every later block with it, so those rows fail their own lineage checks in the
-same pass. The registry has to exist before the migration that consumes it, so
-there is no chain ordering in which the association's anchor is unreadable while
-its consumers are still readable. Both readers also require the
-`registry_announcement` edge, joined on the association's own
+through rows that sit at or after its block, and that ordering is bigname's own
+invariant rather than a claim about ENSv2. A migration boundary's `evidence`
+array is built from the raw-log observations the interpreter had already decoded
+when it derived the boundary
+(`crates/adapters/src/schema_v2/migration/support.rs`, `observation_evidence`),
+and the children builder matches a correlation row only when that array contains
+the row's `evidence_refs` (`crates/project/src/builders/children.rs`). A matched
+row therefore sits at or before the boundary that reads it, and the child
+registration follows the boundary. A reorg that orphans the association's block
+orphans every later block with it, so those rows fail their own lineage checks
+in the same pass, and no reorg can orphan the row while leaving the rows that
+read it readable. Both readers also require the `registry_announcement` edge,
+joined on the association's own
 `(block_number, block_hash)`, and an edge pinned to that block is orphaned by
 the same Interpret redo. Deleting the lineage anchor from the children builder
 therefore leaves the reorg test below green, both after the redo cascade and in
