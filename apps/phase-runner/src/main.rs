@@ -48,15 +48,8 @@ async fn main() -> Result<()> {
             let cancellation = CancellationToken::new();
             phase_runner::shutdown::cancel_on_signal(&cancellation);
             let startup = async {
-                // Hashing the manifest tree is synchronous filesystem work. Left inline
-                // it never yields, so the race below could not observe a stop until it
-                // finished; on a blocking thread the await is a cancellation point.
-                let hashing_root = manifests_root.clone();
                 let (manifest_repository, manifest_profile) =
-                    tokio::task::spawn_blocking(move || {
-                        load_hashed_manifest_repository(&hashing_root)
-                    })
-                    .await??;
+                    hash_manifests_off_runtime(manifests_root.clone()).await??;
                 validate_deployment_table_set(
                     &runtime.chains,
                     COMPILED_CHAIN_NAMESPACES.iter().copied(),
@@ -298,8 +291,26 @@ async fn start_metrics<'a>(
 }
 
 async fn sync_manifests(pool: &sqlx::PgPool, root: &std::path::Path) -> Result<()> {
-    let (repository, profile) = load_hashed_manifest_repository(root)?;
+    let (repository, profile) = hash_manifests_off_runtime(root.to_path_buf()).await??;
     sync_loaded_manifests(pool, root, &repository, profile).await
+}
+
+/// Hash the manifest tree on a detached OS thread and await the result.
+///
+/// The work is synchronous filesystem I/O, so inline it never yields and a stop
+/// cannot be observed until it finishes. `spawn_blocking` is not enough either:
+/// those tasks cannot be aborted and the runtime joins its blocking pool when it
+/// is dropped, so a caller that abandons the await still waits for the hash. A
+/// detached thread is not joined at exit, so abandoning the await lets the
+/// process leave immediately.
+fn hash_manifests_off_runtime(
+    root: std::path::PathBuf,
+) -> tokio::sync::oneshot::Receiver<Result<(bigname_manifests::ManifestRepository, &'static str)>> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(load_hashed_manifest_repository(&root));
+    });
+    receiver
 }
 
 fn load_hashed_manifest_repository(
