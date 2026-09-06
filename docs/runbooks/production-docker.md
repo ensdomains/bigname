@@ -788,7 +788,7 @@ continue to report the stale or absent loop honestly.
 The phase runner handles SIGTERM, which is what `docker compose stop` sends and
 what `tini` forwards, so a stop is a clean stop rather than a kill. It observes
 the request at the next batch boundary: the batch already in flight finishes
-and commits, then the loop exits. Two cases exit nonzero on purpose. A stop that
+and commits, then the loop exits. Three cases exit nonzero on purpose. A stop that
 lands while a chain is working through automatically required redo cannot leave
 that redo looking finished, so the runner converts the cancellation into an
 error, the supervisor records the chain as stopped, and the process exits
@@ -801,8 +801,20 @@ on its rows: recovery is required cleanup, so it is not abandoned, but it is
 given a bounded ten seconds from the stop and then reports a transient error
 (`apps/phase-runner/src/runner_chain.rs`, `bounded_recovery`). Nothing is
 corrupted and the next start retries the same cleanup; it means another process
-held those rows. Distinguish both from an exit `137`, which is the grace period
-expiring into SIGKILL. The API's own stop path, its validated
+held those rows.
+
+An explicit `phase-runner redo` exits nonzero on a stop for the same reason, but
+it needs a different response. A stop during its setup, or at a batch boundary
+once it is running, becomes an `InvalidTransition` error rather than a silent
+success, so the incomplete redo cannot look finished
+(`apps/phase-runner/src/runner_operator_redo.rs`, `prepared_for_redo`;
+`apps/phase-runner/src/runner.rs`). Unlike the supervised runner there is no next
+start to resume it: the redo stamp survives and blocks the phase from normal
+restart until the command is run again. The error says which command, built from
+the stamped mode and range — `rerun \`phase-runner redo --chain <chain>
+--phase <phase> --from-block <n> --to-block <n>\`` — so rerun exactly that
+rather than reconstructing it. Distinguish all of these from an exit `137`, which
+is the grace period expiring into SIGKILL. The API's own stop path, its validated
 `BIGNAME_API_STOP_GRACE_MS` bound, and what counts as graceful success are
 documented under [Stop the API](#stop-the-api).
 
