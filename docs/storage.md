@@ -1229,8 +1229,15 @@ Two consequences worth knowing before writing against this table. A builder that
 omits one of those keys produces a row that silently drops out of reads rather
 than failing — the lineage join yields no match, and the row is simply not
 served. And a reader cannot filter or group these rows by manifest version,
-support, or canonicality the way it can for every other projection family;
-compare `name_current`, which carries all five as typed columns. Constraining
+support, or canonicality the way it can for the projection families that carry
+those columns; compare `name_current`, which carries all five as typed columns.
+That set is not every family: `support_status` and `unsupported_reason` exist on
+`name_current`, `address_names_current`, `record_inventory_current`,
+`resolver_current`, and `permissions_current_resource_summary`;
+`primary_names_current` carries `claim_status` instead; and `children_current`,
+`permissions_current`, and `account_permission_state_current` carry no status
+column at all, so a filter written against one family is not portable to
+another. Constraining
 the two required keys is the obvious hardening, but it is a schema change to a
 populated table and needs its own change.
 
