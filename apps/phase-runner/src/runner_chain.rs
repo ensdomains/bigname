@@ -35,10 +35,9 @@ impl PhaseRunner {
         // Settlement closes out phases recorded against chains this start no longer
         // configures. It is required cleanup, not new work: abandoning it midway
         // leaves those phases active and blocks the next start, so it runs to
-        // completion even when a stop is already pending. The work is bounded --
-        // one row per stranded phase, each under a try-lock -- and the token is read
-        // immediately afterwards.
-        self.settle_unconfigured_phases(config).await?;
+        // completion even when a stop is already pending. It is bounded in time
+        // instead, so an accepted stop cannot wait on it past the grace period.
+        bounded_recovery("settlement", "", self.settle_unconfigured_phases(config)).await?;
         if cancellation.is_cancelled() {
             return Ok(SupervisorReport::default());
         }
@@ -99,13 +98,17 @@ impl PhaseRunner {
     ) -> RunnerResult<()> {
         chain.require_intake_sources()?;
         self.record_loop_progress(&chain.chain_id);
-        self.store.initialize_chain(&chain.chain_id).await?;
-        // Recovery settles phases a previous run left `running`. Callers restart a
-        // chain with an already-cancelled token precisely to run this cleanup, so it
-        // must not be skipped or abandoned on a pending stop: doing so leaves those
-        // phases stuck and the next phase start refuses. Bounded work, four phases
-        // under try-locks, and the token is read immediately afterwards.
-        self.recover_stopped_phases(chain).await?;
+        // Recovery settles phases a previous run left `running`, and `initialize_chain`
+        // writes the rows it settles. Callers restart a chain with an already-cancelled
+        // token precisely to run this cleanup, so it must not be skipped or abandoned
+        // on a pending stop: doing so leaves those phases stuck and the next phase
+        // start refuses. Both are bounded in time instead, so an accepted stop cannot
+        // wait on them past the grace period.
+        bounded_recovery("recovery", &chain.chain_id, async {
+            self.store.initialize_chain(&chain.chain_id).await?;
+            self.recover_stopped_phases(chain).await
+        })
+        .await?;
         if cancellation.is_cancelled() {
             return Ok(());
         }
@@ -162,5 +165,59 @@ impl PhaseRunner {
             .preflight(&chain.chain_id, &chain.sources, &mode)?;
         self.run_phase_with_restart(chain, PhaseName::Verify, mode, cancellation)
             .await
+    }
+}
+
+/// Start-up recovery is required cleanup, so a pending stop does not abandon it.
+/// It is bounded in wall-clock instead: settling one phase is a `pg_try_advisory_lock`
+/// plus a single-row update, and neither the connection attempt nor the update carries
+/// its own timeout, so without this a stalled connection or a row-lock wait could hold
+/// an accepted stop until the supervisor escalates to SIGKILL.
+#[cfg(not(test))]
+const RECOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(test)]
+const RECOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_millis(50);
+
+async fn bounded_recovery(
+    what: &str,
+    chain_id: &str,
+    work: impl std::future::Future<Output = RunnerResult<()>>,
+) -> RunnerResult<()> {
+    match tokio::time::timeout(RECOVERY_DEADLINE, work).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(RunnerError::transient(format!(
+            "start-up {what}{} did not finish within {} s; another process may hold its rows",
+            if chain_id.is_empty() {
+                String::new()
+            } else {
+                format!(" for chain {chain_id}")
+            },
+            RECOVERY_DEADLINE.as_secs()
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod recovery_deadline_tests {
+    #[tokio::test]
+    async fn recovery_that_never_finishes_fails_at_the_deadline() {
+        let error = super::bounded_recovery("recovery", "some-chain", async {
+            std::future::pending::<super::RunnerResult<()>>().await
+        })
+        .await
+        .expect_err("a recovery that never finishes must not return Ok");
+        let message = error.to_string();
+        assert!(message.contains("did not finish within"), "{message}");
+        assert!(message.contains("some-chain"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn recovery_that_finishes_inside_the_deadline_is_untouched() {
+        super::bounded_recovery("recovery", "some-chain", async {
+            tokio::time::sleep(super::RECOVERY_DEADLINE / 5).await;
+            Ok(())
+        })
+        .await
+        .expect("recovery inside the deadline must pass through");
     }
 }
