@@ -24,7 +24,7 @@ use crate::{
     BASENAMES_NAMESPACE, ChainRpcUrls, ENS_NAMESPACE, EnsPrimaryNameStatus, ErrorKind,
     LedgerAction, LookupEngine, LookupPosition, LookupRequest, LookupResponse, RecordSelector,
     abi::{dns_encode_name, hex_string, namehash},
-    ccip::encode_offchain_lookup_for_test,
+    ccip::{encode_batch_query_for_test, encode_offchain_lookup_for_test},
 };
 
 const ETHEREUM: &str = "ethereum-mainnet";
@@ -2546,6 +2546,147 @@ async fn hanging_gateways_are_cut_off_by_the_ccip_read_budget_in_band() -> AnyRe
     Ok(())
 }
 
+fn batch_offchain_lookup(request_count: usize, gateway_url: &str) -> AnyResult<String> {
+    let sender = Address::from_str(BASE_L1_RESOLVER)?;
+    let requests = (0..request_count)
+        .map(|index| (sender, vec![gateway_url.to_owned()], vec![index as u8]))
+        .collect();
+    Ok(encode_offchain_lookup_for_test(
+        sender,
+        vec!["x-batch-gateway:true".to_owned()],
+        encode_batch_query_for_test(requests),
+        [0x01, 0x02, 0x03, 0x04],
+        vec![0xab],
+    ))
+}
+
+#[tokio::test]
+async fn batch_gateway_queries_above_the_request_cap_fail_in_band_before_any_fan_out()
+-> AnyResult<()> {
+    // The gateway task finishes the moment anything connects, so it must
+    // still be pending after the lookup if the cap refused the batch first.
+    let (gateway_url, gateway_handle) = spawn_untouchable_gateway().await?;
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Error {
+        code: 3,
+        message: "execution reverted".to_owned(),
+        data: Value::String(batch_offchain_lookup(9, &gateway_url)?),
+    }])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Basenames, INDEXED_VALUE).await?;
+
+    let result = run_lookup(&fixture, &rpc_url).await?;
+
+    let record = &result.records[0];
+    assert!(record.ccip_read);
+    assert_eq!(record.value, None);
+    assert_eq!(
+        record.failure_reason.as_deref(),
+        Some("ccip_read_failed"),
+        "an oversized batch must be refused before the fan-out: {record:?}"
+    );
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests.len(), 1, "no callback may run for a refused batch");
+    assert!(
+        !gateway_handle.is_finished(),
+        "the gateway must not have been contacted"
+    );
+    gateway_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn batch_gateway_fan_out_runs_at_most_four_requests_at_a_time() -> AnyResult<()> {
+    // Eight inner requests against one gateway that holds each answer for
+    // 25 ms and records how many were in flight together.
+    let (gateway_url, gateway_handle) =
+        spawn_batch_gateway(8, vec![0xca, 0xfe], Duration::from_millis(25)).await?;
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Error {
+            code: 3,
+            message: "execution reverted".to_owned(),
+            data: Value::String(batch_offchain_lookup(8, &gateway_url)?),
+        },
+        RpcResponse::Result(encoded_basenames_text_result(LIVE_VALUE)),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Basenames, INDEXED_VALUE).await?;
+
+    let result = run_lookup(&fixture, &rpc_url).await?;
+
+    let record = &result.records[0];
+    assert!(record.ccip_read);
+    assert_eq!(
+        record.value,
+        Some(json!(LIVE_VALUE)),
+        "a batch within the caps must resolve: {record:?}"
+    );
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests.len(), 2, "initial call and the batch callback");
+    let peak = gateway_handle.await??;
+    assert!(
+        (2..=4).contains(&peak),
+        "the fan-out must run concurrently but never more than four at once: {peak}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn batch_gateway_responses_are_capped_in_aggregate() -> AnyResult<()> {
+    // Each inner response is 400 KiB, under the 1 MiB per-response cap. Two
+    // of them fit the same 1 MiB in total; three do not.
+    let response = vec![0x5a_u8; 400 * 1024];
+    let (gateway_url, gateway_handle) =
+        spawn_batch_gateway(2, response.clone(), Duration::ZERO).await?;
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Error {
+            code: 3,
+            message: "execution reverted".to_owned(),
+            data: Value::String(batch_offchain_lookup(2, &gateway_url)?),
+        },
+        RpcResponse::Result(encoded_basenames_text_result(LIVE_VALUE)),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Basenames, INDEXED_VALUE).await?;
+    let result = run_lookup(&fixture, &rpc_url).await?;
+    let record = &result.records[0];
+    assert_eq!(
+        record.value,
+        Some(json!(LIVE_VALUE)),
+        "two 400 KiB responses fit the aggregate cap: {record:?}"
+    );
+    assert_eq!(join_rpc(rpc_handle).await?.len(), 2);
+    gateway_handle.await??;
+
+    let (gateway_url, gateway_handle) = spawn_batch_gateway(3, response, Duration::ZERO).await?;
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Error {
+        code: 3,
+        message: "execution reverted".to_owned(),
+        data: Value::String(batch_offchain_lookup(3, &gateway_url)?),
+    }])
+    .await?;
+    let result = run_lookup(&fixture, &rpc_url).await?;
+    let record = &result.records[0];
+    assert_eq!(record.value, None);
+    assert_eq!(
+        record.failure_reason.as_deref(),
+        Some("ccip_read_failed"),
+        "three 400 KiB responses exceed the aggregate cap: {record:?}"
+    );
+
+    fixture.cleanup().await?;
+    assert_eq!(
+        join_rpc(rpc_handle).await?.len(),
+        1,
+        "no callback may run for a batch over the aggregate cap"
+    );
+    gateway_handle.abort();
+    Ok(())
+}
+
 #[tokio::test]
 async fn slow_callbacks_do_not_consume_the_gateway_budget() -> AnyResult<()> {
     // Two healthy gateways answer at once; the callback between them stalls
@@ -3980,6 +4121,51 @@ async fn spawn_gateway(response: Vec<u8>) -> AnyResult<(String, JoinHandle<AnyRe
         read_http_json_body(&mut socket).await?;
         let body = json!({ "data": hex_string(&response) }).to_string();
         write_http_response(&mut socket, &body).await
+    });
+    Ok((url, handle))
+}
+
+async fn spawn_batch_gateway(
+    request_count: usize,
+    response: Vec<u8>,
+    delay: Duration,
+) -> AnyResult<(String, JoinHandle<AnyResult<usize>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let body = Arc::new(json!({ "data": hex_string(&response) }).to_string());
+    let handle = tokio::spawn(async move {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut tasks = tokio::task::JoinSet::<AnyResult<()>>::new();
+        for _ in 0..request_count {
+            let (mut socket, _) = listener.accept().await?;
+            let active = Arc::clone(&active);
+            let peak = Arc::clone(&peak);
+            let body = Arc::clone(&body);
+            tasks.spawn(async move {
+                read_http_json_body(&mut socket).await?;
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(current, Ordering::SeqCst);
+                tokio::time::sleep(delay).await;
+                write_http_response(&mut socket, &body).await?;
+                active.fetch_sub(1, Ordering::SeqCst);
+                AnyResult::Ok(())
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result??;
+        }
+        Ok(peak.load(Ordering::SeqCst))
+    });
+    Ok((url, handle))
+}
+
+async fn spawn_untouchable_gateway() -> AnyResult<(String, JoinHandle<AnyResult<()>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        listener.accept().await?;
+        Ok(())
     });
     Ok((url, handle))
 }

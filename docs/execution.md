@@ -109,8 +109,17 @@ reaches the network:
   CCIP-Read step the resolver's URL list is tried in order, at most four URLs,
   and a timed-out or unreachable URL falls through to the next; a resolution
   follows at most four steps, each followed by one JSON-RPC callback bounded by
-  `BIGNAME_API_RPC_TIMEOUT_MS`. The `x-batch-gateway:true` form fans its inner
-  requests out concurrently with no in-process cap on their number. Across all
+  `BIGNAME_API_RPC_TIMEOUT_MS`. The `x-batch-gateway:true` form is followed
+  for at most 8 inner requests, runs at most 4 of them at a time in request
+  order, and lets their decoded responses total at most the same 1 MiB; a
+  longer batch fails the record in band before any request is launched, and a
+  batch whose responses pass that total fails it during the fan-out. A batch
+  the Universal Resolver builds holds one lookup per call it was asked to
+  make: one for a plain resolver call, one per entry of a `multicall()`
+  (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L98-L122 @ ens_v1@91c966f;
+  upstream: .refs/ens_v1/contracts/ccipRead/CCIPBatcher.sol:L42-L53 @ ens_v1@91c966f),
+  and bigname asks for one record per call, so the cap sits well above what a
+  legitimate batch carries. Across all
   of that, the gateway side of one CCIP-Read resolution shares a single 6 s
   budget: it is initialised once, every gateway request runs under whatever
   remains, and each completed request's elapsed time is subtracted, so later
@@ -119,7 +128,10 @@ reaches the network:
   `eth_call`s between steps are bounded by `BIGNAME_API_RPC_TIMEOUT_MS` and do
   not draw on it, so a slow provider cannot starve a healthy gateway. When the
   budget runs out the record fails in band as `resolver_call_failed`, the same
-  way a configured RPC timeout does, instead of holding the request until the
+  way a configured RPC timeout does, whatever phase the in-flight gateway
+  request was in — a connection that had not completed when the budget expired
+  fails in band too, so the connect-phase whole-request `500` applies only to a
+  request that fails within its own per-request timeouts — instead of holding the request until the
   30 s `BIGNAME_API_REQUEST_TIMEOUT_MS` fails it as a whole. The worst case for
   one record is therefore 6 s of gateway time in total plus up to four
   callbacks at the RPC timeout.

@@ -3,6 +3,7 @@ use std::{sync::LazyLock, time::Duration};
 use alloy_primitives::Bytes;
 use alloy_sol_types::{SolCall, SolError, SolValue, sol};
 use anyhow::{Context, Result, bail};
+use futures_util::{StreamExt, stream};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
@@ -11,6 +12,16 @@ use crate::abi::{hex_string, hex_to_bytes};
 
 const LOCAL_BATCH_GATEWAY_URL: &str = "x-batch-gateway:true";
 const MAX_GATEWAY_URLS: usize = 4;
+/// A batch the Universal Resolver builds carries one lookup per call it was
+/// asked to make: one for a plain resolver call, one per entry of a
+/// `multicall()` (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L98-L122 @ ens_v1@91c966f;
+/// upstream: .refs/ens_v1/contracts/ccipRead/CCIPBatcher.sol:L42-L53 @ ens_v1@91c966f),
+/// and bigname asks for one record per call. The batch calldata is still
+/// contract-chosen revert data, so its length is capped before any request is
+/// launched, the fan-out runs a few requests at a time, and the decoded inner
+/// responses share the single-answer byte cap below.
+const MAX_BATCH_GATEWAY_REQUESTS: usize = 8;
+const MAX_BATCH_GATEWAY_CONCURRENCY: usize = 4;
 #[cfg(not(test))]
 const GATEWAY_CONNECT_TIMEOUT: Duration = Duration::from_millis(1000);
 #[cfg(test)]
@@ -88,45 +99,73 @@ async fn fetch_inner(lookup: &OffchainLookup) -> Result<Vec<u8>> {
         .iter()
         .any(|url| url.eq_ignore_ascii_case(LOCAL_BATCH_GATEWAY_URL))
     {
-        let requests = decode_batch_query(&lookup.call_data)?;
-        let results =
-            futures_util::future::join_all(requests.into_iter().map(|request| async move {
-                fetch_standard(&request.sender, &request.urls, &request.data).await
-            }))
-            .await;
-        let mut failures = Vec::with_capacity(results.len());
-        let mut responses = Vec::with_capacity(results.len());
-        let mut transport_error = None;
-        for result in results {
-            match result {
-                Ok(response) => {
-                    failures.push(false);
-                    responses.push(response);
-                }
-                Err(error) => match retain_transport_error(&mut transport_error, error) {
-                    Ok(()) => {}
-                    Err(error) => {
-                        failures.push(true);
-                        responses.push(
-                            alloy_sol_types::Revert::from(format!(
-                                "CCIP gateway request failed: {error}"
-                            ))
-                            .abi_encode(),
-                        );
-                    }
-                },
-            }
-        }
-        if let Some((_, error)) = transport_error {
-            return Err(error);
-        }
-        let responses = responses
-            .iter()
-            .map(|response| Bytes::copy_from_slice(response))
-            .collect::<Vec<_>>();
-        return Ok((failures, responses).abi_encode_params());
+        return fetch_batch(decode_batch_query(&lookup.call_data)?).await;
     }
     fetch_standard(&lookup.sender, &lookup.urls, &lookup.call_data).await
+}
+
+async fn fetch_batch(requests: Vec<BatchRequest>) -> Result<Vec<u8>> {
+    if requests.len() > MAX_BATCH_GATEWAY_REQUESTS {
+        bail!(
+            "CCIP batch gateway query carries {} requests; at most {MAX_BATCH_GATEWAY_REQUESTS} are followed",
+            requests.len()
+        );
+    }
+    let mut results = stream::iter(requests)
+        .map(|request| async move {
+            fetch_standard(&request.sender, &request.urls, &request.data).await
+        })
+        .buffered(MAX_BATCH_GATEWAY_CONCURRENCY);
+    let mut failures = Vec::new();
+    let mut responses = Vec::new();
+    let mut transport_error = None;
+    let mut total_bytes = 0_usize;
+    while let Some(result) = results.next().await {
+        let response = match result {
+            Ok(response) => {
+                failures.push(false);
+                response
+            }
+            Err(error) => match retain_transport_error(&mut transport_error, error) {
+                Ok(()) => continue,
+                Err(error) => {
+                    failures.push(true);
+                    alloy_sol_types::Revert::from(format!("CCIP gateway request failed: {error}"))
+                        .abi_encode()
+                }
+            },
+        };
+        total_bytes += response.len();
+        if total_bytes > MAX_GATEWAY_RESPONSE_BYTES {
+            bail!(
+                "CCIP batch gateway responses exceeded {MAX_GATEWAY_RESPONSE_BYTES} bytes in total"
+            );
+        }
+        responses.push(response);
+    }
+    if let Some((_, error)) = transport_error {
+        return Err(error);
+    }
+    let responses = responses
+        .iter()
+        .map(|response| Bytes::copy_from_slice(response))
+        .collect::<Vec<_>>();
+    Ok((failures, responses).abi_encode_params())
+}
+
+#[cfg(test)]
+pub(crate) fn encode_batch_query_for_test(
+    requests: Vec<(alloy_primitives::Address, Vec<String>, Vec<u8>)>,
+) -> Vec<u8> {
+    let requests = requests
+        .into_iter()
+        .map(|(sender, urls, data)| contracts::Request {
+            sender,
+            urls,
+            data: Bytes::from(data),
+        })
+        .collect();
+    contracts::queryCall { requests }.abi_encode()
 }
 
 struct BatchRequest {

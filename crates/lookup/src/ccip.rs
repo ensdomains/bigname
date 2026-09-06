@@ -12,6 +12,8 @@ use crate::{
 };
 
 mod gateway;
+#[cfg(test)]
+pub(crate) use gateway::encode_batch_query_for_test;
 
 const MAX_CCIP_REDIRECTS: usize = 4;
 /// Gateway time one CCIP-Read resolution may spend in total, summed over every
@@ -121,6 +123,9 @@ pub(crate) async fn follow_ccip_read(
         let gateway_started = tokio::time::Instant::now();
         let gateway_response =
             match tokio::time::timeout(gateway_budget, gateway::fetch(&lookup)).await {
+                // Budget expiry is a configured timeout of the lookup whatever
+                // phase the in-flight request was in; a connect that had not
+                // completed when the budget ran out fails in band too.
                 Err(_elapsed) => {
                     return Err(CcipReadError::transport(
                         format!(

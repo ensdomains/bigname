@@ -1320,10 +1320,14 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   answer plus `verification` with `status=not_found` and
   `failure_reason=claim_name_not_normalizable`. A completed JSON-RPC failure,
   malformed response, or configured provider or CCIP-Read gateway response
-  timeout produces an in-band verified `status=failed` result. Missing provider
+  timeout produces an in-band verified `status=failed` result; so does the
+  shared CCIP-Read gateway budget running out, whatever phase the in-flight
+  gateway request was in, including a connection that had not completed when
+  the budget expired. Missing provider
   configuration or a selected-block rejection returns whole-request `409
   stale`. A provider or gateway connect-phase timeout, DNS failure, TLS
-  failure, connection reset, or other transport failure returns whole-request
+  failure, connection reset, or other transport failure within a request's own
+  timeouts returns whole-request
   `500 internal_error`; no trace or outcome is persisted, so the next read
   retries. Malformed addresses return `400 invalid_input`.
   `source=indexed` does not enter verified-execution rate or concurrency
