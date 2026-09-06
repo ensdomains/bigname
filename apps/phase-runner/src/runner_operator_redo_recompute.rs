@@ -5,8 +5,7 @@ use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
     phase::{BlockRange, PhaseName, RunMode},
     phase_lock::PhaseLock,
-    runner_support::{cancelled_redo_error, resumable_recompute_marker},
-    state_persistence::load_redo_marker,
+    runner_support::{cancelled_redo_error, read_after_stop, resumable_recompute_marker},
 };
 
 use super::{PendingProjectRedoRow, PhaseRunner};
@@ -70,22 +69,48 @@ impl PhaseRunner {
 
     /// The race above is biased toward the stop, so a refresh whose commit
     /// reached PostgreSQL can still lose it. The durable marker decides what is
-    /// reported, not the race: a stamped refresh blocks Project and resumes on a
-    /// rerun of this command; without one, nothing was recorded.
+    /// reported, not the race: a refresh this command owns blocks Project and
+    /// resumes on a rerun; any other Project marker was there before and is not
+    /// this command's to report. The read is bounded, since the stall that lost
+    /// the race may be the same database.
     async fn recompute_setup_cancelled(&self, chain: &ChainConfig) -> RunnerResult<RunnerError> {
-        let project =
-            load_redo_marker(self.store.pool(), &chain.chain_id, PhaseName::Project).await?;
-        let Some((_, from, to)) = project else {
-            return cancelled_redo_error(&self.store, &chain.chain_id, PhaseName::Interpret).await;
+        let chain_id = chain.chain_id.as_str();
+        let refresh: Option<(Option<String>, Option<i64>, Option<i64>)> = read_after_stop(
+            &format!("the recompute-flags project refresh for chain {chain_id}"),
+            async {
+                sqlx::query_as(
+                    "SELECT last_error, redo_from_block_number, redo_to_block_number
+                     FROM chain_phase_state
+                     WHERE chain_id = $1 AND phase_name = 'project' AND redo_in_progress",
+                )
+                .bind(chain_id)
+                .fetch_optional(self.store.pool())
+                .await
+                .map_err(|error| {
+                    RunnerError::database(
+                        format!("failed to load the queued project refresh for chain {chain_id}"),
+                        error,
+                    )
+                })
+            },
+        )
+        .await?;
+        let owned = refresh.and_then(|(reason, from, to)| {
+            let reason = reason?;
+            let owned = crate::redo_recompute::owns_project_refresh(&reason)
+                || crate::redo_recompute::is_staged_project_refresh(&reason);
+            owned.then_some((from?, to?))
+        });
+        let Some((from, to)) = owned else {
+            return cancelled_redo_error(&self.store, chain_id, PhaseName::Interpret).await;
         };
         Ok(RunnerError::new(
             ErrorKind::InvalidTransition,
             format!(
-                "recompute-flags for chain {} stopped after its scoped Project refresh was \
-                 stamped; the refresh blocks Project until it is resumed; rerun \
-                 `phase-runner redo --chain {} --phase recompute-flags --from-block {from} \
-                 --to-block {to}`",
-                chain.chain_id, chain.chain_id
+                "recompute-flags for chain {chain_id} stopped after its scoped Project refresh \
+                 was stamped; the refresh blocks Project until it is resumed; rerun \
+                 `phase-runner redo --chain {chain_id} --phase recompute-flags --from-block \
+                 {from} --to-block {to}`"
             ),
         ))
     }

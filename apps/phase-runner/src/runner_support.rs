@@ -22,12 +22,44 @@ pub(crate) enum PhaseLoopResult {
     Cancelled,
 }
 
+/// How long a stop already accepted may wait on the database to learn what to
+/// report. The read runs after the race is lost, often because that same
+/// database stalled, so it cannot be allowed to hold the stop itself.
+#[cfg(not(test))]
+pub(crate) const STOPPED_MARKER_LOOKUP: Duration = Duration::from_secs(5);
+#[cfg(test)]
+pub(crate) const STOPPED_MARKER_LOOKUP: Duration = Duration::from_millis(50);
+
+/// Read redo state after a stop has been accepted, giving up within
+/// [`STOPPED_MARKER_LOOKUP`] with an error that says the state is unread.
+pub(crate) async fn read_after_stop<T>(
+    what: &str,
+    read: impl std::future::Future<Output = RunnerResult<T>>,
+) -> RunnerResult<T> {
+    match tokio::time::timeout(STOPPED_MARKER_LOOKUP, read).await {
+        Ok(result) => result,
+        Err(_) => Err(RunnerError::new(
+            ErrorKind::InvalidTransition,
+            format!(
+                "stopped, and the database did not answer within {}s to say whether {what} \
+                 was left unfinished; inspect chain_phase_state once it responds",
+                STOPPED_MARKER_LOOKUP.as_secs_f64()
+            ),
+        )),
+    }
+}
+
 pub(crate) async fn cancelled_redo_error(
     store: &PhaseStore,
     chain_id: &str,
     phase: PhaseName,
 ) -> RunnerResult<RunnerError> {
-    let Some((redo_mode, from, to)) = load_redo_marker(store.pool(), chain_id, phase).await? else {
+    let marker = read_after_stop(
+        &format!("the redo for chain {chain_id} phase {phase}"),
+        load_redo_marker(store.pool(), chain_id, phase),
+    )
+    .await?;
+    let Some((redo_mode, from, to)) = marker else {
         return Ok(RunnerError::new(
             ErrorKind::InvalidTransition,
             format!(
@@ -239,5 +271,33 @@ mod tests {
         assert_eq!(backoff.next_delay(), Duration::from_millis(6));
         assert_eq!(backoff.next_delay(), Duration::from_millis(10));
         assert_eq!(backoff.next_delay(), Duration::from_millis(10));
+    }
+}
+
+#[cfg(test)]
+mod read_after_stop_tests {
+    use crate::error::{ErrorKind, RunnerResult};
+
+    #[tokio::test]
+    async fn a_read_that_never_answers_reports_the_state_as_unread() {
+        let error =
+            super::read_after_stop("the redo for chain some-chain phase interpret", async {
+                std::future::pending::<RunnerResult<()>>().await
+            })
+            .await
+            .expect_err("a read that never answers must not hold the stop");
+        assert_eq!(error.kind(), ErrorKind::InvalidTransition);
+        let message = error.to_string();
+        assert!(message.contains("did not answer within"), "{message}");
+        assert!(message.contains("some-chain phase interpret"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_read_that_answers_in_time_is_passed_through() {
+        let value =
+            super::read_after_stop("nothing", async { Ok::<_, crate::error::RunnerError>(7) })
+                .await
+                .expect("an answered read is returned");
+        assert_eq!(value, 7);
     }
 }
