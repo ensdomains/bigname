@@ -1,11 +1,10 @@
 # bigname end-to-end scenario tests
 
 This package exercises ENSv1, ENSv2, and Basenames contract emissions against
-schema-v2 through the production `phase-runner` binary. It does not start the
-deleted indexer or worker and does not start an API server. Assertions that
-previously read HTTP responses now read schema-v2
-[projections](../../docs/glossary.md#projection) and phase state directly
-through the test-only `ProjectionReader`.
+schema-v2 through the production `phase-runner` binary. Most scenarios read
+schema-v2 [projections](../../docs/glossary.md#projection) and phase state directly
+through the test-only `ProjectionReader`. The registry-operator lifecycle also
+starts the production API and asserts its HTTP responses.
 
 ## Prerequisites
 
@@ -66,9 +65,9 @@ suite cannot satisfy CI.
    The rich-chain case also pins the #305 production history-loader fix: its
    canonical read excludes the losing event before redo and returns the winning
    event after redo through the chain-lineage join.
-6. Schema-v2 projections are queried directly. Route-shaped helper inputs are
-   retained only to keep each scenario's semantic assertions recognizable;
-   no network API server or legacy public-schema read occurs.
+6. Projection-reader scenarios query schema-v2 directly and retain route-shaped
+   helper inputs for their semantic assertions. The registry-operator lifecycle
+   checks serving behavior through the production API over HTTP.
 7. A scenario readiness predicate is evaluated once after its synchronous
    phase-runner commands. A false result fails the scenario instead of being
    treated as an asynchronous retry condition.
