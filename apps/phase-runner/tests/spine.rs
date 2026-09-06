@@ -2976,6 +2976,88 @@ async fn redo_restores_the_full_phase_lifecycle_state() -> Result<()> {
 }
 
 #[tokio::test]
+async fn all_phase_redo_stopped_between_phases_keeps_the_all_phase_instruction() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_stop_between_phases").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let chain_id = "redo-stop-between-phases-chain";
+    store.initialize_chain(chain_id).await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 1).await?;
+    for (phase, hash) in [
+        (PhaseName::Ingest, None),
+        (
+            PhaseName::Interpret,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        ),
+        (
+            PhaseName::Project,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        ),
+        (PhaseName::Verify, None),
+    ] {
+        mark_completed(scratch.pool(), chain_id, phase, hash).await?;
+        set_phase_extent(scratch.pool(), chain_id, phase, 1).await?;
+    }
+
+    // The stop lands inside Interpret's last batch, so it is observed before
+    // Project starts. Interpret's redo has already stamped Project and Verify as
+    // required, which is what lets the error carry the all-phase recovery.
+    let cancellation = CancellationToken::new();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let phases = PhaseName::ALL.map(|name| {
+        Arc::new(StoppingRedoPhase {
+            name,
+            calls: Arc::clone(&calls),
+            stop_at: (
+                chain_id.to_owned(),
+                PhaseName::Interpret,
+                cancellation.clone(),
+            ),
+        }) as Arc<dyn Phase>
+    });
+    let phase_runner = runner(
+        scratch.runner(),
+        PhaseSet::new(phases)?,
+        available_capacity(),
+        "redo-stop-between-phases-runner",
+    )?;
+    let report = phase_runner
+        .redo_chains(
+            &[chain(chain_id)?],
+            RedoPhase::All,
+            BlockRange::new(0, 0)?,
+            cancellation,
+        )
+        .await?;
+
+    assert_eq!(
+        report.stopped_chains.len(),
+        1,
+        "{:?}",
+        report.stopped_chains
+    );
+    let (stopped, error) = &report.stopped_chains[0];
+    assert_eq!(stopped, chain_id);
+    assert_eq!(error.kind(), ErrorKind::InvalidTransition);
+    let message = error.to_string();
+    assert!(message.contains("phase project is incomplete"), "{message}");
+    assert!(
+        message.contains(
+            "then rerun `phase-runner redo --chain redo-stop-between-phases-chain --phase all \
+             --from-block 0 --to-block 0`"
+        ),
+        "{message}"
+    );
+    assert_eq!(
+        *calls.lock().expect("recorded calls lock"),
+        [
+            (chain_id.into(), PhaseName::Ingest),
+            (chain_id.into(), PhaseName::Interpret),
+        ]
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn all_phase_redo_stopped_between_chains_reports_the_chains_it_never_started() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_redo_stop_between_chains").await?;
     let store = PhaseStore::new(scratch.runner().pool().clone());

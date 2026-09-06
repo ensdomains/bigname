@@ -97,8 +97,3 @@ justification = "Index timing, rebuild, throughput, memory measurement, and red-
 path = "apps/phase-runner/src/redo_state.rs"
 loc = 608
 justification = "Redo marker state owns the atomic redo-begin transition and its authority/progress fencing. Discovery repair adds only the shared downstream-stamp call at that boundary; the stamping implementation was extracted to redo_stamp.rs, ratcheting this file down from 610 lines."
-
-[[files]]
-path = "apps/phase-runner/src/runner_operator_redo.rs"
-loc = 617
-justification = "Explicit-redo orchestration: the attestation preflight, the per-chain dispatch, and the phase-selection arms share one cancellation token and one SupervisorReport, so splitting them would thread both through a second module for no behavioural gain. Making the pre-batch setup cancellation-aware without wrapping the batch itself (#876) added twenty-four lines over the 593-line base; the all-phase extent check, the recompute marker check, and the undispatched-chain report live in runner_support.rs. Split on the next substantive touch."
