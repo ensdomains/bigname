@@ -67,6 +67,23 @@ pub fn cancel_on_signal(cancellation: &tokio_util::sync::CancellationToken) {
     });
 }
 
+/// Run `startup` unless the process is asked to stop first, returning `None`
+/// when it was. Start-up does work that never reads the token — hashing the
+/// manifest repository, and a blocking `pg_advisory_lock` in manifest
+/// synchronization that a concurrent runner can hold indefinitely — so without
+/// this a stop during start-up is absorbed and the process waits for its
+/// supervisor to escalate to SIGKILL instead of exiting.
+pub async fn until_cancelled<T>(
+    cancellation: &tokio_util::sync::CancellationToken,
+    startup: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<Option<T>> {
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Ok(None),
+        started = startup => started.map(Some),
+    }
+}
+
 /// Resolve when the process is asked to stop. Registration happens when this is
 /// called rather than when the returned future is first polled, so a caller that
 /// spawns or selects over it is covered from the call onwards.
