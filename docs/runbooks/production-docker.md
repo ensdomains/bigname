@@ -788,7 +788,15 @@ continue to report the stale or absent loop honestly.
 The phase runner handles SIGTERM, which is what `docker compose stop` sends and
 what `tini` forwards, so a stop is a clean stop rather than a kill. It observes
 the request at the next batch boundary: the batch already in flight finishes
-and commits, then the loop exits. The API's own stop path, its validated
+and commits, then the loop exits. One case exits nonzero on purpose. A stop that
+lands while a chain is working through automatically required redo cannot leave
+that redo looking finished, so the runner converts the cancellation into an
+error, the supervisor records the chain as stopped, and the process exits
+nonzero (`apps/phase-runner/src/runner.rs`, `apps/phase-runner/src/main.rs`).
+That is the incomplete-redo signal, not a failed shutdown: the redo stamp
+survives, the next start resumes it, and the exit code should not be read as
+corruption. Expect it whenever you stop a runner mid-redo, and distinguish it
+from an exit `137`, which is the grace period expiring into SIGKILL. The API's own stop path, its validated
 `BIGNAME_API_STOP_GRACE_MS` bound, and what counts as graceful success are
 documented under [Stop the API](#stop-the-api).
 

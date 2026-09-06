@@ -52,8 +52,15 @@ async fn main() -> Result<()> {
             let cancellation = CancellationToken::new();
             phase_runner::shutdown::cancel_on_signal(&cancellation);
             let startup = async {
+                // Hashing the manifest tree is synchronous filesystem work. Left inline
+                // it never yields, so the race below could not observe a stop until it
+                // finished; on a blocking thread the await is a cancellation point.
+                let hashing_root = manifests_root.clone();
                 let (manifest_repository, manifest_profile) =
-                    load_hashed_manifest_repository(&manifests_root)?;
+                    tokio::task::spawn_blocking(move || {
+                        load_hashed_manifest_repository(&hashing_root)
+                    })
+                    .await??;
                 validate_deployment_table_set(
                     &runtime.chains,
                     COMPILED_CHAIN_NAMESPACES.iter().copied(),
