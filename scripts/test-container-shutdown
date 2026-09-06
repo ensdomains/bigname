@@ -106,7 +106,28 @@ printf '%s\n' 'fn main() { assert_eq!(std::env::var("NUM_JOBS").unwrap(),"1"); a
 printf '%s\n' 'FROM rust:1.93.1-bookworm' 'WORKDIR /probe' 'COPY . .' 'RUN cargo build --offline -vv' > "$scratch/Dockerfile"
 docker buildx build --builder "$builder" --load -t "bigname-shutdown-probe:$$" "$scratch"
 export CARGO_BUILD_JOBS=1 BIGNAME_BUILD_SHA="$sha"
-docker buildx build --builder "$builder" --load --build-arg "BIGNAME_BUILD_SHA=$sha" -t "$BIGNAME_E2E_SHUTDOWN_IMAGE" "$source_root"
+# The builder is created and destroyed per run, so its `--mount=type=cache` mounts
+# start empty every time and the release build recompiles the whole workspace. When
+# a cache directory is supplied, carry the layers across runs instead. This changes
+# only layer reuse: the source tree, the Dockerfile, the single-CPU builder, and the
+# `-j1` build above are all unchanged, and buildx reuses a layer only when its own
+# inputs hash identically. Unset, the build behaves exactly as before.
+cache_args=()
+if [[ -n "${BIGNAME_E2E_SHUTDOWN_BUILD_CACHE:-}" ]]; then
+  cache_out="${BIGNAME_E2E_SHUTDOWN_BUILD_CACHE}-next"
+  rm -rf "$cache_out"
+  if [[ -d "$BIGNAME_E2E_SHUTDOWN_BUILD_CACHE" ]]; then
+    cache_args+=(--cache-from "type=local,src=$BIGNAME_E2E_SHUTDOWN_BUILD_CACHE")
+  fi
+  cache_args+=(--cache-to "type=local,dest=$cache_out,mode=max")
+fi
+docker buildx build --builder "$builder" --load "${cache_args[@]}" --build-arg "BIGNAME_BUILD_SHA=$sha" -t "$BIGNAME_E2E_SHUTDOWN_IMAGE" "$source_root"
+if [[ -n "${BIGNAME_E2E_SHUTDOWN_BUILD_CACHE:-}" && -d "$cache_out" ]]; then
+  # Replace rather than append: the local exporter never prunes, so writing in place
+  # would grow without bound across runs.
+  rm -rf "$BIGNAME_E2E_SHUTDOWN_BUILD_CACHE"
+  mv "$cache_out" "$BIGNAME_E2E_SHUTDOWN_BUILD_CACHE"
+fi
 export BIGNAME_E2E_SHUTDOWN_MODE=compose
 cd "$ROOT"
 cargo test --locked --manifest-path tests/e2e/Cargo.toml scenarios::service_shutdown::api_signals_drain_accepted_indexed_name_read -- --exact --nocapture

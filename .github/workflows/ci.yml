@@ -991,6 +991,12 @@ jobs:
     name: test (API container shutdown)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    # Ordered after the dependency-cache producer, the same way the e2e shards are.
+    # `!cancelled()` rather than a success guard: a failure over there must not skip
+    # this proof, it only means this job compiles against a cold cache.
+    needs:
+      - e2e_build
+    if: ${{ !cancelled() }}
     services:
       postgres:
         image: postgres:16-alpine
@@ -1006,11 +1012,15 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
+      # sccache is off here for the same reason as `build (e2e phase-runner)`: the
+      # dependency cache below covers this build instead. The image build keeps its
+      # own single-job constraint, which `scripts/test-container-shutdown` exports
+      # alongside the one-CPU builder it verifies; the host build has no such
+      # requirement and uses the runner's cores.
       RUSTC_WRAPPER: ""
       BIGNAME_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
       BIGNAME_E2E_SHUTDOWN_SOURCE_SHA: ${{ github.sha }}
       BIGNAME_E2E_SHUTDOWN_EVIDENCE: ${{ github.workspace }}/target/api-container-shutdown
-      CARGO_BUILD_JOBS: "1"
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
@@ -1028,13 +1038,55 @@ jobs:
         run: |
           scripts/sync-refs
           scripts/sync-refs --check
+      - name: Compute phase-runner dependency-cache key
+        id: phase_runner_cache_key
+        run: |
+          root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+          e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
+          prefix="v1-rust-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
+          runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
+          primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
+          echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
+          echo "primary=$primary" >>"$GITHUB_OUTPUT"
+          echo "phase-runner dependency-cache primary key: $primary"
+
+      # Same workspace, lockfiles, and debug profile as `build (e2e phase-runner)`,
+      # so this restores that job's dependency cache instead of compiling cold.
+      - name: Cache e2e phase-runner Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ steps.phase_runner_cache_key.outputs.prefix }}
+          shared-key: phase-runner
+          add-job-id-key: false
+          add-rust-environment-hash-key: false
+          workspaces: ". -> target"
+          cache-workspace-crates: false
+          save-if: false
+
       - name: Build canonical phase-runner prerequisite
         env:
           BIGNAME_BUILD_SHA: ${{ github.sha }}
         run: |
           cargo build --locked --package phase-runner --bin phase-runner
           sha256sum target/debug/phase-runner
+      # The image build compiles the whole workspace in release mode on the pinned
+      # single-CPU builder. Its builder is per-run, so without this the compile starts
+      # cold every time.
+      - name: Cache exact-image build layers
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/shutdown-image-cache
+          # Keyed on the dependency graph, not the commit: the dependency layers are
+          # what is worth carrying, and first-party layers change every commit anyway.
+          # A per-commit key would write a multi-gigabyte entry every run and evict the
+          # Cargo caches the other jobs depend on.
+          key: v1-shutdown-image-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'Dockerfile') }}
+          restore-keys: |
+            v1-shutdown-image-${{ env.RUST_VERSION }}-
+
       - name: Prove exact-image API shutdown
+        env:
+          BIGNAME_E2E_SHUTDOWN_BUILD_CACHE: ${{ runner.temp }}/shutdown-image-cache
         run: scripts/test-container-shutdown
       - name: Retain shutdown evidence
         if: always()
