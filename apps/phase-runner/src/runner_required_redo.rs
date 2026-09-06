@@ -414,20 +414,13 @@ impl PhaseRunner {
         }
     }
 
-    pub(super) async fn recover_stopped_phases(
-        &self,
-        chain: &ChainConfig,
-        cancellation: &CancellationToken,
-    ) -> RunnerResult<()> {
+    pub(super) async fn recover_stopped_phases(&self, chain: &ChainConfig) -> RunnerResult<()> {
         for phase in [
             PhaseName::Ingest,
             PhaseName::Interpret,
             PhaseName::Project,
             PhaseName::Verify,
         ] {
-            if cancellation.is_cancelled() {
-                return Ok(());
-            }
             let mut phase_lock =
                 PhaseLock::acquire(self.database.connect_options(), &chain.chain_id, phase).await?;
             let result =
@@ -443,9 +436,6 @@ impl PhaseRunner {
                     ));
                 }
             }
-        }
-        if cancellation.is_cancelled() {
-            return Ok(());
         }
         self.recover_stopped_live(chain).await
     }

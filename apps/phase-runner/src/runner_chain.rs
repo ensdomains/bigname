@@ -32,28 +32,28 @@ impl PhaseRunner {
         config: &RuntimeConfig,
         cancellation: CancellationToken,
     ) -> RunnerResult<SupervisorReport> {
-        self.settle_unconfigured_phases(config, &cancellation)
-            .await?;
+        // Settlement issues database updates that can block on a row lock, so
+        // sampling the token between statements is not enough: race the whole of it.
+        // The process exits straight after a stop, so abandoning a statement
+        // mid-flight costs nothing.
+        let settled = crate::shutdown::until_cancelled(
+            &cancellation,
+            self.settle_unconfigured_phases(config),
+        )
+        .await?;
+        if settled.is_none() || cancellation.is_cancelled() {
+            return Ok(SupervisorReport::default());
+        }
         crate::supervisor::run(self, config, cancellation).await
     }
 
-    /// Recovery runs before the supervisor loop and issues database updates that
-    /// can wait on row locks, so it has to read the token itself: a stop here would
-    /// otherwise be absorbed until the supervisor escalates to SIGKILL.
-    async fn settle_unconfigured_phases(
-        &self,
-        config: &RuntimeConfig,
-        cancellation: &CancellationToken,
-    ) -> RunnerResult<()> {
+    async fn settle_unconfigured_phases(&self, config: &RuntimeConfig) -> RunnerResult<()> {
         let configured = config
             .chains
             .iter()
             .map(|chain| chain.chain_id.as_str())
             .collect::<BTreeSet<_>>();
         for (chain_id, phase, observed_updated_at) in self.store.active_normal_phases().await? {
-            if cancellation.is_cancelled() {
-                return Ok(());
-            }
             if configured.contains(chain_id.as_str()) {
                 continue;
             }
@@ -99,13 +99,20 @@ impl PhaseRunner {
         chain: &ChainConfig,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
-        chain.require_intake_sources()?;
-        self.record_loop_progress(&chain.chain_id);
-        self.store.initialize_chain(&chain.chain_id).await?;
         if cancellation.is_cancelled() {
             return Ok(());
         }
-        self.recover_stopped_phases(chain, &cancellation).await?;
+        chain.require_intake_sources()?;
+        self.record_loop_progress(&chain.chain_id);
+        // Same reasoning as `run`: both of these block on the database.
+        let recovered = crate::shutdown::until_cancelled(&cancellation, async {
+            self.store.initialize_chain(&chain.chain_id).await?;
+            self.recover_stopped_phases(chain).await
+        })
+        .await?;
+        if recovered.is_none() {
+            return Ok(());
+        }
         self.run_spine_phase(chain, PhaseName::Ingest, cancellation.clone())
             .await?;
         self.repair_discovery_coverage(chain, cancellation.clone())

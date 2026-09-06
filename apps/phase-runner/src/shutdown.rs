@@ -73,14 +73,14 @@ pub fn cancel_on_signal(cancellation: &tokio_util::sync::CancellationToken) {
 /// synchronization that a concurrent runner can hold indefinitely — so without
 /// this a stop during start-up is absorbed and the process waits for its
 /// supervisor to escalate to SIGKILL instead of exiting.
-pub async fn until_cancelled<T>(
+pub async fn until_cancelled<T, E>(
     cancellation: &tokio_util::sync::CancellationToken,
-    startup: impl std::future::Future<Output = anyhow::Result<T>>,
-) -> anyhow::Result<Option<T>> {
+    work: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<Option<T>, E> {
     tokio::select! {
         biased;
         () = cancellation.cancelled() => Ok(None),
-        started = startup => started.map(Some),
+        done = work => done.map(Some),
     }
 }
 
