@@ -5,7 +5,9 @@ use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
     phase::{BlockRange, PhaseName, RunMode},
     phase_lock::PhaseLock,
-    runner_support::cancelled_redo_error,
+    runner_support::{
+        cancelled_redo_error, report_undispatched_redo, require_all_phase_range_within_verify,
+    },
     state_persistence::load_redo_marker,
 };
 
@@ -435,19 +437,23 @@ impl PhaseRunner {
             }
             match preflight {
                 Ok(Some(generation_token)) => generation_tokens.push(generation_token),
-                Ok(None) => return Ok(report),
+                Ok(None) => {
+                    report_undispatched_redo(&mut report, chains);
+                    return Ok(report);
+                }
                 Err(error) => report.stopped_chains.push((chain.chain_id.clone(), error)),
             }
         }
         if !report.stopped_chains.is_empty() {
             return Ok(report);
         }
-        for (chain, generation_token) in chains.iter().zip(generation_tokens) {
+        for (index, (chain, generation_token)) in chains.iter().zip(generation_tokens).enumerate() {
+            if cancellation.is_cancelled() {
+                report_undispatched_redo(&mut report, &chains[index..]);
+                break;
+            }
             if let Some(heartbeat) = &self.loop_heartbeat {
                 heartbeat.record_progress(&chain.chain_id);
-            }
-            if cancellation.is_cancelled() {
-                break;
             }
             let result = self
                 .scope_manifest_attestation(
@@ -466,9 +472,6 @@ impl PhaseRunner {
             }
             if let Err(error) = result {
                 report.stopped_chains.push((chain.chain_id.clone(), error));
-            }
-            if cancellation.is_cancelled() {
-                break;
             }
         }
         Ok(report)
@@ -491,24 +494,18 @@ impl PhaseRunner {
                 .get(phase)
                 .preflight(&chain.chain_id, &chain.sources, &mode)?;
         }
-        self.store.initialize_chain(&chain.chain_id).await?;
-        self.require_no_pending_redo_for_all(&chain.chain_id, None, None, None)
-            .await?;
-        let verify_to = self
-            .store
-            .phase_resume(&chain.chain_id, PhaseName::Verify, &RunMode::Normal)
-            .await?
-            .current
-            .ok_or_else(|| RunnerError::data_integrity("Verify has no recorded extent"))?
-            .number;
-        if range.to > verify_to {
-            return Err(RunnerError::data_integrity(format!(
-                "all-phase redo range ends at {}, beyond Verify's recorded extent {verify_to}",
-                range.to
-            )));
+        let chain_id = chain.chain_id.as_str();
+        let prepared = crate::shutdown::until_cancelled(&cancellation, async {
+            self.store.initialize_chain(chain_id).await?;
+            self.require_no_pending_redo_for_all(chain_id, None, None, None)
+                .await?;
+            require_all_phase_range_within_verify(&self.store, chain_id, range).await?;
+            self.require_readable_redo_end(chain_id, range).await
+        })
+        .await?;
+        if prepared.is_none() {
+            return Err(cancelled_redo_error(&self.store, chain_id, PhaseName::Ingest).await?);
         }
-        self.require_readable_redo_end(&chain.chain_id, range)
-            .await?;
         self.run_all_redo_phase(chain, PhaseName::Ingest, range, range, cancellation.clone())
             .await?;
         self.run_all_redo_phase(

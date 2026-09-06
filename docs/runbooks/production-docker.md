@@ -812,8 +812,14 @@ success, so the incomplete redo cannot look finished
 start to resume it: the redo stamp survives and blocks the phase from normal
 restart until the command is run again. The error says which command, built from
 the stamped mode and range — `rerun \`phase-runner redo --chain <chain>
---phase <phase> --from-block <n> --to-block <n>\`` — so rerun exactly that
-rather than reconstructing it. Distinguish all of these from an exit `137`, which
+--phase <phase> --from-block <n> --to-block <n>\` with the chain's --source
+options` — because the stamp records neither the sources nor the verifier URL
+and the CLI rejects the bare command without them: add back the `--source`
+options the chain runs with, and `--verification-database-url` when the phase
+is Verify. A redo over several chains that is stopped between two of them exits
+nonzero as well, reporting each chain it never started, since only a prefix
+was redone and nothing was stamped for the rest; rerun the command for those
+chains. Distinguish all of these from an exit `137`, which
 is the grace period expiring into SIGKILL. The API's own stop path, its validated
 `BIGNAME_API_STOP_GRACE_MS` bound, and what counts as graceful success are
 documented under [Stop the API](#stop-the-api).

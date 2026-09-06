@@ -60,9 +60,22 @@ async fn a_stop_while_hashing_manifests_exits_instead_of_waiting_for_sigkill() -
         .spawn()
         .context("spawn phase-runner")?;
 
-    // Give it time to reach the hash and block there. It cannot get past this point:
-    // nothing ever opens the FIFO for writing.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Opening the write end blocks until a reader has the FIFO open, and the only
+    // reader is the hash's `read_to_string`, so returning here proves the runner is
+    // inside the hash. The handle is held, never written or closed, until the
+    // runner has exited: closing it would hand the reader an EOF and let the hash
+    // finish, which is the case this test is not about.
+    let opened = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::task::spawn_blocking({
+            let fifo = fifo.clone();
+            move || std::fs::OpenOptions::new().write(true).open(fifo)
+        }),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("the runner never opened the stalled manifest"))?
+    .context("write-end open task")?;
+    let _writer = opened.context("open the FIFO for writing")?;
     assert!(
         child.try_wait()?.is_none(),
         "the runner exited before it reached the stalled hash"

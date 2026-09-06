@@ -207,7 +207,19 @@ pub(crate) fn redo_rerun_instruction(
     let range_argument = range
         .map(|range| format!(" --from-block {} --to-block {}", range.from, range.to))
         .unwrap_or_default();
-    format!("rerun `phase-runner redo --chain {chain_id} --phase {phase_argument}{range_argument}`")
+    // The stamp records neither sources nor the verifier URL, and the CLI rejects
+    // the bare command without them, so the instruction names what it cannot fill.
+    let options = if redo_mode == Some("recompute_flags") {
+        ""
+    } else if phase == PhaseName::Verify {
+        " with the chain's --source options and --verification-database-url"
+    } else {
+        " with the chain's --source options"
+    };
+    format!(
+        "rerun `phase-runner redo --chain {chain_id} --phase {phase_argument}{range_argument}`\
+         {options}"
+    )
 }
 
 fn require_compatible_active_phase(

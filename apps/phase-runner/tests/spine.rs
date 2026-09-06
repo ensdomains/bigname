@@ -2919,6 +2919,81 @@ async fn redo_restores_the_full_phase_lifecycle_state() -> Result<()> {
 }
 
 #[tokio::test]
+async fn all_phase_redo_stopped_between_chains_reports_the_chains_it_never_started() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_stop_between_chains").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let first = "redo-stop-first-chain";
+    let second = "redo-stop-second-chain";
+    for chain_id in [first, second] {
+        store.initialize_chain(chain_id).await?;
+        seed_interpret_redo_presence(scratch.pool(), chain_id, 1).await?;
+        for (phase, hash) in [
+            (PhaseName::Ingest, None),
+            (
+                PhaseName::Interpret,
+                Some(phase_runner::INTERPRETER_CONTENT_HASH),
+            ),
+            (
+                PhaseName::Project,
+                Some(phase_runner::INTERPRETER_CONTENT_HASH),
+            ),
+            (PhaseName::Verify, None),
+        ] {
+            mark_completed(scratch.pool(), chain_id, phase, hash).await?;
+            set_phase_extent(scratch.pool(), chain_id, phase, 1).await?;
+        }
+    }
+
+    // The stop lands inside the first chain's last batch, so it is observed
+    // between the two chains: too late to abandon the first, before the second.
+    let cancellation = CancellationToken::new();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let phases = PhaseName::ALL.map(|name| {
+        Arc::new(StoppingRedoPhase {
+            name,
+            calls: Arc::clone(&calls),
+            stop_at: (first.to_owned(), PhaseName::Verify, cancellation.clone()),
+        }) as Arc<dyn Phase>
+    });
+    let phase_runner = runner(
+        scratch.runner(),
+        PhaseSet::new(phases)?,
+        available_capacity(),
+        "redo-stop-between-chains-runner",
+    )?;
+    let report = phase_runner
+        .redo_chains(
+            &[chain(first)?, chain(second)?],
+            RedoPhase::All,
+            BlockRange::new(0, 0)?,
+            cancellation,
+        )
+        .await?;
+
+    let stopped = report
+        .stopped_chains
+        .iter()
+        .map(|(chain_id, error)| (chain_id.as_str(), error.kind(), error.to_string()))
+        .collect::<Vec<_>>();
+    let (chain_id, kind, message) = stopped
+        .iter()
+        .find(|(chain_id, _, _)| *chain_id == second)
+        .unwrap_or_else(|| panic!("the undispatched chain must be reported, got {stopped:?}"));
+    assert_eq!(*chain_id, second);
+    assert_eq!(*kind, ErrorKind::InvalidTransition);
+    assert!(message.contains("was not started"), "{message}");
+    assert!(
+        calls
+            .lock()
+            .expect("recorded calls lock")
+            .iter()
+            .all(|(chain_id, _)| chain_id == first),
+        "no batch may run for the second chain"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_redo_all_phases").await?;
     let store = PhaseStore::new(scratch.runner().pool().clone());
@@ -5434,6 +5509,32 @@ impl Phase for RecordingRedoPhase {
                 return Err(RunnerError::data_integrity(
                     "fixture failed during all-phase interpret redo",
                 ));
+            }
+            LoopbackPhase::new(self.name).run_batch(context).await
+        })
+    }
+}
+
+struct StoppingRedoPhase {
+    name: PhaseName,
+    calls: Arc<Mutex<Vec<(String, PhaseName)>>>,
+    stop_at: (String, PhaseName, CancellationToken),
+}
+
+impl Phase for StoppingRedoPhase {
+    fn name(&self) -> PhaseName {
+        self.name
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            self.calls
+                .lock()
+                .expect("recorded calls lock")
+                .push((context.chain_id.clone(), self.name));
+            let (chain_id, phase, cancellation) = &self.stop_at;
+            if *chain_id == context.chain_id && *phase == self.name {
+                cancellation.cancel();
             }
             LoopbackPhase::new(self.name).run_batch(context).await
         })
