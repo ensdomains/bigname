@@ -1077,11 +1077,23 @@ jobs:
       - name: Resolve the image build's base digests
         id: base_images
         run: |
-          builder="$(docker buildx imagetools inspect "rust:${RUST_VERSION}-bookworm" --format '{{ .Manifest.Digest }}')"
-          runtime="$(docker buildx imagetools inspect "ubuntu:24.04" --format '{{ .Manifest.Digest }}')"
-          echo "builder=${builder#sha256:}" >>"$GITHUB_OUTPUT"
-          echo "runtime=${runtime#sha256:}" >>"$GITHUB_OUTPUT"
-          echo "rust:${RUST_VERSION}-bookworm is ${builder}; ubuntu:24.04 is ${runtime}"
+          # `.Manifest.Digest` is the descriptor digest buildx attaches to the resolved
+          # index, the same value its default inspector prints as `Digest:` and the
+          # one BuildKit pins `FROM` to. The guard keeps a format change from turning
+          # into a key that silently stops rotating.
+          resolve() {
+            local digest
+            digest="$(docker buildx imagetools inspect "$1" --format '{{ .Manifest.Digest }}')"
+            case "$digest" in
+              sha256:[0-9a-f]*) printf '%s\n' "${digest#sha256:}" ;;
+              *) echo "could not resolve a digest for $1: got '$digest'" >&2; return 1 ;;
+            esac
+          }
+          builder="$(resolve "rust:${RUST_VERSION}-bookworm")"
+          runtime="$(resolve "ubuntu:24.04")"
+          echo "builder=${builder}" >>"$GITHUB_OUTPUT"
+          echo "runtime=${runtime}" >>"$GITHUB_OUTPUT"
+          echo "rust:${RUST_VERSION}-bookworm is sha256:${builder}; ubuntu:24.04 is sha256:${runtime}"
 
       # The image build compiles the whole workspace in release mode on the pinned
       # single-CPU builder. Its builder is per-run, so without this the compile starts
