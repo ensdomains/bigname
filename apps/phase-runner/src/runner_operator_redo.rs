@@ -418,24 +418,28 @@ impl PhaseRunner {
             return Ok(report);
         }
         for (chain, generation_token) in chains.iter().zip(generation_tokens) {
-            if cancellation.is_cancelled() {
-                break;
-            }
             if let Some(heartbeat) = &self.loop_heartbeat {
                 heartbeat.record_progress(&chain.chain_id);
             }
-            let result = self
-                .scope_manifest_attestation(
-                    &chain.chain_id,
-                    generation_token,
-                    self.redo_after_attestation_preflight(
-                        chain,
-                        selection,
-                        range,
-                        cancellation.clone(),
-                    ),
-                )
-                .await;
+            // Setup before the batch loop -- `initialize_chain` and the queries each
+            // redo runs first -- is not cancellation-aware, so race the whole dispatch
+            // instead of sampling the token before it.
+            let dispatch = self.scope_manifest_attestation(
+                &chain.chain_id,
+                generation_token,
+                self.redo_after_attestation_preflight(
+                    chain,
+                    selection,
+                    range,
+                    cancellation.clone(),
+                ),
+            );
+            let Some(result) = crate::shutdown::until_cancelled(&cancellation, dispatch)
+                .await
+                .transpose()
+            else {
+                break;
+            };
             if let Some(heartbeat) = &self.loop_heartbeat {
                 heartbeat.remove_progress(&chain.chain_id);
             }
