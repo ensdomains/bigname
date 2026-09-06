@@ -7,8 +7,8 @@ use crate::{
     phase_lock::PhaseLock,
     runner_support::{
         cancelled_redo_error, report_undispatched_redo, require_all_phase_range_within_verify,
+        resumable_recompute_marker,
     },
-    state_persistence::load_redo_marker,
 };
 
 use super::{PhaseRunner, RedoPhase, SupervisorReport};
@@ -104,30 +104,25 @@ impl PhaseRunner {
         self.prepared_for_redo(chain, PhaseName::Interpret, range, true, &cancellation)
             .await?;
 
-        if let Some((redo_mode, from, to)) =
-            load_redo_marker(self.store.pool(), &chain.chain_id, PhaseName::Interpret).await?
-        {
-            if redo_mode != "recompute_flags" {
-                return Err(RunnerError::data_integrity(format!(
-                    "interpret phase for chain {} already has an ordinary redo; complete it \
-                     before starting recompute-flags",
-                    chain.chain_id
-                )));
+        // The Project refresh preparation takes the Project lock and commits redo
+        // state, so it is raced too: a stop must not go on to create it.
+        let setup = crate::shutdown::until_cancelled(&cancellation, async {
+            if resumable_recompute_marker(&self.store, &chain.chain_id, range).await? {
+                return Ok(None);
             }
-            let persisted = BlockRange::new(from, to)?;
-            if persisted != range {
-                return Err(RunnerError::data_integrity(format!(
-                    "recompute-flags for chain {} is interrupted; rerun the exact persisted \
-                     range {}..={}",
-                    chain.chain_id, persisted.from, persisted.to
-                )));
-            }
+            self.prepare_project_recompute(chain, range).await.map(Some)
+        })
+        .await?;
+        let Some(setup) = setup else {
+            return Err(
+                cancelled_redo_error(&self.store, &chain.chain_id, PhaseName::Interpret).await?,
+            );
+        };
+        let Some((run_project_now, project_range)) = setup else {
             return self
                 .run_recompute_interpret_with_project_lock(chain, mode, cancellation)
                 .await;
-        }
-
-        let (run_project_now, project_range) = self.prepare_project_recompute(chain, range).await?;
+        };
         if run_project_now {
             self.run_phase_with_restart(
                 chain,

@@ -17,9 +17,10 @@ use crate::{
     phase_lock::PhaseLock,
     progress_monitor::RunnerPhaseProgress,
     runner_support::{
-        Backoff, HeartbeatThrottle, PhaseLoopResult, cancelled_redo_error,
-        finish_failed_redo_start, record_live_mismatch_with_lock, redo_outcome,
+        HeartbeatThrottle, PhaseLoopResult, cancelled_redo_error, finish_failed_redo_start,
+        redo_outcome,
     },
+    shutdown::until_cancelled,
     state::PhaseStore,
     state_persistence::{record_live_verification_mismatch, validate_progress},
 };
@@ -38,8 +39,10 @@ mod manifest_attestation;
 mod operator_redo;
 #[path = "runner_required_redo.rs"]
 mod required_redo;
+#[path = "runner_restart.rs"]
+mod restart;
 
-type LiveMismatchReason = Arc<OnceLock<String>>;
+pub(super) type LiveMismatchReason = Arc<OnceLock<String>>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RedoPhase {
@@ -122,91 +125,18 @@ impl PhaseRunner {
         self
     }
 
-    async fn run_phase_with_restart_inner(
+    /// A stop that wins before the phase transition commits leaves nothing to
+    /// record for a normal run; a redo still has to report itself incomplete.
+    async fn stopped_before_start(
         &self,
         chain: &ChainConfig,
         phase_name: PhaseName,
-        mode: RunMode,
-        cancellation: CancellationToken,
-        live_mismatch: Option<LiveMismatchReason>,
-        automatic_discovery_ingest: bool,
+        mode: &RunMode,
     ) -> RunnerResult<()> {
-        let phase = self.phases.get(phase_name);
-        let mut backoff = Backoff::new(&self.timing);
-        loop {
-            self.record_loop_progress(&chain.chain_id);
-            if cancellation.is_cancelled() {
-                if mode.is_redo() {
-                    return Err(
-                        cancelled_redo_error(&self.store, &chain.chain_id, phase_name).await?,
-                    );
-                }
-                if phase_name == PhaseName::Live
-                    && matches!(mode, RunMode::Normal)
-                    && let Some(reason) = live_mismatch.as_deref().and_then(OnceLock::get)
-                {
-                    record_live_mismatch_with_lock(
-                        &self.database,
-                        &self.store,
-                        &chain.chain_id,
-                        reason,
-                    )
-                    .await?;
-                }
-                return Ok(());
-            }
-            let result = self
-                .run_phase_once(
-                    chain,
-                    Arc::clone(&phase),
-                    mode.clone(),
-                    cancellation.clone(),
-                    live_mismatch.as_deref(),
-                    automatic_discovery_ingest,
-                )
-                .await;
-            self.record_loop_progress(&chain.chain_id);
-            match result {
-                Ok(()) => return Ok(()),
-                Err(error) if error.is_retryable() => {
-                    let delay = backoff.next_delay();
-                    warn!(
-                        chain_id = chain.chain_id,
-                        phase = %phase_name,
-                        error = %error,
-                        retry_delay_ms = delay.as_millis(),
-                        "phase failed with a retryable error"
-                    );
-                    tokio::select! {
-                        () = cancellation.cancelled() => {
-                            if mode.is_redo() {
-                                return Err(cancelled_redo_error(
-                                    &self.store,
-                                    &chain.chain_id,
-                                    phase_name,
-                                )
-                                .await?);
-                            }
-                            if phase_name == PhaseName::Live
-                                && let Some(reason) =
-                                    live_mismatch.as_deref().and_then(OnceLock::get)
-                            {
-                                record_live_mismatch_with_lock(
-                                    &self.database,
-                                    &self.store,
-                                    &chain.chain_id,
-                                    reason,
-                                )
-                                .await?;
-                            }
-                            return Ok(());
-                        }
-                        () = tokio::time::sleep(delay) => {}
-                    }
-                }
-                Err(error) => return Err(error),
-            }
+        if mode.is_redo() {
+            return Err(cancelled_redo_error(&self.store, &chain.chain_id, phase_name).await?);
         }
+        Ok(())
     }
 
     async fn run_phase_once(
@@ -263,24 +193,37 @@ impl PhaseRunner {
         phase_lock: &mut PhaseLock,
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
-        if let Err(error) = self.check_ingest_identity(phase_name, chain, &mode).await {
-            return self
-                .record_phase_validation_failure(
-                    &chain.chain_id,
-                    phase_name,
-                    &mode,
-                    phase_lock,
-                    error,
-                )
-                .await;
+        // Start-up is raced like the batch loop: the identity check, the phase
+        // transition and the heartbeat all wait on rows without a timeout, and a
+        // stop accepted during them must not be held until the grace period ends.
+        // A transition that loses the race is dropped before it commits.
+        let identity = until_cancelled(
+            &cancellation,
+            self.check_ingest_identity(phase_name, chain, &mode),
+        )
+        .await;
+        match identity {
+            Ok(Some(())) => {}
+            Ok(None) => return self.stopped_before_start(chain, phase_name, &mode).await,
+            Err(error) => {
+                return self
+                    .record_phase_validation_failure(
+                        &chain.chain_id,
+                        phase_name,
+                        &mode,
+                        phase_lock,
+                        error,
+                    )
+                    .await;
+            }
         }
         let supplied_manifest_authority_generation = (phase_name == PhaseName::Interpret)
             .then(|| self.supplied_manifest_attestation_generation(&chain.chain_id))
             .flatten();
         let redo_session = if mode.is_redo() {
-            let session = self
-                .store
-                .begin_redo(
+            let begun = until_cancelled(
+                &cancellation,
+                self.store.begin_redo(
                     &chain.chain_id,
                     phase_name,
                     &mode,
@@ -288,8 +231,12 @@ impl PhaseRunner {
                     supplied_manifest_authority_generation.as_deref(),
                     &self.instance_id,
                     automatic_discovery_ingest,
-                )
-                .await?;
+                ),
+            )
+            .await?;
+            let Some(session) = begun else {
+                return self.stopped_before_start(chain, phase_name, &mode).await;
+            };
             if phase_name == PhaseName::Interpret
                 && let Some(audit) = session.manifest_authority_audit.as_ref()
             {
@@ -298,21 +245,31 @@ impl PhaseRunner {
             }
             Some(session)
         } else {
-            if !self
-                .start_normal_phase(chain, Arc::clone(&phase), phase_lock)
-                .await?
-            {
+            let started = until_cancelled(
+                &cancellation,
+                self.start_normal_phase(chain, Arc::clone(&phase), phase_lock),
+            )
+            .await?;
+            if started != Some(true) {
                 return Ok(());
             }
             None
         };
         let redo_attempt = redo_session.as_ref().map(|session| session.attempt_fence());
         phase_lock.check_alive().await?;
-        if let Err(error) = self
-            .store
-            .start_heartbeat(&self.instance_id, &chain.chain_id, phase_name)
-            .await
-        {
+        let heartbeat = until_cancelled(
+            &cancellation,
+            self.store
+                .start_heartbeat(&self.instance_id, &chain.chain_id, phase_name),
+        )
+        .await;
+        let started = match heartbeat {
+            Ok(Some(())) => Ok(()),
+            Ok(None) if redo_session.is_none() => return Ok(()),
+            Ok(None) => Err(cancelled_redo_error(&self.store, &chain.chain_id, phase_name).await?),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = started {
             phase_lock.check_alive().await?;
             if let Some(session) = redo_session {
                 return finish_failed_redo_start(

@@ -831,7 +831,11 @@ Compose's 10s default is not that. `stop_grace_period` is set explicitly on the
 - `BIGNAME_PHASE_RUNNER_STOP_GRACE_PERIOD` (default `120s`) — raise it if a
   single batch at this deployment's block range and hydration settings
   routinely takes longer. Nothing in the runner bounds a batch's wall time, so
-  this is a starting value, not a derived limit.
+  this is a starting value, not a derived limit. It has a floor, though: the
+  recovery deadline above is a fixed ten seconds that the runner does not
+  derive from this value, so a grace period at or below `10s` reaches SIGKILL
+  before the deadline can report, and the bounded-recovery exit described
+  above cannot happen. Compose accepts such a value without complaint.
 
 A grace period that expires is a SIGKILL. Nothing is corrupted, but a batch is
 not one transaction. Each phase commits its own writes before the runner

@@ -121,6 +121,8 @@ services:
     # Cancellation is observed at a batch boundary, so a stop waits out the
     # batch that is already running. Raise this if a single batch at your block
     # range and hydration settings routinely takes longer than two minutes.
+    # Never below 10s: a stop during start-up recovery is bounded by a fixed
+    # ten-second deadline in the runner, which this period must outlast.
     stop_grace_period: ${BIGNAME_PHASE_RUNNER_STOP_GRACE_PERIOD:-120s}
     ports:
       - "${BIGNAME_PHASE_RUNNER_METRICS_HOST:-127.0.0.1}:${BIGNAME_PHASE_RUNNER_METRICS_PORT:-9465}:9465"

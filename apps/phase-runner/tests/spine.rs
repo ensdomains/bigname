@@ -331,6 +331,63 @@ async fn derived_write_refuses_a_recorded_content_hash_mismatch() -> Result<()> 
 }
 
 #[tokio::test]
+async fn a_stop_while_phase_start_waits_on_a_held_row_returns_without_it() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_start_waits_on_row").await?;
+    let chain_id = "start-waits-on-row-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 3).await?;
+    PhaseStore::new(scratch.runner().pool().clone())
+        .initialize_chain(chain_id)
+        .await?;
+    // Another session holds the Ingest row, so `start_phase` blocks on its
+    // `FOR UPDATE` with no lock timeout. The hold outlives the whole test.
+    let mut holder = scratch.pool().begin().await?;
+    sqlx::query(
+        "SELECT 1 FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'ingest' FOR UPDATE",
+    )
+    .bind(chain_id)
+    .execute(&mut *holder)
+    .await?;
+
+    let runner = runner(
+        scratch.runner(),
+        complete_phase_set(None),
+        available_capacity(),
+        "start-waits-on-row-runner",
+    )?;
+    let chain = chain(chain_id)?;
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let task = tokio::spawn(async move { runner.run_chain(&chain, run_cancellation).await });
+
+    // Wait until the runner is really parked on the row before stopping it.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'
+                   AND query LIKE '%chain_phase_state%'",
+            )
+            .fetch_one(scratch.pool())
+            .await?;
+            if waiting >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+
+    cancellation.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .map_err(|_| anyhow::anyhow!("the stop was held by the phase start's row wait"))??;
+    outcome?;
+    holder.rollback().await?;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn runner_writes_transitions_cursors_heads_and_heartbeats() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_writes").await?;
     let chain_id = "write-chain";

@@ -69,6 +69,35 @@ pub(crate) fn report_undispatched_redo(report: &mut SupervisorReport, chains: &[
     }
 }
 
+/// True when the Interpret marker is this recompute's own interrupted run, which
+/// resumes; an ordinary redo or a different range is an error.
+pub(crate) async fn resumable_recompute_marker(
+    store: &PhaseStore,
+    chain_id: &str,
+    range: BlockRange,
+) -> RunnerResult<bool> {
+    let Some((redo_mode, from, to)) =
+        load_redo_marker(store.pool(), chain_id, PhaseName::Interpret).await?
+    else {
+        return Ok(false);
+    };
+    if redo_mode != "recompute_flags" {
+        return Err(RunnerError::data_integrity(format!(
+            "interpret phase for chain {chain_id} already has an ordinary redo; complete it \
+             before starting recompute-flags"
+        )));
+    }
+    let persisted = BlockRange::new(from, to)?;
+    if persisted != range {
+        return Err(RunnerError::data_integrity(format!(
+            "recompute-flags for chain {chain_id} is interrupted; rerun the exact persisted \
+             range {}..={}",
+            persisted.from, persisted.to
+        )));
+    }
+    Ok(true)
+}
+
 pub(crate) async fn require_all_phase_range_within_verify(
     store: &PhaseStore,
     chain_id: &str,
