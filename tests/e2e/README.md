@@ -3,7 +3,7 @@
 This package exercises ENSv1, ENSv2, and Basenames contract emissions against
 schema-v2 through the production `phase-runner` binary. Most assertions read
 [projections](../../docs/glossary.md#projection) and phase state directly
-through the test-only `ProjectionReader`; two #682 scenarios start the production API.
+through the test-only `ProjectionReader`; the two zero-address scenarios and the shutdown scenario start the production API.
 
 `ens_v2_lifecycle::reserved_labels_foreign_registrar_and_token_sale` also
 runs normal local RPC intake through Interpret, Project, and Live, then starts
@@ -34,10 +34,10 @@ run without the count assertion:
 scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --test-threads=8
 ```
 
-The default gate requires the exact library-test summary `94 passed; 0 failed;
-3 ignored; 0 filtered out`. CI shard 1 requires `47 passed; 0 failed; 2
+The default gate requires the exact library-test summary `95 passed; 0 failed;
+3 ignored; 0 filtered out`. CI shard 1 requires `48 passed; 0 failed; 2
 ignored; 48 filtered out`, and shard 2 requires `47 passed; 0 failed; 1
-ignored; 49 filtered out`. The gate checks both Cargo's exit status and every
+ignored; 50 filtered out`. The gate checks both Cargo's exit status and every
 summary count, so a prematurely successful process or an incorrectly filtered
 suite cannot satisfy CI.
 
@@ -74,8 +74,10 @@ suite cannot satisfy CI.
    The rich-chain case also pins the #305 production history-loader fix: its
    canonical read excludes the losing event before redo and returns the winning
    event after redo through the chain-lineage join.
-6. Schema-v2 projections are usually queried directly; the two #682 scenarios start the
-   production API, while other helpers avoid legacy public-schema reads.
+6. Schema-v2 projections are queried directly. Route-shaped helper inputs are
+   retained only to keep each scenario's semantic assertions recognizable;
+   the shutdown and two zero-address scenarios use network API transport. No legacy
+   public-schema read occurs.
 7. A scenario readiness predicate is evaluated once after its synchronous
    phase-runner commands. A false result fails the scenario instead of being
    treated as an asynchronous retry condition.
@@ -208,12 +210,13 @@ registry-created child remains in
 [non-name form](../../docs/glossary.md#non-name-form) in the fixture, so that
 route is already absent before ENSv1→ENSv2 migration.
 
-`forge` must be on `PATH` before the 69 Foundry-dependent semantic scenarios are
+`forge` must be on `PATH` before the 70 Foundry-dependent semantic scenarios are
 described as runnable; the other 3 semantic scenarios are retired and ignored.
 Together with the two [pre-surface](../../docs/glossary.md#pre-surface) resolver scenarios, these three connected
-scenarios produce a counted inventory of 97 tests: 94 runnable and 3 ignored,
-split as 47 runnable plus 2 ignored on shard 1 and 47 runnable plus 1 ignored on
-shard 2. This coverage changes no production rollout,
+scenarios and the later registrar, zero-address, and API shutdown coverage
+produce a counted inventory of 98 tests: 95 runnable and 3 ignored,
+split as 48 runnable plus 2 ignored on shard 1 and 47 runnable plus 1 ignored on
+shard 2. Those migration fixtures change no production rollout,
 deployment file, Docker configuration, environment file, checked-in manifest,
 or interpreter source.
 
@@ -270,7 +273,7 @@ to the lower predicted load subject to the required final capacities, except
 for an explicitly documented scenario-family grouping. The current inventory
 uses one such grouping: the standalone connected ENSv1→ENSv2 migration facts
 scenario is on shard 1 and both connected `cross_protocol` reachability
-scenarios are on shard 2. The current runnable split is 47 on shard 1 and 47 on
+scenarios are on shard 2. The current runnable split is 48 on shard 1 and 47 on
 shard 2. Break
 equal-duration or equal-load ties by full test name, keep at most five of the
 measured top ten on either shard, and keep two ignored tests on shard 1 and one
@@ -285,37 +288,37 @@ The OPS-OWNER-01 measurements on the warm server used one compiler worker and
 one test thread. All 89 runnable names passed; their measured total was
 2569.389 seconds. The resulting shard predictions are 1288.036 seconds for
 shard 1 and 1281.353 seconds for shard 2, with five of the measured top ten
-on each shard. These historical forecasts exclude five additions: the two zero-address
-scenarios, registrar release, controller-free late wrapping, and retained-resolver
-re-registration. They retain the original measured source identity; this composition
-has not been timed. The documented family grouping is unchanged.
+on each shard. These historical forecasts exclude six additions: the two zero-address
+scenarios, registrar release, controller-free late wrapping, retained-resolver
+re-registration, and API shutdown. They retain the original measured source identity;
+this composition has not been timed. The documented family grouping is unchanged.
 
 ## Coverage ledger
 
-The semantic inventory contains 72 scenario tests:
+The semantic inventory contains 73 scenario tests:
 
-- 69 retargeted and runnable;
+- 70 runnable;
 - 3 explicitly retired with one-line reasons.
 
-The 69 runnable scenarios include the #154 known-defect reproduction described
+The 70 runnable scenarios include the #154 known-defect reproduction described
 above; it is kept runnable so the provider path and explicit repair remain
 observable rather than being hidden as an ignored test.
 
-The crate contains 97 total tests when 25 harness/support checks are included.
-The pre-retarget crate contained 88; the net change is +9: obsolete
+The crate contains 98 total tests when 25 harness/support checks are included.
+The pre-retarget crate contained 88; the net change is +10: obsolete
 Cargo-artifact tests for the old indexer, worker, v1 API, and execution plane
 were removed, while deployment-profile binary lifecycle and normalized-event
 parity-completeness regression tests, the archived-artifact path check, the
 three connected ENSv1→ENSv2 migration scenarios, the two pre-surface
 resolver scenarios, the two exact zero-address scenarios, controller-free late wrapping,
-dormant registrar release, and retained-resolver re-registration were added. The pure in-memory
+dormant registrar release, retained-resolver re-registration, and API shutdown were added. The pure in-memory
 `catchup_equivalence::primary_route_normalization_preserves_contract_instance_identity`
 normalization oracle is counted as support rather than as a contract-backed
 semantic scenario. The final worker-coordination stub, verified-resolution
 scenario, and stale observed-code-hash admission scenario were removed
 explicitly with issue #314.
 
-### Retargeted and runnable (69)
+### Runnable semantic scenarios (70)
 
 - Basenames:
   `basenames::basenames_declared_state_matrix_end_to_end`;
@@ -404,17 +407,17 @@ explicitly with issue #314.
 
 ### Count deltas
 
-| Measure | Historical baseline | Retargeted suite | Delta |
+| Measure | Historical baseline | Current suite | Delta |
 | --- | ---: | ---: | ---: |
-| Total crate tests | 88 | 97 | +9 |
-| Semantic scenario inventory | 62 at the retarget base, including one pure helper | 72 | -1 reclassified, -3 deleted, +14 added |
-| Runnable passed-count gate | 65 in the historical Anvil gate | 94 | +29 |
-| Anvil-backed semantic inventory | 65 historical gate reference | 72 | +7 |
-| Runnable Anvil-backed semantic scenarios | 65 historical gate reference | 69 | +4 |
+| Total crate tests | 88 | 98 | +10 |
+| Semantic scenario inventory | 62 at the retarget base, including one pure helper | 73 | -1 reclassified, -3 deleted, +15 added |
+| Runnable passed-count gate | 65 in the historical Anvil gate | 95 | +30 |
+| Anvil-backed semantic inventory | 65 historical gate reference | 73 | +8 |
+| Runnable Anvil-backed semantic scenarios | 65 historical gate reference | 70 | +5 |
 
 The 65 comparisons are reported because that is the historical gate reference,
-but the current passed-count denominator is explicit: 69 runnable Anvil
-scenarios and 25 harness/support checks produce 94 passes. Three semantic
+but the current passed-count denominator is explicit: 70 runnable Anvil
+scenarios and 25 harness/support checks produce 95 passes. Three semantic
 scenarios are explicitly ignored with their retired behavior recorded above.
 
 ## Diagnostics
@@ -428,3 +431,14 @@ scenarios are explicitly ignored with their retired behavior recorded above.
 - Command logs are written under the system temporary directory and removed
   after successful completion; failures include their paths and reversed
   tails.
+
+## API service shutdown
+
+The service-shutdown scenario runs direct-process mode in the counted suite and
+Compose mode in the required container job. Both use real Anvil facts and
+production Interpret/Project redo with the existing seeded fixture phase
+extents. They are not ordinary Reth intake or runner-grace measurements.
+The direct process is built from the current source with its explicit build SHA;
+Compose mode uses the exact candidate image and the same producer/route/lock
+assertions. Unknown modes fail explicitly. Inventory and shard timing are
+updated together after discovery and measurement.

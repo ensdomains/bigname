@@ -762,3 +762,21 @@ including:
 The corresponding SQL migrations remain immutable history, followed by the
 append-only migration that drops their `public`-schema tables. Existing rows
 are not current readiness or replay authority during the planned transition.
+
+## API shutdown
+
+Unix API processes accept Ctrl-C and SIGTERM through the existing Axum graceful
+shutdown path. Non-Unix builds retain Ctrl-C only. Accepted signals stop fresh
+connections while accepted requests finish within their configured deadlines
+(defaults: 30-second request and 25-second SQL timeouts). Signal listener failures are errors, not
+accepted shutdown signals. The metrics listener has no new drain guarantee.
+
+Compose uses `BIGNAME_API_STOP_GRACE_MS` for both its stop grace and API startup
+validation, defaulting to 45000 (45 seconds). Startup rejects a request timeout
+that leaves less than 5000 ms of grace, before database connections or listeners.
+For a 60000 ms request timeout, use at least 65000 ms of grace. Direct launches
+without this optional budget retain their existing request-timeout behavior.
+External stop-timeout overrides must honor the same budget. This API-only
+slice is Part of #641: phase-runner SIGTERM, stop grace, batch settlement,
+heartbeat, restart, and redo behavior remain deferred. It does not authorize
+production rollout or complete the issue.

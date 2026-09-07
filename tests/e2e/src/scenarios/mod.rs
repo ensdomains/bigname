@@ -21,6 +21,7 @@ mod resolver_records;
 mod retained_resolver;
 mod reverse_primary;
 mod reverse_primary_claims;
+mod service_shutdown;
 mod support;
 mod unadmitted_controller;
 mod wrapper;
