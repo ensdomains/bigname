@@ -1,5 +1,5 @@
 {
-  "provenance": {"base": "3ddc4f885b0884a53849af496e723be1895ef77b", "boundary": "actual local Sepolia public-contract receipts and generated profile; no normalized or phase rows", "scenario": "reserved_labels_foreign_registrar_and_token_sale"},
+  "provenance": {"base": "3ddc4f885b0884a53849af496e723be1895ef77b", "boundary": "actual local Sepolia public-contract receipts and generated [deployment profile](../../../../docs/glossary.md#deployment-profile); no normalized or phase rows", "scenario": "reserved_labels_foreign_registrar_and_token_sale"},
   "prefix_end": 32,
   "suffix_end": 33,
   "logical_name_id": "ens:0xf31116838b246bb4a6b332f695a3f6d42fa3216bd663c1ff90ebd97fd8b79059",
