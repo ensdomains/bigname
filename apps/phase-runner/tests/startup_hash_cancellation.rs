@@ -60,22 +60,29 @@ async fn a_stop_while_hashing_manifests_exits_instead_of_waiting_for_sigkill() -
         .spawn()
         .context("spawn phase-runner")?;
 
-    // Opening the write end blocks until a reader has the FIFO open, and the only
-    // reader is the hash's `read_to_string`, so returning here proves the runner is
-    // inside the hash. The handle is held, never written or closed, until the
-    // runner has exited: closing it would hand the reader an EOF and let the hash
-    // finish, which is the case this test is not about.
-    let opened = tokio::time::timeout(
-        Duration::from_secs(30),
-        tokio::task::spawn_blocking({
-            let fifo = fifo.clone();
-            move || std::fs::OpenOptions::new().write(true).open(fifo)
-        }),
-    )
+    // A non-blocking write-open of a FIFO fails with ENXIO until a reader holds
+    // it, and the only reader is the hash's `read_to_string`, so the first open
+    // that succeeds proves the runner is inside the hash — without a blocking
+    // call the test could not abandon if the runner never got there. The handle
+    // is held, never written or closed, until the runner has exited: closing it
+    // would hand the reader an EOF and let the hash finish, which is the case
+    // this test is not about.
+    let _writer = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match open_write_end_nonblocking(&fifo) {
+                Ok(writer) => break Ok::<_, anyhow::Error>(writer),
+                Err(error) if error.raw_os_error() == Some(ENXIO) => {
+                    if let Some(status) = child.try_wait()? {
+                        anyhow::bail!("the runner exited ({status}) before it opened the manifest");
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Err(error) => break Err(error).context("open the FIFO for writing"),
+            }
+        }
+    })
     .await
-    .map_err(|_| anyhow::anyhow!("the runner never opened the stalled manifest"))?
-    .context("write-end open task")?;
-    let _writer = opened.context("open the FIFO for writing")?;
+    .map_err(|_| anyhow::anyhow!("the runner never opened the stalled manifest"))??;
     assert!(
         child.try_wait()?.is_none(),
         "the runner exited before it reached the stalled hash"
@@ -105,4 +112,18 @@ async fn a_stop_while_hashing_manifests_exits_instead_of_waiting_for_sigkill() -
     let _ = std::fs::remove_file(&fifo);
     let _ = std::fs::remove_dir(&manifests);
     Ok(())
+}
+
+const ENXIO: i32 = 6;
+#[cfg(target_os = "linux")]
+const O_NONBLOCK: i32 = 0o4000;
+#[cfg(not(target_os = "linux"))]
+const O_NONBLOCK: i32 = 0x4;
+
+fn open_write_end_nonblocking(fifo: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(O_NONBLOCK)
+        .open(fifo)
 }

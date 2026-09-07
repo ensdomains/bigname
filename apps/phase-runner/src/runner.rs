@@ -18,7 +18,7 @@ use crate::{
     progress_monitor::RunnerPhaseProgress,
     runner_support::{
         HeartbeatThrottle, PhaseLoopResult, STOPPED_MARKER_LOOKUP, cancelled_redo_error,
-        finish_failed_redo_start, finish_stopped_redo_start, redo_outcome,
+        finish_failed_redo_start, finish_stopped_redo_start, read_after_stop, redo_outcome,
     },
     shutdown::until_cancelled,
     state::PhaseStore,
@@ -334,11 +334,12 @@ impl PhaseRunner {
                 chain,
                 phase,
                 batch::Execution::new(mode.clone(), redo_attempt),
-                cancellation,
+                cancellation.clone(),
                 &mut heartbeat,
                 phase_lock,
             )
             .await;
+        let stopped = cancellation.is_cancelled();
         let result = match result {
             Ok(PhaseLoopResult::Cancelled) if mode.is_redo() => {
                 Err(cancelled_redo_error(&self.store, &chain.chain_id, phase_name).await?)
@@ -351,17 +352,32 @@ impl PhaseRunner {
             return Err(error.clone());
         }
         if let Some(session) = redo_session {
-            phase_lock.check_alive().await?;
-            let restore = self
-                .store
-                .finish_redo(
-                    phase_lock.connection(),
-                    &chain.chain_id,
-                    phase_name,
-                    session,
-                    redo_outcome(&result),
+            // After a stop the lock's connection may be the stall that won the
+            // race; the probe and the redo bookkeeping on it are bounded then.
+            let record = async {
+                phase_lock.check_alive().await?;
+                self.store
+                    .finish_redo(
+                        phase_lock.connection(),
+                        &chain.chain_id,
+                        phase_name,
+                        session,
+                        redo_outcome(&result),
+                    )
+                    .await
+            };
+            let restore = if stopped {
+                read_after_stop(
+                    &format!(
+                        "recording the stopped redo for chain {} phase {phase_name}",
+                        chain.chain_id
+                    ),
+                    record,
                 )
-                .await;
+                .await
+            } else {
+                record.await
+            };
             return match (result, restore) {
                 (Ok(_), Ok(())) => Ok(()),
                 (Ok(_), Err(error)) => Err(error),
@@ -379,13 +395,21 @@ impl PhaseRunner {
                     .await
             }
             Ok(PhaseLoopResult::Cancelled) => {
-                phase_lock.check_alive().await?;
+                // Only a stop produces this arm, so a probe of the lock here would
+                // wait on the connection whose stall may have won; the release
+                // that follows is bounded and detects a lost lock itself.
                 if phase_name == PhaseName::Live
                     && let Some(reason) = live_mismatch.and_then(OnceLock::get)
-                    && !record_live_verification_mismatch(
-                        self.store.pool(),
-                        &chain.chain_id,
-                        reason,
+                    && !read_after_stop(
+                        &format!(
+                            "recording the live verification mismatch for chain {}",
+                            chain.chain_id
+                        ),
+                        record_live_verification_mismatch(
+                            self.store.pool(),
+                            &chain.chain_id,
+                            reason,
+                        ),
                     )
                     .await?
                 {
