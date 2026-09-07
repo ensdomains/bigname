@@ -37,6 +37,7 @@ PY
   trap cleanup EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  events_since="$(date +%s)"
   "${compose[@]}" up -d --no-deps api > "$evidence/up.log" 2>&1
   id="$("${compose[@]}" ps -q api)"
   docker inspect "$id" > "$evidence/container.json"
@@ -49,7 +50,7 @@ lines=open(sys.argv[1],'rb').read().splitlines()
 assert len(lines)==2 and lines[0].split(b'\0')[0].endswith(b'tini'),lines
 assert lines[1].split(b'\0')[:2]==[b'bigname-api',b'serve'],lines
 PY
-  docker events --filter "container=$id" --format '{{json .}}' > "$evidence/events.jsonl" & events_pid=$!
+  docker events --since "$events_since" --filter "container=$id" --format '{{json .}}' > "$evidence/events.jsonl" & events_pid=$!
   docker logs --follow "$id" & logs_pid=$!
   status="$(docker wait "$id")"
   docker inspect "$id" > "$evidence/container-exited.json"
