@@ -44,9 +44,16 @@ impl PhaseRunner {
         cancellation: &CancellationToken,
     ) -> RunnerResult<Option<PhaseLock>> {
         loop {
-            match PhaseLock::acquire(self.database.connect_options(), &chain.chain_id, phase).await
-            {
-                Ok(phase_lock) => return Ok(Some(phase_lock)),
+            // The attempt itself opens a connection and can stall, so it is raced
+            // as well as the wait between attempts.
+            let attempt = crate::shutdown::until_cancelled(
+                cancellation,
+                PhaseLock::acquire(self.database.connect_options(), &chain.chain_id, phase),
+            )
+            .await;
+            match attempt {
+                Ok(None) => return Ok(None),
+                Ok(Some(phase_lock)) => return Ok(Some(phase_lock)),
                 Err(error) if error.kind() == ErrorKind::LockHeld || error.is_retryable() => {
                     tokio::select! {
                         () = cancellation.cancelled() => return Ok(None),

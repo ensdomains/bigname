@@ -18,7 +18,7 @@ use crate::{
     progress_monitor::RunnerPhaseProgress,
     runner_support::{
         HeartbeatThrottle, PhaseLoopResult, cancelled_redo_error, finish_failed_redo_start,
-        redo_outcome,
+        finish_stopped_redo_start, redo_outcome,
     },
     shutdown::until_cancelled,
     state::PhaseStore,
@@ -277,8 +277,21 @@ impl PhaseRunner {
         .await;
         let started = match heartbeat {
             Ok(Some(())) => Ok(()),
-            Ok(None) if redo_session.is_none() => return Ok(()),
-            Ok(None) => Err(cancelled_redo_error(&self.store, &chain.chain_id, phase_name).await?),
+            Ok(None) => {
+                let Some(session) = redo_session else {
+                    return Ok(());
+                };
+                let error = cancelled_redo_error(&self.store, &chain.chain_id, phase_name).await?;
+                return Err(finish_stopped_redo_start(
+                    &self.store,
+                    phase_lock,
+                    &chain.chain_id,
+                    phase_name,
+                    session,
+                    error,
+                )
+                .await);
+            }
             Err(error) => Err(error),
         };
         if let Err(error) = started {

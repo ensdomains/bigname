@@ -30,8 +30,8 @@ pub(crate) const STOPPED_MARKER_LOOKUP: Duration = Duration::from_secs(5);
 #[cfg(test)]
 pub(crate) const STOPPED_MARKER_LOOKUP: Duration = Duration::from_millis(50);
 
-/// Read redo state after a stop has been accepted, giving up within
-/// [`STOPPED_MARKER_LOOKUP`] with an error that says the state is unread.
+/// Touch the database after a stop has been accepted, giving up within
+/// [`STOPPED_MARKER_LOOKUP`] with an error that says what was left undone.
 pub(crate) async fn read_after_stop<T>(
     what: &str,
     read: impl std::future::Future<Output = RunnerResult<T>>,
@@ -41,11 +41,45 @@ pub(crate) async fn read_after_stop<T>(
         Err(_) => Err(RunnerError::new(
             ErrorKind::InvalidTransition,
             format!(
-                "stopped, and the database did not answer within {}s to say whether {what} \
-                 was left unfinished; inspect chain_phase_state once it responds",
+                "stopped, and the database did not answer within {}s while {what}; inspect \
+                 chain_phase_state once it responds",
                 STOPPED_MARKER_LOOKUP.as_secs_f64()
             ),
         )),
+    }
+}
+
+/// A redo whose start lost the stop race still records the failed attempt, but
+/// through the lock's connection, which may be the stall that lost the race.
+/// The recording is bounded; the marker already says the redo is incomplete,
+/// so the error to report is the same either way.
+pub(crate) async fn finish_stopped_redo_start(
+    store: &PhaseStore,
+    phase_lock: &mut PhaseLock,
+    chain_id: &str,
+    phase: PhaseName,
+    session: RedoSession,
+    error: RunnerError,
+) -> RunnerError {
+    let recorded = read_after_stop(
+        &format!("recording the stopped redo start for chain {chain_id} phase {phase}"),
+        async {
+            phase_lock.check_alive().await?;
+            store
+                .finish_redo(
+                    phase_lock.connection(),
+                    chain_id,
+                    phase,
+                    session,
+                    RedoOutcome::Failed(&error),
+                )
+                .await
+        },
+    )
+    .await;
+    match recorded {
+        Ok(()) => error,
+        Err(record_error) => error.with_secondary("record the stopped redo start", record_error),
     }
 }
 
@@ -55,7 +89,7 @@ pub(crate) async fn cancelled_redo_error(
     phase: PhaseName,
 ) -> RunnerResult<RunnerError> {
     let marker = read_after_stop(
-        &format!("the redo for chain {chain_id} phase {phase}"),
+        &format!("reading the redo for chain {chain_id} phase {phase}"),
         load_redo_marker(store.pool(), chain_id, phase),
     )
     .await?;
