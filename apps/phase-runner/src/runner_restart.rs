@@ -7,7 +7,7 @@ use crate::{
     config::ChainConfig,
     error::RunnerResult,
     phase::{PhaseName, RunMode},
-    runner_support::{Backoff, cancelled_redo_error, record_live_mismatch_with_lock},
+    runner_support::{Backoff, cancelled_redo_error, record_live_mismatch_after_stop},
 };
 
 use super::{LiveMismatchReason, PhaseRunner};
@@ -36,7 +36,7 @@ impl PhaseRunner {
                     && matches!(mode, RunMode::Normal)
                     && let Some(reason) = live_mismatch.as_deref().and_then(OnceLock::get)
                 {
-                    record_live_mismatch_with_lock(
+                    record_live_mismatch_after_stop(
                         &self.database,
                         &self.store,
                         &chain.chain_id,
@@ -82,7 +82,7 @@ impl PhaseRunner {
                                 && let Some(reason) =
                                     live_mismatch.as_deref().and_then(OnceLock::get)
                             {
-                                record_live_mismatch_with_lock(
+                                record_live_mismatch_after_stop(
                                     &self.database,
                                     &self.store,
                                     &chain.chain_id,

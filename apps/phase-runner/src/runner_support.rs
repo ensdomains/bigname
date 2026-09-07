@@ -192,6 +192,23 @@ pub(crate) fn redo_outcome(result: &RunnerResult<PhaseLoopResult>) -> RedoOutcom
     }
 }
 
+/// Record a Live verification mismatch once a stop has been accepted. The
+/// recording opens, probes, writes through, and releases a lock connection, any
+/// of which can be the stall that let the stop win, so it is bounded; the error
+/// on expiry says the failure state is not persisted.
+pub(crate) async fn record_live_mismatch_after_stop(
+    database: &RunnerDatabase,
+    store: &PhaseStore,
+    chain_id: &str,
+    reason: &str,
+) -> RunnerResult<()> {
+    read_after_stop(
+        &format!("recording the live verification mismatch for chain {chain_id}"),
+        record_live_mismatch_with_lock(database, store, chain_id, reason),
+    )
+    .await
+}
+
 pub(crate) async fn record_live_mismatch_with_lock(
     database: &RunnerDatabase,
     store: &PhaseStore,

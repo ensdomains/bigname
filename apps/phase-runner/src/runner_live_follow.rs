@@ -7,7 +7,7 @@ use crate::{
     error::{ErrorKind, RunnerResult},
     phase::{PhaseName, RunMode},
     phase_lock::PhaseLock,
-    runner_support::record_live_mismatch_with_lock,
+    runner_support::{record_live_mismatch_after_stop, record_live_mismatch_with_lock},
 };
 
 use super::{LiveMismatchReason, PhaseRunner};
@@ -349,7 +349,20 @@ impl PhaseRunner {
     ) -> RunnerResult<()> {
         loop {
             if cancellation.is_cancelled() {
-                return self.record_mismatch_if_present(chain, &live_mismatch).await;
+                // After an accepted stop the recording is bounded, as in the
+                // restart loop; the verify-failure paths above are not stops.
+                return match live_mismatch.get() {
+                    Some(reason) => {
+                        record_live_mismatch_after_stop(
+                            &self.database,
+                            &self.store,
+                            &chain.chain_id,
+                            reason,
+                        )
+                        .await
+                    }
+                    None => Ok(()),
+                };
             }
             self.run_phase_with_restart_inner(
                 chain,
