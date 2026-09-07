@@ -48,10 +48,22 @@ fn report_shutdown_signal(service: &'static str, signal: std::io::Result<&'stati
     }
 }
 
+/// Presence alone is not enough: Compose passes an unset variable through as an
+/// empty string, so a bare `var_os(..).is_some()` check would pin every
+/// deployment that forwards the variable to JSON regardless of its value.
+fn json_logging_requested() -> bool {
+    std::env::var("BIGNAME_LOG_JSON").is_ok_and(|value| {
+        !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off"
+        )
+    })
+}
+
 pub(super) fn init_tracing(service: &'static str) {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    if std::env::var_os("BIGNAME_LOG_JSON").is_some() {
+    if json_logging_requested() {
         tracing_subscriber::fmt()
             .with_env_filter(env_filter)
             .json()

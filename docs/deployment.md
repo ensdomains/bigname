@@ -693,6 +693,38 @@ API docs. The request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; together
 with the reserved readiness connection, one API process can open at most
 `BIGNAME_DATABASE_MAX_CONNECTIONS + 1` PostgreSQL connections.
 
+### Database connection budget
+
+`BIGNAME_DATABASE_MAX_CONNECTIONS` is an API-only setting. The phase runner does
+not read it; it derives its own pools from the number of configured chains, so
+the two services must be budgeted separately.
+
+For `C` configured chains, one phase-runner process opens at most:
+
+| Pool | Size | Where |
+| --- | --- | --- |
+| Phase pool | `max(2C, 4)` | `apps/phase-runner/src/main.rs:59` |
+| Verification pool | `max(C, 1)` | `apps/phase-runner/src/main.rs:83` |
+| Advisory phase locks | `C` | `apps/phase-runner/src/phase_lock.rs:23` |
+
+Each lock is a dedicated connection outside both pools, because it holds a
+session-scoped `pg_try_advisory_lock` (`apps/phase-runner/src/phase_lock.rs:33`).
+Phases run in sequence within a chain, so
+one lock per chain is held at a time — a one-chain deployment settles at
+`4 + 1 + 1 = 6` connections, three chains at `6 + 3 + 3 = 12`.
+
+Two operator paths exceed that steady state. `rewind` takes all four phase locks
+for a chain at once (`apps/phase-runner/src/rewind.rs:40`), so budget `4C` locks
+while it runs, and a start that finds phases recorded against chains no longer
+configured takes one lock at a time to close them out
+(`apps/phase-runner/src/runner_chain.rs:50`).
+
+Set the server's own ceiling explicitly with `POSTGRES_MAX_CONNECTIONS` rather
+than inheriting the PostgreSQL default. Budget it against `work_mem`: a single
+backend can hold several `work_mem` allocations at once, so the worst case a
+server commits to is roughly `max_connections x work_mem x concurrent sort or
+hash nodes`, on top of `shared_buffers`.
+
 ## Owner-ratified Sepolia source-role rollout
 
 Do not begin this destructive rollout until the Issue #411 part-2 release

@@ -19,14 +19,10 @@ use phase_runner::{
     verify_phase::VerifyPhase,
 };
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .json()
-        .init();
+    phase_runner::logging::init();
     let command = Cli::parse().resolve()?;
     let cancellation = CancellationToken::new();
     let signal_cancellation = cancellation.clone();

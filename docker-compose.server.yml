@@ -2,8 +2,9 @@ name: bigname
 
 x-bigname-env: &bigname-env
   BIGNAME_DATABASE_URL: ${BIGNAME_DATABASE_URL:-postgresql://bigname:bigname@postgres:5432/bigname}
-  BIGNAME_DATABASE_MAX_CONNECTIONS: ${BIGNAME_DATABASE_MAX_CONNECTIONS:-10}
   RUST_LOG: ${RUST_LOG:-info,sqlx::query=error}
+  # Empty means "unset"; both binaries treat empty and the negative spellings as off.
+  BIGNAME_LOG_JSON: ${BIGNAME_LOG_JSON:-}
 
 x-bigname-service: &bigname-service
   image: ${BIGNAME_IMAGE:-ghcr.io/ensdomains/bigname:latest}
@@ -40,10 +41,14 @@ services:
       - effective_io_concurrency=${POSTGRES_EFFECTIVE_IO_CONCURRENCY:-256}
       - -c
       - random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}
+      # Explicit so the worst-case backend memory is budgeted rather than
+      # inherited: each backend can hold several work_mem allocations at once.
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-100}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-bigname}
       POSTGRES_USER: ${POSTGRES_USER:-bigname}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bigname}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD; there is no default}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -73,6 +78,10 @@ services:
     environment:
       <<: *bigname-env
       BIGNAME_DATABASE_URL: ${BIGNAME_API_DATABASE_URL:?set BIGNAME_API_DATABASE_URL to the non-owner API login}
+      # Read only here. The phase runner sizes its own pools from the chain count
+      # (see docs/deployment.md § Database connection budget), so injecting this
+      # into that service would document a ceiling nothing enforces.
+      BIGNAME_DATABASE_MAX_CONNECTIONS: ${BIGNAME_DATABASE_MAX_CONNECTIONS:-10}
       BIGNAME_API_BIND_ADDR: ${BIGNAME_API_BIND_ADDR:-0.0.0.0:3000}
       BIGNAME_API_METRICS_BIND_ADDR: 0.0.0.0:9464
       BIGNAME_API_CHAIN_RPC_URLS: ${BIGNAME_API_CHAIN_RPC_URLS:-}
