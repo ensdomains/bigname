@@ -199,7 +199,7 @@ fn save(directory: &Path, name: &str, value: &Value) -> Result<()> {
 
 async fn response(url: String) -> Result<Value> {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(90))
         .build()?;
     let response = client.get(url).send().await?;
     ensure!(
@@ -222,6 +222,11 @@ async fn drain(
     evidence: &Path,
     mode: &str,
 ) -> Result<()> {
+    let extended = std::env::var_os("BIGNAME_E2E_SHUTDOWN_EXTENDED").is_some();
+    ensure!(
+        !extended || mode == "compose",
+        "extended drain requires Compose"
+    );
     let _start = crate::harness::lock_local_server_start().await;
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let metrics = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -252,6 +257,12 @@ async fn drain(
         .env("BIGNAME_LOG_JSON", "1")
         .env("RUST_LOG", "info")
         .kill_on_drop(true);
+    if extended {
+        command
+            .env("BIGNAME_API_REQUEST_TIMEOUT_MS", "60000")
+            .env("BIGNAME_API_DB_STATEMENT_TIMEOUT_MS", "55000")
+            .env("BIGNAME_API_STOP_GRACE_MS", "75000");
+    }
     if mode == "direct" && name == "sigint" {
         let path = evidence.join("occupied-bind.log");
         let log = std::fs::File::create(&path)?;
@@ -303,7 +314,7 @@ async fn drain(
         };
         drop(_start);
         ensure!(boot["fields"]["build_sha"] == sha, "wrong API build");
-        ensure!(boot["fields"]["request_timeout_ms"] == 30000 && boot["fields"]["db_statement_timeout_ms"] == 25000, "timeouts changed");
+        ensure!(boot["fields"]["request_timeout_ms"] == if extended { 60000 } else { 30000 } && boot["fields"]["db_statement_timeout_ms"] == if extended { 55000 } else { 25000 }, "timeouts changed");
         let hashes: Vec<String> = sqlx::query_scalar("SELECT input_content_hash FROM chain_phase_state WHERE phase_name IN ('interpret','project') AND phase_status='completed'")
             .fetch_all(pool).await?;
         ensure!(hashes.len() == 2 && hashes.iter().all(|h| boot["fields"]["interpreter_content_hash"] == *h), "producer/API generation mismatch");
@@ -354,12 +365,16 @@ async fn drain(
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         tokio::select! { biased; value = &mut request => anyhow::bail!("request ended before release: {value:?}"), _ = std::future::ready(()) => {} }
+        if extended {
+            tokio::select! { value = &mut request => anyhow::bail!("request ended during extended drain: {value:?}"), _ = tokio::time::sleep_until(sent + Duration::from_secs(48)) => {} }
+            ensure!(child.try_wait()?.is_none(), "API died before extended lock release");
+        }
         gate.commit().await?;
         let body = tokio::time::timeout(Duration::from_secs(10), request).await??;
         ensure!(body == baseline, "drained response differs from baseline");
         let status = tokio::time::timeout(Duration::from_secs(10), child.wait()).await??;
         save(evidence, &format!("{name}-result"), &json!({"response":body,"exit":status.to_string(),"elapsed_seconds":sent.elapsed().as_secs_f64()}))?;
-        ensure!(status.success() && sent.elapsed() < Duration::from_secs(45), "non-graceful API exit: {status}");
+        ensure!(status.success() && sent.elapsed() < Duration::from_secs(if extended { 75 } else { 45 }), "non-graceful API exit: {status}");
         Ok(())
     }.await;
     let stopped: Result<()> = async {

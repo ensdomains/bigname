@@ -16,9 +16,9 @@ PY
   docker compose --env-file /dev/null -p "$project" -f "$ROOT/docker-compose.server.yml" -f "$override" config --format json > "$rendered"
   printf '%s' "$project" > "$evidence/project"
   python3 - "$rendered" "$evidence/config-result.json" "${BIGNAME_E2E_SHUTDOWN_BASE:-}" <<'PY'
-import json,sys
+import json,sys,os
 c=json.load(open(sys.argv[1])); a=c['services']['api']; r=c['services']['phase-runner']
-valid=a.get('stop_signal')=='SIGTERM' and a.get('stop_grace_period')=='45s'
+valid=a.get('stop_signal')=='SIGTERM' and a.get('stop_grace_period')==('1m15s' if os.environ.get('BIGNAME_E2E_SHUTDOWN_EXTENDED') else '45s')
 json.dump({'api_contract_present':valid,'api_signal':a.get('stop_signal'),'api_grace':a.get('stop_grace_period'),'runner_unchanged':not any(k in r for k in ['stop_signal','stop_grace_period'])},open(sys.argv[2],'w'))
 assert not any(k in r for k in ['stop_signal','stop_grace_period'])
 assert valid or sys.argv[3], 'API Compose stop contract missing'

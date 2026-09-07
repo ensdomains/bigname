@@ -858,8 +858,11 @@ docker compose --env-file .env.server -f docker-compose.server.yml stop api
 ```
 
 Docker sends SIGTERM to Tini, which forwards it to the `exec`-replaced
-`bigname-api serve` child. Docker waits 45 seconds and may use SIGKILL after
-that grace expires. Graceful success requires the application's accepted-signal
+`bigname-api serve` child. Docker waits `BIGNAME_API_STOP_GRACE_MS` (default
+45000 ms) before SIGKILL. The same value is validated at API startup: it must
+exceed the request timeout by at least 5000 ms. Raise both for longer requests;
+external stop-timeout overrides must preserve this margin. Graceful success
+requires the application's accepted-signal
 log and exit 0. Exit 137 or 143, missing signal acceptance, or a grace overrun
 is not graceful success.
 
