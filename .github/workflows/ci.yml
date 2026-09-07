@@ -1008,6 +1008,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
+      RUSTC_WRAPPER: ""
       BIGNAME_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
       BIGNAME_E2E_SHUTDOWN_SOURCE_SHA: ${{ github.sha }}
       BIGNAME_E2E_SHUTDOWN_EVIDENCE: ${{ github.workspace }}/target/api-container-shutdown
