@@ -98,10 +98,11 @@ not admitted.
 `project_events` remains the single filter for data that builders may serve.
 
 Incremental scope also follows the identity recorded when a separately registered
-`.eth` name is wrapped later. If a scoped wrapper resource has a canonical
-`SurfaceBound` event whose `wrapped_registrar_resource_id` identifies the registrar
-token that was wrapped, Project adds that exact registrar resource before staging
-history. In the reverse direction, a changed registrar event reaches the exact name
+`.eth` name is wrapped later. A scoped wrapper resource or scoped name can reach a
+canonical wrapper `SurfaceBound` event whose `wrapped_registrar_resource_id`
+identifies the registrar token that was wrapped. Project adds that exact registrar
+resource before staging history, including when release has made the wrapper
+historical and a later update scopes only the name and its current registry resource. In the reverse direction, a changed registrar event reaches the exact name
 and wrapper resource only when a canonical wrapper binding names that registrar
 resource. These expansions begin from the already affected name or resource and use
 that identifier relationship; they do not admit every registrar history for the

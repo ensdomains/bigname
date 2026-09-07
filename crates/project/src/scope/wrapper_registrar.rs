@@ -70,11 +70,24 @@ pub(super) async fn include_registrars_for_scoped_wrappers(
     target_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO project_scope_resources
+        "WITH scoped_wrappers AS (
+             SELECT wrapper.normalized_event_id
+             FROM project_scope_resources scope
+             JOIN normalized_events wrapper
+               ON wrapper.resource_id = scope.resource_id
+             WHERE wrapper.source_family = 'ens_v1_wrapper_l1'
+               AND wrapper.event_kind = 'SurfaceBound'
+             UNION
+             SELECT wrapper.normalized_event_id
+             FROM project_scope_names scope
+             JOIN normalized_events wrapper USING (logical_name_id)
+             WHERE wrapper.source_family = 'ens_v1_wrapper_l1'
+               AND wrapper.event_kind = 'SurfaceBound'
+         )
+         INSERT INTO project_scope_resources
          SELECT DISTINCT registrar.resource_id
-         FROM project_scope_resources scope
-         JOIN normalized_events wrapper
-           ON wrapper.resource_id = scope.resource_id
+         FROM scoped_wrappers scope
+         JOIN normalized_events wrapper USING (normalized_event_id)
          JOIN chain_lineage wrapper_lineage
            ON wrapper_lineage.chain_id = wrapper.chain_id
           AND wrapper_lineage.block_hash = wrapper.block_hash

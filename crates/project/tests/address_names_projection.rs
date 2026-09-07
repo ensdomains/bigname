@@ -2852,6 +2852,7 @@ enum LaterWrapperDelta {
     ResolverUpdate,
     RegistrarRenewal,
     RegistrarRelease,
+    RegistryUpdateAfterRelease,
 }
 
 #[derive(Debug, PartialEq)]
@@ -2861,6 +2862,7 @@ struct LaterWrapperProjection {
     expiry: Option<i64>,
     registrant: Option<String>,
     registration_resource_id: Option<String>,
+    registered_at: Option<String>,
     address_registrant: Option<String>,
     registrant_event_identity: Option<String>,
     serving: Vec<(String, serde_json::Value)>,
@@ -2870,6 +2872,7 @@ type LaterWrapperRegistrationRow = (
     Option<String>,
     Option<String>,
     Option<i64>,
+    Option<String>,
     Option<String>,
     Option<String>,
 );
@@ -3261,7 +3264,7 @@ async fn project_later_wrapper_delta(
                 .await?;
             }
         }
-        LaterWrapperDelta::RegistrarRelease => {
+        LaterWrapperDelta::RegistrarRelease | LaterWrapperDelta::RegistryUpdateAfterRelease => {
             seed_normalized_event(
                 &pool,
                 "fixture:release-wrapper-holder-transfer",
@@ -3346,13 +3349,14 @@ async fn project_later_wrapper_delta(
                 mode: RunMode::Redo,
             })
             .await?;
-    } else {
+    } else if incremental || !matches!(delta, LaterWrapperDelta::RegistryUpdateAfterRelease) {
         run_project(
             &pool,
             11,
             if incremental {
                 match delta {
-                    LaterWrapperDelta::RegistrarRelease => 10,
+                    LaterWrapperDelta::RegistrarRelease
+                    | LaterWrapperDelta::RegistryUpdateAfterRelease => 10,
                     _ => 11,
                 }
             } else {
@@ -3366,18 +3370,43 @@ async fn project_later_wrapper_delta(
         )
         .await?;
     }
+    if matches!(delta, LaterWrapperDelta::RegistryUpdateAfterRelease) {
+        seed_blocks(&pool, [12]).await?;
+        seed_normalized_event(
+            &pool,
+            "fixture:registry-update-after-wrapper-release",
+            Some(OWNERLESS_LOGICAL),
+            Some(RELEASE_REGISTRY_RESOURCE),
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            12,
+            1,
+            json!({"source_event":"NewResolver","node":OWNERLESS_NAMEHASH,"resolver":RESOLVER_ADDRESS}),
+            json!({"emitting_address":REGISTRY_ADDRESS}),
+        )
+        .await?;
+        run_project(
+            &pool,
+            12,
+            if incremental { 12 } else { 8 },
+            incremental.then_some(11),
+        )
+        .await?;
+    }
     let (
         registration_status,
         selected_registration_kind,
         expiry,
         registrant,
         registration_resource_id,
+        registered_at,
     ): LaterWrapperRegistrationRow = sqlx::query_as(
         "SELECT declared_summary #>> '{registration,status}',
                 declared_summary #>> '{registration,latest_event_kind}',
                 (declared_summary #>> '{registration,expiry}')::bigint,
                 declared_summary #>> '{registration,registrant}',
-                declared_summary #>> '{registration,resource_id}'
+                declared_summary #>> '{registration,resource_id}',
+                declared_summary #>> '{registration,registered_at}'
          FROM name_current WHERE logical_name_id = $1",
     )
     .bind(OWNERLESS_LOGICAL)
@@ -3410,6 +3439,7 @@ async fn project_later_wrapper_delta(
         expiry,
         registrant,
         registration_resource_id,
+        registered_at,
         address_registrant,
         registrant_event_identity,
         serving,
@@ -3515,6 +3545,53 @@ async fn born_wrapped_release_keeps_the_wrapper_registration_identity() -> Resul
     let from_zero = project_later_wrapper_delta(LaterWrapperDelta::RegistrarRelease, false, false, true).await?;
     assert_eq!(incremental, from_zero); assert_eq!(incremental.registration_status.as_deref(), Some("released"));
     assert_eq!(incremental.registration_resource_id.as_deref(), Some(CONTROL_RESOURCE)); assert_eq!(incremental.registrant, incremental.address_registrant); Ok(())
+}
+
+#[tokio::test]
+async fn registry_update_after_wrapper_release_preserves_registration_history() -> Result<()> {
+    for born_wrapped in [false, true] {
+        let incremental = project_later_wrapper_delta(
+            LaterWrapperDelta::RegistryUpdateAfterRelease,
+            true,
+            false,
+            born_wrapped,
+        )
+        .await?;
+        let from_zero = project_later_wrapper_delta(
+            LaterWrapperDelta::RegistryUpdateAfterRelease,
+            false,
+            false,
+            born_wrapped,
+        )
+        .await?;
+        assert_eq!(
+            incremental, from_zero,
+            "post-release registry update diverged"
+        );
+        assert_eq!(incremental.registration_status.as_deref(), Some("released"));
+        assert_eq!(
+            incremental.registration_resource_id.as_deref(),
+            Some(if born_wrapped {
+                CONTROL_RESOURCE
+            } else {
+                OWNERLESS_RESOURCE
+            })
+        );
+        // These resource-only grants are outside the selected registry authority
+        // after release, so its timestamp lookup has no grant in either rebuild.
+        assert_eq!(incremental.registered_at, None);
+        assert_eq!(
+            incremental.registrant.as_deref(),
+            Some("0x7777777777777777777777777777777777777777")
+        );
+        assert_eq!(incremental.registrant, incremental.address_registrant);
+        assert_ne!(
+            incremental.registrant_event_identity.as_deref(),
+            Some("fixture:incremental-old-registration"),
+            "an unrelated registrar lineage was admitted"
+        );
+    }
+    Ok(())
 }
 
 #[tokio::test]
