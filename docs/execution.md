@@ -91,6 +91,33 @@ key.
 Provider results remain request-scoped and are not cached or copied into a
 projection.
 
+## CCIP-Read gateway transport
+
+A gateway URL is chosen by the contract that reverts, not by bigname, so the
+serving path treats it as untrusted input. Requests are bounded before the URL
+reaches the network:
+
+- **Scheme.** Only `http` and `https` are attempted. Anything else fails the
+  gateway before a request is sent.
+- **Redirects.** Not followed. A `3xx` is reported as an unsuccessful gateway
+  status, so a URL that satisfied any origin check cannot bounce the request to
+  a different host.
+- **Response size.** The body read is capped at 1 MiB; a longer response fails
+  that gateway rather than streaming into the request.
+- **Fan-out and time.** At most four URLs are attempted per lookup, under a
+  1000 ms connect and 1500 ms total timeout.
+
+**What is deliberately not enforced in process: destination host or IP.** The
+gateway may resolve to any address the container can route to, including link
+local and cluster internal ranges. For Basenames the URL set is owner
+controlled and effectively fixed, but the ENS primary-name path propagates a
+target resolver's URLs verbatim, so an address that controls a reverse claim can
+choose the destination. Egress restriction for that case belongs to network
+policy around the API container, not to this client, and no such policy is
+described in the deployment docs today. Treat it as a prerequisite before `/v2`
+is admitted at the public edge, and see
+[`production.md`](production.md) for the current edge posture.
+
 ## Primary-name lookup
 
 The verified primary-name product path supports ENS on coin type `60`. It

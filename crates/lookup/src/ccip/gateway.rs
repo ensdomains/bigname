@@ -16,11 +16,19 @@ const GATEWAY_CONNECT_TIMEOUT: Duration = Duration::from_millis(1000);
 #[cfg(test)]
 const GATEWAY_CONNECT_TIMEOUT: Duration = Duration::from_millis(100);
 const GATEWAY_TIMEOUT: Duration = Duration::from_millis(1500);
+/// A CCIP-Read answer is one ABI-encoded resolver result. Cap the read so a
+/// gateway URL taken out of an untrusted revert cannot stream unbounded bytes
+/// into the serving path within the request timeout.
+const MAX_GATEWAY_RESPONSE_BYTES: usize = 1 << 20;
 
 static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .connect_timeout(GATEWAY_CONNECT_TIMEOUT)
         .timeout(GATEWAY_TIMEOUT)
+        // A gateway answers in one hop. Following redirects would let a URL that
+        // passed any origin check bounce the request to an unrelated host, so a
+        // 3xx is surfaced as an ordinary unsuccessful gateway status instead.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("CCIP gateway HTTP client configuration must be valid")
 });
@@ -180,8 +188,15 @@ async fn fetch_standard(sender: &str, urls: &[String], call_data: &[u8]) -> Resu
 
 async fn fetch_one(template: &str, sender: &str, data: &str) -> Result<Vec<u8>> {
     let url = template.replace("{sender}", sender);
-    let response = if url.contains("{data}") {
-        HTTP_CLIENT.get(url.replace("{data}", data)).send().await
+    let use_get = url.contains("{data}");
+    let url = if use_get {
+        url.replace("{data}", data)
+    } else {
+        url
+    };
+    ensure_fetchable_scheme(&url)?;
+    let response = if use_get {
+        HTTP_CLIENT.get(&url).send().await
     } else {
         HTTP_CLIENT
             .post(&url)
@@ -191,14 +206,39 @@ async fn fetch_one(template: &str, sender: &str, data: &str) -> Result<Vec<u8>> 
     }
     .with_context(|| format!("failed to send CCIP gateway request to {url}"))?;
     let status = response.status();
-    let body = response
-        .bytes()
+    let body = read_capped_body(response)
         .await
         .with_context(|| format!("failed to read CCIP gateway response from {url}"))?;
     if !status.is_success() {
         return Err(GatewayStatusError { status }.into());
     }
     decode_body(&body).with_context(|| format!("failed to decode CCIP gateway response from {url}"))
+}
+
+/// The URL arrives inside an `OffchainLookup` revert, so the emitting contract
+/// chooses it. Restrict it to the two schemes a gateway is defined over before
+/// the client is handed the string.
+fn ensure_fetchable_scheme(url: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(url)
+        .with_context(|| format!("CCIP gateway URL is not a valid absolute URL: {url}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        bail!(
+            "CCIP gateway URL scheme `{}` is not supported: {url}",
+            parsed.scheme()
+        );
+    }
+    Ok(())
+}
+
+async fn read_capped_body(mut response: reqwest::Response) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len() + chunk.len() > MAX_GATEWAY_RESPONSE_BYTES {
+            bail!("CCIP gateway response exceeded {MAX_GATEWAY_RESPONSE_BYTES} bytes");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn decode_body(body: &[u8]) -> Result<Vec<u8>> {
@@ -275,6 +315,25 @@ impl std::error::Error for GatewayStatusError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_http_schemes_reach_the_gateway_client() {
+        for url in ["http://gateway.invalid/q", "https://gateway.invalid/q"] {
+            assert!(ensure_fetchable_scheme(url).is_ok(), "rejected {url}");
+        }
+        // The emitting contract picks this string, so a non-HTTP scheme and a
+        // relative reference must both fail before the client sees them.
+        for url in [
+            "file:///etc/passwd",
+            "ftp://gateway.invalid/q",
+            "gopher://gateway.invalid/",
+            "data:text/plain,payload",
+            "/etc/passwd",
+            "",
+        ] {
+            assert!(ensure_fetchable_scheme(url).is_err(), "accepted {url}");
+        }
+    }
 
     #[test]
     fn portable_gateway_response_shapes_match_legacy_execution() -> Result<()> {
