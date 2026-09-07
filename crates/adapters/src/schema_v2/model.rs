@@ -35,7 +35,7 @@ pub struct AddressAdmissionInput {
     pub active_to_block: Option<i64>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RawLogInput {
     pub chain_id: String,
     pub block_hash: String,

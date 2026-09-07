@@ -3364,10 +3364,25 @@ fn cross_family_registrar_cleanup_and_historical_renewal_reject_lookalikes() -> 
         &fixture,
         false,
     ))?;
+    // Not cleanup evidence, so no migration row; but the registrar registered a
+    // name that no admitted controller or bridge claimed in its transaction, and
+    // that is served as a flagged fallback registration rather than silence.
     assert!(
-        ordinary_expiry.normalized_events.is_empty(),
-        "Graveyard ownership without the terminal expiry class is not cleanup evidence"
+        ordinary_expiry.normalized_events.iter().all(|event| {
+            event.source_family == "ens_v1_registrar_l1"
+                && event.migration_correlation_ids.is_empty()
+        }),
+        "Graveyard ownership without the terminal expiry class is not cleanup evidence: {:#?}",
+        ordinary_expiry.normalized_events
     );
+    let fallback = ordinary_expiry
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RegistrationGranted")
+        .expect("an unadmitted controller's registration is a flagged fallback fact");
+    assert_eq!(fallback.after_state["controller_admitted"], false);
+    assert_eq!(fallback.after_state["surface_known"], false);
+    assert!(fallback.logical_name_id.is_none());
 
     let terminal_lookalike = interpret_test_batch(batch(
         vec![raw_at_transaction(
@@ -3389,9 +3404,21 @@ fn cross_family_registrar_cleanup_and_historical_renewal_reject_lookalikes() -> 
         false,
     ))?;
     assert!(
-        terminal_lookalike.normalized_events.is_empty(),
-        "a controller registration to the Graveyard with a different high expiry is not cleanup"
+        terminal_lookalike.normalized_events.iter().all(|event| {
+            event.source_family == "ens_v1_registrar_l1"
+                && event.migration_correlation_ids.is_empty()
+        }),
+        "a controller registration to the Graveyard with a different high expiry is not cleanup: {:#?}",
+        terminal_lookalike.normalized_events
     );
+    let fallback = terminal_lookalike
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RegistrationGranted")
+        .expect("a registration outside the cleanup class is a flagged fallback fact");
+    assert_eq!(fallback.after_state["controller_admitted"], false);
+    // Past `i64`, the expiry reads as never expiring, as the controller path decodes it.
+    assert_eq!(fallback.after_state["expiry"], Value::Null);
 
     let fork_deployer = Address::from([0x99; 20]);
     let fork_rehearsal = interpret_test_batch(batch(
@@ -3425,12 +3452,29 @@ fn cross_family_registrar_cleanup_and_historical_renewal_reject_lookalikes() -> 
         &fixture,
         false,
     ))?;
-    assert!(fork_rehearsal.normalized_events.iter().all(|event| {
-        !matches!(
-            event.event_kind.as_str(),
-            "RegistrationGranted" | "RegistrarNameRegistered" | "RegistrationRenewed"
-        )
-    }));
+    // A controller added in an earlier transaction and then used is the rotation
+    // the registrar fallback exists for: no migration row, and the registration
+    // through the unadmitted controller is served flagged rather than dropped.
+    assert!(
+        fork_rehearsal.normalized_events.iter().all(|event| {
+            event.event_kind != "RegistrarNameRegistered"
+                && (event.source_family != "ens_v1_registrar_l1"
+                    || event.migration_correlation_ids.is_empty())
+        }),
+        "{:#?}",
+        fork_rehearsal.normalized_events
+    );
+    let fallback = fork_rehearsal
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RegistrationGranted")
+        .expect("a registration through a rotated controller is a flagged fallback fact");
+    assert_eq!(fallback.source_family, "ens_v1_registrar_l1");
+    assert_eq!(fallback.after_state["controller_admitted"], false);
+    assert_eq!(
+        fallback.after_state["registrant"],
+        crate::evm_abi::address_hex(Address::from([0x98; 20]))
+    );
     Ok(())
 }
 
@@ -4154,13 +4198,30 @@ fn registrar_manifest() -> ManifestInput {
                 "NameRegistered",
                 "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)",
                 &["registrar"],
-                &["RegistrationReleased"],
+                &[
+                    "RegistrationReleased",
+                    "RegistrationGranted",
+                    "ExpiryChanged",
+                    "PermissionChanged",
+                    "SurfaceUnbound",
+                    "SurfaceBound",
+                    "AuthorityEpochChanged",
+                    "ResolverChanged",
+                ],
             ),
             (
                 "NameRenewed",
                 "event NameRenewed(uint256 indexed id, uint256 expires)",
                 &["registrar"],
-                &["RegistrationRenewed", "ExpiryChanged"],
+                &[
+                    "RegistrationGranted",
+                    "RegistrationRenewed",
+                    "ExpiryChanged",
+                    "SurfaceUnbound",
+                    "SurfaceBound",
+                    "AuthorityEpochChanged",
+                    "ResolverChanged",
+                ],
             ),
             (
                 "Transfer",

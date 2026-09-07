@@ -32,12 +32,16 @@ mod base_registrar {
     }
 }
 
-pub(super) fn interpret(selected: &Selected, raw: &RawLogInput) -> anyhow::Result<Interpreted> {
+pub(super) fn interpret(
+    selected: &Selected,
+    raw: &RawLogInput,
+    state: &mut State,
+) -> anyhow::Result<Interpreted> {
     let mut output = Interpreted::new();
     let decoded = match selected.event.name.as_str() {
         "ProxyDeployed" => proxy_deployed(selected, raw, &mut output)?,
         "NameRenewed" if selected.emitter_role.as_deref() == Some("ens_v1_renewal_bridge") => {
-            bridge_renewed(selected, raw, &mut output)?
+            bridge_renewed(selected, raw, state, &mut output)?
         }
         event => bail!("unsupported ENSv2 migration event {event}"),
     };
@@ -119,6 +123,7 @@ fn proxy_deployed(
 fn bridge_renewed(
     selected: &Selected,
     raw: &RawLogInput,
+    state: &mut State,
     output: &mut Interpreted,
 ) -> anyhow::Result<Value> {
     let event = decode_event_log_data_as::<RawBridgeNameRenewed>(
@@ -131,6 +136,9 @@ fn bridge_renewed(
     let raw_label = event.label.to_vec();
     let labelhash = keccak256(&raw_label);
     let namehash = eth_namehash(labelhash);
+    // The bridge carries the label for the registrar's numeric renewal in this
+    // transaction, so that renewal is migration evidence, not an unadmitted controller.
+    state.release_v1_registrar_log(&selected.source.namespace, &namehash, raw);
     let logical_name_id = format!("{}:{namehash}", selected.source.namespace);
     let decoded = json!({
         "token_id":u256_word_hex(event.tokenId),

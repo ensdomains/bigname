@@ -38,6 +38,8 @@ impl State {
     ) {
         self.begin_v1_registrar_controller_transaction(raw);
         let controller = controller.to_ascii_lowercase();
+        self.v1_registrar_controllers_announced
+            .insert(controller.clone());
         if approved {
             self.v1_registrar_controllers.insert(controller);
         } else {
@@ -98,8 +100,20 @@ impl State {
         if self.v1_registrar_controller_transaction.as_deref() != Some(transaction.as_str()) {
             self.v1_registrar_controller_transaction = Some(transaction);
             self.v1_registrar_controllers.clear();
+            self.v1_registrar_controllers_announced.clear();
             self.v1_pending_wrapper_sync_expiries.clear();
         }
+    }
+
+    /// Whether this transaction has added or removed a registrar controller so far.
+    /// A transaction that announces its own controller, as `syncWrapper` does, is
+    /// migration evidence rather than a controller the manifest failed to admit.
+    pub(in crate::schema_v2) fn v1_registrar_controller_announced(
+        &mut self,
+        raw: &RawLogInput,
+    ) -> bool {
+        self.begin_v1_registrar_controller_transaction(raw);
+        !self.v1_registrar_controllers_announced.is_empty()
     }
 
     pub(in crate::schema_v2) fn restore_v1_correlated_wrapper_expiry(

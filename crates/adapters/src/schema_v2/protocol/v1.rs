@@ -66,6 +66,15 @@ fn is_registry_ownership_event(name: &str) -> bool {
     matches!(name, "NewOwner" | "Transfer")
 }
 
+/// A registrar `NameRegistered` / `NameRenewed` still held when its block ended.
+pub(super) fn interpret_held_registrar(
+    selected: &Selected,
+    raw: &RawLogInput,
+    state: &mut State,
+) -> anyhow::Result<Interpreted> {
+    registrar::interpret_held(selected, raw, state)
+}
+
 pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,

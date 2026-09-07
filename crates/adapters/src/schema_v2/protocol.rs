@@ -240,6 +240,14 @@ pub(super) enum DiscoveryDraft {
     },
 }
 
+pub(super) fn interpret_held_registrar(
+    selected: &Selected,
+    raw: &RawLogInput,
+    state: &mut State,
+) -> anyhow::Result<Interpreted> {
+    v1::interpret_held_registrar(selected, raw, state)
+}
+
 pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
@@ -257,7 +265,7 @@ pub(super) fn interpret(
             v2_registry::interpret(selected, raw, state)
         }
         "ens_v2_resolver_l1" => v2_resolver::interpret(selected, raw, state),
-        "ens_v2_migration_l1" => migration::interpret(selected, raw),
+        "ens_v2_migration_l1" => migration::interpret(selected, raw, state),
         family => bail!("source family {family} has no schema-v2 adapter"),
     }?;
     for event in &mut output.events {
