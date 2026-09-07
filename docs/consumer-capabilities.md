@@ -234,11 +234,26 @@ verified and auto records follow the ordinary lookup capability; direct
 subnames include a read-only row only while a current nonzero event-linked
 resolver exists; and resolver `bound_names` remains subject to the resolver
 family's existing binding-enumeration capability. Registration/control fields,
-address-name relations, and owner-derived permissions stay absent. A resolver
-selection observed only before the name surface and never repeated remains out
-of scope under the documented #613 caveat. The GraphQL compatibility surface
-uses the same serving resource for its resolver record fields; it does not infer
-registration or control from that read path.
+address-name relations, and owner-derived permissions stay absent. When the
+latest nonzero registry resolver selection predates the [name surface](glossary.md#surface-name-surface), the event that first makes the surface active
+links it to the retained serving resource without
+requiring a repeated selection; a latest zero-address selection remains a
+clear. The GraphQL compatibility surface uses the same serving resource for its
+resolver record fields; it does not infer registration or control from that
+read path.
+
+For the fallback registry, a current-registry `NewOwner` or `Transfer` creates
+the current record and ends any resolver pointer inherited from the old
+registry. That [registry fallback handoff](glossary.md#registry-fallback-handoff) is retained across replay even for a same-owner
+`Transfer`; linked zero-resolver events retract an inherited pointer that had
+already become readable from every linked registry, registrar, or wrapper
+resource. An old-registry `Transfer` does not affect a resolver
+selected from the current registry.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L54 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L172 @ ens_v1@91c966f)
 
 Each slice includes its behavior tests and fixture provenance. Counts are
 estimated hand-written production files; test fixtures, test-only harness
@@ -678,11 +693,24 @@ these remaining disagreement classes:
   `resource_control` clears the current controller. The effective controller is
   then absent when the name has no registrar [token lineage](glossary.md#token-lineage),
   or falls back to the token holder or registrant otherwise; served control
-  ownership is unchanged by either `PermissionChanged`. A release can also
-  co-emit an owner-less `AuthorityEpochChanged`, which clears the served registry
-  owner so `Domain.owner` falls back to the registrant or zero address, while the
-  epoch event is excluded from the effective-controller fold and the release's
-  `resource_control` grant keeps the registry owner there.
+  ownership is unchanged by either `PermissionChanged`. A release restoring a
+  retained direct-registry authority carries its owner in `AuthorityEpochChanged`.
+  A genuinely ownerless release epoch instead clears the served registry owner,
+  so `Domain.owner` falls back to the registrant or zero address. The epoch event
+  is excluded from the effective-controller fold; that controller follows the
+  release's `resource_control` changes.
+
+A registrar-token transfer without reclaim differs from that release case.
+When ENSv1 or Basenames still reports the original nonzero registry owner and
+bigname selects the registry-only resource, the transfer observation retains
+that authenticated registry owner. The owner's approved operator remains
+available through name, current-resource and address permission filters, and
+through role summaries for names already on the owner's address page. Operator
+approval alone still adds no address-name membership. This does not change the
+release behaviors above or broaden permission coverage.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L20 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/Registry.sol:L49-L52 @ basenames@1809bbc)
 
 `DomainFilter` remains the separate input for the local `domainConnection`
 operation. Its `name` continues the existing ENS name lookup, and its
