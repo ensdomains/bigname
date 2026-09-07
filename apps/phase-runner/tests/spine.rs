@@ -2976,6 +2976,67 @@ async fn redo_restores_the_full_phase_lifecycle_state() -> Result<()> {
 }
 
 #[tokio::test]
+async fn recompute_flags_stopped_during_its_project_refresh_says_to_rerun_recompute_flags()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_recompute_stop_during_refresh").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let chain_id = "recompute-stop-during-refresh-chain";
+    store.initialize_chain(chain_id).await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 1).await?;
+    for (phase, hash) in [
+        (PhaseName::Ingest, None),
+        (
+            PhaseName::Interpret,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        ),
+        (
+            PhaseName::Project,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        ),
+        (PhaseName::Verify, None),
+    ] {
+        mark_completed(scratch.pool(), chain_id, phase, hash).await?;
+        set_phase_extent(scratch.pool(), chain_id, phase, 1).await?;
+    }
+
+    // The scoped Project refresh runs as a Project redo. Its first batch accepts
+    // the stop and asks to continue, so the batch loop observes the stop before
+    // the refresh completes.
+    let cancellation = CancellationToken::new();
+    let stop = cancellation.clone();
+    let project = Arc::new(FunctionPhase {
+        name: PhaseName::Project,
+        handler: Arc::new(move |_| {
+            stop.cancel();
+            Ok(PhaseBatchOutcome::Continue(PhaseProgress::default()))
+        }),
+    }) as Arc<dyn Phase>;
+    let phase_runner = runner(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Project, project)?,
+        available_capacity(),
+        "recompute-stop-during-refresh-runner",
+    )?;
+    let error = phase_runner
+        .redo(
+            &chain(chain_id)?,
+            RedoPhase::RecomputeFlags,
+            BlockRange::new(0, 1)?,
+            cancellation,
+        )
+        .await
+        .expect_err("a stop during the refresh must not read as a finished recompute");
+    let message = error.to_string();
+    assert_eq!(error.kind(), ErrorKind::InvalidTransition, "{message}");
+    assert!(
+        message.contains("--phase recompute-flags --from-block 0 --to-block 1"),
+        "{message}"
+    );
+    assert!(!message.contains("--phase project"), "{message}");
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn all_phase_redo_stopped_between_phases_keeps_the_all_phase_instruction() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_redo_stop_between_phases").await?;
     let store = PhaseStore::new(scratch.runner().pool().clone());

@@ -43,25 +43,26 @@ impl PhaseRunner {
                 .run_recompute_interpret_with_project_lock(chain, mode, cancellation)
                 .await;
         };
-        if run_project_now {
-            self.run_phase_with_restart(
-                chain,
-                PhaseName::Project,
-                RunMode::Redo(project_range),
-                cancellation.clone(),
-            )
-            .await?;
+        if run_project_now
+            && let Err(error) = self
+                .run_phase_with_restart(
+                    chain,
+                    PhaseName::Project,
+                    RunMode::Redo(project_range),
+                    cancellation.clone(),
+                )
+                .await
+        {
+            // The refresh runs as a Project redo, so its own stop error would say
+            // to rerun `--phase project`; doing that stages the refresh and exits
+            // clean with the Interpret recomputation still undone.
+            if cancellation.is_cancelled() {
+                return Err(recompute_stopped(chain, range, "during"));
+            }
+            return Err(error);
         }
         if cancellation.is_cancelled() {
-            return Err(RunnerError::new(
-                ErrorKind::InvalidTransition,
-                format!(
-                    "recompute-flags for chain {} stopped after its scoped Project refresh; \
-                     rerun `phase-runner redo --chain {} --phase recompute-flags --from-block {} \
-                     --to-block {}`",
-                    chain.chain_id, chain.chain_id, range.from, range.to
-                ),
-            ));
+            return Err(recompute_stopped(chain, range, "after"));
         }
         self.run_recompute_interpret_with_project_lock(chain, mode, cancellation)
             .await
@@ -344,4 +345,19 @@ impl PhaseRunner {
             }
         }
     }
+}
+
+/// A stop observed while recompute-flags was still on its scoped Project
+/// refresh. Whether the refresh finished or not, the Project marker it owns
+/// resumes only through this command, so this is the instruction either way.
+fn recompute_stopped(chain: &ChainConfig, range: BlockRange, when: &str) -> RunnerError {
+    RunnerError::new(
+        ErrorKind::InvalidTransition,
+        format!(
+            "recompute-flags for chain {} stopped {when} its scoped Project refresh; the \
+             refresh blocks Project until it is resumed; rerun `phase-runner redo --chain {} \
+             --phase recompute-flags --from-block {} --to-block {}`",
+            chain.chain_id, chain.chain_id, range.from, range.to
+        ),
+    )
 }
