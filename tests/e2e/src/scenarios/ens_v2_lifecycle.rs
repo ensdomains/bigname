@@ -1143,6 +1143,60 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
         "admin-half bits must render distinctly; saw {power_names:?}"
     );
 
+    // Retain an already-transferred Carol owner, then use the real return sale
+    // as the replay suffix. All original scenario assertions above are unchanged.
+    ens_v2::transfer_registry_token(
+        &rpc,
+        deployment.eth_registry.address,
+        bob,
+        carol,
+        sale.token_id,
+    )
+    .await?;
+    assert_eq!(
+        crate::harness::ens_v2_migration::registry_owner(
+            &rpc,
+            deployment.eth_registry.address,
+            "sale"
+        )
+        .await?,
+        carol
+    );
+    ens_v2::transfer_registry_token(
+        &rpc,
+        deployment.eth_registry.address,
+        carol,
+        bob,
+        sale.token_id,
+    )
+    .await?;
+    for (label, expected) in [
+        ("sale", bob),
+        ("batchsaleone", carol),
+        ("batchsaletwo", carol),
+    ] {
+        assert_eq!(
+            crate::harness::ens_v2_migration::registry_owner(
+                &rpc,
+                deployment.eth_registry.address,
+                label,
+            )
+            .await?,
+            expected,
+            "actual registry token owner for {label}"
+        );
+    }
+    support::prove_ens_v2_normal_http(
+        &anvil,
+        &deployment,
+        &[
+            ("sale.eth", format!("{bob:#x}")),
+            ("batchsaleone.eth", format!("{carol:#x}")),
+            ("batchsaletwo.eth", format!("{carol:#x}")),
+        ],
+    )
+    .await?;
+
     run.db.cleanup().await?;
     Ok(())
 }
