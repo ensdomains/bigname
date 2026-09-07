@@ -266,12 +266,14 @@ impl PhaseRunner {
             None
         };
         let redo_attempt = redo_session.as_ref().map(|session| session.attempt_fence());
-        phase_lock.check_alive().await?;
-        let heartbeat = until_cancelled(
-            &cancellation,
+        // The lock probe after the transition is an unbounded `SELECT 1` on the
+        // lock's own connection, so it is raced with the heartbeat start.
+        let heartbeat = until_cancelled(&cancellation, async {
+            phase_lock.check_alive().await?;
             self.store
-                .start_heartbeat(&self.instance_id, &chain.chain_id, phase_name),
-        )
+                .start_heartbeat(&self.instance_id, &chain.chain_id, phase_name)
+                .await
+        })
         .await;
         let started = match heartbeat {
             Ok(Some(())) => Ok(()),
