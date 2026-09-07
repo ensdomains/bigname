@@ -41,9 +41,10 @@ promise:
   named semantic source files, or to the pinned lockfile families does.
   `#[cfg(test)]` modules under those roots and a manifest's
   `normalizer_version` do not (`crates/content-hash/src/tests.rs` pins both),
-  and a manifest's `read_features` rotates the separate manifest-authority
-  fingerprint with a byte-identical interpreter hash (`deployment.md` §
-  manifest-authority marker). Only an interpreter-hash rotation forces a
+  and a manifest's `read_features` rotates the separate fingerprint recorded
+  by the [manifest-authority marker](../glossary.md#manifest-authority-marker)
+  with a byte-identical interpreter hash (`deployment.md` § manifest-authority
+  marker). Only an interpreter-hash rotation forces a
   full-history re-walk; the normalizer and manifest-authority paths have their
   own, narrower redo.
 - **The content hash does not cover the schema.** It watches Rust sources,
@@ -108,9 +109,11 @@ interpreter content hash, which is the contract `architecture.md` gives it: it
 incorporates the derivation kind, identity suffix, and emission ordinal
 (`crates/adapters/src/schema_v2/normalized.rs`, `raw_log_event_identity`), so a
 covered adapter change can alter it for a raw log that did not change. Across
-the re-derivation boundaries this freeze permits, pair it with the raw-fact
-position — chain, block hash, transaction hash, log index — which is what
-survives. A namehash is safe only
+the re-derivation boundaries this freeze permits, the anchor is the raw-fact
+position alone — chain, block hash, transaction hash, log index — keyed to
+the set of events emitted for it; an expectation about a particular event is
+scoped to one interpreter hash and re-derived, not carried, across a
+rotation. A namehash is safe only
 together with its namespace — which is what `logical_name_id` is
 (`<namespace>:<namehash>`, `architecture.md` § Identity) — because the hash
 does not encode the namespace, and the supported `ens` and `basenames`
