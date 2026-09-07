@@ -1030,6 +1030,12 @@ jobs:
         run: |
           scripts/sync-refs
           scripts/sync-refs --check
+      - name: Build canonical phase-runner prerequisite
+        env:
+          BIGNAME_BUILD_SHA: ${{ github.sha }}
+        run: |
+          cargo build --locked --package phase-runner --bin phase-runner
+          sha256sum target/debug/phase-runner
       - name: Prove exact-image API shutdown
         run: scripts/test-container-shutdown
       - name: Retain shutdown evidence
