@@ -850,3 +850,19 @@ the owner-approved rollback and restoration path required by the
 
 Keep the public edge on its maintainer-approved policy throughout rollback and
 re-run `scripts/public-edge-smoke` before restoring traffic.
+
+## Stop the API
+
+```sh
+docker compose --env-file .env.server -f docker-compose.server.yml stop api
+```
+
+Docker sends SIGTERM to Tini, which forwards it to the `exec`-replaced
+`bigname-api serve` child. Docker waits 45 seconds and may use SIGKILL after
+that grace expires. Graceful success requires the application's accepted-signal
+log and exit 0. Exit 137 or 143, missing signal acceptance, or a grace overrun
+is not graceful success.
+
+Use disposable services for shutdown experiments, never the active production
+API or database. Fixture and container tests are not rollout, restore, or
+beta-launch evidence. No runner stop command or grace is added by this slice.

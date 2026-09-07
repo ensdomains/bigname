@@ -797,10 +797,19 @@ pub async fn run_required_reorg_spine(
 }
 
 #[cfg(unix)]
-mod unix_process {
+pub(crate) mod unix_process {
     use std::io;
 
+    #[cfg(test)]
     const SIGKILL: i32 = 9;
+    #[derive(Clone, Copy)]
+    pub enum Signal {
+        #[cfg(test)]
+        Interrupt = 2,
+        #[cfg(test)]
+        Terminate = 15,
+        Kill = 9,
+    }
     #[cfg(test)]
     const ESRCH: i32 = 3;
 
@@ -811,6 +820,10 @@ mod unix_process {
     }
 
     pub fn kill_process_group(process_group: u32) -> io::Result<()> {
+        signal_process_group(process_group, Signal::Kill)
+    }
+
+    pub fn signal_process_group(process_group: u32, signal: Signal) -> io::Result<()> {
         let process_group = positive_pid(process_group)?;
         // SAFETY: getpgrp takes no arguments and has no memory-safety
         // preconditions.
@@ -823,7 +836,7 @@ mod unix_process {
         }
         // SAFETY: a negative, nonzero pid addresses one Unix process group.
         // The equality guard above prevents signaling the harness group.
-        if unsafe { c_kill(-process_group, SIGKILL) } == 0 {
+        if unsafe { c_kill(-process_group, signal as i32) } == 0 {
             Ok(())
         } else {
             Err(io::Error::last_os_error())
@@ -893,7 +906,7 @@ fn pipeline_command(repo_root: &Path, executable: &Path) -> Command {
     command
 }
 
-async fn run_to_completion(command: Command, what: &str) -> Result<String> {
+pub(crate) async fn run_to_completion(command: Command, what: &str) -> Result<String> {
     let timeout_secs = timeout_secs_from_env(
         "BIGNAME_E2E_COMMAND_TIMEOUT_SECS",
         DEFAULT_COMMAND_TIMEOUT_SECS,

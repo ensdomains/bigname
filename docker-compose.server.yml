@@ -56,6 +56,8 @@ services:
       start_period: 5s
 
   api:
+    stop_signal: SIGTERM
+    stop_grace_period: 45s
     <<: *bigname-service
     command: api
     ports:
