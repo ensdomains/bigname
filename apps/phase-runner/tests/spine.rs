@@ -331,6 +331,49 @@ async fn derived_write_refuses_a_recorded_content_hash_mismatch() -> Result<()> 
 }
 
 #[tokio::test]
+async fn a_stop_while_the_capacity_probe_is_stalled_returns_without_it() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_stalled_capacity_probe").await?;
+    let chain_id = "stalled-capacity-probe-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 3).await?;
+    // The probe never answers, which is what a stalled database looks like from
+    // the batch prelude; the phase has already started by the time it is asked.
+    let runner = runner(
+        scratch.runner(),
+        complete_phase_set(None),
+        CapacityGuard::new(CapacityConfig::default(), Arc::new(NeverAnswers)),
+        "stalled-capacity-probe-runner",
+    )?;
+    let chain = chain(chain_id)?;
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let task = tokio::spawn(async move { runner.run_chain(&chain, run_cancellation).await });
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let status: Option<String> = sqlx::query_scalar(
+                "SELECT phase_status FROM chain_phase_state
+                 WHERE chain_id = $1 AND phase_name = 'ingest'",
+            )
+            .bind(chain_id)
+            .fetch_optional(scratch.pool())
+            .await?;
+            if status.as_deref() == Some("running") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+
+    cancellation.cancel();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .map_err(|_| anyhow::anyhow!("the stop was held by the stalled capacity probe"))???;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn a_stop_while_phase_start_waits_on_a_held_row_returns_without_it() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_start_waits_on_row").await?;
     let chain_id = "start-waits-on-row-chain";
@@ -5266,6 +5309,18 @@ async fn settle_active_rows_for_removed_chain(scratch: &ScratchDatabase) -> Resu
     .run(&runtime, cancellation)
     .await?;
     Ok(())
+}
+
+struct NeverAnswers;
+
+impl CapacityProbe for NeverAnswers {
+    fn measure<'a>(
+        &'a self,
+        _pool: &'a sqlx::PgPool,
+        _writable_path: &'a std::path::Path,
+    ) -> CapacityFuture<'a> {
+        Box::pin(std::future::pending())
+    }
 }
 
 struct AlwaysAvailable;

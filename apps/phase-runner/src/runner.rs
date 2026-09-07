@@ -17,8 +17,8 @@ use crate::{
     phase_lock::PhaseLock,
     progress_monitor::RunnerPhaseProgress,
     runner_support::{
-        HeartbeatThrottle, PhaseLoopResult, cancelled_redo_error, finish_failed_redo_start,
-        finish_stopped_redo_start, redo_outcome,
+        HeartbeatThrottle, PhaseLoopResult, STOPPED_MARKER_LOOKUP, cancelled_redo_error,
+        finish_failed_redo_start, finish_stopped_redo_start, redo_outcome,
     },
     shutdown::until_cancelled,
     state::PhaseStore,
@@ -27,6 +27,8 @@ use crate::{
 
 #[path = "runner_batch.rs"]
 mod batch;
+#[path = "runner_capacity.rs"]
+mod capacity_wait;
 #[path = "runner_chain.rs"]
 mod chain;
 #[path = "runner_context.rs"]
@@ -167,13 +169,30 @@ impl PhaseRunner {
                 chain,
                 phase,
                 mode,
-                cancellation,
+                cancellation.clone(),
                 live_mismatch,
                 automatic_discovery_ingest,
                 &mut phase_lock,
             )
             .await;
-        let release = phase_lock.release().await;
+        // After an accepted stop the lock's connection may be the stall that
+        // won the race, and the release is an unlock and a close on it. Bound
+        // it; a dropped lock closes the session, which releases the lock.
+        let release = if cancellation.is_cancelled() {
+            match tokio::time::timeout(STOPPED_MARKER_LOOKUP, phase_lock.release()).await {
+                Ok(release) => release,
+                Err(_elapsed) => {
+                    warn!(
+                        chain_id = chain.chain_id,
+                        phase = %phase_name,
+                        "phase lock release did not answer after a stop; the connection is dropped"
+                    );
+                    Ok(())
+                }
+            }
+        } else {
+            phase_lock.release().await
+        };
         match (result, release) {
             (Ok(()), Ok(())) => Ok(()),
             (Ok(()), Err(error)) => Err(error),
@@ -414,28 +433,35 @@ impl PhaseRunner {
             if cancellation.is_cancelled() {
                 return Ok(PhaseLoopResult::Cancelled);
             }
-            phase_lock.check_alive().await?;
-            if self
-                .wait_for_capacity(
-                    chain,
-                    phase_name,
-                    reserved_write_bytes,
-                    &cancellation,
-                    heartbeat,
-                    phase_lock,
-                )
-                .await?
-            {
+            // Everything between the check above and the batch waits on the
+            // database — the lock probe, the capacity probe and its pause and
+            // resume writes, the context reads — so the whole prelude is raced.
+            // A write dropped mid-flight rolls back; a stop after a pause
+            // committed leaves the phase paused, which is where a stop inside
+            // the capacity wait already left it.
+            let prelude = until_cancelled(&cancellation, async {
+                phase_lock.check_alive().await?;
+                if self
+                    .wait_for_capacity(
+                        chain,
+                        phase_name,
+                        reserved_write_bytes,
+                        &cancellation,
+                        heartbeat,
+                        phase_lock,
+                    )
+                    .await?
+                {
+                    return Ok(None);
+                }
+                self.phase_context(chain, phase_name, mode.clone(), redo_attempt)
+                    .await
+                    .map(Some)
+            })
+            .await?;
+            let Some(context) = prelude.flatten() else {
                 return Ok(PhaseLoopResult::Cancelled);
-            }
-            let context = self
-                .phase_context(chain, phase_name, mode.clone(), redo_attempt)
-                .await?;
-            // The checks above are separated from this batch by several awaits, so a
-            // stop that arrived in between would otherwise still run a full batch.
-            if cancellation.is_cancelled() {
-                return Ok(PhaseLoopResult::Cancelled);
-            }
+            };
             let progress_token = self.phase_progress.begin_batch(&context);
             let retained_verification_level = context.resume.verification_level;
             let batch = phase.run_batch(context.clone());
@@ -524,58 +550,6 @@ impl PhaseRunner {
                         () = tokio::time::sleep(self.timing.live_poll_interval) => {}
                     }
                 }
-            }
-        }
-    }
-
-    async fn wait_for_capacity(
-        &self,
-        chain: &ChainConfig,
-        phase: PhaseName,
-        reserved_write_bytes: u64,
-        cancellation: &CancellationToken,
-        heartbeat: &mut HeartbeatThrottle,
-        phase_lock: &mut PhaseLock,
-    ) -> RunnerResult<bool> {
-        let mut paused = false;
-        loop {
-            phase_lock.check_alive().await?;
-            let status = self
-                .capacity
-                .check(self.store.pool(), reserved_write_bytes)
-                .await;
-            phase_lock.check_alive().await?;
-            let status = status?;
-            if status.is_available() {
-                if paused {
-                    phase_lock.check_alive().await?;
-                    self.store.resume_phase(&chain.chain_id, phase).await?;
-                }
-                return Ok(false);
-            }
-            if !paused {
-                phase_lock.check_alive().await?;
-                self.store.pause_phase(&chain.chain_id, phase).await?;
-                self.phase_progress.clear_phase(&chain.chain_id, phase);
-                paused = true;
-            }
-            warn!(
-                chain_id = chain.chain_id,
-                phase = %phase,
-                breach_reasons = ?status.breach_reasons,
-                database_size_bytes = status.measurement.database_size_bytes,
-                free_disk_bytes = status.measurement.free_disk_bytes,
-                reserved_write_bytes,
-                "phase paused until storage capacity recovers"
-            );
-            phase_lock.check_alive().await?;
-            heartbeat
-                .record_if_due(&self.store, &self.instance_id, &chain.chain_id, phase)
-                .await?;
-            self.record_loop_progress(&chain.chain_id);
-            tokio::select! {
-                () = cancellation.cancelled() => return Ok(true),
-                () = tokio::time::sleep(self.capacity.poll_interval()) => {}
             }
         }
     }
