@@ -989,6 +989,63 @@ jobs:
       - name: Run e2e shard 2/2
         run: tests/e2e/run-gate
 
+  api_container_shutdown:
+    name: test (API container shutdown)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: bigname
+          POSTGRES_USER: bigname
+          POSTGRES_PASSWORD: bigname
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bigname -d bigname"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      RUSTC_WRAPPER: ""
+      BIGNAME_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
+      BIGNAME_E2E_SHUTDOWN_SOURCE_SHA: ${{ github.sha }}
+      BIGNAME_E2E_SHUTDOWN_EVIDENCE: ${{ github.workspace }}/target/api-container-shutdown
+      CARGO_BUILD_JOBS: "1"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: ${{ env.FOUNDRY_VERSION }}
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang libclang-dev
+      - name: Sync pinned references
+        run: |
+          scripts/sync-refs
+          scripts/sync-refs --check
+      - name: Build canonical phase-runner prerequisite
+        env:
+          BIGNAME_BUILD_SHA: ${{ github.sha }}
+        run: |
+          cargo build --locked --package phase-runner --bin phase-runner
+          sha256sum target/debug/phase-runner
+      - name: Prove exact-image API shutdown
+        run: scripts/test-container-shutdown
+      - name: Retain shutdown evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: api-container-shutdown
+          path: target/api-container-shutdown
+          if-no-files-found: error
+
   e2e:
     name: test (e2e)
     runs-on: ubuntu-latest
@@ -997,13 +1054,16 @@ jobs:
       - e2e_build
       - e2e_shard_1
       - e2e_shard_2
+      - api_container_shutdown
     if: always()
     steps:
       - name: Check e2e builder and shards
         run: |
           if [ "${{ needs.e2e_build.result }}" != "success" ] ||
              [ "${{ needs.e2e_shard_1.result }}" != "success" ] ||
-             [ "${{ needs.e2e_shard_2.result }}" != "success" ]; then
+             [ "${{ needs.e2e_shard_2.result }}" != "success" ] ||
+             [ "${{ needs.api_container_shutdown.result }}" != "success" ]; then
+            echo "API container: ${{ needs.api_container_shutdown.result }}"
             echo "e2e builder:   ${{ needs.e2e_build.result }}"
             echo "e2e shard 1/2: ${{ needs.e2e_shard_1.result }}"
             echo "e2e shard 2/2: ${{ needs.e2e_shard_2.result }}"

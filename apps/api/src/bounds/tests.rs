@@ -13,6 +13,7 @@ use super::*;
 fn test_config() -> ApiBoundsConfig {
     ApiBoundsConfig {
         request_timeout_ms: 1_000,
+        stop_grace_ms: None,
         db_statement_timeout_ms: 900,
         max_in_flight: 4,
         health_max_in_flight: 4,
@@ -660,4 +661,22 @@ async fn assert_error(response: Response, status: StatusCode, code: &str) {
     let payload: Value = serde_json::from_slice(&body).expect("error body must be JSON");
     assert_eq!(payload.pointer("/error/code"), Some(&json!(code)));
     assert_eq!(payload.pointer("/error/details"), Some(&json!({})));
+}
+
+#[test]
+fn stop_grace_requires_request_deadline_and_margin() {
+    let mut config = ApiBoundsConfig {
+        request_timeout_ms: 60_000,
+        ..Default::default()
+    };
+    assert!(config.validate().is_ok());
+    for grace in [0, 45_000, 60_000, 64_999] {
+        config.stop_grace_ms = Some(grace);
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("STOP_GRACE_MS"));
+    }
+    config.stop_grace_ms = Some(65_000);
+    assert!(config.validate().is_ok());
+    config.request_timeout_ms = u64::MAX;
+    assert!(config.validate().is_err());
 }

@@ -3,17 +3,17 @@ set -uo pipefail
 
 # Keep the inventory counts and assignments together. Test-list changes should
 # require edits only in this block; the checks below reject every other drift.
-expected_total=95
-expected_runnable=92
+expected_total=96
+expected_runnable=93
 expected_ignored=3
-expected_shard_1_runnable=45
+expected_shard_1_runnable=46
 expected_shard_1_ignored=2
 expected_shard_1_filtered=48
-# Main historical forecasts exclude the zero-address scenarios and this lane's added test; they are not timings of the combined suite.
+# Main historical forecasts exclude the zero-address, registry-operator and shutdown scenarios; they are not timings of the combined suite.
 expected_shard_1_predicted_seconds=1288.036
 expected_shard_2_runnable=47
 expected_shard_2_ignored=1
-expected_shard_2_filtered=47
+expected_shard_2_filtered=48
 expected_shard_2_predicted_seconds=1281.353
 
 expected_ignored_tests=(
@@ -66,6 +66,7 @@ shard_1_tests=(
     "scenarios::reverse_primary::generic_name_record_set_changed_then_cleared_stays_unadmitted"
     "scenarios::reverse_primary_claims::authorised_third_party_generic_name_record_does_not_key_claim"
     "scenarios::reverse_primary_claims::forward_mismatch_keeps_generic_name_record_unadmitted"
+    "scenarios::service_shutdown::api_signals_drain_accepted_indexed_name_read"
     "scenarios::support::tests::temp_dirs_created_concurrently_are_distinct"
     "scenarios::unadmitted_controller::unadmitted_controller_registration_derives_registry_side_only"
     "scenarios::wrapper_registration::parent_burns_pcc_then_extends_existing_child_expiry"

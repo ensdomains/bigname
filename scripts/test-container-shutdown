@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "${1:-}" == --serve ]]; then
+  database="$2"; address="$3"; metrics="$4"; evidence="$5"
+  project="bigname-shutdown-$$"
+  export BIGNAME_IMAGE="${BIGNAME_E2E_SHUTDOWN_IMAGE:?exact image required}"
+  export BIGNAME_API_DATABASE_URL="$database" BIGNAME_API_BIND_ADDR="$address"
+  export BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL="$database"
+  export BIGNAME_PHASE_RUNNER_CHAINS=ethereum-mainnet BIGNAME_PHASE_RUNNER_SOURCES=unused
+  # Required for full Compose interpolation; this fixture starts only the API.
+  export BIGNAME_PHASE_RUNNER_MINIMUM_FREE_DISK_BYTES=1
+  export BIGNAME_PHASE_RUNNER_WRITABLE_PATH="$evidence/unused-capacity-probe"
+  override="$evidence/override.yml"; rendered="$evidence/compose.json"
+  python3 - "$override" "$metrics" <<'PY'
+import json,sys
+open(sys.argv[1],'w').write('services:\n  api:\n    network_mode: host\n    ports: !reset []\n    restart: "no"\n    environment:\n      BIGNAME_LOG_JSON: "1"\n      BIGNAME_API_METRICS_BIND_ADDR: '+json.dumps(sys.argv[2])+'\n')
+PY
+  docker compose --env-file /dev/null -p "$project" -f "$ROOT/docker-compose.server.yml" -f "$override" config --format json > "$rendered"
+  printf '%s' "$project" > "$evidence/project"
+  python3 - "$rendered" "$evidence/config-result.json" "${BIGNAME_E2E_SHUTDOWN_BASE:-}" <<'PY'
+import json,sys,os
+c=json.load(open(sys.argv[1])); a=c['services']['api']; r=c['services']['phase-runner']
+valid=a.get('stop_signal')=='SIGTERM' and a.get('stop_grace_period')==('1m15s' if os.environ.get('BIGNAME_E2E_SHUTDOWN_EXTENDED') else '45s')
+json.dump({'api_contract_present':valid,'api_signal':a.get('stop_signal'),'api_grace':a.get('stop_grace_period'),'runner_unchanged':not any(k in r for k in ['stop_signal','stop_grace_period'])},open(sys.argv[2],'w'))
+assert not any(k in r for k in ['stop_signal','stop_grace_period'])
+assert valid or sys.argv[3], 'API Compose stop contract missing'
+PY
+  compose=(docker compose -p "$project" -f "$rendered")
+  logs_pid=; events_pid=
+  cleanup() {
+    result=$?
+    trap - EXIT INT TERM
+    "${compose[@]}" down --volumes --remove-orphans >> "$evidence/cleanup.log" 2>&1 || result=1
+    for pid in "$logs_pid" "$events_pid"; do
+      if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+    done
+    exit "$result"
+  }
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  events_since="$(date +%s)"
+  "${compose[@]}" up -d --no-deps api > "$evidence/up.log" 2>&1
+  id="$("${compose[@]}" ps -q api)"
+  docker inspect "$id" > "$evidence/container.json"
+  docker image inspect "$BIGNAME_IMAGE" > "$evidence/image.json"
+  docker exec "$id" sha256sum /usr/local/bin/bigname-api > "$evidence/binary.sha256"
+  docker exec "$id" sh -c 'cat /proc/1/cmdline; echo; for child in $(cat /proc/1/task/1/children); do cat /proc/$child/cmdline; echo; done' > "$evidence/process-tree.txt"
+  python3 - "$evidence/process-tree.txt" <<'PY'
+import sys
+lines=open(sys.argv[1],'rb').read().splitlines()
+assert len(lines)==2 and lines[0].split(b'\0')[0].endswith(b'tini'),lines
+assert lines[1].split(b'\0')[:2]==[b'bigname-api',b'serve'],lines
+PY
+  docker events --since "$events_since" --filter "container=$id" --format '{{json .}}' > "$evidence/events.jsonl" & events_pid=$!
+  docker logs --follow "$id" & logs_pid=$!
+  status="$(docker wait "$id")"
+  docker inspect "$id" > "$evidence/container-exited.json"
+  printf '%s\n' "$status" > "$evidence/exit-code"
+  if [[ "$status" == 0 ]]; then
+    python3 - "$evidence" <<'PYPROOF'
+import json,pathlib,sys,time
+p=pathlib.Path(sys.argv[1])
+for attempt in range(100):
+    events=[json.loads(line) for line in (p/'events.jsonl').read_text().splitlines()]
+    if any(e.get('Action')=='die' for e in events): break
+    time.sleep(.01)
+signals=[e['Actor']['Attributes'].get('signal') for e in events if e.get('Action')=='kill']
+assert '15' in signals and '9' not in signals,signals
+state=json.load(open(p/'container-exited.json'))[0]['State']
+assert state['ExitCode']==0 and not state['OOMKilled'],state
+PYPROOF
+  fi
+  exit "$status"
+fi
+export BIGNAME_E2E_SHUTDOWN_EVIDENCE="${BIGNAME_E2E_SHUTDOWN_EVIDENCE:-$ROOT/target/api-container-shutdown}"
+mkdir -p "$BIGNAME_E2E_SHUTDOWN_EVIDENCE"
+exec > >(tee -a "$BIGNAME_E2E_SHUTDOWN_EVIDENCE/build-and-test.log") 2>&1
+source_root="${BIGNAME_E2E_SHUTDOWN_SOURCE_ROOT:-$ROOT}"
+sha="${BIGNAME_E2E_SHUTDOWN_SOURCE_SHA:?explicit reviewed source SHA required}"
+[[ "$(git -C "$source_root" rev-parse HEAD)" == "$sha" ]]
+[[ -z "$(git -C "$source_root" status --porcelain)" ]]
+git -C "$source_root" log -1 --format="checkout_sha=%H tree=%T requested_sha=$sha"
+builder="${BIGNAME_E2E_SHUTDOWN_BUILDER:-bigname-shutdown-$$}"
+scratch="$(mktemp -d)"; created_builder=0
+export BIGNAME_E2E_SHUTDOWN_IMAGE="bigname-api-shutdown:$sha-$$"
+cleanup_build() {
+  rm -rf "$scratch"
+  docker image rm "$BIGNAME_E2E_SHUTDOWN_IMAGE" "bigname-shutdown-probe:$$" >/dev/null 2>&1 || true
+  if [[ "$created_builder" == 1 ]]; then docker buildx rm "$builder" >/dev/null 2>&1 || true; fi
+}
+trap cleanup_build EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [[ -z "${BIGNAME_E2E_SHUTDOWN_BUILDER:-}" ]]; then
+  cpu="$(awk '/Cpus_allowed_list/{split($2,a,/[-,]/);print a[1]}' /proc/self/status)"
+  if docker buildx inspect "$builder" >/dev/null 2>&1; then echo "owned builder name already exists" >&2; exit 1; fi
+  created_builder=1
+  docker buildx create --name "$builder" --driver docker-container --driver-opt "cpuset-cpus=$cpu" --driver-opt cpu-period=100000 --driver-opt cpu-quota=100000 --bootstrap
+fi
+mkdir "$scratch/src"
+printf '%s\n' '[package]' 'name="shutdown-cpu-probe"' 'version="0.1.0"' 'edition="2021"' > "$scratch/Cargo.toml"
+printf '%s\n' 'fn main() {}' > "$scratch/src/main.rs"
+printf '%s\n' 'fn main() { assert_eq!(std::env::var("NUM_JOBS").unwrap(),"1"); assert_eq!(std::thread::available_parallelism().unwrap().get(),1); }' > "$scratch/build.rs"
+printf '%s\n' 'FROM rust:1.93.1-bookworm' 'WORKDIR /probe' 'COPY . .' 'RUN cargo build --offline -vv' > "$scratch/Dockerfile"
+docker buildx build --builder "$builder" --load -t "bigname-shutdown-probe:$$" "$scratch"
+export CARGO_BUILD_JOBS=1 BIGNAME_BUILD_SHA="$sha"
+docker buildx build --builder "$builder" --load --build-arg "BIGNAME_BUILD_SHA=$sha" -t "$BIGNAME_E2E_SHUTDOWN_IMAGE" "$source_root"
+export BIGNAME_E2E_SHUTDOWN_MODE=compose
+cd "$ROOT"
+cargo test --locked --manifest-path tests/e2e/Cargo.toml scenarios::service_shutdown::api_signals_drain_accepted_indexed_name_read -- --exact --nocapture

@@ -975,6 +975,15 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   supplied, and `address` then restricts the permission subject. An explicit or
   name-implied `namespace` filters registrations before pagination; an
   address-only request without `namespace` continues to span all namespaces.
+  For the limited solo beta, address-only operator discovery retains a known
+  scalability limitation: a small page can still scan or sort an owner's
+  resource keys, and sparse namespace eligibility or cursor filtering can
+  require many eligibility lookups. The accepted optimization reduces payload
+  work in measured finite cases; it does not establish a production latency
+  SLO, a cold-cache guarantee, or a bound for arbitrary owner sizes. Issue #861
+  remains open for scalability. Name or explicit registration filters select
+  one resource and avoid this broad discovery branch. This limitation does not
+  change which rows are eligible or the cursor ordering.
   An explicit namespace must be public; an unknown value returns `404 not_found`
   before cursor decoding.
   A resource belongs to a namespace when it has a readable [surface

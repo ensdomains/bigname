@@ -20,6 +20,7 @@ mod resolver_authorization;
 mod resolver_records;
 mod reverse_primary;
 mod reverse_primary_claims;
+mod service_shutdown;
 mod support;
 mod unadmitted_controller;
 mod wrapper;

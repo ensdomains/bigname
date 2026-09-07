@@ -144,18 +144,59 @@ fn build_page<'a>(
     b.push(DEFAULT_PERMISSIONS_CURRENT_READ_FILTER)
         .push(r#" ORDER BY pc.subject COLLATE "C",pc.resource_id,pc.scope COLLATE "C" LIMIT "#)
         .push_bind(limit);
-    push_operator_start(&mut b);
-    push_effective_permission_filters(&mut b, "aps", subject, None);
-    if let Some(resource_id) = resource_id {
-        b.push(" AND summary.resource_id=").push_bind(resource_id);
+    if resource_id.is_some() {
+        push_operator_start(&mut b);
+        push_effective_permission_filters(&mut b, "aps", subject, None);
+        if let Some(resource_id) = resource_id {
+            b.push(" AND summary.resource_id=").push_bind(resource_id);
+        }
+        push_namespace_filter(&mut b, "summary.resource_id", namespace);
+        let account_scope = "('account:'||aps.chain_id||':'||aps.authority_kind||':'||aps.authority_contract||':'||aps.owner)";
+        push_effective_permission_cursor(
+            &mut b,
+            "aps",
+            "summary.resource_id",
+            account_scope,
+            cursor,
+        );
+        b.push(r#" ORDER BY aps.subject COLLATE "C",summary.resource_id,"#)
+            .push(account_scope)
+            .push(r#" COLLATE "C" LIMIT "#)
+            .push_bind(limit);
+    } else {
+        // Each grant has a constant subject and scope. Its first K eligible resources
+        // suffice for the global first K; filter before limiting, never after.
+        b.push("), operator_candidates AS (SELECT ")
+            .push(OPERATOR_COLUMNS)
+            .push(
+                " FROM bigname_phase.account_permission_state_current aps \
+         CROSS JOIN LATERAL (SELECT eligible.* FROM (SELECT k.resource_id \
+         FROM bigname_phase.permissions_current_resource_summary k \
+         WHERE k.registry_contract=aps.authority_contract AND k.registry_owner=aps.owner",
+            );
+        let account_scope = "('account:'||aps.chain_id||':'||aps.authority_kind||':'||aps.authority_contract||':'||aps.owner)";
+        push_effective_permission_cursor(&mut b, "aps", "k.resource_id", account_scope, cursor);
+        // Order narrow keys before payload lookup, without limiting before eligibility.
+        b.push(
+            " ORDER BY k.resource_id OFFSET 0) ordered_keys \
+         CROSS JOIN LATERAL (SELECT summary.* \
+         FROM bigname_phase.permissions_current_resource_summary summary \
+         WHERE summary.resource_id=ordered_keys.resource_id \
+           AND summary.registry_binding_provenance->>'chain_id'=aps.chain_id \
+           AND (SELECT (",
+        )
+        .push(CURRENT_PERMISSION_SUMMARY_READ_FILTER)
+        .push(ACCOUNT_READ_FILTER);
+        push_namespace_filter(&mut b, "summary.resource_id", namespace);
+        b.push(") OFFSET 0) OFFSET 0) eligible ORDER BY ordered_keys.resource_id LIMIT ")
+            .push_bind(limit)
+            .push(") summary WHERE aps.approved AND aps.authority_kind='registry' AND aps.relation_kind='operator'");
+        push_effective_permission_filters(&mut b, "aps", subject, None);
+        b.push(r#" ORDER BY aps.subject COLLATE "C",summary.resource_id,"#)
+            .push(account_scope)
+            .push(r#" COLLATE "C" LIMIT "#)
+            .push_bind(limit);
     }
-    push_namespace_filter(&mut b, "summary.resource_id", namespace);
-    let account_scope = "('account:'||aps.chain_id||':'||aps.authority_kind||':'||aps.authority_contract||':'||aps.owner)";
-    push_effective_permission_cursor(&mut b, "aps", "summary.resource_id", account_scope, cursor);
-    b.push(r#" ORDER BY aps.subject COLLATE "C",summary.resource_id,"#)
-        .push(account_scope)
-        .push(r#" COLLATE "C" LIMIT "#)
-        .push_bind(limit);
     push_union_end(&mut b);
     b.push(r#"SELECT * FROM effective_permissions ORDER BY subject COLLATE "C",resource_id,scope_storage_key COLLATE "C" LIMIT "#).push_bind(limit);
     b
@@ -378,20 +419,22 @@ pub async fn explain_effective_permissions_account_resource_page(
     namespace: Option<&str>,
     cursor: Option<&PermissionsCurrentAccountResourceCursor>,
     page_size: u64,
+    force_indexes: bool,
 ) -> Result<Value> {
     let limit = checked_page_limit_i64(page_size, "positive", "large")?;
-    explain(
-        pool,
-        build_page(
-            "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) ",
-            subject,
-            resource_id,
-            namespace,
-            cursor,
-            limit,
-        ),
-    )
-    .await
+    let mut query = build_page(
+        "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) ",
+        subject,
+        resource_id,
+        namespace,
+        cursor,
+        limit,
+    );
+    if force_indexes {
+        explain(pool, query).await
+    } else {
+        Ok(query.build().fetch_one(pool).await?.try_get(0)?)
+    }
 }
 pub async fn explain_effective_permissions_account_resource_summary(
     pool: &PgPool,

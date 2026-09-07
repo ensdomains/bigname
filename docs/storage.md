@@ -719,6 +719,25 @@ previous watch plan and redo state unchanged.
 
 ## Interpretation replay
 
+Normalized-event writes preserve immutable event identities and payloads,
+compatible replay, input occurrence order, and successful first-insertion order.
+Database constraints remain authoritative for invalid references and values.
+An error rejects the entire physical Interpret write transaction, including
+identity and discovery writes made earlier in that transaction; it does not
+undo previously committed batches. Runner progress is recorded after success,
+separately from that write transaction.
+
+Rejected input does not promise exact sequence consumption or subsequent
+numeric IDs, that no later submitted row was attempted, or which error wins
+when several faults coexist. SQL failures identify the attempted INSERT slice
+with original submitted indexes and at most 500 identities; immutable conflicts
+identify rejected identities. The SQLSTATE-based classifier and explicit
+classification of immutable identity conflicts are unchanged. The former
+preflight message and whole-call summary are not part of this contract.
+This writer is covered by the [interpreter content hash](glossary.md#interpreter-content-hash);
+changing it requires the full-history adoption described below, including
+restarting an interrupted attested range when its hash changes.
+
 Interpretation is deterministic for a fixed manifest set, interpreter content
 hash, canonical raw facts, and requested block range. A bounded Interpret redo
 may replace only derived identity, discovery, and normalized-event output in
