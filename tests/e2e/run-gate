@@ -3,16 +3,17 @@ set -uo pipefail
 
 # Keep the inventory counts and assignments together. Test-list changes should
 # require edits only in this block; the checks below reject every other drift.
-expected_total=92
-expected_runnable=89
+expected_total=94
+expected_runnable=91
 expected_ignored=3
-expected_shard_1_runnable=44
+expected_shard_1_runnable=45
 expected_shard_1_ignored=2
-expected_shard_1_filtered=46
+expected_shard_1_filtered=47
+# These historical OPS forecasts exclude the two zero-address scenarios added on main.
 expected_shard_1_predicted_seconds=1288.036
-expected_shard_2_runnable=45
+expected_shard_2_runnable=46
 expected_shard_2_ignored=1
-expected_shard_2_filtered=46
+expected_shard_2_filtered=47
 expected_shard_2_predicted_seconds=1281.353
 
 expected_ignored_tests=(
@@ -34,6 +35,7 @@ shard_1_tests=(
     "harness::responses::tests::pointer_rejects_missing_path"
     "scenarios::basenames::basenames_declared_state_matrix_end_to_end"
     "scenarios::basenames_lifecycle::basenames_subnames_list_preimages_placeholders_and_tombstones"
+    "scenarios::basenames_lifecycle::l2_zero_addr60_uses_stubbed_verified_transport"
     "scenarios::basenames_lifecycle::third_party_controller_registration_degrades_without_label_events"
     "scenarios::basenames_lifecycle::upgradeable_controller_proxy_registers_and_renews"
     "scenarios::catchup_equivalence::upfront_facts_match_rpc_ingest_outputs"
@@ -107,6 +109,7 @@ shard_2_tests=(
     "scenarios::registry_preimages::label_preimage_revealed_later_upgrades_child_listing"
     "scenarios::registry_preimages::registry_only_non_eth_tree_derives_declared_state"
     "scenarios::resolver_records::pre_surface_newowner_record_serves_after_late_surface"
+    "scenarios::resolver_records::exact_zero_addr60_uses_stubbed_verified_transport"
     "scenarios::resolver_records::pre_surface_record_attribution_is_node_scoped_and_never_materializes_unknown_names"
     "scenarios::resolver_records::resolver_changes_follow_registry_and_zero_releases"
     "scenarios::reverse_primary::reverse_claim_invalid_name_surfaces_raw_claim"

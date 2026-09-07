@@ -2180,8 +2180,11 @@ pub async fn prove_normal_sepolia_http(
 ) -> Result<()> {
     let reader = db.verification_url().await?;
     let binary = profile_phase_runner(repo_root, manifests_root).await?;
-    let mut build = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-    build.current_dir(repo_root).args([
+    let cargo = std::env::var_os("BIGNAME_E2E_REAL_CARGO")
+        .or_else(|| std::env::var_os("CARGO"))
+        .unwrap_or_else(|| "cargo".into());
+    let mut build = Command::new(&cargo);
+    build.env("CARGO", &cargo).current_dir(repo_root).args([
         "build",
         "--locked",
         "--message-format=json-render-diagnostics",
@@ -2241,6 +2244,14 @@ pub async fn prove_normal_sepolia_http(
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     runner.stop().await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let startup_guard = await_with_readiness_deadline(
+        deadline,
+        30,
+        "normal HTTP API startup lock",
+        super::lock_local_server_start(),
+    )
+    .await?;
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
     drop(listener);
@@ -2260,7 +2271,6 @@ pub async fn prove_normal_sepolia_http(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         api.ensure_running()?;
         if client
@@ -2278,6 +2288,7 @@ pub async fn prove_normal_sepolia_http(
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    drop(startup_guard);
     let before = proof_tables(&db.pool).await?;
     for (name, owner) in owners {
         let response = client
