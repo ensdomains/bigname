@@ -1,9 +1,45 @@
 use super::*;
 use tracing_subscriber::EnvFilter;
 
+/// Docker stops a container with SIGTERM and `tini` forwards it unchanged, so
+/// waiting only for SIGINT leaves `with_graceful_shutdown` unreachable in
+/// production and every deploy severs in-flight requests instead of draining
+/// them.
 pub(super) async fn shutdown_signal(service: &'static str) {
-    match tokio::signal::ctrl_c().await {
-        Ok(()) => info!(service = service, "shutdown signal received"),
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                let signal = tokio::select! {
+                    result = tokio::signal::ctrl_c() => result.map(|()| "SIGINT"),
+                    received = terminate.recv() => {
+                        received.ok_or_else(|| std::io::Error::other("SIGTERM stream closed"))
+                            .map(|()| "SIGTERM")
+                    }
+                };
+                report_shutdown_signal(service, signal);
+                return;
+            }
+            Err(error) => tracing::warn!(
+                service = service,
+                error = ?error,
+                "failed to install a SIGTERM handler; only SIGINT will drain this service"
+            ),
+        }
+    }
+
+    report_shutdown_signal(service, tokio::signal::ctrl_c().await.map(|()| "SIGINT"));
+}
+
+fn report_shutdown_signal(service: &'static str, signal: std::io::Result<&'static str>) {
+    match signal {
+        Ok(signal) => info!(
+            service = service,
+            signal = signal,
+            "shutdown signal received"
+        ),
         Err(error) => tracing::warn!(
             service = service,
             error = ?error,
@@ -35,4 +71,31 @@ pub(super) fn init_tracing(service: &'static str) {
         build_sha = BUILD_SHA,
         "logging configured"
     );
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::{process::Command, time::Duration};
+
+    use tokio::signal::unix::{SignalKind, signal};
+
+    #[tokio::test]
+    async fn a_sigterm_releases_the_shutdown_signal() {
+        // Register first: an unhandled SIGTERM would kill the whole test binary,
+        // and tokio delivers the signal to every stream registered for the kind.
+        let _installed = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        let signalled = tokio::spawn(super::shutdown_signal("test"));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let killed = Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .expect("raise SIGTERM");
+        assert!(killed.success(), "kill -TERM failed: {killed}");
+
+        tokio::time::timeout(Duration::from_secs(5), signalled)
+            .await
+            .expect("SIGTERM did not release the shutdown signal within the timeout")
+            .expect("shutdown listener panicked");
+    }
 }

@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
     let cancellation = CancellationToken::new();
     let signal_cancellation = cancellation.clone();
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
+        if phase_runner::shutdown::requested().await {
             signal_cancellation.cancel();
         }
     });

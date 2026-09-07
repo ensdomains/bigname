@@ -639,6 +639,28 @@ docker compose --env-file .env.server \
 The API remains reachable while indexing is paused, but health and status must
 continue to report the stale or absent loop honestly.
 
+Both binaries handle SIGTERM, which is what `docker compose stop` sends and
+what `tini` forwards, so a stop is a clean stop rather than a kill. The phase
+runner observes the request at the next batch boundary: the batch already in
+flight finishes and commits, then the loop exits. The API stops accepting new
+connections and drains the requests already in flight.
+
+Each service therefore needs a stop grace period longer than the unit of work
+it has to finish, and Compose's 10s default is not that. `stop_grace_period` is
+set explicitly on both services and is tunable per deployment:
+
+- `BIGNAME_API_STOP_GRACE_PERIOD` (default `40s`) — keep it above
+  `BIGNAME_API_REQUEST_TIMEOUT_MS`, or the drain is killed part-way and the
+  deploy severs requests it was about to finish.
+- `BIGNAME_PHASE_RUNNER_STOP_GRACE_PERIOD` (default `120s`) — raise it if a
+  single batch at this deployment's block range and hydration settings
+  routinely takes longer.
+
+A grace period that expires is a SIGKILL. Nothing is corrupted — the batch runs
+in one transaction and rolls back — but the work is lost and the phase lock is
+only released when PostgreSQL reaps the dead session, so the next start can
+find the phase still held.
+
 ## Recovery plays
 
 Route from the first confirmed symptom:

@@ -58,6 +58,10 @@ services:
   api:
     <<: *bigname-service
     command: api
+    # `with_graceful_shutdown` drains in-flight requests, and a request may run
+    # for BIGNAME_API_REQUEST_TIMEOUT_MS. The 10s Compose default would SIGKILL
+    # the drain part-way, so allow the full request timeout plus margin.
+    stop_grace_period: ${BIGNAME_API_STOP_GRACE_PERIOD:-40s}
     ports:
       - "${BIGNAME_API_HOST:-127.0.0.1}:${BIGNAME_API_PORT:-3000}:3000"
       - "${BIGNAME_API_METRICS_HOST:-127.0.0.1}:${BIGNAME_API_METRICS_PORT:-9464}:9464"
@@ -101,6 +105,10 @@ services:
   phase-runner:
     <<: *bigname-service
     command: phases
+    # Cancellation is observed at a batch boundary, so a stop waits out the
+    # batch that is already running. Raise this if a single batch at your block
+    # range and hydration settings routinely takes longer than two minutes.
+    stop_grace_period: ${BIGNAME_PHASE_RUNNER_STOP_GRACE_PERIOD:-120s}
     ports:
       - "${BIGNAME_PHASE_RUNNER_METRICS_HOST:-127.0.0.1}:${BIGNAME_PHASE_RUNNER_METRICS_PORT:-9465}:9465"
     extra_hosts:
