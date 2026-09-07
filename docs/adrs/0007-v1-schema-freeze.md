@@ -35,10 +35,17 @@ promise:
 
 - **Schema change and re-derivation are independent axes.** DDL does not rotate
   the [interpreter content hash](../glossary.md#interpreter-content-hash). A
-  change to `crates/project/src`, `crates/adapters/src`,
-  `crates/interpret/src/write`, `crates/manifests/src`, `manifests/`, the named
-  semantic source files, or the pinned lockfile families does. Only the second
-  forces a full-history re-walk.
+  change to the covered production sources under `crates/project/src`,
+  `crates/adapters/src`, `crates/interpret/src/write`, and
+  `crates/manifests/src`, to a manifest's `[[abi.events]]` declarations, to the
+  named semantic source files, or to the pinned lockfile families does.
+  `#[cfg(test)]` modules under those roots and a manifest's
+  `normalizer_version` do not (`crates/content-hash/src/tests.rs` pins both),
+  and a manifest's `read_features` rotates the separate manifest-authority
+  fingerprint with a byte-identical interpreter hash (`deployment.md` §
+  manifest-authority marker). Only an interpreter-hash rotation forces a
+  full-history re-walk; the normalizer and manifest-authority paths have their
+  own, narrower redo.
 - **The content hash does not cover the schema.** It watches Rust sources,
   manifests, and the lockfile — not `schema-v2/` and not `migrations/`. It cannot
   serve as the freeze anchor.
@@ -66,11 +73,11 @@ than forbade; the head is restated here so the frozen artifact is the tree the
 milestone actually builds on.
 
 An authorized carve-out that lands as a schema-migration becomes the new head,
-and the change that lands it must advance the head named above and the
-pointer in [`storage.md`](../storage.md) in the same change; a carve-out that
-leaves either behind is out of contract, exactly as a schema change that
-leaves `apply-check.sh` behind is. The frozen artifact at any moment is
-therefore the baseline tree plus the head this line names.
+and the change that lands it must advance the head named above and the head
+[`storage.md`](../storage.md) names in its opening paragraph in the same
+change; a carve-out that leaves either behind is out of contract, exactly as a
+schema change that leaves `apply-check.sh` behind is. The frozen artifact at
+any moment is therefore the baseline tree plus the head this line names.
 
 `schema-v2/apply-check.sh` is the conformance test for that contract. It already
 gates its own CI job and asserts table inventory, column presence, constraint
@@ -95,8 +102,15 @@ content hash and force a full `interpret` and `project` walk.
 
 Dependent work must therefore key on stable identifiers only:
 
-**Safe to key on:** `event_identity`, `logical_name_id`, `resource_id`,
-`token_lineage_id`, and `contract_instance_id`. A namehash is safe only
+**Safe to key on:** `logical_name_id`, `resource_id`, `token_lineage_id`, and
+`contract_instance_id`. `event_identity` is safe under a fixed manifest set and
+interpreter content hash, which is the contract `architecture.md` gives it: it
+incorporates the derivation kind, identity suffix, and emission ordinal
+(`crates/adapters/src/schema_v2/normalized.rs`, `raw_log_event_identity`), so a
+covered adapter change can alter it for a raw log that did not change. Across
+the re-derivation boundaries this freeze permits, pair it with the raw-fact
+position — chain, block hash, transaction hash, log index — which is what
+survives. A namehash is safe only
 together with its namespace — which is what `logical_name_id` is
 (`<namespace>:<namehash>`, `architecture.md` § Identity) — because the hash
 does not encode the namespace, and the supported `ens` and `basenames`
@@ -294,7 +308,7 @@ carve-outs 2 and 3 were settled by slice 3 and #885, and this ADR records them
 rather than authorizing them in advance. That is a process miss worth naming: the
 freeze was observable the whole time through `apply-check.sh`, but the written
 contract trailed the schema by three weeks. Carve-out 5 is the one still ahead,
-and it follows the intended order — this ADR first, then the migration
+and it follows the intended order — this ADR first, then the schema-migration
 referencing it.
 
 Ownership follows [`workstreams.md`](../internal/workstreams.md): Storage and
