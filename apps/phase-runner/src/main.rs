@@ -1,8 +1,7 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
-use phase_runner::manifest_startup::sync_loaded_manifests;
 use phase_runner::{
     capacity::CapacityGuard,
     cli::{
@@ -19,6 +18,13 @@ use phase_runner::{
     verify_phase::VerifyPhase,
 };
 use tokio_util::sync::CancellationToken;
+
+#[path = "main_manifests.rs"]
+mod manifests;
+#[cfg(test)]
+use manifests::load_hashed_manifest_repository;
+use manifests::{hash_manifests_off_runtime, sync_manifests};
+use phase_runner::manifest_startup::sync_loaded_manifests;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -151,7 +157,31 @@ async fn main() -> Result<()> {
                     }
                 };
                 validate_deployment_table_set(&chains, COMPILED_CHAIN_NAMESPACES.iter().copied())?;
-                sync_manifests(database.pool(), &manifests_root).await?;
+                anyhow::Ok((database, chains))
+            };
+            // Nothing durable happens before this point, so a stop here is a redo
+            // that never started. Manifest synchronization is the first commit: a
+            // changed manifest can retire hashes or install required Ingest work,
+            // so a stop from here on is reported as something to rerun, never as a
+            // no-op, whether or not the commit made it.
+            let Some((database, chains)) =
+                phase_runner::shutdown::until_cancelled(&cancellation, startup).await?
+            else {
+                tracing::info!("stop requested during start-up; the redo never started");
+                return Ok(());
+            };
+            let synchronized = phase_runner::shutdown::until_cancelled(
+                &cancellation,
+                sync_manifests(database.pool(), &manifests_root),
+            )
+            .await?;
+            if synchronized.is_none() {
+                bail!(
+                    "stop requested during manifest synchronization; whether the manifest change \
+                     committed is not known, so this redo must be run again"
+                );
+            }
+            let startup = async {
                 validate_redo_attestation_chains(&watch_set_coverage_attestations, &chains)?;
                 let (loop_heartbeat, phase_progress) = start_metrics(
                     metrics_bind_addr,
@@ -191,7 +221,7 @@ async fn main() -> Result<()> {
                 } else {
                     PhaseSet::with_ingest_interpret_and_project(ingest, interpret, project)?
                 };
-                anyhow::Ok((
+                anyhow::Ok(
                     PhaseRunner::new(
                         database,
                         phases,
@@ -202,14 +232,16 @@ async fn main() -> Result<()> {
                     .with_watch_set_coverage_attestations(watch_set_coverage_attestations)
                     .with_loop_heartbeat(loop_heartbeat)
                     .with_phase_progress(phase_progress),
-                    chains,
-                ))
+                )
             };
-            let Some((runner, chains)) =
+            let Some(runner) =
                 phase_runner::shutdown::until_cancelled(&cancellation, startup).await?
             else {
-                tracing::info!("stop requested during start-up; the redo never started");
-                return Ok(());
+                bail!(
+                    "stop requested after the manifests were synchronized and before the redo \
+                     started; required work that synchronization installed is durable, so this \
+                     redo must be run again"
+                );
             };
             let report = runner
                 .redo_chains(&chains, phase, range, cancellation)
@@ -290,60 +322,6 @@ async fn start_metrics<'a>(
         "phase-runner metrics listener started"
     );
     Ok((loop_heartbeat, phase_progress))
-}
-
-async fn sync_manifests(pool: &sqlx::PgPool, root: &std::path::Path) -> Result<()> {
-    let (repository, profile) = hash_manifests_off_runtime(root.to_path_buf()).await??;
-    sync_loaded_manifests(pool, root, &repository, profile).await
-}
-
-/// Hash the manifest tree on a detached OS thread and await the result.
-///
-/// The work is synchronous filesystem I/O, so inline it never yields and a stop
-/// cannot be observed until it finishes. `spawn_blocking` is not enough either:
-/// those tasks cannot be aborted and the runtime joins its blocking pool when it
-/// is dropped, so a caller that abandons the await still waits for the hash. A
-/// detached thread is not joined at exit, so abandoning the await lets the
-/// process leave immediately.
-fn hash_manifests_off_runtime(
-    root: std::path::PathBuf,
-) -> tokio::sync::oneshot::Receiver<Result<(bigname_manifests::ManifestRepository, &'static str)>> {
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        let _ = sender.send(load_hashed_manifest_repository(&root));
-    });
-    receiver
-}
-
-fn load_hashed_manifest_repository(
-    root: &std::path::Path,
-) -> Result<(bigname_manifests::ManifestRepository, &'static str)> {
-    let before = bigname_content_hash::manifest_profile_hash(root)
-        .with_context(|| format!("failed to fingerprint manifest profile {}", root.display()))?;
-    let Some((profile, _)) = bigname_content_hash::HASHED_MANIFEST_PROFILES
-        .iter()
-        .find(|(_, expected)| *expected == before)
-    else {
-        bail!(
-            "runtime manifest profile {} has fingerprint {before}, which is not covered by this binary's interpreter content hash {}",
-            root.display(),
-            bigname_content_hash::INTERPRETER_CONTENT_HASH
-        );
-    };
-
-    let repository = bigname_manifests::load_repository(root)?;
-    let after = bigname_content_hash::manifest_profile_hash(root).with_context(|| {
-        format!(
-            "failed to re-fingerprint manifest profile {}",
-            root.display()
-        )
-    })?;
-    ensure!(
-        before == after,
-        "runtime manifest profile {} changed while it was being loaded",
-        root.display()
-    );
-    Ok((repository, profile))
 }
 
 fn require_clean_supervisor_exit(report: SupervisorReport) -> Result<()> {

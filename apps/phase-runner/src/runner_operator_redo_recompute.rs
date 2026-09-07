@@ -135,10 +135,10 @@ impl PhaseRunner {
             Ok(project_lock)
         })
         .await?;
+        // Interpret has no marker yet, but the staged Project refresh may, and it
+        // is what blocks Project until this command resumes it.
         let Some(mut project_lock) = acquired else {
-            return Err(
-                cancelled_redo_error(&self.store, &chain.chain_id, PhaseName::Interpret).await?,
-            );
+            return Err(self.recompute_setup_cancelled(chain).await?);
         };
         let result = project_lock
             .run_while_alive(

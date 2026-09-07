@@ -813,10 +813,17 @@ success, so the incomplete redo cannot look finished
 (`apps/phase-runner/src/runner_operator_redo.rs`, `prepared_for_redo`;
 `apps/phase-runner/src/runner.rs`). Unlike the supervised runner there is no next
 start to resume it. Which response is needed depends on how far it got, and
-the error says which. A stop that wins before the redo was stamped reports
-that it was *cancelled before it started* and that no unfinished redo was
-recorded: nothing blocks, nothing was changed, and rerunning is a choice, not a
-repair. A stop after the stamp exists reports the redo as *incomplete*: the
+the error says which. A stop that wins before the command touched the database
+exits clean and logs that the redo never started. A stop during or after
+manifest synchronization exits nonzero and asks for a rerun even though no
+redo was stamped, because synchronization is the command's first commit — a
+changed manifest can retire derivation hashes or install required Ingest work —
+and once the stop wins, whether that commit made it is not known from the
+outside. A stop that wins before the redo was stamped but after the
+manifests are known to be current reports that it was *cancelled before it
+started* and that no unfinished redo was recorded: nothing blocks, nothing was
+changed, and rerunning is a choice, not a repair. A stop after the stamp
+exists reports the redo as *incomplete*: the
 stamp survives and blocks the phase from normal restart until the command is
 run again. That error says which command, built from the stamped mode and
 range — `rerun \`phase-runner redo --chain <chain> --phase <phase>
