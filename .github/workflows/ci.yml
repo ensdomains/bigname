@@ -313,7 +313,7 @@ jobs:
         run: |
           root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
           e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
-          prefix="v1-rust-ci-cache-20260907-9cf97767dd244d8e814915f5991f96d8-baseline-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
+          prefix="v1-rust-ci-cache-20260907-9cf97767dd244d8e814915f5991f96d8-candidate-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
           runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
           primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
           echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
@@ -429,7 +429,7 @@ jobs:
         run: |
           root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
           e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
-          prefix="v1-rust-ci-cache-20260907-9cf97767dd244d8e814915f5991f96d8-baseline-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
+          prefix="v1-rust-ci-cache-20260907-9cf97767dd244d8e814915f5991f96d8-candidate-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
           runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
           primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
           echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
@@ -531,7 +531,7 @@ jobs:
         run: |
           root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
           e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
-          prefix="v1-rust-ci-cache-20260907-9cf97767dd244d8e814915f5991f96d8-baseline-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
+          prefix="v1-rust-ci-cache-20260907-9cf97767dd244d8e814915f5991f96d8-candidate-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
           runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
           primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
           echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
@@ -627,7 +627,7 @@ jobs:
         run: |
           root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
           e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
-          prefix="v1-rust-ci-cache-20260907-9cf97767dd244d8e814915f5991f96d8-baseline-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
+          prefix="v1-rust-ci-cache-20260907-9cf97767dd244d8e814915f5991f96d8-candidate-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
           runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
           primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
           echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
@@ -644,7 +644,7 @@ jobs:
           add-rust-environment-hash-key: false
           workspaces: ". -> target"
           cache-workspace-crates: false
-          save-if: false
+          save-if: true
 
       - name: Report phase-runner dependency cache
         env:
@@ -753,8 +753,7 @@ jobs:
     timeout-minutes: 25
     needs:
       - e2e_build
-      - phase_runner_shard_1
-    # Order after the cache producer without gating on it, preserving independent e2e signal on red runs.
+    # Start after the artifact and cache build; e2e results remain independently aggregated.
     if: ${{ !cancelled() && needs.e2e_build.result == 'success' }}
     services:
       postgres:
@@ -796,7 +795,7 @@ jobs:
         run: |
           root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
           e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
-          prefix="v1-rust-ci-cache-20260907-9cf97767dd244d8e814915f5991f96d8-baseline-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
+          prefix="v1-rust-ci-cache-20260907-9cf97767dd244d8e814915f5991f96d8-candidate-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
           runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
           primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
           echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
@@ -874,8 +873,7 @@ jobs:
     timeout-minutes: 25
     needs:
       - e2e_build
-      - phase_runner_shard_1
-    # Order after the cache producer without gating on it, preserving independent e2e signal on red runs.
+    # Start after the artifact and cache build; e2e results remain independently aggregated.
     if: ${{ !cancelled() && needs.e2e_build.result == 'success' }}
     services:
       postgres:
@@ -917,7 +915,7 @@ jobs:
         run: |
           root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
           e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
-          prefix="v1-rust-ci-cache-20260907-9cf97767dd244d8e814915f5991f96d8-baseline-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
+          prefix="v1-rust-ci-cache-20260907-9cf97767dd244d8e814915f5991f96d8-candidate-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
           runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
           primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
           echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
