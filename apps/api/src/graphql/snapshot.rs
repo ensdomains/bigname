@@ -17,6 +17,7 @@ use super::enums::SubgraphErrorPolicy;
 use super::error::internal_error;
 use super::inputs::BlockHeight;
 use super::name_queries::{PhaseGraphqlNameCount, PhaseGraphqlNameListRow};
+use super::{account_queries::PhaseGraphqlAccountRow, resolver_queries::PhaseGraphqlResolverRow};
 
 const NAMESPACE: &str = "ens";
 
@@ -271,6 +272,48 @@ pub(super) fn require_rows_at_head(
             require_name_projection_at_served_head(target, NAMESPACE, head.selected())
                 .map_err(|error| internal_error(operation, anyhow::anyhow!("{error:?}")))?;
         }
+    }
+    Ok(())
+}
+
+pub(super) fn require_account_rows_at_head(
+    rows: &[PhaseGraphqlAccountRow],
+    head: Option<&ServedHead>,
+    operation: &str,
+) -> Result<()> {
+    require_projection_targets_at_head(
+        rows.iter().map(|row| &row.membership_target),
+        head,
+        operation,
+    )
+}
+
+pub(super) fn require_resolver_rows_at_head(
+    rows: &[PhaseGraphqlResolverRow],
+    head: Option<&ServedHead>,
+    operation: &str,
+) -> Result<()> {
+    require_projection_targets_at_head(rows.iter().map(|row| &row.chain_positions), head, operation)
+}
+
+fn require_projection_targets_at_head<'a>(
+    targets: impl Iterator<Item = &'a serde_json::Value>,
+    head: Option<&ServedHead>,
+    operation: &str,
+) -> Result<()> {
+    let targets = targets.collect::<Vec<_>>();
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let head = head.ok_or_else(|| {
+        internal_error(
+            operation,
+            anyhow::anyhow!("schema-v2 GraphQL projection has rows without a served head"),
+        )
+    })?;
+    for target in targets {
+        require_name_projection_at_served_head(target, NAMESPACE, head.selected())
+            .map_err(|error| internal_error(operation, anyhow::anyhow!("{error:?}")))?;
     }
     Ok(())
 }

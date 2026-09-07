@@ -84,12 +84,9 @@ fn push_string_filter<'a>(
     values: &'a [String],
 ) {
     builder.push(column);
-    builder.push(" IN (");
-    let mut separated = builder.separated(", ");
-    for value in values {
-        separated.push_bind(value);
-    }
-    separated.push_unseparated(")");
+    builder.push(" = ANY(");
+    builder.push_bind(values);
+    builder.push("::text[])");
 }
 
 pub(super) fn push_history_lineage_join(builder: &mut QueryBuilder<'_, Postgres>) {

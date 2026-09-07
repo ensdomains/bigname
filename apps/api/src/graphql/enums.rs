@@ -1,4 +1,5 @@
 use async_graphql::Enum;
+use bigname_storage::NameCurrentListOrder;
 
 /// Subgraph `Domain_orderBy`. The underscore + lowercase-`o` type name and the lowercase-camel
 /// value names are set explicitly rather than relying on async-graphql's default
@@ -15,9 +16,29 @@ pub(crate) enum DomainOrderBy {
     Id,
     #[graphql(name = "name")]
     Name,
+    #[graphql(name = "owner")]
+    Owner,
+    #[graphql(name = "owner__id")]
+    OwnerId,
+    #[graphql(name = "resolver")]
+    Resolver,
     /// Degenerate on Sepolia v2 — no producer writes `registration_date`, so the column is NULL.
     #[graphql(name = "registrationDate")]
     RegistrationDate,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "Account_orderBy")]
+pub(crate) enum AccountOrderBy {
+    #[graphql(name = "id")]
+    Id,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "Resolver_orderBy")]
+pub(crate) enum ResolverOrderBy {
+    #[graphql(name = "id")]
+    Id,
 }
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
@@ -27,6 +48,16 @@ pub(crate) enum OrderDirection {
     Asc,
     #[graphql(name = "desc")]
     Desc,
+}
+
+pub(crate) fn generated_order(
+    _order_by: Option<()>,
+    direction: Option<OrderDirection>,
+) -> NameCurrentListOrder {
+    match direction.unwrap_or(OrderDirection::Asc) {
+        OrderDirection::Asc => NameCurrentListOrder::Asc,
+        OrderDirection::Desc => NameCurrentListOrder::Desc,
+    }
 }
 
 /// Policy argument reserved for per-entity indexing-error behavior.

@@ -285,7 +285,8 @@ fn normalized_fixture_derivation_kind(value: &str) -> &str {
         | "manifest_sync"
         | "proxy_upgrade"
         | "raw_block_preimage_observation"
-        | "raw_log_preimage_observation" => value,
+        | "raw_log_preimage_observation"
+        | "standard_approval" => value,
         _ => "ens_v1_unwrapped_authority",
     }
 }

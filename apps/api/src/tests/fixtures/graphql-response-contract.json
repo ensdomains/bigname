@@ -1,6 +1,59 @@
 {
   "cases": [
     {
+      "id": "generated_account_by_id",
+      "response": {
+        "data": {
+          "account": {
+            "id": "0x000000000000000000000000000000000000000a"
+          }
+        }
+      }
+    },
+    {
+      "id": "generated_accounts_page",
+      "response": {
+        "data": {
+          "accounts": [
+            {
+              "id": "0x000000000000000000000000000000000000000a"
+            },
+            {
+              "id": "0x000000000000000000000000000000000000000b"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "generated_resolver_by_id",
+      "response": {
+        "data": {
+          "resolver": {
+            "address": "0x000000000000000000000000000000000000def0",
+            "id": "0x000000000000000000000000000000000000def0-0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec"
+          }
+        }
+      }
+    },
+    {
+      "id": "generated_resolvers_page",
+      "response": {
+        "data": {
+          "resolvers": [
+            {
+              "address": "0x000000000000000000000000000000000000def0",
+              "id": "0x000000000000000000000000000000000000def0-0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec"
+            },
+            {
+              "address": "0x000000000000000000000000000000000000def0",
+              "id": "0x000000000000000000000000000000000000def0-0xbe11069ec59144113f438b6ef59dd30497769fc2dce8e2b52e3ae71ac18e47c9"
+            }
+          ]
+        }
+      }
+    },
+    {
       "id": "existing_domain_shape",
       "response": {
         "data": {
@@ -17,7 +70,7 @@
               "address": "0x000000000000000000000000000000000000def0",
               "addresses": [],
               "contentHash": null,
-              "id": "0x000000000000000000000000000000000000def0",
+              "id": "0x000000000000000000000000000000000000def0-0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
               "texts": []
             },
             "tokenId": null
@@ -297,7 +350,7 @@
                 }
               ],
               "contentHash": "0xe30101701220aabbccdd",
-              "id": "0x000000000000000000000000000000000000def0",
+              "id": "0x000000000000000000000000000000000000def0-0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
               "texts": [
                 "avatar",
                 "url"
@@ -347,7 +400,7 @@
                 }
               ],
               "contentHash": "0xe30101701220aabbccdd",
-              "id": "0x000000000000000000000000000000000000def0",
+              "id": "0x000000000000000000000000000000000000def0-0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
               "texts": [
                 "avatar",
                 "url"
@@ -385,7 +438,7 @@
                   }
                 ],
                 "contentHash": "0xe30101701220aabbccdd",
-                "id": "0x000000000000000000000000000000000000def0",
+                "id": "0x000000000000000000000000000000000000def0-0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
                 "texts": [
                   "avatar",
                   "url"
@@ -406,7 +459,7 @@
                 "address": "0x000000000000000000000000000000000000def0",
                 "addresses": [],
                 "contentHash": null,
-                "id": "0x000000000000000000000000000000000000def0",
+                "id": "0x000000000000000000000000000000000000def0-0xbe11069ec59144113f438b6ef59dd30497769fc2dce8e2b52e3ae71ac18e47c9",
                 "texts": []
               },
               "tokenId": null

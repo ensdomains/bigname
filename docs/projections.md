@@ -234,19 +234,17 @@ outcomes, or durable traces.
   input. It excludes candidate normalized events and never reads the planned
   `migration_event_associations` or candidate identity/discovery effect tables.
   Candidate effects therefore cannot change the materialized identity rows that
-  builders join. An independently admitted ordinary event remains activated and
-  byte-for-byte unchanged when an ENSv1→ENSv2 correlation references it; only
-  the ignored association row carries the candidate relationship.
+  builders join. An
+  [independently admitted event](glossary.md#independently-admitted-event)
+  remains activated and byte-for-byte unchanged when an ENSv1→ENSv2 correlation
+  references it; only the ignored association row carries the candidate
+  relationship.
 - The independently admitted `registry_announcement` edge for an ENSv1→ENSv2
   migration-created registry remains ordinary because it drives the watch plan,
   not a product projection. Project ignores every candidate downstream effect.
-  Its authority selector is the sole exception for the corresponding
-  `migration_discovery_associations` row: after an activated parent transition,
-  it may use that row together with the readable ordinary edge and the parent
-  topology current at the registration/proof position to classify a positive
-  ENSv2 child-registration [authority proof](glossary.md#authority-proof), as
-  specified by the storage contract. The association cannot establish authority
-  by itself.
+  After an activated parent transition, authority selection may classify a positive
+  child-registration [authority proof](glossary.md#authority-proof), and child reachability may prove the current subregistry is its migration-created `WrapperRegistry`.
+  Both require the readable canonical association, active ordinary announcement, and matching topology; reachability additionally requires non-empty association evidence contained in the parent boundary. The association proves neither result by itself.
 - Coverage and support are explicit. They are never inferred from row presence
   or a historical ingest range.
 - Verified provider answers are request-scoped lookup output, not projection
@@ -260,18 +258,24 @@ outcomes, or durable traces.
 | `address_names_current` | `(address, logical_name_id, relation)` | address-to-names and reverse lookup |
 | `children_current` | parent/child identity plus class | direct and classified child collections |
 | `permissions_current` | resource, subject, and scope | resource permissions and role summaries |
+| `account_permission_state_current` | (`chain_id`, `authority_kind`, `authority_contract`, `owner`, `subject`, `relation_kind`) | no serving reader yet; a follow-up change adds storage and API readers |
 | `permissions_current_resource_summary` | `resource_id` | permission support and authority summary |
 | `resolver_current` | chain and resolver address | resolver overview |
 | `record_inventory_current` | resource plus record boundary key | indexed record inventory and values |
 | `primary_names_current` | address, coin type, and namespace | declared primary-name claims |
 
 `surface_bindings` remains identity history rather than a `_current`
-projection. Exact-name reads first select the logical name's
+projection. Exact-name reads ordinarily first select the logical name's
 [`authority epoch`](glossary.md#authority-epoch), then select fields only from
 that epoch's binding and resources at the requested position. An activated
 ENSv1→ENSv2 authority proof may select a closed ENSv2 binding after release;
 that [released v2 authority](glossary.md#released-v2-authority) does not fall
-back to an active retained ENSv1 binding.
+back to an active retained ENSv1 binding. The exact
+[shared ENS infrastructure](glossary.md#shared-ens-infrastructure) no-proof
+exception selects a current ENSv2 arm when ENSv1 evidence is current or
+historical, without establishing an authority epoch, so its epoch start and
+proof fields remain null. Historical ENSv2 evidence without a current ENSv2
+binding does not qualify.
 
 ## Exact-name projection
 
@@ -297,6 +301,18 @@ Its projection provenance stores the [source family](glossary.md#source-family)
 of the event that selected the current resolver pointer. Resolver binding
 summaries use that stored event provenance rather than a prior resolver row's
 classification.
+
+When a retained direct-registry authority first becomes name-addressable, its
+[`state-derived normalized event`](glossary.md#state-derived-normalized-event)
+of kind `SurfaceBound` carries the observed registry owner. The exact-name
+control summary exposes that owner, its registration authority context identifies
+the registry-only anchor, and the effective-controller address relation includes
+the owner; `control.status` remains null unless another selected authority event supplies it.
+
+A genuine ENSv1 numeric registration can select a new [resource](glossary.md#resource)
+when no current authority remains, including after a prior lease fully lapses with
+retained zero registry ownership. Output-derived restoration preserves that choice
+and closes its selected [surface binding](glossary.md#surface-binding) after the new lease’s grace period.
 
 ENSv1 wrapper lifecycle and fuse effects are projected from canonical wrapper
 facts. During registrar grace, the holder and lifecycle state remain visible,
@@ -324,6 +340,23 @@ predate the enrichment binding. The exact resource match keeps the fold within o
 registrar lifecycle, while the selected registry-only binding remains its upper
 position bound.
 
+Incremental Project redo maps wrapper resources to affected children after it
+has retained resources from projection rows whose cited events disappeared.
+That second mapping reads only the resource IDs already selected for the batch;
+it does not scan all wrapper resources. The ordering is required when a child
+has no current child or exact-name row and its historical wrapper resource is
+not the resource on its active binding: retracting the latest disqualifying
+`PermissionScopeChanged` or `ExpiryChanged` event must still rebuild the child
+from the surviving wrapper history.
+
+A pre-existing owner-retraction gap remains: if an owner-zeroing ENSv1 or Basenames registry
+`AuthorityTransferred` event hides a child that has no current child or exact-name row, later retracting that
+event does not restore the child incrementally because no current child or
+exact-name row cites it. A fresh Project rebuild or the next full source re-walk
+at a [re-derivation boundary](glossary.md#re-derivation-boundary) restores the
+child; [#835](https://github.com/ensdomains/bigname/issues/835) tracks the
+missing bounded replay seed.
+
 For the ENSv2 post-audit Sepolia deployment profile, declared exact-name rows
 come from the admitted registry and registrar families. Out-of-profile resolver,
 reverse, primary-name, mainnet, and execution behavior does not become exact-name
@@ -341,6 +374,22 @@ is `registrant`, `token_holder`, and `effective_controller`. Surface is the
 default unit; resource deduplication is explicit.
 
 `children_current` stores direct and classified child relations. For registry
+events from ENSv1, Project first filters the relation by the parent's
+ENSv1→ENSv2 migration path: `unwrapped`, `unlocked_wrapped`, and
+`emancipated_child` parents retain no ENSv1 children, while `locked_wrapped` and
+`locked_child` parents retain only a [migratable child](glossary.md#migratable-child)
+through their [migration registry](glossary.md#migration-registry-wrapperregistry).
+An unknown activated path is a Project data-integrity failure. Child authority
+selection then chooses among the surviving arms; cross-era recency never chooses
+the arm. A surviving locked-path row cites the matched association's stable
+logical-edge and correlation identities plus its source manifest; its row-level
+manifest version therefore accounts for the association that authorized the
+migration registry. Its `normalized_event_ids`, `event_identities`,
+`raw_fact_refs`, and `manifest_versions` arrays are independent evidence sets,
+not positionally aligned tuples; an input contributes only the identifiers it
+actually owns.
+Reachability is per parent relation, not transitive: hiding a parent-to-child relation does not itself hide that child's children.
+For registry
 events that expose only a labelhash, Project composes the child name from a
 verified label preimage when one exists and its normalization verdict is true,
 and leaves the name columns null when none does — the labelhash and child node
@@ -428,8 +477,30 @@ chains retain independent publication decisions.
 effective powers, provenance, and chain positions. The companion resource
 summary distinguishes authoritative empty enumeration from unsupported or
 partial permission support. Current non-wrapper summaries are partial because
-standard registry operators, registrar token and account approvals, resolver
-operators and delegates, and ENSv2 registry operators are not indexed.
+registrar token and account approvals, resolver operators and delegates, and
+ENSv2 registry operators are not indexed.
+
+`account_permission_state_current` separately folds `AccountPermissionChanged`
+events from the [`standard_approval`
+derivation](glossary.md#standard-approval-derivation) by chain, authority kind, authority contract,
+owner, subject, and relation. It retains both active and revoked latest states;
+`approved=true` carries `registry_control`, while `approved=false` carries no
+effective powers. Project never fans this account mapping out into per-name
+rows. After constructing `name_current`, Project carries the latest
+[registry-owner binding](glossary.md#registry-owner-binding) onto the resource
+selected for an ENSv1 or Basenames name. Registry-family owner observations are
+first ranked by logical name or emitting resource to suppress detached history,
+then mapped onto that selected resource and ranked again by output resource.
+The separate resource that retains registry observations is bypassed by that
+mapping. When `name_current` has no eligible selected resource, or the event has
+no logical name, the observation stays on its emitting resource. This remapping
+never crosses onto an ENSv2 resource. A latest zero owner or an admitted registry-
+or registrar-family `SurfaceUnbound` transition clears the binding. A registrar-
+family `SurfaceBound` carries the registry owner and emitter-derived registry
+contract remembered at transition time, not the registrar token owner, so the new
+current authority receives the binding without attribution to the registrar
+emitter; wrapper-family authority transitions remain outside this rule.
+
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
@@ -439,6 +510,32 @@ owner-derived rows remain available, but neither those rows nor a zero-row
 summary is an authoritative permission enumeration. API contract tests inject
 an independently proven full summary to verify that resource-bound public
 requests are not globally forced to partial.
+
+When a registrar `Transfer` changes ENSv1 or Basenames authority between a
+registrar resource and a registry-only resource, `resource_control` and
+`resolver_control` for any selected nonzero resolver are revoked on the retiring
+registry-only resource or granted to its owner when it becomes active. An unchanged
+authority emits no additional registry-only balancing rows; ordinary token-holder permission rows remain unchanged.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L86-L95 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/Registry.sol:L46-L52 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/Registry.sol:L132-L134 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L321-L329 @ basenames@1809bbc)
+
+For an ENSv1 registrar registration, the first processed canonical block strictly
+past lease expiry plus the 90-day grace period emits `RegistrationReleased`.
+That event retires the holder's `resource_control` grant on the exact expiring
+[resource](glossary.md#resource) and authority key, even when a distinct registry
+owner keeps the selected [surface binding](glossary.md#surface-binding).
+The registry owner's grants and binding remain unchanged; resolver-control
+revocations and authority transitions still require the released registration
+to have been selected. A later registration has a separate resource identity
+and is not revoked by the preceding registration's release. This describes
+indexed registration lifetime, not proof that every represented action remains
+executable through grace: BaseRegistrar `ownerOf` already refuses at lease expiry.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L75 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L104 @ ens_v1@91c966f)
 
 When a state-derived ENSv2 path-expiry release remains the resource's terminal
 lifecycle event and retires effective permission rows, the resource summary
@@ -532,10 +629,44 @@ follows the registry resolver lookup
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
 and the resolver's version-, node-, and key-scoped text storage
 (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f).
-A known model limitation remains: if a resolver was selected only before the
-[name surface](glossary.md#surface-name-surface) existed and was never selected
-again afterward, Project has no linked resolver pointer for that name and does
-not serve its retained records.
+When the first active ENSv1 [name surface](glossary.md#surface-name-surface) is
+materialized, Interpret links the latest replayed nonzero registry resolver to
+the current registry-only authority resource. If getter-visible registry
+ownership is explicitly zero, Interpret instead links that resolver to the
+retained registry [serving resource](glossary.md#serving-resource) without
+creating control. A latest zero-address
+resolver selection suppresses this materialization pointer rather than reviving
+an older nonzero selection. The original raw-derived normalized row remains
+immutable; the linked pointer is an additive
+[state-derived normalized event](glossary.md#state-derived-normalized-event) at
+the raw event that first materializes the active surface. A wrapper-provided
+surface links the retained registry read resource without binding that dormant
+registry resource while wrapper control remains current. Same-transaction
+registration reconciliation leaves that registry-read pointer on the dormant
+registry resource rather than retargeting it to registrar control. Record
+attribution remains node-keyed and provider-free. If a registrar registration
+makes the registrar resource current before the retained registry-only
+authority can be materialized, the same observation still marks that retained
+authority's surface known. A later registrar release can therefore restore the
+existing registry resource and its direct-registry owner instead of losing the
+known name.
+An old-registry resolver selection stops being eligible when either a
+current-registry `NewOwner` or `Transfer` creates that node's current-registry
+record. The ownership observation persists the
+[registry fallback handoff](glossary.md#registry-fallback-handoff) across replay;
+if the old pointer was already linked, later linked zero-resolver events
+retract it from every registry, registrar, or wrapper resource to which it was
+linked, including a resource from an authority epoch that ended before the
+handoff. An old-registry `Transfer` cannot clear a resolver
+selected from the current registry.
+The root resolver is the frozen exception: current-registry ownership does not
+retract its old-registry pointer or suppress later old-registry root updates.
+(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L243-L248 @ ens_subgraph@723f1b6a)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L54 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L172 @ ens_v1@91c966f)
 A resource-less record event cannot create a binding, and name and record reads
 expose the inventory only when the name's current readable control resource or
 `serving_resource_id` selects it. Resolver-local events are accepted only under the manifest and
@@ -553,12 +684,32 @@ default entry. ENSv1 `ContenthashChanged` normalized state uses
 `address_bytes_hex`, and `value_retained=false`, except that coin type 60 with
 an exactly 20-byte payload preserves the scalar `value` envelope used by the
 legacy `AddrChanged` event.
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L22-L24 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L70 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L43-L66 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L76-L82 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L108-L110 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L116-L121 @ basenames@1809bbc)
 Project reconstructs a retained contenthash entry as
 `value={"encoding":"hex","bytes":"0x..."}` and retains an address entry as
 scalar `value="0x..."`. An empty `contenthash_hex` or `address_bytes_hex`
 payload becomes an exact `not_found` entry with `value` omitted. The nested
 `value.bytes` address compatibility shape receives the same empty-value
 classification.
+
+Project classifies an exact 20-byte-zero `addr:60` as `not_found`, with `value` omitted, behind an
+ENSv1 registry, registrar, or wrapper resolver pointer, or a Basenames registry resolver pointer.
+This covers current scalar and retained nested `value.bytes` envelopes; other origins, types,
+nonempty lengths, and nonzero values remain stored successes. Project keeps the entry and selector, changes
+no raw facts or normalized events, and records selected nonempty exact absences in
+`provenance.exact_nonempty_not_found_record_keys`, a sorted, deduplicated array
+omitted when empty. Only the scoped zero20 predicate adds `addr:60`.
+Rust and SQL block default derivation only for a matching exact `addr:60`
+`not_found` entry. Orphan markers are ignored and exact successes still win.
+Empty or missing exact values retain permitted fallback. This private marker
+adds no read rule or authority; non-authoritative coverage remains unsupported.
+Marker-producing Project, both readers, and rebuilt rows must reach one
+maintainer-selected publication boundary before affected reads become public.
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L81-L84 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L93-L99 @ basenames@1809bbc)
 
 Rows produced under an earlier [interpreter content
 hash](glossary.md#interpreter-content-hash) may retain the nested `value` object
@@ -646,12 +797,14 @@ Canonicality change, manifest change, or interpreted-content replacement stamps
 the affected Project range. Project rebuilds the affected scope in dependency
 order and publishes one coherent generation. There is no worker invalidation
 queue, apply cursor, replay-version fence, general-purpose durable staging,
-replay marker, dead-letter queue, or cache invalidation side effect. Two narrow
+replay marker, dead-letter queue, or cache invalidation side effect. Three narrow
 handoffs preserve input that would otherwise disappear before Project can
 select its redo scope: `project_redo_resolver_evidence` retains resolver and
 permission-resource references, while `project_redo_expiry_roots` retains
 logical names and permission resources from state-derived ENSv2 path-expiry
-releases. Neither table is serving data. Project consumes a row only when its
+releases. `project_redo_child_registration_history` retains affected child and
+registry identifiers for removed migration-registry entry history. None is
+serving data. Project consumes a row only when its
 publication range covers the recorded block; an operator redo ending below an
 already recorded Project head can therefore leave later rows for a covering
 redo or full rebuild.
@@ -678,10 +831,11 @@ new truth family.
 ## Ownership
 
 - Interpret and adapters emit identity, discovery, and normalized events.
-  Interpret also preserves the pre-delete resolver references and state-derived
-  ENSv2 path-expiry logical names or permission resources needed for a covering
-  Project redo or normal catch-up; these are replay coordination, not projection
-  writes.
+  Interpret also preserves pre-delete resolver references, ENSv2 path-expiry
+  names or resources, and migration-registry child names that seed the covering
+  Redo-mode Project publication. Normal-mode catch-up currently consumes these
+  rows without seeding from them; #828 tracks that asymmetry. These rows are
+  replay coordination, not projection writes.
 - Project reads canonical interpreted input and owns every projection write.
 - The API reads projections and request-scoped lookup output.
 - Storage exposes typed reads and phase publication boundaries; it does not

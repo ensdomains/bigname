@@ -111,14 +111,37 @@ fn name_registered(
     output.events[2].explicit_before = Some(before);
     output.events[2].after_state = permission_after;
     let active = state.v1_name(&selected.source.namespace, &namehash);
+    let resolver =
+        state.v1_resolver_for_activation(&selected.source.namespace, &namehash, active.as_ref());
+    if let (Some(authority), Some(subject), Some(resolver)) = (
+        active.as_ref(),
+        active
+            .as_ref()
+            .and_then(|authority| authority.owner.as_deref()),
+        resolver
+            .as_ref()
+            .filter(|link| !link.resolver_address.eq_ignore_ascii_case(ZERO_ADDRESS)),
+    ) {
+        super::super::registry::push_permission_change(
+            &mut output,
+            authority,
+            subject,
+            json!({"kind":"resolver","chain_id":raw.chain_id,"resolver_address":resolver.resolver_address}),
+            "resolver_control",
+            true,
+            "RegistrationGranted",
+            "registration-resolver",
+        );
+    }
     super::super::registry::append_authority_transition(
         &mut output,
         super::super::authority_arm(&selected.source.namespace),
         previous.as_ref(),
         active.as_ref(),
+        state.v1_registry_binding(&selected.source.namespace, &namehash),
         raw,
         &after,
-        state.v1_resolver(&selected.source.namespace, &namehash),
+        resolver,
         None,
     );
     if !surface_known {
@@ -181,6 +204,19 @@ fn name_renewed(
         .as_ref()
         .and_then(|state| state.owner.clone())
         .or_else(|| Some(ZERO_ADDRESS.to_owned()));
+    let refresh_current_registrar = previous_active.as_ref().is_some_and(|current| {
+        current.resource_id == resource_id
+            && current.authority_source_family == selected.source.source_family
+    });
+    let explicit_ownerless_registry = state
+        .v1_registry_owner(&selected.source.namespace, &namehash)
+        .as_deref()
+        == Some(ZERO_ADDRESS);
+    let make_current = refresh_current_registrar
+        || (!explicit_ownerless_registry
+            && previous_active.as_ref().is_none_or(|current| {
+                current.authority_source_family == selected.source.source_family
+            }));
     state.observe_v1_registrar(
         &selected.source.namespace,
         &namehash,
@@ -195,9 +231,7 @@ fn name_renewed(
         owner.clone(),
         authority_key.clone(),
         false,
-        previous_active
-            .as_ref()
-            .is_none_or(|current| current.authority_source_family == selected.source.source_family),
+        make_current,
     );
     let after = json!({
         "source_event":"NameRenewed", "namehash":namehash, "labelhash":labelhash_hex,
@@ -235,9 +269,10 @@ fn name_renewed(
         super::super::authority_arm(&selected.source.namespace),
         previous_active.as_ref(),
         active.as_ref(),
+        state.v1_registry_binding(&selected.source.namespace, &namehash),
         raw,
         &after,
-        state.v1_resolver(&selected.source.namespace, &namehash),
+        state.v1_resolver_for_activation(&selected.source.namespace, &namehash, active.as_ref()),
         None,
     );
     if !surface_known {

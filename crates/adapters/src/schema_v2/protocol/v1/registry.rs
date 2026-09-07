@@ -3,10 +3,21 @@ use anyhow::bail;
 use serde_json::{Value, json};
 
 use super::super::{
-    BindingClosureDraft, EventDraft, Interpreted, ResourceDraft, ensure_declared,
+    EventDraft, Interpreted, ResourceDraft, ensure_declared,
     permissions::{v1_grant_states, v1_revoke_states},
 };
-use super::{support::events, unmasked_word};
+use super::authority_transition::{
+    RegistryOwnerView, append_registry_fallback_handoff, classify_registry_owner,
+    registry_fallback_handoff_kind,
+};
+pub(super) use super::authority_transition::{
+    append_authority_transition, authority_kind, child_node, merge_observation,
+};
+use super::{
+    is_registry_ownership_event,
+    support::{self, events},
+    unmasked_word,
+};
 use crate::evm_abi::{
     address_hex, decode_event_log_tolerant_address_word, decode_event_log_tolerant_uint64_word,
     hex_string,
@@ -18,20 +29,12 @@ use crate::schema_v2::{
     state::{State, V1NameState, V1RegistryReadAnchor},
 };
 
-const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
-const ROOT_NODE: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
-const LLL_REGISTRY: &str = "0x314159265dd8dbb310642f98f50c066173c1259b";
 pub(super) mod node;
-mod owner;
-mod surface;
-use node::child_node;
-use owner::{RegistryOwnerView, classify as classify_registry_owner};
-mod transfer {
-    use super::*;
-    sol! { event Transfer(bytes32 indexed node, address owner); }
-}
+pub(super) mod surface;
 
+const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 sol! {
+    event Transfer(bytes32 indexed node, address owner);
     event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
     event NewResolver(bytes32 indexed node, address resolver);
     event NewTTL(bytes32 indexed node, uint64 ttl);
@@ -61,12 +64,12 @@ pub(super) fn interpret(
             (vec!["SubregistryChanged"], body, child)
         }
         "Transfer" => {
-            let decoded = unmasked_word::decode_registry_event::<transfer::Transfer>(
+            let decoded = unmasked_word::decode_registry_event::<Transfer>(
                 tolerate_unmasked_words,
                 &raw.topics,
                 &raw.data,
                 "registry Transfer log is malformed",
-                decode_event_log_tolerant_address_word::<transfer::Transfer>,
+                decode_event_log_tolerant_address_word::<Transfer>,
             )?;
             let mut body = json!({"source_event":"Transfer","node":hex_string(decoded.event.node),"owner":address_hex(decoded.event.owner)});
             if let Some(word) = decoded.unmasked_word.as_ref() {
@@ -107,13 +110,13 @@ pub(super) fn interpret(
     let emitter_role = selected.emitter_role.as_deref();
     if emitter_role == Some("registry_old")
         && state.v1_is_migrated(&selected.source.namespace, &affected_node)
-        && !(selected.event.name == "NewResolver" && affected_node == ROOT_NODE)
+        && !(selected.event.name == "NewResolver" && affected_node == support::ROOT_NODE)
     {
         return Ok(Interpreted::new());
     }
-    if selected.event.name == "NewOwner" && emitter_role == Some("registry") {
-        state.mark_v1_migrated(&selected.source.namespace, &affected_node);
-    }
+    let migration_handoff = (emitter_role == Some("registry")
+        && is_registry_ownership_event(&selected.event.name))
+    .then(|| state.mark_v1_migrated(&selected.source.namespace, &affected_node));
     if let Some(role) = emitter_role {
         after
             .as_object_mut()
@@ -130,7 +133,8 @@ pub(super) fn interpret(
             owner,
             &raw.emitting_address,
             unmasked_word::body_has_unmasked_owner_word(&after),
-            !raw.emitting_address.eq_ignore_ascii_case(LLL_REGISTRY),
+            !raw.emitting_address
+                .eq_ignore_ascii_case(support::LLL_REGISTRY),
         )
     });
     if let Some(view) = owner_view.as_ref() {
@@ -171,7 +175,7 @@ pub(super) fn interpret(
         .is_some_and(|view| !matches!(view, RegistryOwnerView::UnavailableUnmasked))
         || selected.event.name == "NewResolver")
         .then(|| {
-            let anchor = state
+            let mut anchor = state
                 .v1_registry_read_anchor(&selected.source.namespace, &affected_node)
                 .unwrap_or_else(|| V1RegistryReadAnchor {
                     logical_name_id: format!("{}:{affected_node}", selected.source.namespace),
@@ -182,7 +186,11 @@ pub(super) fn interpret(
                     surface_known,
                     source_family: selected.source.source_family.clone(),
                     source_manifest_id: Some(selected.source.manifest_id),
+                    registry_contract: Some(raw.emitting_address.to_lowercase()),
                 });
+            if owner_view.is_some() {
+                anchor.registry_contract = Some(raw.emitting_address.to_lowercase());
+            }
             state.remember_v1_registry_read_anchor(
                 &selected.source.namespace,
                 &affected_node,
@@ -242,6 +250,7 @@ pub(super) fn interpret(
                         .map(str::to_owned),
                     expiry: None,
                     owner: Some(owner.to_owned()),
+                    registry_contract: Some(raw.emitting_address.to_lowercase()),
                     authority_key: Some(format!("registry-only:{}:{affected_node}", raw.chain_id)),
                     wrapper_fallback: false,
                 };
@@ -298,6 +307,12 @@ pub(super) fn interpret(
             None | Some(RegistryOwnerView::UnavailableUnmasked) => previous.clone(),
         }
     };
+    if let Some(kind) =
+        registry_fallback_handoff_kind(&selected.event.name, migration_handoff.as_ref())
+        && !kinds.contains(&kind)
+    {
+        kinds.push(kind);
+    }
     ensure_declared(selected, &kinds)?;
     if owner.is_some() {
         let object = after.as_object_mut().expect("registry state is an object");
@@ -379,17 +394,25 @@ pub(super) fn interpret(
             token_lineage_id: None,
         });
     }
-    let linked_resolver = state.v1_resolver_link(&selected.source.namespace, &affected_node);
+    append_registry_fallback_handoff(
+        &mut output,
+        migration_handoff.as_ref(),
+        previous.as_ref(),
+        raw,
+        &after,
+        &affected_node,
+    );
     append_authority_transition(
         &mut output,
         super::authority_arm(&selected.source.namespace),
         previous.as_ref(),
         linked.as_ref(),
+        state.v1_registry_binding(&selected.source.namespace, &affected_node),
         raw,
         &after,
-        linked_resolver
-            .as_ref()
-            .and_then(|link| link.resource_id.map(|_| link.resolver_address.clone())),
+        state
+            .v1_resolver_for_activation(&selected.source.namespace, &affected_node, linked.as_ref())
+            .filter(|link| link.resource_id.is_some()),
         None,
     );
     if selected.event.name == "NewResolver" {
@@ -426,6 +449,7 @@ pub(super) fn interpret(
                 resolver_anchor
                     .as_ref()
                     .and_then(|(_, logical_name_id)| logical_name_id.clone()),
+                emitter_role.map(str::to_owned),
             )
             .as_ref()
             .map(|link| link.resolver_address.clone());
@@ -463,7 +487,9 @@ pub(super) fn interpret(
             && let Some(subject) = authority.owner.as_deref()
             && previous_resolver != resolver
         {
-            if let Some(previous_resolver) = previous_resolver {
+            if let Some(previous_resolver) = previous_resolver
+                && !previous_resolver.eq_ignore_ascii_case(ZERO_ADDRESS)
+            {
                 push_permission_change(
                     &mut output,
                     authority,
@@ -507,153 +533,8 @@ pub(super) fn interpret(
     Ok(output)
 }
 
-pub(super) fn append_authority_transition(
-    output: &mut Interpreted,
-    authority_arm: &str,
-    previous: Option<&V1NameState>,
-    linked: Option<&V1NameState>,
-    raw: &RawLogInput,
-    observation_state: &Value,
-    resolver: Option<String>,
-    binding_active_from: Option<time::OffsetDateTime>,
-) {
-    if let Some(linked) = linked.filter(|state| state.token_lineage_id.is_none()) {
-        output.resources.push(ResourceDraft {
-            resource_id: linked.resource_id,
-            token_lineage_id: None,
-        });
-    }
-    if previous.map(|authority| authority.resource_id)
-        == linked.map(|authority| authority.resource_id)
-    {
-        if let (Some(previous), Some(linked)) = (previous, linked)
-            && !previous.surface_known
-            && linked.surface_known
-        {
-            surface::append_binding(output, linked, authority_arm, raw, binding_active_from);
-            surface::append_bound_event(output, linked, raw, observation_state);
-        }
-        return;
-    }
-    if let Some(linked) = linked.filter(|authority| authority.surface_known) {
-        surface::append_binding(output, linked, authority_arm, raw, binding_active_from);
-    } else if let Some(previous) = previous.filter(|authority| authority.surface_known) {
-        output.binding_closures.push(BindingClosureDraft {
-            logical_name_id: previous.logical_name_id.clone(),
-            authority_arm: authority_arm.to_owned(),
-        });
-    }
-    let logical_name_id = linked
-        .filter(|authority| authority.surface_known)
-        .map(|authority| authority.logical_name_id.clone())
-        .or_else(|| {
-            previous
-                .filter(|authority| authority.surface_known)
-                .map(|authority| authority.logical_name_id.clone())
-        });
-    let Some(identity_name_id) = linked
-        .filter(|authority| authority.surface_known || authority.token_lineage_id.is_some())
-        .or_else(|| {
-            previous
-                .filter(|authority| authority.surface_known || authority.token_lineage_id.is_some())
-        })
-        .map(|authority| authority.logical_name_id.clone())
-    else {
-        return;
-    };
-    let source_event = observation_state
-        .get("source_event")
-        .and_then(Value::as_str)
-        .unwrap_or("AuthorityTransferred");
-    if let Some(previous) = previous.filter(|authority| authority.surface_known) {
-        output.events.push(EventDraft {
-            event_kind: "SurfaceUnbound".to_owned(),
-            logical_name_id: Some(previous.logical_name_id.clone()),
-            resource_id: Some(previous.resource_id),
-            identity_suffix: format!("SurfaceUnbound:{source_event}:{}", previous.resource_id),
-            explicit_before: Some(json!({
-                "authority_kind":authority_kind(previous),
-                "authority_key":previous.authority_key,
-            })),
-            after_state: merge_observation(
-                observation_state,
-                json!({
-                    "source_event":source_event,
-                    "authority_kind":authority_kind(previous),
-                    "authority_key":previous.authority_key,
-                    "active_to":raw.block_timestamp.unix_timestamp(),
-                }),
-            ),
-            state_scope: String::new(),
-        });
-    }
-    if let Some(linked) = linked.filter(|authority| authority.surface_known) {
-        surface::append_bound_event(output, linked, raw, observation_state);
-    }
-    output.events.push(EventDraft {
-        event_kind: "AuthorityEpochChanged".to_owned(),
-        logical_name_id: logical_name_id.clone(),
-        resource_id: linked
-            .map(|authority| authority.resource_id)
-            .or_else(|| previous.map(|authority| authority.resource_id)),
-        identity_suffix: format!("AuthorityEpochChanged:{source_event}:{identity_name_id}"),
-        explicit_before: Some(json!({
-            "authority_kind":previous.map(authority_kind),
-            "authority_key":previous.and_then(|authority| authority.authority_key.clone()),
-        })),
-        after_state: merge_observation(
-            observation_state,
-            json!({
-                "source_event":source_event,
-                "authority_kind":linked.map(authority_kind),
-                "authority_key":linked.and_then(|authority| authority.authority_key.clone()),
-            }),
-        ),
-        state_scope: String::new(),
-    });
-    if let (Some(linked), Some(resolver)) = (linked, resolver) {
-        output.events.push(EventDraft {
-            event_kind: "ResolverChanged".to_owned(),
-            logical_name_id,
-            resource_id: Some(linked.resource_id),
-            identity_suffix: format!("ResolverChanged:authority:{source_event}:{resolver}"),
-            explicit_before: Some(json!({"resolver":Value::Null})),
-            after_state: merge_observation(
-                observation_state,
-                json!({
-                    "source_event":"AuthorityEpochChanged",
-                    "resolver":resolver,
-                }),
-            ),
-            state_scope: String::new(),
-        });
-    }
-}
-
-pub(super) fn merge_observation(observation: &Value, fields: Value) -> Value {
-    let mut merged = observation.clone();
-    merged
-        .as_object_mut()
-        .expect("authority observation is an object")
-        .extend(
-            fields
-                .as_object()
-                .expect("authority boundary fields are an object")
-                .clone(),
-        );
-    merged
-}
-
-pub(super) fn authority_kind(authority: &V1NameState) -> &'static str {
-    match authority.authority_source_family.as_str() {
-        "ens_v1_wrapper_l1" => "wrapper",
-        "ens_v1_registrar_l1" | "basenames_base_registrar" => "registrar",
-        _ => "registry_only",
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
-fn push_permission_change(
+pub(super) fn push_permission_change(
     output: &mut Interpreted,
     authority: &V1NameState,
     subject: &str,
@@ -666,25 +547,19 @@ fn push_permission_change(
     let Some(authority_key) = authority.authority_key.as_deref() else {
         return;
     };
-    let (before, after) = if grant {
-        v1_grant_states(
-            subject,
-            scope,
-            power,
-            authority_kind(authority),
-            authority_key,
-            source_event_kind,
-        )
+    let permission_states = if grant {
+        v1_grant_states
     } else {
-        v1_revoke_states(
-            subject,
-            scope,
-            power,
-            authority_kind(authority),
-            authority_key,
-            source_event_kind,
-        )
+        v1_revoke_states
     };
+    let (before, after) = permission_states(
+        subject,
+        scope,
+        power,
+        authority_kind(authority),
+        authority_key,
+        source_event_kind,
+    );
     output.events.push(EventDraft {
         event_kind: "PermissionChanged".to_owned(),
         logical_name_id: authority

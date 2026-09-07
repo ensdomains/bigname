@@ -8,7 +8,7 @@ use crate::schema_v2::{
     state::V1NameState,
 };
 
-pub(super) fn append_binding(
+pub(in crate::schema_v2::protocol::v1) fn append_binding(
     output: &mut Interpreted,
     authority: &V1NameState,
     authority_arm: &str,
@@ -30,7 +30,7 @@ pub(super) fn append_binding(
     });
 }
 
-pub(super) fn append_bound_event(
+pub(in crate::schema_v2::protocol::v1) fn append_bound_event(
     output: &mut Interpreted,
     authority: &V1NameState,
     raw: &RawLogInput,

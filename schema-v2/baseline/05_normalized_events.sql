@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS normalized_events (
     CONSTRAINT normalized_events_event_kind_check
         CHECK (
             event_kind IN (
+                'AccountPermissionChanged',
                 'AliasChanged',
                 'AuthorityEpochChanged',
                 'AuthorityTransferred',
@@ -133,6 +134,7 @@ CREATE TABLE IF NOT EXISTS normalized_events (
                 'proxy_upgrade',
                 'raw_block_preimage_observation',
                 'raw_log_preimage_observation'
+                ,'standard_approval'
             )
         ),
     CHECK (jsonb_typeof(before_state) = 'object'),
@@ -186,6 +188,19 @@ CREATE TABLE IF NOT EXISTS project_redo_expiry_roots (
 
 CREATE INDEX IF NOT EXISTS project_redo_expiry_roots_range_idx
     ON project_redo_expiry_roots (chain_id, block_number);
+
+CREATE TABLE IF NOT EXISTS project_redo_child_registration_history (
+    chain_id text NOT NULL, event_identity text NOT NULL,
+    block_number bigint NOT NULL, event_kind text NOT NULL,
+    logical_name_id text NOT NULL, registry_contract_instance_id uuid NOT NULL,
+    recorded_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (chain_id, event_identity),
+    CHECK (block_number >= 0),
+    CHECK (event_kind IN ('RegistrationReserved', 'RegistrationGranted', 'RegistrationRenewed')),
+    CHECK (btrim(logical_name_id) <> '')
+);
+
+CREATE INDEX IF NOT EXISTS project_redo_child_registration_history_range_idx ON project_redo_child_registration_history (chain_id, block_number);
 
 CREATE TABLE IF NOT EXISTS migration_event_associations (
     event_identity text NOT NULL,
@@ -707,6 +722,16 @@ COMMENT ON COLUMN project_redo_expiry_roots.resource_id IS
     'When present, this value identifies the permission resource whose deleted path-expiry release must seed Project redo.';
 COMMENT ON COLUMN project_redo_expiry_roots.recorded_at IS
     'This time records the Interpret redo that first captured the path-expiry release for pending Project repair.';
+
+COMMENT ON TABLE project_redo_child_registration_history IS
+    'Interpret preserves child identifiers from removed entry-creating events in ENSv1→ENSv2 migration registries until Project publishes a covering redo.';
+COMMENT ON COLUMN project_redo_child_registration_history.chain_id IS 'This value identifies the chain whose Interpret redo replaced the event range.';
+COMMENT ON COLUMN project_redo_child_registration_history.event_identity IS 'This value identifies the pre-redo normalized event without depending on its sequence-assigned row ID.';
+COMMENT ON COLUMN project_redo_child_registration_history.block_number IS 'This value anchors the removed entry-creating event in the active redo range.';
+COMMENT ON COLUMN project_redo_child_registration_history.event_kind IS 'This value identifies the entry-creating registry operation removed by redo.';
+COMMENT ON COLUMN project_redo_child_registration_history.logical_name_id IS 'This value identifies the child whose parent reachability must be rebuilt.';
+COMMENT ON COLUMN project_redo_child_registration_history.registry_contract_instance_id IS 'This value identifies the ENSv1→ENSv2 migration registry whose historical entry made the child ineligible.';
+COMMENT ON COLUMN project_redo_child_registration_history.recorded_at IS 'This time records the Interpret redo that first captured the event for pending Project repair.';
 
 COMMENT ON TABLE migration_event_associations IS
     'This table records candidate ENSv1→ENSv2 migration meaning attached to independently admitted events and retains old-fork evidence after normalized-event redo cleanup.';

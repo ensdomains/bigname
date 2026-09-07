@@ -3,10 +3,8 @@ use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use super::{
     EventHistoryReadFilter,
-    paging::{
-        push_history_filters, push_history_order, push_history_select,
-        push_product_history_duplicate_filter,
-    },
+    duplicates::push_product_history_duplicate_filter,
+    paging::{push_history_filters, push_history_order, push_history_select},
     wrapped_registrar::{
         ResourceNamehashAnchor, push_namehash_surfaces_query,
         push_registrar_namehash_anchors_query, push_wrapped_registrar_resources_query,
@@ -59,7 +57,7 @@ pub(super) async fn explain_history_filter_for_test(
     let mut builder = QueryBuilder::<Postgres>::new("EXPLAIN (COSTS OFF) ");
     push_history_select(&mut builder, &filter, canonical_only, false, false);
     push_history_filters(&mut builder, &filter, canonical_only);
-    push_product_history_duplicate_filter(&mut builder);
+    push_product_history_duplicate_filter(&mut builder, &filter, canonical_only);
     push_history_order(&mut builder);
     let plan = builder
         .build_query_scalar::<String>()

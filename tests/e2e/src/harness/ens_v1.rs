@@ -7,9 +7,15 @@ use anyhow::{Context, Result, bail};
 use super::artifacts::{Deployed, deploy, load_ens_v1_artifact};
 use super::rpc::{RpcClient, TxReceipt};
 
+pub const CANNOT_UNWRAP: u32 = 1;
+pub const CANNOT_SET_RESOLVER: u32 = 8;
+pub const PARENT_CANNOT_CONTROL: u32 = 1 << 16;
+pub const IS_DOT_ETH: u32 = 1 << 17;
+
 // Call fragments match the pinned upstream sources:
 // (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L39 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L45 @ ens_v1@91c966f)
+// `setOwner` changes only the owner field stored separately from the resolver. (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L47 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L7-L13 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L170-L172 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L112 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L23 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172 @ ens_v1@91c966f)
@@ -28,6 +34,7 @@ use super::rpc::{RpcClient, TxReceipt};
 // (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L22 @ ens_v1@91c966f)
 sol! {
     function setSubnodeOwner(bytes32 node, bytes32 label, address owner) external returns (bytes32);
+    function setOwner(bytes32 node, address owner) external;
     function owner(bytes32 node) external view returns (address);
     function setResolver(bytes32 node, address resolver) external;
     function setApprovalForAll(address operator, bool approved) external;
@@ -698,6 +705,28 @@ pub async fn set_resolver(
     .await
 }
 
+/// Set the registry owner for an existing node. This is used by ownerless-read
+/// scenarios that must preserve resolver state while removing registry control.
+pub async fn set_registry_owner(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    name: &str,
+    owner: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        d.registry.address,
+        &setOwnerCall {
+            node: namehash(name),
+            owner,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
 pub async fn set_wrapped_resolver(
     rpc: &RpcClient,
     d: &EnsV1Deployment,
@@ -917,6 +946,32 @@ pub async fn approve_resolver_delegate(
         .abi_encode(),
     )
     .await
+}
+
+// These getters use each deployed resolver's actual ABI and storage behavior.
+// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40,L73-L85 @ ens_v1@91c966f)
+// (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L35-L42,L57-L62 @ basenames@1809bbc)
+pub async fn read_addr_record(
+    rpc: &RpcClient,
+    resolver: Address,
+    name: &str,
+    coin: Option<u64>,
+) -> Result<Vec<u8>> {
+    let (signature, arguments) = match coin {
+        Some(coin) => (
+            "addr(bytes32,uint256)",
+            (namehash(name), U256::from(coin)).abi_encode(),
+        ),
+        None => ("addr(bytes32)", (namehash(name),).abi_encode()),
+    };
+    let mut call = keccak256(signature)[..4].to_vec();
+    call.extend(arguments);
+    let response = rpc.eth_call(resolver, &call).await?;
+    Ok(if coin.is_some() {
+        Bytes::abi_decode(&response)?.to_vec()
+    } else {
+        Address::abi_decode(&response)?.as_slice().to_vec()
+    })
 }
 
 pub async fn set_addr_record(
@@ -1245,6 +1300,21 @@ pub async fn transfer_wrapped_name(
     to: Address,
     name: &str,
 ) -> Result<String> {
+    Ok(
+        transfer_wrapped_name_with_data(rpc, d, from, to, name, Bytes::new())
+            .await?
+            .tx_hash,
+    )
+}
+
+pub async fn transfer_wrapped_name_with_data(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    to: Address,
+    name: &str,
+    data: Bytes,
+) -> Result<TxReceipt> {
     let receipt = send_checked_receipt(
         rpc,
         from,
@@ -1254,12 +1324,12 @@ pub async fn transfer_wrapped_name(
             to,
             id: U256::from_be_bytes(namehash(name).0),
             amount: U256::from(1u8),
-            data: Bytes::new(),
+            data,
         }
         .abi_encode(),
     )
     .await?;
-    Ok(receipt.tx_hash)
+    Ok(receipt)
 }
 
 pub async fn batch_transfer_wrapped_names(

@@ -376,9 +376,10 @@ fn name_wrapped(
         state
             .v1_name(&selected.source.namespace, &raw_namehash)
             .as_ref(),
+        None,
         raw,
         &after,
-        state.v1_resolver(&selected.source.namespace, &raw_namehash),
+        state.v1_resolver_link(&selected.source.namespace, &raw_namehash),
         None,
     );
     if let Some(labels) = labels {
@@ -435,6 +436,11 @@ fn name_unwrapped(
         &namehash,
         raw.block_timestamp.unix_timestamp(),
     );
+    let resolver = state.v1_resolver_for_activation(
+        &selected.source.namespace,
+        &namehash,
+        reactivated.as_ref(),
+    );
     let after = json!({
         "source_event":"NameUnwrapped",
         "node":namehash,
@@ -449,9 +455,10 @@ fn name_unwrapped(
         super::authority_arm(&selected.source.namespace),
         linked.as_ref(),
         reactivated.as_ref(),
+        None,
         raw,
         &after,
-        state.v1_resolver(&selected.source.namespace, &namehash),
+        resolver,
         None,
     );
     Ok(output)

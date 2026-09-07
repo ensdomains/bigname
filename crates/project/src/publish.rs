@@ -13,6 +13,7 @@ pub(crate) async fn swap(
             "DELETE FROM children_current row USING name_surfaces surface WHERE row.parent_logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
             "DELETE FROM name_current row USING name_surfaces surface WHERE row.logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
             "DELETE FROM permissions_current row USING resources resource WHERE row.resource_id = resource.resource_id AND resource.chain_id = $1",
+            "DELETE FROM account_permission_state_current WHERE chain_id = $1",
             "DELETE FROM permissions_current_resource_summary row USING resources resource WHERE row.resource_id = resource.resource_id AND resource.chain_id = $1",
             "DELETE FROM record_inventory_current row USING resources resource WHERE row.resource_id = resource.resource_id AND resource.chain_id = $1",
             "DELETE FROM resolver_current WHERE chain_id = $1",
@@ -24,6 +25,7 @@ pub(crate) async fn swap(
             "DELETE FROM children_current row WHERE EXISTS (SELECT 1 FROM project_scope_children scope WHERE scope.logical_name_id IN (row.parent_logical_name_id, row.child_logical_name_id))",
             "DELETE FROM name_current row USING project_scope_names scope WHERE row.logical_name_id = scope.logical_name_id",
             "DELETE FROM permissions_current row USING project_scope_resources scope WHERE row.resource_id = scope.resource_id",
+            "DELETE FROM account_permission_state_current row USING project_scope_account_permissions scope WHERE row.chain_id = scope.chain_id AND row.authority_kind = scope.authority_kind AND row.authority_contract = scope.authority_contract AND row.owner = scope.owner AND row.subject = scope.subject AND row.relation_kind = scope.relation_kind",
             "DELETE FROM permissions_current_resource_summary row USING project_scope_resources scope WHERE row.resource_id = scope.resource_id",
             "DELETE FROM record_inventory_current row USING project_scope_resources scope WHERE row.resource_id = scope.resource_id",
             "DELETE FROM resolver_current row USING project_scope_resolvers scope WHERE row.chain_id = $1 AND lower(row.resolver_address) = lower(scope.resolver_address)",
@@ -55,6 +57,10 @@ pub(crate) async fn swap(
         (
             "permissions_current",
             "EXISTS (SELECT 1 FROM project_scope_resources scope WHERE scope.resource_id = project_stage_permissions_current.resource_id)",
+        ),
+        (
+            "account_permission_state_current",
+            "EXISTS (SELECT 1 FROM project_scope_account_permissions scope WHERE scope.chain_id = project_stage_account_permission_state_current.chain_id AND scope.authority_kind = project_stage_account_permission_state_current.authority_kind AND scope.authority_contract = project_stage_account_permission_state_current.authority_contract AND scope.owner = project_stage_account_permission_state_current.owner AND scope.subject = project_stage_account_permission_state_current.subject AND scope.relation_kind = project_stage_account_permission_state_current.relation_kind)",
         ),
         (
             "permissions_current_resource_summary",

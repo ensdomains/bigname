@@ -33,6 +33,24 @@ not the public-edge rollout state.
 including its generated-style roots, local extensions, and explicit unsupported
 behavior. This document does not define a second GraphQL contract.
 
+The generated `Domain_filter` serves the complete upstream ID and name operator
+families with conjunctive semantics, direct comparison against the served
+`Domain.id` and `Domain.name` values, and separate case-sensitive and nocase
+pattern operators. Raw-name comparisons and name ordering use expression-local
+PostgreSQL `COLLATE "C"`; canonical fixed-width namehash operands use the
+database-collation index, while noncanonical ID ranges retain C semantics on a
+linear path. Pattern input retains SQL `%`, `_`, and backslash semantics. For
+the generated ID/name families, explicit null equality is
+distinct from omission, while explicit null on the other operators is rejected.
+Generated order ties use the Domain ID in the requested direction. The generated
+`Domain_orderBy` exposes only the exact values listed
+in the capability contract. The legacy `DomainFilter` behavior and local
+`registrationDate` ordering remain separate extensions.
+Graph Node generates these ID and String operator families (upstream:
+.refs/graph_node/graph/src/schema/api.rs:L872-L912 @ graph_node@aefe173), and the
+pinned ENS subgraph declares `Domain.id` as `ID!` and `Domain.name` as `String`
+(upstream: .refs/ens_subgraph/schema.graphql:L1-L7 @ ens_subgraph@723f1b6).
+
 ## Naming Dictionary
 
 Normative one-name-per-concept dictionary from ADR 0006, extended with the
@@ -160,7 +178,7 @@ without the expansion.
 Permission-backed v2 reads also classify the served resources from the typed
 projection-owned per-resource permission summary. For a resource-bound
 `GET /v2/permissions` read, a non-wrapper summary whose standard operator,
-token-approval, or resolver-delegation paths are not indexed produces
+token-approval, or resolver-delegation paths are not fully served produces
 `meta.completeness=partial` with
 `approval_and_delegation_permissions_not_supported`. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) An ENSv1 wrapper-only
 summary instead produces `meta.completeness=unsupported` with
@@ -701,21 +719,40 @@ multicoin records, that string contains the resolver-returned native binary
 address bytes without chain-specific textual re-encoding.
 
 ENSv1 and Basenames store the supplied contenthash and address byte payloads
-verbatim and emit the same bytes. Contenthash reads, and address reads when no
-default-address fallback applies, return the stored bytes. An empty payload is
-therefore the stored value after a clear, and those reads return the same empty
-bytes.
+verbatim and emit the same bytes. Their address setters encode
+`setAddr(node,address)` as a 20-byte coin-type-60 value; the coin-type setter emits and stores
+that payload. The Basenames legacy getter returns the zero address for an empty payload and routes
+a nonempty payload through a conversion helper that requires exactly 20 bytes.
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L22-L24 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L70 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L43-L66 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L76-L82 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L108-L110 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L116-L121 @ basenames@1809bbc)
+Contenthash reads, and address reads when no default-address fallback applies,
+return the stored bytes. An empty payload is therefore the stored value after a
+clear, and those reads return the same empty bytes.
 (upstream: .refs/ens_v1/contracts/resolvers/profiles/ContentHashResolver.sol:L14-L28 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L85 @ ens_v1@91c966f)
 (upstream: .refs/basenames/src/L2/resolver/ContentHashResolver.sol:L32-L43 @ basenames@1809bbc)
 (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L57-L99 @ basenames@1809bbc)
 Bigname represents that zero-length exact stored contenthash or address answer
-as `{"status":"not_found"}` and omits `value`. A records route may then apply a
-documented derived-record rule, such as the ENSIP-19 default-address rule; when
-it does, the final keyed answer and convenience field follow that derived
-answer and carry its metadata. A clear is distinct from any non-empty all-zero
-byte payload; this contract does not define a new meaning for a non-empty
-20-byte all-zero `addr:60` value.
+as `{"status":"not_found"}` and omits `value`. It also represents an exact
+ENSv1 or Basenames `addr:60` value of exactly 20 zero bytes as `not_found` and omits `value`. This
+includes an `AddressChanged(node,60,...)` payload of 20 zero bytes and a retained legacy-only normalized
+`AddrChanged(node,address(0))` behind an ENSv1 registry, registrar, or wrapper resolver pointer,
+or a Basenames registry resolver pointer. Other origins, types, nonempty lengths, and nonzero values
+retain their stored values. Raw facts and normalized events remain unchanged; Project classifies the
+row.
+
+A records route may then apply a documented derived-record rule, such as the
+ENSIP-19 default-address rule; the keyed answer and convenience field follow it.
+A selected exact zero20 `addr:60` remains `not_found` in indexed, auto, and
+verified reads even when a nonzero default exists. No value or default-derived
+convenience field is returned. Empty or missing eligible exact records retain
+fallback only when the resolver's declared read feature permits it. The admitted
+Basenames resolver has no default fallback. The internal observation marker does not
+change public response fields or grant authority to incomplete inventory.
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L81-L84 @ ens_v1@91c966f)
+(upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L57-L62 @ basenames@1809bbc)
 
 The `addresses` convenience map uses the same scalar hex string for each
 decimal coin type, and `content_hash` uses the same contenthash scalar string.
@@ -742,6 +779,19 @@ For lookup and search responses that account for chains selected by the
 request, the target route's served snapshot scope can be narrower than that
 chain scope; every additional in-scope chain is reported under
 `meta.as_of_completeness` and is not added to the token.
+
+Chain-position timestamps are RFC 3339 instants. Inputs and stored projection
+positions may use `Z` or a numeric UTC offset (`+HH:MM` or `-HH:MM`) and may
+carry one to nine fractional-second digits; readers normalize the instant to
+UTC before comparison. Because `+` is decoded as a space in query strings,
+clients must percent-encode it as `%2B` in an `at=` query value. For example,
+`at=2025-06-15T17:37:42%2B02:30` selects the same instant as
+`at=2025-06-15T15:07:42Z`. Different accepted spellings of the same instant do
+not make a projection stale.
+
+Successful v2 metadata and snapshot tokens serialize timestamps in UTC with
+`Z`. They retain non-zero fractional seconds; whole-second timestamps keep the
+existing `YYYY-MM-DDTHH:MM:SSZ` spelling.
 
 The API selects current `latest`, `safe`, and `finalized` positions from
 `bigname_phase.chain_heads` and obtains their timestamps from readable
@@ -884,7 +934,29 @@ evidence; issue #529 retains a surface observed only by resolver
 diagnostics and product history. A cursor issued before that change has no
 continuation guarantee and may be rejected. Consumers must discard
 pre-#348/#529 cursors and restart from the first page; fresh post-publication cursors
-continue normally. This boundary does not claim fresh/resumed parity for the
+continue normally.
+
+The [#613](https://github.com/ensdomains/bigname/issues/613) interpreter change
+keeps the original [pre-surface](glossary.md#pre-surface) ENSv1 registry `ResolverChanged` row unchanged,
+then adds a name- and resource-linked, [state-derived](glossary.md#state-derived-normalized-event) `ResolverChanged` when the
+first active [name surface](glossary.md#surface-name-surface) is learned. Product
+events or name history may therefore gain one historical resolver row, while
+diagnostics may gain each linked resource copy. When current-registry ownership
+ends old-registry fallback, its resource-specific resolver-clear copies represent
+one ownership-log/node transition. Product history selects the lexically first
+stable event identity among the activated copies matching the request and its
+canonicality filters. Selection happens before pagination and is shared by
+counts, summaries, and cursor validation. A resource-only request therefore
+retains its matching clear even when another resource has the globally first
+copy; a sole matching clear is never suppressed. All normalized copies remain
+available to diagnostics, projection, and replay.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
+A cursor issued before this
+change has no continuation guarantee and may be rejected. Consumers must
+discard pre-#613 cursors and restart from the first page; fresh post-publication
+cursors continue normally.
+
+These boundaries do not claim fresh/resumed parity for the
 known pre-existing exception: when a resolver-emitted resource equals
 `namehash(N)`, named-resource and alias preimages can share one retained
 [interpreter state key](glossary.md#interpreter-state-key), so resumed

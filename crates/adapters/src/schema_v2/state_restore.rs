@@ -4,6 +4,8 @@ use {serde_json::Value, uuid::Uuid};
 mod support;
 #[path = "state_restore_v1_registry.rs"]
 mod v1_registry;
+#[path = "state_restore_v1_surface.rs"]
+pub(super) mod v1_surface;
 #[path = "state_restore_v1_transfer.rs"]
 mod v1_transfer;
 use support::{
@@ -210,21 +212,7 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
         return;
     }
     v1_registry::restore_migration_marker(state, event);
-    if event.event_kind == "PreimageObserved" && event.logical_name_id.is_some() && let Some(namehash) = event.after_state.get("namehash").and_then(Value::as_str) {
-        if event
-            .after_state
-            .get("visibility_state")
-            .and_then(Value::as_str)
-            != Some("shadow")
-        {
-            state.observe_v1_active_surface(&event.namespace, namehash);
-            if event.after_state.get("surface_known").and_then(Value::as_bool) == Some(true) {
-                state.bind_v1_active_surface(&event.namespace, namehash);
-            }
-        } else {
-            state.observe_v1_surface(&event.namespace, namehash);
-        }
-    }
+    v1_surface::restore_preimage(state, event);
     if matches!(source_event, Some("NewOwner" | "Transfer"))
         && let Some(namehash) = event
             .after_state
@@ -273,9 +261,6 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
         let already_registry_linked = state
             .v1_resolver_link(&event.namespace, namehash)
             .is_some_and(|link| link.resource_id == Some(registry_resource_id));
-        if already_registry_linked && event.resource_id != Some(registry_resource_id) {
-            return;
-        }
         let resolver = event
             .after_state
             .get("resolver")
@@ -284,13 +269,53 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
                 !resolver.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
             })
             .map(str::to_owned);
-        state.set_v1_resolver_link(
-            &event.namespace,
-            namehash,
-            resolver,
+        if !(already_registry_linked && event.resource_id != Some(registry_resource_id)) {
+            state.set_v1_resolver_link(
+                &event.namespace,
+                namehash,
+                resolver,
+                event.resource_id,
+                event.logical_name_id.clone(),
+                event
+                    .after_state
+                    .get("emitter_role")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            );
+        }
+    }
+    if event.event_kind == "ResolverChanged"
+        && let (Some(namehash), Some(resolver), Some(resource_id)) = (
+            event.after_state["child_node"]
+                .as_str()
+                .or_else(|| event.after_state["node"].as_str())
+                .or_else(|| event.after_state["namehash"].as_str()),
+            event.after_state.get("resolver").and_then(Value::as_str),
             event.resource_id,
-            event.logical_name_id.clone(),
-        );
+        )
+    {
+        if let Some(source_role) = event
+            .after_state
+            .get("resolver_source_role")
+            .and_then(Value::as_str)
+        {
+            state.restore_v1_resolver_linked_resource(
+                &event.namespace,
+                namehash,
+                resolver,
+                resource_id,
+                event.logical_name_id.clone(),
+                source_role,
+            );
+        } else {
+            state.remember_v1_resolver_linked_resource(
+                &event.namespace,
+                namehash,
+                resolver,
+                resource_id,
+                event.logical_name_id.clone(),
+            );
+        }
     }
     if event.source_family == "ens_v1_wrapper_l1"
         && event.event_kind == "PermissionScopeChanged"
@@ -374,7 +399,7 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
             .get("authority_kind")
             .and_then(Value::as_str)
             == Some("registry_only")
-        && let (Some(resource_id), Some(namehash)) = (
+        && let (Some(_resource_id), Some(namehash)) = (
             event.resource_id,
             event
                 .after_state
@@ -383,27 +408,7 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
                 .and_then(Value::as_str),
         )
     {
-        state.observe_v1_registry(
-            &event.namespace,
-            namehash,
-            event
-                .logical_name_id
-                .clone()
-                .unwrap_or_else(|| format!("{}:{namehash}", event.namespace)),
-            event.logical_name_id.is_some(),
-            resource_id,
-            event.source_family.clone(),
-            event
-                .after_state
-                .get("owner")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            event
-                .after_state
-                .get("authority_key")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-        );
+        state.activate_retained_v1_registry_authority(&event.namespace, namehash);
         return;
     }
     if event.event_kind == "RegistrationReleased"
@@ -427,124 +432,18 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
         .and_then(Value::as_str)
         .and_then(|value| Uuid::parse_str(value).ok());
     let expiry = event.after_state.get("expiry").and_then(parse_i64);
+    if v1_surface::restore_registrar(
+        state,
+        event,
+        source_event,
+        logical_name_id,
+        resource_id,
+        lineage,
+        expiry,
+    ) {
+        return;
+    }
     match source_event {
-        Some("NameRegistered" | "NameRenewed") if event.event_kind == "RegistrationGranted" => {
-            let (Some(namehash), Some(lineage)) = (
-                event.after_state.get("namehash").and_then(Value::as_str),
-                lineage,
-            ) else {
-                return;
-            };
-            let registration = source_event == Some("NameRegistered");
-            let retained_authority_owner = event
-                .after_state
-                .get("authority_owner")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            let registration_registry_owner = registration
-                .then(|| state.v1_registry_owner(&event.namespace, namehash))
-                .flatten()
-                .filter(|owner| {
-                    !owner.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
-                });
-            let event_registrant = event
-                .after_state
-                .get("registrant")
-                .or_else(|| event.after_state.get("owner"))
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            let registrar_owner = retained_authority_owner
-                .or(registration_registry_owner)
-                .or(event_registrant);
-            let make_current = state.v1_registrar_event_makes_current(
-                &event.namespace,
-                namehash,
-                &event.source_family,
-                registrar_owner.as_deref(),
-                registration,
-                event.after_state["registration_window"] == "whole_transaction"
-                    && event.after_state["registration_registry_setup"] == true,
-            );
-            state.observe_v1_registrar(
-                &event.namespace,
-                namehash,
-                logical_name_id.clone(),
-                event
-                    .after_state
-                    .get("surface_known")
-                    .and_then(Value::as_bool)
-                    == Some(true),
-                resource_id,
-                lineage,
-                event.source_family.clone(),
-                event.source_manifest_id,
-                event
-                    .after_state
-                    .get("labelhash")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                expiry,
-                registrar_owner,
-                event
-                    .after_state
-                    .get("authority_key")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                false,
-                make_current,
-            );
-        }
-        Some("NameRenewed") if event.event_kind == "RegistrationRenewed" => {
-            let (Some(namehash), Some(lineage)) = (
-                event.after_state.get("namehash").and_then(Value::as_str),
-                lineage,
-            ) else {
-                return;
-            };
-            let make_current = state
-                .v1_name(&event.namespace, namehash)
-                .is_none_or(|current| current.authority_source_family == event.source_family);
-            let retained = state.v1_registrar(&event.namespace, namehash);
-            state.observe_v1_registrar(
-                &event.namespace,
-                namehash,
-                logical_name_id.clone(),
-                event
-                    .after_state
-                    .get("surface_known")
-                    .and_then(Value::as_bool)
-                    == Some(true),
-                resource_id,
-                lineage,
-                event.source_family.clone(),
-                event.source_manifest_id,
-                event
-                    .after_state
-                    .get("labelhash")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .or_else(|| retained.as_ref().and_then(|state| state.labelhash.clone())),
-                expiry,
-                event
-                    .after_state
-                    .get("registrant")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .or_else(|| retained.as_ref().and_then(|state| state.owner.clone())),
-                event
-                    .after_state
-                    .get("authority_key")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .or_else(|| {
-                        retained
-                            .as_ref()
-                            .and_then(|state| state.authority_key.clone())
-                    }),
-                false,
-                make_current,
-            );
-        }
         Some("NameWrapped") if event.event_kind == "TokenControlTransferred" => {
             let Some(namehash) = event.after_state.get("node").and_then(Value::as_str) else {
                 return;

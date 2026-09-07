@@ -10,6 +10,7 @@ const PROJECTION_TABLES: &[&str] = &[
     "name_current",
     "children_current",
     "permissions_current",
+    "account_permission_state_current",
     "permissions_current_resource_summary",
     "record_inventory_current",
     "resolver_current",
@@ -201,6 +202,7 @@ async fn create_events(
         "CREATE INDEX ON project_events (logical_name_id, normalized_event_id)",
         "CREATE INDEX ON project_events (resource_id, normalized_event_id)",
         "CREATE INDEX ON project_events (event_kind, normalized_event_id)",
+        "CREATE INDEX ON project_events (event_kind, chain_id, normalized_event_id)",
     ] {
         sqlx::query(statement)
             .execute(&mut **transaction)
@@ -266,6 +268,19 @@ async fn create_scoped_event_ids(
         FROM project_scope_resources scope
         JOIN normalized_events event USING (resource_id)
         WHERE event.chain_id = $1 AND event.block_number <= $2
+          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        UNION
+        SELECT event.normalized_event_id
+        FROM project_scope_account_permissions scope
+        JOIN normalized_events event
+          ON event.chain_id = scope.chain_id
+         AND event.after_state #>> '{scope,authority_kind}' = scope.authority_kind
+         AND lower(event.after_state #>> '{scope,authority_contract}') = scope.authority_contract
+         AND lower(event.after_state #>> '{scope,owner}') = scope.owner
+         AND lower(event.after_state ->> 'subject') = scope.subject
+         AND event.after_state ->> 'relation_kind' = scope.relation_kind
+        WHERE event.event_kind = 'AccountPermissionChanged'
+          AND event.block_number <= $2
           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
         UNION
         -- Defensive symmetry with create_identity_views; inventory closure guarantees the names.

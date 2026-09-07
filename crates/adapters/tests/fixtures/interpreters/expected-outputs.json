@@ -4959,6 +4959,70 @@
           "source_manifest_id": 4,
           "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
           "transaction_index": 0
+        },
+        {
+          "after_state": {
+            "effective_powers": [],
+            "grant_source": null,
+            "inheritance_path": [],
+            "revocation_source": {
+              "authority_key": "registry-only:ethereum-mainnet:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
+              "authority_kind": "registry_only",
+              "kind": "ens_v1_authority",
+              "source_event_kind": "TokenControlTransferred"
+            },
+            "scope": {
+              "kind": "resource"
+            },
+            "subject": "0x0000000000000000000000000000000000005011",
+            "transfer_behavior": "replace_on_authority_change"
+          },
+          "before_state": {
+            "effective_powers": [
+              "resource_control"
+            ],
+            "grant_source": {
+              "authority_key": "registry-only:ethereum-mainnet:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
+              "authority_kind": "registry_only",
+              "kind": "ens_v1_authority",
+              "source_event_kind": "TokenControlTransferred"
+            },
+            "inheritance_path": [],
+            "revocation_source": null,
+            "scope": {
+              "kind": "resource"
+            },
+            "subject": "0x0000000000000000000000000000000000005011",
+            "transfer_behavior": "replace_on_authority_change"
+          },
+          "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+          "block_number": 200,
+          "canonicality_state": "canonical",
+          "chain_id": "ethereum-mainnet",
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "event_identity": "ens_v1_unwrapped_authority:4:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:4:PermissionChanged:transfer-authority-resource-revoke:0x0000000000000000000000000000000000005011:3",
+          "event_kind": "PermissionChanged",
+          "log_index": 4,
+          "logical_name_id": null,
+          "manifest_version": 1,
+          "namespace": "ens",
+          "raw_fact_ref": {
+            "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+            "block_number": 200,
+            "chain_id": "ethereum-mainnet",
+            "emitting_address": "0x00000000000000000000000000000000000050dd",
+            "interpreter_state_key": "ens:ens_v1_registrar_l1:-:dad7d3be-1453-5013-b56b-3f05c0a1e2fc:permission:0x00000000000000000000000000000000000050dd:-:-:0x0000000000000000000000000000000000005011:PermissionChanged",
+            "kind": "raw_log",
+            "log_index": 4,
+            "state_scope": "0x00000000000000000000000000000000000050dd:-:-:0x0000000000000000000000000000000000005011:PermissionChanged",
+            "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
+            "transaction_index": 0
+          },
+          "resource_id": "dad7d3be-1453-5013-b56b-3f05c0a1e2fc",
+          "source_family": "ens_v1_registrar_l1",
+          "source_manifest_id": 4,
+          "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
+          "transaction_index": 0
         }
       ],
       "resources": [
@@ -5003,6 +5067,63 @@
           "token_lineage_id": "5204f7e1-18cb-5505-9f9f-e171798f77b6"
         }
       ]
+    },
+    {
+      "id": "ens_registry_old_standard_approval",
+      "normalized_events": [
+        {
+          "event_identity": "standard_approval:1:ethereum-sepolia:0xe6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6:0xe7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7:0:AccountPermissionChanged:0x1111111111111111111111111111111111111111:0x2222222222222222222222222222222222222222:0",
+          "namespace": "ens",
+          "logical_name_id": null,
+          "resource_id": null,
+          "event_kind": "AccountPermissionChanged",
+          "source_family": "ens_v1_registry_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-sepolia",
+          "block_number": 210,
+          "block_hash": "0xe6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6",
+          "transaction_hash": "0xe7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "chain_id": "ethereum-sepolia",
+            "block_hash": "0xe6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6",
+            "block_number": 210
+          },
+          "derivation_kind": "standard_approval",
+          "canonicality_state": "canonical",
+          "before_state": {},
+          "after_state": {
+            "subject": "0x2222222222222222222222222222222222222222",
+            "relation_kind": "operator",
+            "approved": true,
+            "scope": {
+              "kind": "account",
+              "chain_id": "ethereum-sepolia",
+              "authority_kind": "registry",
+              "authority_contract": "0x94f523b8261b815b87effcf4d18e6abef18d6e4b",
+              "authority_contract_instance_id": "00000000-0000-0000-0000-000000000024",
+              "owner": "0x1111111111111111111111111111111111111111"
+            },
+            "effective_powers": ["registry_control"],
+            "grant_source": {
+              "kind": "raw_log",
+              "source_event": "ApprovalForAll"
+            },
+            "revocation_source": null,
+            "inheritance_path": [],
+            "transfer_behavior": {
+              "mode": "owner_scoped",
+              "on_registry_owner_change": "ceases_to_apply"
+            },
+            "source_event": "ApprovalForAll"
+          }
+        }
+      ],
+      "name_surfaces": [],
+      "surface_bindings": [],
+      "resources": [],
+      "token_lineages": []
     }
   ]
 }

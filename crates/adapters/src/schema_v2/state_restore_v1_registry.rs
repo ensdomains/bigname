@@ -12,13 +12,17 @@ pub(super) fn restore_migration_marker(state: &mut State, event: &PriorEventInpu
         .after_state
         .get("source_event")
         .and_then(Value::as_str)
-        == Some("NewOwner")
+        .is_some_and(|source| matches!(source, "NewOwner" | "Transfer"))
         && event
             .after_state
             .get("emitter_role")
             .and_then(Value::as_str)
             == Some("registry")
-        && let Some(node) = event.after_state.get("child_node").and_then(Value::as_str)
+        && let Some(node) = event
+            .after_state
+            .get("child_node")
+            .or_else(|| event.after_state.get("node"))
+            .and_then(Value::as_str)
     {
         state.mark_v1_migrated(&event.namespace, node);
     }

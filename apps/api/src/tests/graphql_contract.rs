@@ -119,6 +119,26 @@ async fn execute_graphql_requests(
 fn base_graphql_requests() -> Vec<GraphqlRequestCase> {
     vec![
         GraphqlRequestCase::new(
+            "generated_account_by_id",
+            "query { account(id: \"0x000000000000000000000000000000000000000a\") { id } }",
+            json!({}),
+        ),
+        GraphqlRequestCase::new(
+            "generated_accounts_page",
+            "query { accounts(where: { id_in: [\"0x000000000000000000000000000000000000000a\", \"0x000000000000000000000000000000000000000b\"] }) { id } }",
+            json!({}),
+        ),
+        GraphqlRequestCase::new(
+            "generated_resolver_by_id",
+            format!("query {{ resolver(id: \"{GRAPHQL_RESOLVER}-{GRAPHQL_ALICE_NAMEHASH}\") {{ id address }} }}"),
+            json!({}),
+        ),
+        GraphqlRequestCase::new(
+            "generated_resolvers_page",
+            format!("query {{ resolvers(where: {{ address: \"{GRAPHQL_RESOLVER}\" }}) {{ id address }} }}"),
+            json!({}),
+        ),
+        GraphqlRequestCase::new(
             "existing_domain_shape",
             r#"query Domain($id: ID!) {
                 domain(id: $id) {

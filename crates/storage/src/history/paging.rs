@@ -7,6 +7,7 @@ use super::{
     EventHistoryReadFilter, HistoryCursor, HistoryEvent, HistoryPage, HistorySummaryMode,
     InvalidHistoryCursor,
     decoders::decode_history_event,
+    duplicates::push_product_history_duplicate_filter,
     registration_identity::{push_product_event_kind_predicate, push_product_registration_id},
     selectors::HistorySelector,
     source::{push_history_canonicality_filter, push_history_source_for_filter},
@@ -140,7 +141,7 @@ pub(super) async fn load_history_page(
     );
     push_history_filters(&mut builder, &filter, canonical_only);
     if !include_candidates {
-        push_product_history_duplicate_filter(&mut builder);
+        push_product_history_duplicate_filter(&mut builder, &filter, canonical_only);
     }
 
     if cursor.is_some() {
@@ -193,7 +194,7 @@ async fn load_history_internal(
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_history_select(&mut builder, &filter, canonical_only, false, false);
     push_history_filters(&mut builder, &filter, canonical_only);
-    push_product_history_duplicate_filter(&mut builder);
+    push_product_history_duplicate_filter(&mut builder, &filter, canonical_only);
     push_history_order(&mut builder);
 
     if head_only {
@@ -360,12 +361,6 @@ pub(super) fn push_history_filters<'a>(
     push_history_canonicality_filter(builder, canonical_only);
 }
 
-pub(super) fn push_product_history_duplicate_filter(builder: &mut QueryBuilder<'_, Postgres>) {
-    // One registry resolver log can carry both its registry read resource and a distinct control
-    // resource. Product history shows the log once; raw diagnostic history retains both rows.
-    builder.push(" AND strpos(ne.event_identity, ':ResolverChanged:registry-read:') = 0");
-}
-
 pub(super) fn push_history_order(builder: &mut QueryBuilder<'_, Postgres>) {
     builder.push(" ORDER BY ");
     push_history_order_terms(builder);
@@ -410,7 +405,7 @@ async fn ensure_history_cursor_exists(
     );
     push_history_filters(&mut builder, &cursor_filter, canonical_only);
     if !include_candidates {
-        push_product_history_duplicate_filter(&mut builder);
+        push_product_history_duplicate_filter(&mut builder, &cursor_filter, canonical_only);
     }
     builder.push(" AND ne.event_identity = ");
     builder.push_bind(&cursor.event_identity);
@@ -571,12 +566,9 @@ fn push_string_filter<'a>(
 }
 
 fn push_string_filter_tail<'a>(builder: &mut QueryBuilder<'a, Postgres>, values: &'a [String]) {
-    builder.push(" IN (");
-    let mut separated = builder.separated(", ");
-    for value in values {
-        separated.push_bind(value);
-    }
-    separated.push_unseparated(")");
+    builder.push(" = ANY(");
+    builder.push_bind(values);
+    builder.push("::text[])");
 }
 
 fn push_uuid_filter<'a>(
@@ -589,10 +581,7 @@ fn push_uuid_filter<'a>(
 }
 
 fn push_uuid_filter_tail<'a>(builder: &mut QueryBuilder<'a, Postgres>, values: &'a [Uuid]) {
-    builder.push(" IN (");
-    let mut separated = builder.separated(", ");
-    for value in values {
-        separated.push_bind(value);
-    }
-    separated.push_unseparated(")");
+    builder.push(" = ANY(");
+    builder.push_bind(values);
+    builder.push("::uuid[])");
 }

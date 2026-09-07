@@ -424,16 +424,41 @@ async fn address_scoped_approvals_follow_raw_intake_and_transaction_context_boun
             .fetch_one(scratch.pool())
             .await?;
     assert_eq!(receipt_count, 2);
-    let approval_derived_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM normalized_events
-         WHERE chain_id = $1 AND raw_fact_ref ->> 'kind' = 'raw_log'",
+    type ApprovalEventRow = (i64, String, String, String, String, String, bool);
+    let approval_events: Vec<ApprovalEventRow> = sqlx::query_as(
+        "SELECT log_index, transaction_hash, event_kind, derivation_kind,
+                after_state -> 'scope' ->> 'owner', after_state ->> 'subject',
+                (after_state ->> 'approved')::boolean
+         FROM normalized_events
+         WHERE chain_id = $1 AND raw_fact_ref ->> 'kind' = 'raw_log'
+         ORDER BY log_index",
     )
     .bind(chain_id)
-    .fetch_one(scratch.pool())
+    .fetch_all(scratch.pool())
     .await?;
     assert_eq!(
-        approval_derived_count, 0,
-        "approval logs must not produce normalized output; manifest sync may still emit its independent boundary event"
+        approval_events,
+        vec![
+            (
+                0,
+                DECLARED_APPROVAL_TRANSACTION.to_owned(),
+                "AccountPermissionChanged".to_owned(),
+                "standard_approval".to_owned(),
+                CONTRACT.to_owned(),
+                SENDER.to_owned(),
+                true,
+            ),
+            (
+                2,
+                CONTEXT_APPROVAL_TRANSACTION.to_owned(),
+                "AccountPermissionChanged".to_owned(),
+                "standard_approval".to_owned(),
+                CONTRACT.to_owned(),
+                SENDER.to_owned(),
+                false,
+            ),
+        ],
+        "only logs from the admitted registry contract may produce account permission state"
     );
 
     Engine::new(scratch.pool().clone())

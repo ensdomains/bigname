@@ -67,11 +67,7 @@ async fn graphql_preserves_stored_ensip15_normalized_name_bytes() -> Result<()> 
         lowercase_cherokee["data"]["domains"]
             .as_array()
             .map(Vec::len),
-        Some(1)
-    );
-    assert_eq!(
-        lowercase_cherokee["data"]["domains"][0]["name"],
-        json!(NORMALIZED_NAME)
+        Some(0)
     );
 
     let original_namehash = bigname_lookup::ens_namehash_hex(NORMALIZED_NAME)?;
@@ -888,7 +884,10 @@ fn graphql_sdl_matches_subgraph_compatibility_contract() {
     // golden file; kept so a failure names the broken contract directly).
     assert!(sdl.contains("owner: Account!"), "Domain.owner must be non-null");
     assert!(sdl.contains("createdAt: BigInt!"), "Domain.createdAt must be non-null");
-    assert!(sdl.contains("address: String!"), "Resolver.address must be non-null");
+    assert!(
+        sdl.contains("type Resolver {\n\tid: ID!\n\taddress: Bytes!"),
+        "Resolver.address must be non-null Bytes"
+    );
     assert!(sdl.contains("type Query {"), "the query root must be Query");
     assert!(sdl.contains("domain(id: ID!"), "domain.id must be ID!");
     assert!(!sdl.contains("BigDecimal"), "unused BigDecimal must stay absent");
@@ -1490,6 +1489,42 @@ async fn graphql_point_list_and_inventory_reject_targets_ahead_of_head() -> Resu
     .bind(GRAPHQL_ALICE_NAMEHASH)
     .execute(&database.lookup_pool)
     .await?;
+    let membership_rows = sqlx::query(
+        r#"
+        UPDATE bigname_phase.address_names_current
+        SET chain_positions = jsonb_set(chain_positions, '{target_block_number}', '415')
+        WHERE logical_name_id = 'ens:' || $1
+          AND relation = 'effective_controller'
+        "#,
+    )
+    .bind(GRAPHQL_ALICE_NAMEHASH)
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(membership_rows.rows_affected(), 1);
+    for owner_filter in [
+        json!({ "owner": GRAPHQL_OWNER }),
+        json!({ "owner_contains": "000a" }),
+    ] {
+        let membership_target = post_graphql_allow_errors(
+            database.app_state(),
+            r#"query Domains($where: Domain_filter!) { domains(where: $where) { name } }"#,
+            json!({ "where": owner_filter }),
+        )
+        .await?;
+        assert_eq!(membership_target["data"]["domains"], Value::Null);
+        assert!(membership_target["errors"].as_array().is_some_and(|errors| !errors.is_empty()));
+    }
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.address_names_current
+        SET chain_positions = jsonb_set(chain_positions, '{target_block_number}', '411')
+        WHERE logical_name_id = 'ens:' || $1
+          AND relation = 'effective_controller'
+        "#,
+    )
+    .bind(GRAPHQL_ALICE_NAMEHASH)
+    .execute(&database.lookup_pool)
+    .await?;
     seed_alice_record_inventory(&database).await?;
     sqlx::query(
         r#"
@@ -1579,7 +1614,7 @@ async fn graphql_lists_and_counts_scope_rows_to_the_selected_snapshot_chains() -
     .bind(GRAPHQL_ALICE_NAMEHASH)
     .execute(&database.lookup_pool)
     .await?;
-    sqlx::query(
+    let other_chain_relations = sqlx::query(
         r#"
         INSERT INTO bigname_phase.address_names_current (
             address, logical_name_id, relation, namespace, raw_name, namehash,
@@ -1592,23 +1627,33 @@ async fn graphql_lists_and_counts_scope_rows_to_the_selected_snapshot_chains() -
                support_status, unsupported_reason,
                jsonb_set(provenance, '{chain_id}', '"ethereum-sepolia"'),
                jsonb_build_object(
-                   'ethereum-sepolia', jsonb_build_object(
-                       'chain_id', 'ethereum-sepolia',
-                       'block_number', 10940282,
-                       'block_hash', '0xother-chain',
-                       'timestamp', '2026-05-28T13:15:36Z'
-                   )
+                   'target_block_number', 10940282,
+                   'target_block_hash', '0xother-chain'
                ), canonicality_summary, manifest_version
         FROM bigname_phase.address_names_current
         WHERE logical_name_id = 'ens:' || $1
-          AND relation = 'token_holder'
-        LIMIT 1
+          AND relation IN ('token_holder', 'effective_controller')
         "#,
     )
     .bind(GRAPHQL_ALICE_NAMEHASH)
     .bind(GRAPHQL_OTHER_CHAIN_HOLDER)
     .execute(&database.lookup_pool)
     .await?;
+    assert_eq!(other_chain_relations.rows_affected(), 2);
+    let mut eligible = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+        "SELECT COUNT(*) FROM bigname_phase.address_names_current anc ",
+    );
+    eligible
+        .push(bigname_storage::DEFAULT_ADDRESS_NAMES_MEMBERSHIP_JOINS)
+        .push(" WHERE anc.address = ")
+        .push_bind(GRAPHQL_OTHER_CHAIN_HOLDER)
+        .push(" AND anc.relation = 'effective_controller'")
+        .push(bigname_storage::DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER);
+    let eligible: i64 = eligible
+        .build_query_scalar()
+        .fetch_one(&database.lookup_pool)
+        .await?;
+    assert_eq!(eligible, 1, "cross-chain relation must pass baseline membership eligibility");
 
     let payload = post_graphql(
         database.app_state(),
@@ -2171,7 +2216,7 @@ async fn graphql_domain_resolver_serves_record_inventory_fields() -> Result<()> 
     let bob = post_graphql(
         database.app_state(),
         r#"query Domain($id: ID!) {
-            domain(id: $id) { resolver { texts contentHash addresses { coinType address } } }
+            domain(id: $id) { resolver { id address texts contentHash addresses { coinType address } } }
         }"#,
         json!({ "id": "bob.eth" }),
     )
@@ -2179,6 +2224,19 @@ async fn graphql_domain_resolver_serves_record_inventory_fields() -> Result<()> 
     assert_eq!(bob["data"]["domain"]["resolver"]["texts"], json!([]));
     assert_eq!(bob["data"]["domain"]["resolver"]["addresses"], json!([]));
     assert_eq!(bob["data"]["domain"]["resolver"]["contentHash"], Value::Null);
+
+    let roots = post_graphql(
+        database.app_state(),
+        r#"query { resolvers { id address texts contentHash addresses { coinType address } } }"#,
+        json!({}),
+    )
+    .await?;
+    let roots = roots["data"]["resolvers"]
+        .as_array()
+        .context("resolvers must be a list")?;
+    assert_eq!(roots.len(), 2);
+    assert!(roots.contains(&resolver.clone()));
+    assert!(roots.contains(&bob["data"]["domain"]["resolver"]));
 
     database.cleanup().await?;
     Ok(())
@@ -2190,7 +2248,7 @@ async fn graphql_ownerless_domain_resolver_uses_serving_resource_inventory() -> 
     seed_graphql_compat_fixture(&database).await?;
     seed_alice_record_inventory(&database).await?;
 
-    sqlx::query(
+    let update = sqlx::query(
         r#"
         UPDATE bigname_phase.name_current
         SET serving_resource_id = resource_id,
@@ -2207,17 +2265,31 @@ async fn graphql_ownerless_domain_resolver_uses_serving_resource_inventory() -> 
                 '{control}',
                 '{}'::jsonb
             )
-        WHERE logical_name_id = 'ens:alice.eth'
+        WHERE logical_name_id = 'ens:' || $1
         "#,
     )
+    .bind(GRAPHQL_ALICE_NAMEHASH)
     .execute(&database.pool)
     .await?;
+    assert_eq!(update.rows_affected(), 1, "ownerless fixture must update Alice");
+    let (current_resource_id, serving_resource_id): (Option<Uuid>, Option<Uuid>) =
+        sqlx::query_as(
+            "SELECT resource_id, serving_resource_id
+             FROM bigname_phase.name_current
+             WHERE logical_name_id = 'ens:' || $1",
+        )
+        .bind(GRAPHQL_ALICE_NAMEHASH)
+        .fetch_one(&database.pool)
+        .await?;
+    assert!(current_resource_id.is_none());
+    assert!(serving_resource_id.is_some());
+    assert_ne!(current_resource_id, serving_resource_id);
 
     let payload = post_graphql(
         database.app_state(),
         r#"query Domain($id: String!) {
             domain(id: $id) {
-                resolver { address texts contentHash addresses { coinType address } }
+                resolver { id address texts contentHash addresses { coinType address } }
             }
         }"#,
         json!({ "id": "alice.eth" }),
@@ -2234,6 +2306,19 @@ async fn graphql_ownerless_domain_resolver_uses_serving_resource_inventory() -> 
             { "coinType": 2_147_483_658u32, "address": "0x00000000000000000000000000000000000000bb" },
             { "coinType": 60, "address": "0x00000000000000000000000000000000000000aa" },
         ])
+    );
+
+    let root_payload = post_graphql(
+        database.app_state(),
+        r#"query Resolver($id: ID!) {
+            resolver(id: $id) { id address texts contentHash addresses { coinType address } }
+        }"#,
+        json!({ "id": resolver["id"] }),
+    )
+    .await?;
+    assert_eq!(
+        root_payload["data"]["resolver"], *resolver,
+        "the generated Resolver root must hydrate the same serving-resource inventory as Domain.resolver"
     );
 
     database.cleanup().await?;
@@ -2404,7 +2489,7 @@ async fn graphql_name_order_uses_stored_normalized_name_bytes() -> Result<()> {
 }
 
 #[tokio::test]
-async fn graphql_name_order_sql_pins_c_collation_in_both_directions() -> Result<()> {
+async fn graphql_name_order_sql_pins_semantic_collation_in_both_directions() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
 
@@ -2448,7 +2533,7 @@ async fn graphql_name_order_sql_pins_c_collation_in_both_directions() -> Result<
     for direction in ["ASC", "DESC"] {
         let expected = format!(
             "ORDER BY canonical_display_name COLLATE \"C\" {direction}, \
-             namespace ASC, normalized_name ASC, namehash ASC"
+             namehash {direction}, namespace ASC"
         );
         assert!(
             prepared_statements
@@ -2562,10 +2647,9 @@ async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
         json!({ "where": { "name_contains": "ARO" } }),
     )
     .await?;
-    assert_eq!(wrong_case["data"]["domains"].as_array().map(Vec::len), Some(1));
-    assert_eq!(wrong_case["data"]["domains"][0]["name"], json!("carol.eth"));
+    assert_eq!(wrong_case["data"]["domains"].as_array().map(Vec::len), Some(0));
 
-    let invalid = post_graphql_allow_errors(
+    let wildcard = post_graphql(
         database.app_state(),
         r#"query Domains($where: Domain_filter!) {
             domains(where: $where) { name }
@@ -2573,10 +2657,9 @@ async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
         json!({ "where": { "name_contains": "%" } }),
     )
     .await?;
-    assert_eq!(invalid["data"], Value::Null);
-    assert!(invalid["errors"].as_array().is_some_and(|errors| !errors.is_empty()));
+    assert_eq!(wildcard["data"]["domains"].as_array().map(Vec::len), Some(4));
 
-    let empty = post_graphql_allow_errors(
+    let empty = post_graphql(
         database.app_state(),
         r#"query Domains($where: Domain_filter!) {
             domains(where: $where) { name }
@@ -2584,10 +2667,9 @@ async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
         json!({ "where": { "name_contains": "" } }),
     )
     .await?;
-    assert_eq!(empty["data"], Value::Null);
-    assert!(empty["errors"].as_array().is_some_and(|errors| !errors.is_empty()));
+    assert_eq!(empty["data"]["domains"].as_array().map(Vec::len), Some(4));
 
-    let invalid_empty_page = post_graphql_allow_errors(
+    let empty_page = post_graphql(
         database.app_state(),
         r#"query Domains($where: Domain_filter!) {
             domains(first: 0, where: $where) { name }
@@ -2595,12 +2677,7 @@ async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
         json!({ "where": { "name_contains": "%" } }),
     )
     .await?;
-    assert_eq!(invalid_empty_page["data"], Value::Null);
-    assert!(
-        invalid_empty_page["errors"]
-            .as_array()
-            .is_some_and(|errors| !errors.is_empty())
-    );
+    assert_eq!(empty_page["data"]["domains"].as_array().map(Vec::len), Some(0));
 
     database.cleanup().await?;
     Ok(())
@@ -2673,22 +2750,155 @@ async fn graphql_name_contains_accepts_label_boundary_fragments() -> Result<()> 
         }
     }
 
-    for fragment in [".", ".."] {
-        let payload = post_graphql_allow_errors(
+    for (fragment, expected_len) in [(".", 6), ("..", 0)] {
+        let payload = post_graphql(
             database.app_state(),
             query,
             json!({ "where": { "name_contains": fragment } }),
         )
         .await?;
-        assert_eq!(payload["data"], Value::Null, "{fragment}");
-        assert!(
-            payload["errors"]
-                .as_array()
-                .is_some_and(|errors| !errors.is_empty()),
+        assert_eq!(
+            payload["data"]["domains"].as_array().map(Vec::len),
+            Some(expected_len),
             "{fragment}: {payload}"
         );
     }
 
     database.cleanup().await?;
+    Ok(())
+}
+
+async fn graphql_make_owner_target_future(database: &TestDatabase, namehash: &str) -> Result<()> {
+    let stamp_query = "SELECT jsonb_build_object('head', to_jsonb(head), 'phase', to_jsonb(phase), 'generation', phase.xmin::text)::text FROM bigname_phase.chain_heads head JOIN bigname_phase.chain_phase_state phase USING(chain_id) WHERE head.chain_id = 'ethereum-mainnet' AND phase.phase_name = 'project'";
+    let before: String = sqlx::query_scalar(stamp_query).fetch_one(&database.lookup_pool).await?;
+    // Stable inconsistent projection state, not an ordinary concurrent Project race:
+    // the request head and phase generation remain fixed while canonical future lineage exists.
+    sqlx::query("INSERT INTO bigname_phase.chain_lineage (chain_id, block_hash, parent_hash, block_number, block_timestamp, canonicality_state) SELECT chain_id, '0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff', latest_block_hash, 415, '2027-01-15T08:00:00Z', 'finalized' FROM bigname_phase.chain_heads WHERE chain_id = 'ethereum-mainnet' ON CONFLICT DO NOTHING")
+        .execute(&database.lookup_pool).await?;
+    let changed = sqlx::query("UPDATE bigname_phase.address_names_current SET chain_positions = jsonb_build_object('target_block_number', 415, 'target_block_hash', '0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff') WHERE logical_name_id = 'ens:' || $1 AND relation = 'effective_controller' AND address = $2")
+        .bind(namehash).bind(GRAPHQL_OWNER).execute(&database.lookup_pool).await?;
+    assert_eq!(changed.rows_affected(), 1);
+    let after: String = sqlx::query_scalar(stamp_query).fetch_one(&database.lookup_pool).await?;
+    assert_eq!(before, after, "head and Project generation must stay fixed");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn graphql_owner_hidden_negative_witness_refuses() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    sqlx::query("INSERT INTO bigname_phase.address_names_current SELECT (jsonb_populate_record(NULL::bigname_phase.address_names_current, to_jsonb(anc) || jsonb_build_object('address', $1::text))).* FROM bigname_phase.address_names_current anc WHERE logical_name_id = 'ens:' || $2 AND relation = 'effective_controller'")
+        .bind(GRAPHQL_FALLBACK_HOLDER).bind(GRAPHQL_ALICE_NAMEHASH).execute(&database.lookup_pool).await?;
+    let query = "query($where: Domain_filter!) { domains(where: $where) { id } }";
+    let filters = [
+        json!({"id": GRAPHQL_ALICE_NAMEHASH, "owner_not": GRAPHQL_OWNER}),
+        json!({"id": GRAPHQL_ALICE_NAMEHASH, "owner_not_in": [GRAPHQL_OWNER]}),
+        json!({"id": GRAPHQL_ALICE_NAMEHASH, "owner_not_contains": "000a"}),
+        json!({"id": GRAPHQL_ALICE_NAMEHASH, "owner": GRAPHQL_FALLBACK_HOLDER, "owner_not": GRAPHQL_OWNER}),
+    ];
+    for filter in &filters {
+        let current = post_graphql(database.app_state(), query, json!({"where": filter})).await?;
+        assert_eq!(current["data"]["domains"], json!([]));
+    }
+    graphql_make_owner_target_future(&database, GRAPHQL_ALICE_NAMEHASH).await?;
+    let control = post_graphql_allow_errors(database.app_state(), query, json!({"where": {"id": GRAPHQL_ALICE_NAMEHASH, "owner": GRAPHQL_OWNER}})).await?;
+    assert!(control["errors"].as_array().is_some_and(|errors| !errors.is_empty()), "{control}");
+    let unrelated = post_graphql(database.app_state(), query, json!({"where": {
+        "id": GRAPHQL_ALICE_NAMEHASH, "owner": GRAPHQL_FALLBACK_HOLDER,
+        "owner_not": GRAPHQL_OTHER_CHAIN_HOLDER
+    }})).await?;
+    assert_eq!(unrelated["data"]["domains"], json!([{"id": GRAPHQL_ALICE_NAMEHASH}]),
+        "a nonmatching invalid sibling is not rejecting evidence");
+    let mut missing = Vec::new();
+    for filter in filters {
+        let response = post_graphql_allow_errors(database.app_state(), query, json!({"where": filter})).await?;
+        if response["errors"].as_array().is_none_or(|errors| errors.is_empty()) {
+            missing.push((filter, response));
+        }
+    }
+    assert!(missing.is_empty(), "negative witnesses escaped validation: {missing:?}");
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_owner_hidden_offset_witness_refuses() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    let query = "query($where: Domain_filter!, $skip: Int!, $first: Int!) { domains(where: $where, orderBy: id, orderDirection: asc, skip: $skip, first: $first) { id } }";
+    let filters = [
+        json!({"owner_contains": "0x"}),
+        json!({"owner": GRAPHQL_OWNER}),
+        json!({"owner_in": [GRAPHQL_OWNER]}),
+    ];
+    // Bound the unanchored pattern to the same two-name candidate set.
+    let filters = filters.map(|mut filter| {
+        filter["id_in"] = json!([GRAPHQL_ALICE_NAMEHASH, GRAPHQL_BOB_NAMEHASH]);
+        filter
+    });
+    for filter in &filters {
+        let current = post_graphql(database.app_state(), query, json!({"where": filter, "skip": 0, "first": 2})).await?;
+        assert_eq!(current["data"]["domains"], json!([{"id": GRAPHQL_ALICE_NAMEHASH}, {"id": GRAPHQL_BOB_NAMEHASH}]));
+        let page = post_graphql(database.app_state(), query, json!({"where": filter, "skip": 1, "first": 1})).await?;
+        assert_eq!(page["data"]["domains"], json!([{"id": GRAPHQL_BOB_NAMEHASH}]));
+    }
+    graphql_make_owner_target_future(&database, GRAPHQL_ALICE_NAMEHASH).await?;
+    let mut missing = Vec::new();
+    for filter in filters {
+        let control = post_graphql_allow_errors(database.app_state(), query, json!({"where": filter, "skip": 0, "first": 1})).await?;
+        assert!(control["errors"].as_array().is_some_and(|errors| !errors.is_empty()), "{control}");
+        let page = post_graphql_allow_errors(database.app_state(), query, json!({"where": filter, "skip": 1, "first": 1})).await?;
+        if page["errors"].as_array().is_none_or(|errors| errors.is_empty()) {
+            missing.push((filter, page));
+        }
+    }
+    assert!(missing.is_empty(), "skipped witnesses escaped validation: {missing:?}");
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_owner_hidden_offset_name_target_refuses() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    let query = "query($where: Domain_filter!, $skip: Int!) { domains(where: $where, orderBy: id, orderDirection: asc, skip: $skip, first: 1) { id } }";
+    let filters = [json!({"owner": GRAPHQL_OWNER}), json!({"owner_contains": "0x"})]
+        .map(|mut filter| {
+            filter["id_in"] = json!([GRAPHQL_ALICE_NAMEHASH, GRAPHQL_BOB_NAMEHASH]);
+            filter
+        });
+    let stamp_query = "SELECT jsonb_build_object('head', to_jsonb(head), 'phase', to_jsonb(phase), 'generation', phase.xmin::text)::text FROM bigname_phase.chain_heads head JOIN bigname_phase.chain_phase_state phase USING(chain_id) WHERE head.chain_id = 'ethereum-mainnet' AND phase.phase_name = 'project'";
+    let stamp: String = sqlx::query_scalar(stamp_query).fetch_one(&database.lookup_pool).await?;
+    let original: Value = sqlx::query_scalar("SELECT chain_positions FROM bigname_phase.name_current WHERE namehash = $1")
+        .bind(GRAPHQL_ALICE_NAMEHASH).fetch_one(&database.lookup_pool).await?;
+    let witness_query = "SELECT chain_positions FROM bigname_phase.address_names_current WHERE namehash = $1 AND relation = 'effective_controller' AND address = $2";
+    let witness: Value = sqlx::query_scalar(witness_query).bind(GRAPHQL_ALICE_NAMEHASH).bind(GRAPHQL_OWNER).fetch_one(&database.lookup_pool).await?;
+    for filter in &filters {
+        for (skip, expected) in [(0, GRAPHQL_ALICE_NAMEHASH), (1, GRAPHQL_BOB_NAMEHASH)] {
+            let response = post_graphql(database.app_state(), query, json!({"where": filter, "skip": skip})).await?;
+            assert_eq!(response["data"]["domains"], json!([{"id": expected}]));
+        }
+    }
+    // Refusal of stable inconsistent projection state; ordinary Project publication
+    // rebuilds the name and controller together. Keep its head/generation fixed here.
+    sqlx::query("INSERT INTO bigname_phase.chain_lineage (chain_id, block_hash, parent_hash, block_number, block_timestamp, canonicality_state) SELECT chain_id, '0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff', latest_block_hash, latest_block_number + 1, '2027-01-15T08:00:00Z', 'finalized' FROM bigname_phase.chain_heads WHERE chain_id = 'ethereum-mainnet' ON CONFLICT DO NOTHING")
+        .execute(&database.lookup_pool).await?;
+    let mut missing = Vec::new();
+    for future in [true, false] {
+        let changed = sqlx::query("UPDATE bigname_phase.name_current SET chain_positions = (SELECT jsonb_object_agg(position.key, position.value || jsonb_build_object('block_number', head.latest_block_number + $2, 'block_hash', '0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff')) FROM jsonb_each($3::jsonb) position CROSS JOIN bigname_phase.chain_heads head WHERE head.chain_id = 'ethereum-mainnet') WHERE namehash = $1")
+            .bind(GRAPHQL_ALICE_NAMEHASH).bind(i64::from(future)).bind(&original).execute(&database.lookup_pool).await?;
+        assert_eq!(changed.rows_affected(), 1);
+        for filter in &filters {
+            for skip in [0, 1] {
+                let response = post_graphql_allow_errors(database.app_state(), query, json!({"where": filter, "skip": skip})).await?;
+                if response["errors"].as_array().is_none_or(|errors| errors.is_empty()) {
+                    missing.push((future, filter.clone(), skip, response));
+                }
+            }
+        }
+        assert_eq!(stamp, sqlx::query_scalar::<_, String>(stamp_query).fetch_one(&database.lookup_pool).await?);
+        assert_eq!(witness, sqlx::query_scalar::<_, Value>(witness_query).bind(GRAPHQL_ALICE_NAMEHASH).bind(GRAPHQL_OWNER).fetch_one(&database.lookup_pool).await?);
+    }
+    database.cleanup().await?;
+    assert!(missing.is_empty(), "name targets escaped validation: {missing:?}");
     Ok(())
 }

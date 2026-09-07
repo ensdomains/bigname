@@ -100,6 +100,34 @@ table](api-v2-routes.md#public-record-field-completeness) gives the
 consumer-facing status of standard registry and resolver fields and links back
 to the applicable entries below.
 
+> **Stored zero address is served as absence**: bigname serves an exactly stored
+> 20-byte zero `addr:60` through an ENSv1 authority pointer or Basenames registry
+> pointer as `not_found`, including when a successful ENSIP-19 default exists.
+> Empty or missing eligible exact data retains permitted fallback.
+> **Upstream**: ENSv1 returns the selected coin-type bytes and consults the
+> default only when that payload is empty
+> `(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L73-L85 @ ens_v1@91c966f)`;
+> its direct `addr(bytes32)` getter converts the selected coin-60 bytes to an
+> address
+> `(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)`.
+> The admitted Basenames resolver reads exact storage without default fallback
+> `(upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L57-L62 @ basenames@1809bbc)`.
+> Its legacy getter returns the zero address for empty bytes and otherwise
+> converts the returned payload as an exact 20-byte address
+> `(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L76-L82 @ basenames@1809bbc)`
+> `(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L108-L110 @ basenames@1809bbc)`.
+> **Our rule**: `docs/api-v2.md` § Resolver record answers and values,
+> `docs/api-v2-routes.md` resolver-record route, and `docs/projections.md` §
+> Resolver and records.
+> **Why**: classifying `address(0)` as absence keeps indexed and verified
+> answers aligned without changing retained normalized bytes.
+> **Since**: `2026-09-05`
+
+> **ENS no-proof overlap refusal versus chain-side era precedence** — For an ordinary logical name with current ENSv1 and ENSv2 candidates but no activated ENSv1→ENSv2 migration, release, or other admitted [authority proof](glossary.md#authority-proof), bigname refuses the name instead of inferring ENSv2. A chain-facing resolution path may nevertheless answer from one era according to its own era precedence. For the exact [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names, a current ENSv2 binding wins when ENSv1 evidence is current or historical; historical ENSv2 evidence without a current binding does not qualify. The maintainer ruling includes root, `eth`, `reverse`, and `addr.reverse`. The pinned ENSv2 deployment evidence covers root, `eth`, and `reverse`, not `addr.reverse`; `addr.reverse` is included by the ruling because the pinned ENSv1 contract defines it as the reverse registrar node and its deployment assigns that node directly on testnets. Bigname intentionally preserves this exact four-name classification across configured ENS [deployment profiles](glossary.md#deployment-profile). This is an exact-name exception, not a `.reverse` suffix rule. Configured ingest start blocks that omit proof events do not establish authority and do not weaken the refusal.
+> **Upstream**: the ENSv1 `.eth` resolver is updated to the ENSv2 resolver, which traverses the ENSv2 registry and retains an explicit ENSv1 override for `eth` `(upstream: .refs/ens_v2/contracts/deploy/00_ENSV2Resolver.ts:L62-L80 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/src/resolver/ENSV2Resolver.sol:L13-L23 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/src/resolver/ENSV2Resolver.sol:L49-L55 @ ens_v2@a971bd64)`. The ENSv2 deployment creates its root registry, registers and canonically parents `eth`, and registers or preserves `reverse` `(upstream: .refs/ens_v2/contracts/deploy/00_RootRegistry.ts:L15-L29 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/deploy/01_ETHRegistry.ts:L23-L64 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/deploy/01_ReverseMirror.ts:L13-L34 @ ens_v2@a971bd64)`. The ENSv1 reverse registrar uses the `addr.reverse` node and transfers an existing registrar's claim during replacement; its deployment writes the `addr.reverse` assignment only on testnets `(upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L15-L37 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/deploy/reverseregistrar/00_deploy_reverse_registrar.ts:L30-L48 @ ens_v1@91c966f)`.
+> **Our rule**: `docs/architecture.md` § “ENSv1→ENSv2 current authority” and `crates/project/src/builders/name_authority.rs`.
+> **Why**: selecting an era for an ordinary overlap would invent an authority boundary. The four exact infrastructure names are a documented bigname exception grounded in the pinned deployment and reverse-registrar evidence above; descendants remain refused.
+> **Since**: `2026-08-26`
 > **Born-wrapped registration identity follows its first wrapper [resource](glossary.md#resource-backing-resource-resource_id)** —
 > bigname uses the first wrapper resource created in the registrar registration
 > transaction as the registration identity for that lifecycle. Registrar rows
@@ -139,9 +167,9 @@ to the applicable entries below.
 > **Why**: the hosted behavior reproduces the pinned schema/resolver mismatch; omitting a field outside the claimed schema index allows the reviewed live capture to complete without weakening any compared path.
 > **Since**: `2026-09-02`
 
-> **Generated Domain pagination retains bigname's safety bounds** — Graph Node rejects a non-positive or over-limit
-> `first` and a negative or over-limit `skip`. Bigname's generated-style `domains` root instead returns an empty page for
-> non-positive `first`, caps positive `first` at `200`, treats negative `skip` as zero, and caps
+> **Generated entity pagination retains bigname's safety bounds** — Graph Node rejects a non-positive or over-limit
+> `first` and a negative or over-limit `skip`. Bigname's generated-style `domains`, `accounts`, and `resolvers` roots
+> instead return an empty page for non-positive `first`, cap positive `first` at `200`, treat negative `skip` as zero, and cap
 > positive `skip` at `1_000_000`.
 > **Upstream**: Graph Node accepts `first` only in `1..=max_first` and `skip` only in `0..=max_skip`, returning a range
 > argument error otherwise (upstream: .refs/graph_node/graphql/src/store/query.rs:L62-L84 @ graph_node@aefe1737).
@@ -150,30 +178,94 @@ to the applicable entries below.
 > generated argument defaults.
 > **Since**: `2026-09-02`
 
+> **Generated Account reads expose current address relations, not persistent historical entities** — bigname's
+> `account` and `accounts` roots select distinct addresses that currently appear as a registrant, token holder, or
+> effective controller. An address with no current membership relation is absent, including a current address-record
+> target that is not also a registrant, token holder, or effective controller, as well as an address seen only in past
+> events. `Domain.owner.id` can serve the zero address while `account(id:)` returns null because the current address-name
+> [projection](glossary.md#projection) drops the zero address; this is the same `#670/T5` zero-owner residual as the Domain owner filter.
+> **Upstream**: the ENS subgraph creates and saves an Account for each `NewOwner` and `Transfer` owner before assigning
+> that address to the Domain (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L89-L92 @ ens_subgraph@723f1b6)
+> (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L146-L157 @ ens_subgraph@723f1b6), and `AddrChanged` creates and
+> saves an Account for the resolved address (upstream: .refs/ens_subgraph/src/resolver.ts:L33-L35 @ ens_subgraph@723f1b6).
+> The registrar creates an Account for registration and transfer recipients before assigning it as the registrant
+> (upstream: .refs/ens_subgraph/src/ethRegistrar.ts:L43-L56 @ ens_subgraph@723f1b6)
+> (upstream: .refs/ens_subgraph/src/ethRegistrar.ts:L163-L174 @ ens_subgraph@723f1b6).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T4` owns Account persistence beyond
+> current membership and `#670/T5` owns resolved-address membership and zero-owner agreement.
+> **Why**: the authorized source for this slice is the current address-name projection, not event-history synthesis.
+> **Since**: `2026-09-02`
+
+> **Generated hexadecimal input handling is entry-point specific** — Account and composite Resolver point IDs and
+> generated Domain-filter IDs compare exact lowercase served identities, so case-different IDs are no-matches. Bigname's
+> `domain(id:)` point path instead accepts uppercase hexadecimal digits after lowercase `0x`, normalizes the namehash, and
+> can match the lowercase served ID. Uppercase `0X` does not alias a namehash ID, but can match a literal ENS name through
+> bigname's point-path name extension. The pre-existing Account list-filter plus Resolver
+> ID/domain-namehash filter canonicalization remains outside this slice. Graph Node passes point IDs into an exact equality filter and preserves
+> ordinary string filter values (upstream: .refs/graph_node/graphql/src/store/prefetch.rs:L726-L730 @
+> graph_node@aefe1737) (upstream: .refs/graph_node/graph/src/data/store/mod.rs:L357-L379 @ graph_node@aefe1737)
+> (upstream: .refs/graph_node/graphql/src/store/query.rs:L332-L334 @ graph_node@aefe1737). Resolver address filters are
+> `Bytes` in both systems and accept uppercase digits, but Graph Node's byte parser permits an omitted or repeated `0x`
+> prefix while bigname requires exactly one (upstream:
+> .refs/graph_node/graph/src/data/store/scalar/bytes.rs:L47-L53 @ graph_node@aefe173).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Why**: point-root IDs follow exact entity-ID semantics; Bytes retains byte canonicalization.
+> **Since**: `2026-09-03`
+
+> **Generated Resolver reads expose current bindings, not persistent historical entities** — bigname uses the composite
+> `<lowercase-address>-<lowercase-namehash>` identity, excludes the zero address, and exposes one Resolver for each
+> current Domain binding. After a Domain switches resolvers, the old composite ID is absent locally.
+> **Upstream**: `NewResolver` constructs the composite identity, maps zero to no Resolver, assigns the Domain to the new
+> identity, and saves a newly observed Resolver (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L167-L201 @
+> ens_subgraph@723f1b6). Resolver event handlers load or create the same address/node identity and can save it
+> (upstream: .refs/ens_subgraph/src/resolver.ts:L233-L248 @ ens_subgraph@723f1b6)
+> (upstream: .refs/ens_subgraph/src/resolver.ts:L258-L262 @ ens_subgraph@723f1b6). The upstream schema defines
+> `Resolver.id` as that concatenation and `Resolver.address` as `Bytes!`
+> (upstream: .refs/ens_subgraph/schema.graphql:L281-L287 @ ens_subgraph@723f1b6).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; `#670/T6` owns current Resolver serving and
+> `#670/T9` owns event history that could support prior bindings.
+> **Why**: the authorized local source is the Domain's current `name_current` binding; this slice does not synthesize
+> durable Resolver entities from historical events.
+> **Since**: `2026-09-02`
+
+> **Generated Resolver content hashes retain the local String scalar** — `Resolver.contentHash` remains nullable
+> `String` while the other Resolver identity and address signatures move to the captured upstream types.
+> **Upstream**: the ENS subgraph declares `Resolver.contentHash` as `Bytes`
+> (upstream: .refs/ens_subgraph/schema.graphql:L290-L291 @ ens_subgraph@723f1b6).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; the signature difference keeps its existing
+> `#670/T2` disposition while `#670/T6` owns the remaining Resolver serving fields.
+> **Why**: this Account/Resolver-root slice preserves the existing record-serving JSON contract and does not fold in
+> the independently owned content-hash scalar change.
+> **Since**: `2026-09-03`
+
 > **Generated Domain point lookup accepts an ENS name** — `domain(id:)` treats only a canonical `0x` plus 64-hex input
 > as a namehash first, then falls back to the local ENS-name lookup if the entity ID does not match. Every other input
 > takes the direct name lookup path. Namehash precedence prevents a hash-shaped ENS name from shadowing an entity ID.
 > **Upstream**: the ENS subgraph defines `Domain.id` as the namehash
 > (upstream: .refs/ens_subgraph/schema.graphql:L1-L5 @ ens_subgraph@723f1b6), and Graph Node applies the supplied point ID
 > as an equality filter without a name fallback
-> (upstream: .refs/graph_node/graphql/src/store/prefetch.rs:L726-L730 @ graph_node@aefe1737).
+> (upstream: .refs/graph_node/graphql/src/store/prefetch.rs:L726-L730 @ graph_node@aefe173).
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
 > **Why**: the local extension preserves bigname's existing name-string lookup convenience while keeping generated
 > namehash IDs authoritative.
 > **Since**: `2026-09-02`
 
-> **Generated Domain exact-name filtering uses ENS namehash equality** — `Domain_filter.name` normalizes the supplied ENS
-> name and matches its namehash rather than comparing the stored human-readable name bytes directly.
+> **Generated Domain filters compare served ID and name text directly** — generated `Domain_filter.id` members bind the
+> supplied ID text without normalization, while generated `Domain_filter.name` members compare the supplied text with the
+> nullable human-readable name instead of converting it to an ENS namehash.
 > **Upstream**: Graph Node maps an equality filter to direct entity-field equality
-> (upstream: .refs/graph_node/graphql/src/store/query.rs:L156-L190 @ graph_node@aefe1737), while the ENS subgraph declares
+> (upstream: .refs/graph_node/graphql/src/store/query.rs:L156-L190 @ graph_node@aefe173), while the ENS subgraph declares
 > the human-readable `Domain.name` separately from the namehash `Domain.id`
 > (upstream: .refs/ens_subgraph/schema.graphql:L1-L5 @ ens_subgraph@723f1b6).
-> **Our rule**: `docs/architecture.md` and `docs/consumer-capabilities.md` § GraphQL compatibility.
-> **Why**: the existing Manager-facing name semantics treat normalization-equivalent spellings as the same ENS name.
-> **Since**: `2026-09-02`
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility. The separate legacy `DomainFilter` retains its ENS
+> name lookup and normalization behavior.
+> **Since**: `2026-09-03`
 
-> **Generated Domain owner filters depend on projected registry ownership** — the partial `Domain_filter.owner` and
-> `owner_in` members use bigname's effective-controller relation. The effective controller agrees with `Domain.owner`
+> **Generated Domain owner filters depend on projected registry ownership** — the generated `Domain_filter` owner family compares the projected effective-controller relation rather than the served `Domain.owner` fallback.
+> Positive conditions in one filter must match the same relation row; each negative condition rejects the name when any eligible relation row matches its positive counterpart. Negative members require an eligible effective-controller relation row and use a name-correlated anti-semijoin, so a name cannot pass merely because the relation is absent. Filtered relation targets participate in snapshot revalidation.
+> Equality and membership compare supplied ID-shaped text exactly. Ranges retain the supplied text, and patterns retain its text and case while adding the wildcard prefix or suffix required by the operator; `_nocase` retains its case-insensitive meaning. Graph Node routes supplied equality and list values directly into store filters (upstream: .refs/graph_node/graphql/src/store/query.rs:L156-L190 @ graph_node@aefe173).
+> Explicit null for retained `owner` and `owner_in` remains equivalent to omission. Graph Node emits `IS NULL` for null equality, maps `_not` null to `IS NOT NULL`, and rejects `_in` null because membership requires a list (upstream: .refs/graph_node/graph/src/data/store/mod.rs:L337-L384 @ graph_node@aefe173) (upstream: .refs/graph_node/graphql/src/store/query.rs:L156-L190 @ graph_node@aefe173) (upstream: .refs/graph_node/graphql/src/store/query.rs:L415-L436 @ graph_node@aefe173) (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1603-L1623 @ graph_node@aefe173). Locally, `owner_not: null` is rejected with the other newly served members. These deliberate null divergences are filed as `#862`. Every newly served owner member rejects explicit null as `Domain_filter.<member> must not be null`. Empty
+> `owner_in` and `owner_not_in` lists both return an empty page, while duplicate list entries are tolerated. A positive equality or membership starts from indexed effective-controller addresses. Without either anchor, the query visits candidate names and performs an indexed effective-controller lookup for each name. Under ID order or a bounded ID predicate this is page-driven only while matches occur early enough in the requested direction to fill the page; a rare owner or matches late in that direction walk the complete ordered names relation. Non-ID orders also perform the lookup before sorting and remain in the linear cost class owned by `#831`. The effective controller agrees with `Domain.owner`
 > when the latest projected registry-ownership event is an owner-bearing `AuthorityTransferred` to a non-zero address on
 > a non-wrapper-authority name and no later resource-scoped `PermissionChanged` event exists on the selected resource.
 > A zero registry owner is served as the zero address; a masked owner word is served as the registrant fallback, or the
@@ -187,7 +279,7 @@ to the applicable entries below.
 > ownership is unchanged by either `PermissionChanged`. A release can also co-emit an owner-less `AuthorityEpochChanged`,
 > which clears the served registry owner so `Domain.owner` falls back to the registrant or zero address, while the epoch
 > event is excluded from the effective-controller fold and the release's `resource_control` grant keeps the registry owner
-> there. `docs/consumer-capabilities.md` § GraphQL compatibility states each class explicitly.
+> there. This GraphQL section states each class explicitly and carries the served scalar-family contract.
 > **Upstream**: the ENS subgraph defines `Domain.owner` as the account that owns the domain and updates it from registry
 > ownership events (upstream: .refs/ens_subgraph/schema.graphql:L29-L32 @ ens_subgraph@723f1b6)
 > (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L131-L138 @ ens_subgraph@723f1b6)
@@ -195,17 +287,105 @@ to the applicable entries below.
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T5` owns the four residual classes.
 > **Why**: the effective-controller and served-owner projections intentionally answer different authority questions in
 > those classes, so the partial filter contract names the boundary instead of claiming universal field/filter equality.
-> **Since**: `2026-09-02`
+> **Planner evidence**: the SQL-seeded owner fixture contains 5,006 eligible ordered names and 5,004 effective-controller relations. It asserts that all 5,004 eligible owner names retain distinct bindings, resources, and token lineages. The 5,000 padded names, two eligible sentinel names, and base owners form owner populations of 4,797, 201, and six. All seven participating tables are analyzed. These tests exercise the bound identity shape; they do not run Ingest, Interpret, or Project.
+> The earlier fixture cleared name bindings and shared a resource/lineage across padded controllers. Retaining distinct identities fails its former 8,192 full-buffer and 4,096 ascending anti-subtree ceilings. The reviewed replacement fixture ceilings are 12,288 shared hit/read blocks per zero-offset page, 10,240 per prefix validation, and 6,144 per ascending anti subtree. For `skip: 200, first: 200`, the page ceiling is 24,576 and the combined prefix-plus-page ceiling is 34,816. Each bounded-request statement must cost less than 100,000; their combined estimated cost must be below 200,000. These are regression-fixture envelopes with headroom, not a universal latency or scalability SLO.
+> PostgreSQL 16 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` measurements below use ID ascending and limit 200 unless labeled otherwise. Prefix rows are a single validation boolean; OFFSET page rows are the separate page statement. `outer` is name rows times loops, `max loops` spans every plan node, and `anti blocks` is the first anti subtree. All measurements have no JIT or temporary blocks. Representative OFFSET statements each visit at most 404 names/loops (prefix name visits at most 204); the rare descending case deliberately visits all 5,006 names and remains outside the bounded-page envelope.
+>
+> | statement/operator | total cost | rows | outer | max loops | anti blocks | full blocks |
+> | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+> | `NEGATIVE DESC` | 49,776.10 | 200 | 208 | 208 | 5,312 | 10,328 |
+> | `NEGATIVE owner_not` | 49,862.18 | 200 | 200 | 200 | 5,006 | 10,050 |
+> | `NEGATIVE owner_not_contains` | 49,862.18 | 200 | 200 | 200 | 5,000 | 10,018 |
+> | `NEGATIVE owner_not_contains_nocase` | 49,862.18 | 200 | 200 | 200 | 5,000 | 10,018 |
+> | `NEGATIVE owner_not_ends_with` | 49,862.18 | 200 | 200 | 200 | 5,000 | 10,021 |
+> | `NEGATIVE owner_not_ends_with_nocase` | 49,862.18 | 200 | 200 | 200 | 5,000 | 10,021 |
+> | `NEGATIVE owner_not_in` | 49,861.43 | 200 | 200 | 200 | 5,000 | 10,021 |
+> | `NEGATIVE owner_not_starts_with` | 49,862.18 | 200 | 200 | 200 | 5,000 | 10,018 |
+> | `NEGATIVE owner_not_starts_with_nocase` | 49,862.18 | 200 | 200 | 200 | 5,000 | 10,021 |
+> | `OFFSET PAGE owner` | 554.44 | 1 | 201 | 201 | 0 | 8,479 |
+> | `OFFSET PAGE owner_contains` | 38,861.92 | 200 | 400 | 400 | 0 | 17,248 |
+> | `OFFSET PAGE owner_in` | 554.19 | 1 | 201 | 201 | 0 | 8,476 |
+> | `POSITIVE owner` | 553.91 | 200 | 201 | 201 | 0 | 8,476 |
+> | `POSITIVE owner_contains` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `POSITIVE owner_contains_nocase` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `POSITIVE owner_ends_with` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `POSITIVE owner_ends_with_nocase` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `POSITIVE owner_gt` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `POSITIVE owner_gte` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `POSITIVE owner_in` | 553.66 | 200 | 201 | 201 | 0 | 8,476 |
+> | `POSITIVE owner_lt` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `POSITIVE owner_lte` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `POSITIVE owner_starts_with` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `POSITIVE owner_starts_with_nocase` | 19,459.46 | 200 | 200 | 200 | 0 | 8,618 |
+> | `PREFIX owner` | 544.79 | 1 | 200 | 400 | 8,894 | 8,894 |
+> | `PREFIX owner_contains` | 58.13 | 1 | 200 | 400 | 9,418 | 9,418 |
+> | `PREFIX owner_in` | 544.54 | 1 | 200 | 400 | 8,873 | 8,873 |
+> | `RARE DESC` | 19,459.46 | 6 | 5,006 | 5,006 | 0 | 31,204 |
+> Combined `skip: 200, first: 200` work: `owner` 17,373 blocks / 1,099.23 estimated cost; `owner_in` 17,349 blocks / 1,098.73 estimated cost; `owner_contains` 26,666 blocks / 38,920.05 estimated cost. These sums cover both SQL statements, not elapsed request latency.
+> **Since**: `2026-09-05`
 
-> **Generated Domain `name_contains` retains ENS normalization** — bigname normalizes the supplied ENS fragment before
-> applying the stored-name predicate, so case variants that normalize identically can match even though the separate
-> `name_contains_nocase` member remains absent.
-> **Upstream**: Graph Node maps `contains` to SQL `LIKE` and `contains_nocase` to `ILIKE`
-> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1532-L1535 @ graph_node@aefe1737).
-> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T3` owns the remaining filter
-> vocabulary and any later alignment.
-> **Why**: this T2 slice preserves bigname's existing ENS-aware name filtering behavior.
-> **Since**: `2026-09-02`
+> **Generated Domain patterns preserve SQL wildcards** — generated contains patterns are left unchanged when they start or
+> end with `%` and otherwise gain `%` at both ends. Generated pattern input does not perform ENSIP-15 substring
+> normalization and does not escape `%`, `_`, or backslash. The legacy `DomainFilter` retains its existing normalization
+> and escaped-pattern behavior. These rules apply to both generated name patterns and generated owner-ID patterns:
+> starts-with appends `%`, ends-with prepends `%`, case-sensitive members use `LIKE`, and `_nocase` members use `ILIKE`.
+> **Upstream**: Graph Node constructs contains patterns this way and passes them to `LIKE`/`ILIKE` (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1432-L1476 @ graph_node@aefe173)
+> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1532-L1545 @ graph_node@aefe173), including ends-with variants (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1547-L1555 @ graph_node@aefe173).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Since**: `2026-09-03`
+
+> **Generated GraphQL text uses C collation only when it changes semantics** — Graph Node rejects a store database whose collation or character classification is not `C` (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L152-L158 @ graph_node@aefe173)
+> (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L159-L163 @ graph_node@aefe173). Bigname applies `COLLATE "C"` to generated raw-name comparisons, name ordering, noncanonical ID ranges,
+> generated owner-ID ranges, and case-sensitive owner-ID patterns, but deliberately leaves fixed-width lowercase
+> hexadecimal namehash predicates and order/tie-break expressions unwrapped so
+> `name_current_lookup_idx` remains usable. The deployment contract requires a collation that orders those canonical
+> hexadecimal keys byte-lexically like C. Alpine/musl CI and default deployment images satisfy that rule by construction;
+> glibc deployments rely on the separately verified lowercase-hexadecimal property, while local C collation remains
+> necessary for noncanonical range operands. This API-only slice does not add a database-locale startup gate; issue `#833`
+> tracks glibc CI coverage.
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Divergence**: Graph Node enforces the locale for the database; bigname enforces it only where collation can change the
+> generated expression's semantics.
+> **Since**: `2026-09-03`
+
+> **Most generated Domain name filters and non-ID orders require linear scans** — the default and explicit ID order and
+> ID equality or membership predicates use `name_current_lookup_idx`. Canonical ranges use that index with ID order, but
+> use the flat eligibility joins with a non-ID order because the range operand does not bound the matching row count.
+> Noncanonical ID ranges, ID negations, every name operator, and the name, date,
+> owner, Resolver, and local registration-date orders have cost linear in bigname's eligible names table. Graph Node
+> creates indexes for eligible entity attributes and uses B-trees for ordinary scalar attributes (upstream:
+> .refs/graph_node/store/postgres/src/relational/ddl.rs:L251-L275 @ graph_node@aefe173) (upstream:
+> .refs/graph_node/store/postgres/src/relational/ddl.rs:L277-L342 @ graph_node@aefe173); its substring, suffix, nocase, and
+> negated patterns are nevertheless scan-shaped under that ordinary-index design.
+> Bigname also adds a same-direction namehash tie-break to `owner__id`; Graph Node's child-ID path adds no parent-ID
+> tie-break. For a mutable entity such as `Domain`, the default setting appends the internal block-range column after
+> that child ID (upstream: .refs/ens_subgraph/schema.graphql:L1 @ ens_subgraph@723f1b6) (upstream:
+> .refs/graph_node/store/postgres/src/relational_queries.rs:L3838-L3842 @ graph_node@aefe173) (upstream:
+> .refs/graph_node/store/postgres/src/relational_queries.rs:L4046-L4052 @ graph_node@aefe173) (upstream:
+> .refs/graph_node/graph/src/env/store.rs:L299-L300 @ graph_node@aefe173).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Divergence**: bigname lacks equivalent raw-name and expression indexes for name equality/range/prefix and the non-ID
+> order keys. Issue `#831` owns those names-projection indexes. They require a separate schema-migration slice and are not
+> hidden in this API-only change.
+> **Since**: `2026-09-04`
+
+> **Uppercase `0X` handling is entry-point specific** — Account point IDs and generated Domain-filter IDs remain valid GraphQL text
+> but compare exactly, a non-lowercase Resolver point ID is a no-match, the pre-existing `Resolver_filter.id` canonicalizes hexadecimal digit case only when both components keep lowercase `0x`, and `Resolver_filter.address` rejects uppercase `0X`. Hexadecimal
+> digits after lowercase `0x` remain valid Bytes input and serialize canonically.
+> **Upstream**: Graph Node's Bytes parser strips only lowercase `0x`
+> (upstream: .refs/graph_node/graph/src/data/store/scalar/bytes.rs:L47-L53 @ graph_node@aefe173).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Since**: `2026-09-03`
+
+> **Generated `_change_block` is absent** — bigname's current Domain projection has no entity last-change block, so
+> `BlockChangedFilter` and the Domain, Account, and Resolver `_change_block` inputs remain exact upstream-only instead of
+> substituting publication provenance or the selected [served head](glossary.md#served-head).
+> **Upstream**: Graph Node adds `_change_block: BlockChangedFilter` to generated filters (upstream:
+> .refs/graph_node/graph/src/schema/api.rs:L1202-L1209 @ graph_node@aefe173) and defines its `number_gte` member
+> (upstream: .refs/graph_node/graph/src/schema/meta.graphql:L55-L57 @ graph_node@aefe173).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility. The existing `block: Block_height` argument only
+> validates an eligible current snapshot.
+> **Since**: `2026-09-03`
 
 > **Direct Domain registration-date ordering is a local GraphQL extension** — bigname retains
 > `Domain_orderBy.registrationDate` from bigname's earlier GraphQL schema. The generated upstream equivalent is the nested
@@ -221,14 +401,9 @@ to the applicable entries below.
 > **Since**: `2026-09-02`
 
 > **ENSv1 and Basenames ownerless registry reads use event-linked reachability** — registry owner events retain their literal owner word as history, while control uses the [getter-visible owner](glossary.md#getter-visible-owner). In the current ENS Solidity registry and Basenames, a literal zero word and the emitting registry's own address are control-equivalent, but neither clears an independently selected resolver. ENSv1 emits the literal owner argument, maps current-registry self storage to getter zero, stores the resolver separately, and its fallback writes current-registry self when asked to store zero `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L67-L68 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L81-L82 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L141 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L170-L172 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L55 @ ens_v1@91c966f)`. The admitted 2017 mainnet LLL registry instead returns its stored owner word unchanged, and the fallback delegates to that getter when the current registry has no record, so an owner equal to that emitter remains authentic `(upstream: .refs/ens_v1_lll/contracts/ENS.lll:L65-L66 @ ens_v1_lll@7e377df)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L29-L34 @ ens_v1@91c966f)`. The similarly named Sepolia legacy deployment uses the Solidity registry artifact and therefore retains the Solidity self-to-zero getter rule `(upstream: .refs/ens_v1/deploy/registry/00_deploy_registry.ts:L14-L19 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)`. Basenames emits the literal owner arguments, maps registry-self to getter zero, and stores owner and resolver independently `(upstream: .refs/basenames/src/L2/Registry.sol:L100-L134 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/Registry.sol:L165-L180 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/Registry.sol:L214-L216 @ basenames@1809bbc)`.
-> **Our rule**: Getter-visible zero ends only registry-direct control. A current nonzero resolver pointer already linked by a post-surface registry event remains readable, and a later post-surface resolver event can restore that read path without opening a binding. Direct-child enumeration requires either live control or that nonzero event-linked resolver; fallback `recordExists` alone is not enough.
-> **Narrowing**: A resolver selected only before the name surface and never repeated remains unlinked and unserved under the separate pre-surface divergence below; this change does not synthesize that pointer.
-> **Since**: `2026-08-27`
-
-> **Pre-surface-only ENSv1 resolver selection is not projected** — when a resolver was selected before bigname materialized a [name surface](glossary.md#surface-name-surface) and was never selected again afterward, bigname retains the record facts but has no linked current-resolver pointer and does not publish a record inventory for the name.
-> **Upstream**: ENSv1 reads the resolver stored for the node without requiring a later selection event `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)`, and its text resolver reads storage keyed by record version, node, and key `(upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f)`.
-> **Our rule**: `docs/projections.md` § Resolver and records and `docs/api-v2-routes.md` § `GET /v2/names/{name}/records`.
-> **Why**: The projection builder can safely attribute retained record writes from their node and emitter after a linked resolver pointer exists, but this slice intentionally leaves interpretation-time null links immutable and does not infer a current pointer from a `ResolverChanged` event that predates the name surface.
+> **Our rule**: Getter-visible zero ends only registry-direct control. An event-linked nonzero resolver remains readable after its surface is known. For ENSv1, the first active [name surface](glossary.md#surface-name-surface) links retained [pre-surface](glossary.md#pre-surface) state to the registry [serving resource](glossary.md#serving-resource) without opening a control binding; a latest zero-address selection suppresses that [state-derived normalized event](glossary.md#state-derived-normalized-event). When no registrar state was previously known, a label-bearing registrar renewal establishes no registrar control while the getter-visible registry owner is zero. Registrar control already current before the registry owner becomes zero remains current. Direct-child enumeration requires either live control or a nonzero event-linked resolver; fallback `recordExists` alone is not enough.
+> A registrar token transfer does not re-establish registry control: the registrar exposes the live token holder through its ERC-721 `ownerOf`, while changing the ENS registry owner requires the separate `reclaim` call `(upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L4-L7 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L67-L75 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)`.
+> **Narrowing**: Linking the first active name surface is additive: it preserves the original pre-surface event with null `logical_name_id` and its original `resource_id`, whether null or already linked to a known authority or registry read resource, and uses the retained registry source for the new pointer. ENSv1 stores and emits resolver selection by node and returns that stored node resolver `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L86-L95 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L134-L140 @ ens_v1@91c966f)`. The admitted 2017 LLL registry likewise keys its resolver slot by node `(upstream: .refs/ens_v1_lll/contracts/ENS.lll:L86-L98 @ ens_v1_lll@7e377df)`.
 > **Since**: `2026-08-27`
 
 > **ENS expiry projection narrowing** — bigname current projections expose expiry timestamps as finite Unix-second values or `null`; they do not fabricate far-future dates for the ENSv1 `i64::MAX` sentinel or ENSv2 `type(uint64).max`.
@@ -300,10 +475,10 @@ to the applicable entries below.
 > **Why**: keep declared Basenames primary-name values aligned with the ENSv1 Base L2 primary-name path while preserving the Basenames Base registry/registrar/resolver families as the declared exact-name, address-name, children, and record authority.
 > **Since**: `2026-06-04`
 
-> **Permission enumeration with unindexed approval paths** — bigname serves known permission rows that apply to a resource and retains the manifest-scoped ENSv1 and Basenames registry operator, registrar token/operator, resolver operator/delegate, and NameWrapper approval logs as [raw facts](glossary.md#raw-fact). Those grants and delegations are not normalized or projected into permissions, and ENSv2 registry operator approvals remain outside intake. Non-wrapper permission summaries therefore remain request-relative partial rather than full or authoritative, including when a request returns zero rows; the existing `operator_approval_surfaces_not_ingested` pipeline reason and `approval_and_delegation_permissions_not_supported` product reason remain the typed unsupported vocabulary until a permission-interpretation slice replaces them. NameWrapper holder enumeration remains a separate unsupported class.
+> **Permission enumeration with partially indexed approval paths** — the manifest-scoped ENSv1 and Basenames registry `ApprovalForAll` logs from admitted Solidity registries are normalized into [account permission state](glossary.md#account-permission-state), and Project records their applicability through current registry ownership. App-facing synthesis and request-relative reason narrowing are deferred to a follow-up change. Registrar token/operator, resolver operator/delegate, and NameWrapper approval logs remain retained [raw facts](glossary.md#raw-fact) without permission output; the uncaptured Mainnet LLL registry and ENSv2 registry operator approvals also remain outside this slice. Permission summaries retain `operator_approval_surfaces_not_ingested` and remain request-relative partial rather than full or authoritative. NameWrapper holder enumeration remains a separate unsupported class.
 > **Upstream**: ENSv1 registry ownership checks include approved operators and `setApprovalForAll` persists that authority `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L20 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)`. BaseRegistrar accepts both per-token approvees and owner-wide operators for `reclaim` `(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)`. PublicResolver accepts owner-wide operators and node delegates `(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L114-L129 @ ens_v1@91c966f)`. Basenames has equivalent registry operator and resolver operator/delegate paths, while its registrar delegates authorization to ERC-721 approval checks `(upstream: .refs/basenames/src/L2/Registry.sol:L46-L52 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/Registry.sol:L148-L158 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L319-L329 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L448-L465 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/L2Resolver.sol:L141-L166 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/L2Resolver.sol:L180-L198 @ basenames@1809bbc)`. ENSv2's ERC-1155 base exposes owner-wide approval and `PermissionedRegistry` inherits approved-owner roles for non-root resources `(upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L70-L84 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)`. NameWrapper separately exposes token approval and owner/operator mutation paths `(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L124-L135 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L210-L221 @ ens_v1@91c966f)`.
-> **Our rule**: `docs/api-v2.md` § Naming Dictionary, `docs/api-v2-routes.md` § `GET /v2/permissions`, `docs/consumer-capabilities.md` § Capability mapping, `docs/projections.md` § Permissions, and `docs/storage.md` § Projection publication.
-> **Why**: the existing projection contains useful owner-derived rows but has no representation of the approval paths above. Marking the current result partial avoids claiming that returned rows, including zero rows, enumerate every account that can mutate a registration. Separate family slices can add each approval path without changing the current resource-anchored response identity.
+> **Our rule**: `docs/projections.md` § Permissions and `docs/storage.md` § Projection publication.
+> **Why**: account state represents future and current registry-owned names without per-name fan-out. Remaining approval paths keep the projection partial; the serving contract is deferred to a follow-up change.
 > **Since**: `2026-08-27`
 
 > **ENSv1 wrapper/resolver admission narrowing** — bigname admits the NameWrapper and declared PublicResolver generations on both the mainnet and Sepolia deployment profiles as source-family inputs for current declared-state normalization without claiming every upstream wrapper or resolver capability as supported public coverage. The narrowing is a property of the source families, not of one deployment profile: it applies wherever `ens_v1_wrapper_l1` or `ens_v1_resolver_l1` is admitted.
@@ -356,10 +531,10 @@ to the applicable entries below.
 > **Why**: preserve a narrow, replayable Base record-family contract while keeping the immutable raw observation available for audit and future replay. Adding an omitted normalized resolver family requires deliberate manifest/adapter admission rather than being inferred from compatible bytecode or from raw-log retention alone.
 > **Since**: `2026-07-10`
 
-> **ENSv1 old-registry admission narrowing** — bigname may admit `ENSRegistryOld` as migration-aware `ens_v1_registry_l1` input, but it does not treat the current registry `startBlock: 9380380` as original ENS history and does not union old and current registry logs by latest block.
+> **ENSv1 old-registry admission narrowing** — bigname may admit `ENSRegistryOld` as old-registry [fallback-handoff](glossary.md#registry-fallback-handoff) input under `ens_v1_registry_l1`, but it does not treat the current registry `startBlock: 9380380` as original ENS history and does not union old and current registry logs by latest block.
 > **Upstream**: `(upstream: .refs/ens_subgraph/subgraph.yaml:L10 @ ens_subgraph@723f1b6)` `(upstream: .refs/ens_subgraph/subgraph.yaml:L15 @ ens_subgraph@723f1b6)` `(upstream: .refs/ens_subgraph/subgraph.yaml:L39 @ ens_subgraph@723f1b6)` `(upstream: .refs/ens_subgraph/subgraph.yaml:L42 @ ens_subgraph@723f1b6)` `(upstream: .refs/ens_subgraph/subgraph.yaml:L44 @ ens_subgraph@723f1b6)` `(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L134 @ ens_subgraph@723f1b6)` `(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L230 @ ens_subgraph@723f1b6)` `(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L238 @ ens_subgraph@723f1b6)` `(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L246 @ ens_subgraph@723f1b6)` `(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L252 @ ens_subgraph@723f1b6)` `(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L259 @ ens_subgraph@723f1b6)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L29 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L40 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L153 @ ens_v1@91c966f)`
-> **Our rule**: `docs/manifests.md` § Required Fields and § Capability Policy; mirrored in `docs/architecture.md` § Source Families / Source Manifests And Capability Registry, `docs/chain-intake.md` § ENSv1 and Basenames resolver intake, `docs/storage.md` § ID Strategy and § Table Families And Write Ownership, and `docs/consumer-capabilities.md` § Current Status.
-> **Why**: preserve current-registry topology after a node migrates, keep the root resolver as the explicit old-registry exception, and prevent historical backfill or old-registry admission from graduating coverage or consumer replacement without route-level evidence.
+> **Our rule**: `docs/manifests.md` § Required Fields and § Capability Policy; mirrored in `docs/architecture.md` § Source Families / Source Manifests And Capability Registry, `docs/chain-intake.md` § ENSv1 and Basenames resolver intake, `docs/storage.md` § ID Strategy and § Table Families And Write Ownership, and `docs/consumer-capabilities.md` § Current Status. Unlike the ENS subgraph, which sets `isMigrated` only in its current-registry `NewOwner` handler and leaves `Transfer` to update the owner, bigname treats both current-registry ownership events as the fallback handoff `(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L131-L135 @ ens_subgraph@723f1b6)` `(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L146-L165 @ ens_subgraph@723f1b6)`. Solidity `setOwner` writes the current record before emitting `Transfer`, and fallback resolver reads delegate only while that record does not exist `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L54 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L172 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)`.
+> **Why**: preserve current-registry topology and resolver truth after the fallback handoff, keep the root resolver as the explicit old-registry exception, and prevent historical backfill or old-registry admission from graduating coverage or consumer replacement without route-level evidence.
 > **Since**: `2026-04-24`
 
 > **ENSv2 ETHRegistry cutover suffix anchor** — upstream canonical-name reconstruction terminates only when its registry walk reaches the supplied `RootRegistry`; during the ENSv2 cutover window, bigname additionally treats the manifest-declared `ETHRegistry` as a suffix anchor.

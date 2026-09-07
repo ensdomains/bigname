@@ -206,7 +206,7 @@ sol! {
 }
 
 #[tokio::test]
-async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> {
+async fn canonical_fixture_builds_all_eight_projection_families() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_all_builders").await?;
     seed_project_fixture(scratch.pool()).await?;
 
@@ -214,6 +214,13 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
 
     let grouped_builder_snapshot: Value = sqlx::query_scalar(
         "SELECT jsonb_build_object(
+             'account_permissions', COALESCE((
+                 SELECT jsonb_agg(
+                     to_jsonb(account_permission) - 'last_recomputed_at' - 'inserted_at'
+                     ORDER BY chain_id, authority_kind, authority_contract, owner, subject,
+                         relation_kind
+                 ) FROM account_permission_state_current account_permission
+             ), '[]'::jsonb),
              'permissions', COALESCE((
                  SELECT jsonb_agg(
                      to_jsonb(permission) - 'last_recomputed_at' - 'inserted_at'
@@ -251,6 +258,7 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
     assert_eq!(
         grouped_builder_snapshot,
         json!({
+            "account_permissions": [],
             "permission_summaries": [{
                 "authority_kind": "registrar",
                 "canonicality_summary": {
@@ -271,8 +279,13 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
                     "coverage": {
                         "exhaustiveness": "not_asserted",
                         "status": "projected"
-                    }
+                    },
+                    "registry_binding_clear_event_id": 3
                 },
+                "registry_binding_chain_positions": null,
+                "registry_binding_provenance": null,
+                "registry_contract": null,
+                "registry_owner": null,
                 "resource_id": RESOURCE,
                 "root_resource_id": null,
                 "support_status": "unsupported",
@@ -385,11 +398,12 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
         })
     );
 
-    let counts: (i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+    let counts: (i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM name_current),
             (SELECT count(*) FROM children_current),
             (SELECT count(*) FROM permissions_current),
+            (SELECT count(*) FROM account_permission_state_current),
             (SELECT count(*) FROM permissions_current_resource_summary),
             (SELECT count(*) FROM record_inventory_current),
             (SELECT count(*) FROM resolver_current),
@@ -398,7 +412,7 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
     )
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(counts, (2, 2, 1, 1, 1, 1, 3, 1));
+    assert_eq!(counts, (2, 2, 1, 0, 1, 1, 1, 3, 1));
 
     let evidence: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT family, status, exhaustiveness
@@ -796,8 +810,13 @@ async fn permission_builder_preserves_grouped_history_output_exactly() -> Result
                         "exhaustiveness": "not_asserted",
                         "status": "projected"
                     },
-                    "history": "tie_break_winner"
+                    "history": "tie_break_winner",
+                    "registry_binding_clear_event_id": 3
                 },
+                "registry_binding_chain_positions": null,
+                "registry_binding_provenance": null,
+                "registry_contract": null,
+                "registry_owner": null,
                 "resource_id": RESOURCE,
                 "root_resource_id": null,
                 "support_status": "unsupported",
@@ -3137,7 +3156,11 @@ async fn a_post_boundary_ens_v1_child_relation_blocks_mainnet_publication() -> R
 /// Seeds the same parent-child pair, but with the child's ENSv2 authority proven by a
 /// positive ENSv2 child registration under a migrated parent registry instead of by the
 /// child's own migration boundary. The ENSv1 relation is restated at `v1_block`.
-async fn seed_positive_child_authority_fixture(pool: &PgPool, v1_block: i64) -> Result<()> {
+async fn seed_positive_child_authority_fixture(
+    pool: &PgPool,
+    v1_block: i64,
+    parent_path: &str,
+) -> Result<()> {
     let subregistry_instance = Uuid::parse_str("00000000-0000-0000-0000-0000000000e4")?;
     let subregistry_address = "0x00000000000000000000000000000000000000e4";
     for block in 4..=6 {
@@ -3179,7 +3202,8 @@ async fn seed_positive_child_authority_fixture(pool: &PgPool, v1_block: i64) -> 
              transaction_index, log_index, canonicality_state, consumer_visibility,
              interpreter_content_hash
          ) VALUES (
-             $1, $2, 'migration_registry_creation', $3, lower($4), $5, '[]'::jsonb,
+             $1, $2, 'migration_registry_creation', $3, lower($4), $5,
+             '[{\"event_identity\":\"positive-child-registry-proof\"}]'::jsonb,
              $6, 1, $7, $8, 0, 0, 'canonical', 'candidate', $9
          )",
     )
@@ -3220,7 +3244,12 @@ async fn seed_positive_child_authority_fixture(pool: &PgPool, v1_block: i64) -> 
         None,
         "MigrationApplied",
         "ens_v2_migration_l1",
-        json!({"successor_binding":{"authority_epoch":"ens_v2"}}),
+        json!({
+            "successor_binding":{"authority_epoch":"ens_v2"},
+            "migration_path":parent_path,
+            "successor_registry_contract_instance_id":subregistry_instance,
+            "evidence":[{"event_identity":"positive-child-registry-proof"}]
+        }),
         json!({}),
     )
     .await?;
@@ -3250,6 +3279,30 @@ async fn seed_positive_child_authority_fixture(pool: &PgPool, v1_block: i64) -> 
             "label":"alice",
             "registrant":OWNER
         }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        2,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "PermissionScopeChanged",
+        "ens_v1_wrapper_l1",
+        json!({"fuses":65536,"wrapper_state":"emancipated"}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        2,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "ExpiryChanged",
+        "ens_v1_wrapper_l1",
+        json!({"expiry":2_000_000_000_i64}),
         json!({}),
     )
     .await?;
@@ -3522,35 +3575,42 @@ async fn same_position_multi_candidate_child_conflict_is_replay_stable_within_ea
 // for a chain/address, and `ranked_v2_registrations` keeps one current row per child and admitted
 // instance, so that proposed second candidate cannot reach `publish` after candidate construction.
 
-// The other ENSv2 child authority proof reaches the same assertion: a positive ENSv2 child
-// registration is an authority epoch too, so an ENSv1 relation asserted after it is the same
-// unreconcilable contradiction as one asserted after a migration boundary.
+// Parent reachability is applied before the child's positive ENSv2 authority proof. An ENSv1
+// relation restated beneath an unlocked migrated parent is unreachable, so it cannot become a
+// dual-current contradiction or suppress the reachable ENSv2 relation.
 #[tokio::test]
-async fn a_post_epoch_ens_v1_relation_blocks_a_positively_registered_child() -> Result<()> {
-    let scratch = ScratchDatabase::create("production_project_child_positive_conflict").await?;
-    seed_project_fixture(scratch.pool()).await?;
-    seed_positive_child_authority_fixture(scratch.pool(), 5).await?;
+async fn parent_reachability_filters_before_positive_v2_child_integrity() -> Result<()> {
+    for path in ["unlocked_wrapped", "locked_wrapped"] {
+        let scratch =
+            ScratchDatabase::create(&format!("production_project_positive_child_{path}")).await?;
+        seed_project_fixture(scratch.pool()).await?;
+        seed_positive_child_authority_fixture(scratch.pool(), 5, path).await?;
 
-    let failure = run_project_phase(scratch.pool(), CHAIN, 5)
-        .await
-        .expect_err("a post-epoch ENSv1 child relation must not publish");
-    assert!(
-        failure
-            .to_string()
-            .contains("after the child's ENSv2 authority began"),
-        "unexpected failure: {failure}"
-    );
-    let rows = generation_failure_rows(scratch.pool(), CHAIN).await?;
-    assert_eq!(rows.len(), 1);
-    let (_, _, _, failure_kind, _, name, evidence) = rows[0].clone();
-    assert_eq!(failure_kind, DUAL_CURRENT_CHILD_AUTHORITY);
-    assert_eq!(name, "ens:0xalice");
+        run_project_phase(scratch.pool(), CHAIN, 5).await?;
+        assert_eq!(
+            child_relation(scratch.pool()).await?,
+            Some((None, Some(OWNER.to_owned()))),
+            "the ENSv2 relation publishes after the ENSv1 arm is filtered for {path}"
+        );
+        assert!(
+            generation_failure_rows(scratch.pool(), CHAIN)
+                .await?
+                .is_empty()
+        );
+        scratch.cleanup().await?;
+    }
+    let control = ScratchDatabase::create("production_project_positive_child_control").await?;
+    seed_project_fixture(control.pool()).await?;
+    seed_positive_child_authority_fixture(control.pool(), 5, "locked_wrapped").await?;
+    sqlx::query("DELETE FROM normalized_events WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'RegistrationGranted' AND logical_name_id = 'ens:0xalice' AND after_state ->> 'registry_contract_instance_id' = '00000000-0000-0000-0000-0000000000e4'")
+        .execute(control.pool()).await?;
+    run_project(control.pool(), CHAIN, None, RunMode::Normal, 0, 5).await?;
     assert_eq!(
-        evidence["authority_proof"]["proof_kind"],
-        json!("positive_v2_child_registration"),
-        "the positive registration is the proof this conflict is measured against"
+        child_relation(control.pool()).await?,
+        Some((Some(OWNER.to_owned()), None))
     );
-    scratch.cleanup().await
+    control.cleanup().await?;
+    Ok(())
 }
 
 // Basenames subnames are their own authority arm. The child's authority selects `basenames`,
@@ -3611,26 +3671,20 @@ async fn a_basenames_child_publishes_under_its_own_authority_arm() -> Result<()>
     scratch.cleanup().await
 }
 
-// Sepolia runs the same selection but never blocks publication on the pair.
+// Sepolia applies the same proof-gated contradiction assertion as Mainnet.
 #[tokio::test]
-async fn a_sepolia_child_overlap_selects_without_blocking_publication() -> Result<()> {
+async fn a_sepolia_child_overlap_blocks_publication() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_child_sepolia").await?;
     seed_project_fixture(scratch.pool()).await?;
     seed_child_authority_fixture(scratch.pool(), 5, 3).await?;
     declare_sepolia_post_audit_profile(scratch.pool(), CHAIN).await?;
 
-    run_project_phase(scratch.pool(), CHAIN, 5).await?;
-    assert_eq!(
-        child_relation(scratch.pool()).await?,
-        Some((None, Some(OWNER.to_owned()))),
-        "sepolia still selects the proven ENSv2 relation"
-    );
-    assert!(
-        generation_failure_rows(scratch.pool(), CHAIN)
-            .await?
-            .is_empty(),
-        "sepolia records no publication-blocking failure"
-    );
+    run_project_phase(scratch.pool(), CHAIN, 5)
+        .await
+        .expect_err("the proven Sepolia child contradiction must not publish");
+    let rows = generation_failure_rows(scratch.pool(), CHAIN).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].3, DUAL_CURRENT_CHILD_AUTHORITY);
     scratch.cleanup().await
 }
 
@@ -9380,34 +9434,33 @@ async fn manifest_admission_reclassifies_v2_resolver_inline_without_a_queue() ->
 }
 
 #[tokio::test]
-async fn authority_selector_dual_open_cross_arm_fixture() -> Result<()> {
-    for (database_prefix, chain, v2_block, expected_arms) in [
+async fn authority_selector_uses_successor_after_closed_predecessor_across_positions() -> Result<()>
+{
+    for (database_prefix, chain, v2_block, v1_block, boundary_block) in [
         (
             "production_project_authority_v2_older",
             "project-authority-v2-older",
             1,
-            ["ens_v2", "ens_v1"],
+            3,
+            5,
         ),
         (
             "production_project_authority_v2_newer",
             "project-authority-v2-newer",
             4,
-            ["ens_v1", "ens_v2"],
+            1,
+            4,
         ),
     ] {
         let scratch = ScratchDatabase::create(database_prefix).await?;
-        let logical_name_id =
-            seed_dual_open_cross_arm_fixture(scratch.pool(), chain, v2_block).await?;
-        declare_sepolia_post_audit_profile(scratch.pool(), chain).await?;
-        InterpretEngine::new(scratch.pool().clone())
-            .run_batch(InterpretRequest {
-                chain_id: chain.into(),
-                from_block: 0,
-                to_block: 5,
-                resume_current: None,
-                mode: InterpretRunMode::Normal,
-            })
-            .await?;
+        let logical_name_id = seed_closed_predecessor_cross_arm_fixture(
+            scratch.pool(),
+            chain,
+            v2_block,
+            v1_block,
+            boundary_block,
+        )
+        .await?;
         sqlx::query(
             "UPDATE surface_bindings
              SET surface_binding_id = CASE authority_arm
@@ -9421,29 +9474,57 @@ async fn authority_selector_dual_open_cross_arm_fixture() -> Result<()> {
         .execute(scratch.pool())
         .await?;
 
-        let open_bindings: Vec<(Uuid, String, time::OffsetDateTime)> = sqlx::query_as(
-            "SELECT surface_binding_id, authority_arm, active_from
+        let bindings: Vec<(
+            Uuid,
+            String,
+            time::OffsetDateTime,
+            Option<time::OffsetDateTime>,
+        )> = sqlx::query_as(
+            "SELECT DISTINCT ON (authority_arm)
+                    surface_binding_id, authority_arm, active_from, active_to
              FROM surface_bindings
-             WHERE chain_id = $1 AND logical_name_id = $2 AND active_to IS NULL
-             ORDER BY active_from, surface_binding_id",
+             WHERE chain_id = $1 AND logical_name_id = $2
+             ORDER BY authority_arm, block_number DESC, surface_binding_id DESC",
         )
         .bind(chain)
         .bind(&logical_name_id)
         .fetch_all(scratch.pool())
         .await?;
         assert_eq!(
-            open_bindings
+            bindings
                 .iter()
-                .map(|(_, arm, _)| arm.as_str())
+                .map(|(_, arm, _, _)| arm.as_str())
                 .collect::<Vec<_>>(),
-            expected_arms,
-            "production Interpret must retain both authority arms"
+            ["ens_v1", "ens_v2"],
+            "the post-transition fixture must retain both authority histories"
         );
-        assert!(open_bindings[0].2 < open_bindings[1].2);
+        assert!(
+            bindings[0].3.is_some(),
+            "the ENSv1 predecessor is closed: {bindings:?}"
+        );
+        assert!(bindings[1].3.is_none(), "the ENSv2 successor is current");
+        if database_prefix.ends_with("v2_older") {
+            assert!(
+                bindings[1].2 < bindings[0].2,
+                "the older-successor case must place ENSv2 before ENSv1: {bindings:?}"
+            );
+        }
 
-        let (v2_binding, v2_resource, proof_identity) =
-            insert_activated_authority_proof(scratch.pool(), chain, &logical_name_id, "unwrapped")
-                .await?;
+        let (v2_binding, v2_resource, proof_identity) = insert_activated_authority_proof(
+            scratch.pool(),
+            chain,
+            &logical_name_id,
+            "unwrapped",
+            Some(boundary_block),
+        )
+        .await?;
+        let proof_block: i64 = sqlx::query_scalar(
+            "SELECT block_number FROM normalized_events WHERE event_identity = $1",
+        )
+        .bind(&proof_identity)
+        .fetch_one(scratch.pool())
+        .await?;
+        assert_eq!(proof_block, boundary_block);
         run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
         let projected: (Uuid, Uuid, Value) = sqlx::query_as(
             "SELECT surface_binding_id, resource_id,
@@ -9454,15 +9535,23 @@ async fn authority_selector_dual_open_cross_arm_fixture() -> Result<()> {
         .fetch_one(scratch.pool())
         .await?;
         assert_eq!(projected.0, v2_binding);
-        assert_ne!(
-            projected.0,
-            open_bindings.iter().map(|row| row.0).max().unwrap()
-        );
+        assert_ne!(projected.0, bindings.iter().map(|row| row.0).max().unwrap());
         assert_eq!(projected.1, v2_resource);
         assert_eq!(projected.2["authority_arm"], "ens_v2");
         assert_eq!(projected.2["proof_kind"], "migration_authority_transition");
         assert_eq!(projected.2["proof_event_identity"], proof_identity);
         assert_eq!(projected.2["transition_id"], "authority-proof-fixture");
+        let leaked_registry_owner: Option<String> = sqlx::query_scalar(
+            "SELECT registry_owner FROM permissions_current_resource_summary
+             WHERE resource_id = $1",
+        )
+        .bind(v2_resource)
+        .fetch_one(scratch.pool())
+        .await?;
+        assert_eq!(
+            leaked_registry_owner, None,
+            "ENSv1 registry evidence must not bind the selected ENSv2 resource"
+        );
 
         scratch.cleanup().await?;
     }
@@ -9473,20 +9562,16 @@ async fn authority_selector_dual_open_cross_arm_fixture() -> Result<()> {
 async fn authority_selector_follows_post_migration_v2_binding_churn() -> Result<()> {
     let scratch = ScratchDatabase::create("project_authority_v2_binding_churn").await?;
     let chain = "authority-v2-binding-churn";
-    let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
-    declare_sepolia_post_audit_profile(scratch.pool(), chain).await?;
-    InterpretEngine::new(scratch.pool().clone())
-        .run_batch(InterpretRequest {
-            chain_id: chain.into(),
-            from_block: 0,
-            to_block: 5,
-            resume_current: None,
-            mode: InterpretRunMode::Normal,
-        })
-        .await?;
-    let (successor_binding, successor_resource, _) =
-        insert_activated_authority_proof(scratch.pool(), chain, &logical_name_id, "unwrapped")
-            .await?;
+    let logical_name_id =
+        seed_closed_predecessor_cross_arm_fixture(scratch.pool(), chain, 4, 1, 4).await?;
+    let (successor_binding, successor_resource, _) = insert_activated_authority_proof(
+        scratch.pool(),
+        chain,
+        &logical_name_id,
+        "unwrapped",
+        None,
+    )
+    .await?;
     let churned_binding = Uuid::parse_str("00000000-0000-0000-0000-000000000020")?;
     sqlx::query(
         "UPDATE surface_bindings SET active_to = to_timestamp(5)
@@ -10315,17 +10400,8 @@ async fn earlier_other_resource_grant_disqualifies_regime_carry() -> Result<()> 
 async fn candidate_authority_is_inert_and_activation_names_every_changed_row() -> Result<()> {
     let scratch = ScratchDatabase::create("project_authority_candidate_parity").await?;
     let chain = "authority-candidate-parity";
-    let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 1).await?;
-    declare_sepolia_post_audit_profile(scratch.pool(), chain).await?;
-    InterpretEngine::new(scratch.pool().clone())
-        .run_batch(InterpretRequest {
-            chain_id: chain.into(),
-            from_block: 0,
-            to_block: 5,
-            resume_current: None,
-            mode: InterpretRunMode::Normal,
-        })
-        .await?;
+    let logical_name_id =
+        seed_closed_predecessor_cross_arm_fixture(scratch.pool(), chain, 2, 1, 2).await?;
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
     normalize_projection_clocks(scratch.pool()).await?;
     let before: Value = sqlx::query_scalar(
@@ -10335,9 +10411,14 @@ async fn candidate_authority_is_inert_and_activation_names_every_changed_row() -
     .fetch_one(scratch.pool())
     .await?;
 
-    let (_, _, proof_identity) =
-        insert_activated_authority_proof(scratch.pool(), chain, &logical_name_id, "unwrapped")
-            .await?;
+    let (_, _, proof_identity) = insert_activated_authority_proof(
+        scratch.pool(),
+        chain,
+        &logical_name_id,
+        "unwrapped",
+        None,
+    )
+    .await?;
     sqlx::query(
         "UPDATE normalized_events SET consumer_visibility = 'candidate'
          WHERE event_identity = $1",
@@ -10752,7 +10833,9 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
         "ens_v2_migration_l1",
         json!({
             "successor_registry_contract_instance_id":Uuid::new_v4(),
-            "fixture_child_registry_contract_instance_id":registry_instance
+            "migration_path":"locked_wrapped",
+            "fixture_child_registry_contract_instance_id":registry_instance,
+            "evidence":[{"event_identity":"fixture-migration-registry-proof"}]
         }),
         json!({}),
     )
@@ -10778,7 +10861,8 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
              transaction_index, log_index, canonicality_state, consumer_visibility,
              interpreter_content_hash
          ) VALUES (
-             $1, $2, 'migration_registry_creation', $3, lower($4), $5, '[]'::jsonb,
+             $1, $2, 'migration_registry_creation', $3, lower($4), $5,
+             '[{\"event_identity\":\"fixture-migration-registry-proof\"}]'::jsonb,
              $6, $7, $8, $9, $10, $11, 'canonical', 'candidate', $12
          )",
     )
@@ -11169,6 +11253,8 @@ async fn authority_classifier_covers_every_ens_binding_event_arm_combination() -
                 &logical_name_id,
                 bindings,
                 events,
+                1,
+                None,
             )
             .await?;
             let has_v1 = bindings.includes_v1() || events.includes_v1();
@@ -11214,10 +11300,13 @@ async fn authority_classifier_covers_every_ens_binding_event_arm_combination() -
         &proof_name,
         EnsArmSet::Both,
         EnsArmSet::Both,
+        1,
+        Some(5),
     )
     .await?;
     let (proof_binding, proof_resource, _) =
-        insert_activated_authority_proof(scratch.pool(), chain, &proof_name, "unwrapped").await?;
+        insert_activated_authority_proof(scratch.pool(), chain, &proof_name, "unwrapped", None)
+            .await?;
     assert_eq!(proof_bindings.v2, Some((proof_binding, proof_resource)));
 
     let released_name = format!(
@@ -11230,6 +11319,8 @@ async fn authority_classifier_covers_every_ens_binding_event_arm_combination() -
         &released_name,
         EnsArmSet::V2,
         EnsArmSet::V2,
+        1,
+        None,
     )
     .await?;
     let (released_binding, released_resource) = released_bindings.v2.unwrap();
@@ -11274,6 +11365,8 @@ async fn authority_classifier_covers_every_ens_binding_event_arm_combination() -
         &regime_name,
         EnsArmSet::V2,
         EnsArmSet::V2,
+        1,
+        None,
     )
     .await?;
     let (old_regime_binding, old_regime_resource) = regime_bindings.v2.unwrap();
@@ -11305,6 +11398,7 @@ async fn authority_classifier_covers_every_ens_binding_event_arm_combination() -
         new_regime_resource,
         new_regime_binding,
         4,
+        None,
     )
     .await?;
     insert_event(
@@ -11801,6 +11895,8 @@ async fn reservation_release_event_vote_requires_a_preexisting_binding() -> Resu
         &logical_name_id,
         EnsArmSet::Empty,
         EnsArmSet::Empty,
+        1,
+        None,
     )
     .await?;
 
@@ -11814,6 +11910,7 @@ async fn reservation_release_event_vote_requires_a_preexisting_binding() -> Resu
         future_resource,
         future_binding,
         2,
+        None,
     )
     .await?;
     sqlx::query(
@@ -12050,10 +12147,26 @@ async fn bindingless_resolver_summary_ignores_selected_head_resource_shape() -> 
             json!({"capability_flags":{"exact_name_profile":{"status":"supported"}}}),
         )
         .await?;
-        seed_authority_classifier_case(pool, chain, &resourceful, EnsArmSet::Empty, EnsArmSet::V2)
-            .await?;
-        seed_authority_classifier_case(pool, chain, &resourceless, EnsArmSet::Empty, EnsArmSet::V2)
-            .await?;
+        seed_authority_classifier_case(
+            pool,
+            chain,
+            &resourceful,
+            EnsArmSet::Empty,
+            EnsArmSet::V2,
+            1,
+            None,
+        )
+        .await?;
+        seed_authority_classifier_case(
+            pool,
+            chain,
+            &resourceless,
+            EnsArmSet::Empty,
+            EnsArmSet::V2,
+            1,
+            None,
+        )
+        .await?;
         sqlx::query(
             "INSERT INTO resources (
                  resource_id, chain_id, block_hash, block_number, canonicality_state
@@ -13378,6 +13491,196 @@ async fn registrar_transfer_authority_flip_matches_full_rebuild() -> Result<()> 
     assert_registrar_transfer_matches_full_rebuild("project-resolver-transfer-flip", true).await
 }
 
+#[tokio::test]
+async fn registrar_reregistration_moves_registry_binding_per_block() -> Result<()> {
+    let scratch = ScratchDatabase::create("project-registrar-reregistration-binding").await?;
+    let splits = vec![
+        (
+            11,
+            ScratchDatabase::create("project-registrar-binding-split-11").await?,
+        ),
+        (
+            13,
+            ScratchDatabase::create("project-registrar-binding-split-13").await?,
+        ),
+        (
+            14,
+            ScratchDatabase::create("project-registrar-binding-split-14").await?,
+        ),
+    ];
+    let chain = "project-registrar-reregistration-binding";
+    let fixture: Value = serde_json::from_str(include_str!(
+        "fixtures/registry-binding-reregistration.json"
+    ))?;
+    let blocks = serde_json::from_value::<Vec<i64>>(fixture["blocks"].clone())?;
+    for pool in std::iter::once(scratch.pool()).chain(splits.iter().map(|(_, db)| db.pool())) {
+        seed_raw_registrar_transfer_fixture(pool, chain, true).await?;
+        for table in ["raw_logs", "raw_transactions"] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE chain_id = $1"))
+                .bind(chain)
+                .execute(pool)
+                .await?;
+        }
+        for block in 6..=*blocks.last().unwrap() {
+            insert_lineage_block(pool, chain, block).await?;
+        }
+        sqlx::raw_sql(
+            "ALTER TABLE chain_lineage DISABLE TRIGGER chain_lineage_protect_identity;
+        UPDATE chain_lineage SET block_timestamp = to_timestamp(CASE block_number
+        WHEN 2 THEN 8000000 WHEN 3 THEN 8000001 WHEN 4 THEN 8000002
+        WHEN 5 THEN 16000004 WHEN 6 THEN 16000005 WHEN 7 THEN 16000006
+        WHEN 8 THEN 16000007 ELSE block_number END);
+        ALTER TABLE chain_lineage ENABLE TRIGGER chain_lineage_protect_identity;",
+        )
+        .execute(pool)
+        .await?;
+        for fact in fixture["facts"].as_array().unwrap() {
+            let topics = serde_json::from_value::<Vec<String>>(fact["topics"].clone())?
+                .iter()
+                .map(|topic| topic.parse())
+                .collect::<Result<Vec<B256>, _>>()?;
+            let data = alloy_primitives::hex::decode(
+                fact["data"].as_str().unwrap().trim_start_matches("0x"),
+            )?;
+            insert_raw_event_at(
+                pool,
+                chain,
+                fact["block"].as_i64().unwrap(),
+                0,
+                fact["log"].as_i64().unwrap(),
+                fact["emitter"].as_str().unwrap(),
+                &topics,
+                &data,
+            )
+            .await?;
+        }
+    }
+    let expected: Vec<Vec<String>> = serde_json::from_value(fixture["expected"].clone())?;
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: *blocks.last().unwrap(),
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    let full_payload = registry_transition_payload(scratch.pool(), chain).await?;
+    assert_eq!(full_payload["owner_getter"], TRANSFER_OWNER);
+    assert_eq!(full_payload["registry_contract"], REGISTRY);
+    for (split, database) in &splits {
+        let first = InterpretEngine::new(database.pool().clone())
+            .run_batch(InterpretRequest {
+                chain_id: chain.into(),
+                from_block: 0,
+                to_block: *split,
+                resume_current: None,
+                mode: InterpretRunMode::Normal,
+            })
+            .await?;
+        InterpretEngine::new(database.pool().clone())
+            .run_batch(InterpretRequest {
+                chain_id: chain.into(),
+                from_block: split + 1,
+                to_block: 24,
+                resume_current: Some(first.current),
+                mode: InterpretRunMode::Normal,
+            })
+            .await?;
+        assert_eq!(
+            registry_transition_payload(database.pool(), chain).await?,
+            full_payload,
+            "split after block {split}"
+        );
+    }
+    let incremental = &splits[2].1;
+    let logical_name_id: String = sqlx::query_scalar(
+        "SELECT logical_name_id FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RegistrationGranted' LIMIT 1",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    for (index, block) in blocks.into_iter().enumerate() {
+        run_project(scratch.pool(), chain, None, RunMode::Normal, 0, block).await?;
+        let rows = registry_binding_rows(scratch.pool(), &logical_name_id).await?;
+        let owners = rows
+            .iter()
+            .filter_map(|row| row.1.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            owners, expected[index],
+            "registry owners at block {block}: {rows:?}"
+        );
+        let selected: Option<Uuid> = sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT resource_id FROM name_current WHERE logical_name_id = $1",
+        )
+        .bind(&logical_name_id)
+        .fetch_one(scratch.pool())
+        .await?;
+        if let Some(selected) = selected {
+            assert!(
+                rows.iter().all(|row| row.1.is_none() || row.0 == selected),
+                "binding is not on selected resource at block {block}: selected={selected:?} rows={rows:?}"
+            );
+        }
+        assert!(rows.iter().all(|row| row.1.is_none()
+            || row.2.as_deref() == Some("0x0000000000000000000000000000000000000044")));
+    }
+    run_project(incremental.pool(), chain, None, RunMode::Normal, 0, 14).await?;
+    run_project(
+        incremental.pool(),
+        chain,
+        Some(Marker {
+            number: 14,
+            hash: block_hash(chain, 14),
+        }),
+        RunMode::Normal,
+        15,
+        24,
+    )
+    .await?;
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(scratch.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(scratch.pool()).await?
+    );
+    InterpretEngine::new(incremental.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 24,
+            resume_current: None,
+            mode: InterpretRunMode::Redo,
+        })
+        .await?;
+    assert_eq!(
+        registry_transition_payload(incremental.pool(), chain).await?,
+        full_payload
+    );
+    run_project(incremental.pool(), chain, None, RunMode::Normal, 0, 24).await?;
+    assert_eq!(
+        registry_binding_rows(incremental.pool(), &logical_name_id).await?,
+        registry_binding_rows(scratch.pool(), &logical_name_id).await?
+    );
+    for (_, database) in splits {
+        database.cleanup().await?;
+    }
+    scratch.cleanup().await
+}
+async fn registry_transition_payload(pool: &PgPool, chain: &str) -> Result<Value> {
+    Ok(sqlx::query_scalar("SELECT after_state FROM normalized_events WHERE chain_id = $1 AND block_number = 15 AND event_kind = 'SurfaceBound' AND source_family IN ('ens_v1_registrar_l1', 'basenames_base_registrar')")
+        .bind(chain).fetch_one(pool).await?)
+}
+async fn registry_binding_rows(
+    pool: &PgPool,
+    logical_name_id: &str,
+) -> Result<Vec<(Uuid, Option<String>, Option<String>)>> {
+    Ok(sqlx::query_as("SELECT resource_id, registry_owner, registry_contract FROM permissions_current_resource_summary WHERE resource_id IN (SELECT resource_id FROM normalized_events WHERE logical_name_id = $1) ORDER BY resource_id")
+        .bind(logical_name_id).fetch_all(pool).await?)
+}
+
 async fn assert_registrar_transfer_matches_full_rebuild(
     chain: &str,
     include_registry_owner: bool,
@@ -13397,8 +13700,8 @@ async fn assert_registrar_transfer_matches_full_rebuild(
             .await?;
     }
 
-    let resolver_permissions: Vec<(Value, Value, String, Option<String>)> = sqlx::query_as(
-        "SELECT before_state, after_state, source_family,
+    let resolver_permissions: Vec<(Uuid, Value, Value, String, Option<String>)> = sqlx::query_as(
+        "SELECT resource_id, before_state, after_state, source_family,
                 raw_fact_ref ->> 'emitting_address'
          FROM normalized_events
          WHERE chain_id = $1 AND block_number = 5
@@ -13415,41 +13718,51 @@ async fn assert_registrar_transfer_matches_full_rebuild(
     assert_eq!(
         resolver_permissions.len(),
         2,
-        "transfer must emit one resolver revoke and one resolver grant"
+        "authority change must emit one resolver revoke and one resolver grant"
     );
-    assert!(resolver_permissions.iter().all(|(_, _, family, emitter)| {
-        family == "basenames_base_registrar" && emitter.as_deref() == Some(REGISTRAR)
-    }));
+    assert!(
+        resolver_permissions
+            .iter()
+            .all(|(_, _, _, family, emitter)| {
+                family == "basenames_base_registrar" && emitter.as_deref() == Some(REGISTRAR)
+            })
+    );
     let revoke = resolver_permissions
         .iter()
-        .find(|(before, _, _, _)| before.pointer("/subject").and_then(Value::as_str) == Some(OWNER))
-        .expect("old-owner resolver revoke");
+        .find(|(_, before, _, _, _)| {
+            before.pointer("/subject").and_then(Value::as_str) == Some(OWNER)
+        })
+        .expect("old-authority resolver revoke");
     assert_eq!(
-        revoke.0.pointer("/scope/resolver_address"),
+        revoke.1.pointer("/scope/resolver_address"),
         Some(&json!(RESOLVER))
     );
-    assert_eq!(
-        revoke.0.pointer("/effective_powers"),
-        Some(&json!(["resolver_control"]))
-    );
+    assert_eq!(revoke.1["effective_powers"], json!(["resolver_control"]));
+    assert_eq!(revoke.2["effective_powers"], json!([]));
+    let expected_grantee = if include_registry_owner {
+        OWNER
+    } else {
+        TRANSFER_OWNER
+    };
     let grant = resolver_permissions
         .iter()
-        .find(|(_, after, _, _)| {
-            after.pointer("/subject").and_then(Value::as_str) == Some(TRANSFER_OWNER)
+        .find(|(_, _, after, _, _)| {
+            after.pointer("/subject").and_then(Value::as_str) == Some(expected_grantee)
+                && after["effective_powers"] == json!(["resolver_control"])
         })
-        .expect("new-owner resolver grant");
+        .expect("new-authority resolver grant");
     assert_eq!(
-        grant.1.pointer("/scope/resolver_address"),
+        grant.2.pointer("/scope/resolver_address"),
         Some(&json!(RESOLVER))
     );
     assert_eq!(
-        grant.1.pointer("/grant_source/source_event_kind"),
+        grant.2.pointer("/grant_source/source_event_kind"),
         Some(&json!("TokenControlTransferred"))
     );
-    assert!(resolver_permissions.iter().all(|(before, after, _, _)| {
+    assert_eq!(revoke.0 == grant.0, !include_registry_owner);
+    assert!(resolver_permissions.iter().all(|(_, before, after, _, _)| {
         before.get("resolver").is_none() && after.get("resolver").is_none()
     }));
-
     let surface_event_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events
          WHERE chain_id = $1 AND block_number = 5
@@ -13501,22 +13814,35 @@ async fn assert_registrar_transfer_matches_full_rebuild(
     run_project(full.pool(), chain, None, RunMode::Normal, 0, 5).await?;
 
     for pool in [incremental.pool(), full.pool()] {
-        let current_permission: (String, Option<String>) = sqlx::query_as(
-            "SELECT subject, grant_source ->> 'source_event_kind'
+        let current_permission: (Uuid, String, Option<String>, bool) = sqlx::query_as(
+            "SELECT resource_id, subject, grant_source ->> 'source_event_kind', (NOT EXISTS (
+                 SELECT 1 FROM permissions_current retired WHERE retired.resource_id = $2
+                   AND lower(retired.subject) = lower($3)
+                   AND retired.effective_powers ? 'resource_control') AND EXISTS (
+                 SELECT 1 FROM permissions_current active
+                 WHERE active.resource_id = permissions_current.resource_id
+                   AND lower(active.subject) = lower(permissions_current.subject)
+                   AND active.effective_powers ? 'resource_control'))
              FROM permissions_current
              WHERE scope_kind = 'resolver'
+               AND resource_id = (
+                   SELECT resource_id FROM name_current
+                   WHERE raw_name = 'alice.base.eth'
+               )
                AND lower(scope_detail ->> 'resolver_address') = lower($1)",
         )
         .bind(RESOLVER)
+        .bind(revoke.0)
+        .bind(OWNER)
         .fetch_one(pool)
         .await?;
-        assert_eq!(
-            current_permission,
-            (
-                TRANSFER_OWNER.into(),
-                Some("TokenControlTransferred".into())
-            )
+        let expected_permission = (
+            grant.0,
+            expected_grantee.into(),
+            Some("TokenControlTransferred".into()),
+            true,
         );
+        assert_eq!(current_permission, expected_permission);
     }
 
     let incremental_resolver = resolver_permission_summary(incremental.pool(), chain).await?;
@@ -13524,7 +13850,7 @@ async fn assert_registrar_transfer_matches_full_rebuild(
     for summary in [&incremental_resolver, &full_resolver] {
         assert_eq!(
             summary.pointer("/permissions/items/0/subject"),
-            Some(&json!(TRANSFER_OWNER))
+            Some(&json!(expected_grantee))
         );
         assert_eq!(
             summary.pointer("/permissions/items/0/grant_source/source_event_kind"),
@@ -13532,7 +13858,7 @@ async fn assert_registrar_transfer_matches_full_rebuild(
         );
         assert_eq!(
             summary.pointer("/role_holders/items/0/subject"),
-            Some(&json!(TRANSFER_OWNER))
+            Some(&json!(expected_grantee))
         );
     }
 
@@ -16848,6 +17174,7 @@ async fn surviving_reservation_drives_summary_after_other_resource_expires() -> 
         Uuid::parse_str(REGISTERED_RESOURCE)?,
         Uuid::parse_str(BINDING)?,
         1,
+        None,
     )
     .await?;
     sqlx::query(
@@ -17062,6 +17389,7 @@ async fn state_derived_expiry_for_another_resource_does_not_delete_the_current_b
         Uuid::parse_str(CURRENT_RESOURCE)?,
         Uuid::parse_str(CURRENT_BINDING)?,
         1,
+        None,
     )
     .await?;
     sqlx::query(
@@ -18980,6 +19308,7 @@ async fn seed_expiry_revival_subrange_fixture(pool: &PgPool) -> Result<()> {
         Uuid::parse_str(EXPIRY_REDO_CURRENT_RESOURCE)?,
         Uuid::parse_str(EXPIRY_REDO_CURRENT_BINDING)?,
         3,
+        None,
     )
     .await?;
     insert_event(
@@ -19045,6 +19374,7 @@ async fn seed_expiry_release_redo_fixture(pool: &PgPool) -> Result<()> {
         Uuid::parse_str(EXPIRY_REDO_RESOURCE)?,
         Uuid::parse_str(EXPIRY_REDO_BINDING)?,
         1,
+        None,
     )
     .await?;
     insert_event(
@@ -19453,7 +19783,7 @@ async fn a_closed_predecessor_publishes_on_mainnet_without_an_audit_row() -> Res
 }
 
 #[tokio::test]
-async fn sepolia_profile_publishes_the_same_dual_current_corpus() -> Result<()> {
+async fn sepolia_profile_blocks_the_same_proven_dual_current_corpus() -> Result<()> {
     let scratch = ScratchDatabase::create("project_dual_current_sepolia").await?;
     let chain = "project-dual-current-sepolia";
     let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
@@ -19467,22 +19797,23 @@ async fn sepolia_profile_publishes_the_same_dual_current_corpus() -> Result<()> 
             mode: InterpretRunMode::Normal,
         })
         .await?;
-    insert_activated_authority_proof(scratch.pool(), chain, &logical_name_id, "unwrapped").await?;
+    // Construct this proof row as a pre-Project fixture.
+    // Connected activation is exercised by the #852 e2e scenarios.
+    insert_activated_authority_proof(
+        scratch.pool(),
+        chain,
+        &logical_name_id,
+        "unlocked_wrapped",
+        None,
+    )
+    .await?;
 
-    run_project_phase(scratch.pool(), chain, 5).await?;
-
-    let published: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
-            .bind(&logical_name_id)
-            .fetch_one(scratch.pool())
-            .await?;
-    assert_eq!(published, 1, "sepolia keeps selecting past the boundary");
-    assert!(
-        generation_failure_rows(scratch.pool(), chain)
-            .await?
-            .is_empty(),
-        "the assertion is Mainnet-scoped"
-    );
+    run_project_phase(scratch.pool(), chain, 5)
+        .await
+        .expect_err("the proven Sepolia exact-name contradiction must not publish");
+    let rows = generation_failure_rows(scratch.pool(), chain).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].3, DUAL_CURRENT_EXACT_NAME_AUTHORITY);
 
     scratch.cleanup().await
 }
@@ -19709,7 +20040,7 @@ async fn seed_mainnet_dual_current_conflict(pool: &PgPool, chain: &str) -> Resul
             mode: InterpretRunMode::Normal,
         })
         .await?;
-    insert_activated_authority_proof(pool, chain, &logical_name_id, "unwrapped").await?;
+    insert_activated_authority_proof(pool, chain, &logical_name_id, "unwrapped", None).await?;
     Ok(logical_name_id)
 }
 
@@ -22464,6 +22795,12 @@ async fn seed_raw_registrar_transfer_fixture(
                 &["registry"],
                 &["ResolverChanged", "PermissionChanged"],
             ),
+            (
+                "Transfer",
+                "event Transfer(bytes32 indexed node, address owner)",
+                &["registry"],
+                &["AuthorityTransferred", "PermissionChanged"],
+            ),
         ],
     )
     .await?;
@@ -22916,6 +23253,8 @@ async fn seed_authority_classifier_case(
     logical_name_id: &str,
     bindings: EnsArmSet,
     events: EnsArmSet,
+    v2_binding_block: i64,
+    v1_active_to: Option<i64>,
 ) -> Result<ClassifierBindings> {
     let namehash = logical_name_id
         .strip_prefix("ens:")
@@ -22951,6 +23290,7 @@ async fn seed_authority_classifier_case(
             resource,
             binding,
             1,
+            v1_active_to,
         )
         .await?;
         seeded.v1 = Some((binding, resource));
@@ -22965,7 +23305,8 @@ async fn seed_authority_classifier_case(
             "ens_v2",
             resource,
             binding,
-            1,
+            v2_binding_block,
+            None,
         )
         .await?;
         seeded.v2 = Some((binding, resource));
@@ -22990,7 +23331,7 @@ async fn seed_authority_classifier_case(
         insert_event(
             pool,
             chain,
-            2,
+            v2_binding_block,
             Some(logical_name_id),
             resource_id.as_deref(),
             "RegistrationGranted",
@@ -23037,6 +23378,7 @@ async fn seed_authority_classifier_case(
     Ok(seeded)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_classifier_resource_and_binding(
     pool: &PgPool,
     chain: &str,
@@ -23045,6 +23387,7 @@ async fn insert_classifier_resource_and_binding(
     resource_id: Uuid,
     binding_id: Uuid,
     block_number: i64,
+    active_to: Option<i64>,
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO resources (
@@ -23057,13 +23400,15 @@ async fn insert_classifier_resource_and_binding(
     .bind(block_number)
     .execute(pool)
     .await?;
+    sqlx::query("WITH lineage AS (INSERT INTO token_lineages (token_lineage_id, chain_id, block_hash, block_number, canonicality_state) SELECT resource_id, chain_id, block_hash, block_number, canonicality_state FROM resources WHERE resource_id = $1) UPDATE resources SET token_lineage_id = $1 WHERE resource_id = $1").bind(resource_id).execute(pool).await?;
     sqlx::query(
         "INSERT INTO surface_bindings (
              surface_binding_id, logical_name_id, resource_id, binding_kind,
-             authority_arm, active_from, chain_id, block_hash, block_number,
+             authority_arm, active_from, active_to, chain_id, block_hash, block_number,
              provenance, canonicality_state
          ) VALUES (
              $1, $2, $3, 'declared_registry_path', $4, to_timestamp($5),
+             CASE WHEN $8::bigint IS NULL THEN NULL ELSE to_timestamp($8) END,
              $6, $7, $5, '{\"transaction_index\":0,\"log_index\":0}'::jsonb,
              'canonical'
          )",
@@ -23075,6 +23420,7 @@ async fn insert_classifier_resource_and_binding(
     .bind(block_number)
     .bind(chain)
     .bind(block_hash(chain, block_number))
+    .bind(active_to)
     .execute(pool)
     .await?;
     Ok(())
@@ -23205,7 +23551,7 @@ async fn seed_raw_reservation_release_then_registration_before_v1(
     )
     .await?;
 
-    let label = "eth";
+    let label = "ordinary";
     let mut token_bytes = *keccak256(label.as_bytes());
     token_bytes[28..].copy_from_slice(&0_u32.to_be_bytes());
     let token_id = U256::from_be_bytes(token_bytes);
@@ -23282,8 +23628,8 @@ async fn seed_raw_reservation_release_then_registration_before_v1(
     )
     .await?;
     let wrapped = NameWrapped {
-        node: raw_namehash(&[b"eth"]),
-        name: b"\x03eth\0".to_vec().into(),
+        node: raw_namehash(&[b"ordinary"]),
+        name: b"\x08ordinary\0".to_vec().into(),
         owner: OWNER.parse()?,
         fuses: 0,
         expiry: 4_000_000_000,
@@ -23301,7 +23647,7 @@ async fn seed_raw_reservation_release_then_registration_before_v1(
     )
     .await?;
 
-    Ok(format!("ens:{:#x}", raw_namehash(&[b"eth"])))
+    Ok(format!("ens:{:#x}", raw_namehash(&[b"ordinary"])))
 }
 
 async fn assert_reservation_selects_v1(
@@ -23471,12 +23817,76 @@ async fn seed_dual_open_cross_arm_fixture(
     Ok(format!("ens:{:#x}", raw_namehash(&[b"alice", b"eth"])))
 }
 
-// An inert manifest whose deployment epoch makes the projection classify the
-// chain under the sepolia deployment profile. Selection coverage that leaves
-// both authority arms open past an activated boundary declares it: the same
-// corpus on Mainnet is unpublishable under the dual-current assertion. It must
-// be declared before the first projection so a profile-sensitive field cannot
-// change mid-test.
+// Hand-seed Project's intended post-transition state: a closed ENSv1 predecessor
+// and current ENSv2 successor. Interpret-driven publication proof is deferred to
+// #822 (`unwrapped`) and the #503 e2e harness (wrapper/locked).
+async fn seed_closed_predecessor_cross_arm_fixture(
+    pool: &PgPool,
+    chain: &str,
+    v2_block: i64,
+    v1_block: i64,
+    boundary_block: i64,
+) -> Result<String> {
+    seed_lineage(pool, chain, 5).await?;
+    declare_sepolia_post_audit_profile(pool, chain).await?;
+    for source_family in ["ens_v2_registry_l1", "ens_v2_registrar_l1"] {
+        insert_namespaced_manifest(
+            pool,
+            "ens",
+            chain,
+            source_family,
+            1,
+            "ens_v2_sepolia_post_audit",
+            &format!("tests/{chain}-{source_family}.toml"),
+            json!({"capability_flags":{"exact_name_profile":{"status":"supported"}}}),
+        )
+        .await?;
+    }
+    let logical_name_id = format!("ens:{:#x}", raw_namehash(&[b"alice", b"eth"]));
+    let seeded = seed_authority_classifier_case(
+        pool,
+        chain,
+        &logical_name_id,
+        EnsArmSet::Both,
+        EnsArmSet::Both,
+        v2_block,
+        Some(boundary_block),
+    )
+    .await?;
+    if v1_block != 1 {
+        let (binding, resource) = seeded.v1.expect("seeded ENSv1 binding");
+        sqlx::query(
+            "UPDATE surface_bindings
+             SET active_from = to_timestamp($1), block_number = $1, block_hash = $2
+             WHERE surface_binding_id = $3",
+        )
+        .bind(v1_block)
+        .bind(block_hash(chain, v1_block))
+        .bind(binding)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "UPDATE resources SET block_number = $1, block_hash = $2 WHERE resource_id = $3",
+        )
+        .bind(v1_block)
+        .bind(block_hash(chain, v1_block))
+        .bind(resource)
+        .execute(pool)
+        .await?;
+    }
+    sqlx::query("UPDATE normalized_events SET transaction_hash = concat(chain_id, '-v2-registration'), transaction_index = 0, log_index = 0 WHERE chain_id = $1 AND logical_name_id = $2 AND source_family = 'ens_v2_registry_l1' AND event_kind = 'RegistrationGranted'").bind(chain).bind(&logical_name_id).execute(pool).await?;
+    assert!(seeded.v1.is_some());
+    assert!(seeded.v2.is_some());
+    Ok(logical_name_id)
+}
+
+// An inert manifest whose deployment epoch makes Project classify the chain
+// under the [Sepolia deployment profile](../../../docs/glossary.md#deployment-profile).
+// A proven boundary with both authority arms still open is unpublishable on
+// every ENS deployment profile, so selector-only fixtures seed the closed
+// predecessor state that production Interpret writes. Declare this before the
+// first projection so a deployment-profile-sensitive field cannot change
+// mid-test.
 async fn declare_sepolia_post_audit_profile(pool: &PgPool, chain: &str) -> Result<()> {
     insert_namespaced_manifest(
         pool,
@@ -23652,6 +24062,7 @@ async fn insert_activated_authority_proof(
     chain: &str,
     logical_name_id: &str,
     migration_path: &str,
+    boundary_block: Option<i64>,
 ) -> Result<(Uuid, Uuid, String)> {
     let (binding_id, resource_id, block_number, transaction_index, log_index): (
         Uuid,
@@ -23672,6 +24083,7 @@ async fn insert_activated_authority_proof(
     .bind(logical_name_id)
     .fetch_one(pool)
     .await?;
+    let block_number = boundary_block.unwrap_or(block_number);
     let proof_identity = format!("{chain}:MigrationApplied:authority-proof-fixture");
     sqlx::query(
         "INSERT INTO normalized_events (
@@ -23714,22 +24126,13 @@ async fn seed_authority_lifecycle_fixture(
     chain: &str,
     migration_path: &str,
 ) -> Result<(String, String)> {
-    let logical_name_id = seed_dual_open_cross_arm_fixture(pool, chain, 4).await?;
-    declare_sepolia_post_audit_profile(pool, chain).await?;
-    InterpretEngine::new(pool.clone())
-        .run_batch(InterpretRequest {
-            chain_id: chain.into(),
-            from_block: 0,
-            to_block: 5,
-            resume_current: None,
-            mode: InterpretRunMode::Normal,
-        })
-        .await?;
+    let logical_name_id = seed_closed_predecessor_cross_arm_fixture(pool, chain, 4, 1, 4).await?;
     for block in 6..=9 {
         insert_lineage_block(pool, chain, block).await?;
     }
     let (_, v2_resource, proof_identity) =
-        insert_activated_authority_proof(pool, chain, &logical_name_id, migration_path).await?;
+        insert_activated_authority_proof(pool, chain, &logical_name_id, migration_path, None)
+            .await?;
     let v1_resource: Uuid = sqlx::query_scalar(
         "SELECT resource_id FROM surface_bindings
          WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v1'

@@ -4,6 +4,22 @@ PostgreSQL is the durable indexing and serving store. Current runtime objects
 live in `bigname_phase`; the append-only SQLx history in `migrations/` records
 the retired `public` schema, its schema-qualified deletion, and reviewed
 in-place schema-migrations for initialized `bigname_phase` databases.
+Deployments do not require the database itself to use C collation, but the
+deployed collation must order fixed-width lowercase hexadecimal text
+byte-lexically as C does; the API relies on that property to retain the existing
+B-tree service for identity keys. Other comparisons that need C ordering apply
+it locally. Numeric or otherwise hex-incompatible collations are unsupported
+until a schema-migration index or startup locale gate explicitly admits them.
+The repository's CI/test database and default Docker deployment use
+`postgres:16-alpine`: musl-backed libc collations are bytewise, so those images
+satisfy this contract by construction but cannot validate its glibc behavior.
+An external glibc 2.39 deployment probe confirmed that 25,000 fixed-width lowercase
+hexadecimal strings sort identically under `en_US.UTF-8` and C. This remains a
+deployment property rather than a suite-enforced gate. The ignored integration
+test runs the same probe on the available glibc PostgreSQL image; issue `#833`
+tracks glibc 2.39 CI. Expression-local `COLLATE "C"` remains load-bearing on a
+glibc server for noncanonical operands, where lowercase and uppercase
+hexadecimal text can sort differently.
 
 ## Invariants
 
@@ -114,8 +130,9 @@ Ordinary binding interval operations use
 predecessor and successor lookups, explicit closes, and implicit predecessor
 caps cannot affect another chain or arm. The existing ordering and interval
 rules are otherwise unchanged within that domain. This permits an ordinary
-ENSv1 row and an independently admitted ordinary ENSv2 row for the exact same
-logical name to remain simultaneously open until an explicit activated
+ENSv1 row and an ordinary ENSv2 row derived from an [independently admitted
+event](glossary.md#independently-admitted-event) for the exact same logical name
+to remain simultaneously open until an explicit activated
 [migration boundary](glossary.md#migration-boundary) selects the successor.
 
 When an ENSv2 registration release, a move away from a registry path, or a
@@ -162,6 +179,7 @@ mandatory full Interpret and Project redos.
 | `discovery_watch_admissions` | Interpret | The last acknowledged [discovery-watch admission snapshot](glossary.md#discovery-watch-admission-snapshot) for each active manifest-authority fingerprint and lineage-orphaning epoch. This is replay coordination state, never fetched-fact evidence, redo authority, projection, or serving data. |
 | `project_redo_resolver_evidence` | Interpret, then Project consumption | Pre-delete resolver and permission-resource references preserved across Interpret retries for one redo range; redo coordination only, never serving data. |
 | `project_redo_expiry_roots` | Interpret, then Project consumption | Logical names or permission resources from state-derived ENSv2 path-expiry releases preserved before Interpret deletes a redo range; bounded projection-redo coordination only, never serving data. |
+| `project_redo_child_registration_history` | Interpret, then Project consumption | Child and registry identifiers from entry-creating events in an ENSv1→ENSv2 [migration `WrapperRegistry`](glossary.md#migration-registry-wrapperregistry), preserved before Interpret deletes a redo range; bounded child-scope coordination only, never serving data. |
 | `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding; never identity, normalized-event, projection, or serving data. |
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or [discovery edges](glossary.md#discovery-graph--discovery-edge). The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
@@ -184,7 +202,14 @@ registration transaction. `registration_registry_setup` records that the whole t
 a registry ownership setup matching the registrar owner, so restore can make that registrar current.
 `registry_migrated` records that a current-registry `NewOwner` proved the node moved to the 2020
 ENSv1 registry replacement, so restore continues to suppress later observations from the retired
-registry (upstream: .refs/ens_v1/README.md:L73 @ ens_v1@91c966f). `surface_known` records that an
+registry (upstream: .refs/ens_v1/README.md:L73 @ ens_v1@91c966f). Independently,
+current-registry `Transfer` observations also retain terminal
+[registry fallback handoff](glossary.md#registry-fallback-handoff) during restore;
+a numeric grant need not carry `registry_migrated` for that separate ownership
+observation to suppress the old registry.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L29-L34 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L68 @ ens_v1@91c966f)
+`surface_known` records that an
 active plaintext surface was known when the authority observation was emitted, so restore can
 reattach the logical name and reproduce the same binding decision.
 Another same-namespace preimage can create the surface without binding the registrar until the next
@@ -394,14 +419,17 @@ intake carveout. A migration-created registry's independently admitted
 announcement position, because it records indexability only and the watch plan
 traverses it. Interpret attaches the `migration_registry_creation` relationship
 in `migration_discovery_associations`, keyed to that ordinary edge;
-the association does not change the edge's columns or active range. Slice 2C's
-authority selector is the sole Project exception: after an activated transition
-has proved the parent migrated, it may use the readable canonical
-`migration_registry_creation` association to classify the independently
-admitted registry that emitted a positive child registration. The association
-remains diagnostic whether its [complete group](glossary.md#complete-group) is candidate or activated; it
-neither establishes child authority by itself nor activates any
-correlation-dependent effect. Correlation-dependent parent, topology, identity,
+the association does not change the edge's columns or active range. After an
+activated parent transition, Project may use the readable canonical association
+and active ordinary announcement to classify a positive child-registration
+emitter or prove the current parent subregistry is the migration-created
+`WrapperRegistry`. Candidate or activated, the association establishes neither
+result by itself and activates no correlation-dependent effect. Parent
+reachability additionally requires the association's evidence-reference array
+to be non-empty, every reference to be a non-empty object, and the whole array
+to be contained in the activated boundary; an empty array, non-object reference,
+or empty-object reference cannot authorize an ENSv1 child relation under a locked parent.
+Correlation-dependent parent, topology, identity,
 role, registration, renewal, and normalized-event rows from the watched registry
 activate only when every group they reference is complete. Refused and incomplete
 rows remain candidate. Association with the migration group is not
@@ -464,6 +492,7 @@ closed its wrapper binding and reactivated its registrar position before that
 recorded transfer. If no prior registrar identity was materialized, that exact
 transfer confirms the fallback identity with its binding effective from the
 preceding `NameUnwrapped`; the cleanup-relative time predicate remains strict.
+For registrar-token `unwrapped`, [issue #822](https://github.com/ensdomains/bigname/issues/822) currently makes valid input present a false zero at that exact-predecessor check and rolls back the [physical Interpret batch](glossary.md#batch-grid). Zero remains an integrity error; the path above describes the required behavior after the writer resolves the actual predecessor.
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
@@ -807,6 +836,64 @@ resume marker and current block anchors in the write transaction. A concurrent
 reorg therefore cannot publish interpretation derived from an unreadable
 branch.
 
+An ENSv1 surface-materializing renewal may emit an additive
+[state-derived normalized event](glossary.md#state-derived-normalized-event).
+Its `source_manifest_id` comes from the retained registry authority or registry
+state used for serving, while its block, transaction, log, canonicality, and
+`raw_fact_ref` come from the renewal that materializes the surface. It retains
+the existing `ens_v1_unwrapped_authority` derivation kind and is distinguished
+by `after_state.state_derived=true`. The earlier [pre-surface](glossary.md#pre-surface)
+`ResolverChanged` keeps its null `logical_name_id` and remains immutable. Its
+`resource_id` may already identify a known control authority before the surface
+is learned; it remains null when no authority or registry read resource was known.
+This behavior requires no
+`normalized_events` check change or schema-migration.
+Surface-materialization and per-log authority-transition resolver copies carry
+`after_state.resolver_source_role`, preserving their old- or current-registry origin
+so compacted restoration survives a later global resolver selection.
+
+Only active manifests participate in raw-log selection and watch authority.
+Interpret separately retains metadata for stored deprecated manifest versions
+so a state-derived event can preserve the manifest identifier and source family
+of the state it surfaces. A retained manifest identifier absent from all stored
+versions is a data-integrity error in both live interpretation and restoration;
+it is never attributed to the currently active triggering source.
+
+A current-registry `NewOwner` or `Transfer` that ends old-registry fallback
+resolution persists that handoff at the ownership log's raw position. When an
+old-registry pointer was already linked, the current registry source emits
+additive linked `ResolverChanged` rows with the zero address for every retained
+registry, registrar, or wrapper resource that could carry the old pointer, and
+`after_state.registry_fallback_handoff=true`; the earlier selection and surface
+materialization rows remain immutable. Retained linkage includes resources that
+inherited the pointer during an earlier authority epoch and are no longer the
+current registry, registrar, or wrapper resource. A same-owner `Transfer` still
+leaves a normalized handoff row when it would otherwise produce no state delta,
+so compacted restoration cannot reopen old-registry input. Same-transaction
+registration reconciliation leaves each resource-specific handoff row attached
+to its original resource.
+An old-registry zero selection clears active copies but retains an inactive resource carrying the prior pointer. Whenever that resource becomes active again through a registry, registrar, or wrapper authority transition, reactivation emits a zero `ResolverChanged` before handoff.
+A current-registry resolver selection discards the retained old-registry resource set, so a later ownership event cannot clear the current-registry pointer. A current-registry zero selection retains one per-name marker—not a per-resource fan-out set—so a known registrar reactivated after the clear cannot expose its earlier pointer.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L54 @ ens_v1@91c966f)
+
+A current-registry `NewResolver` cannot precede that node's current-record creation:
+`setResolver` authorizes against the owner stored in the current registry, while an
+absent record has the zero owner and no caller able to authorize the write. A parent
+owner can create a current record with a getter-visible zero owner and a resolver in
+one `setSubnodeRecord`; its `NewOwner` precedes its `NewResolver`. The fallback getter
+serves the old registry only until that current record exists, including when the
+current registry stores itself for a requested zero owner.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L16-L20 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L49-L57 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L86-L95 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L153-L156 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174-L182 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L34 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L55 @ ens_v1@91c966f)
+
 ### Interpret process memory
 
 `normalized_events` is the working store for each [interpreter state
@@ -817,6 +904,16 @@ changing it must not change normalized events, identity rows, discovery edges,
 or the latest persisted state per key. A smaller capacity may cause more
 database reads, but it has no interpretation meaning and is not part of the
 [interpreter content hash](glossary.md#interpreter-content-hash).
+
+ENSv1 [registry fallback handoff](glossary.md#registry-fallback-handoff)
+tracking is populated only by pointers selected through the old registry. Its
+per-name fan-out contains at most one entry for each distinct registry, registrar, or wrapper resource given an old-registry pointer since the preceding handoff. Repeated authority epochs and wrap/unwrap cycles can therefore grow this set without a fixed per-name ceiling until handoff.
+Replacing an old-registry pointer on an exact resource overwrites that resource's
+fan-out entry with the new address, while clearing it removes the resource. A
+current-registry selection discards the old-source set, and the current-registry
+handoff drains any remaining name entry. The single selected-link slot may retain a
+current-registry zero marker until a later selection replaces it; this does not add
+entries to the per-resource fan-out map.
 
 Every cached value is the `after_state` of the latest readable normalized event
 for the exact interpreter state key before the current batch. A cache miss uses
@@ -973,8 +1070,8 @@ same rule: which interpreted row wins a conflict, how a redo range reopens and
 reanchors bindings, and which surfaces a normalizer-version recompute
 activates all decide which identity, discovery, and label-preimage rows the
 projections then read, so they are interpretation rather than plumbing.
-Interpret's batch sizing stays outside, because folding the same events into
-differently sized physical batches produces the same rows. Request-scoped
+Interpret's batch sizing stays outside, because completed walks that fold the same events into
+differently sized physical batches produce the same rows. Request-scoped
 serving is outside because it writes no interpreted, discovery, or projection
 row — the guarded divergence ledger is diagnostic output, not interpretation
 input. The rest of RPC transport — client construction, timeouts, and endpoint
@@ -1030,12 +1127,14 @@ Project is the only projection writer. It derives the affected scope from
 canonical interpreted input, stages rows in connection-local tables, and
 publishes the affected projection set transactionally. It has no legacy claim
 queue, general-purpose durable replay stage tables, apply cursors, dead-letter
-queue, database session version stamp, or worker heartbeat. The two narrow replay
+queue, database session version stamp, or worker heartbeat. The three narrow replay
 handoffs contain pre-delete input rather than staged projection rows:
 `project_redo_resolver_evidence` retains resolver and permission-resource
 references, and `project_redo_expiry_roots` retains the available logical-name
 or permission-resource identifiers whose deleted path-expiry releases must seed
-a bounded rebuild.
+a bounded rebuild. `project_redo_child_registration_history` retains affected
+child and registry identifiers for entry-creating events in a correlated
+migration `WrapperRegistry`, so removing history can re-evaluate a hidden child.
 Project consumes a row when a publication covers its recorded block. The normal
 Interpret-to-Project pipeline does so immediately; if an operator runs an
 Interpret redo whose requested Project endpoint is below the already recorded
@@ -1084,12 +1183,13 @@ run does not affect its scope. Serving admission therefore accepts targets at
 or before the selected head rather than requiring every row to equal the latest
 Project block.
 
-The projection families used by the API include:
+Published projection families include:
 
 - `name_current` and identity companions;
 - `address_names_current`;
 - `children_current`;
-- `permissions_current` and its per-resource summary;
+- `permissions_current`, `account_permission_state_current`, and the
+  per-resource permission summary;
 - `resolver_current`;
 - `record_inventory_current`; and
 - `primary_names_current`.
@@ -1102,6 +1202,16 @@ unchanged; Project
 clears only the rebuildable current summary when the served projection timestamp
 passes wrapper expiry. Permission reads join this current summary by
 `resource_id` rather than persisting a second copy in `permissions_current`.
+Registry-wide approvals use the same rule: Project owns the replayable
+[account permission state](glossary.md#account-permission-state) and the
+[registry-owner binding](glossary.md#registry-owner-binding). Revoked account
+rows remain in the current-state table so losing-fork grants and losing-fork
+revocations both rebuild from surviving canonical history. Interpret re-walks
+retained raw facts through the [`standard_approval`
+derivation](glossary.md#standard-approval-derivation); Project then rebuilds both state legs without a provider
+refetch. App-facing synthesis from those two state legs is deferred to the
+follow-up serving change.
+
 For ENSv2, a latest state-derived `RegistryPathExpired` release removes that resource's effective
 permission rows without removing its partial-coverage summary. A later
 `RegistrationRenewed` marked as a revival readmits retained grants when the same
@@ -1120,17 +1230,32 @@ ens_v2@a971bd64)
 Coverage wording is not an exhaustiveness claim. `support_status` and
 `unsupported_reason` carry admission separately from projection completeness.
 `operator_approval_surfaces_not_ingested` maps to partial, best-effort
-permission coverage; `ensv1_wrapper_holder_permissions_not_projected` remains a
-separate unsupported class. Readers reject inconsistent typed combinations and
+permission coverage. This interpretation-and-projection change retains that
+broad reason for every authority class; the follow-up serving change owns any
+request-relative narrowing based on a proven registry-owner binding.
+`ensv1_wrapper_holder_permissions_not_projected`
+remains a separate unsupported class. Readers reject inconsistent typed combinations and
 map an unrecognized persisted unsupported reason to unknown partial product
 coverage rather than treating it as wrapper support or returning an internal
-server error. The scoped ENSv1 and Basenames approval declarations widen raw
-intake without changing normalized-event semantics. A retained database must
-complete the manifest-sync-required Ingest redo for the widened address/topic
-intervals before the shared interpreter content-hash rotation permits the
-planned full-history Interpret and Project walk. A fresh deployment instead
-loads the final manifests before its block-zero historical walk, so the new raw
-facts arrive in that initial pass. The ENSv2 expiry Project fold also rotates
+server error. The adapter-owned mapping requires a full-history Interpret
+re-walk and Project rebuild under the rotated interpreter content hash; Ingest
+does not rerun only when retained raw facts cover the registry
+`ApprovalForAll` range required by the current [compiled watch
+plan](glossary.md#compiled-watch-plan). That range was declared by commit
+`b22bccee` on 2026-08-31 through
+[`ens_v1_registry_l1` manifest version 3](../manifests/mainnet/ethereum/ens/ens_v1_registry_l1/v3.toml)
+on Ethereum Mainnet,
+[`ens_v1_registry_l1` manifest version 1](../manifests/sepolia/ethereum/ens/ens_v1_registry_l1/v1.toml)
+on Sepolia, and
+[`basenames_base_registry` manifest version 2](../manifests/mainnet/base/basenames/basenames_base_registry/v2.toml)
+on Base Mainnet. A retained database whose Ingest predates that declaration must
+have completed the retained-range Ingest redo; otherwise, the [re-derivation
+boundary](glossary.md#re-derivation-boundary) must start with Ingest for that
+range before Interpret and Project. A
+from-zero Ingest under the current compiled watch plan satisfies the
+precondition directly.
+
+The ENSv2 expiry Project fold also rotates
 the shared interpreter content hash without changing raw facts or
 normalized-event semantics; the expiry interpretation slice must not be served
 before its paired Project fold is deployed and that coherent replay and rebuild
@@ -1142,6 +1267,17 @@ Snapshot selection resolves `at`, explicit `chain_positions`, and consistency
 to one concrete set of phase chain positions. Current head, safe, and finalized
 positions come from `chain_heads`; timestamp and historical selection use
 readable `chain_lineage` rows.
+
+Projection `chain_positions` timestamps are decoded as RFC 3339 instants.
+PostgreSQL JSON may spell UTC as `+00:00`; request selectors or retained rows
+may carry other numeric UTC offsets and one to nine fractional-second digits.
+Snapshot selection normalizes these values to UTC before comparing the
+timestamp component of a chain-position identity. Storage reserializes the
+normalized instant with `Z` and preserves non-zero fractional seconds. Invalid
+timestamp syntax remains unusable projection state; a valid alternate offset
+spelling is not stale state. This is a serving-boundary compatibility rule and
+does not change which stored projection rows are authoritative or when they are
+rebuilt.
 
 Every selection also requires the current Project generation to be complete at
 the newest stored head with the API's compiled interpreter content hash. The

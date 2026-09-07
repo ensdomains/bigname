@@ -104,7 +104,18 @@ may consequently enter name-filtered diagnostics and product history. An
 outstanding cursor has no continuation guarantee across this behavior-changing
 boundary and may be rejected. Consumers must discard pre-#348/#529 cursors and
 restart from the first page; fresh post-publication cursors continue normally.
-This boundary does not claim fresh/resumed parity for the known pre-existing
+
+The [#613](https://github.com/ensdomains/bigname/issues/613) interpreter change
+keeps the original [pre-surface](glossary.md#pre-surface) ENSv1 registry `ResolverChanged` row unchanged,
+then adds a name- and resource-linked, [state-derived](glossary.md#state-derived-normalized-event) `ResolverChanged` when the
+first active [name surface](glossary.md#surface-name-surface) is learned. Product
+events or name history may therefore gain one historical resolver row, while
+diagnostics may gain each linked resource copy. A cursor issued before this
+change has no continuation guarantee and may be rejected. Consumers must
+discard pre-#613 cursors and restart from the first page; fresh post-publication
+cursors continue normally.
+
+These boundaries do not claim fresh/resumed parity for the known pre-existing
 exception: when a resolver-emitted resource equals `namehash(N)`,
 named-resource and alias preimages can share one retained [interpreter state
 key](glossary.md#interpreter-state-key), so resumed interpretation can lose the
@@ -206,9 +217,13 @@ Field ownership:
   binds the deployment-derived public namespace set and is rejected if that
   set changes. Relation filters that cannot be satisfied by one storage role
   (including exact `owner`, exact `registrant`, and partial relation sets such
-  as `owner,manager`) may return an as-filled page with `has_more=true` when the
-  API reaches its bounded post-filter scan cap; clients continue with the
-  returned `next_cursor`.
+  as `owner,manager`) may require multiple broad candidate batches to assemble
+  one response page. The API retains the selected [projection
+  generation](glossary.md#projection-generation) across those batches. Before
+  issuing a second or later broad batch, it revalidates that generation and
+  returns retryable `409 stale` if it changed. The API may return an as-filled
+  page with `has_more=true` when it reaches the bounded post-filter scan cap;
+  clients continue with the returned `next_cursor`.
 - Status semantics: per-result `status` uses the common result vocabulary.
   Name misses are in-band `not_found`; invalid names are in-band
   `invalid_name`. Name-only and exact-scope latest reads return retryable `409
@@ -223,8 +238,17 @@ Field ownership:
   exact-name consumer slice is activated, `conflicting_current_ens_authority`
   covers Mainnet overlap without a provable boundary.
   `independent_ens_deployments_overlap` covers
-  Sepolia overlap without a proven migration boundary; a proven Sepolia
-  boundary follows the same per-name authority rule. These values replace the
+  ordinary Sepolia overlap without a proven ENSv1→ENSv2 migration boundary; a proven
+  Sepolia boundary follows the same per-name authority rule. The exact
+  [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names—root,
+  `eth`, `reverse`, and `addr.reverse`—instead select ENSv2 when the ENSv2 arm is
+  current and ENSv1 evidence, current or historical, exists without proof.
+  When that shared-infrastructure rule selects ENSv2, it overrides the ordinary
+  no-proof handling below, so those names carry neither Mainnet's
+  `conflicting_current_ens_authority` nor Sepolia's
+  `independent_ens_deployments_overlap`.
+  Historical ENSv2 evidence alone does not qualify, and `.reverse` descendants
+  do not inherit the exception. These values replace the
   blanket mixed-corpus reason; intake from the planned [ENSv2 migration source
   family](glossary.md#source-family) alone does not add them. An address lookup
   returns `409 conflict` when the deployment has no ready public namespace.
@@ -236,14 +260,17 @@ Field ownership:
   families rather than presenting either binding as current.
 - Snapshot behavior: lookup selects the current schema-v2 phase head and reads
   `bigname_phase` name, inventory, and address-name projections published for
-  one completed projection-phase generation. Public reverse lookup with no
-  explicit namespace derives its snapshot scope from the namespaces served by
-  the deployment, excluding a namespace while its selected authority chain has
-  Interpret `redo_in_progress=true`, regardless of redo mode. A running
-  Interpret redo rewrites previously served identity history batch by batch, so
-  a page read during the redo can be incomplete even while Project still
-  reports its prior completed head. Because projection publication is
-  incremental, an unchanged
+  one completed projection-phase generation. For each reverse result, the
+  readable name fetched with the candidate row is the common source for the
+  emitted normalized and display names, label-derived fields, primary-name
+  ordering, the `is_primary` result, and the reverse cursor. Public reverse
+  lookup with no explicit namespace derives its snapshot scope from the
+  namespaces served by the deployment, excluding a namespace
+  while its selected authority chain has Interpret `redo_in_progress=true`,
+  regardless of redo mode. A running Interpret redo rewrites previously served
+  identity history batch by batch, so a page read during the redo can be
+  incomplete even while Project still reports its prior completed head. Because
+  projection publication is incremental, an unchanged
   row target may precede the selected head; it may not be ahead, and a
   same-height target must match the selected hash. Lookup revalidates both
   `chain_heads` and that generation after the read. Before that check, public
@@ -613,7 +640,26 @@ Field ownership:
   recurses. A derived answer is normalized through the requested getter's
   verified decode: for coin type `60`, a 20-byte zero default becomes derived
   `not_found`; for EVM-range multicoin selectors, the same non-empty bytes remain
-  an `ok` value. Exact stored records keep their existing behavior. Other
+  an `ok` value. Exact stored records retain their stored value except that an
+  ENSv1 or Basenames `addr:60` value of exactly 20 zero bytes is normalized to `not_found`
+  before this derived rule runs. That covers an `AddressChanged(node,60,...)` payload of 20 zero
+  bytes and a retained
+  legacy-only normalized `AddrChanged(node,address(0))` behind an ENSv1 registry, registrar,
+  or wrapper resolver pointer, or a Basenames registry resolver pointer. ENSv2-origin
+  attribution, another coin type, another nonempty byte length, and nonzero addresses retain
+  their values. The exact entry remains but omits `value`. Indexed and auto
+  retain exact `not_found` even when an authorized nonzero default exists;
+  verified returns the same absence. `addresses["60"]`, `primary_address`, and
+  default derivation metadata remain absent. Empty or missing exact data keeps
+  permitted fallback. The private observation marker and inventory provenance
+  do not appear in product responses or record diagnostics.
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L22-L24 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L70 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L81-L84 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L43-L66 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L76-L82 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L108-L110 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L93-L99 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L116-L121 @ basenames@1809bbc)
+  Other
   default-source `ok` values yield the requested-key value, while authoritative
   absence yields derived `not_found`. An unsupported or
   non-authoritative source leaves auto unsatisfied and triggers ordinary
@@ -644,12 +690,11 @@ Field ownership:
   and the resolver's version-, node-, and key-scoped text storage
   (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f).
   Once that inventory exists, a key's absence is therefore absence from the
-  retained attributable history rather than an unfinished build. The known
-  case documented in [`projections.md`](projections.md#resolver-and-records),
-  where resolver selection predates the
-  [name surface](glossary.md#surface-name-surface) and is never repeated,
-  produces no inventory instead of treating an interpretation-time linking gap
-  as authoritative absence. The row's
+  retained attributable history rather than an unfinished build. When an
+  ENSv1 registry resolver selection predates the
+  [name surface](glossary.md#surface-name-surface), first-surface
+  materialization supplies the linked pointer without requiring a repeated
+  selection; a latest zero-address selection remains a clear. The row's
   `exhaustiveness: not_asserted` disclaims a claim about complete *history*,
   which is a weaker statement than `full` and does not weaken this admission.
   Node-keyed `ens_v1_resolver_l1` records written before the name surface
@@ -716,12 +761,6 @@ Field ownership:
   state is unregistered. Indexed reads use the [serving resource](glossary.md#serving-resource)'s inventory, verified reads select
   the surviving resolver, and `source=auto` follows the ordinary indexed/verified blend. Owner zero
   or registry-self alone therefore does not produce `inventory_not_available`.
-  When current authority is projected but inventory is missing because resolver
-  selection predates the [name surface](glossary.md#surface-name-surface) and
-  was never repeated, `source=indexed` reports requested keys as
-  `status=unsupported` with `inventory_not_available`. `source=auto` follows
-  its ordinary verified-lookup fallback rules when that execution path is
-  available.
   Direct verified lookup compares against the same exact-or-derived indexed
   evaluator before the guarded resolution-divergence-ledger write. Agreement
   can therefore clear an older exact-key false miss; provider output remains
@@ -805,13 +844,36 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   to the revision-bound storage follow-up.
 - Status semantics: no direct subnames returns `200` with empty `data`.
   Missing parent names return `404 not_found`. Each child appears at most once,
-  from the relation its own selected authority names. An unmigrated protected
-  child can remain ENSv1-backed; a migrated or otherwise currently registered
-  ENSv2 child is ENSv2-backed. A child whose arms disagree with no authority
-  proof is omitted entirely, and on the Mainnet deployment profile an ENSv1
-  relation asserted after a proven ENSv2 child authority began blocks Project
+  from the relation its own selected authority names. ENSv1 relations that are
+  unreachable through the parent's ENSv1→ENSv2 migration path are omitted. A
+  parent on the `unwrapped`, `unlocked_wrapped`, or `emancipated_child` path
+  retains no ENSv1 children. A parent on the `locked_wrapped` or `locked_child`
+  path retains only a [migratable child](glossary.md#migratable-child): one
+  whose label has never had a reserved, registered, or renewed entry in that
+  parent's [migration `WrapperRegistry`](glossary.md#migration-registry-wrapperregistry), whose current
+  expiry-effective fuse word has `PARENT_CANNOT_CONTROL` set and `IS_DOT_ETH`
+  clear, and whose current ENSv1 registry owner is nonzero. The wrapper fuse
+  and expiry evidence remains effective across an ENSv1 binding rotation.
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276-L277 @ ens_v1@91c966f)
+  The child's own
+  [authority arm](glossary.md#authority-epoch) still chooses between the remaining ENSv1 and ENSv2 candidates.
+  An unknown activated migration-path value blocks the Project generation as a
+  data-integrity failure instead of silently hiding relations. A child whose
+  arms disagree with no authority proof is omitted entirely. On every ENS
+  [deployment profile](glossary.md#deployment-profile) (Mainnet and Sepolia), an ENSv1 relation that survives
+  parent reachability and
+  was asserted after a proven ENSv2 child authority began blocks Project
   publication for that generation,
-  so this route never chooses one by recency, emits two rows for one logical
+  though a positive ENSv2 registration in a locked parent's migration registry
+  is itself entry history and therefore filters the ENSv1 relation before this
+  assertion. The dual-current assertion remains a defensive generation check:
+  an unmigrated parent can expose this contradiction, but no ordinary on-chain
+  parent-and-child ENSv1→ENSv2 shape reaches it after parent reachability and
+  migration-registry history are applied.
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L146-L164 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
+  This route therefore never chooses one
+  by recency, emits two rows for one logical
   child, or adds a row-local unsupported shape.
   A V1 child with getter-visible owner zero is omitted unless a current
   event-linked nonzero resolver independently establishes read reachability.
@@ -843,8 +905,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   by this product route. Slice 1 excludes every correlation-dependent normalized
   row with `consumer_visibility=candidate`, including a familiar event kind whose
   existence depends on correlation under an existing source family; diagnostics
-  may expose those rows. An existing-family event admitted independently of the
-  correlation remains byte-for-byte activated and product-visible. Its separate
+  may expose those rows. An [independently admitted
+  event](glossary.md#independently-admitted-event) remains byte-for-byte
+  activated and product-visible. Its separate
   candidate association is diagnostics-only and cannot suppress, duplicate, or
   reclassify that ordinary row. Only slice 2 consumer activation enables the
   per-source-log mapping specified for [`GET /v2/events`](#get-v2events) when an
@@ -872,7 +935,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   requested name, and `scope=both` reads both sets. `scope` defaults to `both`.
   A V1 ownerless row linked only to the registry resource retained for reads is
   visible through name history with `registration_id=null` when it carries the
-  name's `logical_name_id`. Name history returns a pre-surface owner row on a
+  name's `logical_name_id`. Name history returns a
+  [pre-surface](glossary.md#pre-surface) owner row on a
   registry resource that was ever bound to the name under `scope=both` or
   `scope=registration`, even when the row was stored before the
   [name surface](glossary.md#surface-name-surface) existed and carries no name
@@ -970,7 +1034,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   per-registration permission summary classifies the result. Independently
   proven full support adds no completeness metadata. A non-wrapper resource
   whose standard operator, token-approval, or resolver-delegation paths are not
-  indexed returns `meta.completeness=partial` with
+  fully served returns `meta.completeness=partial` with
   `unsupported_reason=approval_and_delegation_permissions_not_supported`.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)

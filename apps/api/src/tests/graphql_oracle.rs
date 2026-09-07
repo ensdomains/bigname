@@ -255,6 +255,9 @@ fn scope_matches(scope: &str, path: &str) -> bool {
     if scope.starts_with("field:") || scope.starts_with("input:") {
         return path == scope;
     }
+    if exact_enum_scope(scope).is_some() {
+        return path == scope;
+    }
     if let Some(name) = scope.strip_prefix("type:") {
         return path == scope
             || ["field:", "arg:", "input:", "enum:", "implements:", "member:"]
@@ -264,6 +267,66 @@ fn scope_matches(scope: &str, path: &str) -> bool {
     scope.strip_prefix("root:").is_some_and(|root| {
         path == format!("field:{root}") || path.starts_with(&format!("arg:{root}("))
     })
+}
+
+fn exact_enum_scope(scope: &str) -> Option<(&str, &str)> {
+    let (enum_type, value) = scope.strip_prefix("enum:")?.split_once('.')?;
+    (!enum_type.is_empty() && !value.is_empty() && !value.contains('.'))
+        .then_some((enum_type, value))
+}
+
+fn classify_oracle_enum_coverage(
+    upstream: &OracleMap<String, Value>,
+    local: &OracleMap<String, Value>,
+    coverage: &Value,
+) -> Vec<Value> {
+    let dispositions = coverage["upstream_only"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| Some((entry["scope"].as_str()?, entry)))
+        .collect::<OracleMap<_, _>>();
+    let known = coverage["known_upstream_types"].as_object();
+    upstream
+        .keys()
+        .filter(|path| path.starts_with("enum:"))
+        .filter_map(|path| {
+            let enum_type = path.strip_prefix("enum:")?.split_once('.')?.0;
+            let exact = dispositions.get(path.as_str());
+            if local.contains_key(path) {
+                return exact.map(|entry| json!({
+                    "owner": entry["owner"],
+                    "path": path,
+                    "reason": "exact enum value is now local",
+                    "status": "stale"
+                }));
+            }
+            if let Some(entry) = exact {
+                return Some(json!({
+                    "owner": entry["owner"],
+                    "path": path,
+                    "reason": "exact enum value disposition",
+                    "status": entry["status"]
+                }));
+            }
+            if !local.contains_key(&format!("type:{enum_type}"))
+                && let Some(entry) = known.and_then(|known| known.get(enum_type))
+            {
+                return Some(json!({
+                    "owner": entry["owner"],
+                    "path": path,
+                    "reason": "wholly absent enum type census",
+                    "status": "deferred"
+                }));
+            }
+            Some(json!({
+                "owner": Value::Null,
+                "path": path,
+                "reason": "partially local enum requires an exact value disposition",
+                "status": "unowned"
+            }))
+        })
+        .collect()
 }
 
 fn oracle_named_type(type_ref: &str) -> &str {
@@ -337,13 +400,6 @@ fn oracle_upstream_path_is_deferred(
             known,
             claimed,
         );
-    }
-    if let Some(enum_type) = path
-        .strip_prefix("enum:")
-        .and_then(|path| path.split_once('.'))
-        .map(|(name, _)| name)
-    {
-        return known.contains_key(enum_type);
     }
     deferred.iter().any(|entry| {
         entry["scope"]
@@ -432,10 +488,12 @@ fn apply_oracle_coverage(
             failures.push(format!("duplicate conflicting disposition: {scope}"));
         }
         if scope.contains('*')
+            || scope.starts_with("enum:") && exact_enum_scope(scope).is_none()
             || !scope.starts_with("type:")
                 && !scope.starts_with("root:")
                 && !scope.starts_with("field:")
                 && !scope.starts_with("input:")
+                && !scope.starts_with("enum:")
         {
             failures.push(format!("overbroad disposition: {scope}"));
             continue;
@@ -449,7 +507,20 @@ fn apply_oracle_coverage(
         }
     }
     let mut unowned = 0;
+    for classification in classify_oracle_enum_coverage(upstream, local, coverage) {
+        if matches!(classification["status"].as_str(), Some("stale" | "unowned")) {
+            unowned += 1;
+            let path = classification["path"].as_str().unwrap_or("invalid");
+            failures.push(match classification["status"].as_str() {
+                Some("unowned") => format!("unowned upstream-only path: {path}"),
+                _ => format!("stale upstream disposition: {path}"),
+            });
+        }
+    }
     for path in &upstream_only {
+        if path.starts_with("enum:") {
+            continue;
+        }
         if !oracle_upstream_path_is_deferred(
             path,
             upstream,
@@ -955,14 +1026,11 @@ fn assert_oracle_enum_value_ownership_rules() {
         "local_extensions": [],
         "known_upstream_types": {"Domain_orderBy": {"owner":"#670/T3", "docs":"x"}}
     });
-    assert!(
-        apply_oracle_coverage(
-            &OracleMap::from([enum_type.clone(), new_value]),
-            &OracleMap::from([enum_type]),
-            &coverage,
-        )
-        .is_ok()
-    );
+    assert!(apply_oracle_coverage(
+        &OracleMap::from([enum_type.clone(), new_value]),
+        &OracleMap::from([enum_type]),
+        &coverage,
+    ).is_err());
 
     let uncensused = apply_oracle_coverage(
         &OracleMap::from([

@@ -1,18 +1,9 @@
-use alloy_primitives::{B256, keccak256};
-
 use crate::{
     evm_abi::{address_hex, decode_event_log_tolerant_address_word},
     schema_v2::{catalog::Selected, model::RawLogInput},
 };
 
-use super::{NewOwner, transfer, unmasked_word};
-
-pub(super) fn child_node(parent: B256, labelhash: B256) -> String {
-    let mut input = [0u8; 64];
-    input[..32].copy_from_slice(parent.as_slice());
-    input[32..].copy_from_slice(labelhash.as_slice());
-    format!("{:#x}", keccak256(input))
-}
+use super::{NewOwner, Transfer, child_node, unmasked_word};
 
 pub(in crate::schema_v2) fn registration_setup_node(
     selected: &Selected,
@@ -37,12 +28,12 @@ pub(in crate::schema_v2) fn registration_setup_node(
             )))
         }
         "Transfer" => {
-            let decoded = unmasked_word::decode_registry_event::<transfer::Transfer>(
+            let decoded = unmasked_word::decode_registry_event::<Transfer>(
                 tolerate_unmasked_words,
                 &raw.topics,
                 &raw.data,
                 "registry Transfer log is malformed",
-                decode_event_log_tolerant_address_word::<transfer::Transfer>,
+                decode_event_log_tolerant_address_word::<Transfer>,
             )?;
             Ok(Some((
                 format!("{:#x}", decoded.event.node),

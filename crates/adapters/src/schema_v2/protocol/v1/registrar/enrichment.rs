@@ -59,7 +59,14 @@ fn event(
         });
         return Ok(output);
     };
-    let binding_target = previous_active.as_ref().or(registrar.as_ref());
+    let binding_target = previous_active.as_ref().or_else(|| {
+        registrar.as_ref().filter(|_| {
+            state
+                .v1_registry_owner(&selected.source.namespace, &namehash)
+                .as_deref()
+                != Some(super::ZERO_ADDRESS)
+        })
+    });
     let resource_id = binding_target.map(|state| state.resource_id);
     let token_lineage_id = binding_target.and_then(|state| state.token_lineage_id);
     let bind = binding_target.is_some_and(|state| !state.surface_known);

@@ -244,6 +244,11 @@ pub fn fold_prior_events(
             source_family: event.source_family.clone(),
             manifest_version: event.manifest_version,
             source_manifest_id: event.source_manifest_id,
+            emitting_address: event
+                .raw_fact_ref
+                .get("emitting_address")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             state_scope: Some(state_scope),
             block_timestamp,
             after_state: event.after_state.clone(),
@@ -293,6 +298,7 @@ mod tests {
                 source_family: "legacy".to_owned(),
                 manifest_version: 1,
                 source_manifest_id: None,
+                emitting_address: None,
                 state_scope: None,
                 block_timestamp: None,
                 after_state: json!({"value": value}),

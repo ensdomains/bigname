@@ -1,6 +1,6 @@
 # Interpreter fixtures
 
-`raw-events.json` contains 19 bounded raw-log cases. Each case runs in a new
+`raw-events.json` contains 20 bounded raw-log cases. Each case runs in a new
 migrated database so its block, transaction, and log positions remain
 unchanged. `expected-outputs.json` records every
 [normalized event](../../../../../docs/glossary.md) and every row in the
@@ -149,6 +149,13 @@ by the schema-v2 unit fixtures that share the same manifest catalog. The dense
 same-transaction corpus now contains 1,472 logs and 320 numeric registrar
 anchors; `binding-fk-release.json` and `binding-closure-dangling.json` include
 the numeric renewal that establishes the lease they later settle.
+
+The registry-operator addition exercises a Sepolia ENSv1 `registry_old`
+`ApprovalForAll` log and pins its resource-independent
+`AccountPermissionChanged` output, account state key, and `standard_approval`
+writer path.
+(upstream: .refs/ens_v1/contracts/registry/ENS.sol:L17-L22 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
 
 Validate the byte-identical corpus through its schema-v2 consumer with:
 

@@ -2,6 +2,9 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result, scope::Window};
 
+mod handoffs;
+use handoffs::seed_child_registration_history;
+
 /// Retain keys whose cited events Interpret deleted during redo so Project can retract losing-fork output.
 pub(super) async fn seed(
     transaction: &mut Transaction<'_, Postgres>,
@@ -18,9 +21,44 @@ pub(super) async fn seed(
     )
     .await?;
     seed_children(transaction, chain_id).await?;
+    seed_child_registration_history(transaction, chain_id, window.from_block, window.to_block)
+        .await?;
     seed_resources(transaction, chain_id, window.from_block, window.to_block).await?;
+    handoffs::seed_wrapper_effect_resources(transaction, chain_id).await?;
+    seed_account_permissions(transaction, chain_id).await?;
     seed_resolvers(transaction, chain_id, window.from_block, window.to_block).await?;
     seed_primary(transaction, chain_id).await?;
+    Ok(())
+}
+
+async fn seed_account_permissions(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO project_scope_account_permissions
+        SELECT row.chain_id, row.authority_kind, row.authority_contract,
+               row.owner, row.subject, row.relation_kind
+        FROM account_permission_state_current row
+        CROSS JOIN LATERAL jsonb_array_elements_text(
+            COALESCE(row.provenance -> 'normalized_event_ids', '[]'::jsonb)
+        ) citation(event_id)
+        WHERE row.chain_id = $1
+          AND NOT EXISTS (
+              SELECT 1 FROM normalized_events event
+              LEFT JOIN chain_lineage lineage USING (chain_id, block_hash, block_number)
+              WHERE event.normalized_event_id = citation.event_id::bigint
+                AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+                AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+          )
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(chain_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to retain account permission scope", error))?;
     Ok(())
 }
 
@@ -208,6 +246,24 @@ async fn seed_resources(
                 (row.provenance ->> 'expiry_retirement_event_id')
             ) citation(event_id)
             WHERE row.provenance ->> 'chain_id' = $1
+            UNION ALL
+            SELECT row.resource_id, citation.event_id, false
+            FROM permissions_current_resource_summary row
+            CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(
+                row.registry_binding_provenance -> 'normalized_event_ids', '[]'::jsonb
+            )) citation(event_id)
+            WHERE row.registry_binding_provenance ->> 'chain_id' = $1
+            UNION ALL
+            SELECT row.resource_id,
+                   row.provenance ->> 'registry_binding_clear_event_id', false
+            FROM permissions_current_resource_summary row
+            WHERE row.provenance ->> 'chain_id' = $1
+            UNION ALL
+            SELECT row.resource_id, NULL, true
+            FROM permissions_current_resource_summary row
+            WHERE row.provenance ->> 'chain_id' = $1
+              AND NULLIF(row.chain_positions ->> 'block_number', '')::bigint
+                  BETWEEN $2 AND $3
             UNION ALL
             SELECT root.resource_id, NULL::text, true
             FROM project_redo_expiry_roots root
@@ -477,6 +533,21 @@ pub(super) async fn consume(
     .map_err(|error| {
         ProjectError::database(
             "failed to consume path-expiry logical names during Project publication",
+            error,
+        )
+    })?;
+    sqlx::query(
+        "DELETE FROM project_redo_child_registration_history
+         WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3",
+    )
+    .bind(chain_id)
+    .bind(from_block)
+    .bind(to_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database(
+            "failed to consume child registration history during Project publication",
             error,
         )
     })?;

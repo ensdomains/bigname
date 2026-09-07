@@ -1,6 +1,6 @@
-mod intake_only;
 pub(in crate::schema_v2) mod migration;
 pub(super) mod permissions;
+mod standard_approvals;
 pub(super) mod v1;
 
 #[cfg(test)]
@@ -43,6 +43,7 @@ pub(super) fn event_allows_empty_emitter_roles(
 #[derive(Clone, Debug)]
 pub(super) struct Interpreted {
     pub events: Vec<EventDraft>,
+    pub sourced_events: Vec<SourcedEventBatch>,
     pub boundary_events: Vec<EventDraft>,
     pub labels: Vec<LabelDraft>,
     pub names: Vec<NameDraft>,
@@ -61,6 +62,7 @@ impl Interpreted {
     pub(super) fn new() -> Self {
         Self {
             events: Vec::new(),
+            sourced_events: Vec::new(),
             boundary_events: Vec::new(),
             labels: Vec::new(),
             names: Vec::new(),
@@ -76,6 +78,7 @@ impl Interpreted {
 
     pub(super) fn append(&mut self, other: &mut Self) {
         self.events.append(&mut other.events);
+        self.sourced_events.append(&mut other.sourced_events);
         self.boundary_events.append(&mut other.boundary_events);
         self.labels.append(&mut other.labels);
         self.names.append(&mut other.names);
@@ -88,6 +91,12 @@ impl Interpreted {
         self.migration_observations
             .append(&mut other.migration_observations);
     }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct SourcedEventBatch {
+    pub source_manifest_id: i64,
+    pub events: Vec<EventDraft>,
 }
 
 #[derive(Clone, Debug)]
@@ -237,7 +246,7 @@ pub(super) fn interpret(
     state: &mut State,
     registrar_context: super::migration::RegistrarContext,
 ) -> anyhow::Result<Interpreted> {
-    if let Some(output) = intake_only::approval(selected, raw)? {
+    if let Some(output) = standard_approvals::interpret(selected, raw)? {
         return Ok(output);
     }
     let mut output = match selected.source.source_family.as_str() {
@@ -361,7 +370,7 @@ pub(super) fn validate_manifest(
             && !event.normalized_events.is_empty()
         {
             bail!(
-                "source family {} intake-only approval {} must declare no normalized events",
+                "source family {} adapter-owned standard approval mapping {} must declare no normalized events",
                 source.source_family,
                 event.signature
             );

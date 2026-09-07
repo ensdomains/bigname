@@ -193,10 +193,17 @@ async fn successful_refresh_caches_eth_block_number_and_cache_age_is_explicit() 
     let endpoint = format!("http://{}", listener.local_addr()?);
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("probe must connect");
-        let mut request = vec![0_u8; 4096];
-        let count = stream.read(&mut request).await.expect("request must read");
-        let request = String::from_utf8_lossy(&request[..count]);
-        assert!(request.contains("eth_blockNumber"));
+        let mut request = Vec::with_capacity(4096);
+        while request.len() < 4096 && !request.windows(15).any(|part| part == b"eth_blockNumber") {
+            let count = stream
+                .read_buf(&mut request)
+                .await
+                .expect("request must read");
+            if count == 0 {
+                break;
+            }
+        }
+        assert!(request.windows(15).any(|part| part == b"eth_blockNumber"));
         let body = r#"{"jsonrpc":"2.0","id":1,"result":"0x2a"}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",

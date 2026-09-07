@@ -264,7 +264,9 @@ pub(super) fn event_time(raw: &RawLogInput) -> OffsetDateTime {
 }
 
 pub(super) fn derivation_kind(source_family: &str, event_kind: &str) -> &'static str {
-    if source_family == "ens_v2_migration_l1" {
+    if event_kind == "AccountPermissionChanged" {
+        "standard_approval"
+    } else if source_family == "ens_v2_migration_l1" {
         "ens_v2_migration"
     } else if event_kind == "Upgraded" {
         "proxy_upgrade"

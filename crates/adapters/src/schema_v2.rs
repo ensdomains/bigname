@@ -16,6 +16,7 @@ mod normalized;
 mod protocol;
 pub mod seam;
 mod session;
+mod sourced_events;
 mod state;
 mod state_key;
 mod state_residency;
@@ -24,8 +25,9 @@ mod state_restore;
 pub use model::*;
 pub use session::{
     AdapterSession, AdapterSessionRestore, InterpreterStateRequest, InterpreterStateValue,
-    PreparedAdapterBatch, begin_schema_v2_adapter_restore, interpret_schema_v2_batch,
-    prepare_schema_v2_batch_incremental,
+    PreparedAdapterBatch, begin_schema_v2_adapter_restore,
+    begin_schema_v2_adapter_restore_with_provenance, interpret_schema_v2_batch,
+    prepare_schema_v2_batch_incremental, prepare_schema_v2_batch_incremental_with_provenance,
 };
 pub use state_residency::StateCacheCapacity;
 
@@ -97,12 +99,10 @@ fn settle_block_boundary(
             }),
             state_scope: format!("boundary:{}:registration", release.namehash),
         }];
-        if release.release_was_active
-            && let (Some(subject), Some(authority_key)) = (
-                release.registrar.owner.as_deref(),
-                release.registrar.authority_key.as_deref(),
-            )
-        {
+        if let (Some(subject), Some(authority_key)) = (
+            release.registrar.owner.as_deref(),
+            release.registrar.authority_key.as_deref(),
+        ) {
             append_boundary_permission(
                 &mut registration_events,
                 &release.registrar,
@@ -112,7 +112,9 @@ fn settle_block_boundary(
                 false,
                 "registrar-release",
             );
-            if let Some(resolver) = release.resolver.as_deref() {
+            if release.release_was_active
+                && let Some(resolver) = release.resolver.as_deref()
+            {
                 append_boundary_permission(
                     &mut registration_events,
                     &release.registrar,
@@ -199,6 +201,9 @@ fn settle_block_boundary(
                     "source_event":"RegistrationReleased",
                     "authority_kind":next_kind,
                     "authority_key":next_key,
+                    // The expiry fallback has no registry observation of its own.
+                    "owner_getter":next.owner,
+                    "registry_contract":next.registry_contract,
                     "active_from":block.block_timestamp.unix_timestamp(),
                     "binding_kind":"declared_registry_path",
                 }),
@@ -379,6 +384,7 @@ fn authority_boundary_state(authority: Option<&state::V1NameState>) -> serde_jso
         "source_event":"RegistrationReleased",
         "authority_kind":authority.map(|value| v1_authority_kind(&value.authority_source_family)),
         "authority_key":authority.and_then(|value| value.authority_key.clone()),
+        "owner":authority.and_then(|value| value.owner.clone()),
     })
 }
 
