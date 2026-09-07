@@ -80,8 +80,12 @@ content hash and force a full `interpret` and `project` walk.
 Dependent work must therefore key on stable identifiers only:
 
 **Safe to key on:** `event_identity`, `logical_name_id`, `resource_id`,
-`token_lineage_id`, `contract_instance_id`, namehashes and derived normalized
-names.
+`token_lineage_id`, `contract_instance_id`, and derived normalized names. A
+namehash is safe only together with its namespace — which is what
+`logical_name_id` is (`<namespace>:<namehash>`, `architecture.md` §
+Identity) — because the hash does not encode the namespace, and the supported
+`ens` and `basenames` namespaces can carry the same node. An artifact that
+spans namespaces and keys on the bare hash conflates them.
 
 **Not safe to key on:** `normalized_event_id` numeric values, cursor bytes, a
 specific interpreter content hash, projection generation numbers, or row counts
@@ -179,17 +183,26 @@ values the system already documents as unstable across a boundary.
    predecessor served name text only within one address and never globally.
    A global name-text index is new work, to be shaped by the query it serves and
    justified by a benchmark rather than by a predecessor. Separately,
-   `normalized_events` has no index leading with `namespace`, so an unfiltered
-   `/v2/events` page cannot use one. Both are additive; no re-derivation.
+   `normalized_events` has no index leading with `namespace`. That is not the
+   same as the default `/v2/events` page having no index: a request with no
+   `event_type` still injects the product history event kinds
+   (`apps/api/src/v2/events.rs`, `product_history_event_kinds()`), and
+   `normalized_events_projection_idx (event_kind, canonicality_state, chain_id,
+   block_number, normalized_event_id)` leads with `event_kind`, so it is a
+   candidate access path for the real default query. Whether it serves the
+   page or degrades into a scan over the kinds is a benchmark question. Both
+   items are additive; no re-derivation.
 
-   **Decided: in, and land early in the milestone.** Both gaps are confirmed
-   present: no index in `schema-v2/baseline/06_projections.sql` supports a
-   name-text filter or name sort, and every `normalized_events` index leads with
-   `logical_name_id`, `resource_id` or `chain_id` — none with `namespace`. They
-   are tracked as #404 and #402. Monitoring and parity work exercise exactly
-   these paths, so the latency should be found by a benchmark rather than by the
-   milestone's own measurements. Both are additive and require no
-   re-derivation.
+   **Decided: in for the name-text index; #402 needs the measurement first.**
+   The name-text gap is confirmed present: no index in
+   `schema-v2/baseline/06_projections.sql` supports a name-text filter or name
+   sort (#404). For `/v2/events` (#402), the carve-out authorizes an index only
+   after `EXPLAIN` of the default query against the existing
+   `normalized_events_projection_idx`; a `namespace`-leading index that
+   duplicates or misshapes that path is not authorized on the strength of this
+   ADR. Monitoring and parity work exercise exactly these paths, so the latency
+   should be found by a benchmark rather than by the milestone's own
+   measurements. Both are additive and require no re-derivation.
 
 ### Derivation-side changes that are not schema changes
 
