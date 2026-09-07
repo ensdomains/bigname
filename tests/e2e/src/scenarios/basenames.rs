@@ -220,14 +220,18 @@ async fn basenames_declared_state_matrix_end_to_end() -> Result<()> {
     );
     assert_eq!(
         pointer(&nft_only, "/declared_state/control/registry_owner"),
-        Value::Null,
-        "the first registry-owner setup is not materialized as a later control transfer"
+        alice_path,
+        "the NFT transfer retains the original registry owner on the selected authority"
     );
     assert_eq!(
         pointer(&nft_only, "/declared_state/control/latest_event_kind"),
         "AuthorityEpochChanged"
     );
 
+    let epoch_owners: Vec<String> = sqlx::query_scalar(
+        "SELECT after_state->>'registry_owner' FROM normalized_events WHERE resource_id=$1::uuid AND event_kind='AuthorityEpochChanged' AND after_state->>'source_event'='Transfer' AND canonicality_state='canonical'",
+    ).bind(pointer(&nft_only, "/data/resource_id").as_str().context("NFT-only resource")?).fetch_all(&run.db.pool).await?;
+    assert_eq!(epoch_owners, vec![alice_path.clone()]);
     let management_only = exact_name(&run.api, "basenames", "mgmtonly.base.eth").await?;
     assert_exact_control(
         &management_only,
