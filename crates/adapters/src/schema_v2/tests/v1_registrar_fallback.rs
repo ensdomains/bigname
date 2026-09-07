@@ -32,6 +32,12 @@ fn manifest() -> ManifestInput {
                 &["TokenControlTransferred", "PermissionChanged"],
             ),
             (
+                "ControllerAdded",
+                "event ControllerAdded(address indexed controller)",
+                &["registrar"],
+                &["PermissionChanged"],
+            ),
+            (
                 "NameRegistered",
                 "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)",
                 &["registrar"],
@@ -400,6 +406,77 @@ fn a_fallback_registration_survives_the_block_boundary_and_its_later_renewal_lan
     assert!(renewals[0].logical_name_id.is_none());
     assert!(
         kinds(&output, "RegistrationReleased").is_empty(),
+        "{:#?}",
+        output.normalized_events
+    );
+    Ok(())
+}
+
+#[test]
+fn a_fallback_registration_is_visible_to_a_later_log_in_the_same_transaction() -> anyhow::Result<()>
+{
+    // The current controller shape: register the token to the controller, then
+    // transfer it to the user, all in one transaction.
+    const ROTATED_CONTROLLER: &str = "0x00000000000000000000000000000000000000c6";
+    const USER: &str = "0x00000000000000000000000000000000000000c7";
+    let mut registered = registrar_registered(10, 0, 1_000);
+    registered = in_transaction(registered, 0);
+    let registered = {
+        let mut raw = registered;
+        raw.topics[2] = format!("0x{:0>64}", &ROTATED_CONTROLLER[2..]);
+        raw
+    };
+    let output = interpret(
+        vec![
+            registered,
+            registrar_transfer(10, 0, 1, ROTATED_CONTROLLER, USER),
+        ],
+        &[],
+    )?;
+    let grants = kinds(&output, "RegistrationGranted");
+    assert_eq!(grants.len(), 1, "{:#?}", output.normalized_events);
+    assert_eq!(grants[0].after_state["registrant"], ROTATED_CONTROLLER);
+    let transfers = kinds(&output, "TokenControlTransferred");
+    assert_eq!(
+        transfers.len(),
+        1,
+        "the transfer must see the registrar state the fallback established: {:#?}",
+        output.normalized_events
+    );
+    assert_eq!(transfers[0].log_index, Some(1));
+    Ok(())
+}
+
+#[test]
+fn a_controller_announced_in_the_same_transaction_does_not_silence_the_fallback()
+-> anyhow::Result<()> {
+    // Without the migration family, `ControllerAdded` then use in one transaction
+    // is a rotation, not `syncWrapper`; the registration is still a fallback fact.
+    mod controller_events {
+        use alloy_sol_types::sol;
+        sol! { event ControllerAdded(address indexed controller); }
+    }
+    let added = in_transaction(
+        raw_at(
+            controller_events::ControllerAdded {
+                controller: "0x00000000000000000000000000000000000000c6"
+                    .parse()
+                    .unwrap(),
+            }
+            .encode_log_data(),
+            10,
+            0,
+            REGISTRAR,
+        ),
+        0,
+    );
+    let output = interpret(
+        vec![added, in_transaction(registrar_registered(10, 1, 1_000), 0)],
+        &[],
+    )?;
+    assert_eq!(
+        kinds(&output, "RegistrationGranted").len(),
+        1,
         "{:#?}",
         output.normalized_events
     );

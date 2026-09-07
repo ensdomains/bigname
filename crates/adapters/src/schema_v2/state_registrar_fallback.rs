@@ -42,21 +42,13 @@ impl State {
         }
     }
 
-    /// The held logs whose transaction is not `open_transaction`, in their
-    /// original order; those logs leave the hold. `None` takes every held log.
-    pub(in crate::schema_v2) fn take_v1_pending_registrar_logs(
-        &mut self,
-        open_transaction: Option<&str>,
-    ) -> Vec<RawLogInput> {
-        let (complete, still_open): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut self.v1_pending_registrar_logs)
-                .into_iter()
-                .partition(|((transaction, _, _), _)| {
-                    open_transaction != Some(transaction.as_str())
-                });
-        self.v1_pending_registrar_logs = still_open.into_iter().collect();
-        let mut complete = complete.into_iter().map(|(_, raw)| raw).collect::<Vec<_>>();
-        complete.sort_by_key(|raw| (raw.block_number, raw.log_index));
-        complete
+    /// Every held log in its original order; the hold is empty afterwards.
+    pub(in crate::schema_v2) fn take_v1_pending_registrar_logs(&mut self) -> Vec<RawLogInput> {
+        let mut held = std::mem::take(&mut self.v1_pending_registrar_logs)
+            .into_iter()
+            .map(|(_, raw)| raw)
+            .collect::<Vec<_>>();
+        held.sort_by_key(|raw| (raw.block_number, raw.log_index));
+        held
     }
 }

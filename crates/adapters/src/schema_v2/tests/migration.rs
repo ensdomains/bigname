@@ -2258,7 +2258,8 @@ fn cross_family_registrar_controller_uses_a_separate_name_wrapper_envelope() -> 
 }
 
 #[test]
-fn numeric_base_registrar_events_are_silent_without_the_migration_family() -> anyhow::Result<()> {
+fn numeric_base_registrar_events_are_fallback_facts_without_the_migration_family()
+-> anyhow::Result<()> {
     let fixture = fixture()?;
     let addresses = &fixture["addresses"];
     let registrar = addresses["base_registrar"].as_str().unwrap();
@@ -2311,10 +2312,28 @@ fn numeric_base_registrar_events_are_silent_without_the_migration_family() -> an
         .retain(|admission| admission.source_manifest_id != Some(MIGRATION_MANIFEST_ID));
 
     let output = interpret_test_batch(input)?;
-    assert!(output.normalized_events.is_empty());
-    assert!(output.resources.is_empty());
-    assert!(output.token_lineages.is_empty());
+    // Without the migration family there is no correlation to read the
+    // announcement as `syncWrapper`, so a controller added and used in one
+    // transaction is a rotation: the numeric events are flagged fallback facts,
+    // and nothing is migration evidence.
     assert!(output.migration_event_associations.is_empty());
+    assert!(
+        output
+            .normalized_events
+            .iter()
+            .all(|event| event.source_family == "ens_v1_registrar_l1"
+                && event.migration_correlation_ids.is_empty()),
+        "{:#?}",
+        output.normalized_events
+    );
+    for kind in ["RegistrationGranted", "RegistrationRenewed"] {
+        let fact = output
+            .normalized_events
+            .iter()
+            .find(|event| event.event_kind == kind)
+            .unwrap_or_else(|| panic!("{kind} fallback fact: {:#?}", output.normalized_events));
+        assert_eq!(fact.after_state["controller_admitted"], false);
+    }
     Ok(())
 }
 

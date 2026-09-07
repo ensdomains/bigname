@@ -4,7 +4,7 @@ use anyhow::{Context, bail};
 
 #[path = "session_interpret.rs"]
 mod interpret;
-use interpret::{interpret_held_registrar, interpret_raw};
+use interpret::interpret_transaction;
 use serde_json::{Value, json};
 
 use super::{
@@ -327,24 +327,21 @@ fn interpret_loaded(
         while raw_logs.peek().is_some_and(|raw| {
             raw.block_number == block.block_number && raw.block_hash == block.block_hash
         }) {
-            let raw = raw_logs.next().expect("peeked raw log");
-            // Registrar lifecycle logs no admitted controller event claimed in their
-            // transaction are the fallback source, interpreted once that transaction
-            // is complete and before the next one, so a later transaction in the
-            // same block sees the state they establish.
-            for held in block_state.take_v1_pending_registrar_logs(Some(&raw.transaction_hash)) {
-                interpret_held_registrar(catalog, &held, &mut block_state, &mut block_output)?;
+            let first = raw_logs.next().expect("peeked raw log");
+            let mut transaction = vec![first];
+            while raw_logs.peek().is_some_and(|raw| {
+                raw.block_hash == block.block_hash
+                    && raw.transaction_hash == transaction[0].transaction_hash
+            }) {
+                transaction.push(raw_logs.next().expect("peeked raw log"));
             }
-            interpret_raw(
+            interpret_transaction(
                 catalog,
-                &raw,
+                &transaction,
                 &mut block_state,
                 &mut block_output,
                 &mut migration_observations,
             )?;
-        }
-        for held in block_state.take_v1_pending_registrar_logs(None) {
-            interpret_held_registrar(catalog, &held, &mut block_state, &mut block_output)?;
         }
         super::protocol::reconcile_batch(&mut block_output);
         if block_output

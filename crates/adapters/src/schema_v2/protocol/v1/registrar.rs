@@ -55,7 +55,12 @@ pub(super) fn interpret(
                 .normalized_events
                 .iter()
                 .any(|kind| kind == "RegistrationGranted");
-            if fallback_declared && !state.v1_registrar_controller_announced(raw) {
+            // A transaction that announces its own controller is `syncWrapper`, which
+            // only the migration correlation reads; without it, an announcement in
+            // the same transaction is no claim on the fact.
+            let announced_for_migration =
+                migration_enabled && state.v1_registrar_controller_announced(raw);
+            if fallback_declared && !announced_for_migration {
                 let (labelhash, _, after) = decode_registrar_lifecycle(selected, raw)?;
                 // The ENSv1→ENSv2 Graveyard cleanup registers with a sentinel expiry no
                 // controller can produce from `block.timestamp + duration`; that is
@@ -206,7 +211,10 @@ fn name_fact(
     // The wrapper registers itself first; the controller's later event names the wrapped user.
     // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L297 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
-    let owner = registration
+    // The registrar's own payload names the token owner; a controller's event
+    // names the registrant, which the registry owner outranks because the wrapper
+    // registers to itself first. The fallback has the payload and nothing else.
+    let owner = (registration && raw_label.is_some())
         .then(|| state.v1_registry_owner(&selected.source.namespace, &raw_namehash))
         .flatten()
         .filter(|owner| !owner.eq_ignore_ascii_case(ZERO_ADDRESS))
