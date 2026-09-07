@@ -665,8 +665,10 @@ async fn assert_error(response: Response, status: StatusCode, code: &str) {
 
 #[test]
 fn stop_grace_requires_request_deadline_and_margin() {
-    let mut config = ApiBoundsConfig::default();
-    config.request_timeout_ms = 60_000;
+    let mut config = ApiBoundsConfig {
+        request_timeout_ms: 60_000,
+        ..Default::default()
+    };
     assert!(config.validate().is_ok());
     for grace in [0, 45_000, 60_000, 64_999] {
         config.stop_grace_ms = Some(grace);
