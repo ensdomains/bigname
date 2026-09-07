@@ -197,6 +197,12 @@ fn name_renewed(
             )
         })
         .unwrap_or_else(|| new_registrar_identity(selected, raw, &labelhash_hex));
+    state.note_v1_registrar_renewal_expiry(
+        &selected.source.namespace,
+        &namehash,
+        event.expires,
+        raw,
+    );
     let expiry = saturating_u256_i64(event.expires);
     let surface_known = existing.as_ref().is_some_and(|state| state.surface_known)
         || state.v1_active_surface_materialized(&selected.source.namespace, &namehash);

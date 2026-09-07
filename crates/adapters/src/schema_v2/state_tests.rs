@@ -538,3 +538,86 @@ fn release_returns_the_promoted_retained_registry_authority() {
         "the release output must carry the surface-known state established during activation"
     );
 }
+
+#[test]
+fn wrapper_renewal_restore_preserves_unsigned_expiry_and_later_fuse_state() {
+    const NODE: &str = "wrapper-node";
+    let mut initial = State::new(Vec::new(), Vec::new());
+    initial.observe_v1_name(
+        NAMESPACE,
+        NODE,
+        "test:wrapper-node".to_owned(),
+        true,
+        Uuid::from_u128(7),
+        None,
+        "ens_v1_wrapper_l1".to_owned(),
+        Some(i64::MAX),
+        None,
+        None,
+    );
+    initial.restore_v1_wrapper_data(NAMESPACE, NODE, 1, u64::MAX);
+
+    for expiry in [i64::MAX as u64 + 1, 1_907_776_200, 7_776_000] {
+        let mut live = initial.clone();
+        let (previous, wrapper) = live
+            .renew_v1_wrapper_expiry(NAMESPACE, NODE, expiry)
+            .expect("known wrapper");
+        assert_eq!(previous, u64::MAX);
+        assert_eq!(
+            wrapper.expiry,
+            Some(i64::try_from(expiry).unwrap_or(i64::MAX))
+        );
+        let serialized = serde_json::to_vec(&json!({
+            "source_event": "NameRenewed",
+            "node": NODE,
+            "authority_kind": "wrapper",
+            "expiry": expiry,
+        }))
+        .unwrap();
+        let event = PriorEventInput {
+            retained_state_key: "wrapper-expiry".to_owned(),
+            chain_id: "test-chain".to_owned(),
+            namespace: NAMESPACE.to_owned(),
+            logical_name_id: Some(wrapper.logical_name_id),
+            resource_id: Some(wrapper.resource_id),
+            event_kind: "ExpiryChanged".to_owned(),
+            source_family: "ens_v1_registrar_l1".to_owned(),
+            manifest_version: 1,
+            source_manifest_id: Some(1),
+            emitting_address: None,
+            state_scope: None,
+            block_timestamp: None,
+            after_state: serde_json::from_slice(&serialized).unwrap(),
+        };
+        assert_eq!(event.after_state["expiry"].as_u64(), Some(expiry));
+        let mut restored = initial.clone();
+        crate::schema_v2::state_restore::v1(&mut restored, &event);
+        assert_eq!(
+            live.v1_name(NAMESPACE, NODE),
+            restored.v1_name(NAMESPACE, NODE)
+        );
+        let live_fuses = live.set_v1_wrapper_fuses(NAMESPACE, NODE, 3).unwrap();
+        let restored_fuses = restored.set_v1_wrapper_fuses(NAMESPACE, NODE, 3).unwrap();
+        assert_eq!(live_fuses, restored_fuses);
+        assert_eq!(restored_fuses.1.expiry, expiry);
+        assert_eq!(restored_fuses.1.fuses, 3);
+
+        // An ordinary ExpiryExtended event still retains the larger existing expiry.
+        let mut extension = event;
+        extension.source_family = "ens_v1_wrapper_l1".to_owned();
+        extension.after_state = json!({
+            "source_event": "ExpiryExtended",
+            "node": NODE,
+            "expiry": expiry - 1,
+        });
+        crate::schema_v2::state_restore::v1(&mut restored, &extension);
+        assert_eq!(
+            restored
+                .set_v1_wrapper_fuses(NAMESPACE, NODE, 3)
+                .unwrap()
+                .1
+                .expiry,
+            expiry
+        );
+    }
+}

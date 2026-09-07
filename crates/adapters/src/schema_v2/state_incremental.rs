@@ -35,7 +35,7 @@ impl State {
             v1_names: OrdMap::new(),
             v1_wrapper_data: OrdMap::new(),
             v1_pending_unwraps: OrdMap::new(),
-            v1_registrar_controller_transaction: None,
+            v1_registrar_transaction: Default::default(),
             v1_registrar_controllers: OrdSet::new(),
             v1_pending_wrapper_sync_expiries: OrdMap::new(),
             v1_correlated_wrapper_expiries: OrdMap::new(),

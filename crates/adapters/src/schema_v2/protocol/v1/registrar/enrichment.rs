@@ -46,7 +46,7 @@ fn event(
         state,
         previous_active.as_ref(),
         &namehash,
-        registrar.as_ref().and_then(|state| state.expiry),
+        raw,
         registration,
     )? {
         output.events.push(wrapper_event);

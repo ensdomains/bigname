@@ -1,7 +1,10 @@
+use alloy_primitives::U256;
+use anyhow::Context;
 use serde_json::json;
 
 use crate::schema_v2::{
     catalog::Selected,
+    model::RawLogInput,
     protocol::EventDraft,
     state::{State, V1NameState},
 };
@@ -13,7 +16,7 @@ pub(super) fn event(
     state: &mut State,
     previous_active: Option<&V1NameState>,
     namehash: &str,
-    registrar_expiry: Option<i64>,
+    raw: &RawLogInput,
     registration: bool,
 ) -> anyhow::Result<Option<EventDraft>> {
     if registration
@@ -23,15 +26,19 @@ pub(super) fn event(
     {
         return Ok(None);
     }
-    let Some(registrar_expiry) = registrar_expiry else {
+    let Some(registrar_expiry) = state
+        .v1_registrar(&selected.source.namespace, namehash)
+        .and_then(|registrar| registrar.expiry)
+    else {
         return Ok(None);
     };
     let registrar_expiry = u64::try_from(registrar_expiry)?;
-    let wrapper_expiry = registrar_expiry
-        .checked_add(ENS_GRACE_PERIOD_SECS)
-        .map_or(i64::MAX as u64, |expiry| expiry.min(i64::MAX as u64));
+    let registrar_word = state
+        .v1_registrar_renewal_expiry(&selected.source.namespace, namehash, raw)
+        .unwrap_or_else(|| U256::from(registrar_expiry));
+    let wrapper_expiry = wrapper_expiry(registrar_word)?;
     let Some((previous_expiry, wrapper)) =
-        state.update_v1_wrapper_expiry(&selected.source.namespace, namehash, wrapper_expiry)
+        state.renew_v1_wrapper_expiry(&selected.source.namespace, namehash, wrapper_expiry)
     else {
         return Ok(None);
     };
@@ -52,4 +59,38 @@ pub(super) fn event(
         }),
         state_scope: String::new(),
     }))
+}
+
+// NameWrapper narrows to uint64 before its checked grace-period addition.
+// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318-L337 @ ens_v1@91c966f)
+fn wrapper_expiry(registrar_expiry: U256) -> anyhow::Result<u64> {
+    registrar_expiry.as_limbs()[0]
+        .checked_add(ENS_GRACE_PERIOD_SECS)
+        .context("NameWrapper renewal expiry overflows uint64")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registrar_width_is_preserved_until_wrapper_conversion() {
+        let ordinary = U256::from(1_900_000_200_u64);
+        assert_eq!(wrapper_expiry(ordinary).unwrap(), 1_907_776_200);
+        assert_eq!(
+            wrapper_expiry((U256::from(1) << 64) + ordinary).unwrap(),
+            wrapper_expiry(ordinary).unwrap()
+        );
+        assert_eq!(
+            wrapper_expiry(U256::from(1) << 255).unwrap(),
+            ENS_GRACE_PERIOD_SECS
+        );
+    }
+
+    #[test]
+    fn wrapper_grace_addition_uses_checked_uint64_arithmetic() {
+        let boundary = u64::MAX - ENS_GRACE_PERIOD_SECS;
+        assert_eq!(wrapper_expiry(U256::from(boundary)).unwrap(), u64::MAX);
+        assert!(wrapper_expiry(U256::from(boundary + 1)).is_err());
+    }
 }

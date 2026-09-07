@@ -410,7 +410,7 @@ fn name_event(
         state,
         previous_active.as_ref(),
         &raw_namehash,
-        expiry,
+        raw,
         registration,
     )?;
     let after_object = after.as_object_mut().expect("registrar state is an object");

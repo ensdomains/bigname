@@ -2989,14 +2989,14 @@ fn wrapped_controller_renewal_updates_the_wrapper_resource_expiry_from_registrar
         },
         Some(session),
     )?;
-    let saturated = far_future
+    let narrowed = far_future
         .normalized_events
         .iter()
         .find(|event| {
             event.event_kind == "ExpiryChanged" && event.resource_id == Some(wrapper_resource)
         })
         .expect("far-future wrapper renewal expiry");
-    assert_eq!(saturated.after_state["expiry"], i64::MAX);
+    assert_eq!(narrowed.after_state["expiry"], 7_776_000);
     Ok(())
 }
 

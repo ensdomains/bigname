@@ -348,7 +348,7 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
             event.after_state.get("expiry").and_then(parse_u64),
         )
     {
-        state.update_v1_wrapper_expiry(&event.namespace, namehash, expiry);
+        state.renew_v1_wrapper_expiry(&event.namespace, namehash, expiry);
     }
     if event.event_kind == "AuthorityTransferred"
         && matches!(source_event, Some("NewOwner" | "Transfer"))
