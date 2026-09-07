@@ -9,10 +9,19 @@ Accepted: 2026-09-06
 
 ## Context
 
-The V1 milestone builds parity coverage, regression tests, and monitoring on top
-of the schema. That work is expensive to redo, so it needs a schema it can rely
-on. The requirement is not that the schema never changes — it is that changes
-are enumerated in advance rather than discovered mid-milestone.
+"V1" in this ADR is bigname's first stable read release — not ENSv1, and not
+the prospective V2 specification. The V1 milestone is the work that proves
+that release as a replacement for the retained legacy read surface: parity
+coverage (the slice-1 full-re-walk acceptance comparison and the
+combined-boundary gate that
+[`consumer-capabilities.md`](../consumer-capabilities.md) requires),
+regression tests over the served routes, and monitoring, all built
+on top of the schema. It ends when those gates pass and the release is signed
+off; the sign-off is recorded by amending the status line of this ADR with its
+date, and until that amendment the freeze applies. That work is expensive to
+redo, so it needs a schema it can rely on. The requirement is not that the
+schema never changes — it is that changes are enumerated in advance rather
+than discovered mid-milestone.
 
 Two prior decisions frame this. [ADR 0006](0006-api-v2-product-surface.md) fixed
 the v2 product surface and rejected GraphQL as the product contract.
@@ -56,6 +65,13 @@ the two carried slices 2 and 3, whose schema work this ADR anticipated rather
 than forbade; the head is restated here so the frozen artifact is the tree the
 milestone actually builds on.
 
+An authorized carve-out that lands as a schema-migration becomes the new head,
+and the change that lands it must advance the head named above and the
+pointer in [`storage.md`](../storage.md) in the same change; a carve-out that
+leaves either behind is out of contract, exactly as a schema change that
+leaves `apply-check.sh` behind is. The frozen artifact at any moment is
+therefore the baseline tree plus the head this line names.
+
 `schema-v2/apply-check.sh` is the conformance test for that contract. It already
 gates its own CI job and asserts table inventory, column presence, constraint
 shape, and a forbidden-name policy. **A change to the schema that does not also
@@ -80,12 +96,17 @@ content hash and force a full `interpret` and `project` walk.
 Dependent work must therefore key on stable identifiers only:
 
 **Safe to key on:** `event_identity`, `logical_name_id`, `resource_id`,
-`token_lineage_id`, `contract_instance_id`, and derived normalized names. A
-namehash is safe only together with its namespace — which is what
-`logical_name_id` is (`<namespace>:<namehash>`, `architecture.md` §
-Identity) — because the hash does not encode the namespace, and the supported
-`ens` and `basenames` namespaces can carry the same node. An artifact that
-spans namespaces and keys on the bare hash conflates them.
+`token_lineage_id`, and `contract_instance_id`. A namehash is safe only
+together with its namespace — which is what `logical_name_id` is
+(`<namespace>:<namehash>`, `architecture.md` § Identity) — because the hash
+does not encode the namespace, and the supported `ens` and `basenames`
+namespaces can carry the same node. A derived normalized name is not an
+identity at all: `architecture.md` and
+[ADR 0002](0002-surface-resource-identity.md) make normalization results
+read-time attributes, and a normalizer-version walk — which this freeze
+permits — can change, remove, or collide them. An artifact may record a
+normalized name only beside the `logical_name_id` it was derived for and the
+normalizer version it was derived under.
 
 **Not safe to key on:** `normalized_event_id` numeric values, cursor bytes, a
 specific interpreter content hash, projection generation numbers, or row counts
@@ -123,7 +144,10 @@ values the system already documents as unstable across a boundary.
    **Decided: no widening was needed, and none is authorized.** Slice 3A reuses
    `authority_transition`, so the CHECK on
    `migration_candidate_identity_effects` still pins that single value and
-   `migration_discovery_effects` still pins `migration_registry_creation`. The
+   `migration_discovery_associations` still pins `migration_registry_creation`
+(`schema-v2/baseline/05_normalized_events.sql`); the candidate-side
+`migration_candidate_discovery_effects` accepts any nonblank
+`correlation_kind` and is not the constraint this decision guards. The
    interpreter writes exactly those two kinds. A future shape that needs a third
    is a constraint replacement on a populated table and therefore a new ADR, not
    a carve-out under this one.
@@ -175,14 +199,18 @@ values the system already documents as unstable across a boundary.
 5. **Serving indexes the projections never had** — no index in
    `bigname_phase` supports a name-text filter or a name sort, so `/v2/search`
    and the GraphQL `name_contains` and name-ordered paths are sequential scans
-   plus external sorts. This is not an index lost in the `public` schema
-   cutover: every index the retired `public.address_names_current` carried led
-   with `address`, including the one prefix index that named
-   `normalized_name` (`address_names_current_address_normalized_name_prefix_idx`,
-   `migrations/20260627120000_address_names_q_sort_read_indexes.sql`), so the
-   predecessor served name text only within one address and never globally.
-   A global name-text index is new work, to be shaped by the query it serves and
-   justified by a benchmark rather than by a predecessor. Separately,
+   plus external sorts. The predecessor is not where the draft looked for it:
+   every index the retired `public.address_names_current` carried led with
+   `address`, including the one prefix index that named `normalized_name`
+   (`address_names_current_address_normalized_name_prefix_idx`,
+   `migrations/20260627120000_address_names_q_sort_read_indexes.sql`), so that
+   table served name text only within one address. The global predecessors
+   were on `public.name_current`, which is what the search and name-ordered
+   paths read: `name_current_app_namespace_name_idx (namespace,
+   normalized_name)` and `name_current_app_global_name_idx (normalized_name,
+   namespace)` (`migrations/20260502170000_app_facing_rest_indexes.sql`). Those
+   two shapes are the starting point for #404, benchmarked against the current
+   `raw_name` queries rather than copied. Separately,
    `normalized_events` has no index leading with `namespace`. That is not the
    same as the default `/v2/events` page having no index: a request with no
    `event_type` still injects the product history event kinds
@@ -196,7 +224,9 @@ values the system already documents as unstable across a boundary.
    **Decided: in for the name-text index; #402 needs the measurement first.**
    The name-text gap is confirmed present: no index in
    `schema-v2/baseline/06_projections.sql` supports a name-text filter or name
-   sort (#404). For `/v2/events` (#402), the carve-out authorizes an index only
+   sort (#404), and the two `name_current` predecessors above are the shapes
+   to measure first. For `/v2/events` (#402), the carve-out authorizes an index
+   only
    after `EXPLAIN` of the default query against the existing
    `normalized_events_projection_idx`; a `namespace`-leading index that
    duplicates or misshapes that path is not authorized on the strength of this
