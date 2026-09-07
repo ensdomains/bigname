@@ -2168,6 +2168,258 @@ fn comma_values(value: Option<&str>) -> impl Iterator<Item = &str> {
     value.into_iter().flat_map(|value| value.split(','))
 }
 
+/// Prove normal RPC intake and supported HTTP against naturally produced rows.
+/// This does not use the fixture replay commands or seed phase progress.
+pub async fn prove_normal_sepolia_http(
+    repo_root: &Path,
+    db: &mut super::db::HarnessDb,
+    manifests_root: &Path,
+    rpc_url: &str,
+    head: i64,
+    owners: &[(&str, String)],
+) -> Result<()> {
+    let reader = db.verification_url().await?;
+    let binary = profile_phase_runner(repo_root, manifests_root).await?;
+    let cargo = std::env::var_os("BIGNAME_E2E_REAL_CARGO")
+        .or_else(|| std::env::var_os("CARGO"))
+        .unwrap_or_else(|| "cargo".into());
+    let mut build = Command::new(&cargo);
+    build.env("CARGO", &cargo).current_dir(repo_root).args([
+        "build",
+        "--locked",
+        "--message-format=json-render-diagnostics",
+        "--package",
+        "bigname-api",
+        "--bin",
+        "bigname-api",
+    ]);
+    let output = run_to_completion(build, "ops exact-source API build").await?;
+    let mut api_binary = None;
+    for line in output.lines() {
+        let message: Value = serde_json::from_str(line)?;
+        if message["reason"] == "compiler-artifact"
+            && message["target"]["name"] == "bigname-api"
+            && message["manifest_path"].as_str().map(Path::new)
+                == Some(repo_root.join("apps/api/Cargo.toml").as_path())
+        {
+            api_binary = message["executable"].as_str().map(PathBuf::from);
+        }
+    }
+    let api_binary = api_binary.context("Cargo did not produce the exact-source API")?;
+    eprintln!(
+        "OPS producer binary {:?}; API binary {api_binary:?}",
+        binary.path
+    );
+    let mut command = pipeline_command(repo_root, &binary);
+    command.args([
+        "run",
+        "--database-url",
+        &db.url,
+        "--verification-database-url",
+        &reader,
+        "--metrics-bind-addr",
+        "127.0.0.1:0",
+        "--chain",
+        "ethereum-sepolia",
+        "--source",
+        "ethereum-sepolia:ops-owner:drpc:ethereum_head:0=BIGNAME_OPS_RPC",
+        "--manifests-root",
+    ]);
+    command.arg(manifests_root).env("BIGNAME_OPS_RPC", rpc_url);
+    let mut runner = OwnedProofProcess::spawn(command, "ops-normal-run")?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+    loop {
+        runner.ensure_running()?;
+        let complete: bool = sqlx::query_scalar(
+            "SELECT count(*) = 3 AND bool_and(COALESCE(current_block_number >= $1, false) AND NOT redo_in_progress AND last_error IS NULL) FROM chain_phase_state WHERE chain_id = 'ethereum-sepolia' AND phase_name IN ('interpret', 'project', 'live')",
+        ).bind(head).fetch_one(&db.pool).await?;
+        if complete {
+            break;
+        }
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "normal intake did not reach Live at {head}; logs {:?}",
+            runner.logs
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    runner.stop().await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let startup_guard = await_with_readiness_deadline(
+        deadline,
+        30,
+        "normal HTTP API startup lock",
+        super::lock_local_server_start(),
+    )
+    .await?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    drop(listener);
+    let mut api_command = pipeline_command(repo_root, &api_binary);
+    api_command.args([
+        "serve",
+        "--database-url",
+        &reader,
+        "--bind-addr",
+        &address.to_string(),
+        "--metrics-bind-addr",
+        "127.0.0.1:0",
+        "--chain-rpc-url",
+        &format!("ethereum-sepolia={rpc_url}"),
+    ]);
+    let mut api = OwnedProofProcess::spawn(api_command, "ops-http-api")?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    loop {
+        api.ensure_running()?;
+        if client
+            .get(format!("http://{address}/healthz"))
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success())
+        {
+            break;
+        }
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "API did not become healthy; logs {:?}",
+            api.logs
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    drop(startup_guard);
+    let before = proof_tables(&db.pool).await?;
+    for (name, owner) in owners {
+        let response = client
+            .get(format!("http://{address}/v2/names/{name}"))
+            .query(&[
+                ("namespace", "ens"),
+                ("finality", "latest"),
+                ("source", "indexed"),
+            ])
+            .send()
+            .await?;
+        let status = response.status();
+        let body: Value = response.json().await?;
+        anyhow::ensure!(status.is_success(), "indexed HTTP {name}: {status} {body}");
+        anyhow::ensure!(
+            body["data"]["owner"] == *owner && body["data"]["registrant"] == *owner,
+            "indexed HTTP ownership mismatch for {name}: {body}"
+        );
+        anyhow::ensure!(
+            body["data"]["chain_id"] == 11155111 && body["data"]["network"] == "ethereum-sepolia",
+            "wrong network: {body}"
+        );
+        eprintln!("OPS indexed HTTP {name}: {body}");
+    }
+    anyhow::ensure!(
+        proof_tables(&db.pool).await? == before,
+        "HTTP changed produced tables"
+    );
+    api.stop().await?;
+    Ok(())
+}
+
+async fn proof_tables(pool: &sqlx::PgPool) -> Result<Vec<(String, Vec<String>)>> {
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'bigname_phase' ORDER BY tablename",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut tables = Vec::new();
+    for name in names {
+        let quoted = name.replace('"', "\"\"");
+        let rows = sqlx::query_scalar(&format!("SELECT row_to_json(t)::text FROM bigname_phase.\"{quoted}\" t ORDER BY row_to_json(t)::text"))
+            .fetch_all(pool).await?;
+        tables.push((name, rows));
+    }
+    Ok(tables)
+}
+
+struct OwnedProofProcess {
+    child: Option<Child>,
+    logs: (PathBuf, PathBuf),
+}
+
+impl OwnedProofProcess {
+    fn spawn(mut command: Command, name: &str) -> Result<Self> {
+        let (stdout, stdout_file) = create_process_log_file("proof-out", name)?;
+        let (stderr, stderr_file) = create_process_log_file("proof-err", name)?;
+        command
+            .kill_on_drop(true)
+            .stdout(stdout_file)
+            .stderr(stderr_file);
+        Ok(Self {
+            child: Some(command.spawn()?),
+            logs: (stdout, stderr),
+        })
+    }
+
+    fn ensure_running(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            self.child
+                .as_mut()
+                .context("proof process absent")?
+                .try_wait()?
+                .is_none(),
+            "proof process exited; logs {:?}: {}",
+            self.logs,
+            process_log_tail(&self.logs.1)
+        );
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<()> {
+        let child = self.child.as_mut().context("proof process absent")?;
+        let pid = child.id().context("proof process already exited")?;
+        let result = Command::new("kill")
+            .args(["-INT", &pid.to_string()])
+            .status()
+            .await?;
+        anyhow::ensure!(
+            result.success(),
+            "could not interrupt owned proof process {pid}"
+        );
+        let status = tokio::time::timeout(Duration::from_secs(30), child.wait()).await??;
+        anyhow::ensure!(
+            status.success(),
+            "proof process exit {status}; logs {:?}",
+            self.logs
+        );
+        Ok(())
+    }
+}
+
+impl Drop for OwnedProofProcess {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        // A scoped thread can reap even when the enclosing async task is being
+        // cancelled. These runtime executables do not launch subprocess trees.
+        let result = std::thread::spawn(move || {
+            child.start_kill()?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while child.try_wait()?.is_none() {
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "proof child did not exit"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .join();
+        if !matches!(result, Ok(Ok(()))) {
+            eprintln!("could not reap owned proof process; logs {:?}", self.logs);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
@@ -2265,6 +2517,34 @@ mod tests {
 
     #[tokio::test]
     async fn one_shot_command_deadline_stops_and_reaps_the_child() -> Result<()> {
+        #[cfg(unix)]
+        {
+            let started = std::time::Instant::now();
+            let mut child_pid = None;
+            let failed: Result<()> = async {
+                let mut command = Command::new("sleep");
+                command.arg("30");
+                let mut process = OwnedProofProcess::spawn(command, "ops-early-return")?;
+                process.ensure_running()?;
+                child_pid = process.child.as_ref().and_then(Child::id);
+                anyhow::bail!("deliberate proof failure");
+            }
+            .await;
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "proof early return must not wait for the cleanup timeout"
+            );
+            assert!(
+                failed
+                    .unwrap_err()
+                    .to_string()
+                    .contains("deliberate proof failure")
+            );
+            assert!(
+                !unix_process::process_exists(child_pid.context("proof child PID")?)?,
+                "proof early return must synchronously stop and reap its child"
+            );
+        }
         let label = "unit-one-shot-timeout";
         let mut command = Command::new("sh");
         command.args([

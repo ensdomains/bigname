@@ -1,11 +1,19 @@
 # bigname end-to-end scenario tests
 
 This package exercises ENSv1, ENSv2, and Basenames contract emissions against
-schema-v2 through the production `phase-runner` binary. Most scenarios read
-schema-v2 [projections](../../docs/glossary.md#projection) and phase state directly
-through the test-only `ProjectionReader`. The registry-operator lifecycle also
-starts the production API and asserts its HTTP responses, as do the two
-zero-address resolver scenarios.
+schema-v2 through the production `phase-runner` binary. Most assertions read
+[projections](../../docs/glossary.md#projection) and phase state directly
+through the test-only `ProjectionReader`; the two zero-address scenarios and the registry-operator lifecycle start the production API.
+
+`ens_v2_lifecycle::reserved_labels_foreign_registrar_and_token_sale` also
+runs normal local RPC intake through Interpret, Project, and Live, then starts
+the real API from the same source and checks indexed-name HTTP. The single
+sale and both batch sales assert owner and registrant separately from the
+on-chain getter checks. A directly authenticated SELECT-only role supplies
+verification and API reads; every produced phase table must remain unchanged
+across HTTP. The harness stops and reaps its runner and API on success and
+early return. This local Sepolia scenario does not establish Mainnet intake
+or deployment readiness. Its original fixture and projection assertions remain.
 
 ## Prerequisites
 
@@ -275,6 +283,13 @@ together in the block at the top of `run-gate`, then run its default, shard 1,
 and shard 2 modes. The explicit root-workspace build above removes a one-time
 canonical `phase-runner` compile from the first measured scenario while leaving
 scenario-specific generated builds in the timing sample.
+
+The OPS-OWNER-01 measurements on the warm server used one compiler worker and
+one test thread. All 89 runnable names passed; their measured total was
+2569.389 seconds. The resulting shard predictions are 1288.036 seconds for
+shard 1 and 1281.353 seconds for shard 2, with five of the measured top ten
+on each shard. These historical forecasts exclude this lane's added scenario and the two zero-address scenarios
+added on main; the documented family grouping is unchanged.
 
 ## Coverage ledger
 
