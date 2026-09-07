@@ -4,7 +4,8 @@ This package exercises ENSv1, ENSv2, and Basenames contract emissions against
 schema-v2 through the production `phase-runner` binary. Most scenarios read
 schema-v2 [projections](../../docs/glossary.md#projection) and phase state directly
 through the test-only `ProjectionReader`. The registry-operator lifecycle also
-starts the production API and asserts its HTTP responses.
+starts the production API and asserts its HTTP responses, as do the two
+zero-address resolver scenarios.
 
 ## Prerequisites
 
@@ -25,10 +26,10 @@ run without the count assertion:
 scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --test-threads=8
 ```
 
-The default gate requires the exact library-test summary `90 passed; 0 failed;
-3 ignored; 0 filtered out`. CI shard 1 requires `44 passed; 0 failed; 2
-ignored; 47 filtered out`, and shard 2 requires `46 passed; 0 failed; 1
-ignored; 46 filtered out`. The gate checks both Cargo's exit status and every
+The default gate requires the exact library-test summary `92 passed; 0 failed;
+3 ignored; 0 filtered out`. CI shard 1 requires `45 passed; 0 failed; 2
+ignored; 48 filtered out`, and shard 2 requires `47 passed; 0 failed; 1
+ignored; 47 filtered out`. The gate checks both Cargo's exit status and every
 summary count, so a prematurely successful process or an incorrectly filtered
 suite cannot satisfy CI.
 
@@ -67,7 +68,8 @@ suite cannot satisfy CI.
    event after redo through the chain-lineage join.
 6. Projection-reader scenarios query schema-v2 directly and retain route-shaped
    helper inputs for their semantic assertions. The registry-operator lifecycle
-   checks serving behavior through the production API over HTTP.
+   and the two zero-address resolver scenarios check serving behavior through
+   the production API over HTTP.
 7. A scenario readiness predicate is evaluated once after its synchronous
    phase-runner commands. A false result fails the scenario instead of being
    treated as an asynchronous retry condition.
@@ -200,11 +202,12 @@ registry-created child remains in
 [non-name form](../../docs/glossary.md#non-name-form) in the fixture, so that
 route is already absent before ENSv1→ENSv2 migration.
 
-`forge` must be on `PATH` before the 65 Foundry-dependent semantic scenarios are
+`forge` must be on `PATH` before the 67 Foundry-dependent semantic scenarios are
 described as runnable; the other 3 semantic scenarios are retired and ignored.
-Together with the two [pre-surface](../../docs/glossary.md#pre-surface) resolver scenarios, these three connected
-scenarios produce a counted inventory of 93 tests: 90 runnable and 3 ignored,
-split as 44 runnable plus 2 ignored on shard 1 and 46 runnable plus 1 ignored on
+Together with the two [pre-surface](../../docs/glossary.md#pre-surface) resolver
+scenarios, the two zero-address resolver scenarios and the registry-operator
+lifecycle, these three connected scenarios produce 95 tests: 92 runnable and
+3 ignored, split as 45 runnable plus 2 ignored on shard 1 and 47 runnable plus 1 ignored on
 shard 2. This coverage changes no production rollout,
 deployment file, Docker configuration, environment file, checked-in manifest,
 or interpreter source.
@@ -262,7 +265,7 @@ to the lower predicted load subject to the required final capacities, except
 for an explicitly documented scenario-family grouping. The current inventory
 uses one such grouping: the standalone connected ENSv1→ENSv2 migration facts
 scenario is on shard 1 and both connected `cross_protocol` reachability
-scenarios are on shard 2. The current runnable split is 44 on shard 1 and 46 on
+scenarios are on shard 2. The current runnable split is 45 on shard 1 and 47 on
 shard 2. Break
 equal-duration or equal-load ties by full test name, keep at most five of the
 measured top ten on either shard, and keep two ignored tests on shard 1 and one
@@ -275,34 +278,36 @@ scenario-specific generated builds in the timing sample.
 
 ## Coverage ledger
 
-The semantic inventory contains 68 scenario tests:
+The semantic inventory contains 70 scenario tests:
 
-- 65 retargeted and runnable;
+- 67 retargeted and runnable;
 - 3 explicitly retired with one-line reasons.
 
-The 65 runnable scenarios include the #154 known-defect reproduction described
+The 67 runnable scenarios include the #154 known-defect reproduction described
 above; it is kept runnable so the provider path and explicit repair remain
 observable rather than being hidden as an ignored test.
 
-The crate contains 93 total tests when 25 harness/support checks are included.
-The pre-retarget crate contained 88; the net change is +5: obsolete
+The crate contains 95 total tests when 25 harness/support checks are included.
+The pre-retarget crate contained 88; the net change is +7: obsolete
 Cargo-artifact tests for the old indexer, worker, v1 API, and execution plane
 were removed, while deployment-profile binary lifecycle and normalized-event
 parity-completeness regression tests, the archived-artifact path check, the
 three connected ENSv1→ENSv2 migration scenarios, the two pre-surface
-resolver scenarios, and the registry-operator approval lifecycle were added. The pure in-memory
+resolver scenarios, the two zero-address resolver scenarios, and the
+registry-operator approval lifecycle were added. The pure in-memory
 `catchup_equivalence::primary_route_normalization_preserves_contract_instance_identity`
 normalization oracle is counted as support rather than as a contract-backed
 semantic scenario. The final worker-coordination stub, verified-resolution
 scenario, and stale observed-code-hash admission scenario were removed
 explicitly with issue #314.
 
-### Retargeted and runnable (65)
+### Retargeted and runnable (67)
 
 - Basenames:
   `basenames::basenames_declared_state_matrix_end_to_end`;
   `basenames_lifecycle::basenames_subnames_list_preimages_placeholders_and_tombstones`;
   `basenames_lifecycle::l2_resolver_records_clear_and_contenthash_gap`;
+  `basenames_lifecycle::l2_zero_addr60_uses_stubbed_verified_transport`;
   `basenames_lifecycle::legacy_reverse_registrar_stays_registry_and_raw_record_only`;
   `basenames_lifecycle::renew_release_and_premium_reregistration_rotate_lineage`;
   `basenames_lifecycle::third_party_controller_registration_degrades_without_label_events`;
@@ -352,6 +357,7 @@ explicitly with issue #314.
   `registry_operator_permissions::registry_operator_approval_serving_lifecycle`;
   `registry_preimages::label_preimage_revealed_later_upgrades_child_listing`.
 - Resolver and reverse claims:
+  `resolver_records::exact_zero_addr60_uses_stubbed_verified_transport`;
   `resolver_authorization::operator_delegate_writes_match_owner_authorship`;
   `resolver_records::pre_surface_newowner_record_serves_after_late_surface`;
   `resolver_records::pre_surface_record_attribution_is_node_scoped_and_never_materializes_unknown_names`;
@@ -384,15 +390,15 @@ explicitly with issue #314.
 
 | Measure | Historical baseline | Retargeted suite | Delta |
 | --- | ---: | ---: | ---: |
-| Total crate tests | 88 | 93 | +5 |
-| Semantic scenario inventory | 62 at the retarget base, including one pure helper | 68 | -1 reclassified, -3 deleted, +10 added |
-| Runnable passed-count gate | 65 in the historical Anvil gate | 90 | +25 |
-| Anvil-backed semantic inventory | 65 historical gate reference | 68 | +3 |
-| Runnable Anvil-backed semantic scenarios | 65 historical gate reference | 65 | 0 |
+| Total crate tests | 88 | 95 | +7 |
+| Semantic scenario inventory | 62 at the retarget base, including one pure helper | 70 | -1 reclassified, -3 deleted, +12 added |
+| Runnable passed-count gate | 65 in the historical Anvil gate | 92 | +27 |
+| Anvil-backed semantic inventory | 65 historical gate reference | 70 | +5 |
+| Runnable Anvil-backed semantic scenarios | 65 historical gate reference | 67 | +2 |
 
 The 65 comparisons are reported because that is the historical gate reference,
-but the current passed-count denominator is explicit: 65 runnable Anvil
-scenarios and 25 harness/support checks produce 90 passes. Three semantic
+but the current passed-count denominator is explicit: 67 runnable Anvil
+scenarios and 25 harness/support checks produce 92 passes. Three semantic
 scenarios are explicitly ignored with their retired behavior recorded above.
 
 ## Diagnostics
