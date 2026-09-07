@@ -1,5 +1,8 @@
 use crate::load::{self, CachedPrior, LoadedBatch};
 use anyhow::{Context, Result};
+use bigname_adapters::schema_v2::seam::{
+    INTERPRETER_STATE_KEY, STATE_SCOPE_KEY, TOKEN_CONTROL_TRANSFERRED_EVENT_KIND,
+};
 use bigname_adapters::{
     SchemaV2AdapterSession, StateCacheCapacity, begin_schema_v2_adapter_restore_with_provenance,
     prepare_schema_v2_batch_incremental_with_provenance,
@@ -239,7 +242,7 @@ async fn actual_token_sale_live_full_and_compacted_restore_project_identically()
             .normalized_events
             .iter()
             .find(|event| {
-                event.event_kind == "TokenControlTransferred"
+                event.event_kind == TOKEN_CONTROL_TRANSFERRED_EVENT_KIND
                     && event.logical_name_id.as_deref() == Some(logical)
             })
             .context("same-name real transfer after the retained prefix")?;
@@ -346,11 +349,11 @@ async fn full_restore(
     )?;
     // Same columns, lineage membership, ordering and row conversion as the
     // production loader, with only ranking removed for the full-output branch.
-    let rows: Vec<super::Row> = sqlx::query_as(
+    let statement = format!(
         "SELECT event.chain_id, event.namespace, event.logical_name_id, event.resource_id,
          event.event_kind, event.source_family, event.manifest_version, event.source_manifest_id,
-         event.raw_fact_ref ->> 'emitting_address', event.raw_fact_ref ->> 'interpreter_state_key',
-         event.event_identity, event.raw_fact_ref ->> 'state_scope', event.block_number,
+         event.raw_fact_ref ->> 'emitting_address', event.raw_fact_ref ->> '{INTERPRETER_STATE_KEY}',
+         event.event_identity, event.raw_fact_ref ->> '{STATE_SCOPE_KEY}', event.block_number,
          event.block_hash, lineage.block_timestamp, event.after_state
          FROM normalized_events event JOIN chain_lineage lineage
          ON lineage.chain_id = event.chain_id AND lineage.block_hash = event.block_hash AND lineage.block_number = event.block_number
@@ -358,7 +361,12 @@ async fn full_restore(
          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
          AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
          ORDER BY event.block_number, event.normalized_event_id"
-    ).bind(CHAIN).bind(before).fetch_all(pool).await?;
+    );
+    let rows: Vec<super::Row> = sqlx::query_as(&statement)
+        .bind(CHAIN)
+        .bind(before)
+        .fetch_all(pool)
+        .await?;
     let count = rows.len();
     restore.apply_prior_events(rows.into_iter().map(super::row_to_event).collect())?;
     let mut connection = pool.acquire().await?;
