@@ -765,6 +765,25 @@ impl Drop for TempDir {
     }
 }
 
+pub async fn prove_ens_v2_normal_http(
+    anvil: &Anvil,
+    deployment: &EnsV2Deployment,
+    owners: &[(&str, String)],
+) -> Result<()> {
+    let root = repo_root();
+    let scratch = TempDir::create()?;
+    let profile = manifests::generate_local_sepolia_profile(
+        scratch.path(),
+        &root,
+        &deployment.manifest_targets(),
+    )?;
+    let mut db = HarnessDb::create().await?;
+    let head = i64::try_from(anvil.client().block_number().await?)?;
+    pipeline::prove_normal_sepolia_http(&root, &mut db, &profile.root, &anvil.url, head, owners)
+        .await?;
+    db.cleanup().await
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
