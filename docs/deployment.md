@@ -740,3 +740,16 @@ including:
 The corresponding SQL migrations remain immutable history, followed by the
 append-only migration that drops their `public`-schema tables. Existing rows
 are not current readiness or replay authority during the planned transition.
+
+## API shutdown
+
+Unix API processes accept Ctrl-C and SIGTERM through the existing Axum graceful
+shutdown path. Non-Unix builds retain Ctrl-C only. Accepted signals stop fresh
+connections while accepted requests finish within the unchanged 30-second
+request and 25-second SQL timeouts. Signal listener failures are errors, not
+accepted shutdown signals. The metrics listener has no new drain guarantee.
+
+The Compose API service uses SIGTERM and a 45-second stop grace. This API-only
+slice is Part of #641: phase-runner SIGTERM, stop grace, batch settlement,
+heartbeat, restart, and redo behavior remain deferred. It does not authorize
+production rollout or complete the issue.

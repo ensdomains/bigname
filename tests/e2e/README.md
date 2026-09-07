@@ -2,7 +2,7 @@
 
 This package exercises ENSv1, ENSv2, and Basenames contract emissions against
 schema-v2 through the production `phase-runner` binary. It does not start the
-deleted indexer or worker and does not start an API server. Assertions that
+deleted indexer or worker. The service-shutdown scenario starts a real API; other assertions that
 previously read HTTP responses now read schema-v2
 [projections](../../docs/glossary.md#projection) and phase state directly
 through the test-only `ProjectionReader`.
@@ -26,10 +26,10 @@ run without the count assertion:
 scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --test-threads=8
 ```
 
-The default gate requires the exact library-test summary `89 passed; 0 failed;
-3 ignored; 0 filtered out`. CI shard 1 requires `44 passed; 0 failed; 2
+The default gate requires the exact library-test summary `90 passed; 0 failed;
+3 ignored; 0 filtered out`. CI shard 1 requires `45 passed; 0 failed; 2
 ignored; 46 filtered out`, and shard 2 requires `45 passed; 0 failed; 1
-ignored; 46 filtered out`. The gate checks both Cargo's exit status and every
+ignored; 47 filtered out`. The gate checks both Cargo's exit status and every
 summary count, so a prematurely successful process or an incorrectly filtered
 suite cannot satisfy CI.
 
@@ -68,7 +68,8 @@ suite cannot satisfy CI.
    event after redo through the chain-lineage join.
 6. Schema-v2 projections are queried directly. Route-shaped helper inputs are
    retained only to keep each scenario's semantic assertions recognizable;
-   no network API server or legacy public-schema read occurs.
+   the service-shutdown scenario alone uses network API transport. No legacy
+   public-schema read occurs.
 7. A scenario readiness predicate is evaluated once after its synchronous
    phase-runner commands. A false result fails the scenario instead of being
    treated as an asynchronous retry condition.
@@ -201,12 +202,12 @@ registry-created child remains in
 [non-name form](../../docs/glossary.md#non-name-form) in the fixture, so that
 route is already absent before ENSv1→ENSv2 migration.
 
-`forge` must be on `PATH` before the 64 Foundry-dependent semantic scenarios are
+`forge` must be on `PATH` before the 65 Foundry-dependent semantic scenarios are
 described as runnable; the other 3 semantic scenarios are retired and ignored.
 Together with the two [pre-surface](../../docs/glossary.md#pre-surface) resolver scenarios, these three connected
-scenarios produce a counted inventory of 92 tests: 89 runnable and 3 ignored,
-split as 44 runnable plus 2 ignored on shard 1 and 45 runnable plus 1 ignored on
-shard 2. This coverage changes no production rollout,
+scenarios plus the API shutdown scenario produce 93 tests: 90 runnable and 3 ignored,
+split as 45 runnable plus 2 ignored on shard 1 and 45 runnable plus 1 ignored on
+shard 2. Those migration fixtures change no production rollout,
 deployment file, Docker configuration, environment file, checked-in manifest,
 or interpreter source.
 
@@ -263,7 +264,7 @@ to the lower predicted load subject to the required final capacities, except
 for an explicitly documented scenario-family grouping. The current inventory
 uses one such grouping: the standalone connected ENSv1→ENSv2 migration facts
 scenario is on shard 1 and both connected `cross_protocol` reachability
-scenarios are on shard 2. The current runnable split is 44 on shard 1 and 45 on
+scenarios are on shard 2. The current runnable split is 45 on shard 1 and 45 on
 shard 2. Break
 equal-duration or equal-load ties by full test name, keep at most five of the
 measured top ten on either shard, and keep two ignored tests on shard 1 and one
@@ -276,29 +277,29 @@ scenario-specific generated builds in the timing sample.
 
 ## Coverage ledger
 
-The semantic inventory contains 67 scenario tests:
+The semantic inventory contains 68 scenario tests:
 
-- 64 retargeted and runnable;
+- 65 runnable;
 - 3 explicitly retired with one-line reasons.
 
-The 64 runnable scenarios include the #154 known-defect reproduction described
+The 65 runnable scenarios include the #154 known-defect reproduction described
 above; it is kept runnable so the provider path and explicit repair remain
 observable rather than being hidden as an ignored test.
 
-The crate contains 92 total tests when 25 harness/support checks are included.
-The pre-retarget crate contained 88; the net change is +4: obsolete
+The crate contains 93 total tests when 25 harness/support checks are included.
+The pre-retarget crate contained 88; the net change is +5: obsolete
 Cargo-artifact tests for the old indexer, worker, v1 API, and execution plane
 were removed, while deployment-profile binary lifecycle and normalized-event
 parity-completeness regression tests, the archived-artifact path check, the
 three connected ENSv1→ENSv2 migration scenarios, and the two pre-surface
-resolver scenarios were added. The pure in-memory
+resolver scenarios, and the API shutdown scenario were added. The pure in-memory
 `catchup_equivalence::primary_route_normalization_preserves_contract_instance_identity`
 normalization oracle is counted as support rather than as a contract-backed
 semantic scenario. The final worker-coordination stub, verified-resolution
 scenario, and stale observed-code-hash admission scenario were removed
 explicitly with issue #314.
 
-### Retargeted and runnable (64)
+### Runnable semantic scenarios (65)
 
 - Basenames:
   `basenames::basenames_declared_state_matrix_end_to_end`;
@@ -382,17 +383,17 @@ explicitly with issue #314.
 
 ### Count deltas
 
-| Measure | Historical baseline | Retargeted suite | Delta |
+| Measure | Historical baseline | Current suite | Delta |
 | --- | ---: | ---: | ---: |
-| Total crate tests | 88 | 92 | +4 |
-| Semantic scenario inventory | 62 at the retarget base, including one pure helper | 67 | -1 reclassified, -3 deleted, +9 added |
-| Runnable passed-count gate | 65 in the historical Anvil gate | 89 | +24 |
-| Anvil-backed semantic inventory | 65 historical gate reference | 67 | +2 |
-| Runnable Anvil-backed semantic scenarios | 65 historical gate reference | 64 | -1 |
+| Total crate tests | 88 | 93 | +5 |
+| Semantic scenario inventory | 62 at the retarget base, including one pure helper | 68 | -1 reclassified, -3 deleted, +10 added |
+| Runnable passed-count gate | 65 in the historical Anvil gate | 90 | +25 |
+| Anvil-backed semantic inventory | 65 historical gate reference | 68 | +3 |
+| Runnable Anvil-backed semantic scenarios | 65 historical gate reference | 65 | 0 |
 
 The 65 comparisons are reported because that is the historical gate reference,
-but the current passed-count denominator is explicit: 64 runnable Anvil
-scenarios and 25 harness/support checks produce 89 passes. Three semantic
+but the current passed-count denominator is explicit: 65 runnable Anvil
+scenarios and 25 harness/support checks produce 90 passes. Three semantic
 scenarios are explicitly ignored with their retired behavior recorded above.
 
 ## Diagnostics
@@ -406,3 +407,14 @@ scenarios are explicitly ignored with their retired behavior recorded above.
 - Command logs are written under the system temporary directory and removed
   after successful completion; failures include their paths and reversed
   tails.
+
+## API service shutdown
+
+The service-shutdown scenario runs direct-process mode in the counted suite and
+Compose mode in the required container job. Both use real Anvil facts and
+production Interpret/Project redo with the existing seeded fixture phase
+extents. They are not ordinary Reth intake or runner-grace measurements.
+The direct process is built from the current source with its explicit build SHA;
+Compose mode uses the exact candidate image and the same producer/route/lock
+assertions. Unknown modes fail explicitly. Inventory and shard timing are
+updated together after discovery and measurement.
