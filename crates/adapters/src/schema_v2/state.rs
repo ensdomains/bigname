@@ -107,7 +107,7 @@ pub(super) struct State {
     v1_correlated_wrapper_expiries: OrdMap<String, u64>,
     v1_registrars: OrdMap<String, V1NameState>,
     v1_expiries: OrdSet<(i64, String)>,
-    v1_pending_registrar_logs: OrdMap<(String, String), super::model::RawLogInput>,
+    v1_pending_registrar_logs: OrdMap<(String, String, i64), super::model::RawLogInput>,
     v1_registry_authorities: OrdMap<String, V1NameState>,
     v1_registry_owners: OrdMap<String, String>,
     v1_registry_owner_words: OrdMap<String, String>,

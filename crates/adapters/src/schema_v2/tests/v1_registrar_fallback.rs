@@ -146,6 +146,35 @@ fn controller_registered(block: i64, log_index: i64, expiry: i64) -> RawLogInput
     )
 }
 
+fn registrar_transfer(
+    block: i64,
+    transaction: i64,
+    log_index: i64,
+    from: &str,
+    to: &str,
+) -> RawLogInput {
+    let mut raw = raw_at(
+        v1_registrar::Transfer {
+            from: from.parse().unwrap(),
+            to: to.parse().unwrap(),
+            tokenId: token(),
+        }
+        .encode_log_data(),
+        block,
+        log_index,
+        REGISTRAR,
+    );
+    raw.transaction_hash = format!("transaction-{block}-{transaction}");
+    raw.transaction_index = transaction;
+    raw
+}
+
+fn in_transaction(mut raw: RawLogInput, transaction: i64) -> RawLogInput {
+    raw.transaction_hash = format!("transaction-{}-{transaction}", raw.block_number);
+    raw.transaction_index = transaction;
+    raw
+}
+
 fn empty_block(block_number: i64) -> RawBlockInput {
     RawBlockInput {
         chain_id: CHAIN.to_owned(),
@@ -257,6 +286,10 @@ fn a_renewal_through_an_unadmitted_controller_keeps_the_expiry_current() -> anyh
         renewals[0].logical_name_id.is_some(),
         "the admitted registration materialized the surface the renewal links to"
     );
+    assert_eq!(
+        renewals[0].after_state["surface_known"], true,
+        "a label-less renewal keeps the surface the registration established"
+    );
     assert!(
         kinds(&output, "RegistrationReleased").is_empty(),
         "the refreshed expiry must not settle a release at the stale boundary: {:#?}",
@@ -291,5 +324,84 @@ fn a_renewal_of_a_registration_this_family_does_not_hold_is_not_invented() -> an
         output.normalized_events
     );
     assert!(output.resources.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_fallback_registration_is_visible_to_a_later_transaction_in_the_same_block()
+-> anyhow::Result<()> {
+    const BUYER: &str = "0x00000000000000000000000000000000000000c5";
+    let output = interpret(
+        vec![
+            in_transaction(registrar_registered(10, 0, 1_000), 0),
+            registrar_transfer(10, 1, 1, OWNER, BUYER),
+        ],
+        &[],
+    )?;
+    let transfers = kinds(&output, "TokenControlTransferred");
+    assert_eq!(transfers.len(), 1, "{:#?}", output.normalized_events);
+    assert_eq!(transfers[0].log_index, Some(1));
+    let grant = kinds(&output, "RegistrationGranted");
+    assert_eq!(grant.len(), 1);
+    assert_eq!(grant[0].log_index, Some(0));
+    // The transfer's own after-state names the buyer; the registration it
+    // follows named the registrant. Order in the output is the order on chain.
+    let grant_position = output
+        .normalized_events
+        .iter()
+        .position(|event| event.event_kind == "RegistrationGranted")
+        .unwrap();
+    let transfer_position = output
+        .normalized_events
+        .iter()
+        .position(|event| event.event_kind == "TokenControlTransferred")
+        .unwrap();
+    assert!(grant_position < transfer_position);
+    Ok(())
+}
+
+#[test]
+fn a_registration_and_renewal_in_one_transaction_are_both_held_and_both_derived()
+-> anyhow::Result<()> {
+    let output = interpret(
+        vec![
+            in_transaction(registrar_registered(10, 0, 1_000), 0),
+            in_transaction(registrar_renewed(10, 1, 5_000), 0),
+        ],
+        &[],
+    )?;
+    let grants = kinds(&output, "RegistrationGranted");
+    let renewals = kinds(&output, "RegistrationRenewed");
+    assert_eq!(grants.len(), 1, "{:#?}", output.normalized_events);
+    assert_eq!(renewals.len(), 1, "{:#?}", output.normalized_events);
+    assert_eq!(grants[0].after_state["expiry"], 1_000);
+    assert_eq!(renewals[0].after_state["expiry"], 5_000);
+    assert_eq!(renewals[0].before_state["expiry"], 1_000);
+    Ok(())
+}
+
+#[test]
+fn a_fallback_registration_survives_the_block_boundary_and_its_later_renewal_lands()
+-> anyhow::Result<()> {
+    // The per-block reconciliation rebuilds ENSv1 state from the block's own
+    // events; a registration with no served name link has to restore from them.
+    let first_release = 1_000 + GRACE + 1;
+    let output = interpret(
+        vec![
+            registrar_registered(10, 0, 1_000),
+            registrar_renewed(20, 0, 20_000_000),
+        ],
+        &[first_release],
+    )?;
+    let renewals = kinds(&output, "RegistrationRenewed");
+    assert_eq!(renewals.len(), 1, "{:#?}", output.normalized_events);
+    assert_eq!(renewals[0].block_number, Some(20));
+    assert_eq!(renewals[0].after_state["controller_admitted"], false);
+    assert!(renewals[0].logical_name_id.is_none());
+    assert!(
+        kinds(&output, "RegistrationReleased").is_empty(),
+        "{:#?}",
+        output.normalized_events
+    );
     Ok(())
 }

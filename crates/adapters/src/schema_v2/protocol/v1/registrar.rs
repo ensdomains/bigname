@@ -47,7 +47,15 @@ pub(super) fn interpret(
             // Held until the block ends: an admitted controller event for the same
             // label in this transaction owns the fact, and only a log still held
             // then is interpreted as the fallback source (`interpret_held`).
-            if !state.v1_registrar_controller_announced(raw) {
+            // A manifest authorizes the fallback by declaring `RegistrationGranted` on
+            // the registrar's own event; one that declares only migration output
+            // keeps its numeric events out of it, as the Sepolia profile does.
+            let fallback_declared = selected
+                .event
+                .normalized_events
+                .iter()
+                .any(|kind| kind == "RegistrationGranted");
+            if fallback_declared && !state.v1_registrar_controller_announced(raw) {
                 let (labelhash, _, after) = decode_registrar_lifecycle(selected, raw)?;
                 // The ENSv1→ENSv2 Graveyard cleanup registers with a sentinel expiry no
                 // controller can produce from `block.timestamp + duration`; that is
@@ -158,7 +166,14 @@ fn name_fact(
             .chain(suffix.iter().cloned())
             .collect::<Vec<_>>()
     });
-    let surface_known = labels.is_some();
+    // Without a label the surface is whatever this family already knows: a
+    // fallback renewal of a named registration must not turn it nameless.
+    let surface_known = labels.is_some()
+        || (raw_label.is_none()
+            && (state
+                .v1_registrar(&selected.source.namespace, &raw_namehash)
+                .is_some_and(|registrar| registrar.surface_known)
+                || state.v1_surface_materialized(&selected.source.namespace, &raw_namehash)));
     let raw_labels = raw_label.as_ref().map(|raw_label| {
         let mut raw_labels = vec![raw_label.clone()];
         raw_labels.extend(suffix.iter().map(|label| label.as_bytes().to_vec()));
