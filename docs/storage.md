@@ -549,6 +549,22 @@ row's recorded hash. A rejected candidate leaves no trace beyond the import's
 logged counters. Collapsing the split would put unverified claims into the
 verified store, so it stays.
 
+**Load the dump into `bigname_phase`, not `public`.** The upstream generator
+emits SQL that clears `search_path` and then creates and fills
+`public.ens_names`
+(upstream: .refs/ens_rainbow/src/main.rs:L26 @ ens_rainbow@bc44492)
+(upstream: .refs/ens_rainbow/src/main.rs:L36 @ ens_rainbow@bc44492)
+(upstream: .refs/ens_rainbow/src/main.rs:L46 @ ens_rainbow@bc44492).
+bigname declares its own `ens_names` inside the phase schema
+(`schema-v2/baseline/07_labels.sql`), and the runner connects with
+`search_path = bigname_phase` and no `public` fallback, so the import reads
+`bigname_phase.ens_names` only. Applying the upstream dump unmodified therefore
+fills a table the importer never reads, and the run reports zero scanned rows
+rather than failing — the phase table exists, it is just empty. Rewrite the
+dump's schema qualification, or `\copy` into `bigname_phase.ens_names`, before
+running the import, and check the logged scanned-row counter against the dump's
+row count.
+
 `phase-runner label-preimages import-ens-rainbow` walks `ens_names` in
 hash-keyset batches, proof-checks every row, and inserts the survivors with
 `source_kind = 'ens_rainbow_import'` at priority 10 — below the interpreter's
@@ -592,6 +608,30 @@ Every fact-derived row that can be invalidated by a reorg carries chain,
 number, hash, and canonicality evidence. `chain_lineage` is the authority for
 parentage and readable block identity. Serving paths never join the deleted
 `public.chain_lineage` table.
+
+**At most one readable block per height, enforced by the schema.** A partial
+unique index makes a second readable row at the same height impossible to
+insert:
+
+```sql
+CREATE UNIQUE INDEX chain_lineage_readable_height_idx
+    ON chain_lineage (chain_id, block_number)
+    WHERE canonicality_state IN ('canonical', 'safe', 'finalized');
+```
+
+`chain_lineage` holds every competing branch it has observed, but only one row
+per `(chain_id, block_number)` may be readable at a time, so "the block at
+height N" is a total function on the readable set rather than a choice among
+candidates. Head publication must therefore orphan a displaced branch in the
+same transaction that promotes its replacement — that ordering is not a
+convention, it is what keeps the index satisfiable.
+
+Two consequences for readers. A height lookup on readable rows needs no
+tie-break, ordering, or `LIMIT 1` to be deterministic; adding one hides a
+constraint violation rather than resolving an ambiguity. And a presence check
+that treats an ambiguous readable height as a fatal error — see the interpret
+range checks below — is asserting an invariant the database already guarantees,
+not handling a reachable state.
 
 Head publication walks by block hash, marks the orphaned suffix explicitly,
 publishes the replacement readable head, and records downstream redo in one
@@ -1139,6 +1179,25 @@ Projection rows carry:
 - the [Project-owned maintenance fields](glossary.md#projection) defined for
   that family. `primary_names_current` carries rolling hydration-selection
   fields rather than a last-recomputation time.
+
+`primary_names_current` is the exception and does not follow this shape. It has
+no `manifest_version`, no `canonicality_summary`, no `support_status`, and no
+last-recomputation column; `reverse_hydration_attempted_block_*` records a
+hydration attempt, not a publication target. Its publication target lives inside
+the untyped `claim_provenance` object, and the serving predicate joins lineage on
+`claim_provenance ->> 'chain_id'` and `claim_provenance ->> 'target_block_hash'`
+while the only constraint on that column is
+`CHECK (jsonb_typeof(claim_provenance) = 'object')`. Nothing requires either key
+to be present.
+
+Two consequences worth knowing before writing against this table. A builder that
+omits one of those keys produces a row that silently drops out of reads rather
+than failing — the lineage join yields no match, and the row is simply not
+served. And a reader cannot filter or group these rows by manifest version,
+support, or canonicality the way it can for every other projection family;
+compare `name_current`, which carries all five as typed columns. Constraining
+the two required keys is the obvious hardening, but it is a schema change to a
+populated table and needs its own change.
 
 An unchanged row may retain an earlier publication target when a later Project
 run does not affect its scope. Serving admission therefore accepts targets at

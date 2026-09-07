@@ -864,6 +864,16 @@ has no direct `Domain.registrationDate` field and instead exposes the nested
 (upstream: .refs/ens_subgraph/schema.graphql:L184-L190 @ ens_subgraph@723f1b6), and Graph Node generates child order
 values as `<parent>__<child>` (upstream: .refs/graph_node/graph/src/schema/api.rs:L531-L603 @ graph_node@aefe1737).
 
+Of the declared `DomainFilter` arguments, `owner`, `owner_in`, `name`, and
+`name_contains` filter storage. `isMigrated` filters only on `true`, and it
+answers a different question than the upstream field of the same name — see the
+[subgraph `isMigrated` divergence](upstream.md#known-divergences). `id` is
+accepted and applies no predicate; `domain(id:)` is the namehash lookup. The two
+inert cases are declared so subgraph-shaped variables validate against the
+schema, not because this surface implements them; a caller that needs either
+constraint enforced should not read a filtered `domains` result as
+authoritative for it.
+
 The schema includes graph-node-compatible `BigInt` and `Bytes` scalars,
 `Block_height`, `_SubgraphErrorPolicy_`, and `_meta`/`_Meta_`/`_Block_` shapes.
 `BigInt` is a decimal string of arbitrary width and `Bytes` is an even-length,

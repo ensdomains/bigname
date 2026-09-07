@@ -606,6 +606,15 @@ unrelated operational tables directly. Reapply these explicit relation and
 function grants after a reviewed phase-schema replacement; do not use ownership
 or schema-wide write grants as a shortcut.
 
+`migration_event_associations` is on the list because
+`GET /v2/diagnostics/events` selects the ENSv1→ENSv2 migration correlation rows
+for its candidate payload; the public `GET /v2/events` path shares the same
+loader but does not select from that table. The row set is Interpret
+coordination state rather than a projection, so the grant is deliberately
+read-only and does not widen the API's write boundary. A database provisioned
+without it serves every other route and fails only that one, with a permission
+error rather than an empty payload.
+
 ### Replacing an initialized phase schema
 
 The current installer cannot upgrade a nonempty `bigname_phase` schema. When a
