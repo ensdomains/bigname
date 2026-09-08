@@ -49,6 +49,27 @@ pub(crate) async fn read_after_stop<T>(
     }
 }
 
+/// Release a phase lock once a stop has been accepted. The release is an unlock
+/// and a close on a connection whose stall may have won the race, so it is
+/// bounded; a lock dropped on expiry closes its session, which releases it.
+pub(crate) async fn release_lock_after_stop(
+    phase_lock: PhaseLock,
+    chain_id: &str,
+    phase: PhaseName,
+) -> RunnerResult<()> {
+    match tokio::time::timeout(STOPPED_MARKER_LOOKUP, phase_lock.release()).await {
+        Ok(release) => release,
+        Err(_elapsed) => {
+            tracing::warn!(
+                chain_id,
+                phase = %phase,
+                "phase lock release did not answer after a stop; the connection is dropped"
+            );
+            Ok(())
+        }
+    }
+}
+
 /// A redo whose start lost the stop race still records the failed attempt, but
 /// through the lock's connection, which may be the stall that lost the race.
 /// The recording is bounded; the marker already says the redo is incomplete,

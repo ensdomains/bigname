@@ -17,8 +17,8 @@ use crate::{
     phase_lock::PhaseLock,
     progress_monitor::RunnerPhaseProgress,
     runner_support::{
-        HeartbeatThrottle, PhaseLoopResult, STOPPED_MARKER_LOOKUP, cancelled_redo_error,
-        finish_failed_redo_start, finish_stopped_redo_start, read_after_stop, redo_outcome,
+        HeartbeatThrottle, PhaseLoopResult, cancelled_redo_error, finish_failed_redo_start,
+        finish_stopped_redo_start, read_after_stop, redo_outcome, release_lock_after_stop,
     },
     shutdown::until_cancelled,
     state::PhaseStore,
@@ -175,21 +175,8 @@ impl PhaseRunner {
                 &mut phase_lock,
             )
             .await;
-        // After an accepted stop the lock's connection may be the stall that
-        // won the race, and the release is an unlock and a close on it. Bound
-        // it; a dropped lock closes the session, which releases the lock.
         let release = if cancellation.is_cancelled() {
-            match tokio::time::timeout(STOPPED_MARKER_LOOKUP, phase_lock.release()).await {
-                Ok(release) => release,
-                Err(_elapsed) => {
-                    warn!(
-                        chain_id = chain.chain_id,
-                        phase = %phase_name,
-                        "phase lock release did not answer after a stop; the connection is dropped"
-                    );
-                    Ok(())
-                }
-            }
+            release_lock_after_stop(phase_lock, &chain.chain_id, phase_name).await
         } else {
             phase_lock.release().await
         };

@@ -5,7 +5,9 @@ use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
     phase::{BlockRange, PhaseName, RunMode},
     phase_lock::PhaseLock,
-    runner_support::{cancelled_redo_error, read_after_stop, resumable_recompute_marker},
+    runner_support::{
+        cancelled_redo_error, read_after_stop, release_lock_after_stop, resumable_recompute_marker,
+    },
 };
 
 use super::{PendingProjectRedoRow, PhaseRunner};
@@ -140,13 +142,18 @@ impl PhaseRunner {
         let Some(mut project_lock) = acquired else {
             return Err(self.recompute_setup_cancelled(chain).await?);
         };
+        let stopped = cancellation.clone();
         let result = project_lock
             .run_while_alive(
                 self.timing.live_poll_interval,
                 self.run_phase_with_restart(chain, PhaseName::Interpret, mode, cancellation),
             )
             .await;
-        let release = project_lock.release().await;
+        let release = if stopped.is_cancelled() {
+            release_lock_after_stop(project_lock, &chain.chain_id, PhaseName::Project).await
+        } else {
+            project_lock.release().await
+        };
         match (result, release) {
             (Ok(()), Ok(())) => Ok(()),
             (Ok(()), Err(error)) | (Err(error), Ok(())) => Err(error),
