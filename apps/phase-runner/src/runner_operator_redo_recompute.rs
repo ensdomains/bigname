@@ -126,13 +126,17 @@ impl PhaseRunner {
             RecomputeSetupReport::NeverStarted => {
                 cancelled_redo_error(&self.store, chain_id, PhaseName::Interpret).await
             }
+            // The refresh is clipped to Project's current block, so the marker's
+            // range is not the range to rerun: the rerun repeats the requested
+            // one, and the resumed refresh widens to it again if Project caught up.
             RecomputeSetupReport::OwnedRefresh { from, to } => Ok(RunnerError::new(
                 ErrorKind::InvalidTransition,
                 format!(
                     "recompute-flags for chain {chain_id} stopped after its scoped Project refresh \
-                     was stamped; the refresh blocks Project until it is resumed; rerun \
-                     `phase-runner redo --chain {chain_id} --phase recompute-flags --from-block \
-                     {from} --to-block {to}`"
+                     {from}..={to} was stamped; the refresh blocks Project until it is resumed; \
+                     rerun `phase-runner redo --chain {chain_id} --phase recompute-flags \
+                     --from-block {} --to-block {}`",
+                    range.from, range.to
                 ),
             )),
             RecomputeSetupReport::ExtendedPendingRedo { from, to } => Ok(RunnerError::new(
