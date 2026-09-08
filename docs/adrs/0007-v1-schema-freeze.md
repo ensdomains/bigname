@@ -157,7 +157,10 @@ freeze observable rather than aspirational.
 
 - No schema change to the frozen artifact during the V1 milestone, except the
   pre-authorized carve-outs below.
-- Each carve-out is additive and requires no re-derivation.
+- Each carve-out made under this freeze is additive and requires no
+  re-derivation. The one non-additive change in the history recorded below —
+  carve-out 1's constraint replacement — predates the freeze and is recorded,
+  not authorized; a like change now is an amendment, not a carve-out.
 - Any change beyond the carve-outs requires an amendment to this ADR before it
   merges.
 

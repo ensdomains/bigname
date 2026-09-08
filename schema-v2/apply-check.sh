@@ -57,14 +57,38 @@ render_phase_migration() {
     local migration_file="$1"
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file"
 }
+# Strip `--` comments the way PostgreSQL reads them: not inside a single-quoted
+# string ('' escapes), a double-quoted identifier, or a $$ body, across lines.
+# `quote` carries the open quoting from one line to the next; a file that ends
+# inside a quote is unparsable and the caller treats it as such.
+sql_comment_stripper='
+    function strip_sql_comments(line,    out, i, c, n) {
+        out = ""; n = length(line); i = 1
+        while (i <= n) {
+            c = substr(line, i, 1)
+            if (quote == "") {
+                if (substr(line, i, 2) == "--") { break }
+                if (substr(line, i, 2) == "$$") { quote = "$$"; out = out "$$"; i += 2; continue }
+                if (c == "\047" || c == "\"") { quote = c }
+            } else if (quote == "$$") {
+                if (substr(line, i, 2) == "$$") { quote = ""; out = out "$$"; i += 2; continue }
+            } else if (c == quote) {
+                if (quote == "\047" && substr(line, i + 1, 1) == "\047") { out = out "\047\047"; i += 2; continue }
+                quote = ""
+            }
+            out = out c; i++
+        }
+        return out
+    }
+'
 # Inventory membership requires the whole quoted or bare literal bigname_phase token
 # after stripping -- line comments. Search-path-relative phase SQL would be silently
 # excluded. Today only the two public-schema service-loop files are outside the inventory;
 # block comments are not stripped, so a token-only mention is included and fails loud.
 phase_migration_uses_production_schema() {
-    awk '
-        { sub(/--.*$/, "") }
-        /(^|[^[:alnum:]_])"?bigname_phase"?([^[:alnum:]_]|$)/ { found = 1 }
+    awk "$sql_comment_stripper"'
+        { line = strip_sql_comments($0) }
+        line ~ /(^|[^[:alnum:]_])"?bigname_phase"?([^[:alnum:]_]|$)/ { found = 1 }
         END { exit !found }
     ' "$1"
 }
@@ -77,9 +101,10 @@ phase_migration_uses_production_schema() {
 # any statement it cannot read.
 legacy_public_schema_drop="20260806120000_drop_legacy_public_schema.sql"
 migration_objects_are_schema_qualified() {
-    awk '
-        { sub(/--.*$/, ""); text = text " " $0 }
+    awk "$sql_comment_stripper"'
+        { text = text " " strip_sql_comments($0) }
         END {
+            if (quote != "") { print " [unterminated quote at end of file]"; exit 1 }
             gsub(/[[:space:]]+/, " ", text)
             n = split(toupper(text), statements, ";")
             for (i = 1; i <= n; i++) {
@@ -129,12 +154,12 @@ migration_objects_are_schema_qualified() {
 }
 assert_uninventoried_migrations_are_schema_qualified() {
     local migration_file migration_basename unqualified
-    if unqualified="$(printf 'CREATE INDEX x ON chain_phase_state (a);\nUPDATE public.t SET a = 1;\nALTER TABLE "name_surfaces" ADD COLUMN c int;\nDROP INDEX "public"."ok_idx";\nWITH chosen AS (SELECT 1) UPDATE chain_phase_state SET a = 1;\nDROP INDEX IF EXISTS public.old_idx, name_current_lookup_idx CASCADE;\nTRUNCATE public.a, "resources";\nCOMMENT ON COLUMN chain_phase_state.phase_name IS '"'"'x'"'"';\nCOMMENT ON COLUMN public.t.c IS '"'"'y'"'"';\n' \
+    if unqualified="$(printf 'CREATE INDEX x ON chain_phase_state (a);\nUPDATE public.t SET a = 1;\nALTER TABLE "name_surfaces" ADD COLUMN c int;\nDROP INDEX "public"."ok_idx";\nWITH chosen AS (SELECT 1) UPDATE chain_phase_state SET a = 1;\nDROP INDEX IF EXISTS public.old_idx, name_current_lookup_idx CASCADE;\nTRUNCATE public.a, "resources";\nCOMMENT ON COLUMN chain_phase_state.phase_name IS '"'"'x'"'"';\nCOMMENT ON COLUMN public.t.c IS '"'"'y'"'"';\nCOMMENT ON TABLE public.audit IS '"'"'--'"'"'; UPDATE resources SET a = 1;\nCOMMENT ON TABLE public.b IS '"'"'it'"'"''"'"'s -- fine'"'"'; -- DROP TABLE nope\n' \
         | migration_objects_are_schema_qualified /dev/stdin)"; then
         printf '%s\n' "schema-qualification check accepted a search-path-relative statement" >&2
         exit 1
     fi
-    if [ "$unqualified" != " CHAIN_PHASE_STATE NAME_SURFACES [unrecognized statement: WITH CHOSEN] NAME_CURRENT_LOOKUP_IDX RESOURCES CHAIN_PHASE_STATE.PHASE_NAME" ]; then
+    if [ "$unqualified" != " CHAIN_PHASE_STATE NAME_SURFACES [unrecognized statement: WITH CHOSEN] NAME_CURRENT_LOOKUP_IDX RESOURCES CHAIN_PHASE_STATE.PHASE_NAME RESOURCES" ]; then
         printf '%s\n' "schema-qualification check misreported the search-path-relative statement: $unqualified" >&2
         exit 1
     fi
