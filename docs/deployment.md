@@ -751,8 +751,17 @@ lock is held while the Interpret phase runs beneath it
 takes its own lock (`apps/phase-runner/src/runner.rs:223`). The advisory locks
 let it run beside a supervised runner that holds a non-conflicting phase such as
 Live. Either stop the supervised runner before an explicit redo, or budget `7`
-more for its duration. Only one of redo or rewind can hold a chain's writer
-locks, so budget the larger of the two, not both.
+more for its duration.
+
+The advisory locks do **not** serialize explicit processes against each other:
+they only prevent the same phase from running twice on the same chain. A
+Verify-only redo holds the Verify lock alone
+(`apps/phase-runner/src/runner_operator_redo.rs:369-386`), rewind never takes
+Verify, and lock keys are per chain, so a redo and a rewind — or two redos on
+different chains — can run at the same time and each brings its own pools and
+locks: up to `7` for a redo, `6` for a rewind. Run one explicit process at a
+time, which is what the ceiling below assumes, or add each additional
+overlapping process to the budget in full.
 
 **The superuser reservation.** The writer login created from `POSTGRES_USER` is
 a superuser; `bigname_api` and `bigname_verify` are created `NOSUPERUSER`
@@ -771,15 +780,16 @@ than inheriting the PostgreSQL default, and size it as the sum of:
 | Term | Value |
 | --- | --- |
 | Supervised runner peak | `max(2C, 4) + max(C, 1) + 3C` |
-| One concurrent explicit process | `7` (redo) — larger than rewind's `6` |
+| Explicit maintenance, one process at a time | `7` (a redo; a rewind needs `6`) — add `7` per additional process you intend to overlap |
 | Superuser reservation | `superuser_reserved_connections`, `3` by default |
 | Administrative headroom | `2` for `psql` and `sqlx migrate` |
 | Each API process | `BIGNAME_DATABASE_MAX_CONNECTIONS + 1` |
 
-One chain with one API process at the default pool of `10`:
-`8 + 7 + 3 + 2 + 11 = 31`. Three chains: `18 + 7 + 3 + 2 + 11 = 41`. The
-shipped default of `100` clears both; the arithmetic matters when the ceiling
-is lowered to fit `work_mem`. Then budget it against `work_mem`: a single
+One chain with one API process at the default pool of `10` and one explicit
+process at a time: `8 + 7 + 3 + 2 + 11 = 31`. Three chains: `18 + 7 + 3 + 2 +
+11 = 41`. A redo (`7`) and a rewind (`6`) overlapping would need `37` rather than
+`31`. The shipped default of `100` clears all of these; the arithmetic
+matters when the ceiling is lowered to fit `work_mem`. Then budget it against `work_mem`: a single
 backend can hold several `work_mem` allocations at once, so the worst case a
 server commits to is roughly `max_connections x work_mem x concurrent sort or
 hash nodes`, on top of `shared_buffers`.
