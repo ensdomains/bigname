@@ -6,7 +6,7 @@ milestone](glossary.md#v1-milestone) by
 conformance test that makes the freeze observable, and every authorized
 carve-out. The frozen artifact is the `schema-v2/baseline/` tree plus the
 schema-migration head
-`migrations/20260906120000_exact_zero_addr60_default_derivation.sql`; a
+`migrations/20260915120000_address_records_optional_authority.sql`; a
 carve-out that lands as a schema-migration advances this head here and in the
 ADR in the same change.
 

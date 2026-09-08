@@ -95,7 +95,7 @@ The V1 schema contract is the pair:
 
 - the `schema-v2/baseline/` tree, and
 - the schema-migration head at
-  `migrations/20260906120000_exact_zero_addr60_default_derivation.sql`.
+  `migrations/20260915120000_address_records_optional_authority.sql`.
 
 The draft named `20260811120200_ens_v2_migration_slice_1_constraints.sql`, which
 was the head when it was written. The 38 schema-migrations between the two
@@ -133,6 +133,23 @@ is one more independent change:
 2026-09-07) replaces the `write_resolution_divergence` function so that an
 exact zero `addr:60` stays absent when a default derivation exists — a
 serving-semantics change, and the last schema-migration before acceptance.
+
+Twelve more landed after acceptance and before this ADR merged, all in #893
+(2026-09-16), and none as a carve-out or with an amendment: they are the
+first breach of the freeze, recorded here rather than reclassified as
+history. `20260909120000`–`120200_resolver_record_id_events` widen the
+`normalized_events` event-kind CHECK in three steps — a constraint
+replacement on a populated table; `20260911120000` and `20260911120200` add
+`normalized_events` and `name_current` indexes; `20260911120100` creates the
+`address_records_current` projection table, `20260914120100` comments it,
+and `20260915120000` drops three of its NOT NULL constraints;
+`20260913120000` and `20260914120000` replace `write_resolution_divergence`
+and add `revalidate_resolution_lookup_state`; `20260913130000` and
+`20260913130100` replace the CHECKs on `permissions_current_resource_summary`
+and `account_permission_state_current`. The head named above is the last of
+them, so the frozen artifact is the tree an initialized database actually
+holds; the breach is the subject of the Rollout section below.
+
 Since #849 `apply-check.sh` applies every schema-migration that names a
 `bigname_phase` object and fails on one it does not list. Its inventory is
 that literal token, so a schema-migration written against the connection's
@@ -140,8 +157,9 @@ search path would not be in it; the same script therefore rejects any
 schema-migration newer than the legacy-schema drop that names no
 `bigname_phase` object unless each of its statements is one the check
 recognizes and every relation it names — the object it creates, alters,
-drops, or writes, and any it inherits, partitions, references, copies, or
-reads — carries a schema qualifier, quoted or bare; a statement or lexical
+drops, or writes, any it inherits, partitions, references, copies, or reads,
+and any it names as a string in an expression (`nextval`, a `::regclass`
+cast) — carries a schema qualifier, quoted or bare; a statement or lexical
 form it cannot read (a `WITH`-prefixed write, a `DO` block, a block comment,
 a dollar-quoted, escape, or unicode string) is rejected rather than assumed
 safe, as is any spelling of the phase schema other than `bigname_phase`,
@@ -440,9 +458,17 @@ settled by slice 3 and #885, and this ADR records them rather than authorizing
 them in advance; the 34 others are inventoried under the frozen artifact. That
 is a process miss worth naming: the freeze was observable the whole time
 through `apply-check.sh`, but the written contract trailed the schema by three
-weeks. Carve-out 5 is the one still ahead,
-and it follows the intended order — this ADR first, then the schema-migration
-referencing it.
+weeks. And the miss repeated once more: between acceptance and this ADR's
+merge, #893 landed twelve schema-migrations — a new projection table,
+constraint replacements on populated tables, function replacements — under
+the review-only process, with no carve-out and no amendment. They are
+inventoried under the frozen artifact and the head advanced to the last of
+them, because the artifact has to be the tree that exists; they are not
+retroactively authorized. From this ADR's merge the process is the one it
+describes: a schema change is a listed carve-out or an amendment, and
+`apply-check.sh` is where the omission fails. Carve-out 5 is the one still
+ahead, and it follows the intended order — this ADR first, then the
+schema-migration referencing it.
 
 Ownership follows [`workstreams.md`](../internal/workstreams.md): Storage and
 Domain own the schema-migrations and `apply-check.sh`; Projections and API own
