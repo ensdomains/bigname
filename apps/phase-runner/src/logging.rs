@@ -8,7 +8,14 @@ use tracing_subscriber::EnvFilter;
 /// is not enough, because Compose passes an unset variable through as an empty
 /// string — a bare `is_some()` check would pin every deployment to JSON.
 pub fn json_requested() -> bool {
-    std::env::var("BIGNAME_LOG_JSON").is_ok_and(|value| {
+    json_requested_from(std::env::var("BIGNAME_LOG_JSON").ok().as_deref())
+}
+
+/// The environment read is kept out of this function so the parsing rule can be
+/// tested without mutating the process environment, which the parallel test
+/// harness shares with every other test in the binary.
+pub fn json_requested_from(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
         !matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "" | "0" | "false" | "no" | "off"
@@ -33,17 +40,19 @@ pub fn init() {
 
 #[cfg(test)]
 mod tests {
+    use super::json_requested_from;
+
     #[test]
     fn negative_and_empty_spellings_do_not_enable_json() {
+        assert!(!json_requested_from(None), "unset enabled JSON");
         for value in ["", " ", "0", "false", "FALSE", "no", "off"] {
-            unsafe { std::env::set_var("BIGNAME_LOG_JSON", value) };
-            assert!(!super::json_requested(), "{value:?} enabled JSON");
+            assert!(!json_requested_from(Some(value)), "{value:?} enabled JSON");
         }
         for value in ["1", "true", "yes", "json"] {
-            unsafe { std::env::set_var("BIGNAME_LOG_JSON", value) };
-            assert!(super::json_requested(), "{value:?} did not enable JSON");
+            assert!(
+                json_requested_from(Some(value)),
+                "{value:?} did not enable JSON"
+            );
         }
-        unsafe { std::env::remove_var("BIGNAME_LOG_JSON") };
-        assert!(!super::json_requested(), "unset enabled JSON");
     }
 }

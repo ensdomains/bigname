@@ -705,25 +705,38 @@ For `C` configured chains, one phase-runner process opens at most:
 | --- | --- | --- |
 | Phase pool | `max(2C, 4)` | `apps/phase-runner/src/main.rs:59` |
 | Verification pool | `max(C, 1)` | `apps/phase-runner/src/main.rs:83` |
-| Advisory phase locks | `C` | `apps/phase-runner/src/phase_lock.rs:23` |
+| Advisory phase locks, peak | `3C` | see below |
 
 Each lock is a dedicated connection outside both pools, because it holds a
 session-scoped `pg_try_advisory_lock` (`apps/phase-runner/src/phase_lock.rs:33`).
-Phases run in sequence within a chain, so
-one lock per chain is held at a time — a one-chain deployment settles at
-`4 + 1 + 1 = 6` connections, three chains at `6 + 3 + 3 = 12`.
+How many are held at once depends on where the chain is in its cycle, and the
+budget has to cover the peak, not the common case:
 
-Two operator paths exceed that steady state. `rewind` takes all four phase locks
-for a chain at once (`apps/phase-runner/src/rewind.rs:40`), so budget `4C` locks
-while it runs, and a start that finds phases recorded against chains no longer
-configured takes one lock at a time to close them out
-(`apps/phase-runner/src/runner_chain.rs:50`).
+| Situation | Locks per chain | Where |
+| --- | --- | --- |
+| Serial path: Verify runs before Live (`verify_before_live`) | `1` | `apps/phase-runner/src/runner_chain.rs:109` |
+| Combined path: Verify and Live polled concurrently, each holding its own lock | `2` | `apps/phase-runner/src/runner_live_follow.rs:262` |
+| Post-Live discovery repair: a Verify fence, then an Ingest fence inside it, then one phase lock inside that | `3` | `runner_live_follow.rs:70`, `:112`, `:143` |
+| `rewind` (operator one-shot): all four phase locks taken together | `4` | `apps/phase-runner/src/rewind.rs:40` |
+
+A fence is an ordinary phase lock on that phase's name, so it excludes the
+phase itself rather than adding to it — the post-Live Verify fence waits for the
+paired Verify to release before it is granted. Catch-up and the spine phases run
+one after another and never hold two of their own locks at once.
+
+So budget `max(2C, 4) + max(C, 1) + 3C` for the running service: a one-chain
+deployment peaks at `4 + 1 + 3 = 8` connections and settles at `6` or `7`
+depending on the path; three chains peak at `6 + 3 + 9 = 18`. Add `C` more
+while a `rewind` runs. A start that finds phases recorded against chains no
+longer configured takes one lock at a time to close them out
+(`apps/phase-runner/src/runner_chain.rs:50`) and does not raise the peak.
 
 Set the server's own ceiling explicitly with `POSTGRES_MAX_CONNECTIONS` rather
-than inheriting the PostgreSQL default. Budget it against `work_mem`: a single
-backend can hold several `work_mem` allocations at once, so the worst case a
-server commits to is roughly `max_connections x work_mem x concurrent sort or
-hash nodes`, on top of `shared_buffers`.
+than inheriting the PostgreSQL default, and size it from the peak above plus
+`BIGNAME_DATABASE_MAX_CONNECTIONS + 1` per API process. Budget it against
+`work_mem`: a single backend can hold several `work_mem` allocations at once, so
+the worst case a server commits to is roughly `max_connections x work_mem x
+concurrent sort or hash nodes`, on top of `shared_buffers`.
 
 ## Owner-ratified Sepolia source-role rollout
 

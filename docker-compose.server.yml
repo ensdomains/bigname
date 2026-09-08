@@ -1,7 +1,11 @@
 name: bigname
 
 x-bigname-env: &bigname-env
-  BIGNAME_DATABASE_URL: ${BIGNAME_DATABASE_URL:-postgresql://bigname:bigname@postgres:5432/bigname}
+  # The fallback is derived from the same required credential PostgreSQL is
+  # initialised with, so a deployment that sets POSTGRES_PASSWORD but omits
+  # BIGNAME_DATABASE_URL cannot end up with a runner that fails authentication
+  # behind a passing pg_isready healthcheck.
+  BIGNAME_DATABASE_URL: ${BIGNAME_DATABASE_URL:-postgresql://${POSTGRES_USER:-bigname}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD; there is no default}@postgres:5432/${POSTGRES_DB:-bigname}}
   RUST_LOG: ${RUST_LOG:-info,sqlx::query=error}
   # Empty means "unset"; both binaries treat empty and the negative spellings as off.
   BIGNAME_LOG_JSON: ${BIGNAME_LOG_JSON:-}

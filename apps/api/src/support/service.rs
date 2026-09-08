@@ -52,7 +52,11 @@ fn report_shutdown_signal(service: &'static str, signal: std::io::Result<&'stati
 /// empty string, so a bare `var_os(..).is_some()` check would pin every
 /// deployment that forwards the variable to JSON regardless of its value.
 fn json_logging_requested() -> bool {
-    std::env::var("BIGNAME_LOG_JSON").is_ok_and(|value| {
+    json_logging_requested_from(std::env::var("BIGNAME_LOG_JSON").ok().as_deref())
+}
+
+fn json_logging_requested_from(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
         !matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "" | "0" | "false" | "no" | "off"
