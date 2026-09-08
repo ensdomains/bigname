@@ -256,15 +256,6 @@ async fn v2_address_names_permission_id_does_not_resolve_name_again() -> Result<
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
     let selected = Uuid::from_u128(0xa100);
-    let other = Uuid::from_u128(0xb100);
-    // The address-name representative and a subsequent current-name lookup can differ.
-    sqlx::query("UPDATE bigname_phase.name_current SET resource_id=$1 WHERE raw_name='alpha.eth'")
-        .bind(other)
-        .execute(&database.pool)
-        .await?;
-    let named =
-        v2_permissions_payload_for_database(&database, "/v2/permissions?name=alpha.eth").await?;
-    assert_eq!(named["data"], json!([]));
     let payload = v2_address_names_payload_for_database(
         &database,
         &format!("/v2/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"),
@@ -276,6 +267,37 @@ async fn v2_address_names_permission_id_does_not_resolve_name_again() -> Result<
     );
     let grants = address_name_inline_grants(&payload["data"][0]);
     assert!(!grants.is_empty());
+
+    // Advance the name to a new registration after the caller captured its permission ID.
+    // The old binding ends where the new one starts; its grants remain an ID-only audit.
+    let mut replacement = v2_address_name_specs().remove(0);
+    replacement.resource_id = Uuid::from_u128(0xe100);
+    replacement.token_lineage_id = Uuid::from_u128(0xe101);
+    replacement.surface_binding_id = Uuid::from_u128(0xe102);
+    replacement.block_hash = "0xnamec8";
+    replacement.block_number = 200;
+    sqlx::query(
+        "UPDATE bigname_phase.surface_bindings SET active_to=$1 WHERE surface_binding_id=$2",
+    )
+    .bind(timestamp(1_717_180_000 + replacement.block_number))
+    .bind(Uuid::from_u128(0xa102))
+    .execute(&database.pool)
+    .await?;
+    seed_v2_address_name_storage(&database, std::slice::from_ref(&replacement)).await?;
+    seed_v2_address_name_current_rows(&database, std::slice::from_ref(&replacement)).await?;
+    let (logical_name_id, _) = phase_logical_identity("ens", "alpha.eth")?;
+    let current = bigname_storage::load_name_current(&database.pool, &logical_name_id)
+        .await?
+        .expect("the replacement name must be readable");
+    assert_eq!(current.resource_id, Some(replacement.resource_id));
+    assert_eq!(
+        current.surface_binding_id,
+        Some(replacement.surface_binding_id)
+    );
+    assert_eq!(current.token_lineage_id, Some(replacement.token_lineage_id));
+    let named =
+        v2_permissions_payload_for_database(&database, "/v2/permissions?name=alpha.eth").await?;
+    assert_eq!(named["data"], json!([]));
     assert_eq!(
         grants,
         address_name_permission_grants(&database, &selected.to_string(), "").await?
@@ -326,7 +348,8 @@ async fn v2_address_names_grant_budget_maximum_page_operators_and_default_plan()
         canonicality_summary, manifest_version)
         SELECT chain_id, authority_kind, authority_contract, authority_contract_instance_id,
         owner, '0x'||lpad(to_hex(i), 40, '0'), relation_kind, i <= 4,
-        effective_powers, grant_source, inheritance_path, transfer_behavior,
+        CASE WHEN i <= 4 THEN effective_powers ELSE '[]'::jsonb END,
+        grant_source, inheritance_path, transfer_behavior,
         provenance, chain_positions, canonicality_summary, manifest_version
         FROM bigname_phase.account_permission_state_current CROSS JOIN generate_series(1,1104) i
         WHERE subject=$1"#,
@@ -422,7 +445,7 @@ async fn v2_address_names_grant_budget_maximum_page_operators_and_default_plan()
     sqlx::query("DELETE FROM bigname_phase.permissions_current")
         .execute(&database.pool)
         .await?;
-    sqlx::query("UPDATE bigname_phase.account_permission_state_current SET approved=true WHERE subject='0x0000000000000000000000000000000000000005'").execute(&database.pool).await?;
+    sqlx::query("UPDATE bigname_phase.account_permission_state_current SET approved=true, effective_powers='[\"registry_control\"]'::jsonb WHERE subject='0x0000000000000000000000000000000000000005'").execute(&database.pool).await?;
     let over =
         v2_address_names_response_for_database(&database, &format!("{uri}&include=role_summary"))
             .await?;
