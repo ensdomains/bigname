@@ -38,7 +38,7 @@ impl PhaseRunner {
         })
         .await?;
         let Some(setup) = setup else {
-            return Err(self.recompute_setup_cancelled(chain).await?);
+            return Err(self.recompute_setup_cancelled(chain, range).await?);
         };
         let Some((run_project_now, project_range)) = setup else {
             return self
@@ -70,19 +70,22 @@ impl PhaseRunner {
             .await
     }
 
-    /// The race above is biased toward the stop, so a refresh whose commit
-    /// reached PostgreSQL can still lose it. The durable marker decides what is
-    /// reported, not the race: a refresh this command owns blocks Project and
-    /// resumes on a rerun; any other Project marker was there before and is not
-    /// this command's to report. The read is bounded, since the stall that lost
-    /// the race may be the same database.
-    async fn recompute_setup_cancelled(&self, chain: &ChainConfig) -> RunnerResult<RunnerError> {
+    /// The race above is biased toward the stop, so a setup whose commit reached
+    /// PostgreSQL can still lose it. The durable Project marker decides what is
+    /// reported, not the race: `recompute_setup_report` below. The read is
+    /// bounded, since the stall that lost the race may be the same database.
+    async fn recompute_setup_cancelled(
+        &self,
+        chain: &ChainConfig,
+        range: BlockRange,
+    ) -> RunnerResult<RunnerError> {
         let chain_id = chain.chain_id.as_str();
-        let refresh: Option<(Option<String>, Option<i64>, Option<i64>)> = read_after_stop(
+        let refresh: Option<ProjectMarkerRow> = read_after_stop(
             &format!("the recompute-flags project refresh for chain {chain_id}"),
             async {
                 sqlx::query_as(
-                    "SELECT last_error, redo_from_block_number, redo_to_block_number
+                    "SELECT last_error, redo_from_block_number, redo_to_block_number,
+                            current_block_number
                      FROM chain_phase_state
                      WHERE chain_id = $1 AND phase_name = 'project' AND redo_in_progress",
                 )
@@ -98,24 +101,52 @@ impl PhaseRunner {
             },
         )
         .await?;
-        let owned = refresh.and_then(|(reason, from, to)| {
-            let reason = reason?;
-            let owned = crate::redo_recompute::owns_project_refresh(&reason)
-                || crate::redo_recompute::is_staged_project_refresh(&reason);
-            owned.then_some((from?, to?))
+        // The setup extends a pending redo only through Project's current block,
+        // so that is the end the marker has to reach to have been touched.
+        let marker = refresh.and_then(|(reason, from, to, current)| {
+            Some((
+                reason,
+                from?,
+                to?,
+                current.unwrap_or(range.to).min(range.to),
+            ))
         });
-        let Some((from, to)) = owned else {
-            return cancelled_redo_error(&self.store, chain_id, PhaseName::Interpret).await;
-        };
-        Ok(RunnerError::new(
-            ErrorKind::InvalidTransition,
-            format!(
-                "recompute-flags for chain {chain_id} stopped after its scoped Project refresh \
-                 was stamped; the refresh blocks Project until it is resumed; rerun \
-                 `phase-runner redo --chain {chain_id} --phase recompute-flags --from-block \
-                 {from} --to-block {to}`"
-            ),
-        ))
+        let report = recompute_setup_report(
+            marker
+                .as_ref()
+                .map(|(reason, from, to, _)| (reason.as_deref(), *from, *to)),
+            BlockRange {
+                from: range.from,
+                to: marker
+                    .as_ref()
+                    .map_or(range.to, |(_, _, _, through)| *through),
+            },
+        );
+        match report {
+            RecomputeSetupReport::NeverStarted => {
+                cancelled_redo_error(&self.store, chain_id, PhaseName::Interpret).await
+            }
+            RecomputeSetupReport::OwnedRefresh { from, to } => Ok(RunnerError::new(
+                ErrorKind::InvalidTransition,
+                format!(
+                    "recompute-flags for chain {chain_id} stopped after its scoped Project refresh \
+                     was stamped; the refresh blocks Project until it is resumed; rerun \
+                     `phase-runner redo --chain {chain_id} --phase recompute-flags --from-block \
+                     {from} --to-block {to}`"
+                ),
+            )),
+            RecomputeSetupReport::ExtendedPendingRedo { from, to } => Ok(RunnerError::new(
+                ErrorKind::InvalidTransition,
+                format!(
+                    "recompute-flags for chain {chain_id} stopped after its range was recorded \
+                     on the pending Project redo {from}..={to}, before the flags were \
+                     recomputed; that redo runs as usual, and the flags still need rerunning: \
+                     `phase-runner redo --chain {chain_id} --phase recompute-flags --from-block \
+                     {} --to-block {}`",
+                    range.from, range.to
+                ),
+            )),
+        }
     }
 
     async fn run_recompute_interpret_with_project_lock(
@@ -140,7 +171,10 @@ impl PhaseRunner {
         // Interpret has no marker yet, but the staged Project refresh may, and it
         // is what blocks Project until this command resumes it.
         let Some(mut project_lock) = acquired else {
-            return Err(self.recompute_setup_cancelled(chain).await?);
+            let range = mode.range().ok_or_else(|| {
+                RunnerError::data_integrity("recompute-flags runs over an explicit range")
+            })?;
+            return Err(self.recompute_setup_cancelled(chain, range).await?);
         };
         let stopped = cancellation.clone();
         let result = project_lock
@@ -367,4 +401,108 @@ fn recompute_stopped(chain: &ChainConfig, range: BlockRange, when: &str) -> Runn
             chain.chain_id, chain.chain_id, range.from, range.to
         ),
     )
+}
+
+/// `last_error`, redo range, and current block of the pending Project marker.
+type ProjectMarkerRow = (Option<String>, Option<i64>, Option<i64>, Option<i64>);
+
+/// What a stop that won the setup race is reported as, from the Project marker
+/// alone. A refresh this command owns resumes only through it. Any other
+/// pending Project redo was there before, but the setup extends its range and
+/// resets its progress before committing, so a marker that now covers the
+/// requested range cannot be told apart from one the setup touched; it is
+/// reported as work this command left behind, since rerunning is what completes
+/// it either way. Only a marker that does not cover the range, or none, proves
+/// the setup never committed.
+#[derive(Debug, Eq, PartialEq)]
+enum RecomputeSetupReport {
+    NeverStarted,
+    OwnedRefresh { from: i64, to: i64 },
+    ExtendedPendingRedo { from: i64, to: i64 },
+}
+
+fn recompute_setup_report(
+    marker: Option<(Option<&str>, i64, i64)>,
+    requested: BlockRange,
+) -> RecomputeSetupReport {
+    let Some((reason, from, to)) = marker else {
+        return RecomputeSetupReport::NeverStarted;
+    };
+    let owned = reason.is_some_and(|reason| {
+        crate::redo_recompute::owns_project_refresh(reason)
+            || crate::redo_recompute::is_staged_project_refresh(reason)
+    });
+    if owned {
+        return RecomputeSetupReport::OwnedRefresh { from, to };
+    }
+    if from <= requested.from && to >= requested.to {
+        return RecomputeSetupReport::ExtendedPendingRedo { from, to };
+    }
+    RecomputeSetupReport::NeverStarted
+}
+
+#[cfg(test)]
+mod setup_report_tests {
+    use super::*;
+
+    fn range() -> BlockRange {
+        BlockRange::new(10, 20).expect("range")
+    }
+
+    #[test]
+    fn no_project_marker_means_the_setup_never_committed() {
+        assert_eq!(
+            recompute_setup_report(None, range()),
+            RecomputeSetupReport::NeverStarted
+        );
+    }
+
+    #[test]
+    fn an_owned_refresh_is_resumed_through_this_command() {
+        let reason = format!(
+            "{}{}",
+            crate::redo_stamp::REQUIRED_REDO_PREFIX,
+            crate::redo_recompute::PROJECT_REFRESH_REASON
+        );
+        assert_eq!(
+            recompute_setup_report(Some((Some(&reason), 10, 20)), range()),
+            RecomputeSetupReport::OwnedRefresh { from: 10, to: 20 }
+        );
+        assert_eq!(
+            recompute_setup_report(
+                Some((
+                    Some(crate::redo_recompute::PROJECT_REFRESH_STAGED_REASON),
+                    5,
+                    25
+                )),
+                range()
+            ),
+            RecomputeSetupReport::OwnedRefresh { from: 5, to: 25 }
+        );
+    }
+
+    #[test]
+    fn a_pending_redo_that_covers_the_range_is_reported_as_left_behind_work() {
+        assert_eq!(
+            recompute_setup_report(Some((Some("operator redo"), 0, 100)), range()),
+            RecomputeSetupReport::ExtendedPendingRedo { from: 0, to: 100 }
+        );
+        assert_eq!(
+            recompute_setup_report(Some((None, 10, 20)), range()),
+            RecomputeSetupReport::ExtendedPendingRedo { from: 10, to: 20 }
+        );
+    }
+
+    #[test]
+    fn a_pending_redo_that_does_not_cover_the_range_proves_no_commit() {
+        // The setup would have extended it to cover the range before committing.
+        assert_eq!(
+            recompute_setup_report(Some((Some("operator redo"), 0, 15)), range()),
+            RecomputeSetupReport::NeverStarted
+        );
+        assert_eq!(
+            recompute_setup_report(Some((Some("operator redo"), 12, 30)), range()),
+            RecomputeSetupReport::NeverStarted
+        );
+    }
 }

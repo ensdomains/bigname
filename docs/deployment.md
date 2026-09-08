@@ -499,7 +499,10 @@ and resumable. A completed scoped refresh stays marked as "Interpret flags
 pending" until Interpret completion clears or replaces it atomically, so a
 restart in that handoff resumes the same command without repeating Project. An
 unrelated ordinary Project redo that was already pending is widened or
-preserved, never completed by the recompute session. This split
+preserved, never completed by the recompute session; a stop that lands after
+that widening committed and before the flags were recomputed reports the
+widened redo and asks for a `recompute-flags` rerun over the same range, since
+that redo runs as usual but does not recompute the flags. This split
 deliberately narrows the simplification plan's
 bare statement that the mode runs without replay: shadow names suppress
 bindings, so a class transition requires normal binding derivation or
