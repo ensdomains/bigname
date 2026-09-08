@@ -294,9 +294,9 @@ async fn candidates(
              AND parent.namespace = event.namespace
              AND parent.chain_id = event.chain_id
              AND parent.visibility_state = 'active'
+            -- Stored lowercase; wrapping the PK in lower() forces a seq scan.
             LEFT JOIN label_preimages preimage
-              ON lower(preimage.labelhash) =
-                 lower(event.after_state ->> 'labelhash')
+              ON preimage.labelhash = lower(event.after_state ->> 'labelhash')
             LEFT JOIN project_latest_registry_owner ownership
               ON ownership.logical_name_id = event.namespace || ':' ||
                  lower(event.after_state ->> 'child_node')
@@ -434,7 +434,7 @@ async fn candidates(
              AND cardinality(child.labelhashes) = cardinality(parent.labelhashes) + 1
              AND child.labelhashes[2:cardinality(child.labelhashes)] = parent.labelhashes
             LEFT JOIN label_preimages preimage
-              ON lower(preimage.labelhash) = lower(child.labelhashes[1])
+              ON preimage.labelhash = lower(child.labelhashes[1])
             WHERE parent.raw_name <> ''
         )
         SELECT * FROM v1_rows
