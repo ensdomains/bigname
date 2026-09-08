@@ -27,7 +27,7 @@ use std::{
 };
 use tokio::{
     process::{Child, Command},
-    time::{Instant, sleep, timeout},
+    time::{Instant, sleep, timeout, timeout_at},
 };
 
 const CHAIN: &str = "ethereum-sepolia";
@@ -642,7 +642,9 @@ async fn observe(
     let deadline = Instant::now() + Duration::from_secs(cfg.progress_timeout_secs);
     let mut previous = false;
     let mut iteration = 0;
+    timeout_at(deadline, async {
     loop {
+        ensure!(Instant::now() < deadline, "healthy resting checkpoint deadline");
         ensure!(
             writer.try_wait()?.is_none(),
             "writer exited during observation"
@@ -663,6 +665,7 @@ async fn observe(
             "{}-observation-{iteration}",
             e["stage"].as_str().context("stage")?
         );
+        ensure!(Instant::now() < deadline, "healthy resting checkpoint deadline");
         let path = cfg.sql(db, "checkpoint", &tag, Some(e), false).await?;
         let snapshot = read_json(&path)?;
         let checked = validate(&snapshot, e);
@@ -670,17 +673,15 @@ async fn observe(
             &path.with_extension("validation.json"),
             &json!({"at_ms":now(),"healthy":checked.is_ok(),"violation":checked.as_ref().err().map(|e|e.to_string())}),
         )?;
+        ensure!(Instant::now() < deadline, "healthy resting checkpoint deadline");
         if checked.is_ok() && previous {
             return Ok(());
         }
         previous = checked.is_ok();
-        ensure!(
-            Instant::now() < deadline,
-            "healthy resting checkpoint deadline"
-        );
-        sleep(Duration::from_secs(cfg.poll_secs)).await;
+        sleep(Duration::from_secs(cfg.poll_secs).min(deadline.saturating_duration_since(Instant::now()))).await;
         iteration += 1;
     }
+    }).await.context("healthy resting checkpoint deadline")?
 }
 async fn connections(cfg: &Config, db: &str, tag: &str) -> Result<()> {
     let mut identities = Vec::new();

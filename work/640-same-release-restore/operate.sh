@@ -167,12 +167,20 @@ port=$(docker port "$container" 5432/tcp | sed -n 's/^127\.0\.0\.1://p')
 # First require final TCP service internally; driver also verifies the published host endpoint before setup.
 until=$((SECONDS + BIGNAME_RESTORE_READINESS_SECS))
 while :; do
-  [[ $(docker inspect --format '{{.State.Running}}' "$container") == true ]]
-  if timeout --kill-after="$BIGNAME_RESTORE_SHUTDOWN_SECS" "$BIGNAME_RESTORE_COMMAND_SECS" docker exec -i "$container" sh -c \
+  remaining=$((until - SECONDS))
+  ((remaining > 0)) || { echo 'Owned PostgreSQL TCP readiness expired' >&2; exit 1; }
+  ((remaining <= BIGNAME_RESTORE_COMMAND_SECS)) || remaining=$BIGNAME_RESTORE_COMMAND_SECS
+  [[ $(timeout --kill-after="$BIGNAME_RESTORE_SHUTDOWN_SECS" "$remaining" "$docker_binary" inspect --format '{{.State.Running}}' "$container") == true ]]
+  remaining=$((until - SECONDS))
+  ((remaining > 0)) || { echo 'Owned PostgreSQL TCP readiness expired' >&2; exit 1; }
+  ((remaining <= BIGNAME_RESTORE_COMMAND_SECS)) || remaining=$BIGNAME_RESTORE_COMMAND_SECS
+  if timeout --kill-after="$BIGNAME_RESTORE_SHUTDOWN_SECS" "$remaining" "$docker_binary" exec -i "$container" sh -c \
     'read -r PGPASSWORD; export PGPASSWORD; exec psql -X -w -h 127.0.0.1 -p 5432 -U postgres -d postgres -Atc "SELECT 1"' sh \
-    < <(printf '%s\n' "$R640_ADMIN_PASSWORD") > "$private/readiness.out" 2> "$private/readiness.err"; then break; else ready_status=$?; fi
-  if [[ $ready_status == 124 || $ready_status == 137 ]]; then echo "Native readiness command timed out" >&2; exit 1; fi
+    < <(printf '%s\n' "$R640_ADMIN_PASSWORD") > "$private/readiness.out" 2> "$private/readiness.err"; then ready_status=0; else ready_status=$?; fi
   ((SECONDS < until)) || { echo 'Owned PostgreSQL TCP readiness expired' >&2; exit 1; }
+  ((ready_status != 0)) || break
+  if [[ $ready_status == 124 || $ready_status == 137 ]]; then echo "Native readiness command timed out" >&2; exit 1; fi
+  # SECONDS and the positive remaining budget are integral; one second cannot exceed it.
   sleep 1
 done
 for tool in postgres psql pg_dump pg_restore; do docker exec "$container" "$tool" --version; done > "$evidence/postgres-versions.txt"
