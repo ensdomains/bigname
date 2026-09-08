@@ -104,15 +104,64 @@ reaches the network:
   a different host.
 - **Response size.** The body read is capped at 1 MiB; a longer response fails
   that gateway rather than streaming into the request.
-- **Fan-out and time.** At most four URLs are attempted per lookup, under a
-  1000 ms connect and 1500 ms total timeout.
+- **Fan-out and time.** Each gateway HTTP request has a 1000 ms connect and a
+  1500 ms total timeout; those are per request, not per lookup. For each
+  CCIP-Read step the resolver's URL list is tried in order, at most four URLs,
+  and a timed-out or unreachable URL falls through to the next, so one step can
+  spend up to 6 s on gateways; a resolution follows at most four steps, each
+  paying that plus one JSON-RPC callback bounded by `BIGNAME_API_RPC_TIMEOUT_MS`.
+  The `x-batch-gateway:true` form fans its inner requests out concurrently with
+  no in-process cap on their number. What bounds the whole resolution is a
+  6 s gateway budget per CCIP-Read resolution, shared across every step and
+  URL: when it runs out the record fails in band as `resolver_call_failed`,
+  the same way a configured RPC timeout does, instead of holding the request
+  until the 30 s `BIGNAME_API_REQUEST_TIMEOUT_MS` fails it as a whole.
 
 **What is deliberately not enforced in process: destination host or IP.** The
 gateway may resolve to any address the container can route to, including link
-local and cluster internal ranges. For Basenames the URL set is owner
-controlled and effectively fixed, but the ENS primary-name path propagates a
-target resolver's URLs verbatim, so an address that controls a reverse claim can
-choose the destination. Egress restriction for that case belongs to network
+local and cluster internal ranges. Who chooses that destination differs by path.
+
+For Basenames the URL set is a single gateway URL read from the L1 resolver's
+contract-level `url` storage
+(upstream: .refs/basenames/src/L1/L1Resolver.sol:L28-L29 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L1/L1Resolver.sol:L171-L173 @ basenames@1809bbc).
+Only the contract owner can change it, through `setUrl` under `onlyOwner`, which
+emits `UrlChanged`
+(upstream: .refs/basenames/src/L1/L1Resolver.sol:L92-L100 @ basenames@1809bbc);
+no name owner or caller can substitute a URL on this path, and bigname calls the
+manifest-declared L1 resolver address directly and rejects an `OffchainLookup`
+from any other sender. The URL is fixed only until that owner rotates it —
+upstream ships an operator script for exactly that
+(upstream: .refs/basenames/script/configure/SetL1ResolverUrl.s.sol:L13-L16 @ basenames@1809bbc)
+— and bigname does not index `UrlChanged`, so a rotation is observed only
+through the live revert. Egress policy for this path should pin the host the
+contract currently returns, not assume it is immutable.
+
+For the ENS primary-name path the reverse leg is two plain `eth_call`s —
+registry `resolver(node)`, then `name(node)` on the reverse resolver — that never
+follow CCIP-Read, so the reverse resolver itself cannot supply URLs. The forward
+`addr:60` leg is different: it calls the Universal Resolver's `resolve(name,
+data)` with CCIP-Read following enabled, and the Universal Resolver forwards the
+target resolver's `OffchainLookup.urls` unchanged — directly when the resolver
+supports ERC-7996
+(upstream: .refs/ens_v1/contracts/ccipRead/CCIPReader.sol:L72-L94 @ ens_v1@91c966f),
+or wrapped in a batch-gateway request otherwise
+(upstream: .refs/ens_v1/contracts/ccipRead/CCIPBatcher.sol:L107-L126 @ ens_v1@91c966f),
+which bigname unwraps and fetches itself. Because the Universal Resolver wraps
+the calldata in ENSIP-10 `resolve(name, data)` for any resolver that advertises
+`IExtendedResolver`
+(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L73-L88 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L330-L337 @ ens_v1@91c966f),
+the URLs are chosen by whoever controls the forward name's resolver, or a
+wildcard resolver on one of its ancestors. An address that controls its reverse
+record — the address itself, an ENS operator it approved, a registrar
+controller, or the owner of an `Ownable` contract at that address
+(upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L40-L49 @ ens_v1@91c966f)
+— chooses only which name the forward leg looks up; in practice that is enough,
+because it can point the claim at a name whose resolver it also controls.
+bigname applies no allowlist to the resolver address or the gateway host before
+following; the only pre-fetch check is that the `OffchainLookup.sender` equals
+the Universal Resolver. Egress restriction for that case belongs to network
 policy around the API container, not to this client, and no such policy is
 described in the deployment docs today. Treat it as a prerequisite before `/v2`
 is admitted at the public edge, and see

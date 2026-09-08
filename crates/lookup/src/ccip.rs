@@ -4,6 +4,7 @@ use alloy_primitives::Bytes;
 use alloy_sol_types::{SolError, SolValue, sol};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
+use std::time::Duration;
 
 use crate::{
     abi::{hex_string, hex_to_bytes},
@@ -13,6 +14,16 @@ use crate::{
 mod gateway;
 
 const MAX_CCIP_REDIRECTS: usize = 4;
+/// Gateway time one CCIP-Read resolution may spend in total, across every
+/// continuation and every URL tried. The per-request timeouts in `gateway.rs`
+/// bound one HTTP attempt only; without this, four continuations of four stalled
+/// URLs each can hold a record for 24 s inside a request whose only other
+/// ceiling is the 30 s request timeout, which fails the whole request out of
+/// band instead of this one record in band.
+#[cfg(not(test))]
+const CCIP_READ_BUDGET: Duration = Duration::from_millis(6000);
+#[cfg(test)]
+const CCIP_READ_BUDGET: Duration = Duration::from_millis(400);
 
 mod contracts {
     use super::*;
@@ -96,6 +107,7 @@ pub(crate) async fn follow_ccip_read(
         return Ok(None);
     };
     let mut expected_sender = expected_sender.to_owned();
+    let deadline = tokio::time::Instant::now() + CCIP_READ_BUDGET;
     for redirect_index in 0..MAX_CCIP_REDIRECTS {
         if !lookup.sender.eq_ignore_ascii_case(&expected_sender) {
             return Err(CcipReadError::malformed(format!(
@@ -103,16 +115,26 @@ pub(crate) async fn follow_ccip_read(
                 lookup.sender, expected_sender
             )));
         }
-        let gateway_response = match gateway::fetch(&lookup).await {
-            Ok(response) => response,
-            Err(error) if error.is_transport_failure() => {
-                return Err(CcipReadError::transport(
-                    error.to_string(),
-                    error.is_timeout(),
-                ));
-            }
-            Err(error) => return Err(CcipReadError::malformed(error)),
-        };
+        let gateway_response =
+            match tokio::time::timeout_at(deadline, gateway::fetch(&lookup)).await {
+                Err(_elapsed) => {
+                    return Err(CcipReadError::transport(
+                        format!(
+                            "CCIP-Read gateway budget of {} ms exhausted",
+                            CCIP_READ_BUDGET.as_millis()
+                        ),
+                        true,
+                    ));
+                }
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) if error.is_transport_failure() => {
+                    return Err(CcipReadError::transport(
+                        error.to_string(),
+                        error.is_timeout(),
+                    ));
+                }
+                Ok(Err(error)) => return Err(CcipReadError::malformed(error)),
+            };
         let callback_calldata = callback_calldata(
             lookup.callback_function,
             &gateway_response,

@@ -2490,6 +2490,63 @@ async fn successful_ccip_result_is_never_persisted() -> AnyResult<()> {
 }
 
 #[tokio::test]
+async fn hanging_gateways_are_cut_off_by_the_ccip_read_budget_in_band() -> AnyResult<()> {
+    // Each hanging server accepts one connection, reads the gateway POST body,
+    // and never answers, so every URL would otherwise run to the per-request
+    // timeout in turn. The budget has to stop the chain before that.
+    let (first_url, first_handle) = spawn_hanging_rpc().await?;
+    let (second_url, second_handle) = spawn_hanging_rpc().await?;
+    let sender = Address::from_str(BASE_L1_RESOLVER)?;
+    let offchain_data = encode_offchain_lookup_for_test(
+        sender,
+        vec![first_url, second_url],
+        vec![0x12, 0x34],
+        [0x01, 0x02, 0x03, 0x04],
+        vec![0xab],
+    );
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Error {
+        code: 3,
+        message: "execution reverted".to_owned(),
+        data: Value::String(offchain_data),
+    }])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Basenames, INDEXED_VALUE).await?;
+
+    let started = std::time::Instant::now();
+    let result = run_lookup(&fixture, &rpc_url).await?;
+    let elapsed = started.elapsed();
+
+    let record = &result.records[0];
+    assert!(
+        record.ccip_read,
+        "the record must be marked as a CCIP-Read attempt"
+    );
+    assert_eq!(record.value, None);
+    assert_eq!(
+        record.failure_reason.as_deref(),
+        Some("resolver_call_failed"),
+        "budget exhaustion must fail this record in band, like a configured timeout"
+    );
+    // One stalled URL alone would take the 1500 ms per-request timeout; the
+    // 400 ms test budget must have ended the chain well before that.
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "budget did not bound the chain: {elapsed:?}"
+    );
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(
+        requests.len(),
+        1,
+        "no callback may run once the budget is exhausted"
+    );
+    first_handle.abort();
+    second_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn mixed_ccip_and_direct_batch_persists_only_the_direct_disagreement() -> AnyResult<()> {
     let (gateway_url, gateway_handle) = spawn_gateway(vec![0xca, 0xfe]).await?;
     let offchain_data = encode_offchain_lookup_for_test(
