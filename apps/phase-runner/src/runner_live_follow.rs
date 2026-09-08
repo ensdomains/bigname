@@ -8,7 +8,7 @@ use crate::{
     phase::{PhaseName, RunMode},
     phase_lock::PhaseLock,
     runner_support::{
-        record_live_mismatch_after_stop, record_live_mismatch_with_lock, release_lock_after_stop,
+        record_live_mismatch_after_stop, record_live_mismatch_with_lock, release_lock_racing_stop,
     },
 };
 
@@ -87,11 +87,13 @@ impl PhaseRunner {
                 Box::pin(self.run_post_live_downstream_fenced(chain, cancellation.clone())),
             )
             .await;
-        let release = if cancellation.is_cancelled() {
-            release_lock_after_stop(verify_fence, &chain.chain_id, PhaseName::Verify).await
-        } else {
-            verify_fence.release().await
-        };
+        let release = release_lock_racing_stop(
+            verify_fence,
+            &chain.chain_id,
+            PhaseName::Verify,
+            &cancellation,
+        )
+        .await;
         match (result, release) {
             (Ok(()), Ok(())) => {}
             (Ok(()), Err(error)) | (Err(error), Ok(())) => return Err(error),
@@ -193,11 +195,13 @@ impl PhaseRunner {
                     Ok(PostLiveDownstream::Complete)
                 })
                 .await;
-            let release = if cancellation.is_cancelled() {
-                release_lock_after_stop(ingest_fence, &chain.chain_id, PhaseName::Ingest).await
-            } else {
-                ingest_fence.release().await
-            };
+            let release = release_lock_racing_stop(
+                ingest_fence,
+                &chain.chain_id,
+                PhaseName::Ingest,
+                &cancellation,
+            )
+            .await;
             let outcome = match (result, release) {
                 (Ok(outcome), Ok(())) => outcome,
                 (Ok(_), Err(error)) | (Err(error), Ok(())) => return Err(error),

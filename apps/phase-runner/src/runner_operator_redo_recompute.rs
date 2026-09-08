@@ -6,7 +6,7 @@ use crate::{
     phase::{BlockRange, PhaseName, RunMode},
     phase_lock::PhaseLock,
     runner_support::{
-        cancelled_redo_error, read_after_stop, release_lock_after_stop, resumable_recompute_marker,
+        cancelled_redo_error, read_after_stop, release_lock_racing_stop, resumable_recompute_marker,
     },
 };
 
@@ -187,11 +187,9 @@ impl PhaseRunner {
                 self.run_phase_with_restart(chain, PhaseName::Interpret, mode, cancellation),
             )
             .await;
-        let release = if stopped.is_cancelled() {
-            release_lock_after_stop(project_lock, &chain.chain_id, PhaseName::Project).await
-        } else {
-            project_lock.release().await
-        };
+        let release =
+            release_lock_racing_stop(project_lock, &chain.chain_id, PhaseName::Project, &stopped)
+                .await;
         match (result, release) {
             (Ok(()), Ok(())) => Ok(()),
             (Ok(()), Err(error)) | (Err(error), Ok(())) => Err(error),

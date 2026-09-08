@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use sqlx::PgConnection;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::{ChainConfig, TimingConfig},
@@ -49,16 +50,26 @@ pub(crate) async fn read_after_stop<T>(
     }
 }
 
-/// Release a phase lock once a stop has been accepted. The release is an unlock
-/// and a close on a connection whose stall may have won the race, so it is
-/// bounded; a lock dropped on expiry closes its session, which releases it.
-pub(crate) async fn release_lock_after_stop(
+/// Release a phase lock, racing the release against a stop. The release is an
+/// unlock and a close on a connection that may be the stall a stop is waiting
+/// out, so once a stop is pending -- already, or arriving mid-release -- the
+/// rest of it is bounded; a lock dropped on expiry closes its session, which
+/// releases it. Without a stop the release waits as long as it needs to.
+pub(crate) async fn release_lock_racing_stop(
     phase_lock: PhaseLock,
     chain_id: &str,
     phase: PhaseName,
+    cancellation: &CancellationToken,
 ) -> RunnerResult<()> {
-    match tokio::time::timeout(STOPPED_MARKER_LOOKUP, phase_lock.release()).await {
-        Ok(release) => release,
+    let release = phase_lock.release();
+    tokio::pin!(release);
+    tokio::select! {
+        biased;
+        released = &mut release => return released,
+        () = cancellation.cancelled() => {}
+    }
+    match tokio::time::timeout(STOPPED_MARKER_LOOKUP, release).await {
+        Ok(released) => released,
         Err(_elapsed) => {
             tracing::warn!(
                 chain_id,

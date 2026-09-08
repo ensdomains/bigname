@@ -16,7 +16,7 @@ use crate::{
     progress_monitor::RunnerPhaseProgress,
     runner_support::{
         HeartbeatThrottle, PhaseLoopResult, cancelled_redo_error, finish_failed_redo_start,
-        finish_stopped_redo_start, read_after_stop, redo_outcome, release_lock_after_stop,
+        finish_stopped_redo_start, read_after_stop, redo_outcome, release_lock_racing_stop,
     },
     shutdown::until_cancelled,
     state::PhaseStore,
@@ -178,11 +178,8 @@ impl PhaseRunner {
                 &mut phase_lock,
             )
             .await;
-        let release = if cancellation.is_cancelled() {
-            release_lock_after_stop(phase_lock, &chain.chain_id, phase_name).await
-        } else {
-            phase_lock.release().await
-        };
+        let release =
+            release_lock_racing_stop(phase_lock, &chain.chain_id, phase_name, &cancellation).await;
         match (result, release) {
             (Ok(()), Ok(())) => Ok(()),
             (Ok(()), Err(error)) => Err(error),
