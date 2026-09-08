@@ -307,17 +307,22 @@ async fn v2_address_names_permission_id_does_not_resolve_name_again() -> Result<
 
 #[tokio::test]
 async fn v2_address_names_grant_budget_maximum_page_operators_and_default_plan() -> Result<()> {
-    fn summary_row_visits(node: &Value) -> u64 {
+    fn relation_row_visits(node: &Value, relation: &str) -> u64 {
         let mut visits = 0;
-        if node["Relation Name"] == "permissions_current_resource_summary" {
-            let returned = node["Actual Rows"].as_u64().expect("actual summary rows");
+        if node["Relation Name"] == relation {
+            let returned = node["Actual Rows"].as_u64().expect("actual relation rows");
             let filtered = node["Rows Removed by Filter"].as_u64().unwrap_or(0);
             let rechecked = node["Rows Removed by Index Recheck"].as_u64().unwrap_or(0);
-            let loops = node["Actual Loops"].as_u64().expect("actual summary loops");
+            let loops = node["Actual Loops"]
+                .as_u64()
+                .expect("actual relation loops");
             visits = (returned + filtered + rechecked) * loops;
         }
         if let Some(children) = node["Plans"].as_array() {
-            visits += children.iter().map(summary_row_visits).sum::<u64>();
+            visits += children
+                .iter()
+                .map(|child| relation_row_visits(child, relation))
+                .sum::<u64>();
         }
         visits
     }
@@ -459,11 +464,21 @@ async fn v2_address_names_grant_budget_maximum_page_operators_and_default_plan()
     // This fixture has exactly one eligible summary per selected resource. Inspect every
     // scan of that relation, regardless of alias: the former plan revisited its 200 rows
     // 1,025 times. This guards those rescans, not arbitrary query work or latency.
-    let summary_visits = summary_row_visits(&plan[0]["Plan"]);
+    let summary_visits =
+        relation_row_visits(&plan[0]["Plan"], "permissions_current_resource_summary");
     assert!(
         summary_visits > 0 && summary_visits <= ids.len() as u64,
         "selected summaries were rescanned: {summary_visits} row visits for {} resources",
         ids.len()
+    );
+    // Bound this fixture's lineage scans across every alias: four lineage checks per grant
+    // plus two per selected resource leave room for the small direct branch. This catches
+    // scanning other block heights per resource, not arbitrary query work or latency.
+    let lineage_visits = relation_row_visits(&plan[0]["Plan"], "chain_lineage");
+    let lineage_visit_budget = 4 * (oracle.len() as u64 + 1) + 2 * ids.len() as u64;
+    assert!(
+        lineage_visits > 0 && lineage_visits <= lineage_visit_budget,
+        "lineage scans visited {lineage_visits} rows; fixture budget is {lineage_visit_budget}"
     );
     // Pure operator overflow is independently rejected.
     sqlx::query("DELETE FROM bigname_phase.permissions_current")
