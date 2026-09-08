@@ -104,6 +104,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .context("failed to bind the API listener")?;
     let metrics_server = metrics::bind(args.metrics_bind_addr).await?;
 
+    let shutdown = shutdown_signal("api")?;
     info!(
         service = "api",
         bind_addr = %args.bind_addr,
@@ -141,7 +142,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         listener,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal("api"))
+    .with_graceful_shutdown(shutdown)
     .await
     .context("API server exited unexpectedly")
 }

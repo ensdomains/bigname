@@ -1,50 +1,53 @@
 use super::*;
 use tracing_subscriber::EnvFilter;
 
-/// Docker stops a container with SIGTERM and `tini` forwards it unchanged, so
-/// waiting only for SIGINT leaves `with_graceful_shutdown` unreachable in
-/// production and every deploy severs in-flight requests instead of draining
-/// them.
-pub(super) async fn shutdown_signal(service: &'static str) {
+use std::future::Future;
+
+pub(super) fn shutdown_signal(service: &'static str) -> anyhow::Result<impl Future<Output = ()>> {
     #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-
-        match signal(SignalKind::terminate()) {
-            Ok(mut terminate) => {
-                let signal = tokio::select! {
-                    result = tokio::signal::ctrl_c() => result.map(|()| "SIGINT"),
-                    received = terminate.recv() => {
-                        received.ok_or_else(|| std::io::Error::other("SIGTERM stream closed"))
-                            .map(|()| "SIGTERM")
-                    }
-                };
-                report_shutdown_signal(service, signal);
-                return;
-            }
-            Err(error) => tracing::warn!(
-                service = service,
-                error = ?error,
-                "failed to install a SIGTERM handler; only SIGINT will drain this service"
-            ),
-        }
-    }
-
-    report_shutdown_signal(service, tokio::signal::ctrl_c().await.map(|()| "SIGINT"));
+    let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map(|mut signals| async move { signals.recv().await });
+    #[cfg(not(unix))]
+    let terminate = Ok(std::future::pending::<Option<()>>());
+    registered_shutdown(service, terminate)
 }
 
-fn report_shutdown_signal(service: &'static str, signal: std::io::Result<&'static str>) {
-    match signal {
-        Ok(signal) => info!(
-            service = service,
-            signal = signal,
-            "shutdown signal received"
-        ),
-        Err(error) => tracing::warn!(
-            service = service,
-            error = ?error,
-            "failed to listen for shutdown signal"
-        ),
+fn registered_shutdown(
+    service: &'static str,
+    terminate: std::io::Result<impl Future<Output = Option<()>>>,
+) -> anyhow::Result<impl Future<Output = ()>> {
+    use anyhow::Context;
+    let terminate = terminate.context("failed to register API SIGTERM listener")?;
+    let interrupt = tokio::signal::ctrl_c();
+    Ok(wait_for_signals(service, interrupt, terminate))
+}
+
+async fn wait_for_signals(
+    service: &'static str,
+    interrupt: impl Future<Output = std::io::Result<()>>,
+    terminate: impl Future<Output = Option<()>>,
+) {
+    tokio::pin!(interrupt, terminate);
+    let (mut int_open, mut term_open) = (true, true);
+    loop {
+        let signal = tokio::select! {
+            result = &mut interrupt, if int_open => match result {
+                Ok(()) => Some("sigint"),
+                Err(error) => { tracing::error!(service, %error, "Ctrl-C listener failed"); int_open = false; None }
+            },
+            result = &mut terminate, if term_open => match result {
+                Some(()) => Some("sigterm"),
+                None => { tracing::error!(service, "SIGTERM stream closed"); term_open = false; None }
+            },
+            else => {
+                tracing::error!(service, "all shutdown listeners failed");
+                return std::future::pending::<()>().await;
+            }
+        };
+        if let Some(signal) = signal {
+            info!(service, signal, action = "graceful_shutdown");
+            return;
+        }
     }
 }
 
@@ -73,29 +76,59 @@ pub(super) fn init_tracing(service: &'static str) {
     );
 }
 
-#[cfg(all(test, unix))]
-mod tests {
-    use std::{process::Command, time::Duration};
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    use std::future::{Pending, pending, ready};
+    use std::{io, time::Duration};
+    use tokio::time::timeout;
 
-    use tokio::signal::unix::{SignalKind, signal};
+    #[test]
+    fn registration_failure_is_a_startup_error() {
+        let failure: io::Result<Pending<Option<()>>> = Err(io::Error::other("registration"));
+        let error = registered_shutdown("api", failure).err().unwrap();
+        assert!(format!("{error:#}").contains("register API SIGTERM listener"));
+    }
 
     #[tokio::test]
-    async fn a_sigterm_releases_the_shutdown_signal() {
-        // Register first: an unhandled SIGTERM would kill the whole test binary,
-        // and tokio delivers the signal to every stream registered for the kind.
-        let _installed = signal(SignalKind::terminate()).expect("install SIGTERM handler");
-        let signalled = tokio::spawn(super::shutdown_signal("test"));
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let killed = Command::new("kill")
-            .args(["-TERM", &std::process::id().to_string()])
-            .status()
-            .expect("raise SIGTERM");
-        assert!(killed.success(), "kill -TERM failed: {killed}");
-
-        tokio::time::timeout(Duration::from_secs(5), signalled)
-            .await
-            .expect("SIGTERM did not release the shutdown signal within the timeout")
-            .expect("shutdown listener panicked");
+    async fn listener_errors_preserve_pending_and_surviving_sources() {
+        let subscriber = tracing_subscriber::fmt().with_test_writer().finish();
+        let _diagnostics = tracing::subscriber::set_default(subscriber);
+        let error = || ready(Err(io::Error::other("Ctrl-C")));
+        let short = Duration::from_millis(1);
+        let long = Duration::from_secs(1);
+        let both_failed = wait_for_signals("api", error(), ready(None));
+        assert!(timeout(short, both_failed).await.is_err());
+        let ctrl_c_only_failed = wait_for_signals("api", error(), pending());
+        assert!(timeout(short, ctrl_c_only_failed).await.is_err());
+        let ctrl_c_only = wait_for_signals("api", ready(Ok(())), pending());
+        timeout(long, ctrl_c_only).await.unwrap();
+        for failed_interrupt in [true, false] {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let interrupt = async {
+                if failed_interrupt {
+                    Err(io::Error::other("Ctrl-C"))
+                } else {
+                    receiver.await.map_err(io::Error::other)
+                }
+            };
+            let (term_sender, term_receiver) = tokio::sync::oneshot::channel();
+            let terminate = async {
+                if failed_interrupt {
+                    term_receiver.await.ok()
+                } else {
+                    None
+                }
+            };
+            let future = wait_for_signals("api", interrupt, terminate);
+            tokio::pin!(future);
+            assert!(timeout(short, &mut future).await.is_err());
+            if failed_interrupt {
+                term_sender.send(()).unwrap();
+            } else {
+                sender.send(()).unwrap();
+            }
+            timeout(long, future).await.unwrap();
+        }
     }
 }
