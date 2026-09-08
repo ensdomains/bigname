@@ -136,7 +136,12 @@ migration_objects_are_schema_qualified() {
                         if (object != "" && !qualified(object)) { unqualified = unqualified " " bare(object) }
                     }
                     continue
-                } else if (match(s, /^(CREATE( OR REPLACE)?|ALTER)( MATERIALIZED)? (TABLE|INDEX|FUNCTION|VIEW|SEQUENCE|TYPE|TRIGGER)( IF NOT EXISTS)?( ONLY)? [^ (]+/)) {
+                } else if (s ~ /^(CREATE( OR REPLACE)?|ALTER) (FUNCTION|PROCEDURE) /) {
+                    # A routine body is a string the check does not read, and the
+                    # routine can be called from anywhere later; not accepted here.
+                    unqualified = unqualified " [unrecognized statement: routine definition]"
+                    continue
+                } else if (match(s, /^(CREATE( OR REPLACE)?|ALTER)( MATERIALIZED)? (TABLE|INDEX|VIEW|SEQUENCE|TYPE|TRIGGER)( IF NOT EXISTS)?( ONLY)? [^ (]+/)) {
                     m = split(substr(s, RSTART, RLENGTH), words, " "); object = words[m]
                 } else if (match(s, /^COMMENT ON COLUMN [^ (]+/)) {
                     # A column comment names schema.table.column; two parts is a
@@ -156,6 +161,21 @@ migration_objects_are_schema_qualified() {
                     continue
                 }
                 if (!qualified(object)) { unqualified = unqualified " " bare(object); reported[bare(object)] = 1 }
+            }
+            # Every parent in an INHERITS list, not only the first.
+            upper = toupper(text)
+            while (match(upper, /INHERITS *\([^)]*\)/)) {
+                list = substr(upper, RSTART, RLENGTH)
+                sub(/^INHERITS *\(/, "", list); sub(/\)$/, "", list)
+                t = split(list, parents, ",")
+                for (j = 1; j <= t; j++) {
+                    object = parents[j]; gsub(/^ +| +$/, "", object)
+                    if (object != "" && !qualified(object) && !(bare(object) in reported)) {
+                        reported[bare(object)] = 1
+                        unqualified = unqualified " " bare(object)
+                    }
+                }
+                upper = substr(upper, RSTART + RLENGTH)
             }
             # Any relation a clause names -- a parent to inherit or partition from,
             # a foreign key target, a LIKE source, a FROM/JOIN/INTO/ON relation --
@@ -193,12 +213,12 @@ migration_uses_unsupported_lexical_forms() {
 }
 assert_uninventoried_migrations_are_schema_qualified() {
     local migration_file migration_basename unqualified
-    if unqualified="$(printf 'CREATE INDEX x ON chain_phase_state (a);\nUPDATE public.t SET a = 1;\nALTER TABLE "name_surfaces" ADD COLUMN c int;\nDROP INDEX "public"."ok_idx";\nWITH chosen AS (SELECT 1) UPDATE chain_phase_state SET a = 1;\nDROP INDEX IF EXISTS public.old_idx, name_current_lookup_idx CASCADE;\nTRUNCATE public.a, "resources";\nCOMMENT ON COLUMN chain_phase_state.phase_name IS '"'"'x'"'"';\nCOMMENT ON COLUMN public.t.c IS '"'"'y'"'"';\nCOMMENT ON TABLE public.audit IS '"'"'--'"'"'; UPDATE resources SET a = 1;\nCOMMENT ON TABLE public.b IS '"'"'it'"'"''"'"'s -- fine'"'"'; -- DROP TABLE nope\nCREATE TABLE public.shadow () INHERITS (chain_phase_state);\nCREATE TABLE public.part PARTITION OF resources FOR VALUES IN (1);\nALTER TABLE public.child ADD CONSTRAINT fk FOREIGN KEY (a) REFERENCES name_surfaces (id);\nCREATE TABLE public.copy (LIKE token_lineages);\nCREATE TABLE "phase.audit" (id int);\nDELETE FROM public.audit USING chain_lineage WHERE true;\nCREATE INDEX i ON public.audit USING btree (id);\n' \
+    if unqualified="$(printf 'CREATE INDEX x ON chain_phase_state (a);\nUPDATE public.t SET a = 1;\nALTER TABLE "name_surfaces" ADD COLUMN c int;\nDROP INDEX "public"."ok_idx";\nWITH chosen AS (SELECT 1) UPDATE chain_phase_state SET a = 1;\nDROP INDEX IF EXISTS public.old_idx, name_current_lookup_idx CASCADE;\nTRUNCATE public.a, "resources";\nCOMMENT ON COLUMN chain_phase_state.phase_name IS '"'"'x'"'"';\nCOMMENT ON COLUMN public.t.c IS '"'"'y'"'"';\nCOMMENT ON TABLE public.audit IS '"'"'--'"'"'; UPDATE resources SET a = 1;\nCOMMENT ON TABLE public.b IS '"'"'it'"'"''"'"'s -- fine'"'"'; -- DROP TABLE nope\nCREATE TABLE public.shadow () INHERITS (chain_phase_state);\nCREATE TABLE public.part PARTITION OF resources FOR VALUES IN (1);\nALTER TABLE public.child ADD CONSTRAINT fk FOREIGN KEY (a) REFERENCES name_surfaces (id);\nCREATE TABLE public.copy (LIKE token_lineages);\nCREATE TABLE "phase.audit" (id int);\nDELETE FROM public.audit USING chain_lineage WHERE true;\nCREATE INDEX i ON public.audit USING btree (id);\nCREATE TABLE public.shadow2 () INHERITS (public.audit, token_lineages);\nCREATE FUNCTION public.touch() RETURNS int LANGUAGE sql AS '"'"'SELECT 1'"'"';\n' \
         | migration_objects_are_schema_qualified /dev/stdin)"; then
         printf '%s\n' "schema-qualification check accepted a search-path-relative statement" >&2
         exit 1
     fi
-    if [ "$unqualified" != " CHAIN_PHASE_STATE NAME_SURFACES [unrecognized statement: WITH CHOSEN] NAME_CURRENT_LOOKUP_IDX RESOURCES CHAIN_PHASE_STATE.PHASE_NAME RESOURCES PHASE.AUDIT TOKEN_LINEAGES CHAIN_LINEAGE" ]; then
+    if [ "$unqualified" != " CHAIN_PHASE_STATE NAME_SURFACES [unrecognized statement: WITH CHOSEN] NAME_CURRENT_LOOKUP_IDX RESOURCES CHAIN_PHASE_STATE.PHASE_NAME RESOURCES PHASE.AUDIT [unrecognized statement: routine definition] TOKEN_LINEAGES CHAIN_LINEAGE" ]; then
         printf '%s\n' "schema-qualification check misreported the search-path-relative statement: $unqualified" >&2
         exit 1
     fi
