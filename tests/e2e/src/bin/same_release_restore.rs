@@ -33,6 +33,7 @@ use tokio::{
 const CHAIN: &str = "ethereum-sepolia";
 const LABEL: &str = "restore640";
 const DURATION: u64 = 2_592_000;
+// getExpiry (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/PermissionedRegistry.sol:L296 @ ens_v2_sepolia_20260629@ccaeb58b).
 // getOwner (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/PermissionedRegistry.sol:L310 @ ens_v2_sepolia_20260629@ccaeb58b).
 sol! {
     function getExpiry(uint256 anyId) external view returns (uint64);

@@ -16,7 +16,7 @@ cd "$root"
 for setting in BIGNAME_RESTORE_COMMAND_SECS BIGNAME_RESTORE_SHUTDOWN_SECS BIGNAME_RESTORE_READINESS_SECS BIGNAME_RESTORE_PROGRESS_SECS BIGNAME_RESTORE_POLL_SECS; do
   [[ ${!setting} =~ ^[1-9][0-9]*$ ]] || { echo "Invalid positive setting: $setting" >&2; exit 1; }
 done
-for command in docker cargo rustc anvil jq git rg sha256sum timeout setsid cmp od tr; do
+for command in docker cargo rustc anvil jq git rg sha256sum timeout setsid cmp od tr ps pkill; do
   command -v "$command" >/dev/null || { echo "Missing required tool: $command" >&2; exit 1; }
 done
 docker_binary=$(command -v docker)
@@ -77,22 +77,51 @@ container="r640-$(date -u +%Y%m%dT%H%M%S)-$$"
 volume="${container}-data"
 owner_token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 driver_group=''
+driver_waited=0
+# setsid owns the whole job session, including Cargo's separate process group.
+owned_job_alive() {
+  [[ -n $driver_group ]] || return 1
+  local snapshot alive
+  snapshot=$(ps -eo pid=,sid=,stat=) || return 0 # Uncertain absence must fail cleanup.
+  alive=$(awk -v sid="$driver_group" -v waited="$driver_waited" '($2 == sid || (!waited && $1 == sid)) && $3 !~ /^Z/ { alive=1 } END { print alive+0 }' <<< "$snapshot") || return 0
+  [[ $alive != 0 ]]
+}
+signal_owned_job() {
+  [[ $driver_group =~ ^[1-9][0-9]*$ && $driver_group != $(ps -o sid= -p $$ | tr -d ' ') ]] || return 1
+  if ((!driver_waited)) && [[ $(ps -o ppid= -p "$driver_group" | tr -d ' ') == $$ ]]; then
+    kill -"$1" "$driver_group" 2>/dev/null
+  fi
+  pkill -"$1" -s "$driver_group"
+}
+launch_owned_job() {
+  local launch_signal=0
+  trap 'launch_signal=130' INT
+  trap 'launch_signal=143' TERM
+  driver_waited=0
+  setsid "$@" &
+  driver_group=$!
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  ((launch_signal == 0)) || exit "$launch_signal"
+}
 container_created=0
 volume_created=0
 cleanup() {
   local outcome=$? cleanup_failed=0
   trap - EXIT INT TERM
   set +e
-  if [[ -n $driver_group ]] && kill -0 -- "-$driver_group" 2>/dev/null; then
-    kill -INT -- "-$driver_group" 2>/dev/null
+  if owned_job_alive; then
+    signal_owned_job INT
     local until=$((SECONDS + BIGNAME_RESTORE_SHUTDOWN_SECS))
-    while kill -0 -- "-$driver_group" 2>/dev/null && ((SECONDS < until)); do sleep 1; done
-    if kill -0 -- "-$driver_group" 2>/dev/null; then
-      kill -KILL -- "-$driver_group" 2>/dev/null
+    while owned_job_alive && ((SECONDS < until)); do sleep 1; done
+    if owned_job_alive; then
       cleanup_failed=1
+      until=$((SECONDS + BIGNAME_RESTORE_SHUTDOWN_SECS))
+      while owned_job_alive && ((SECONDS < until)); do signal_owned_job KILL; sleep 1; done
     fi
-    wait "$driver_group" 2>/dev/null
+    owned_job_alive && cleanup_failed=1
   fi
+  if ! owned_job_alive; then [[ -z $driver_group ]] || wait "$driver_group" 2>/dev/null; fi
   if ((container_created)); then
     if [[ $(docker inspect --format '{{index .Config.Labels "r640.owner"}}' "$container" 2>/dev/null) == "$owner_token" ]]; then
       if docker logs "$container" > "$evidence/postgres.log" 2>&1; then log_status=0; else log_status=$?; cleanup_failed=1; fi
@@ -164,20 +193,20 @@ export CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR="$private/target"
 export BIGNAME_E2E_COMMAND_TIMEOUT_SECS="$BIGNAME_RESTORE_COMMAND_SECS"
 export BIGNAME_E2E_READY_TIMEOUT_SECS="$BIGNAME_RESTORE_READINESS_SECS"
 printf '%s\n' 'cargo build --locked --manifest-path tests/e2e/Cargo.toml --bin same_release_restore (jobs=1; task-owned target)' > "$evidence/build-command.txt"
-setsid timeout --kill-after="$BIGNAME_RESTORE_SHUTDOWN_SECS" "$BIGNAME_RESTORE_COMMAND_SECS" cargo build --locked --manifest-path tests/e2e/Cargo.toml \
-  --bin same_release_restore > "$evidence/driver-build.stdout" 2> "$evidence/driver-build.stderr" &
-driver_group=$!
+launch_owned_job timeout --kill-after="$BIGNAME_RESTORE_SHUTDOWN_SECS" "$BIGNAME_RESTORE_COMMAND_SECS" cargo build --locked --manifest-path tests/e2e/Cargo.toml \
+  --bin same_release_restore > "$evidence/driver-build.stdout" 2> "$evidence/driver-build.stderr"
 if wait "$driver_group"; then stage_status=0; else stage_status=$?; fi
+driver_waited=1
 printf '%s\n' "$stage_status" > "$evidence/build-exit.txt"
 ((stage_status == 0)) || exit "$stage_status"
-if kill -0 -- "-$driver_group" 2>/dev/null; then echo "Owned descendants remain after process exit" >&2; exit 1; fi
+if owned_job_alive; then echo "Owned session descendants remain after process exit" >&2; exit 1; fi
 driver_group=''
 printf '%s\n' 'same_release_restore <protected-config-path>' > "$evidence/run-command.txt"
-setsid "$CARGO_TARGET_DIR/debug/same_release_restore" "$private/config.json" \
-  > "$evidence/driver.stdout" 2> "$evidence/driver.stderr" &
-driver_group=$!
+launch_owned_job "$CARGO_TARGET_DIR/debug/same_release_restore" "$private/config.json" \
+  > "$evidence/driver.stdout" 2> "$evidence/driver.stderr"
 if wait "$driver_group"; then stage_status=0; else stage_status=$?; fi
+driver_waited=1
 printf '%s\n' "$stage_status" > "$evidence/run-exit.txt"
 ((stage_status == 0)) || exit "$stage_status"
-if kill -0 -- "-$driver_group" 2>/dev/null; then echo "Owned descendants remain after process exit" >&2; exit 1; fi
+if owned_job_alive; then echo "Owned session descendants remain after process exit" >&2; exit 1; fi
 driver_group=''
