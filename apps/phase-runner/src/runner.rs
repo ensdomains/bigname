@@ -301,19 +301,31 @@ impl PhaseRunner {
             Err(error) => Err(error),
         };
         if let Err(error) = started {
-            phase_lock.check_alive().await?;
-            if let Some(session) = redo_session {
-                return finish_failed_redo_start(
-                    &self.store,
-                    phase_lock.connection(),
-                    &chain.chain_id,
-                    phase_name,
-                    session,
-                    error,
-                )
-                .await;
-            }
-            return Err(error);
+            // The probe and the failed-start record run on the lock's connection;
+            // a stop arriving now bounds them, as it does the bookkeeping after
+            // the loop.
+            let Some(session) = redo_session else {
+                return Err(error);
+            };
+            return bounded_recovery(
+                self.stop_deadline,
+                "phase start failure recording",
+                &chain.chain_id,
+                &cancellation,
+                async {
+                    phase_lock.check_alive().await?;
+                    finish_failed_redo_start(
+                        &self.store,
+                        phase_lock.connection(),
+                        &chain.chain_id,
+                        phase_name,
+                        session,
+                        error,
+                    )
+                    .await
+                },
+            )
+            .await;
         }
         let mut heartbeat = HeartbeatThrottle::new();
         let result = self
