@@ -7,7 +7,9 @@ use crate::{
     error::{ErrorKind, RunnerResult},
     phase::{PhaseName, RunMode},
     phase_lock::PhaseLock,
-    runner_support::{record_live_mismatch_after_stop, record_live_mismatch_with_lock},
+    runner_support::{
+        record_live_mismatch_after_stop, record_live_mismatch_with_lock, release_lock_after_stop,
+    },
 };
 
 use super::{LiveMismatchReason, PhaseRunner};
@@ -82,10 +84,14 @@ impl PhaseRunner {
         let result = verify_fence
             .run_while_alive(
                 self.timing.live_poll_interval,
-                self.run_post_live_downstream_fenced(chain, cancellation.clone()),
+                Box::pin(self.run_post_live_downstream_fenced(chain, cancellation.clone())),
             )
             .await;
-        let release = verify_fence.release().await;
+        let release = if cancellation.is_cancelled() {
+            release_lock_after_stop(verify_fence, &chain.chain_id, PhaseName::Verify).await
+        } else {
+            verify_fence.release().await
+        };
         match (result, release) {
             (Ok(()), Ok(())) => {}
             (Ok(()), Err(error)) | (Err(error), Ok(())) => return Err(error),
@@ -96,10 +102,12 @@ impl PhaseRunner {
                 ));
             }
         }
-        if cancellation.is_cancelled() {
+        if !self
+            .require_no_pending_ingest_unless_stopped(&chain.chain_id, &cancellation)
+            .await?
+        {
             return Ok(());
         }
-        self.reject_pending_required_ingest(&chain.chain_id).await?;
         self.run_required_verify_redo(chain, cancellation).await
     }
 
@@ -123,11 +131,16 @@ impl PhaseRunner {
             };
             let result = ingest_fence
                 .run_while_alive(self.timing.live_poll_interval, async {
-                    if let Some(range) = self
-                        .store
-                        .required_redo_range(&chain.chain_id, PhaseName::Ingest)
-                        .await?
-                    {
+                    let Some(required) = crate::shutdown::until_cancelled(
+                        &cancellation,
+                        self.store
+                            .required_redo_range(&chain.chain_id, PhaseName::Ingest),
+                    )
+                    .await?
+                    else {
+                        return Ok(PostLiveDownstream::Complete);
+                    };
+                    if let Some(range) = required {
                         self.catch_up_required_range(chain, range, cancellation.clone())
                             .await?;
                         if cancellation.is_cancelled() {
@@ -149,11 +162,16 @@ impl PhaseRunner {
                     }
                     self.run_spine_phase(chain, PhaseName::Interpret, cancellation.clone())
                         .await?;
-                    if let Some(range) = self
-                        .store
-                        .required_redo_range(&chain.chain_id, PhaseName::Ingest)
-                        .await?
-                    {
+                    let Some(required) = crate::shutdown::until_cancelled(
+                        &cancellation,
+                        self.store
+                            .required_redo_range(&chain.chain_id, PhaseName::Ingest),
+                    )
+                    .await?
+                    else {
+                        return Ok(PostLiveDownstream::Complete);
+                    };
+                    if let Some(range) = required {
                         let Some(discovery_owned) = self
                             .discovery_required_ingest_pending(&chain.chain_id, &cancellation)
                             .await?
@@ -170,11 +188,16 @@ impl PhaseRunner {
                     }
                     self.run_spine_phase(chain, PhaseName::Project, cancellation.clone())
                         .await?;
-                    self.reject_pending_required_ingest(&chain.chain_id).await?;
+                    self.require_no_pending_ingest_unless_stopped(&chain.chain_id, &cancellation)
+                        .await?;
                     Ok(PostLiveDownstream::Complete)
                 })
                 .await;
-            let release = ingest_fence.release().await;
+            let release = if cancellation.is_cancelled() {
+                release_lock_after_stop(ingest_fence, &chain.chain_id, PhaseName::Ingest).await
+            } else {
+                ingest_fence.release().await
+            };
             let outcome = match (result, release) {
                 (Ok(outcome), Ok(())) => outcome,
                 (Ok(_), Err(error)) | (Err(error), Ok(())) => return Err(error),
@@ -228,8 +251,7 @@ impl PhaseRunner {
             if cancellation.is_cancelled() {
                 return Ok(());
             }
-            self.run_post_live_downstream(chain, cancellation.clone())
-                .await?;
+            Box::pin(self.run_post_live_downstream(chain, cancellation.clone())).await?;
             if !self.phases.continuous_live_follow() {
                 return Ok(());
             }
@@ -382,8 +404,7 @@ impl PhaseRunner {
             if cancellation.is_cancelled() {
                 return self.record_mismatch_if_present(chain, &live_mismatch).await;
             }
-            self.run_post_live_downstream(chain, cancellation.clone())
-                .await?;
+            Box::pin(self.run_post_live_downstream(chain, cancellation.clone())).await?;
             if !self.phases.continuous_live_follow() {
                 return Ok(());
             }

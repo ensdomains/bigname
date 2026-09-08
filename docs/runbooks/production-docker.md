@@ -827,7 +827,7 @@ exists reports the redo as *incomplete*: the
 stamp survives and blocks the phase from normal restart until the command is
 run again. That error says which command, built from the stamped mode and
 range — `rerun \`phase-runner redo --chain <chain> --phase <phase>
---from-block <n> --to-block <n>\` with the chain's --source options` —
+--from-block <n> --to-block <n>\` with the chain's configured sources as --source options` —
 because the stamp records neither the sources nor the verifier URL and the CLI
 rejects the bare command without them: add back the `--source` options the
 chain runs with, and `--verification-database-url` when the phase is Verify

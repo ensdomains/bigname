@@ -39,6 +39,8 @@ mod live_follow;
 mod manifest_attestation;
 #[path = "runner_operator_redo.rs"]
 mod operator_redo;
+#[path = "runner_recovery.rs"]
+mod recovery;
 #[path = "runner_required_redo.rs"]
 mod required_redo;
 #[path = "runner_restart.rs"]

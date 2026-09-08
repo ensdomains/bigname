@@ -128,10 +128,19 @@ impl PhaseRunner {
         self.run_spine_phase(chain, PhaseName::Project, cancellation.clone())
             .await?;
         // This barrier applies to both serial Verify and the Verify/live combined path.
-        self.reject_pending_required_ingest(&chain.chain_id).await?;
+        if !self
+            .require_no_pending_ingest_unless_stopped(&chain.chain_id, &cancellation)
+            .await?
+        {
+            return Ok(());
+        }
         self.run_required_verify_redo(chain, cancellation.clone())
             .await?;
 
+        // The tail futures are boxed here and at the redo dispatch: the phase state
+        // machines are large in debug builds, and a caller that awaits one inline
+        // (a test body, the supervisor) embeds it several times over in its own
+        // frame, which overflowed the 2 MiB test-thread stack in CI.
         if Self::verify_before_live(chain)? {
             self.phases.get(PhaseName::Verify).preflight(
                 &chain.chain_id,
@@ -145,9 +154,9 @@ impl PhaseRunner {
                 cancellation.clone(),
             )
             .await?;
-            return self.run_live_follow(chain, cancellation).await;
+            return Box::pin(self.run_live_follow(chain, cancellation)).await;
         }
-        self.run_verify_and_live(chain, cancellation).await
+        Box::pin(self.run_verify_and_live(chain, cancellation)).await
     }
 
     pub(super) async fn run_required_verify_redo(
@@ -155,12 +164,8 @@ impl PhaseRunner {
         chain: &ChainConfig,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
-        if cancellation.is_cancelled() {
-            return Ok(());
-        }
-        let Some(range) = self
-            .store
-            .required_redo_range(&chain.chain_id, PhaseName::Verify)
+        let Some(Some(range)) = self
+            .required_redo_range_unless_stopped(&chain.chain_id, PhaseName::Verify, &cancellation)
             .await?
         else {
             return Ok(());
@@ -184,7 +189,7 @@ const RECOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10
 #[cfg(test)]
 const RECOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_millis(50);
 
-async fn bounded_recovery(
+pub(super) async fn bounded_recovery(
     what: &str,
     chain_id: &str,
     cancellation: &CancellationToken,

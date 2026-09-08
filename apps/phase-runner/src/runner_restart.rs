@@ -46,16 +46,15 @@ impl PhaseRunner {
                 }
                 return Ok(());
             }
-            let result = self
-                .run_phase_once(
-                    chain,
-                    Arc::clone(&phase),
-                    mode.clone(),
-                    cancellation.clone(),
-                    live_mismatch.as_deref(),
-                    automatic_discovery_ingest,
-                )
-                .await;
+            let result = Box::pin(self.run_phase_once(
+                chain,
+                Arc::clone(&phase),
+                mode.clone(),
+                cancellation.clone(),
+                live_mismatch.as_deref(),
+                automatic_discovery_ingest,
+            ))
+            .await;
             self.record_loop_progress(&chain.chain_id);
             match result {
                 Ok(()) => return Ok(()),

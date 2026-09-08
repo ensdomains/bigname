@@ -5,7 +5,8 @@ use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
     phase::{BlockRange, PhaseName, RunMode},
     runner_support::{
-        cancelled_redo_error, report_undispatched_redo, require_all_phase_range_within_verify,
+        cancelled_redo_error, read_after_stop, report_undispatched_redo,
+        require_all_phase_range_within_verify,
     },
 };
 
@@ -35,7 +36,7 @@ impl PhaseRunner {
         self.scope_manifest_attestation(
             &chain.chain_id,
             generation_token,
-            self.redo_after_attestation_preflight(chain, selection, range, cancellation),
+            Box::pin(self.redo_after_attestation_preflight(chain, selection, range, cancellation)),
         )
         .await
     }
@@ -47,16 +48,19 @@ impl PhaseRunner {
         range: BlockRange,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
+        // Boxed for the reason `run_chain` gives.
         match selection {
             RedoPhase::RecomputeFlags => {
-                self.redo_recompute_flags(chain, range, cancellation).await
+                Box::pin(self.redo_recompute_flags(chain, range, cancellation)).await
             }
-            RedoPhase::All => self.redo_all_phases(chain, range, cancellation).await,
+            RedoPhase::All => Box::pin(self.redo_all_phases(chain, range, cancellation)).await,
             RedoPhase::Phase(PhaseName::Live) => Err(RunnerError::new(
                 ErrorKind::Configuration,
                 "live does not support historical redo",
             )),
-            RedoPhase::Phase(phase) => self.redo_phase(chain, phase, range, cancellation).await,
+            RedoPhase::Phase(phase) => {
+                Box::pin(self.redo_phase(chain, phase, range, cancellation)).await
+            }
         }
     }
 
@@ -98,18 +102,31 @@ impl PhaseRunner {
     ) -> RunnerResult<()> {
         self.redo_phase_only(chain, phase, range, cancellation.clone())
             .await?;
-        if phase == PhaseName::Interpret {
-            self.repair_discovery_after_operator_interpret(chain, cancellation.clone())
-                .await?;
+        if phase != PhaseName::Interpret {
+            return Ok(());
         }
-        if phase == PhaseName::Interpret
-            && self.store.status(&chain.chain_id, phase).await?
-                == crate::state::PhaseStatus::Completed
-            && let Some(range) = self
-                .store
+        self.repair_discovery_after_operator_interpret(chain, cancellation.clone())
+            .await?;
+        // The follow-on Project stamp is read under the race; a stop that wins
+        // there (or skipped the repair check above) is reported exactly as one
+        // at the Project redo's own setup.
+        let Some(project) = crate::shutdown::until_cancelled(&cancellation, async {
+            if self.store.status(&chain.chain_id, phase).await?
+                != crate::state::PhaseStatus::Completed
+            {
+                return Ok(None);
+            }
+            self.store
                 .required_redo_range(&chain.chain_id, PhaseName::Project)
-                .await?
-        {
+                .await
+        })
+        .await?
+        else {
+            return Err(
+                cancelled_redo_error(&self.store, &chain.chain_id, PhaseName::Project).await?,
+            );
+        };
+        if let Some(range) = project {
             self.redo_phase_only(chain, PhaseName::Project, range, cancellation)
                 .await?;
         }
@@ -178,12 +195,12 @@ impl PhaseRunner {
                 .scope_manifest_attestation(
                     &chain.chain_id,
                     generation_token,
-                    self.redo_after_attestation_preflight(
+                    Box::pin(self.redo_after_attestation_preflight(
                         chain,
                         selection,
                         range,
                         cancellation.clone(),
-                    ),
+                    )),
                 )
                 .await;
             if let Some(heartbeat) = &self.loop_heartbeat {
@@ -237,16 +254,27 @@ impl PhaseRunner {
         .await?;
         self.repair_discovery_after_operator_interpret(chain, cancellation.clone())
             .await?;
-        let project_stamp = self
-            .store
-            .required_redo_range(&chain.chain_id, PhaseName::Project)
-            .await?;
-        let verify_stamp = self
-            .store
-            .required_redo_range(&chain.chain_id, PhaseName::Verify)
-            .await?;
-        self.require_no_pending_redo_for_all(&chain.chain_id, project_stamp, verify_stamp, None)
-            .await?;
+        // Between phases the stamps are read under the race; a stop that wins
+        // there is reported exactly as one at the next phase's first boundary.
+        let Some(project_stamp) = crate::shutdown::until_cancelled(&cancellation, async {
+            let project = self
+                .store
+                .required_redo_range(&chain.chain_id, PhaseName::Project)
+                .await?;
+            let verify = self
+                .store
+                .required_redo_range(&chain.chain_id, PhaseName::Verify)
+                .await?;
+            self.require_no_pending_redo_for_all(&chain.chain_id, project, verify, None)
+                .await?;
+            Ok(project)
+        })
+        .await?
+        else {
+            return self
+                .all_phase_stopped(chain, PhaseName::Project, range)
+                .await;
+        };
         let project_range = project_stamp.unwrap_or(range);
         self.run_all_redo_phase(
             chain,
@@ -256,12 +284,21 @@ impl PhaseRunner {
             cancellation.clone(),
         )
         .await?;
-        let verify_stamp = self
-            .store
-            .required_redo_range(&chain.chain_id, PhaseName::Verify)
-            .await?;
-        self.require_no_pending_redo_for_all(&chain.chain_id, None, verify_stamp, None)
-            .await?;
+        let Some(verify_stamp) = crate::shutdown::until_cancelled(&cancellation, async {
+            let verify = self
+                .store
+                .required_redo_range(&chain.chain_id, PhaseName::Verify)
+                .await?;
+            self.require_no_pending_redo_for_all(&chain.chain_id, None, verify, None)
+                .await?;
+            Ok(verify)
+        })
+        .await?
+        else {
+            return self
+                .all_phase_stopped(chain, PhaseName::Verify, range)
+                .await;
+        };
         let verify_range = verify_stamp.unwrap_or(range);
         self.run_all_redo_phase(chain, PhaseName::Verify, verify_range, range, cancellation)
             .await?;
@@ -296,29 +333,67 @@ impl PhaseRunner {
         recovery_all_range: BlockRange,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
+        let stopped = cancellation.clone();
         match self
             .run_phase_with_restart(chain, phase, RunMode::Redo(phase_range), cancellation)
             .await
         {
             Ok(()) => Ok(()),
-            Err(error) => {
-                match self
-                    .require_no_pending_redo_for_all(
-                        &chain.chain_id,
-                        None,
-                        None,
-                        Some(recovery_all_range),
-                    )
-                    .await
-                {
-                    Err(recovery) if recovery.kind() == ErrorKind::DataIntegrity => Err(
-                        RunnerError::new(error.kind(), format!("{error}; {recovery}")),
-                    ),
-                    Err(recovery) => Err(error
-                        .with_secondary("load the all-phase redo recovery instruction", recovery)),
-                    Ok(()) => Err(error),
-                }
+            Err(error) => Err(self
+                .with_all_phase_recovery(chain, recovery_all_range, error, stopped.is_cancelled())
+                .await),
+        }
+    }
+
+    /// A stop that wins between two phases of an all-phase redo: reported as the
+    /// next phase's cancellation, with the all-phase recovery attached.
+    async fn all_phase_stopped(
+        &self,
+        chain: &ChainConfig,
+        next: PhaseName,
+        recovery_all_range: BlockRange,
+    ) -> RunnerResult<()> {
+        let error = cancelled_redo_error(&self.store, &chain.chain_id, next).await?;
+        Err(self
+            .with_all_phase_recovery(chain, recovery_all_range, error, true)
+            .await)
+    }
+
+    /// Attach the all-phase recovery instruction to a phase's error. After a stop
+    /// the lookup is bounded, since the stop may have won on a stalled database.
+    async fn with_all_phase_recovery(
+        &self,
+        chain: &ChainConfig,
+        recovery_all_range: BlockRange,
+        error: RunnerError,
+        stopped: bool,
+    ) -> RunnerError {
+        let lookup = self.require_no_pending_redo_for_all(
+            &chain.chain_id,
+            None,
+            None,
+            Some(recovery_all_range),
+        );
+        let recovery = if stopped {
+            read_after_stop(
+                &format!(
+                    "loading the all-phase redo recovery for chain {}",
+                    chain.chain_id
+                ),
+                lookup,
+            )
+            .await
+        } else {
+            lookup.await
+        };
+        match recovery {
+            Err(recovery) if recovery.kind() == ErrorKind::DataIntegrity => {
+                RunnerError::new(error.kind(), format!("{error}; {recovery}"))
             }
+            Err(recovery) => {
+                error.with_secondary("load the all-phase redo recovery instruction", recovery)
+            }
+            Ok(()) => error,
         }
     }
 

@@ -212,9 +212,9 @@ pub(crate) fn redo_rerun_instruction(
     let options = if redo_mode == Some("recompute_flags") {
         ""
     } else if phase == PhaseName::Verify {
-        " with the chain's --source options and --verification-database-url"
+        " with the chain's configured sources as --source options and --verification-database-url"
     } else {
-        " with the chain's --source options"
+        " with the chain's configured sources as --source options"
     };
     format!(
         "rerun `phase-runner redo --chain {chain_id} --phase {phase_argument}{range_argument}`\
