@@ -143,9 +143,9 @@ a dollar-quoted, escape, or unicode string) is rejected rather than assumed
 safe, as is any spelling of the phase schema other than `bigname_phase`,
 which PostgreSQL would fold to production while the check would neither
 inventory nor rewrite it. The check proves itself against planted
-search-path-relative statements on each run. From acceptance on, a schema-migration of any of these kinds cannot land
-without moving the conformance test, which is where the carve-out or
-amendment is checked for.
+search-path-relative statements on each run. From acceptance on, a
+schema-migration of any of these kinds cannot land without moving the
+conformance test, which is where the carve-out or amendment is checked for.
 
 An authorized carve-out that lands as a schema-migration becomes the new head,
 and the change that lands it must advance the head named above and the head
