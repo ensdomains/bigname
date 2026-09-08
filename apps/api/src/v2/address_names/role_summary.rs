@@ -25,7 +25,7 @@ pub(super) async fn load_rows(
     let expanded_rows: usize = rows.iter().map(|row| multiplicity[&row.resource_id]).sum();
     if expanded_rows > MAX_INLINE_GRANT_ROWS as usize {
         return Err(V2Error::unsupported(
-            "inline role_summary exceeds 1000 total grant rows; omit include, then paginate /v2/permissions?registration_id=<permission_resource_id> for each returned row; preserve only an explicitly requested namespace and do not add name or address filters",
+            "inline role_summary exceeds 1000 total grant rows; omit include and paginate /v2/permissions using the returned permission handle as registration_id; preserve only an explicitly requested namespace and do not add name or address filters",
         ));
     }
     Ok(rows)

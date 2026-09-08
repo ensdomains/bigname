@@ -130,6 +130,13 @@ async fn v2_address_names_grant_budget_boundaries_and_single_resource_recovery()
             let error: Value = read_json(response).await?;
             assert_eq!(error["error"]["code"], json!("unsupported"));
             assert!(error.get("data").is_none());
+            let mut violations = Vec::new();
+            collect_pipeline_vocabulary_in_error_body(
+                "role-summary overflow",
+                &error,
+                &mut violations,
+            );
+            assert!(violations.is_empty(), "{violations:?}");
             assert_eq!(
                 address_name_permission_grants(
                     &database,

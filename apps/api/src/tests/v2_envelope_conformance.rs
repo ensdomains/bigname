@@ -1892,6 +1892,9 @@ fn collect_pipeline_vocabulary_in_product_response(
     violations: &mut Vec<String>,
 ) {
     walk_product_pipeline_response(value, "$", None, &mut |path, value_key, candidate| {
+        if value_key.is_none() && is_address_name_permission_handle(route, path, candidate) {
+            return;
+        }
         for term in matched_pipeline_terms(candidate) {
             violations.push(format!(
                 "{} at {path}: {candidate:?} contains product-banned pipeline vocabulary {term:?}",
@@ -2039,7 +2042,23 @@ fn matched_pipeline_terms(candidate: &str) -> Vec<&'static str> {
     crate::v2::matched_boundary_vocabulary_terms(candidate, crate::v2::PRODUCT_PIPELINE_TERMS)
 }
 
+// ADR 0006 permits this authority handle only on direct address-name rows.
+fn is_address_name_permission_handle(route: &V2ConformanceRoute, path: &str, key: &str) -> bool {
+    route.success == V2SuccessFixture::AddressNames
+        && key == "permission_resource_id"
+        && path
+            .strip_prefix("$.data[")
+            .and_then(|path| path.strip_suffix("].permission_resource_id"))
+            .is_some_and(|index| {
+                !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+            })
+}
+
 fn is_dictionary_allowlisted(route: &V2ConformanceRoute, path: &str, key: &str) -> bool {
+    if is_address_name_permission_handle(route, path, key) {
+        return true;
+    }
+
     if route.success == V2SuccessFixture::DiagnosticsEvents
         && diagnostics_events_raw_state_subtree(path)
     {
@@ -2120,6 +2139,63 @@ fn v2_pipeline_matching_uses_shared_underscore_boundaries_and_plural_suffixes() 
     let raw_fact_matches = matched_pipeline_terms("raw facts unavailable");
     assert!(raw_fact_matches.contains(&"raw_fact"));
     assert!(raw_fact_matches.contains(&"raw fact"));
+}
+
+#[test]
+fn v2_permission_resource_id_exception_is_only_for_address_name_rows() {
+    let route = V2_CONFORMANCE_ROUTES
+        .iter()
+        .find(|route| route.success == V2SuccessFixture::AddressNames)
+        .unwrap();
+    let allowed = json!({"data": [
+        {"permission_resource_id": "first"}, {"permission_resource_id": "second"}
+    ]});
+    type Collector = fn(&V2ConformanceRoute, &Value, &mut Vec<String>);
+    for collect in [
+        collect_banned_dictionary_fields as Collector,
+        collect_pipeline_vocabulary_in_product_response as Collector,
+    ] {
+        let mut violations = Vec::new();
+        collect(route, &allowed, &mut violations);
+        assert!(violations.is_empty(), "{violations:?}");
+        for payload in [
+            json!({"data": [{"resource_id": "id"}]}),
+            json!({"data": [{"resource": "id"}]}),
+            json!({"data": [{"permission_resource_ids": ["id"]}]}),
+            json!({"data": [{"other_permission_resource_id": "id"}]}),
+            json!({"data": [{"nested": {"permission_resource_id": "id"}}]}),
+            json!({"meta": {"permission_resource_id": "id"}}),
+            json!({"permission_resource_id": "id"}),
+        ] {
+            let mut violations = Vec::new();
+            collect(route, &payload, &mut violations);
+            assert!(!violations.is_empty(), "unexpected exception for {payload}");
+        }
+        for other in V2_CONFORMANCE_ROUTES.iter().filter(|other| {
+            other.tier == V2RouteTier::Product && other.success != V2SuccessFixture::AddressNames
+        }) {
+            let mut violations = Vec::new();
+            collect(other, &allowed, &mut violations);
+            assert!(
+                !violations.is_empty(),
+                "unexpected exception for {}",
+                other.label
+            );
+        }
+    }
+    // Global matchers still reject this spelling outside the precise row-field exception.
+    assert_eq!(
+        matched_banned_dictionary_field_names("permission_resource_id"),
+        vec!["resource_id"]
+    );
+    assert_eq!(
+        matched_field_name_terms("permission_resource_id", PRODUCT_ONLY_BANNED_FIELD_NAMES),
+        vec!["resource"]
+    );
+    assert_eq!(
+        matched_pipeline_terms("permission_resource_id"),
+        vec!["resources"]
+    );
 }
 
 #[test]
