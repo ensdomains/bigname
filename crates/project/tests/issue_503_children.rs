@@ -872,3 +872,75 @@ async fn unlocked_to_locked_reclassification_restages_previously_hidden_children
     assert!(!incremental.as_array().unwrap().is_empty());
     Ok(())
 }
+
+/// The ENSv1→ENSv2 correlation tables stamp `canonicality_state` at insert and
+/// nothing maintains it after a reorg (`clear_redo_range` keeps losing-fork rows
+/// as evidence), so a retained row can read `canonical` while its anchor block
+/// is `orphaned`. Every reader must therefore anchor on `chain_lineage`, never on
+/// the row's own column. This pins that rule for the children builder, the
+/// reader closest to served output.
+async fn seed_association_case(
+    prefix: &str,
+    orphan_anchor: bool,
+) -> Result<(TestDatabase, PgPool)> {
+    let (database, pool) = database(prefix).await?;
+    seed_identity(&pool, &["ens_v1"]).await?;
+    seed_v1_relation(&pool, OWNER, 10).await?;
+    seed_wrapper(&pool, 65_536, 2_000_000_000).await?;
+    // Anchor the association (and its announcement edge) one block later than
+    // everything else, so orphaning that anchor cannot hide the child for any
+    // reason other than the association guard under test.
+    seed_parent_migration_registry(&pool, 11).await?;
+    sqlx::query("UPDATE normalized_events SET block_number = 10, block_hash = $1 WHERE event_identity = 'v2-parent-registry'")
+        .bind(hash(10)).execute(&pool).await?;
+    seed_migration(&pool, "locked_wrapped", 10, "parent-migration").await?;
+    if orphan_anchor {
+        // A reorg replaces height 11: the old hash is orphaned and a new block
+        // is readable there. The association row itself is left untouched.
+        sqlx::query("UPDATE chain_lineage SET canonicality_state = 'orphaned' WHERE chain_id = $1 AND block_hash = $2")
+            .bind(CHAIN).bind(hash(11)).execute(&pool).await?;
+        sqlx::query("INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state) VALUES ($1, $2, 11, to_timestamp(1800000011), 'canonical')")
+            .bind(CHAIN).bind("0x000000000000000000000000000000000000000000000000000000000000f00b").execute(&pool).await?;
+    }
+    run(&pool, 11, None, RunMode::Normal).await?;
+    Ok((database, pool))
+}
+
+#[tokio::test]
+async fn orphaned_anchor_excludes_an_association_whose_own_column_still_reads_canonical()
+-> Result<()> {
+    let (_readable_db, readable) =
+        seed_association_case("issue503_association_anchor_readable", false).await?;
+    assert!(
+        visible(&readable).await?,
+        "positive control: readable anchor publishes the child"
+    );
+    let provenance: Value = sqlx::query_scalar(
+        "SELECT provenance FROM children_current WHERE child_logical_name_id = $1",
+    )
+    .bind(CHILD)
+    .fetch_one(&readable)
+    .await?;
+    assert_eq!(
+        provenance["parent_reachability"]["migration_registry_association"]["logical_edge_identity"],
+        "edge-11",
+        "positive control must reach the child through the block-11 association"
+    );
+
+    let (_orphaned_db, orphaned) =
+        seed_association_case("issue503_association_anchor_orphaned", true).await?;
+    let column: String = sqlx::query_scalar(
+        "SELECT canonicality_state::text FROM migration_discovery_associations WHERE logical_edge_identity = 'edge-11'",
+    )
+    .fetch_one(&orphaned)
+    .await?;
+    assert_eq!(
+        column, "canonical",
+        "premise: the retained row's own column is not maintained"
+    );
+    assert!(
+        !visible(&orphaned).await?,
+        "a reader trusting the association's own canonicality_state would still publish the child"
+    );
+    Ok(())
+}

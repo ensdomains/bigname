@@ -375,6 +375,33 @@ same identity. Project and product history readers ignore event-association rows
 diagnostic readers treat the normalized-event join as optional and can read a
 retained association from its own position and `chain_lineage` anchor.
 
+**The correlation tables' own `canonicality_state` is not maintained.** All four
+ENSv1→ENSv2 correlation tables — `migration_event_associations`,
+`migration_discovery_associations`, `migration_candidate_identity_effects`, and
+`migration_candidate_discovery_effects` — copy `canonicality_state` from the
+parent event at insert and nothing updates it afterwards: head publication
+orphans and re-promotes `chain_lineage` only, Interpret redo orphaning covers
+identity, discovery, and binding rows but never names these tables, and
+`clear_redo_range` deletes only rows whose anchor is still readable so that
+losing-fork rows survive as evidence. A retained row therefore reads `canonical`
+on an `orphaned` anchor. The column is a stamp of what was true at insert, not a
+current fact. Every reader must anchor on `chain_lineage (chain_id,
+block_number, block_hash)` with a readable-state predicate, or, for
+`migration_event_associations` alone, join `normalized_events` on
+`event_identity`, which embeds the block hash; the other three tables carry no
+`event_identity`, so a lineage anchor is the only correct guard there. Readers
+that feed projections or history follow this rule today; two scope-widening
+reads — `include_topology_dependents` in `crates/project/src/scope/authority.rs`
+and `capture_child_registration_history` in `crates/interpret/src/write/redo.rs`
+— do not, which can only enlarge a rebuild's scope, never publish a row.
+`crates/project/tests/issue_503_children.rs` pins the rule for the children
+builder by seeding an association whose column reads `canonical` on an orphaned
+anchor and asserting the child is not published. The position indexes on these
+tables (`migration_event_associations_position_idx` and the two
+`*_candidate_*_effects_position_idx` in `schema-v2/baseline/05_normalized_events.sql`)
+exist for `clear_redo_range` and range-scoped selection, both of which resolve
+readability through `chain_lineage`; they are not an alternative to that anchor.
+
 Slice 1 applies the same precedence to identity and discovery, with one explicit
 intake carveout. A migration-created registry's independently admitted
 `registry_announcement` edge remains an ordinary discovery row, active from the
