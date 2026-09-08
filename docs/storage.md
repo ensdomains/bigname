@@ -385,23 +385,34 @@ identity, discovery, and binding rows but never names these tables, and
 `clear_redo_range` deletes only rows whose anchor is still readable so that
 losing-fork rows survive as evidence. A retained row therefore reads `canonical`
 on an `orphaned` anchor. The column is a stamp of what was true at insert, not a
-current fact. Every reader must anchor on `chain_lineage (chain_id,
-block_number, block_hash)` with a readable-state predicate. For
-`migration_event_associations` the anchor may be reached through the
-normalized event instead — join `normalized_events` on `event_identity` **and**
-require that event's own `chain_lineage` row to be readable, as the history
-reader does (`crates/storage/src/history/source.rs`). The identity join alone is
-not enough: `normalized_events.canonicality_state` is likewise a stamp at
-insert, head publication orphans the lineage row without touching it, and the
-orphaned events leave the table only when the Interpret redo that follows runs
-(`crates/interpret/src/write.rs`). Between those two moments an association and
-its event both read `canonical` on an orphaned block, and matching identities
-proves only that they describe the same fork. The other three tables carry no
-`event_identity`, so a direct lineage anchor is the only correct guard there. Readers
-that feed projections or history follow this rule today; two scope-widening
-reads — `include_topology_dependents` in `crates/project/src/scope/authority.rs`
-and `capture_child_registration_history` in `crates/interpret/src/write/redo.rs`
-— do not, which can only enlarge a rebuild's scope, never publish a row.
+current fact. Any reader that treats one of these rows as **current** must
+anchor the row's own `(chain_id, block_number, block_hash)` on `chain_lineage`
+with a readable-state predicate. Reaching the row through its normalized event
+is not a substitute, even when that event's own lineage is checked: a
+`MigrationApplied` event's identity is
+`ens_v2_migration:{manifest}:{chain}:{correlation id}:MigrationApplied` with no
+block hash in it (`crates/adapters/src/schema_v2/migration/support.rs`), so a
+losing-fork association and the canonical event replayed after the reorg share
+an `event_identity` while sitting on different blocks. Ordinary event
+identities do embed the block hash (`crates/adapters/src/schema_v2/normalized.rs`),
+but the correlation rows are keyed by the migration event, not by those. The
+readers that treat these rows as current — the children builder, the
+name-authority child proof, the Interpret admission loader, and Project scoping —
+all anchor on `chain_lineage` today; two scope-widening reads —
+`include_topology_dependents` in `crates/project/src/scope/authority.rs` and
+`capture_child_registration_history` in `crates/interpret/src/write/redo.rs` —
+do not, which can only enlarge a rebuild's scope, never publish a row.
+
+The one deliberate exception is raw diagnostics. `GET /v2/diagnostics/events`
+attaches every `migration_event_associations` row that shares the returned
+event's `event_identity` and applies no lineage predicate to them
+(`crates/storage/src/history/paging.rs`); the route contract in
+`api-v2-routes.md` states that the event's `canonicality_state` does not filter
+its associations, that retained associations from replaced forks can therefore
+appear beside a canonical event, and that a consumer wanting canonical-only
+correlation must not read association presence as a current relationship. That
+is evidence presentation, not a current-state read, and it is the only place
+the identity-only attach is correct.
 `crates/project/tests/issue_503_children.rs` pins the rule for the children
 builder by seeding an association whose column reads `canonical` on an orphaned
 anchor and asserting the child is not published. The position indexes on these
