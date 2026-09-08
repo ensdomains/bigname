@@ -1,11 +1,6 @@
 name: bigname
 
 x-bigname-env: &bigname-env
-  # The fallback is derived from the same required credential PostgreSQL is
-  # initialised with, so a deployment that sets POSTGRES_PASSWORD but omits
-  # BIGNAME_DATABASE_URL cannot end up with a runner that fails authentication
-  # behind a passing pg_isready healthcheck.
-  BIGNAME_DATABASE_URL: ${BIGNAME_DATABASE_URL:-postgresql://${POSTGRES_USER:-bigname}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD; there is no default}@postgres:5432/${POSTGRES_DB:-bigname}}
   RUST_LOG: ${RUST_LOG:-info,sqlx::query=error}
   # Empty means "unset"; both binaries treat empty and the negative spellings as off.
   BIGNAME_LOG_JSON: ${BIGNAME_LOG_JSON:-}
@@ -131,6 +126,11 @@ services:
         condition: service_healthy
     environment:
       <<: *bigname-env
+      # Required, and a complete URL rather than one assembled here: a password
+      # with URI-reserved characters (/ ? # % @ :) has to be percent-encoded
+      # inside the URL, which Compose interpolation cannot do. It must
+      # authenticate as the same login PostgreSQL is initialised with above.
+      BIGNAME_DATABASE_URL: ${BIGNAME_DATABASE_URL:?set BIGNAME_DATABASE_URL to the writer login, password percent-encoded}
       BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT: ${BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT:-/app/manifests/mainnet}
       BIGNAME_PHASE_RUNNER_INTERPRETER_STATE_CACHE_ENTRIES: ${BIGNAME_PHASE_RUNNER_INTERPRETER_STATE_CACHE_ENTRIES:-65536}
       BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL: ${BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL:?set BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL to the SELECT-only verifier login}

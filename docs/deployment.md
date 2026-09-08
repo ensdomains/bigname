@@ -717,7 +717,7 @@ budget has to cover the peak, not the common case:
 | Serial path: Verify runs before Live (`verify_before_live`) | `1` | `apps/phase-runner/src/runner_chain.rs:109` |
 | Combined path: Verify and Live polled concurrently, each holding its own lock | `2` | `apps/phase-runner/src/runner_live_follow.rs:262` |
 | Post-Live discovery repair: a Verify fence, then an Ingest fence inside it, then one phase lock inside that | `3` | `runner_live_follow.rs:70`, `:112`, `:143` |
-| `rewind` (operator one-shot): all four phase locks taken together | `4` | `apps/phase-runner/src/rewind.rs:40` |
+| `rewind` (separate operator process): the four writer-phase locks, no Verify lock | `4`, plus its own pool | `apps/phase-runner/src/rewind.rs:40`, `apps/phase-runner/src/main.rs:203` |
 
 A fence is an ordinary phase lock on that phase's name, so it excludes the
 phase itself rather than adding to it — the post-Live Verify fence waits for the
@@ -726,10 +726,21 @@ one after another and never hold two of their own locks at once.
 
 So budget `max(2C, 4) + max(C, 1) + 3C` for the running service: a one-chain
 deployment peaks at `4 + 1 + 3 = 8` connections and settles at `6` or `7`
-depending on the path; three chains peak at `6 + 3 + 9 = 18`. Add `C` more
-while a `rewind` runs. A start that finds phases recorded against chains no
-longer configured takes one lock at a time to close them out
-(`apps/phase-runner/src/runner_chain.rs:50`) and does not raise the peak.
+depending on the path; three chains peak at `6 + 3 + 9 = 18`. A start that
+finds phases recorded against chains no longer configured takes one lock at a
+time to close them out (`apps/phase-runner/src/runner_chain.rs:50`) and does
+not raise the peak.
+
+`phase-runner rewind` is not part of that figure: it is a separate process
+with its own pool of up to `2` connections (`apps/phase-runner/src/main.rs:203`)
+that takes the Ingest, Interpret, Project, and Live locks for one chain and
+never the Verify lock (`apps/phase-runner/src/rewind.rs:40`). It therefore
+succeeds while the supervised runner is alive whenever that chain is not in a
+writer phase — during its serial Verify phase, for instance — so the two
+processes can hold connections at the same time. Either stop the supervised
+runner before a rewind, or budget `6` more connections for the duration:
+`14` for one chain, `24` for three. A rewind against a chain whose writer
+phase is running fails on the held lock rather than waiting.
 
 Set the server's own ceiling explicitly with `POSTGRES_MAX_CONNECTIONS` rather
 than inheriting the PostgreSQL default, and size it from the peak above plus
