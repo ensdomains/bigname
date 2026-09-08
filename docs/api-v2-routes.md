@@ -952,8 +952,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   exclusive; an older registration does not acquire later registrations' name
   events. The binding must be backed by a registration grant, directly or through
   a wrapper's explicit registrar link; a registry-control binding alone does not
-  admit resource-less events under its resource UUID. This selection also governs
-  page counts, summaries, and cursor anchors.
+  establish a public registration handle. An invalid handle selects no product
+  rows, whether resource-bearing or resource-less. This selection also governs
+  page counts, summaries, and cursor anchors; raw diagnostics retains resource filtering.
   `scope=name` returns only rows carrying the name's
   `logical_name_id`. A row on a resource that was never bound to the name is
   reachable through `GET /v2/diagnostics/events` via the registry resource

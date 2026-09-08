@@ -481,8 +481,7 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
 }
 
 #[tokio::test]
-async fn v2_registry_only_binding_does_not_admit_resource_less_registration_history() -> Result<()>
-{
+async fn v2_registry_only_binding_does_not_admit_registration_history() -> Result<()> {
     assert_registry_binding_does_not_witness_registration(false).await
 }
 
@@ -565,6 +564,22 @@ async fn assert_registry_binding_does_not_witness_registration(released: bool) -
     );
     record.source_family = "ens_v1_resolver_l1".to_owned();
     let mut events = vec![binding, record];
+    for kind in ["AuthorityTransferred", "AuthorityEpochChanged"] {
+        let mut authority = v2_history_event(
+            &format!("registry-witness-{kind}"),
+            Some(logical_name_id),
+            Some(registry),
+            kind,
+            123,
+        );
+        authority.source_family = "ens_v1_registry_l1".to_owned();
+        authority.after_state = json!({
+            "authority_kind": "registry_only",
+            "owner": "0x0000000000000000000000000000000000007132",
+            "owner_getter": "0x0000000000000000000000000000000000007132",
+        });
+        events.push(authority);
+    }
     if released {
         upsert_test_resources(
             &database.pool,
@@ -608,7 +623,7 @@ async fn assert_registry_binding_does_not_witness_registration(released: bool) -
     .await?;
     assert!(
         filtered["data"].as_array().is_some_and(Vec::is_empty),
-        "registry binding admitted a resource-less row: {filtered:?}"
+        "registry resource admitted product registration history: {filtered:?}"
     );
     assert_eq!(filtered["page"]["has_more"], json!(false));
     for route in [
@@ -619,12 +634,16 @@ async fn assert_registry_binding_does_not_witness_registration(released: bool) -
         let rows = payload["data"].as_array().expect("name history rows");
         assert_eq!(
             rows.len(),
-            if released { 4 } else { 1 },
+            if released { 6 } else { 3 },
             "{route}: {rows:?}"
         );
         assert_eq!(rows[0]["type"], json!("record"));
         assert_eq!(rows[0]["block_number"], json!(124));
         assert_eq!(rows[0]["registration_id"], Value::Null);
+        assert_eq!(
+            rows.iter().filter(|row| row["type"] == "authority").count(),
+            2
+        );
     }
     let diagnostics = v2_history_payload_for_database(
         &database,
@@ -633,8 +652,38 @@ async fn assert_registry_binding_does_not_witness_registration(released: bool) -
     .await?;
     assert_eq!(
         diagnostics["data"].as_array().map(Vec::len),
-        Some(if released { 5 } else { 2 })
+        Some(if released { 7 } else { 4 })
     );
+    for (resource_id, include_candidates, expected) in [
+        (Some(registry), false, 0),
+        (Some(registry), true, if released { 7 } else { 4 }),
+        (None, false, if released { 6 } else { 3 }),
+    ] {
+        let page = bigname_storage::load_event_history_page(
+            &database.pool,
+            bigname_storage::EventHistoryFilter {
+                resource_id,
+                logical_name_id: resource_id
+                    .is_none()
+                    .then(|| bigname_storage::logical_name_id_for_name("ens", name)),
+                event_kinds: if include_candidates {
+                    Vec::new()
+                } else {
+                    crate::v2::product_history_event_kinds()
+                },
+                ..bigname_storage::EventHistoryFilter::default()
+            },
+            true,
+            None,
+            1,
+            bigname_storage::HistorySummaryMode::Full,
+            include_candidates,
+        )
+        .await?;
+        assert_eq!(page.rows.len(), usize::from(expected != 0));
+        assert_eq!(page.next_cursor.is_some(), expected > 1);
+        assert_eq!(page.summary.unwrap().total_count, expected);
+    }
     if released {
         let previous = v2_history_payload_for_database(
             &database,
@@ -1458,6 +1507,166 @@ async fn v2_get_history_keeps_prior_registration_resources_after_rebinding() -> 
         |row| row["registration_id"] == json!(prior_resource_id.to_string())
     ));
 
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn noncanonical_born_wrapped_history_keeps_one_registration_handle() -> Result<()> {
+    const NAME: &str = "noncanonical-born-wrapped.eth";
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
+    let namehash = bigname_lookup::ens_namehash_hex(NAME)?;
+    let wrapper = Uuid::from_u128(0x7160);
+    let registrar = Uuid::from_u128(0x7161);
+    seed_identity_name(
+        &database,
+        "ens:noncanonical-born-wrapped.eth",
+        NAME,
+        NAME,
+        &namehash,
+        wrapper,
+        Uuid::from_u128(0x8160),
+        Uuid::from_u128(0x9160),
+        "0x0000000000000000000000000000000000007160",
+        bigname_storage::AddressNameRelation::Registrant,
+        80,
+    )
+    .await?;
+    upsert_test_resources(
+        &database.pool,
+        &[address_name_resource(
+            registrar,
+            None,
+            "0xnoncanonical-registrar",
+            79,
+        )],
+    )
+    .await?;
+    seed_v2_history_blocks(&database, 130..=133).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.surface_bindings
+         SET active_from = to_timestamp(1700000130), canonicality_state = 'orphaned'
+         WHERE resource_id = $1",
+    )
+    .bind(wrapper)
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_surfaces SET canonicality_state = 'orphaned'
+         WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .execute(&database.pool)
+    .await?;
+    let mut grant = v2_history_event(
+        "noncanonical-grant",
+        None,
+        Some(registrar),
+        "RegistrationGranted",
+        130,
+    );
+    grant.after_state["namehash"] = json!(namehash);
+    let mut binding = v2_history_event(
+        "noncanonical-binding",
+        Some(&logical_name_id),
+        Some(wrapper),
+        "SurfaceBound",
+        130,
+    );
+    binding.source_family = "ens_v1_wrapper_l1".to_owned();
+    binding.after_state = json!({"wrapped_registrar_resource_id": registrar});
+    let mut transfer = v2_history_event(
+        "noncanonical-transfer",
+        Some(&logical_name_id),
+        Some(wrapper),
+        "TokenControlTransferred",
+        131,
+    );
+    transfer.source_family = "ens_v1_wrapper_l1".to_owned();
+    let permission = v2_history_event(
+        "noncanonical-permission",
+        None,
+        Some(registrar),
+        "PermissionChanged",
+        132,
+    );
+    let mut record = v2_history_event(
+        "noncanonical-record",
+        Some(&logical_name_id),
+        None,
+        "RecordChanged",
+        133,
+    );
+    record.source_family = "ens_v1_resolver_l1".to_owned();
+    let mut events = vec![grant, binding, transfer, permission, record];
+    for event in &mut events {
+        event.canonicality_state = CanonicalityState::Orphaned;
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_lineage SET canonicality_state = 'orphaned'
+         WHERE chain_id = 'ethereum-mainnet' AND block_number BETWEEN 130 AND 133",
+    )
+    .execute(&database.pool)
+    .await?;
+    for canonical_only in [true, false] {
+        let name_rows = bigname_storage::load_name_history(
+            &database.pool,
+            &logical_name_id,
+            &[wrapper, registrar],
+            bigname_storage::HistoryScope::Both,
+            canonical_only,
+        )
+        .await?;
+        let registration_rows = bigname_storage::load_event_history(
+            &database.pool,
+            bigname_storage::EventHistoryFilter {
+                resource_id: Some(wrapper),
+                ..bigname_storage::EventHistoryFilter::default()
+            },
+            canonical_only,
+        )
+        .await?;
+        for rows in [name_rows, registration_rows] {
+            assert_eq!(rows.len(), if canonical_only { 0 } else { 5 }, "{rows:?}");
+            if canonical_only {
+                continue;
+            }
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row.event_identity.as_str())
+                    .collect::<Vec<_>>(),
+                vec![
+                    "noncanonical-record",
+                    "noncanonical-permission",
+                    "noncanonical-transfer",
+                    "noncanonical-grant",
+                    "noncanonical-binding"
+                ]
+            );
+            assert!(
+                rows.iter()
+                    .filter(|row| row.resource_id.is_some())
+                    .all(|row| row.registration_id == Some(wrapper)),
+                "{rows:?}"
+            );
+            assert_eq!(rows[0].resource_id, None);
+            assert_eq!(rows[0].registration_id, None);
+        }
+    }
+    let registrar_rows = bigname_storage::load_event_history(
+        &database.pool,
+        bigname_storage::EventHistoryFilter {
+            resource_id: Some(registrar),
+            ..bigname_storage::EventHistoryFilter::default()
+        },
+        false,
+    )
+    .await?;
+    assert!(
+        registrar_rows.is_empty(),
+        "second lifecycle handle: {registrar_rows:?}"
+    );
     database.cleanup().await
 }
 

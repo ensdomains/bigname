@@ -80,6 +80,9 @@ The physical layers are:
 `crates/storage` owns [canonicality](glossary.md#canonicality), snapshot selection,
 reusable row reads, and database invariants. These rules are shared across callers and remain
 below route code even when a route composes them into a larger query.
+History loaders with `canonical_only=false` include activated losing-branch events
+and use the same canonicality mode for registration grants, bindings, and ID mapping.
+The HTTP product history routes continue to request canonical-only reads.
 
 `apps/api` owns route-specific joins, pagination, wire shaping, and GraphQL compatibility.
 GraphQL compatibility queries therefore live with the API surface, while their reusable

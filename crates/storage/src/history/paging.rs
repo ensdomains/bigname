@@ -230,7 +230,7 @@ pub(super) fn push_history_select<'a>(
             ne.resource_id,
         "#,
     );
-    push_product_registration_id(builder);
+    push_product_registration_id(builder, canonical_only);
     builder.push(
         r#" AS registration_id,
             ne.event_kind,
@@ -335,14 +335,14 @@ pub(super) fn push_history_filters<'a>(
     }
 
     if let Some(registration_id) = filter.registration_id.as_ref() {
-        builder.push(" AND ((ne.resource_id IS NULL AND ");
-        builder.push_bind(filter.registration_id_is_public);
         builder.push(" AND ");
+        builder.push_bind(filter.registration_id_is_public);
+        builder.push(" AND ((ne.resource_id IS NULL AND ");
         push_product_event_kind_predicate(builder);
         builder.push(" AND ");
         push_registration_binding_at_event(builder, *registration_id, canonical_only);
         builder.push(") OR (");
-        push_product_registration_id(builder);
+        push_product_registration_id(builder, canonical_only);
         builder.push(" = ");
         builder.push_bind(registration_id);
         builder.push("))");

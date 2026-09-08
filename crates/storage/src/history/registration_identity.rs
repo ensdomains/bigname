@@ -40,9 +40,9 @@ pub(super) async fn is_public_registration_id(
         );
     }
     builder.push(" AND ");
-    push_registration_lifecycle_witness(&mut builder);
+    push_registration_lifecycle_witness(&mut builder, canonical_only);
     builder.push(" AND (");
-    push_product_registration_id(&mut builder);
+    push_product_registration_id(&mut builder, canonical_only);
     builder.push(" = ");
     builder.push_bind(registration_id);
     builder.push(") LIMIT 1)");
@@ -105,9 +105,9 @@ pub(super) fn push_registration_binding_at_event(
     );
     super::source::push_history_canonicality_filter(builder, canonical_only);
     builder.push(" AND ");
-    push_registration_lifecycle_witness(builder);
+    push_registration_lifecycle_witness(builder, canonical_only);
     builder.push(" AND (");
-    push_product_registration_id(builder);
+    push_product_registration_id(builder, canonical_only);
     builder.push(" = ");
     builder.push_bind(registration_id);
     builder.push(")))");
@@ -115,7 +115,10 @@ pub(super) fn push_registration_binding_at_event(
 
 // Producers emit RegistrationGranted for new lifecycles, including renewal-first
 // recovery. A wrapper binding can witness only its explicitly linked registrar grant.
-fn push_registration_lifecycle_witness(builder: &mut QueryBuilder<'_, Postgres>) {
+fn push_registration_lifecycle_witness(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    canonical_only: bool,
+) {
     builder.push(
         "(ne.event_kind = 'RegistrationGranted'
           OR (
@@ -128,9 +131,13 @@ fn push_registration_lifecycle_witness(builder: &mut QueryBuilder<'_, Postgres>)
                       WHERE grant_event.resource_id =
                             (ne.after_state ->> 'wrapped_registrar_resource_id')::uuid
                         AND grant_event.resource_id IS NOT NULL
-                        AND grant_event.consumer_visibility = 'activated'
-                        AND grant_event.canonicality_state IN ('canonical', 'safe', 'finalized')
-                      OFFSET 0
+                        AND grant_event.consumer_visibility = 'activated'",
+    );
+    if canonical_only {
+        builder.push(" AND grant_event.canonicality_state IN ('canonical', 'safe', 'finalized')");
+    }
+    builder.push(
+        " OFFSET 0
                   ) lifecycle_grant
                   LEFT JOIN bigname_phase.chain_lineage lifecycle_lineage
                     ON lifecycle_lineage.chain_id = lifecycle_grant.chain_id
@@ -139,18 +146,23 @@ fn push_registration_lifecycle_witness(builder: &mut QueryBuilder<'_, Postgres>)
                     AND lifecycle_grant.source_family = 'ens_v1_registrar_l1'
                     AND lifecycle_grant.chain_id = ne.chain_id
                     AND (lifecycle_grant.logical_name_id IS NULL
-                         OR lifecycle_grant.logical_name_id = ne.logical_name_id)
-                    AND (lifecycle_grant.block_hash IS NULL
-                         OR lifecycle_lineage.canonicality_state IN (
-                             'canonical', 'safe', 'finalized'
-                         ))
-              )
-          ))",
+                         OR lifecycle_grant.logical_name_id = ne.logical_name_id)",
     );
+    if canonical_only {
+        builder.push(
+            " AND (lifecycle_grant.block_hash IS NULL
+                   OR lifecycle_lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))",
+        );
+    }
+    builder.push(")))");
 }
 
-pub(super) fn push_product_registration_id(builder: &mut QueryBuilder<'_, Postgres>) {
-    builder.push(
+pub(super) fn push_product_registration_id(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    canonical_only: bool,
+) {
+    // Emit a Boolean literal so canonical reads retain constant-folded index predicates.
+    builder.push(format!(
         r#"
         CASE
             WHEN ne.resource_id IS NULL THEN NULL::uuid
@@ -184,15 +196,15 @@ pub(super) fn push_product_registration_id(builder: &mut QueryBuilder<'_, Postgr
                                   registrar_grant.after_state ->> 'child_node',
                                   registrar_grant.after_state ->> 'node'
                               )
-                              AND surface.canonicality_state IN (
+                              AND (NOT {canonical_only} OR surface.canonicality_state IN (
                                   'canonical', 'safe', 'finalized'
-                              )
-                              AND (
+                              ))
+                              AND (NOT {canonical_only} OR (
                                   surface.block_hash IS NULL
                                   OR surface_lineage.canonicality_state IN (
                                       'canonical', 'safe', 'finalized'
                                   )
-                              )
+                              ))
                         ) resolved
                         ORDER BY resolved.priority, resolved.logical_name_id
                         LIMIT 1
@@ -216,15 +228,15 @@ pub(super) fn push_product_registration_id(builder: &mut QueryBuilder<'_, Postgr
                           AND born_wrapper_candidate.source_family =
                               'ens_v1_wrapper_l1'
                           AND born_wrapper_candidate.consumer_visibility = 'activated'
-                          AND born_wrapper_candidate.canonicality_state IN (
+                          AND (NOT {canonical_only} OR born_wrapper_candidate.canonicality_state IN (
                               'canonical', 'safe', 'finalized'
-                          )
-                          AND (
+                          ))
+                          AND (NOT {canonical_only} OR (
                               born_wrapper_candidate.block_hash IS NULL
                               OR wrapper_lineage.canonicality_state IN (
                                   'canonical', 'safe', 'finalized'
                               )
-                          )
+                          ))
                         ORDER BY born_wrapper_candidate.normalized_event_id
                         LIMIT 1
                     ) born_wrapper ON TRUE
@@ -244,15 +256,15 @@ pub(super) fn push_product_registration_id(builder: &mut QueryBuilder<'_, Postgr
                                     AND current_wrapper.consumer_visibility = 'activated'
                                     AND current_wrapper.after_state ->>
                                           'wrapped_registrar_resource_id' IS NOT NULL
-                                    AND current_wrapper.canonicality_state IN (
+                                    AND (NOT {canonical_only} OR current_wrapper.canonicality_state IN (
                                         'canonical', 'safe', 'finalized'
-                                    )
-                                    AND (
+                                    ))
+                                    AND (NOT {canonical_only} OR (
                                         current_wrapper.block_hash IS NULL
                                         OR current_lineage.canonicality_state IN (
                                             'canonical', 'safe', 'finalized'
                                         )
-                                    )
+                                    ))
                                   ORDER BY current_wrapper.normalized_event_id DESC
                                   LIMIT 1
                               ),
@@ -261,15 +273,15 @@ pub(super) fn push_product_registration_id(builder: &mut QueryBuilder<'_, Postgr
                       AND registrar_grant.event_kind = 'RegistrationGranted'
                       AND registrar_grant.source_family = 'ens_v1_registrar_l1'
                       AND registrar_grant.consumer_visibility = 'activated'
-                      AND registrar_grant.canonicality_state IN (
+                      AND (NOT {canonical_only} OR registrar_grant.canonicality_state IN (
                           'canonical', 'safe', 'finalized'
-                      )
-                      AND (
+                      ))
+                      AND (NOT {canonical_only} OR (
                           registrar_grant.block_hash IS NULL
                           OR grant_lineage.canonicality_state IN (
                               'canonical', 'safe', 'finalized'
                           )
-                      )
+                      ))
                     ORDER BY born_wrapper.normalized_event_id
                     LIMIT 1
                 ),
@@ -288,19 +300,19 @@ pub(super) fn push_product_registration_id(builder: &mut QueryBuilder<'_, Postgr
                       AND wrapper_binding.consumer_visibility = 'activated'
                       AND wrapper_binding.after_state ->>
                             'wrapped_registrar_resource_id' IS NOT NULL
-                      AND wrapper_binding.canonicality_state IN (
+                      AND (NOT {canonical_only} OR wrapper_binding.canonicality_state IN (
                           'canonical'::bigname_phase.canonicality_state,
                           'safe'::bigname_phase.canonicality_state,
                           'finalized'::bigname_phase.canonicality_state
-                      )
-                      AND (
+                      ))
+                      AND (NOT {canonical_only} OR (
                           wrapper_binding.block_hash IS NULL
                           OR wrapper_lineage.canonicality_state IN (
                               'canonical'::bigname_phase.canonicality_state,
                               'safe'::bigname_phase.canonicality_state,
                               'finalized'::bigname_phase.canonicality_state
                           )
-                      )
+                      ))
                     ORDER BY wrapper_binding.normalized_event_id DESC
                     LIMIT 1
                 ),
@@ -341,16 +353,16 @@ pub(super) fn push_product_registration_id(builder: &mut QueryBuilder<'_, Postgr
                                           + GREATEST(COALESCE(ne.log_index, 0), 0)
                                             * interval '1 microsecond'
                                   )
-                                  AND binding.canonicality_state IN (
+                                  AND (NOT {canonical_only} OR binding.canonicality_state IN (
                                       'canonical'::bigname_phase.canonicality_state,
                                       'safe'::bigname_phase.canonicality_state,
                                       'finalized'::bigname_phase.canonicality_state
-                                  )
-                                  AND binding_lineage.canonicality_state IN (
+                                  ))
+                                  AND (NOT {canonical_only} OR binding_lineage.canonicality_state IN (
                                       'canonical'::bigname_phase.canonicality_state,
                                       'safe'::bigname_phase.canonicality_state,
                                       'finalized'::bigname_phase.canonicality_state
-                                  )
+                                  ))
                             )
                         )
                     ) THEN NULL::uuid
@@ -359,5 +371,5 @@ pub(super) fn push_product_registration_id(builder: &mut QueryBuilder<'_, Postgr
             )
         END
         "#,
-    );
+    ));
 }

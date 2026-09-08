@@ -140,7 +140,7 @@ pub struct EventHistoryAddressFilter {
     pub relation: Option<AddressNameRelation>,
 }
 
-/// Projection-backed filters for canonical normalized-event history reads.
+/// Projection-backed filters for normalized-event history reads.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct EventHistoryFilter {
     pub namespace: Option<String>,
@@ -248,7 +248,7 @@ pub async fn load_name_history_head(
     })
 }
 
-/// Load app-facing event history rows using only canonical normalized-event/history anchors.
+/// Load activated event history with anchors and registration IDs matching `canonical_only`.
 pub async fn load_event_history(
     pool: &PgPool,
     filter: EventHistoryFilter,
