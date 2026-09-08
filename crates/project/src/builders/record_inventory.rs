@@ -291,10 +291,13 @@ pub(super) async fn build(
                        'status', CASE
                            WHEN event.coin60_zero_address_is_absent THEN 'not_found'
                            WHEN event.after_state ? 'value' THEN CASE
-                               WHEN event.after_state ->> 'record_family' = 'contenthash'
-                                AND event.after_state ->> 'value' IN ('', '0x')
-                                   THEN 'not_found'
-                               WHEN event.after_state ->> 'record_family' = 'addr'
+                               -- ENSv1 and Basenames nest the value under
+                               -- encoding/bytes; only the flat shape is a scalar.
+                               -- Both must be tested or a cleared record compares
+                               -- against an object JSON text and reads back as a
+                               -- retained value.
+                               WHEN event.after_state ->> 'record_family'
+                                    IN ('contenthash', 'addr')
                                 AND (
                                     event.after_state ->> 'value' IN ('', '0x')
                                     OR COALESCE(
@@ -320,17 +323,13 @@ pub(super) async fn build(
                            WHEN event.coin60_zero_address_is_absent THEN NULL::jsonb
                            WHEN event.after_state ? 'value'
                             AND NOT (
-                                (
-                                    event.after_state ->> 'record_family' = 'contenthash'
-                                    AND event.after_state ->> 'value' IN ('', '0x')
-                                ) OR (
-                                    event.after_state ->> 'record_family' = 'addr'
-                                    AND (
-                                        event.after_state ->> 'value' IN ('', '0x')
-                                        OR COALESCE(
-                                            event.after_state #>> '{value,bytes}' IN ('', '0x'),
-                                            false
-                                        )
+                                event.after_state ->> 'record_family'
+                                    IN ('contenthash', 'addr')
+                                AND (
+                                    event.after_state ->> 'value' IN ('', '0x')
+                                    OR COALESCE(
+                                        event.after_state #>> '{value,bytes}' IN ('', '0x'),
+                                        false
                                     )
                                 )
                             ) THEN event.after_state -> 'value'
