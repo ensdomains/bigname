@@ -945,7 +945,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   registration is released or superseded. Wrapper lifecycle rows associated
   through that binding report the registrar lifecycle's `registration_id`, and
   name-filtered `GET /v2/events` reads follow the association back to the
-  registrar rows. `scope=name` returns only rows carrying the name's
+  registrar rows. For an explicit `GET /v2/events?registration_id=...` request,
+  product events without a resource belong to that registration only during a
+  readable binding to its lifecycle, on the event's chain and at its recorded
+  block time plus log-index position. The start is inclusive and the end is
+  exclusive; an older registration does not acquire later registrations' name
+  events. This selection also governs page counts, summaries, and cursor anchors.
+  `scope=name` returns only rows carrying the name's
   `logical_name_id`. A row on a resource that was never bound to the name is
   reachable through `GET /v2/diagnostics/events` via the registry resource
   recorded internally at

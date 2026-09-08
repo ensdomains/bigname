@@ -511,7 +511,25 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
         )],
     )
     .await?;
-    seed_v2_history_blocks(&database, 121..=124).await?;
+    seed_v2_history_blocks(&database, 120..=125).await?;
+    // The old registration ends exactly where the next binding begins.
+    sqlx::query(
+        "UPDATE bigname_phase.surface_bindings
+         SET active_from = to_timestamp(1700000121), active_to = to_timestamp(1700000123)
+         WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .execute(&database.pool)
+    .await?;
+    let later_binding = address_name_surface_binding(
+        Uuid::from_u128(0x9141),
+        logical_name_id,
+        later_resource_id,
+        "0xhistory123",
+        123,
+        1_700_000_123,
+    );
+    upsert_test_surface_bindings(&database.pool, &[later_binding]).await?;
     let mut unmapped_surface_event = v2_history_event(
         "registration-filter-unmapped-surface",
         Some(logical_name_id),
@@ -520,34 +538,57 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
         124,
     );
     unmapped_surface_event.source_family = "ens_v2_registrar_l1".to_owned();
-    bigname_storage::insert_normalized_event_fixtures(
-        &database.pool,
-        &[
-            v2_history_event(
-                "registration-filter-grant",
-                Some(logical_name_id),
-                Some(resource_id),
-                "RegistrationGranted",
-                121,
-            ),
-            v2_history_event(
-                "registration-filter-record",
-                Some(logical_name_id),
-                None,
-                "RecordChanged",
-                122,
-            ),
-            v2_history_event(
-                "registration-filter-later-grant",
-                Some(logical_name_id),
-                Some(later_resource_id),
-                "RegistrationGranted",
-                123,
-            ),
-            unmapped_surface_event,
-        ],
-    )
-    .await?;
+    let mut events = vec![
+        v2_history_event(
+            "registration-filter-grant",
+            Some(logical_name_id),
+            Some(resource_id),
+            "RegistrationGranted",
+            121,
+        ),
+        v2_history_event(
+            "registration-filter-record",
+            Some(logical_name_id),
+            None,
+            "RecordChanged",
+            122,
+        ),
+        v2_history_event(
+            "registration-filter-later-grant",
+            Some(logical_name_id),
+            Some(later_resource_id),
+            "RegistrationGranted",
+            123,
+        ),
+        v2_history_event(
+            "registration-filter-before-record",
+            Some(logical_name_id),
+            None,
+            "RecordChanged",
+            120,
+        ),
+        v2_history_event(
+            "registration-filter-next-record",
+            Some(logical_name_id),
+            None,
+            "RecordChanged",
+            123,
+        ),
+        v2_history_event(
+            "registration-filter-latest-record",
+            Some(logical_name_id),
+            None,
+            "RecordChanged",
+            125,
+        ),
+        unmapped_surface_event,
+    ];
+    for event in &mut events {
+        if event.event_kind == "RecordChanged" {
+            event.source_family = "ens_v1_resolver_l1".to_owned();
+        }
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
 
     let payload = v2_history_payload_for_database(
         &database,
@@ -564,8 +605,69 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
         &format!("/v2/events?registration_id={resource_id}&page_size=1"),
     )
     .await?;
-    assert_eq!(history_types(first_page["data"].as_array().unwrap()), vec!["record"]);
+    assert_eq!(
+        history_types(first_page["data"].as_array().unwrap()),
+        vec!["record"]
+    );
     assert_eq!(first_page["page"]["has_more"], json!(true));
+
+    let cursor = first_page["page"]["next_cursor"]
+        .as_str()
+        .expect("old registration cursor");
+    let second_page = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/events?registration_id={resource_id}&page_size=1&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(
+        history_types(second_page["data"].as_array().unwrap()),
+        vec!["registration"]
+    );
+    assert_eq!(second_page["page"]["has_more"], json!(false));
+    assert_eq!(second_page["page"]["next_cursor"], Value::Null);
+
+    let newer_page = bigname_storage::load_event_history_page(
+        &database.pool,
+        bigname_storage::EventHistoryFilter {
+            resource_id: Some(later_resource_id),
+            ..bigname_storage::EventHistoryFilter::default()
+        },
+        true,
+        None,
+        1,
+        bigname_storage::HistorySummaryMode::Full,
+        false,
+    )
+    .await?;
+    assert_eq!(newer_page.rows.len(), 1);
+    assert_eq!(
+        newer_page.rows[0].event_identity,
+        "registration-filter-latest-record"
+    );
+    assert_eq!(newer_page.summary.as_ref().unwrap().total_count, 3);
+    let foreign_anchor = newer_page
+        .next_cursor
+        .as_ref()
+        .expect("newer registration cursor");
+    let invalid_cursor = bigname_storage::load_event_history_page(
+        &database.pool,
+        bigname_storage::EventHistoryFilter {
+            resource_id: Some(resource_id),
+            ..bigname_storage::EventHistoryFilter::default()
+        },
+        true,
+        Some(foreign_anchor),
+        1,
+        bigname_storage::HistorySummaryMode::None,
+        false,
+    )
+    .await
+    .expect_err("a newer name event cannot anchor the old registration");
+    assert!(
+        invalid_cursor
+            .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
+            .is_some()
+    );
 
     let storage_page = bigname_storage::load_event_history_page(
         &database.pool,
@@ -1192,6 +1294,14 @@ async fn born_wrapped_detail_and_history_keep_the_wrapper_registration_handle() 
     let database = TestDatabase::new_migrated().await?; let wrapper = Uuid::from_u128(0x7140); let registrar = Uuid::from_u128(0x7141); let rewrapper = Uuid::from_u128(0x7142); let namehash = bigname_lookup::ens_namehash_hex(NAME)?;
     seed_identity_name(&database, LOGICAL, NAME, NAME, &namehash, wrapper, Uuid::from_u128(0x8140), Uuid::from_u128(0x9140), "0x0000000000000000000000000000000000007140", bigname_storage::AddressNameRelation::Registrant, 80).await?;
     let orphan_wrapper = Uuid::from_u128(0x7143); upsert_test_resources(&database.pool, &[address_name_resource(registrar, None, "0xborn-wrap-registrar", 79), address_name_resource(rewrapper, None, "0xborn-wrap-rewrapper", 79), address_name_resource(orphan_wrapper, None, "0xborn-wrap-orphan", 79)]).await?; seed_v2_history_blocks(&database, 130..=136).await?;
+    // Bind the fixture at its normalized history time, rather than the seed's default date.
+    sqlx::query(
+        "UPDATE bigname_phase.surface_bindings
+         SET active_from = to_timestamp(1700000130) WHERE resource_id = $1",
+    )
+    .bind(wrapper)
+    .execute(&database.pool)
+    .await?;
     let mut grant = v2_history_event("born-wrap-grant", None, Some(registrar), "RegistrationGranted", 130); grant.after_state["namehash"] = json!(namehash); let mut setup = v2_history_event("born-wrap-setup", None, Some(registrar), "AuthorityTransferred", 130); setup.source_family = "ens_v1_registry_l1".to_owned(); setup.after_state = json!({"source_event":"NewOwner","child_node":namehash,"owner":"0x0000000000000000000000000000000000007140"}); let mut binding = v2_history_event("born-wrap-binding", Some(LOGICAL), Some(wrapper), "SurfaceBound", 130); binding.source_family = "ens_v1_wrapper_l1".to_owned(); binding.after_state = json!({"source_event":"NameWrapped","node":namehash,"wrapped_registrar_resource_id":registrar});
     let mut transfer = v2_history_event("born-wrap-transfer", Some(LOGICAL), Some(wrapper), "TokenControlTransferred", 131); transfer.source_family = "ens_v1_wrapper_l1".to_owned();
     let mut unbound = v2_history_event("born-wrap-unbound", Some(LOGICAL), Some(wrapper), "SurfaceUnbound", 132); unbound.source_family = "ens_v1_wrapper_l1".to_owned();
@@ -1289,6 +1399,14 @@ async fn later_wrapped_name_keeps_one_followable_registrar_lifecycle_handle() ->
     assert_eq!(projected_registration_id, Some(registrar_resource_id.to_string()));
     seed_v2_history_blocks(&database, 120..=125).await?;
 
+    // Bind the fixture at its normalized history time, rather than the seed's default date.
+    sqlx::query(
+        "UPDATE bigname_phase.surface_bindings
+         SET active_from = to_timestamp(1700000121) WHERE resource_id = $1",
+    )
+    .bind(wrapper_resource_id)
+    .execute(&database.pool)
+    .await?;
     let mut older_registration = v2_history_event(
         "later-wrap-older-unbound-registration",
         None,

@@ -8,7 +8,10 @@ use super::{
     InvalidHistoryCursor,
     decoders::decode_history_event,
     duplicates::push_product_history_duplicate_filter,
-    registration_identity::{push_product_event_kind_predicate, push_product_registration_id},
+    registration_identity::{
+        push_product_event_kind_predicate, push_product_registration_id,
+        push_registration_binding_at_event,
+    },
     selectors::HistorySelector,
     source::{push_history_canonicality_filter, push_history_source_for_filter},
     summary::load_history_summary,
@@ -336,6 +339,8 @@ pub(super) fn push_history_filters<'a>(
         builder.push_bind(filter.registration_id_is_public);
         builder.push(" AND ");
         push_product_event_kind_predicate(builder);
+        builder.push(" AND ");
+        push_registration_binding_at_event(builder, *registration_id, canonical_only);
         builder.push(") OR (");
         push_product_registration_id(builder);
         builder.push(" = ");

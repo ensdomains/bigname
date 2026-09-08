@@ -47,6 +47,68 @@ pub(super) async fn is_public_registration_id(
     builder.build_query_scalar().fetch_one(pool).await
 }
 
+// Resource-less name events belong to a registration only while its binding is active.
+pub(super) fn push_registration_binding_at_event(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    registration_id: Uuid,
+    canonical_only: bool,
+) {
+    builder.push(
+        "EXISTS (
+            SELECT 1
+            FROM bigname_phase.surface_bindings history_binding
+            LEFT JOIN bigname_phase.chain_lineage binding_lineage
+              ON binding_lineage.chain_id = history_binding.chain_id
+             AND binding_lineage.block_hash = history_binding.block_hash
+             AND binding_lineage.block_number = history_binding.block_number
+            WHERE history_binding.logical_name_id = ne.logical_name_id
+              AND history_binding.chain_id = ne.chain_id
+              AND history_binding.active_from <= rb.block_timestamp
+                  + GREATEST(COALESCE(ne.log_index, 0), 0) * interval '1 microsecond'
+              AND (history_binding.active_to IS NULL
+                   OR history_binding.active_to > rb.block_timestamp
+                       + GREATEST(COALESCE(ne.log_index, 0), 0)
+                         * interval '1 microsecond')",
+    );
+    if canonical_only {
+        builder.push(
+            " AND history_binding.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND (history_binding.block_hash IS NULL
+                   OR binding_lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))",
+        );
+    }
+    // Restrict the inner lookup to one resource before applying chain and handle checks.
+    builder.push(
+        " AND EXISTS (
+            SELECT 1
+            FROM (
+                SELECT * FROM bigname_phase.normalized_events resource_event
+                WHERE resource_event.resource_id = history_binding.resource_id
+                  AND resource_event.resource_id IS NOT NULL
+                  AND resource_event.consumer_visibility = 'activated'",
+    );
+    if canonical_only {
+        // Keep the readable-row predicate inside the partial resource-index lookup.
+        builder
+            .push(" AND resource_event.canonicality_state IN ('canonical', 'safe', 'finalized')");
+    }
+    builder.push(
+        " OFFSET 0
+            ) ne
+            LEFT JOIN bigname_phase.chain_lineage rb
+              ON rb.chain_id = ne.chain_id AND rb.block_hash = ne.block_hash
+            WHERE ne.chain_id = history_binding.chain_id
+              AND (ne.logical_name_id IS NULL
+                   OR ne.logical_name_id = history_binding.logical_name_id)",
+    );
+    super::source::push_history_canonicality_filter(builder, canonical_only);
+    builder.push(" AND (");
+    push_product_registration_id(builder);
+    builder.push(" = ");
+    builder.push_bind(registration_id);
+    builder.push(")))");
+}
+
 pub(super) fn push_product_registration_id(builder: &mut QueryBuilder<'_, Postgres>) {
     builder.push(
         r#"
