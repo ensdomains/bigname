@@ -3678,11 +3678,18 @@ fn reverse_plan_scan_work(plan: &Value, page: bool) -> Result<ReversePlanWork> {
                 ]) {
                     *total += value;
                 }
+                let key = if page && key == "address" {
+                    "lower(address)"
+                } else {
+                    key
+                };
                 bounded = matches!(kind, "Index Scan" | "Index Only Scan" | "Bitmap Index Scan")
                     && node["Index Cond"].as_str().is_some_and(|condition| {
-                        condition.contains(key)
-                            && condition.contains(" = ")
-                            && (!page || key != "address" || condition.contains("lower("))
+                        !condition.contains(" OR ")
+                            && condition.split(" AND ").any(|term| {
+                                term.trim_start_matches('(')
+                                    .starts_with(&format!("{key} = "))
+                            })
                     });
             }
         }
@@ -3740,7 +3747,13 @@ fn reverse_plan_validator_rejects_hidden_work() {
         "Index Cond":"(logical_name_id = anc.logical_name_id)", "Actual Rows":1, "Actual Loops":1});
     let plan = json!([{"Plan":{"Node Type":"Nested Loop","Plans":[scan.clone()]}}]);
     assert!(reverse_plan_scan_work(&plan, true).is_ok());
-    let broad = json!({"Node Type":"Seq Scan", "Relation Name":"resources",
+    for (key, page) in [("lower(address)", true), ("address", false)] {
+        let address = json!([{"Plan":{"Node Type":"Index Scan", "Relation Name":"address_names_current",
+            "Index Cond":format!("({key} = requested.address)"), "Actual Rows":1, "Actual Loops":1}}]);
+        assert!(reverse_plan_scan_work(&address, page).is_ok());
+    }
+    let broad = json!({"Node Type":"Index Scan", "Relation Name":"name_current",
+        "Index Cond":"((logical_name_id > ''::text) AND (namespace = 'ens'::text))",
         "Actual Rows":264, "Actual Loops":1});
     let mut probes = scan.clone();
     probes["Actual Rows"] = json!(0);
@@ -3798,17 +3811,13 @@ async fn reverse_plan_pages(
     namespaces: &[String],
     expected: &[&str],
 ) -> Result<bigname_storage::ReverseIdentityCursor> {
-    use bigname_storage::{AddressNameRelation, ReverseIdentityCursor};
+    use crate::v2::support::load_reverse_identity_records_live as load_reverse;
+    use bigname_storage::{AddressNameRelation as Relation, ReverseIdentityCursor};
     let mut request = input.clone();
     let mut names = Vec::new();
     let mut first_cursor = None;
     loop {
-        let groups = crate::v2::support::load_reverse_identity_records_live(
-            &database.lookup_pool,
-            &[request.clone()],
-            namespaces,
-        )
-        .await?;
+        let groups = load_reverse(&database.lookup_pool, &[request.clone()], namespaces).await?;
         assert_eq!(groups.len(), 1);
         let group = &groups[0];
         assert_eq!(group.total_count, Some(expected.len() as u64));
@@ -3817,15 +3826,12 @@ async fn reverse_plan_pages(
             let row = &entry.name_record.row;
             assert!(namespaces.contains(&row.namespace));
             let facets = match row.normalized_name.as_str() {
-                "amber.eth" | "dune.base.eth" => vec![AddressNameRelation::Registrant],
-                "birch.eth" => vec![
-                    AddressNameRelation::TokenHolder,
-                    AddressNameRelation::EffectiveController,
-                ],
+                "amber.eth" | "dune.base.eth" => vec![Relation::Registrant],
+                "birch.eth" => vec![Relation::TokenHolder, Relation::EffectiveController],
                 "bob.eth" | "cedar.eth" | "elm.base.eth" => {
-                    vec![AddressNameRelation::EffectiveController]
+                    vec![Relation::EffectiveController]
                 }
-                _ => vec![AddressNameRelation::TokenHolder],
+                _ => vec![Relation::TokenHolder],
             };
             let mut facets = facets
                 .into_iter()
@@ -3849,12 +3855,11 @@ async fn reverse_plan_pages(
         let row = &last.name_record.row;
         let cursor = ReverseIdentityCursor {
             is_primary: row.normalized_name == "alice.eth",
-            role_rank: if last.relation_facets.iter().any(|r| {
-                matches!(
-                    r,
-                    AddressNameRelation::Registrant | AddressNameRelation::TokenHolder
-                )
-            }) {
+            role_rank: if last
+                .relation_facets
+                .iter()
+                .any(|r| matches!(r, Relation::Registrant | Relation::TokenHolder))
+            {
                 0
             } else {
                 1
@@ -3877,8 +3882,9 @@ async fn reverse_plan_pages(
 #[tokio::test]
 async fn reverse_readability_plans_follow_address_candidates() -> Result<()> {
     use crate::v2::support::{
-        explain_reverse_identity_count, explain_reverse_identity_page,
-        load_reverse_identity_records_live,
+        explain_reverse_identity_count as explain_count,
+        explain_reverse_identity_page as explain_page,
+        load_reverse_identity_records_live as load_reverse,
     };
     use bigname_storage::{
         AddressNameRelation as Relation, ReverseIdentityRoles as Roles, ReverseIdentityStorageInput,
@@ -3940,10 +3946,10 @@ async fn reverse_readability_plans_follow_address_candidates() -> Result<()> {
             page_size: 2,
             cursor: None,
         });
-    let empty = load_reverse_identity_records_live(&database.lookup_pool, &[], &namespaces).await?;
+    let empty = load_reverse(&database.lookup_pool, &[], &namespaces).await?;
     assert!(empty.is_empty());
     assert!(
-        explain_reverse_identity_page(&database.lookup_pool, &[], &namespaces)
+        explain_page(&database.lookup_pool, &[], &namespaces)
             .await?
             .is_none()
     );
@@ -4009,15 +4015,9 @@ async fn reverse_readability_plans_follow_address_candidates() -> Result<()> {
                 ..input.clone()
             }]);
         }
-        let batch = vec![
-            cases[0][0].clone(),
-            cases[3][0].clone(),
-            cases[4][0].clone(),
-            cases[5][0].clone(),
-            missing.clone(),
-        ];
-        let groups =
-            load_reverse_identity_records_live(&database.lookup_pool, &batch, &namespaces).await?;
+        let mut batch = [0, 3, 4, 5].map(|case| cases[case][0].clone()).to_vec();
+        batch.push(missing.clone());
+        let groups = load_reverse(&database.lookup_pool, &batch, &namespaces).await?;
         let expected_batch = [
             &expected[0][..2],
             &expected[1][2..4],
@@ -4042,11 +4042,11 @@ async fn reverse_readability_plans_follow_address_candidates() -> Result<()> {
         for (case, requests) in cases.iter().chain(std::iter::once(&batch)).enumerate() {
             let page = case != 7;
             let plan = if page {
-                explain_reverse_identity_page(&database.lookup_pool, requests, &namespaces)
+                explain_page(&database.lookup_pool, requests, &namespaces)
                     .await?
                     .context("missing nonempty plan")?
             } else {
-                explain_reverse_identity_count(&database.lookup_pool, requests, &namespaces).await?
+                explain_count(&database.lookup_pool, requests, &namespaces).await?
             };
             plans += 1;
             eprintln!("reverse population={population} case={case} page={page} plan={plan}");
