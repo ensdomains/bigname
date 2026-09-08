@@ -71,9 +71,10 @@ phase_migration_uses_production_schema() {
 # A migration outside the inventory is never applied here, so a phase migration
 # written against the connection's search path would change bigname_phase
 # unlisted and untested. Since the legacy public schema was dropped, every such
-# file must name each object it creates, alters, drops, or writes with its
-# schema (for CREATE INDEX, the table), quoted or not; the check prints what
-# carries no schema qualifier.
+# file must consist of statements the check can read, each naming the object it
+# creates, alters, drops, or writes with its schema (for CREATE INDEX, the
+# table), quoted or not; the check prints what carries no schema qualifier and
+# any statement it cannot read.
 legacy_public_schema_drop="20260806120000_drop_legacy_public_schema.sql"
 migration_objects_are_schema_qualified() {
     awk '
@@ -90,7 +91,15 @@ migration_objects_are_schema_qualified() {
                     m = split(substr(s, RSTART, RLENGTH), words, " "); object = words[m]
                 } else if (match(s, /^(INSERT INTO|UPDATE|DELETE FROM|TRUNCATE( TABLE)?|COMMENT ON (TABLE|INDEX|FUNCTION|COLUMN)) [^ (]+/)) {
                     m = split(substr(s, RSTART, RLENGTH), words, " "); object = words[m]
-                } else { continue }
+                } else if (s == "") {
+                    continue
+                } else {
+                    # A statement the check cannot read -- a WITH-prefixed write, a DO
+                    # block, SET search_path -- is not assumed safe.
+                    split(s, words, " ")
+                    unqualified = unqualified " [unrecognized statement: " words[1] " " words[2] "]"
+                    continue
+                }
                 gsub(/"/, "", object)
                 if (object !~ /\./) { unqualified = unqualified " " object }
             }
@@ -101,12 +110,12 @@ migration_objects_are_schema_qualified() {
 }
 assert_uninventoried_migrations_are_schema_qualified() {
     local migration_file migration_basename unqualified
-    if unqualified="$(printf 'CREATE INDEX x ON chain_phase_state (a);\nUPDATE public.t SET a = 1;\nALTER TABLE "name_surfaces" ADD COLUMN c int;\nDROP INDEX "public"."ok_idx";\n' \
+    if unqualified="$(printf 'CREATE INDEX x ON chain_phase_state (a);\nUPDATE public.t SET a = 1;\nALTER TABLE "name_surfaces" ADD COLUMN c int;\nDROP INDEX "public"."ok_idx";\nWITH chosen AS (SELECT 1) UPDATE chain_phase_state SET a = 1;\n' \
         | migration_objects_are_schema_qualified /dev/stdin)"; then
         printf '%s\n' "schema-qualification check accepted a search-path-relative statement" >&2
         exit 1
     fi
-    if [ "$unqualified" != " CHAIN_PHASE_STATE NAME_SURFACES" ]; then
+    if [ "$unqualified" != " CHAIN_PHASE_STATE NAME_SURFACES [unrecognized statement: WITH CHOSEN]" ]; then
         printf '%s\n' "schema-qualification check misreported the search-path-relative statement: $unqualified" >&2
         exit 1
     fi

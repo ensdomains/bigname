@@ -107,27 +107,36 @@ The other 34 are independent changes that would each have needed a carve-out
 or an amendment had the freeze been in force: phase-runner coordination state
 — heartbeat liveness, unconfigured-phase settlement, Ingest redo
 source-boundary and manifest-authority markers, and the redo attempt
-generation (#427, #556) — and Project incremental-scope and reverse-hydration
-state (#415); the raw-block preimage derivation swap (#519); the Interpret
-decode-skip audit and the manifest applied-change counter (#583, #579);
+generation (#427, #556) — and Project incremental-scope and
+reverse-[hydration](../glossary.md#hydration) state (#415); the raw-block
+preimage derivation swap (#519); the Interpret decode-skip audit and the
+manifest applied-change counter (#583, #579);
 `normalized_events` scope indexes and the legacy index drops (#612, #653,
-#762, #636) and the `name_current` serving-resource column (#636); the
-retirement of direct divergences for null-resolver names (#739); the
-discovery-watch admissions snapshot (#747); Project redo expiry-root and
-expiry-resource seeds (#762); and registry operator account permissions
-(#815). The head itself is one more independent change:
+#762, #636) and the `name_current`
+[serving-resource](../glossary.md#serving-resource) column (#636); the
+retirement of direct [resolution
+divergences](../glossary.md#resolution-divergence-ledger) for null-resolver
+names (#739); the [discovery-watch admissions
+snapshot](../glossary.md#discovery-watch-admission-snapshot) (#747); Project
+redo [expiry-root](../glossary.md#expiry-root) and expiry-resource seeds
+(#762); and registry operator [account
+permissions](../glossary.md#account-permission-state) (#815). The head itself
+is one more independent change:
 `20260906120000_exact_zero_addr60_default_derivation.sql` (#869, landed
 2026-09-07) replaces the `write_resolution_divergence` function so that an
 exact zero `addr:60` stays absent when a default derivation exists — a
 serving-semantics change, and the last schema-migration before acceptance.
 Since #849 `apply-check.sh` applies every schema-migration that names a
 `bigname_phase` object and fails on one it does not list. Its inventory is
-that literal token, so a migration written against the connection's search
-path would not be in it; the same script therefore rejects any migration
-newer than the legacy-schema drop that names no `bigname_phase` object unless
-every object it creates, alters, drops, or writes carries a schema qualifier,
-quoted or bare, and proves that check against planted search-path-relative
-statements on each run. From acceptance on, a schema-migration of any of these kinds cannot land
+that literal token, so a schema-migration written against the connection's
+search path would not be in it; the same script therefore rejects any
+schema-migration newer than the legacy-schema drop that names no
+`bigname_phase` object unless each of its statements is one the check
+recognizes and names every object it creates, alters, drops, or writes with a
+schema qualifier, quoted or bare — a statement it cannot read, such as a
+`WITH`-prefixed write or a `DO` block, is rejected rather than assumed safe —
+and proves that check against planted search-path-relative statements on each
+run. From acceptance on, a schema-migration of any of these kinds cannot land
 without moving the conformance test, which is where the carve-out or
 amendment is checked for.
 
@@ -211,8 +220,8 @@ values the system already documents as unstable across a boundary.
    already described in [`storage.md`](../storage.md) and
    [`architecture.md`](../architecture.md) as part of the ownership map but did
    not exist; the baseline now carries it as
-   `schema-v2/baseline/12_project_generation_failures.sql`. Additive; no
-   re-derivation.
+   `schema-v2/baseline/12_project_generation_failures.sql`. Proposed as
+   additive; no re-derivation.
    Landing it requires three things beyond the table itself: entries in both
    expected-table lists in `apply-check.sh`, and an entry in the maintainer
    allowlist, because the table name matches the forbidden-name regex on
@@ -222,9 +231,15 @@ values the system already documents as unstable across a boundary.
    after slices 2A–2C.**
    `migrations/20260814131000_project_generation_failure_audit.sql` creates the
    table and `20260814132000_project_generation_failure_child_authority.sql`
-   extends it. All three prerequisites are in place: the table appears in both
-   expected-table lists in `apply-check.sh` and in the maintainer allowlist that
-   exempts it from the `generation` forbidden-name regex.
+   extends it — and that extension was not additive: it drops and recreates
+   the populated table's `failure_kind` CHECK to admit
+   `dual_current_child_authority`, the same constraint replacement on a
+   populated table that carve-out 2 below classifies as beyond a carve-out.
+   It is recorded here as a historical non-additive exception, made while
+   this ADR was a draft; it required no re-derivation. All three
+   prerequisites are in place: the table appears in both expected-table lists
+   in `apply-check.sh` and in the maintainer allowlist that exempts it from
+   the `generation` forbidden-name regex.
 
 2. **`migration_candidate_identity_effects.correlation_kind`** — currently
    pinned by CHECK to a single value. If slice 3's child-migration shape is not
@@ -359,6 +374,17 @@ after slice 3, each as its own content-hash rotation (#745 on 2026-08-31 and
   as `not_found`, pinned by the `v1-record-clears.json` interpreter fixture.
 
 Neither needs scheduling again.
+
+## Upstream anchors
+
+This ADR governs bigname's own schema and has one upstream dependency, in the
+derivation-side outcome above:
+
+- `.refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L48
+  @ ens_v2@a971bd64` — anchors `ROLE_WAS_RESERVED` (bit 32) as an ENSv2
+  registry role, mirrored by `REGISTRY_ROLE_BITS` in
+  `crates/adapters/src/schema_v2/protocol/permissions.rs`. Mirrored, not
+  diverged; no `upstream.md` entry.
 
 ### Explicitly out of scope
 

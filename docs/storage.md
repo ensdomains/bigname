@@ -1,6 +1,7 @@
 # Storage
 
-The schema this document describes is frozen for the V1 milestone by
+The schema this document describes is frozen for the [V1
+milestone](glossary.md#v1-milestone) by
 [ADR 0007](adrs/0007-v1-schema-freeze.md), which names the frozen artifact, the
 conformance test that makes the freeze observable, and every authorized
 carve-out. The frozen artifact is the `schema-v2/baseline/` tree plus the
