@@ -167,3 +167,25 @@ rewrite. Both are expected.
 The deliberate remaining corpus gaps ride the pre-B2 gate: the Basenames
 forward path and broader resolver-record coverage. An intentional interpreter
 change must update the golden output in the same review.
+
+### Controller-free short lease and migration
+
+`numeric-short-lease-migration.json` retains receipt topics, data, emitters and positions for
+`LEG-U-013-R01` from the disposable `corrected-interleaved-01` run. Its provenance lists the
+original receipt and manifest SHA-256 values. The actual order is numeric registration at block
+403, owner/resolver/record setup at 405 and 406, readable V2 reservation at 407, the pre-checkpoint
+at 414, and the ten-log migration at 415. The numeric lease lasts 60 seconds; migration occurs
+49 seconds before that expiry. The V2 reservation retains the longer expiry.
+
+`numeric_short_lease.rs` is the shared test-input seam: it uses the shipped hackathon manifest
+ABIs and numeric admission with the fixture's disposable addresses and zero start blocks.
+It supplies no prior registrar state, controller event, fabricated renewal or cleanup event.
+Unknown execution-wallet receipt logs remain in the input and are not selected by those source
+families. An empty block at V1 expiry plus one is explicitly constructed because the failed chain
+run never executed that later action. It is not a captured chain receipt.
+
+Direct BaseRegistrar registration emits numeric identity and expiry with its token mint and
+registry setup; the migration controller then reclaims, clears registry ownership/resolver and
+transfers the registrar token to Graveyard before injecting the successor.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)

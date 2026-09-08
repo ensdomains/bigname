@@ -36,7 +36,7 @@ pub(super) fn request_variants(
     let mut requests = Vec::new();
     match endpoint {
         "lookup" => defaults::lookup_requests(base, corpus, &mut requests)?,
-        "status" => requests.push(get(base, &["v2", "status"], &[])?),
+        "status" => requests.push(get(base, &["v1", "status"], &[])?),
         "name" => defaults::exact_name_requests(base, corpus, &mut requests)?,
         "records" => defaults::record_requests(base, corpus, &mut requests)?,
         "subnames" => defaults::subname_requests(base, corpus, &mut requests)?,
@@ -66,7 +66,7 @@ pub(super) fn request_variants(
                     requests.push(get(
                         base,
                         &[
-                            "v2",
+                            "v1",
                             "resolvers",
                             numeric_chain_id(&target.chain_id)?,
                             &target.resolver_address,
@@ -78,7 +78,7 @@ pub(super) fn request_variants(
         }
         "namespace" => {
             for namespace in &corpus.namespaces {
-                requests.push(get(base, &["v2", "namespaces", namespace], &[])?);
+                requests.push(get(base, &["v1", "namespaces", namespace], &[])?);
             }
         }
         unknown => bail!("unknown endpoint budget {unknown:?}"),
@@ -108,7 +108,7 @@ fn primary_name_requests(
     for (address, coin_type, namespace) in primary_names {
         let mut request = get(
             base,
-            &["v2", "addresses", address, "primary-name"],
+            &["v1", "addresses", address, "primary-name"],
             &[
                 ("source", "indexed"),
                 ("namespace", namespace),
@@ -220,10 +220,10 @@ mod tests {
     #[test]
     fn path_parameters_are_encoded_as_segments() {
         let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
-        let request = get(&base, &["v2", "names", "name with space.eth"], &[]).unwrap();
+        let request = get(&base, &["v1", "names", "name with space.eth"], &[]).unwrap();
         assert_eq!(
             request.url.as_str(),
-            "http://127.0.0.1:3000/v2/names/name%20with%20space.eth"
+            "http://127.0.0.1:3000/v1/names/name%20with%20space.eth"
         );
     }
 

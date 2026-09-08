@@ -379,3 +379,130 @@ async fn database(name: &str) -> Result<(TestDatabase, PgPool)> {
     }
     Ok((database, pool))
 }
+
+#[tokio::test]
+async fn public_v2_node_inventory_resets_and_replays_without_stale_pointer_records() -> Result<()> {
+    let fixture = cases()?
+        .into_iter()
+        .find(|case| case["case"]["id"] == "ens_v1_contenthash_set_clear_set")
+        .context("fixture")?;
+    let mut final_rows = Vec::new();
+    for execution in [
+        Execution::AllAtOnce,
+        Execution::Incremental,
+        Execution::Redo,
+    ] {
+        let (database, pool) = database("public_v2_node_versions").await?;
+        seed(&pool, &fixture).await?;
+        let blocks = blocks(&fixture)?;
+        let first = &blocks[0];
+        let reset = &blocks[1];
+        let last = blocks.last().context("last block")?;
+        let resolver = fixture["expected_normalized_events"][0]["after_state"]["resolver"]
+            .as_str()
+            .context("resolver")?;
+        let payload = json!({"deployment_epoch":"fixture","contracts":[{"role":"public_resolver_v2","address":resolver,"proxy_kind":"none","start_block":0}]});
+        // source_family is part of the manifest FK; detach the referenced events
+        // while converting both sides, then restore their admission references.
+        sqlx::query("UPDATE normalized_events SET source_manifest_id = NULL")
+            .execute(&pool)
+            .await?;
+        sqlx::query("UPDATE manifest_versions SET source_family = 'ens_v2_resolver_l1', manifest_payload = $1")
+            .bind(&payload).execute(&pool).await?;
+        sqlx::query("UPDATE normalized_events SET source_family = 'ens_v2_resolver_l1', source_manifest_id = (SELECT manifest_id FROM manifest_versions), after_state = jsonb_set(after_state, '{manifest_payload}', $1) WHERE event_kind = 'SourceManifestUpdated'")
+            .bind(&payload).execute(&pool).await?;
+        sqlx::query("UPDATE normalized_events SET source_family = 'ens_v2_registry_l1' WHERE event_kind = 'ResolverChanged'").execute(&pool).await?;
+        sqlx::query("UPDATE normalized_events SET source_family = 'ens_v2_resolver_l1', source_manifest_id = (SELECT manifest_id FROM manifest_versions), logical_name_id = NULL WHERE event_kind = 'RecordChanged'").execute(&pool).await?;
+        sqlx::query("UPDATE normalized_events SET event_kind = 'RecordVersionChanged', after_state = (after_state - 'record_key' - 'record_family' - 'contenthash_hex') || '{\"source_event\":\"VersionChanged\",\"record_version\":1}'::jsonb WHERE event_kind = 'RecordChanged' AND block_number = $1")
+            .bind(reset.number).execute(&pool).await?;
+        if !matches!(execution, Execution::AllAtOnce) {
+            run(&pool, first, None, RunMode::Normal).await?;
+            run(&pool, reset, Some(first), RunMode::Normal).await?;
+            let entries: Value = sqlx::query_scalar(
+                "SELECT entries FROM record_inventory_current WHERE resource_id = $1::uuid",
+            )
+            .bind(RESOURCE)
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(
+                entries,
+                json!([]),
+                "reset must retire every old-version selector"
+            );
+        }
+        run(
+            &pool,
+            last,
+            if matches!(execution, Execution::AllAtOnce) {
+                None
+            } else {
+                Some(reset)
+            },
+            if matches!(execution, Execution::Redo) {
+                RunMode::Redo
+            } else {
+                RunMode::Normal
+            },
+        )
+        .await?;
+        let row: Value = sqlx::query_scalar("SELECT jsonb_build_object('entries', entries, 'boundary', record_version_boundary, 'support', support_status, 'provenance', provenance) FROM record_inventory_current WHERE resource_id = $1::uuid")
+            .bind(RESOURCE).fetch_one(&pool).await?;
+        assert_eq!(row["support"], "supported");
+        assert_eq!(row["entries"].as_array().context("entries")?.len(), 1);
+        final_rows.push(json!({"entries":row["entries"],"boundary":row["boundary"]}));
+        for mutation in [
+            "canonicality_state = 'orphaned'",
+            "namespace = 'another-namespace'",
+            "after_state = jsonb_set(after_state, '{resolver}', to_jsonb('0x00000000000000000000000000000000000000ff'::text))",
+        ] {
+            let wrong_namespace = mutation == "namespace = 'another-namespace'";
+            if wrong_namespace {
+                // Keep the resolver evidence admitted in its own namespace while
+                // the registry pointer remains in the name's ens namespace.
+                sqlx::query("UPDATE normalized_events SET source_manifest_id = NULL WHERE source_family = 'ens_v2_resolver_l1'")
+                    .execute(&pool).await?;
+                sqlx::query("UPDATE manifest_versions SET namespace = 'another-namespace'")
+                    .execute(&pool)
+                    .await?;
+                sqlx::query("UPDATE normalized_events SET namespace = 'another-namespace', source_manifest_id = (SELECT manifest_id FROM manifest_versions) WHERE source_family = 'ens_v2_resolver_l1'")
+                    .execute(&pool).await?;
+            } else {
+                sqlx::query(&format!("UPDATE normalized_events SET {mutation} WHERE event_kind = 'RecordChanged' AND block_number = $1"))
+                    .bind(last.number).execute(&pool).await?;
+            }
+            run(&pool, last, None, RunMode::Redo).await?;
+            let entries: Value = sqlx::query_scalar(
+                "SELECT entries FROM record_inventory_current WHERE resource_id = $1::uuid",
+            )
+            .bind(RESOURCE)
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(entries, json!([]), "unattributable write: {mutation}");
+            if wrong_namespace {
+                sqlx::query("UPDATE normalized_events SET source_manifest_id = NULL WHERE source_family = 'ens_v2_resolver_l1'")
+                    .execute(&pool).await?;
+                sqlx::query("UPDATE manifest_versions SET namespace = 'ens'")
+                    .execute(&pool)
+                    .await?;
+                sqlx::query("UPDATE normalized_events SET namespace = 'ens', source_manifest_id = (SELECT manifest_id FROM manifest_versions) WHERE source_family = 'ens_v2_resolver_l1'")
+                    .execute(&pool).await?;
+            }
+            sqlx::query("UPDATE normalized_events SET canonicality_state = 'canonical', namespace = 'ens', after_state = jsonb_set(after_state, '{resolver}', to_jsonb($2::text)) WHERE event_kind = 'RecordChanged' AND block_number = $1")
+                .bind(last.number).bind(resolver).execute(&pool).await?;
+        }
+        // A later zero pointer must suppress this inventory even though node observations remain.
+        sqlx::query("UPDATE normalized_events SET after_state = jsonb_set(after_state, '{resolver}', to_jsonb('0x0000000000000000000000000000000000000000'::text)) WHERE event_kind = 'ResolverChanged'").execute(&pool).await?;
+        run(&pool, last, None, RunMode::Redo).await?;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM record_inventory_current WHERE resource_id = $1::uuid",
+        )
+        .bind(RESOURCE)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(count, 0);
+        database.cleanup().await?;
+    }
+    assert_eq!(final_rows[0], final_rows[1]);
+    assert_eq!(final_rows[0], final_rows[2]);
+    Ok(())
+}

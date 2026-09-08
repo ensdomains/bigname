@@ -19,6 +19,17 @@ impl From<SnapshotSelectionError> for ResolutionLookupError {
     }
 }
 
+/// What a fresh lookup produced when it did not fail: an executed response, or one of the
+/// engine's in-band refusals the route reports under its own public reason.
+pub(crate) enum ResolutionLookupOutcome {
+    Executed(Box<bigname_lookup::LookupResponse>),
+    /// The engine declared the name outside its supported classes.
+    NotSupported,
+    /// The name's selected authority arm is outside the arms the selected execution manifest
+    /// declares (`docs/manifests.md` § `verified_authority_arms`); nothing was dispatched.
+    AuthorityArmNotAdmitted,
+}
+
 /// Executes a fresh schema-v2 lookup. The lookup engine owns any guarded
 /// divergence-ledger write; the API never writes a legacy execution outcome.
 pub(crate) async fn execute_resolution_lookup(
@@ -26,9 +37,9 @@ pub(crate) async fn execute_resolution_lookup(
     row: &NameCurrentRow,
     records: &[ResolutionRecordKey],
     selected_snapshot: &mut SelectedSnapshot,
-) -> std::result::Result<Option<bigname_lookup::LookupResponse>, ResolutionLookupError> {
+) -> std::result::Result<ResolutionLookupOutcome, ResolutionLookupError> {
     if records.is_empty() {
-        return Ok(None);
+        return Ok(ResolutionLookupOutcome::NotSupported);
     }
 
     let logical_name_id = schema_v2_logical_name_id(row)?;
@@ -66,11 +77,16 @@ pub(crate) async fn execute_resolution_lookup(
                 "partial"
             };
             timer.finish(outcome);
-            Ok(Some(response))
+            Ok(ResolutionLookupOutcome::Executed(Box::new(response)))
         }
         Err(error) if error.kind() == bigname_lookup::ErrorKind::Unsupported => {
             timer.finish("unsupported");
-            Ok(None)
+            Ok(match error.refusal() {
+                Some(bigname_lookup::LookupRefusal::AuthorityArmNotAdmitted) => {
+                    ResolutionLookupOutcome::AuthorityArmNotAdmitted
+                }
+                _ => ResolutionLookupOutcome::NotSupported,
+            })
         }
         Err(error) => {
             timer.finish("failed");

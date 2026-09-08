@@ -28,6 +28,8 @@ mod calls {
         }
 
         function clear(bytes[] names) external;
+        function setTTL(bytes32 node, uint64 ttl) external;
+        function safeTransferFrom(address from, address to, uint256 tokenId, bytes data) external;
         function owner(bytes32 node) external view returns (address);
         function resolver(bytes32 node) external view returns (address);
         function getOwner(uint256 anyId) external view returns (address);
@@ -257,6 +259,50 @@ pub async fn reserve_eth_label(
     .await?;
     anyhow::ensure!(receipt.status_ok, "ENSv2 reservation for {label} reverted");
     Ok(receipt)
+}
+
+/// Exercise the existing-token ERC721 receiver with nonzero resolver and TTL pre-state.
+/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L91-L119 @ ens_v2@a971bd64)
+pub async fn migrate_unwrapped(
+    rpc: &RpcClient,
+    ens_v1: &EnsV1Deployment,
+    migration: &EnsV2MigrationDeployment,
+    owner: Address,
+    label: &str,
+) -> Result<TxReceipt> {
+    rpc.send_checked(
+        owner,
+        ens_v1.registry.address,
+        &calls::setTTLCall {
+            node: ens_v1::namehash(&format!("{label}.eth")),
+            ttl: 60,
+        }
+        .abi_encode(),
+        U256::ZERO,
+        "set pre-migration TTL",
+    )
+    .await?;
+    let data = calls::MigrationData {
+        label: label.to_owned(),
+        owner,
+        subregistry: Address::ZERO,
+        resolver: migration.ens_v1_resolver.address,
+    }
+    .abi_encode();
+    rpc.send_checked(
+        owner,
+        ens_v1.base_registrar.address,
+        &calls::safeTransferFromCall {
+            from: owner,
+            to: migration.unlocked_migration_controller.address,
+            tokenId: U256::from_be_bytes(keccak256(label.as_bytes()).0),
+            data: data.into(),
+        }
+        .abi_encode(),
+        U256::ZERO,
+        "migrate unwrapped registrar token",
+    )
+    .await
 }
 
 pub async fn migrate_unlocked_wrapped(

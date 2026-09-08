@@ -318,6 +318,17 @@ confirm the handoff table, nullable identifier columns, and range index exist an
 that the index is ready and valid with the query below.
 
 The release containing
+`20260911120000_normalized_events_emitter_history_idx.sql` adds the bounded
+emitter lookup used by the `GET /v1/events?contract_address=` filter and the
+registry-contract event count. On an initialized production namespace, build
+`normalized_events_emitter_history_idx` concurrently in step 3 with the
+reviewed statement below and validate that it is ready and valid. Then apply
+the schema-migration in step 4; its `IF NOT EXISTS` build is a no-op when the
+concurrent index is already valid. Do not allow the versioned schema-migration
+to perform the first build against a populated production `normalized_events`
+table.
+
+The release containing
 `20260904120000_project_redo_child_registration_history.sql` adds the bounded
 Interpret-to-Project handoff for child and registry identifiers from deleted
 ENSv1→ENSv2 [migration-registry](../glossary.md#migration-registry-wrapperregistry)
@@ -445,7 +456,16 @@ EXISTS (
       AND index_state.indisready
       AND pg_get_expr(index_state.indpred, index_state.indrelid, true)
           LIKE '%RegistrationReserved%'
-) AS normalized_events_reserved_registration_history_index_ready;
+) AS normalized_events_reserved_registration_history_index_ready,
+EXISTS (
+    SELECT 1
+    FROM pg_class index_relation
+    JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
+    WHERE index_relation.oid =
+          to_regclass('bigname_phase.normalized_events_emitter_history_idx')
+      AND index_state.indisvalid
+      AND index_state.indisready
+) AS normalized_events_emitter_history_index_ready;
 ```
 
 Apply the following index statements one at a time with the writer role. Do not
@@ -553,6 +573,13 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_basenames_record_node_
       AND event_kind IN ('RecordChanged', 'RecordVersionChanged')
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_emitter_history_idx
+    ON bigname_phase.normalized_events
+       (lower(raw_fact_ref ->> 'emitting_address'),
+        block_number DESC NULLS LAST, log_index DESC NULLS LAST,
+        normalized_event_id DESC)
+    WHERE raw_fact_ref ->> 'emitting_address' IS NOT NULL
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
 CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_chain_block_number_idx
     ON bigname_phase.name_surfaces (chain_id, block_number);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS surface_bindings_chain_block_number_idx
@@ -617,19 +644,22 @@ indexes are additive; rollback may leave them in place.
 3. for the release containing Issue #400, Issue #591, or
    `20260831150000_normalized_events_v2_expiry_scope_idx.sql`, or
    `20260902120000_normalized_events_basenames_record_node_resolver_idx.sql`,
+   or `20260911120000_normalized_events_emitter_history_idx.sql`,
    apply and validate the applicable concurrent baseline indexes above;
    otherwise skip this step;
    For the release containing
    `20260814130000_surface_binding_authority_arm.sql`, a populated phase schema
    cannot take the required `NOT NULL` column without the forbidden historical
    arm backfill. Before step 4, empty only the rebuildable binding rows and the
-   two current projections that reference them:
+   current projections that reference them. If the installed schema predates
+   `address_records_current`, omit that table from the statement:
 
    ```sql
    BEGIN;
    TRUNCATE TABLE
        bigname_phase.name_current,
        bigname_phase.address_names_current,
+       bigname_phase.address_records_current,
        bigname_phase.surface_bindings
        CONTINUE IDENTITY RESTRICT;
    COMMIT;
@@ -704,10 +734,10 @@ indexes are additive; rollback may leave them in place.
 10. confirm the phase state directly in the database while the API is still
    stopped — the `project` row in `chain_phase_state` current with no pending
    redo, and Verify success from the `verify` row for each affected chain plus
-   the supervisor's Verify completion output (`/v2/status` cannot be used here
+   the supervisor's Verify completion output (`/v1/status` cannot be used here
    because the API is stopped; after startup, the API accepts every known verification level at or above Sepolia's `quick_synced` floor and rejects unknown
    levels);
-11. start the API built from the same commit and confirm `/v2/status` reports
+11. start the API built from the same commit and confirm `/v1/status` reports
    current phase state and no pending redo; and
 12. run the release smoke and public-edge checks before undraining traffic.
 
@@ -758,7 +788,7 @@ Probe the host-private API listener:
 
 ```sh
 curl -fsS http://127.0.0.1:3000/healthz
-curl -fsS http://127.0.0.1:3000/v2/status
+curl -fsS http://127.0.0.1:3000/v1/status
 ```
 
 `api_status="ready"` proves the API can reach PostgreSQL. Aggregate readiness

@@ -116,6 +116,8 @@ impl PhaseLock {
                 result = &mut future => return result,
                 probed = &mut probe => probed?,
             }
+            // A slow probe must leave a full interval before the next one.
+            checks.reset();
         }
     }
 

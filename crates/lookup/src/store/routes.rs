@@ -8,8 +8,8 @@ use bigname_domain::{
 };
 
 use crate::{
-    BASENAMES_L1_RESOLVER_ROLE, ENS_UNIVERSAL_RESOLVER_ROLE, ETHEREUM_MAINNET_CHAIN_ID,
-    LookupError, Result, abi::ResolutionResultAbi,
+    BASENAMES_L1_RESOLVER_ROLE, ENS_UNIVERSAL_RESOLVER_ROLE, LookupError, Result,
+    abi::ResolutionResultAbi, ens_l1_chain,
 };
 
 use super::manifests;
@@ -41,20 +41,54 @@ pub(super) struct EntrypointAuthority {
     pub required_manifest_version: Option<i64>,
 }
 
+/// The execution entrypoint the engine uses for names of `namespace` whose selected resolver lives
+/// on `resource_chain_id`, or `None` when that pair has no verified route. This is the same table
+/// `entrypoint_authority` consults, exposed so the namespace metadata route reports exactly what
+/// the engine will execute.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VerifiedExecutionEntrypoint {
+    /// Source family whose manifest must declare the entrypoint contract.
+    pub source_family: SourceFamily,
+    /// Chain the entrypoint executes on; differs from the resource chain for Basenames.
+    pub chain_id: ChainId,
+    /// Whether a `shadow` manifest may serve as the entrypoint.
+    pub allow_shadow: bool,
+    /// Exact manifest version required, when the route pins one.
+    pub required_manifest_version: Option<i64>,
+}
+
+pub fn verified_execution_entrypoint(
+    namespace: Namespace,
+    resource_chain_id: ChainId,
+) -> Option<VerifiedExecutionEntrypoint> {
+    entrypoint_authority(namespace, resource_chain_id)
+        .ok()
+        .map(|authority| VerifiedExecutionEntrypoint {
+            source_family: authority.source_family,
+            chain_id: authority.chain_id,
+            allow_shadow: authority.allow_shadow,
+            required_manifest_version: authority.required_manifest_version,
+        })
+}
+
 pub(super) fn entrypoint_authority(
     namespace: Namespace,
     resolver_chain_id: ChainId,
 ) -> Result<EntrypointAuthority> {
     match (namespace, resolver_chain_id) {
-        (Namespace::Ens, ChainId::EthereumMainnet) => Ok(EntrypointAuthority {
-            source_family: SourceFamily::EnsExecution,
-            chain_id: ChainId::EthereumMainnet,
-            role: ENS_UNIVERSAL_RESOLVER_ROLE,
-            follow_ccip: false,
-            result_abi: ResolutionResultAbi::EnsUniversalResolver,
-            allow_shadow: true,
-            required_manifest_version: None,
-        }),
+        // ENS executes on the Ethereum L1 its deployment profile projects: Mainnet or Sepolia,
+        // through that chain's manifest-admitted Universal Resolver, under one set of rules.
+        (Namespace::Ens, ChainId::EthereumMainnet | ChainId::EthereumSepolia) => {
+            Ok(EntrypointAuthority {
+                source_family: SourceFamily::EnsExecution,
+                chain_id: resolver_chain_id,
+                role: ENS_UNIVERSAL_RESOLVER_ROLE,
+                follow_ccip: false,
+                result_abi: ResolutionResultAbi::EnsUniversalResolver,
+                allow_shadow: true,
+                required_manifest_version: None,
+            })
+        }
         (Namespace::Basenames, ChainId::BaseMainnet) => Ok(EntrypointAuthority {
             source_family: SourceFamily::BasenamesExecution,
             chain_id: ChainId::EthereumMainnet,
@@ -124,13 +158,16 @@ pub(super) fn preflight_route_policy(
 }
 
 pub(super) fn classify_lookup_route(candidate: DiscoveryRouteCandidate<'_>) -> LookupRoute {
+    let Some(chain) = ens_l1_chain(candidate.resource_chain_id) else {
+        return LookupRoute::Projected;
+    };
     if candidate.namespace == Namespace::Ens
-        && candidate.resource_chain_id == ETHEREUM_MAINNET_CHAIN_ID
         && candidate.exact_resolver_is_null
         && is_ens_universal_resolver_discovery_topology(
             candidate.topology,
             candidate.path,
             candidate.logical_name_id,
+            chain,
         )
         && !candidate.dns_name.is_empty()
         && crate::abi::parse_node(candidate.namehash).is_ok()
@@ -149,7 +186,7 @@ pub(super) fn classify_absent_topology_route(
     dns_name: &[u8],
     exact_resolver_is_null: bool,
 ) -> Option<ResolutionTopology> {
-    let topology = direct_null_topology(logical_name_id);
+    let topology = direct_null_topology(logical_name_id, ens_l1_chain(resource_chain_id)?);
     (classify_lookup_route(DiscoveryRouteCandidate {
         namespace,
         resource_chain_id,
@@ -163,7 +200,7 @@ pub(super) fn classify_absent_topology_route(
         .then_some(topology)
 }
 
-fn direct_null_topology(logical_name_id: &str) -> ResolutionTopology {
+fn direct_null_topology(logical_name_id: &str, chain: ChainId) -> ResolutionTopology {
     ResolutionTopology {
         status: None,
         unsupported_reason: None,
@@ -175,7 +212,7 @@ fn direct_null_topology(logical_name_id: &str) -> ResolutionTopology {
             normalized_name: None,
             canonical_display_name: None,
             resource_id: None,
-            chain_id: Some(ChainId::EthereumMainnet),
+            chain_id: Some(chain),
             address: None,
             latest_event_kind: None,
         }]),
@@ -204,9 +241,13 @@ fn direct_null_topology(logical_name_id: &str) -> ResolutionTopology {
 pub(super) fn selected_resolver(
     route: LookupRoute,
     topology: &ResolutionTopology,
+    resource_chain_id: &str,
 ) -> Result<(ChainId, EvmAddress)> {
     if route == LookupRoute::EnsUniversalResolverDiscovery {
-        return Ok((ChainId::EthereumMainnet, EvmAddress::from_bytes([0_u8; 20])));
+        let chain = ens_l1_chain(resource_chain_id).ok_or_else(|| {
+            LookupError::unsupported("Universal Resolver discovery is outside the ENS L1 chains")
+        })?;
+        return Ok((chain, EvmAddress::from_bytes([0_u8; 20])));
     }
     let hop = topology
         .resolver_path
@@ -225,6 +266,7 @@ pub(super) fn is_ens_universal_resolver_discovery_topology(
     topology: &ResolutionTopology,
     path: ResolutionRoute,
     logical_name_id: &str,
+    chain: ChainId,
 ) -> bool {
     let Some([hop]) = topology.resolver_path.as_deref() else {
         return false;
@@ -235,7 +277,7 @@ pub(super) fn is_ens_universal_resolver_discovery_topology(
             .as_ref()
             .is_some_and(Vec::is_empty)
         && hop.logical_name_id.as_deref() == Some(logical_name_id)
-        && matches!(hop.chain_id, None | Some(ChainId::EthereumMainnet))
+        && hop.chain_id.is_none_or(|hop_chain| hop_chain == chain)
         && hop
             .address
             .is_none_or(|address| address == EvmAddress::from_bytes([0_u8; 20]))
@@ -246,6 +288,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::{ETHEREUM_MAINNET_CHAIN_ID, ETHEREUM_SEPOLIA_CHAIN_ID};
 
     const LOGICAL_NAME_ID: &str =
         "ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec";
@@ -349,6 +392,94 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    #[test]
+    fn sepolia_is_an_ens_l1_under_the_mainnet_discovery_rules() {
+        let mut sepolia = topology();
+        sepolia["resolver_path"][0]["chain_id"] = json!(ETHEREUM_SEPOLIA_CHAIN_ID);
+        assert_eq!(
+            route(
+                sepolia.clone(),
+                Namespace::Ens,
+                ETHEREUM_SEPOLIA_CHAIN_ID,
+                NAMEHASH,
+                true,
+                b"\x05alice\x03eth\0",
+            ),
+            LookupRoute::EnsUniversalResolverDiscovery
+        );
+        // The projected hop must name the resource chain, in both directions.
+        assert_eq!(
+            route(
+                topology(),
+                Namespace::Ens,
+                ETHEREUM_SEPOLIA_CHAIN_ID,
+                NAMEHASH,
+                true,
+                b"\x05alice\x03eth\0",
+            ),
+            LookupRoute::Projected
+        );
+        assert_eq!(
+            route(
+                sepolia,
+                Namespace::Ens,
+                ETHEREUM_MAINNET_CHAIN_ID,
+                NAMEHASH,
+                true,
+                b"\x05alice\x03eth\0",
+            ),
+            LookupRoute::Projected
+        );
+
+        let absent = classify_absent_topology_route(
+            Namespace::Ens,
+            ETHEREUM_SEPOLIA_CHAIN_ID,
+            LOGICAL_NAME_ID,
+            NAMEHASH,
+            b"\x05alice\x03eth\0",
+            true,
+        )
+        .expect("sepolia direct null shape must be admitted");
+        assert_eq!(
+            absent
+                .resolver_path
+                .as_deref()
+                .and_then(|path| path.first())
+                .and_then(|hop| hop.chain_id),
+            Some(ChainId::EthereumSepolia)
+        );
+        assert_eq!(
+            selected_resolver(
+                LookupRoute::EnsUniversalResolverDiscovery,
+                &absent,
+                ETHEREUM_SEPOLIA_CHAIN_ID
+            )
+            .expect("discovery selects the null resolver on the resource chain"),
+            (ChainId::EthereumSepolia, EvmAddress::from_bytes([0_u8; 20]))
+        );
+        assert!(
+            selected_resolver(
+                LookupRoute::EnsUniversalResolverDiscovery,
+                &absent,
+                "base-mainnet"
+            )
+            .is_err()
+        );
+
+        for chain in [ChainId::EthereumMainnet, ChainId::EthereumSepolia] {
+            let authority = entrypoint_authority(Namespace::Ens, chain)
+                .expect("ENS L1 chains have an execution entrypoint");
+            assert_eq!(authority.chain_id, chain);
+            assert_eq!(authority.source_family, SourceFamily::EnsExecution);
+            assert_eq!(authority.role, ENS_UNIVERSAL_RESOLVER_ROLE);
+            assert!(authority.allow_shadow);
+            assert!(!authority.follow_ccip);
+            assert_eq!(authority.required_manifest_version, None);
+        }
+        assert!(entrypoint_authority(Namespace::Ens, ChainId::BaseMainnet).is_err());
+        assert!(entrypoint_authority(Namespace::Basenames, ChainId::EthereumSepolia).is_err());
     }
 
     #[test]

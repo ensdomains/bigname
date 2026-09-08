@@ -812,7 +812,7 @@ fn codegen_dependency_closure(packages: &[LockedPackage], root_package: &str) ->
             packages[index]
                 .dependencies
                 .iter()
-                .map(|dependency| dependency_target(&packages, dependency)),
+                .map(|dependency| dependency_target(packages, dependency)),
         );
     }
 
@@ -830,7 +830,7 @@ fn codegen_dependency_closure(packages: &[LockedPackage], root_package: &str) ->
             packages[index]
                 .dependencies
                 .iter()
-                .map(|dependency| dependency_target(&packages, dependency)),
+                .map(|dependency| dependency_target(packages, dependency)),
         );
     }
 

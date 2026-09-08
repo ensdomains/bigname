@@ -34,15 +34,15 @@ const SUMMARY_SELECT_COLUMNS: &str = r#"
             'enumeration_basis', 'resource_permissions',
             'unsupported_reason', 'operator_approval_surfaces_not_ingested'
         )
-        WHEN summary.unsupported_reason = 'ensv1_wrapper_holder_permissions_not_projected'
+        WHEN summary.unsupported_reason = 'wrapper_parent_and_resolver_delegation_not_projected'
         THEN jsonb_build_object(
-            'status', 'unsupported',
-            'exhaustiveness', 'not_applicable',
+            'status', 'partial',
+            'exhaustiveness', 'best_effort',
             'source_classes_considered', jsonb_build_array(
                 'permissions_current', 'ens_v1_wrapper_l1'
             ),
             'enumeration_basis', 'resource_permissions',
-            'unsupported_reason', 'ensv1_wrapper_holder_permissions_not_projected'
+            'unsupported_reason', 'wrapper_parent_and_resolver_delegation_not_projected'
         )
         ELSE jsonb_build_object(
             'status', 'partial',
@@ -52,6 +52,7 @@ const SUMMARY_SELECT_COLUMNS: &str = r#"
             'unsupported_reason', 'resource_permission_authority_not_projected'
         )
     END AS coverage,
+    summary.resource_restrictions,
     summary.provenance,
     summary.chain_positions,
     summary.canonicality_summary,
@@ -99,4 +100,28 @@ pub async fn load_permissions_current_resource_summaries(
         )
     })?;
     Ok(rows.into_iter().map(|row| (row.resource_id, row)).collect())
+}
+
+/// Namespace membership for resource audit reads, including registrations with no current name.
+pub async fn permission_resource_matches_namespace(
+    pool: &PgPool,
+    resource_id: Uuid,
+    namespace: &str,
+) -> Result<bool> {
+    sqlx::query_scalar(
+        r#"SELECT EXISTS (
+            SELECT 1 FROM bigname_phase.normalized_events ne
+            JOIN bigname_phase.chain_lineage lineage
+              ON lineage.chain_id = ne.chain_id AND lineage.block_hash = ne.block_hash
+            WHERE ne.resource_id = $1 AND ne.namespace = $2
+              AND ne.consumer_visibility = 'activated'
+              AND ne.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+        )"#,
+    )
+    .bind(resource_id)
+    .bind(namespace)
+    .fetch_one(pool)
+    .await
+    .context("failed to check permission resource namespace")
 }

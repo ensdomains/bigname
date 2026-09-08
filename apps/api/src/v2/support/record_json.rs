@@ -22,6 +22,19 @@ pub(crate) fn direct_json_field<'a>(value: &'a JsonValue, key: &str) -> Option<&
     value.get(key)
 }
 
+/// The record inventory row a route may take indexed record values from: the row whose coverage
+/// is authoritative under the same test the domain evaluator applies. An `unsupported` row (for
+/// example a name behind a resolver whose implementation is not an admitted profile) filters to
+/// `None`, so convenience maps and `unsupported_fields` treat it exactly like a missing inventory
+/// while the per-key answers still carry the row's own reason (docs/api-v2-routes.md).
+pub(crate) fn serving_record_inventory(
+    record_inventory: Option<&bigname_storage::RecordInventoryCurrentRow>,
+) -> Option<&bigname_storage::RecordInventoryCurrentRow> {
+    record_inventory.filter(|inventory| {
+        bigname_domain::resolver_read::coverage_is_authoritative(&inventory.coverage)
+    })
+}
+
 pub(crate) fn record_addresses_from_entries(
     entries: Option<&JsonValue>,
     field: JsonFieldAccessor,

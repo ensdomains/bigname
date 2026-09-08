@@ -640,7 +640,7 @@ fn phase_permission_summary_support(
         }
         Some("wrapper") => (
             "unsupported",
-            Some("ensv1_wrapper_holder_permissions_not_projected"),
+            Some("wrapper_parent_and_resolver_delegation_not_projected"),
         ),
         _ => (
             "unsupported",
@@ -678,12 +678,13 @@ async fn upsert_phase_permissions_current_resource_summary(
         INSERT INTO bigname_phase.permissions_current_resource_summary (
             resource_id, authority_kind, root_resource_id, support_status,
             unsupported_reason, provenance, chain_positions, canonicality_summary,
-            manifest_version, last_recomputed_at
+            manifest_version, last_recomputed_at, resource_restrictions
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (resource_id) DO UPDATE SET
             authority_kind = EXCLUDED.authority_kind,
             root_resource_id = EXCLUDED.root_resource_id,
+            resource_restrictions = EXCLUDED.resource_restrictions,
             support_status = EXCLUDED.support_status,
             unsupported_reason = EXCLUDED.unsupported_reason,
             provenance = EXCLUDED.provenance,
@@ -703,6 +704,7 @@ async fn upsert_phase_permissions_current_resource_summary(
     .bind(canonicality_summary)
     .bind(row.manifest_version)
     .bind(row.last_recomputed_at)
+    .bind(&row.resource_restrictions)
     .execute(pool)
     .await?;
     Ok(())
@@ -1622,6 +1624,33 @@ impl TestDatabase {
         Ok(())
     }
 
+    /// The Sepolia deployment profile's counterpart of
+    /// `seed_default_ens_primary_name_fallback_context`: one readable `ethereum-sepolia`
+    /// position under the `ethereum-sepolia` slot and a shadow `ens_execution` manifest on that
+    /// chain, with no Mainnet head at all.
+    async fn seed_default_sepolia_ens_primary_name_fallback_context(&self) -> Result<()> {
+        self.seed_snapshot_selector_chain_positions(&json!({
+            "ethereum-sepolia": {
+                "chain_id": "ethereum-sepolia",
+                "block_number": 21_000_003,
+                "block_hash": "0xbinding",
+                "timestamp": "2026-04-17T00:00:03Z"
+            }
+        }))
+        .await?;
+        self.insert_manifest(
+            "ens",
+            bigname_lookup::ENS_EXECUTION_SOURCE_FAMILY,
+            "ethereum-sepolia",
+            "ens_v1",
+            1,
+            "shadow",
+            bigname_domain::normalization::ENS_NORMALIZER_VERSION,
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn insert_primary_name_current_claim_row(
         &self,
         address: &str,
@@ -1791,12 +1820,34 @@ async fn seed_schema_v2_ens_manifest(
     contract_instance_id: Uuid,
     resolution_capability: bool,
 ) -> Result<()> {
+    seed_schema_v2_ens_manifest_on_chain(
+        pool,
+        "ethereum-mainnet",
+        source_family,
+        role,
+        address,
+        contract_instance_id,
+        resolution_capability,
+    )
+    .await
+}
+
+async fn seed_schema_v2_ens_manifest_on_chain(
+    pool: &PgPool,
+    chain_id: &str,
+    source_family: &str,
+    role: &str,
+    address: &str,
+    contract_instance_id: Uuid,
+    resolution_capability: bool,
+) -> Result<()> {
     sqlx::query(
         "INSERT INTO contract_instances
             (contract_instance_id, chain_id, contract_kind)
-         VALUES ($1, 'ethereum-mainnet', 'contract')",
+         VALUES ($1, $2, 'contract')",
     )
     .bind(contract_instance_id)
+    .bind(chain_id)
     .execute(pool)
     .await?;
     let manifest_payload = if resolution_capability {
@@ -1812,24 +1863,26 @@ async fn seed_schema_v2_ens_manifest(
         "INSERT INTO manifest_versions
             (manifest_version, namespace, source_family, chain_id, deployment_label,
              rollout_status, normalizer_version, file_path, manifest_payload)
-         VALUES (1, 'ens', $1, 'ethereum-mainnet', 'api-test', 'active', 'test', $2, $3)
+         VALUES (1, 'ens', $1, $4, 'api-test', 'active', 'test', $2, $3)
          RETURNING manifest_id",
     )
     .bind(source_family)
     .bind(format!("test/ens/{source_family}.toml"))
     .bind(manifest_payload)
+    .bind(chain_id)
     .fetch_one(pool)
     .await?;
     sqlx::query(
         "INSERT INTO manifest_contract_instances
             (manifest_id, chain_id, declaration_kind, declaration_name,
              contract_instance_id, declared_address, role, proxy_kind)
-         VALUES ($1, 'ethereum-mainnet', 'contract', $2, $3, $4, $2, 'none')",
+         VALUES ($1, $5, 'contract', $2, $3, $4, $2, 'none')",
     )
     .bind(manifest_id)
     .bind(role)
     .bind(contract_instance_id)
     .bind(address)
+    .bind(chain_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -2218,9 +2271,30 @@ async fn seed_schema_v2_ens_primary_name_authority(
     block_hash: &str,
     timestamp: &str,
 ) -> Result<()> {
-    seed_schema_v2_ens_lookup_head(pool, block_number, block_hash, timestamp).await?;
-    seed_schema_v2_ens_manifest(
+    seed_schema_v2_ens_primary_name_authority_on_chain(
         pool,
+        "ethereum-mainnet",
+        block_number,
+        block_hash,
+        timestamp,
+    )
+    .await
+}
+
+/// Readable head plus the registry and Universal Resolver manifests primary-name lookup selects,
+/// on the given ENS L1 chain. The Universal Resolver proxy address is the same on Mainnet and
+/// Sepolia.
+async fn seed_schema_v2_ens_primary_name_authority_on_chain(
+    pool: &PgPool,
+    chain_id: &str,
+    block_number: i64,
+    block_hash: &str,
+    timestamp: &str,
+) -> Result<()> {
+    seed_schema_v2_lookup_head(pool, chain_id, block_number, block_hash, timestamp).await?;
+    seed_schema_v2_ens_manifest_on_chain(
+        pool,
+        chain_id,
         "ens_v1_registry_l1",
         "registry",
         "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e",
@@ -2228,8 +2302,9 @@ async fn seed_schema_v2_ens_primary_name_authority(
         false,
     )
     .await?;
-    seed_schema_v2_ens_manifest(
+    seed_schema_v2_ens_manifest_on_chain(
         pool,
+        chain_id,
         "ens_execution",
         "universal_resolver",
         "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
@@ -2832,7 +2907,7 @@ fn permission_current_resource_summary(
         Some(kind) if PHASE_PROJECTED_PERMISSION_AUTHORITY_KINDS.contains(&kind) => {
             bigname_storage::ResourcePermissionCoverage::operator_approval_surfaces_not_ingested()
         }
-        Some("wrapper") => bigname_storage::ResourcePermissionCoverage::ensv1_wrapper_holder_permissions_not_projected(),
+        Some("wrapper") => bigname_storage::ResourcePermissionCoverage::wrapper_parent_and_resolver_delegation_not_projected(),
         _ => bigname_storage::ResourcePermissionCoverage::resource_authority_not_projected(),
     };
     bigname_storage::PermissionsCurrentResourceSummary {
@@ -2840,6 +2915,7 @@ fn permission_current_resource_summary(
         authority_kind,
         root_resource_id: None,
         coverage,
+        resource_restrictions: None,
         provenance: json!({
             "derivation_kind": "permissions_current_resource_summary_rebuild",
             "chain_id": "ethereum-mainnet",

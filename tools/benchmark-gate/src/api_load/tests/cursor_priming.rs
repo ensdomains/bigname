@@ -23,7 +23,7 @@ async fn cursor_priming_continues_past_the_fixed_prefix() {
     });
     let base = normalized_base_url(&format!("http://{address}")).unwrap();
     let requests = (0..3)
-        .map(|index| get(&base, &["v2", "events", &index.to_string()], &[]).unwrap())
+        .map(|index| get(&base, &["v1", "events", &index.to_string()], &[]).unwrap())
         .collect::<Vec<_>>();
 
     let primed = prime_cursor_variants(&Client::new(), "events", requests, 2, 10)
@@ -65,7 +65,7 @@ async fn cursor_priming_exhausts_the_corpus_without_inventing_a_cursor() {
     });
     let base = normalized_base_url(&format!("http://{address}")).unwrap();
     let requests = (0..3)
-        .map(|index| get(&base, &["v2", "events", &index.to_string()], &[]).unwrap())
+        .map(|index| get(&base, &["v1", "events", &index.to_string()], &[]).unwrap())
         .collect::<Vec<_>>();
 
     let primed = prime_cursor_variants(&Client::new(), "events", requests, 2, 10)
@@ -109,7 +109,7 @@ async fn cursor_priming_deduplicates_identical_resumed_requests() {
         }
     });
     let base = normalized_base_url(&format!("http://{address}")).unwrap();
-    let seed = get(&base, &["v2", "events"], &[]).unwrap();
+    let seed = get(&base, &["v1", "events"], &[]).unwrap();
 
     let primed = prime_cursor_variants(&Client::new(), "events", vec![seed.clone(), seed], 2, 10)
         .await

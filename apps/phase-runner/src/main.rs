@@ -7,7 +7,6 @@ use phase_runner::{
     cli::{
         Cli, RedoChains, ResolvedCommand, resolve_all_redo_chains, validate_redo_attestation_chains,
     },
-    config::{COMPILED_CHAIN_NAMESPACES, validate_deployment_table_set},
     database::{RunnerDatabase, VerificationDatabase},
     ingest_phase::IngestPhase,
     interpret_phase::InterpretPhase,
@@ -21,9 +20,11 @@ use tokio_util::sync::CancellationToken;
 
 #[path = "main_manifests.rs"]
 mod manifests;
+use manifests::{bind_runtime_manifests, hash_manifests_off_runtime};
 #[cfg(test)]
-use manifests::load_hashed_manifest_repository;
-use manifests::{hash_manifests_off_runtime, sync_manifests};
+use manifests::{load_hashed_manifest_repository, prepare_runtime_manifests};
+#[cfg(test)]
+use phase_runner::config::{COMPILED_CHAIN_NAMESPACES, validate_deployment_table_set};
 use phase_runner::manifest_startup::sync_loaded_manifests;
 
 #[tokio::main]
@@ -46,7 +47,7 @@ async fn main() -> Result<()> {
             metrics_bind_addr,
             heartbeat_stale_after_secs,
             manifests_root,
-            runtime,
+            mut runtime,
             hydration_rpc_urls,
         } => {
             // Only the supervised run and an explicit redo poll the token; the
@@ -57,9 +58,10 @@ async fn main() -> Result<()> {
             let startup = async {
                 let (manifest_repository, manifest_profile) =
                     hash_manifests_off_runtime(manifests_root.clone()).await??;
-                validate_deployment_table_set(
-                    &runtime.chains,
-                    COMPILED_CHAIN_NAMESPACES.iter().copied(),
+                bind_runtime_manifests(
+                    &manifest_repository,
+                    manifest_profile,
+                    Arc::make_mut(&mut runtime.chains),
                 )?;
                 let connections = u32::try_from(runtime.chains.len())
                     .unwrap_or(u32::MAX)
@@ -145,7 +147,7 @@ async fn main() -> Result<()> {
                 .context("register the stop signals before starting")?;
             let startup = async {
                 let database = RunnerDatabase::connect(&database_url, 4).await?;
-                let chains = match chains {
+                let mut chains = match chains {
                     RedoChains::Explicit(chains) => chains,
                     RedoChains::All { sources } => {
                         resolve_all_redo_chains(
@@ -156,15 +158,17 @@ async fn main() -> Result<()> {
                         .await?
                     }
                 };
-                validate_deployment_table_set(&chains, COMPILED_CHAIN_NAMESPACES.iter().copied())?;
-                anyhow::Ok((database, chains))
+                let (manifest_repository, manifest_profile) =
+                    hash_manifests_off_runtime(manifests_root.clone()).await??;
+                bind_runtime_manifests(&manifest_repository, manifest_profile, &mut chains)?;
+                anyhow::Ok((database, chains, manifest_repository, manifest_profile))
             };
             // Nothing durable happens before this point, so a stop here is a redo
             // that never started. Manifest synchronization is the first commit: a
             // changed manifest can retire hashes or install required Ingest work,
             // so a stop from here on is reported as something to rerun, never as a
             // no-op, whether or not the commit made it.
-            let Some((database, chains)) =
+            let Some((database, chains, manifest_repository, manifest_profile)) =
                 phase_runner::shutdown::until_cancelled(&cancellation, startup).await?
             else {
                 tracing::info!("stop requested during start-up; the redo never started");
@@ -172,7 +176,12 @@ async fn main() -> Result<()> {
             };
             let synchronized = phase_runner::shutdown::until_cancelled(
                 &cancellation,
-                sync_manifests(database.pool(), &manifests_root),
+                sync_loaded_manifests(
+                    database.pool(),
+                    &manifests_root,
+                    &manifest_repository,
+                    manifest_profile,
+                ),
             )
             .await?;
             if synchronized.is_none() {
@@ -339,6 +348,10 @@ fn require_clean_supervisor_exit(report: SupervisorReport) -> Result<()> {
         report.stopped_chains.len()
     )
 }
+
+#[cfg(test)]
+#[path = "main/startup_tests.rs"]
+mod startup_tests;
 
 #[cfg(test)]
 mod tests {

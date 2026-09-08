@@ -1,5 +1,9 @@
 # API v2
 
+> **Prefix note (#315):** the public route prefix is now `/v1`. This file's
+> name (`api-v2`) is historical, naming the ADR 0006 contract generation; it
+> is not the wire prefix. A rename of the contract docs is tracked separately.
+
 Development-time contract for the API surface accepted in
 [ADR 0006](adrs/0006-api-v2-product-surface.md). Per-route reference lives in
 [`api-v2-routes.md`](api-v2-routes.md). This surface has no generated OpenAPI
@@ -21,10 +25,10 @@ artifact.
 
 ## Versioning
 
-The binary serves this contract under `/v2`; the old v1 REST surface has been
-deleted. The production edge does not expose `/v2` until the maintainer-gated
-C3 edge flip. These docs define the currently served internal REST contract,
-not the public-edge rollout state.
+The binary serves this contract under `/v1`; the old v1 REST surface was
+deleted before this contract took over the prefix (#315), and no `/v2` prefix
+is served. The production edge admits `/v1` reads, `POST /v1/lookup`, and
+GraphQL; see [`production.md`](production.md#public-edge) for the edge policy.
 
 ## GraphQL compatibility
 
@@ -58,7 +62,7 @@ step-3-gate vocabulary needed by the route schemas:
 
 | `v2` name | Meaning | Replaces (`v1`) |
 | --- | --- | --- |
-| `name` | the ENSIP-15 normalized name string, except on routes that document an explicit [non-name form](glossary.md#non-name-form) for a label bigname cannot state as a name — today only `GET /v2/names/{name}/subnames` | `normalized_name`, `logical_name_id` (derivable as `namespace:name`) |
+| `name` | the ENSIP-15 normalized name string, except on routes that document an explicit [non-name form](glossary.md#non-name-form) for a label bigname cannot state as a name — today only `GET /v1/names/{name}/subnames` | `normalized_name`, `logical_name_id` (derivable as `namespace:name`) |
 | `display_name` | display form of the name | `canonical_display_name` |
 | `namespace` | public namespace slug used to resolve a name or filter a route, such as `ens` or `basenames` | `namespace` path segment/query usage (unchanged; now echoed consistently) |
 | `namehash` | ENS namehash hex string | `namehash` (unchanged) |
@@ -66,15 +70,21 @@ step-3-gate vocabulary needed by the route schemas:
 | `owner` | token/registry owner | `token_holder`, `owner`, `owner_address`, `registry_owner` |
 | `manager` | controller/manager | `effective_controller`, `manager_address` |
 | `registrant` | registrant | `registrant` (unchanged) |
-| `relation` | address-to-name relation filter: one or more of `owner`, `manager`, `registrant` (comma-separated set); `any` = all three | four divergent relation/role enums incl. `owned`/`managed`/`both` (partner `BOTH` = `owner,manager`) |
-| `relations` | address-to-name relations that matched a row, using `owner`, `manager`, and `registrant` values | `relation_facets`, role-specific match arrays |
-| `expires_at` | expiry, RFC 3339 | `expiry_date`, `expiration` (unix), `expiry` |
+| `relation` | address-to-name relation filter: one or more of the authority relations `owner`, `manager`, `registrant` (comma-separated set); `any` = all three; or, on its own, the resolver-record relation `resolves_to` (names whose current `addr:<coin_type>` record resolves to the address, coin type from `coin_type`, default `60`). `resolves_to` is not part of `any` and cannot be combined with an authority relation | four divergent relation/role enums incl. `owned`/`managed`/`both` (partner `BOTH` = `owner,manager`); ensjs `resolvedAddress` |
+| `relations` | address-to-name relations that matched a row, using `owner`, `manager`, `registrant`, and `resolves_to` values | `relation_facets`, role-specific match arrays |
+| `resolution` | on a `resolves_to` row only: `{coin_type, record_key}`, the coin type asked about and the resolver record key that answered it (`addr:<coin_type>`, or `addr:2147483648` when the ENSIP-19 default EVM address answered) | subgraph `resolver.coinTypes` |
+| `expires_at` | expiry, RFC 3339: the registrar lease for registrar-backed names; for a wrapped ENSv1 name with no registrar lease (a wrapped subname) the NameWrapper entry's expiry, which is the only expiry the chain holds for it (zero means the parent set none and the field is omitted) | `expiry_date`, `expiration` (unix), `expiry` |
 | `registered_at` | current registration start, RFC 3339 | `registration_date` |
 | `created_at` | first observation of the name, RFC 3339 | `created_at` (now defined and distinguished from `registered_at`) |
 | `registration_status` | registration/control lifecycle label: `active`, `wrapped`, `registered`, `released`, or `unregistered` | `ControlVector.status`, role-summary `status` |
 | `wrapper_state` | bigname's current ENSv1 NameWrapper lifecycle value: [`wrapped`](glossary.md#wrapped-namewrapper-state), [`emancipated`](glossary.md#emancipated-namewrapper-state), or [`locked`](glossary.md#locked-namewrapper-state); omitted when the current name is not in one of those states | raw NameWrapper fuse bitmap |
 | `wrapper_fuses` | typed summary of the current [expiry-effective NameWrapper fuse word](glossary.md#expiry-effective-namewrapper-fuse-word); present exactly when `wrapper_state` is present | raw NameWrapper fuse bitmap |
 | `fuses` | uint32 fuse word nested in `wrapper_fuses`; it is zero after wrapper expiry even though normalized events retain their expiry-unadjusted interpreted word | raw NameWrapper fuse bitmap |
+| `restrictions` | the [resource restrictions](glossary.md#resource-restrictions) of a registration, constraints that bind the registration itself rather than any one account: `{registration_id, kind, ...}` where `kind` is `ens_v1_wrapper` (with `wrapper_state`, `wrapper_fuses`, `wrapper_expires_at`) or `ens_v2_registry` (with `locked_roles`); see [resource restrictions](#resource-restrictions) | new in v2 |
+| `wrapper_expires_at` | RFC 3339 NameWrapper entry expiry inside an `ens_v1_wrapper` `restrictions` object; for a wrapped `.eth` second-level name it is the registrar expiry plus the 90-day grace period NameWrapper stores, so it is later than that name's `expires_at` | `expiry` on NameWrapper events |
+| `locked_roles` | inside an `ens_v2_registry` `restrictions` object: the token-scoped registry roles whose assignment can no longer change because no account holds the corresponding admin role on the registration or its registry root | new in v2 |
+| `authority` | the protocol arm that supplies the row's current registration and control fields: `ens_v1` or `ens_v2` (the selected [authority epoch](glossary.md#authority-epoch) arm). Omitted when the projection selected no ENSv1/ENSv2 arm — Basenames names have no era split, and an `unsupported` name detail object carries no registration fields | new in v2; the zigens `Domain.protocol` / `isMigrated` concept |
+| `migrated_at` | RFC 3339 block time of the activated `MigrationApplied` [migration boundary](glossary.md#migration-boundary) that proved the row's current `ens_v2` authority through an ENSv1→ENSv2 [migration authority transition](glossary.md#migration-authority-transition). Present only with `authority=ens_v2`; a name registered directly in ENSv2, or one still on `ens_v1`, omits it | new in v2 |
 | `primary_name` | primary name selected or claimed for an address/coin tuple | `claimed_primary_name`, `verified_primary_name` when surfaced as the selected name |
 | `primary_address` | primary/default address value for a name | `primary_address` (unchanged) |
 | `is_primary` | whether an address-name row is the selected primary answer for that address/coin tuple | `is_primary` (unchanged) |
@@ -84,6 +94,9 @@ step-3-gate vocabulary needed by the route schemas:
 | `text_records` | text-key-to-value map | `text_records` (unchanged) |
 | `content_hash` | contenthash value | `content_hash` (unchanged) |
 | `resolver` | `{chain_id, address}` | `resolver_address`, `current_resolver`, declared resolver summaries |
+| `subregistry` | `{chain_id, address}` of the ENSv2 registry a name's current subregistry pointer targets; omitted when there is none | `SubregistryChanged` after-state `subregistry` |
+| `parent_registry` | `{chain_id, address}` of the registry that emitted the pointer to a registry; `null` for the root registry | `SubregistryChanged` emitter |
+| `contract_address` | event filter for the contract that emitted an event's source log | `emitting_address` |
 | `chain_id` | numeric EVM chain id (`1`, `8453`); string-keyed in maps | string chain ids (`"ethereum-mainnet"`), position slot keys |
 | `network` | display slug (`ethereum`, `base`) | `network` (unchanged, display-only) |
 | `registration_id` | the one opaque stable handle for a registration lifecycle | `resource_id`, `resource_hex`, `resource`, `token_lineage_id`, `surface_binding_id` |
@@ -97,7 +110,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `at` | snapshot selector parameter for routes that support point-in-time reads | `chain_positions` query parameter and timestamp-specific ad hoc selectors |
 | `include` | route-documented expansion allowlist | comma-separated expansion flags, `meta` knobs, and route-specific include flags |
 | `sort` | route-documented sort field | `sort` (unchanged; allowed fields are now route-documented) |
-| `order` | sort direction, `asc` or `desc` | `order` (unchanged) |
+| `order` | sort direction, `asc` or `desc`; history collections default to `desc` (newest first) and treat `asc` as the exact reverse | `order` (unchanged) |
 | `scope` (history) | `name`, `registration`, `both` | `surface`, `resource`, `both` |
 | `grant_scope` | the protocol scope of a permission row: `root`, `registry`, `registration`, `resolver`, or `record_manager` | permission-row `scope` (renamed so history `scope` and permission scope are two names for two concepts) |
 | `verification` | typed checked-answer summary for claimed-vs-verified answers | `verified_state`, `verified_primary_name` section wrappers |
@@ -105,7 +118,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `unsupported_reason` | reason code or short reason string required with `status=unsupported` | `coverage.unsupported_reason`, route-specific unsupported details |
 | `failure_reason` | reason code or short reason string for `failed`, `stale`, `not_found`, or `mismatch` details | route-specific failure detail fields |
 | `completeness` | `full`, `partial`, `unsupported` | `coverage.status` on product routes (full taxonomy moves to diagnostics) |
-| `powers` | effective permission powers; storage `resource_control` is exposed as `registration_control`; ENSv2 registry `was_reserved` is a non-authorizing history marker retained here so marker-only transitions remain visible (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@a971bd64) | `effective_powers` |
+| `powers` | effective permission powers, drawn from the [permission powers vocabulary](#permission-powers-vocabulary); storage `resource_control` is exposed as `registration_control`; ENSv2 registry `was_reserved` is a non-authorizing history marker retained here so marker-only transitions remain visible (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@a971bd64) | `effective_powers` |
 | `unsupported_fields` | fields or expansions that could not be served or proved for a response item | `unsupported_filters`, coverage-derived unsupported field lists |
 | `keys` | comma-separated resolver record-key allowlist | `records` query parameter, selector token lists in record diagnostics |
 | `page` | pagination object on top-level collections, per-input lookup results, and the resolver overview `bound_names` nested collection | pagination sections with divergent field subsets |
@@ -119,8 +132,8 @@ step-3-gate vocabulary needed by the route schemas:
 | `record_count` | count of known record keys when requested | `record_count` (unchanged) |
 | `role_summary` | grouped permission powers for dashboard-style name rows | `role_summary` (unchanged; rewritten to dictionary field names inside) |
 | `authority_context` | required permission-row marker from the [per-name ownership rule](consumer-capabilities.md#ensv1ensv2-mixed-history-ownership); [`current_for_name`](glossary.md#current-for-name-authority-context) means a `name` filter selected the current registration, while [`resource_audit`](glossary.md#resource-audit-context) makes no current-name claim | new in v2 |
-| `capabilities` | product-facing summary of supported namespace capabilities | capability flag summaries when exposed to product routes |
-| `type` | product event category label | `event_kind`, compact event `type` aliases |
+| `capabilities` | product-facing summary of supported namespace capabilities; `verified_records` and `verified_primary_name` carry a `chains` object keyed by numeric chain id with per-chain `{completeness, unsupported_reason?}` | capability flag summaries when exposed to product routes |
+| `type` | product event category label; as a history filter, one label or a comma-separated set | `event_kind`, compact event `type` aliases |
 | `by_type` | map of product event `type` values to counts | event summary `by_kind` maps keyed by raw event kind |
 | `block_number` | EVM block number | block-number fields inside chain-position objects |
 | `block_hash` | EVM block hash | block-hash fields inside chain-position objects |
@@ -129,23 +142,58 @@ step-3-gate vocabulary needed by the route schemas:
 | `log_index` | EVM log index within a transaction | `log_index` (unchanged) |
 | `from_block` | inclusive lower block-number filter | `from_block` (unchanged) |
 | `to_block` | inclusive upper block-number filter | `to_block` (unchanged) |
-| `data` | envelope root payload, and event-row payload when nested inside an event row | compact event payload objects |
+| `from_timestamp` | inclusive lower RFC 3339 bound on history collections, resolved per chain to the first readable lineage block at or after it | new in v2 |
+| `to_timestamp` | inclusive upper RFC 3339 bound on history collections, resolved per chain to the last readable lineage block at or before it | new in v2 |
+| `expires_after` | inclusive lower `expires_at` bound on `GET /v1/names` (RFC 3339 UTC) | `expires_after` (new) |
+| `expires_before` | exclusive upper `expires_at` bound on `GET /v1/names` (RFC 3339 UTC) | `expires_before` (new) |
+| `data` | envelope root payload, and the `include=data` event-row payload when nested inside an event row (see [history event payloads](api-v2-routes.md#history-event-payloads-includedata-includeraw)) | compact event payload objects |
+| `kind` | raw storage event kind on an event row, exposed only behind the explicit `include=raw` opt-in (never part of `include=data`); the one pipeline term the product tier carries, for explorer and diagnostic use | `event_kind` |
+| `contract_address` | lower-cased emitting contract of an event row, exposed only with `include=data`; `null` for state-derived rows | `emitting_address` |
+| `resolver` (query) | `/v1/events` filter naming one resolver contract as `<chain_id>:<address>` (numeric chain id, case-insensitive address); matches rows the contract emitted plus `resolver` pointer rows naming it | new in v2 |
+| `mirror` | on the resolver overview, present only for a declared [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver): `{kind: "ensv1_registry", registry: {chain_id, address}}`, the ENSv1 registry whose resolvers answer for names bound to this resolver | `declared_summary.classification.mirror`, `ensv1_mirror_resolver` |
+| `grant_event` | on resolver-overview `include=roles` items: `{block_number, timestamp, transaction_hash, log_index}` of the earliest permission event that granted the role; omitted when unresolvable | permission-row `provenance.normalized_event_ids` |
 
-`GET /v2/permissions` and `GET /v2/addresses/{address}/names?include=role_summary`
+An admitted controller-free ENSv1 numeric registration can retain its resource and token lifecycle
+before its plaintext name is known. Such normalized events have no logical-name attachment.
+Once admitted name evidence and the current ENSv1 authority establish a name binding, normal
+name reads can use that registrar owner and expiry, and `owner` reports the registry owner proven
+equal to it at disclosure until a later name-attached registry transfer replaces it. Earlier resource-only events remain unchanged;
+name evidence alone does not reactivate a dormant registrar authority. See [storage semantics](storage.md)
+for the numeric registration and restoration rules. This does not widen route or history coverage.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f)
+
+For a registrar lease first identified by a later readable observation, registration time remains the original numeric grant time. Compact product history omits only snapshots with both `state_derived=true` and `registrar_surface_snapshot=true`, before pagination and cursor validation. Diagnostics retains the marked snapshot at its later readable trigger; original resource-only history and all unmarked events remain unchanged. See [storage semantics](storage.md).
+
+`GET /v1/permissions` and `GET /v1/addresses/{address}/names?include=role_summary`
 read current permission rows and per-resource permission summaries. Canonical
-identity checks exclude rows from an orphaned chain lineage. These routes do
-not claim a request-wide immutable projection generation, and their cursors carry
-no snapshot-validity claim. The base v2 address-name collection remains available
-without the expansion.
+identity checks exclude rows from an orphaned chain lineage. These routes bind
+pagination to the captured project publication and revalidate it before returning.
+Rows use the binding selected by Project. A later Interpret binding closure does
+not change the published collection's membership or count; the next Project
+publication installs the replacement or removal. Canonicality checks still apply.
+A changed publication, including replacement at the same block, requires a
+pagination restart with `409 stale`. The base address-name collection remains
+available without the expansion.
 
 Permission-backed v2 reads also classify the served resources from the typed
 projection-owned per-resource permission summary. For a resource-bound
-`GET /v2/permissions` read, a non-wrapper summary whose standard operator,
+`GET /v1/permissions` read, a non-wrapper summary whose standard operator,
 token-approval, or resolver-delegation paths are not fully served produces
 `meta.completeness=partial` with
-`approval_and_delegation_permissions_not_supported`. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) An ENSv1 wrapper-only
-summary instead produces `meta.completeness=unsupported` with
-`wrapper_holder_permissions_not_supported`. A missing or unrecognized summary
+`approval_and_delegation_permissions_not_supported`. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) An ENSv1 NameWrapper
+registration instead produces `meta.completeness=partial` with
+`parent_and_resolver_delegation_permissions_not_supported`: its token holder,
+the owner-wide operators that holder approved, and its per-token approved
+delegate are projected rows, while the parent name's control over a
+non-emancipated wrapped subname and resolver operator/delegate approvals are
+not enumerated as rows. The NameWrapper contract's `Ownable` owner is a
+deployment-wide administrator (it sets the upgrade contract and metadata
+service), not a per-registration permission, and is never a row.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565-L589 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L162 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L186 @ ens_v1@91c966f)
+A missing or unrecognized summary
 produces `meta.completeness=partial` with `permission_support_unknown`, which
 takes precedence over both known limitations.
 
@@ -173,13 +221,14 @@ reason; missing or unrecognized summary metadata still takes precedence. A
 synthetic or future resource summary that independently proves full coverage
 adds no completeness metadata on a resource-bound request.
 
-These classifications are request-relative. `/v2/permissions` continues to
+These classifications are request-relative. `/v1/permissions` continues to
 serve known permission rows that apply to each resource, but those rows and the
 derived role summaries are not authoritative enumerations while the coverage
 described above remains partial. Zero returned rows therefore
 do not prove that no account can mutate the selected name or registration.
-NameWrapper holder enumeration remains a separate known unsupported class, and
-ENSv2 registry operator approval remains separately narrowed until indexed.
+NameWrapper holders, operators, and per-token delegates are projected rows;
+parent control of non-emancipated wrapped subnames and ENSv2 registry operator
+approval remain separately narrowed until indexed.
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
 
 `wrapper_fuses` has one stable shape on name detail, resolver `bound_names`,
@@ -218,18 +267,202 @@ permission rows does not make zero-row permission enumeration complete, so the
 `meta.completeness` and unsupported-reason rules above still apply.
 
 During `.eth` registrar grace, bigname keeps the existing approve-only policy
-interpretation for projected wrapper-holder powers: it removes owner
-modification and transfer powers except `approve` and `approve_wrapper`, then
-still applies `CANNOT_APPROVE`. Upstream's `canModifyName` rejects owner/operator
-modification during grace, while per-token `approve` routes through the
-ERC-1155-fuse owner/operator authorization path rather than that helper. This
-approve exception is bigname policy, not an upstream lifecycle state.
+interpretation for projected wrapper holder and operator powers: it removes
+owner modification and transfer powers except `approve` and `approve_wrapper`,
+then still applies `CANNOT_APPROVE`. Upstream's `canModifyName` rejects
+owner/operator modification during grace, while per-token `approve` routes
+through the ERC-1155-fuse owner/operator authorization path rather than that
+helper. This approve exception is bigname policy, not an upstream lifecycle
+state. The approved delegate's `extend_subname_expiry` is removed in grace as
+well, because `canExtendSubnames` applies the same grace check.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L222 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L228-L238 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L37 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L47 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L127 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L135 @ ens_v1@91c966f)
+
+### Resource restrictions
+
+`restrictions` describes the [resource restrictions](glossary.md#resource-restrictions)
+of a registration: constraints that bind the registration itself rather than
+any one account. `GET /v1/permissions` returns it once at the envelope's
+top level for a resource-bound read (`name` or `registration_id`), and
+`GET /v1/addresses/{address}/names?include=role_summary` returns it on each row
+next to `role_summary`. It is omitted when the registration has no
+resource-level constraint model (ENSv1 registrar- and registry-held names,
+Basenames), when a NameWrapper position has expired with a cleared owner, and
+once the wrapped token is burnt or unwrapped: the block is served only while the
+newest NameWrapper lifecycle evidence on the registration is the mint or a
+holder grant, so `NameUnwrapped` removes it and so does the bare ERC-1155 burn
+of the un-admitted `upgrade()` path, which emits no `NameUnwrapped`. An explicit
+`registration_id` read of such a token returns no wrapper block, matching the
+sibling `wrapper_state` field, which appears only for a current NameWrapper
+registration.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L483-L509 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+Name detail keeps `wrapper_state` and `wrapper_fuses` unchanged; `restrictions`
+adds to them and does not replace them.
+
+```json
+{
+  "registration_id": "…",
+  "kind": "ens_v1_wrapper",
+  "wrapper_state": "locked",
+  "wrapper_fuses": { "fuses": 196609, "cannot_unwrap": true, "…": "…" },
+  "wrapper_expires_at": "2027-03-01T00:00:00Z"
+}
+```
+
+- `kind=ens_v1_wrapper`: `wrapper_state` and `wrapper_fuses` use the same
+  atomic, [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word)
+  contract as name detail; a burnt fuse removes the matching power from every
+  holder, operator, and delegate row of the registration. `wrapper_expires_at`
+  is the NameWrapper entry expiry. For a wrapped `.eth` second-level name it is
+  the registrar expiry plus `GRACE_PERIOD`, and the holder's modification
+  powers already stop at the earlier grace boundary.
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L268-L277 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1082-L1089 @ ens_v1@91c966f)
+- `kind=ens_v2_registry`: `locked_roles` lists the token-scoped registry roles
+  `unregister`, `renew`, `set_subregistry`, `set_resolver`, and `transfer`
+  whose assignment can no longer change. A role is granted or revoked on a
+  registration only by an account whose admin roles, held on that registration
+  or on the registry root, cover it; on a registration the settable roles are
+  the held admin roles shifted down to their regular counterparts, so an admin
+  role cannot be re-granted once every holder has revoked it, and
+  `ROLE_CAN_TRANSFER_ADMIN`, checked only on the token owner, has no lower
+  role at all. `locked_roles` is therefore the set of those roles whose admin
+  counterpart (`can_transfer_admin` for `transfer`) no current permission row on
+  the registration or its root carries; whether the role itself is still held
+  is read from the rows. An empty list means every one of them can still change.
+  (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L418-L424 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L453-L455 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/access-control/libraries/EACBaseRolesLib.sol:L31-L34 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L560-L572 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L24-L45 @ ens_v2@a971bd64)
+
+### Permission powers vocabulary
+
+`powers` (on `GET /v1/permissions` rows, `include=role_summary` grants, and
+lineage objects) is a list of snake_case names drawn from three producers. The
+table is the complete vocabulary the code can serve; a test
+(`documented_powers_vocabulary_matches_code` in
+`apps/api/src/v2/permission_values.rs`) fails when this table and the producing
+source files disagree. Names are listed once even where two producers share
+them.
+
+- **ENSv1 and Basenames projected control** (adapters
+  `crates/adapters/src/schema_v2/protocol/v1/*`, projection
+  `crates/project/src/builders/permissions.rs`). Registrar- and registry-held
+  ENSv1 and Basenames names receive only these two powers. Storage spells the
+  first `resource_control`; the API renames it `registration_control`.
+- **ENSv1 NameWrapper fuse vocabulary** (projection mask in
+  `crates/project/src/builders/permissions.rs`). The projection recognises
+  these names and removes each one from a wrapped name's effective powers when
+  the corresponding NameWrapper fuse is burnt, evaluated with the
+  [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) fuse
+  word. The NameWrapper interpreter
+  (`crates/adapters/src/schema_v2/protocol/v1/wrapper/permissions.rs`, constant
+  `WRAPPER_HOLDER_POWERS`) grants the token holder `registration_control`,
+  `set_resolver`, `set_ttl`, `create_subnames`, `transfer`, `unwrap`,
+  `burn_fuses`, `approve`, `extend_subname_expiry`, and `extend_expiry` on the
+  registration and `resolver_control` on the linked resolver, because the
+  holder and any owner-wide operator pass `canModifyName`, the ERC-1155-fuse
+  approve and transfer checks, and `canExtendSubnames`; Project copies the
+  holder's masked set to each operator, and the per-token approved delegate
+  receives `extend_subname_expiry` alone, the only check that consults
+  `getApproved`. Two of the holder powers are gated on a fuse being burnt rather
+  than unburnt: `burn_fuses` requires `PARENT_CANNOT_CONTROL`, because
+  `_canFusesBeBurned` rejects every owner-controlled burn until the parent has
+  emancipated the name and the holder cannot burn that parent-controlled bit
+  itself, and `extend_expiry` requires `CAN_EXTEND_EXPIRY`.
+  The alias spellings stay recognised by the mask but no interpreter emits them.
+  (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10-L16 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214-L238 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L421-L437 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L443-L470 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058-L1068 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L37-L47 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L137-L150 @ ens_v1@91c966f)
+- **ENSv2 role bitmaps** (adapters
+  `crates/adapters/src/schema_v2/protocol/permissions.rs` and
+  `v2_record_resolver/permissions.rs`). `EACRolesChanged` bitmaps are decoded
+  bit by bit; each name is the pinned upstream `ROLE_<NAME>` constant in
+  lower snake case, and `admin_<name>` is `ROLE_<NAME>_ADMIN`, the same bit
+  shifted by 128. Unknown bits are omitted rather than surfaced under invented
+  names.
+  (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L7-L63 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L7-L64 @ ens_v2_sepolia_20260629@ccaeb58)
+  (upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L10 @ ens_v2_sepolia_20260903@5da83f6a)
+
+<!-- powers-vocabulary:start -->
+| Power | Producer | On-chain role or condition |
+| --- | --- | --- |
+| `registration_control` | ENSv1/Basenames control | Storage `resource_control`. Held by the account that controls the registration's authority object: the registrar token owner (`RegistrationGranted`, registrar `Transfer`), the registry owner of a registry-only resource (`NewOwner`/`Transfer`), or the NameWrapper token holder (`TokenControlTransferred`). Masked away while the wrapper is `locked`. |
+| `resolver_control` | ENSv1/Basenames control | Held by the same account, scoped to the registration's current nonzero resolver (`grant_scope.kind = resolver`); revoked and re-granted on `ResolverChanged` and `RegistrationGranted`. Masked by `CANNOT_SET_RESOLVER` (8). |
+| `set_resolver` | ENSv2 registry; wrapper mask | Registry `ROLE_SET_RESOLVER` (bit 24). On a wrapped ENSv1 name the mask removes it under `CANNOT_SET_RESOLVER` (8). |
+| `set_ttl` | wrapper mask | Removed under `CANNOT_SET_TTL` (16). |
+| `create_subnames` | wrapper mask | Removed under `CANNOT_CREATE_SUBDOMAIN` (32). |
+| `create_subdomain` | wrapper mask | Alias of `create_subnames`; removed under `CANNOT_CREATE_SUBDOMAIN` (32). |
+| `transfer` | wrapper mask | Removed under `CANNOT_TRANSFER` (4). |
+| `transfer_name` | wrapper mask | Alias of `transfer`; removed under `CANNOT_TRANSFER` (4). |
+| `unwrap` | wrapper mask | Removed under `CANNOT_UNWRAP` (1). |
+| `burn_fuses` | wrapper mask | Removed under `CANNOT_BURN_FUSES` (2) and whenever `PARENT_CANNOT_CONTROL` (65536) is not burnt: `setFuses` routes through `_canFusesBeBurned`, which rejects any owner-controlled burn unless both `PARENT_CANNOT_CONTROL` and `CANNOT_UNWRAP` are set, and the holder cannot burn the parent-controlled bit, so on a `wrapped` name every non-zero `setFuses` reverts; once the parent has burnt `PARENT_CANNOT_CONTROL` the holder may burn `CANNOT_UNWRAP` together with other fuses. |
+| `approve` | wrapper mask | Removed under `CANNOT_APPROVE` (64); retained during `.eth` registrar grace (policy, see above). |
+| `approve_wrapper` | wrapper mask | Removed under `CANNOT_APPROVE` (64); retained during `.eth` registrar grace (policy, see above). |
+| `extend_subname_expiry` | ENSv1 NameWrapper | Held by the holder, each operator, and the per-token approved delegate: may extend a wrapped subname's expiry up to the parent's own expiry (`canExtendSubnames`). No fuse removes it; the `.eth` registrar grace boundary does. |
+| `extend_expiry` | ENSv1 NameWrapper; wrapper mask | Held by the holder and each operator only while `CAN_EXTEND_EXPIRY` (262144) is burnt: `extendExpiry` lets the name's own controller (`canModifyName`) extend the name's expiry up to the parent's expiry. Removed while the fuse is unburnt and during `.eth` registrar grace. |
+| `registrar` | ENSv2 registry | `ROLE_REGISTRAR` (bit 0): may register names. |
+| `register_reserved` | ENSv2 registry | `ROLE_REGISTER_RESERVED` (bit 4). |
+| `set_parent` | ENSv2 registry | `ROLE_SET_PARENT` (bit 8). |
+| `unregister` | ENSv2 registry | `ROLE_UNREGISTER` (bit 12). |
+| `renew` | ENSv2 registry | `ROLE_RENEW` (bit 16). |
+| `set_subregistry` | ENSv2 registry | `ROLE_SET_SUBREGISTRY` (bit 20). |
+| `was_reserved` | ENSv2 registry | `ROLE_WAS_RESERVED` (bit 32): a token-only, non-revocable history marker that the name was registered through `ROLE_REGISTER_RESERVED`. It authorizes nothing; it is retained so a marker-only `EACRolesChanged` stays visible. |
+| `set_uri` | ENSv2 registry | `ROLE_SET_URI` (bit 36). |
+| `can_name` | ENSv2 registry; ENSv2 resolvers | `ROLE_CAN_NAME` (bit 120). |
+| `upgrade` | ENSv2 registry; ENSv2 resolvers | `ROLE_UPGRADE` (bit 124). |
+| `can_transfer_admin` | ENSv2 registry | `ROLE_CAN_TRANSFER_ADMIN` (bit 156, `(1 << 28) << 128`). |
+| `admin_registrar` | ENSv2 registry | `ROLE_REGISTRAR_ADMIN` (bit 128). |
+| `admin_register_reserved` | ENSv2 registry | `ROLE_REGISTER_RESERVED_ADMIN` (bit 132). |
+| `admin_set_parent` | ENSv2 registry | `ROLE_SET_PARENT_ADMIN` (bit 136). |
+| `admin_unregister` | ENSv2 registry | `ROLE_UNREGISTER_ADMIN` (bit 140). |
+| `admin_renew` | ENSv2 registry | `ROLE_RENEW_ADMIN` (bit 144). |
+| `admin_set_subregistry` | ENSv2 registry | `ROLE_SET_SUBREGISTRY_ADMIN` (bit 148). |
+| `admin_set_resolver` | ENSv2 registry | `ROLE_SET_RESOLVER_ADMIN` (bit 152). |
+| `admin_set_uri` | ENSv2 registry | `ROLE_SET_URI_ADMIN` (bit 164). |
+| `admin_can_name` | ENSv2 registry; ENSv2 resolvers | `ROLE_CAN_NAME_ADMIN` (bit 248). |
+| `admin_upgrade` | ENSv2 registry; ENSv2 resolvers | `ROLE_UPGRADE_ADMIN` (bit 252). |
+| `set_addr` | ENSv2 resolvers | `ROLE_SET_ADDR` (bit 0 of the resolver bitmap). |
+| `set_text` | ENSv2 resolvers | `ROLE_SET_TEXT` (bit 4). |
+| `set_contenthash` | ENSv2 resolvers | `ROLE_SET_CONTENTHASH` (bit 8). |
+| `set_pubkey` | ENSv2 resolver (20260629) | `ROLE_SET_PUBKEY` (bit 12). |
+| `set_abi` | ENSv2 resolvers | `ROLE_SET_ABI` (bit 16; bit 12 on the record resolver). |
+| `set_interface` | ENSv2 resolvers | `ROLE_SET_INTERFACE` (bit 20; bit 16 on the record resolver). |
+| `set_name` | ENSv2 resolvers | `ROLE_SET_NAME` (bit 24; bit 20 on the record resolver). |
+| `set_alias` | ENSv2 resolver (20260629) | `ROLE_SET_ALIAS` (bit 28). |
+| `clear_records` | ENSv2 resolver (20260629) | `ROLE_CLEAR` (bit 32): may clear a name's records. |
+| `set_data` | ENSv2 resolvers | `ROLE_SET_DATA` (bit 36; bit 24 on the record resolver). |
+| `link` | ENSv2 record resolver | `ROLE_LINK` (bit 28). |
+| `admin_set_addr` | ENSv2 resolvers | `ROLE_SET_ADDR_ADMIN` (bit 128). |
+| `admin_set_text` | ENSv2 resolvers | `ROLE_SET_TEXT_ADMIN` (bit 132). |
+| `admin_set_contenthash` | ENSv2 resolvers | `ROLE_SET_CONTENTHASH_ADMIN` (bit 136). |
+| `admin_set_pubkey` | ENSv2 resolver (20260629) | `ROLE_SET_PUBKEY_ADMIN` (bit 140). |
+| `admin_set_abi` | ENSv2 resolvers | `ROLE_SET_ABI_ADMIN` (bit 144; bit 140 on the record resolver). |
+| `admin_set_interface` | ENSv2 resolvers | `ROLE_SET_INTERFACE_ADMIN` (bit 148; bit 144 on the record resolver). |
+| `admin_set_name` | ENSv2 resolvers | `ROLE_SET_NAME_ADMIN` (bit 152; bit 148 on the record resolver). |
+| `admin_set_alias` | ENSv2 resolver (20260629) | `ROLE_SET_ALIAS_ADMIN` (bit 156). |
+| `admin_clear_records` | ENSv2 resolver (20260629) | `ROLE_CLEAR_ADMIN` (bit 160). |
+| `admin_set_data` | ENSv2 resolvers | `ROLE_SET_DATA_ADMIN` (bit 164; bit 152 on the record resolver). |
+| `admin_link` | ENSv2 record resolver | `ROLE_LINK_ADMIN` (bit 156). |
+<!-- powers-vocabulary:end -->
+
+`set_records` is not in this vocabulary: it appears only in bigname's own API
+test fixtures for `record_manager` grants, and no interpreter emits it. A
+consumer that saw it came from a fixture, not from chain data. Names ending in
+`_resource` or containing `resource_` other than `resource_control` are storage
+vocabulary that the API refuses to serve.
 
 Rules:
 
@@ -239,7 +472,9 @@ Rules:
 - `token_id` stays a decimal string.
 - Pipeline vocabulary (`projection`, `sidecar`, `manifest`, `normalized event`,
   `raw fact`, table names) must not appear in product-route field names, enum
-  values, or error messages.
+  values, or error messages. The documented exception is the `kind` string on
+  `include=raw` event rows, which carries the raw storage event kind behind an
+  explicit opt-in.
 
 ## Envelope
 
@@ -282,22 +517,37 @@ Rules:
 
 - `data` is an object on single-resource routes and an array on collections.
 - Top-level `page` appears on collection routes only. Per-input pagination on
-  `POST /v2/lookup` and the nested resolver-overview `bound_names` collection
+  `POST /v1/lookup` and the nested resolver-overview `bound_names` collection
   use the same object inside their containing result/object.
-- `total_count` is nullable. Reverse address results from `POST /v2/lookup`
+- `total_count` is nullable. Reverse address results from `POST /v1/lookup`
   populate it by counting the same readable current name/address rows used by
   the page query when the requested relation set maps directly to a stored role
-  group. Relation sets that require post-filtering retain `total_count=null`.
-  Other routes populate it only where a precomputed count makes it cheap or
-  where they explicitly document `include=total_count`; they must not otherwise
-  run unconditional full counts on the request path.
+  group. Relation sets that require post-filtering retain `total_count=null`;
+  use the address-name GET collection for an exact single-relation count.
+  Address-name ownership collections return the exact count of their filtered,
+  deduplicated entries before the cursor.
+  Anchored history collections (name history, address history, and
+  `/v1/events` with a `name`, `registration_id`, `address`, or `resolver`
+  anchor) populate
+  it with a capped count over the page's exact filters: exact up to 10,000
+  product-visible rows and `null` beyond by default; `include=total_count`
+  requests an exact uncapped count on anchored history. It is always `null` for unanchored event
+  reads. `GET /v1/names/{name}/subnames` populates it with the parent's direct
+  readable subname count, applying the same optional prefix and expiry filters
+  as the page before its cursor.
+  Other routes populate it only where a precomputed count makes it
+  cheap or where they explicitly document `include=total_count`; they must not
+  otherwise run unconditional full counts on the request path.
 - `meta` is always present. Single-resource routes that read chain-derived state
   include `meta.as_of` and `meta.as_of_token` when they can attribute at least
-  one served snapshot-pinned chain position. Top-level collection routes omit
-  both because their mutable latest-state rows are not bound to one snapshot,
-  except that `/v2/search` reports request-scoped `meta.as_of` positions as
-  human-readable staleness attribution and still omits `meta.as_of_token`.
-  Control-plane routes (`/v2/status`, `/v2/namespaces/{namespace}`) omit both.
+  one served snapshot-pinned chain position. Product name, subname, ownership,
+  permission and history collections disclose `meta.as_of` and bind cursors to
+  the current publication; they omit `meta.as_of_token` because old publications
+  are not retained for collection replay. A changed publication returns `409 stale`
+  requiring a restart. `/v1/search` reports request-scoped `meta.as_of` as
+  staleness attribution without a publication-bound cursor. Diagnostic event
+  collections retain their separately documented latest-state behavior.
+  Control-plane routes (`/v1/status`, `/v1/namespaces/{namespace}`) omit both.
   Verified name and record responses keep the same metadata shape as their
   indexed peers. The authoritative position identifies the projection snapshot
   admitted for the lookup. For a cross-chain path, the auxiliary position is
@@ -316,7 +566,7 @@ Rules:
   `at` when a route supports snapshot replay. `meta.completeness`,
   `meta.unsupported_fields`, and `meta.unsupported_reason` appear only when the
   read is not clean. `meta.source` appears when the route supports `source`.
-- Public reverse requests to `POST /v2/lookup` and all `GET /v2/search`
+- Public reverse requests to `POST /v1/lookup` and all `GET /v1/search`
   requests disclose the chain scope selected by the request. A public reverse
   request or search without an explicit `namespace` accounts for the chains of
   every active public namespace; an explicit search namespace accounts only
@@ -350,7 +600,7 @@ Rules:
 sections or route-documented expensive metadata. No route supports
 `include=total_count` unless that route's parameter list says so.
 
-`profile=feed` on `POST /v2/lookup` is a field budget over the same record
+`profile=feed` on `POST /v1/lookup` is a field budget over the same record
 shape used by `profile=detail`. Feed returns fewer fields; every feed field has
 the same name and type as its detail counterpart. Feed does not change reverse
 lookup pagination semantics: `cursor`, `page_size`, `next_cursor`, and
@@ -365,18 +615,25 @@ Rows classified as `registration_status=unregistered`, including ownerless
 ENSv2 reservations, have no current registration, so product name detail and
 batch lookup always omit `registration_id`. Resolver and record fields are also
 omitted, the records route exposes no resolver, record values, or audit-only
-inventory, and resolver `bound_names` omits the row unless it is
-an ownerless ENSv1 or Basenames registry row whose current registry resolver
-pointer is retained (a [serving resource](glossary.md#serving-resource)). That
-retained pointer permits resolver and record reads without acquiring registration
-identity or control. Indexed records require retained inventory;
+inventory, and resolver `bound_names` omits the row unless it carries an
+event-linked registry resolver pointer (a
+[serving resource](glossary.md#serving-resource)): an ownerless ENSv1 or
+Basenames registry row whose current registry resolver pointer is retained, or
+an ENSv2 TLD whose current
+[root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
+survives while the TLD's authority is not projected. That pointer permits
+resolver and record reads without acquiring registration identity or control;
+the TLD row keeps `current_authority_not_projected` wherever a route reports
+its coverage. Indexed records require retained, supported inventory;
 routes with source selection let verified and auto records follow the ordinary
 lookup capability, and resolver `bound_names` remains subject to the resolver
 family's binding-enumeration capability.
 See [registration status](#status-vocabulary) for the upstream basis.
 The ENSv2 rule is an intentional product
 narrowing: ENSv2 stores a nonzero resolver supplied for an ownerless
-reservation and returns it until expiry. (upstream:
+reservation and returns it until expiry. A root-registry TLD reservation is the
+one exception: its pointer is served as a
+[root-registry resolver pointer](glossary.md#root-registry-resolver-pointer). (upstream:
 .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @
 ens_v2@a971bd64) (upstream:
 .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @
@@ -388,11 +645,11 @@ ens_v2@a971bd64)
 
 Lookup primitives serve the partner latency path and current indexing status:
 
-- `POST /v2/lookup`
-- `GET /v2/status`
+- `POST /v1/lookup`
+- `GET /v1/status`
 
 The lookup route uses the common record shape and in-band per-result statuses.
-`GET /v2/status` is the only route with the ops status vocabulary
+`GET /v1/status` is the only route with the ops status vocabulary
 `ready`, `degraded`, `stale`. It reads the chain set from
 `bigname_phase.chain_heads` and `bigname_phase.chain_phase_state`. The stored
 head and finality fields come from `chain_heads`; indexed progress is the
@@ -443,11 +700,16 @@ The product-route denylist includes pipeline terms such as `projection`,
 `execution_checkpoint` pseudo-chain slot. If a product capability needs that
 detail, it belongs on a diagnostics route instead.
 
-`GET /v2/names/{name}?source=verified` and
-`GET /v2/names/{name}/records` with a verified source execute through the
+`GET /v1/names/{name}?source=verified` and
+`GET /v1/names/{name}/records` with a verified source execute through the
 schema-v2 lookup engine on every request. Response fields and per-record status
 meaning stay unchanged, but there is no reusable outcome, durable execution
-trace, or execution-cache readback. A direct live answer that disagrees
+trace, or execution-cache readback. The engine refuses a name whose selected
+[authority arm](glossary.md#authority-epoch) is outside the
+`verified_authority_arms` the selected `ens_execution` manifest declares
+(`manifests.md` § `verified_authority_arms`); the routes report that refusal as
+`exact_name_authority_not_verifiable`, distinct from the
+`verified_records_not_supported` a row without an admitted topology reports. A direct live answer that disagrees
 with the indexed exact entry or manifest-authorized derived read used for
 comparison writes the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger).
@@ -478,7 +740,7 @@ before its synthetic `addr:60` request is added, so a 200-selector inventory
 may issue 201 provider keys when the primary-address selector was absent; more
 than 200 inventory-derived selectors still returns the same error.
 
-`GET /v2/addresses/{address}/primary-name` keeps its documented `answers` and
+`GET /v1/addresses/{address}/primary-name` keeps its documented `answers` and
 typed `verification` shapes. Every indexed answer reads
 `bigname_phase.primary_names_current`; `source` selection only narrows the
 answer list and does not select a different indexed projection. A successful
@@ -503,15 +765,30 @@ The post-call guard also revalidates the Ethereum project generation and both
 selected ENS manifest declarations; a concurrent replacement returns `409
 stale` and no verified answer.
 
-The exact-head and post-call generation fences on verified reads fail safe
-under schema-v2 projection lag. If head following or project publication
-remains behind the readable chain head, verified reads degrade to `409 stale`
-instead of executing against mixed generations. Snapshot selection and
-verified lookup now read the same `chain_heads` and `chain_phase_state` project
-row, so this exact-head fence detects only a concurrent head, rewind, or
-project-publication change between their reads. A fast-moving chain can still
-advance during a provider or CCIP round trip, so the post-call generation
-checks remain necessary.
+Verified lookup accepts the Project publication captured before provider execution
+while Project is `completed` or `running`, provided that publication is canonical,
+belongs to the compiled interpreter generation, and trails the stored execution
+head by at most one block. The post-call guard compares its captured block number,
+block hash, content hash, and row generation, alongside the unchanged execution
+head and manifest declarations. A new publication, same-height republish, or any
+phase-row update during a provider or CCIP round trip still returns `409 stale`.
+The tolerance admits an already-running publication; it does not promise that a
+request survives a concurrent phase transition. Routes combining indexed and
+verified answers retain their separate requirement that both answers fit the
+reported `meta.as_of` position.
+
+Indexed snapshot selection serves the project phase's latest publication: the
+project row's current position while the phase is `completed` or `running` (a
+running pass has not yet published beyond that position; a failed, paused, or
+idle phase, or a fresh run that cleared the position, has no publication).
+Live-follow stores a new head as soon as a block arrives and Project publishes
+for it a few seconds later, so the publication may trail the stored head. When
+it trails by exactly one block, the selected position is the publication (and
+`as_of` reports it) whenever the publication is behind the requested `head`,
+`safe`, or `finalized` position; otherwise the requested position is served
+unchanged. A publication further behind, one from a different interpreter
+generation, or one whose block a reorg has orphaned (until Project republishes
+on the new fork) is `409 stale`, so a wedged or paused Project still surfaces.
 
 Indexed lookup names, record inventories, address-name relations, resolver
 overviews, and resolver bound names now come from `bigname_phase` projections.
@@ -551,7 +828,11 @@ Common parameter rules:
 | `source` | names, records, primary-name | names and records use `indexed` (default) or `verified`; the records route also accepts `auto`; primary-name omits `source` to return all supported source answers and may use `indexed` or `verified` to request a subset |
 | `namespace` | name-inferred, address-anchored, and collection routes | explicit override or filter |
 | `include` | route-documented expansions | per-route allowlist |
-| `sort`, `order` | paginated routes that declare a sort set | route-documented field set plus `asc`/`desc` |
+| `sort`, `order` | paginated routes that declare a sort set; history collections accept `order` alone over their fixed chain-position sort | route-documented field set plus `asc`/`desc` |
+| `resolver` | `/v1/events` | `<chain_id>:<address>` resolver contract; anchors the read, suppresses the `ens` namespace default, and is bound by cursors |
+| `type`, `from_timestamp`, `to_timestamp` | name history, address history, `/v1/events` | friendly event type or comma-separated set; inclusive RFC 3339 bounds resolved to lineage block ranges (see [history collection filters](api-v2-routes.md#history-collection-filters)) |
+| `expires_after`, `expires_before` | `GET /v1/names` | RFC 3339 UTC window over `expires_at`; at least one is required, `expires_after` inclusive, `expires_before` exclusive |
+| `include_expired` | `GET /v1/names/{name}/subnames` | `true` (default) lists released and past-expiry children; `false` omits them |
 | `cursor`, `page_size` | every paginated route | opaque cursor; default 50, max 200 |
 
 For a cross-namespace read with no explicit `namespace`, the API accounts for
@@ -617,6 +898,16 @@ an ownerless ENSv1 or Basenames registry row whose current registry resolver
 pointer is retained (a [serving resource](glossary.md#serving-resource)). It
 serves indexed records when retained inventory exists; routes with source
 selection can also serve verified records under the ordinary lookup capability.
+An ENSv2 TLD whose root-registry token is reserved or whose registration is
+not projected serves the same way from its current
+[root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
+while it stays `current_authority_not_projected` and
+`registration_status=unregistered`: the root registry stores the pointer per
+token and returns it while the label is unexpired, and bigname serves that
+pointer without inventing the TLD's registration or authority.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L150-L155 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L476-L478 @ ens_v2@a971bd64)
 The current ENSv1 registry and the Basenames registry emit the supplied owner
 from `setOwner`.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L68 @ ens_v1@91c966f)
@@ -637,7 +928,7 @@ The internal reason
 unresolved or unsupported, not for a registry event stream that positively
 proves current authority is absent.
 
-One result-status vocabulary is used everywhere except the `/v2/status` ops
+One result-status vocabulary is used everywhere except the `/v1/status` ops
 route:
 
 - `ok`
@@ -651,6 +942,13 @@ route:
 Rules:
 
 - `unsupported_reason` is required when `status=unsupported`.
+- `mirrored_resolver_not_projected` is the projected inventory reason for a
+  name whose current ENSv2 resolver is a declared
+  [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
+  while the ENSv1 resolver the mirror's registry walk selects for the name (the
+  exact node's, else the nearest ancestor's) is not projected, or is an
+  ancestor's declared `ensip10_extended_resolver`; it crosses the serving
+  boundary unchanged wherever a route exposes the inventory reason.
 - A read over a projected row keys `unsupported` on that row's own coverage
   status, not on a list of known reasons: an unsupported row serves
   `status=unsupported` even when it names no reason or names a reason the build
@@ -671,7 +969,12 @@ Rules:
 
 A keyed resolver record answer contains `status`. It contains `value` only
 when `status` is `ok`; `unsupported_reason`, `failure_reason`, and `meta` are
-present only where the route contract permits them.
+present only where the route contract permits them. An indexed keyed answer is
+taken from a record inventory only while that inventory's coverage is
+authoritative (`full` or `projected` with no `unsupported_reason`); an
+`unsupported` inventory row yields `status=unsupported` with the row's reason
+and no `value` for every key, whatever entries the projection retained
+([api-v2-routes.md](api-v2-routes.md#get-v1namesnamerecords)).
 
 For a successful `contenthash` answer, `value` is a lowercase,
 `0x`-prefixed hex string containing the bytes returned by the resolver. The API
@@ -759,8 +1062,9 @@ existing `YYYY-MM-DDTHH:MM:SSZ` spelling.
 The API selects current `latest`, `safe`, and `finalized` positions from
 `bigname_phase.chain_heads` and obtains their timestamps from readable
 `bigname_phase.chain_lineage`. Every selection is available only when the current
-`project` phase is completed at the exact latest head with the API's compiled
-interpreter content hash. Timestamp `at` selection and opaque-token replay
+`project` phase is completed with the API's compiled interpreter content hash on
+the readable lineage at most one block behind the latest head (see the
+publication-lag rule above). Timestamp `at` selection and opaque-token replay
 still choose historical positions: every supplied or resolved position must
 exist in `bigname_phase.chain_lineage` and satisfy the requested finality
 floor, and an authoritative cross-chain selection bounds auxiliary positions
@@ -770,7 +1074,7 @@ A token or timestamp that selects a block absent from readable phase lineage
 returns `409 conflict`.
 
 API startup discovers the status chain set from the union of
-`bigname_phase.chain_heads` and `bigname_phase.chain_phase_state`. `/v2/status` uses
+`bigname_phase.chain_heads` and `bigname_phase.chain_phase_state`. `/v1/status` uses
 those same relations for its chain set and reads stored head/finality positions
 from `chain_heads`, project progress from the `project` row in
 `chain_phase_state`, and both timestamps from the matching readable
@@ -793,7 +1097,7 @@ semantics when that revision is no longer available. Once revision-bound
 cursors and row reads land, the collection `at` and historical `finality`
 restrictions lift and collection snapshot metadata can be restored.
 
-`POST /v2/lookup` is a current-state read. It does not accept `at` or
+`POST /v1/lookup` is a current-state read. It does not accept `at` or
 `finality`; when a served head is available, its `meta.as_of` and
 `meta.as_of_token` record the served positions for staleness attribution and
 shadow-diff correlation. Lookup rejects partial scoped heads instead of
@@ -809,7 +1113,7 @@ check and return `409 stale`. Historical resolver reads selected with `at` and
 resolver reads at `finality=safe|finalized` retain their existing generation
 validation without that redo check.
 
-`GET /v2/addresses/{address}/primary-name` is also a current-state read. It
+`GET /v1/addresses/{address}/primary-name` is also a current-state read. It
 does not accept `at` or `finality`; when a served head is available, its
 `meta.as_of` and `meta.as_of_token` record the served positions for staleness
 attribution and shadow-diff correlation. For an ENS/60 verified answer, both
@@ -835,7 +1139,7 @@ dataset is frozen. A legacy collection cursor's snapshot component is ignored.
 Snapshot-bound cursor semantics remain on single-resource responses with nested
 pagination where documented.
 
-The `/v2/events`, name-history, and address-history collections use a
+The `/v1/events`, name-history, and address-history collections use a
 collection-wide `redo_in_progress` check. An active Interpret redo on any chain
 returns retryable `409 stale` for all three collections, regardless of the
 requested namespace or name. Events validates the request and cursor binding
@@ -857,12 +1161,17 @@ event-type filtering precedes keyset pagination, so page rows and continuation
 metadata describe only product-visible events. For requests without an explicit
 `type`, cursor anchor validation omits the implicit product event-type filter,
 so a still-existing non-product anchor continues to the next product-visible
-row. An explicit `type` remains part of anchor validation. Cursor bytes remain
+row. An explicit `type` (one label or a set) remains part of anchor validation.
+History cursors also encode the direction in their sort token and the
+canonical `type` set and timestamp bounds in their filters, so `order=asc`,
+`type`, `from_timestamp`, and `to_timestamp` each fail closed when a cursor is
+replayed against a different query; see the [history collection
+filters](api-v2-routes.md#history-collection-filters). Cursor bytes remain
 unstable.
 
 A full Interpret and Project re-walk that must not change product behavior at a
 fixed readable chain head does not invalidate an outstanding collection cursor
-merely because an internal normalized-event row ID changes. On `/v2/events`,
+merely because an internal normalized-event row ID changes. On `/v1/events`,
 name history, address history, and every other product cursor surface backed by
 normalized-event row identity, a cursor issued before the re-walk must resume
 after publication from the same underlying normalized-event keyset anchor, with
@@ -899,6 +1208,17 @@ continuation guarantee and may be rejected. Consumers must discard
 pre-#348/#529 cursors and restart from the first page; fresh post-publication cursors
 continue normally.
 
+A `record` row may also come from a node-keyed resolver observation that carries
+no logical name or resource of its own, such as an exact direct
+`public_resolver_v2` write. Project attributes that observation to a registration
+through its selected resolver pointer and publishes the attributed event ids in
+the record inventory provenance; `registration` and `both` scope name history
+read them back so history lists the writes the name's records serve, while
+`name` scope does not because the observation has no surface link. The row's
+`registration_id` stays null. The attribution follows the current pointer
+exactly as the inventory does: switching the pointer away hides those rows and
+switching back restores them.
+
 The [#613](https://github.com/ensdomains/bigname/issues/613) interpreter change
 keeps the original [pre-surface](glossary.md#pre-surface) ENSv1 registry `ResolverChanged` row unchanged,
 then adds a name- and resource-linked, [state-derived](glossary.md#state-derived-normalized-event) `ResolverChanged` when the
@@ -932,9 +1252,21 @@ resource-less late event does not restore `name_current.resource_id`, so name
 and record reads for the released or expired name continue to expose no current
 record inventory.
 
+An ENSv2 registration that lapses by path expiry is served like one released by
+`unregister`: `GET /v1/names/{name}` keeps answering with `registration_status`
+`released`, the registration identity, timestamps and the lapsed `expires_at`,
+without a current owner, resolver or records, and `GET /v1/names/{name}/history`
+keeps serving the name's history. An ENSv1 lease that lapses past grace with no
+revived custody, which is how a wrapped `.eth` name lapses, is served the same
+way as a [released v1 authority](glossary.md#released-v1-authority):
+`registration_status` `released` with the registration identity and
+timestamps, no owner, registrant, `expires_at`, resolver or records, and its
+history intact. Only a name that never had a readable surface
+answers `404 not_found`.
+
 Every collection uses `cursor`, `next_cursor`, `page_size`, nullable
 `total_count`, and `has_more`. Default `page_size` is 50; maximum is 200.
-For reverse address inputs to `POST /v2/lookup` whose relation set maps directly
+For reverse address inputs to `POST /v1/lookup` whose relation set maps directly
 to a stored role group, `total_count` is the exact distinct-name count from the
 same current joins and readability filters as the page, and `has_more` compares
 against that live count on the one-row first-page path. Relation sets that need
@@ -945,7 +1277,7 @@ returned `is_primary` is computed from the current name and primary-name claim
 even when a different primary-matching relation row is unreadable. The retired
 v1 page/sidecar pair disagreed on this case; the v2 live page and count joins
 share the same eligibility rule.
-Reverse address results from `POST /v2/lookup` additionally require the
+Reverse address results from `POST /v1/lookup` additionally require the
 projection rows behind a name to be [readable](glossary.md#readable--read-safe)
 *and* supported. Both the name row and the address-relation row that admits it
 must carry a supported support status; a name whose current name row or whose
@@ -955,7 +1287,7 @@ results therefore answer which supported names an address holds. This
 deliberately narrows earlier behavior, which listed unsupported names and left
 the caller to read the reason; per-name unsupported detail now lives on the
 name-shaped routes and diagnostics, which read the row directly.
-`GET /v2/addresses/{address}/names` is the exception: it lists an unsupported
+`GET /v1/addresses/{address}/names` is the exception: it lists an unsupported
 row when the matching current address relation is provable but other coverage
 for that name is unsupported. Once the [per-name ownership
 rule](consumer-capabilities.md#ensv1ensv2-mixed-history-ownership) is activated,
@@ -1011,7 +1343,7 @@ Rules:
   other transport failures within a request's own timeouts return
   whole-request `500 internal_error`. Neither
   result is persisted by the v2 serving path.
-- Every route has a whole-request deadline. `/healthz` and `/v2/status` retain
+- Every route has a whole-request deadline. `/healthz` and `/v1/status` retain
   that deadline as their final backstop. `/healthz` bypasses
   the process-wide concurrency limiter and load shedding, uses a reserved
   one-connection database pool with a two-second check limit, and has a small
@@ -1030,8 +1362,8 @@ Rules:
 - The verified-execution rate limit, when enabled, and all in-flight ceilings
   reject work before it waits for execution capacity. The rate-limit key is an
   IPv4 address or IPv6 `/64`; `/healthz` passes only through the health-specific
-  ceiling. `GET /v2/names/{name}/records?source=auto` with omitted or empty
-  `keys` and `GET /v2/addresses/{address}/primary-name?source=indexed` are
+  ceiling. `GET /v1/names/{name}/records?source=auto` with omitted or empty
+  `keys` and `GET /v1/addresses/{address}/primary-name?source=indexed` are
   indexed reads and do not enter verified-execution admission.
 - Single-resource GETs return `404 not_found` when no answer exists.
 - Collections return `200` with empty `data`.

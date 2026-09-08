@@ -119,6 +119,9 @@ pub async fn load_discovery_watch_coverage(
              WHEN edge.edge_kind = 'resolver'
               AND source_manifest.source_family = 'basenames_base_registry'
                  THEN 'basenames_base_resolver'
+             WHEN edge.edge_kind = 'resolver'
+              AND source_manifest.source_family = 'ens_v2_resolver_l1'
+                 THEN 'ens_v2_resolver_l1'
              ELSE NULL
          END
         JOIN contract_instance_addresses address
@@ -258,7 +261,7 @@ fn payload_topics(
                 Some("family") => {
                     topics.insert(topic0);
                 }
-                Some("address") => {}
+                Some("address") | Some("implementation") => {}
                 Some(kind) => anyhow::bail!("compiled watch entry has unknown emitter kind {kind}"),
                 None => anyhow::bail!("compiled watch entry is missing its emitter kind"),
             }

@@ -42,14 +42,23 @@ pub(crate) fn ens_universal_resolver_discovery_candidate(row: &NameCurrentRow) -
         || !row.namehash.strip_prefix("0x").is_some_and(|digits| {
             digits.len() == 64 && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
         })
-        || row
-            .chain_positions
-            .pointer("/ethereum/chain_id")
-            .and_then(Value::as_str)
-            != Some("ethereum-mainnet")
     {
         return false;
     }
+    // Match Lookup's ENS L1 discovery chains and position slots. Execution still validates
+    // the selected manifest's authority arms; this only binds the pre-execution route shape.
+    let chain = [
+        ("ethereum", ChainId::EthereumMainnet),
+        ("ethereum-sepolia", ChainId::EthereumSepolia),
+    ]
+    .into_iter()
+    .find_map(|(slot, chain)| {
+        (row.chain_positions.get(slot)?.get("chain_id")?.as_str()? == chain.as_str())
+            .then_some(chain)
+    });
+    let Some(chain) = chain else {
+        return false;
+    };
     let Some(topology_value) = row.declared_summary.get("topology") else {
         // Ordinary direct projected rows omit topology. Special alias, wildcard,
         // subregistry, and transport shapes carry explicit topology and are
@@ -72,7 +81,7 @@ pub(crate) fn ens_universal_resolver_discovery_candidate(row: &NameCurrentRow) -
         return false;
     };
     hop.logical_name_id.as_deref() == Some(row.logical_name_id.as_str())
-        && matches!(hop.chain_id, None | Some(ChainId::EthereumMainnet))
+        && hop.chain_id.is_none_or(|hop_chain| hop_chain == chain)
         && hop
             .address
             .is_none_or(|address| address == EvmAddress::from_bytes([0_u8; 20]))

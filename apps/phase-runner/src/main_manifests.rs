@@ -2,12 +2,7 @@
 //! is never held by the filesystem, then synchronized into the database.
 
 use anyhow::{Context, Result, bail, ensure};
-use phase_runner::manifest_startup::sync_loaded_manifests;
-
-pub(super) async fn sync_manifests(pool: &sqlx::PgPool, root: &std::path::Path) -> Result<()> {
-    let (repository, profile) = hash_manifests_off_runtime(root.to_path_buf()).await??;
-    sync_loaded_manifests(pool, root, &repository, profile).await
-}
+use phase_runner::config::{COMPILED_CHAIN_NAMESPACES, validate_deployment_table_set};
 
 /// Hash the manifest tree on a detached OS thread and await the result.
 ///
@@ -55,5 +50,28 @@ pub(super) fn load_hashed_manifest_repository(
         "runtime manifest profile {} changed while it was being loaded",
         root.display()
     );
+    Ok((repository, profile))
+}
+
+/// Bind the loaded manifest profile's start blocks into the chain configs and
+/// validate the deployment table set against them.
+pub(super) fn bind_runtime_manifests(
+    repository: &bigname_manifests::ManifestRepository,
+    profile: &'static str,
+    chains: &mut [phase_runner::config::ChainConfig],
+) -> Result<()> {
+    phase_runner::config::bind_profile_start(chains, repository, profile)?;
+    validate_deployment_table_set(chains, COMPILED_CHAIN_NAMESPACES.iter().copied())?;
+    Ok(())
+}
+
+/// The synchronous form, for callers that are not racing a stop.
+#[cfg(test)]
+pub(super) fn prepare_runtime_manifests(
+    root: &std::path::Path,
+    chains: &mut [phase_runner::config::ChainConfig],
+) -> Result<(bigname_manifests::ManifestRepository, &'static str)> {
+    let (repository, profile) = load_hashed_manifest_repository(root)?;
+    bind_runtime_manifests(&repository, profile, chains)?;
     Ok((repository, profile))
 }

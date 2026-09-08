@@ -90,6 +90,13 @@ fn query_matches_log(query: &WatchQuery, log: &Log) -> bool {
                 .iter()
                 .any(|expected| expected.eq_ignore_ascii_case(topic0))
         })
+        && (query.topic1s.is_empty()
+            || log.topics.get(1).is_some_and(|topic1| {
+                query
+                    .topic1s
+                    .iter()
+                    .any(|expected| expected.eq_ignore_ascii_case(topic1))
+            }))
 }
 
 #[cfg(test)]

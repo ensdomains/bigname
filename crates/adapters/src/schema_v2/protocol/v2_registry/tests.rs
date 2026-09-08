@@ -98,6 +98,7 @@ fn named_expiry_fixture(
         chain_id: "ethereum-sepolia".to_owned(),
         deployment_label: "unit-test".to_owned(),
         correlation_addresses: BTreeMap::new(),
+        resolver_implementations: Vec::new(),
         events: vec![event.clone()],
     };
     let selected = Selected {

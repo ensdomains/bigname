@@ -143,7 +143,10 @@ impl PhaseRunner {
             && let Some(heads) = &progress.heads
         {
             phase_lock.check_alive().await?;
-            publish_heads(self.store.pool(), &chain.chain_id, heads).await?;
+            let heads =
+                crate::heads::retain_stored_finality(self.store.pool(), &chain.chain_id, heads)
+                    .await?;
+            publish_heads(self.store.pool(), &chain.chain_id, &heads).await?;
         }
         phase_lock.check_alive().await?;
         if mode.is_redo() {

@@ -225,6 +225,7 @@ async fn seed_resources(
             FROM record_inventory_current row
             CROSS JOIN LATERAL jsonb_array_elements_text(
                 COALESCE(row.provenance -> 'record_event_ids', '[]'::jsonb)
+                || COALESCE(row.provenance -> 'attributed_event_ids', '[]'::jsonb)
                 || jsonb_build_array(
                     row.provenance -> 'resolver_pointer_event_id',
                     row.record_version_boundary -> 'normalized_event_id',

@@ -2,6 +2,7 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{Marker, ProjectError, Result};
 
+mod direct;
 mod serialization;
 
 pub(super) async fn build(
@@ -12,6 +13,7 @@ pub(super) async fn build(
     project_alias_topology(transaction).await?;
     project_wildcard_topology(transaction).await?;
     project_ownerless_ens_topology(transaction).await?;
+    direct::build(transaction).await?;
     project_basenames_transport(transaction, chain_id, target).await?;
     serialization::serialize_projected_topologies(transaction).await?;
     Ok(())
@@ -69,6 +71,7 @@ async fn project_ownerless_ens_topology(transaction: &mut Transaction<'_, Postgr
         ) resolver ON TRUE
         JOIN project_stage_record_inventory_current inventory
           ON inventory.resource_id = serving.serving_resource_id
+         AND inventory.provenance ->> 'record_serving' IS DISTINCT FROM 'false'
         WHERE name.logical_name_id = surface.logical_name_id
           AND surface.namespace = 'ens'
         "#,
@@ -537,6 +540,7 @@ async fn project_basenames_transport(
         ) boundary ON TRUE
         LEFT JOIN project_stage_record_inventory_current inventory
           ON inventory.resource_id = binding.resource_id
+         AND inventory.provenance ->> 'record_serving' IS DISTINCT FROM 'false'
         WHERE name.logical_name_id = surface.logical_name_id
           AND surface.namespace = 'basenames'
           AND $1 = 'base-mainnet'

@@ -4,17 +4,17 @@ async fn v2_lookup_rejects_invalid_request_shapes() -> Result<()> {
 
     for (uri, body) in [
         (
-            "/v2/lookup",
+            "/v1/lookup",
             json!({"inputs": [{"id": "both", "name": "alice.eth", "address": "0x0000000000000000000000000000000000000abc"}]}),
         ),
-        ("/v2/lookup", json!({"inputs": [{"id": "neither"}]})),
-        ("/v2/lookup", json!({"inputs": [{"id": "", "name": "alice.eth"}]})),
+        ("/v1/lookup", json!({"inputs": [{"id": "neither"}]})),
+        ("/v1/lookup", json!({"inputs": [{"id": "", "name": "alice.eth"}]})),
         (
-            "/v2/lookup",
+            "/v1/lookup",
             json!({"profile": "detail", "extra": true, "inputs": []}),
         ),
         (
-            "/v2/lookup",
+            "/v1/lookup",
             json!({"namespace": "ens", "inputs": [{"id": "addr", "address": "0x0000000000000000000000000000000000000abc"}]}),
         ),
     ] {
@@ -25,8 +25,8 @@ async fn v2_lookup_rejects_invalid_request_shapes() -> Result<()> {
     }
 
     for uri in [
-        "/v2/lookup?at=2026-04-17T00:00:00Z",
-        "/v2/lookup?finality=safe",
+        "/v1/lookup?at=2026-04-17T00:00:00Z",
+        "/v1/lookup?finality=safe",
     ] {
         let response = v2_lookup_response_for_database(
             &database,
@@ -44,7 +44,7 @@ async fn v2_lookup_rejects_invalid_request_shapes() -> Result<()> {
         .collect::<Vec<_>>();
     let response = v2_lookup_response_for_database(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": oversized_inputs}),
     )
     .await?;
@@ -61,7 +61,7 @@ async fn v2_lookup_validates_reverse_inputs_before_deployment_readiness() -> Res
     let database = TestDatabase::new_migrated().await?;
     let response = v2_lookup_response_for_database_with_public_namespaces(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"address": "not-an-address"}]}),
         &[],
     )
@@ -72,7 +72,7 @@ async fn v2_lookup_validates_reverse_inputs_before_deployment_readiness() -> Res
 
     let response = v2_lookup_response_for_database_with_public_namespaces(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"address": "0x0000000000000000000000000000000000000abc"}]}),
         &[],
     )
@@ -92,7 +92,7 @@ async fn v2_lookup_empty_public_namespace_set_takes_precedence_over_bound_cursor
 
     let first = v2_lookup_response_for_database_with_public_namespaces(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"address": address, "page_size": 1}]}),
         &["ens", "basenames"],
     )
@@ -105,7 +105,7 @@ async fn v2_lookup_empty_public_namespace_set_takes_precedence_over_bound_cursor
 
     let response = v2_lookup_response_for_database_with_public_namespaces(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"address": address, "page_size": 1, "cursor": cursor}]}),
         &[],
     )
@@ -153,7 +153,7 @@ async fn v2_lookup_name_only_refuses_while_interpret_redo_is_in_progress()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v2/lookup")
+                .uri("/v1/lookup")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&json!({
@@ -191,7 +191,7 @@ async fn v2_lookup_bare_reverse_discloses_a_redo_suppressed_request_chain() -> R
     .oneshot(
         Request::builder()
             .method("POST")
-            .uri("/v2/lookup")
+            .uri("/v1/lookup")
             .header("content-type", "application/json")
             .body(Body::from(
                 serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
@@ -236,7 +236,7 @@ async fn v2_lookup_bare_reverse_returns_conflict_when_every_public_namespace_is_
     .oneshot(
         Request::builder()
             .method("POST")
-            .uri("/v2/lookup")
+            .uri("/v1/lookup")
             .header("content-type", "application/json")
             .body(Body::from(
                 serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
@@ -270,7 +270,7 @@ async fn v2_lookup_exact_scope_fallback_refuses_while_interpret_redo_is_in_progr
     .oneshot(
         Request::builder()
             .method("POST")
-            .uri("/v2/lookup")
+            .uri("/v1/lookup")
             .header("content-type", "application/json")
             .body(Body::from(
                 serde_json::to_vec(&json!({
@@ -339,7 +339,7 @@ async fn v2_lookup_forward_results_are_in_order_with_head_meta() -> Result<()> {
     let token = payload["meta"]["as_of_token"]
         .as_str()
         .expect("lookup response must include meta.as_of_token");
-    let replay = v2_get_json(&database, &format!("/v2/names/case.eth?at={token}")).await?;
+    let replay = v2_get_json(&database, &format!("/v1/names/case.eth?at={token}")).await?;
     assert_eq!(replay["meta"]["as_of"], payload["meta"]["as_of"]);
     assert_eq!(replay["meta"]["as_of_token"], payload["meta"]["as_of_token"]);
 
@@ -551,6 +551,53 @@ async fn v2_lookup_withholds_resolver_without_projected_authority() -> Result<()
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_serves_a_root_registry_pointer_without_projected_authority() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    // An ENSv2 TLD whose root-registry token has a resolver pointer but no observed registration.
+    sqlx::query(
+        "UPDATE name_current
+         SET support_status = 'unsupported',
+             unsupported_reason = 'current_authority_not_projected',
+             serving_resource_id = resource_id,
+             resource_id = NULL,
+             surface_binding_id = NULL,
+             token_lineage_id = NULL,
+             binding_kind = NULL,
+             provenance = provenance || jsonb_build_object(
+                 'read_reachability', jsonb_build_object(
+                     'basis', 'root_registry_resolver_pointer'))
+         WHERE raw_name = 'alice.eth'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let forward = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"name": "alice.eth"}]}),
+    )
+    .await?;
+    let record = &forward["data"][0]["record"];
+    assert_eq!(record["status"], json!("unsupported"), "{record}");
+    assert_eq!(
+        record["unsupported_reason"],
+        json!("current_authority_not_projected")
+    );
+    assert_eq!(
+        record["resolver"],
+        json!({"chain_id": 1, "address": address}),
+        "{record}"
+    );
+    assert_eq!(record["registration_status"], json!("unregistered"));
+    assert!(record.get("registration_id").is_none(), "{record}");
+    assert!(record.get("authority").is_none_or(Value::is_null), "{record}");
+    assert_eq!(record["addresses"]["60"], json!(address));
+
+    database.cleanup().await
 }
 
 #[tokio::test]
@@ -796,6 +843,61 @@ async fn v2_lookup_marks_unsupported_phase_inventory_fields() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_lookup_detail_withholds_record_values_from_unsupported_inventory() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        "ens:unknown-resolver.eth",
+        "unknown-resolver.eth",
+        "unknown-resolver.eth",
+        "namehash:unknown-resolver.eth",
+        Uuid::from_u128(0x5a0207),
+        Uuid::from_u128(0x5a0208),
+        Uuid::from_u128(0x5a0209),
+        "0x0000000000000000000000000000000000000abc",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        38,
+    )
+    .await?;
+    // The seeded inventory retains a successful addr:60 entry; only its support flips, as for a
+    // name behind an ENSv2 resolver whose implementation is not an admitted profile.
+    let updated = sqlx::query(
+        r#"
+        UPDATE record_inventory_current inventory
+        SET support_status = 'unsupported',
+            unsupported_reason = 'resolver_implementation_unknown'
+        FROM name_current name
+        WHERE name.resource_id = inventory.resource_id
+          AND name.raw_name = 'unknown-resolver.eth'
+          AND inventory.entries @> '[{"record_key":"addr:60","status":"success"}]'::jsonb
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?
+    .rows_affected();
+    assert_eq!(updated, 1, "fixture must flip the row that carries the retained addr:60 value");
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"name": "unknown-resolver.eth"}]}),
+    )
+    .await?;
+    let record = &payload["data"][0]["record"];
+
+    assert_eq!(payload["data"][0]["status"], json!("ok"));
+    assert!(record.get("addresses").is_none(), "{record}");
+    assert!(record.get("primary_address").is_none(), "{record}");
+    assert!(record.get("text_records").is_none(), "{record}");
+    assert!(record.get("content_hash").is_none(), "{record}");
+    assert_eq!(
+        record["unsupported_fields"],
+        json!(["addresses", "content_hash", "primary_address", "text_records"])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_lookup_serves_unchanged_phase_projection_after_head_advance() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_identity_name(
@@ -816,7 +918,7 @@ async fn v2_lookup_serves_unchanged_phase_projection_after_head_advance() -> Res
 
     let response = v2_lookup_response_for_database(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"id": "public-gap", "name": "public-gap.eth"}]}),
     )
     .await?;
@@ -867,7 +969,7 @@ async fn v2_lookup_rejects_address_relation_from_another_phase_publication() -> 
 
     let response = v2_lookup_response_for_database(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"address": address}]}),
     )
     .await?;
@@ -1017,7 +1119,7 @@ async fn v2_lookup_rejects_primary_claim_from_future_phase_publication() -> Resu
 
     let response = v2_lookup_response_for_database(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"address": address}]}),
     )
     .await?;
@@ -1134,7 +1236,33 @@ async fn v2_lookup_rejects_head_reorg_before_project_republication() -> Result<(
         38,
     )
     .await?;
-    advance_v2_lookup_ethereum_head(&database, 39, "0xlookup-before-reorg").await?;
+    // The served block 39 is only canonical (not yet safe), so a reorg can still replace it.
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_lineage (
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state
+         ) VALUES (
+             'ethereum-mainnet', '0xlookup-before-reorg', 39,
+             '2026-04-17T00:00:39Z'::timestamptz, 'canonical'
+         )",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        "UPDATE chain_heads
+         SET latest_block_hash = '0xlookup-before-reorg',
+             latest_block_number = 39,
+             updated_at = now()
+         WHERE chain_id = 'ethereum-mainnet'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET current_block_number = 39, current_block_hash = '0xlookup-before-reorg'
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
     let (_guard, control) =
         crate::v2::lookup_served_head_revalidation_test_hooks::install(&database.lookup_pool)
             .await?;
@@ -1144,7 +1272,7 @@ async fn v2_lookup_rejects_head_reorg_before_project_republication() -> Result<(
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({
@@ -1158,6 +1286,8 @@ async fn v2_lookup_rejects_head_reorg_before_project_republication() -> Result<(
     });
 
     control.wait_until_reached().await;
+    // A reorg replaces the served block 39 and extends the new fork to 40. The head moves on
+    // before Project republishes, so the served publication is no longer on the readable path.
     sqlx::query(
         "INSERT INTO bigname_phase.chain_lineage (
              chain_id, block_hash, block_number, block_timestamp, canonicality_state
@@ -1174,6 +1304,23 @@ async fn v2_lookup_rejects_head_reorg_before_project_republication() -> Result<(
              latest_block_number = 40,
              updated_at = now()
          WHERE chain_id = 'ethereum-mainnet'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_lineage
+         SET canonicality_state = 'orphaned'
+         WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xlookup-before-reorg'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_lineage (
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state
+         ) VALUES (
+             'ethereum-mainnet', '0xlookup-reorged-39', 39,
+             '2026-04-17T00:00:39Z'::timestamptz, 'canonical'
+         )",
     )
     .execute(&database.lookup_pool)
     .await?;
@@ -1219,7 +1366,7 @@ async fn v2_lookup_rejects_project_publication_between_selection_and_first_read(
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({
@@ -1260,7 +1407,7 @@ async fn v2_lookup_internal_head_selection_error_is_sanitized() -> Result<()> {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v2/lookup")
+                .uri("/v1/lookup")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&json!({
@@ -1338,14 +1485,14 @@ async fn v2_lookup_tokens_remain_snapshot_capable_while_collections_reject_at() 
 
     let replay = v2_get_response(
         &database,
-        &format!("/v2/names/missing.eth?at={token}"),
+        &format!("/v1/names/missing.eth?at={token}"),
     )
     .await?;
     assert_eq!(replay.status(), StatusCode::NOT_FOUND);
 
     let collection = v2_get_response(
         &database,
-        &format!("/v2/search?q=missing&namespace=ens&at={token}"),
+        &format!("/v1/search?q=missing&namespace=ens&at={token}"),
     )
     .await?;
     assert_eq!(collection.status(), StatusCode::BAD_REQUEST);
@@ -1356,7 +1503,7 @@ async fn v2_lookup_tokens_remain_snapshot_capable_while_collections_reject_at() 
     );
 
     let union_replay =
-        v2_get_response(&database, &format!("/v2/search?q=missing&at={token}")).await?;
+        v2_get_response(&database, &format!("/v1/search?q=missing&at={token}")).await?;
     assert_eq!(union_replay.status(), StatusCode::BAD_REQUEST);
 
     let public_payload = v2_lookup_json(
@@ -1377,7 +1524,7 @@ async fn v2_lookup_tokens_remain_snapshot_capable_while_collections_reject_at() 
         .as_str()
         .expect("public lookup response must include meta.as_of_token");
     let public_replay =
-        v2_get_response(&database, &format!("/v2/search?q=missing&at={public_token}")).await?;
+        v2_get_response(&database, &format!("/v1/search?q=missing&at={public_token}")).await?;
     assert_eq!(public_replay.status(), StatusCode::BAD_REQUEST);
     let public_replay_error: Value = read_json(public_replay).await?;
     assert_eq!(
@@ -1437,7 +1584,7 @@ async fn v2_lookup_serves_reverse_pagination_after_unrelated_head_advance() -> R
 
     let second_page = v2_lookup_response_for_database(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({
             "profile": "detail",
             "inputs": [{
@@ -1457,7 +1604,7 @@ async fn v2_lookup_serves_reverse_pagination_after_unrelated_head_advance() -> R
 
     let mismatch = v2_lookup_response_for_database(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({
             "profile": "detail",
             "inputs": [{
@@ -1587,7 +1734,7 @@ async fn v2_lookup_reverse_keeps_primary_order_and_flag_coherent_across_projecti
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         json!({
@@ -1651,7 +1798,7 @@ async fn v2_lookup_reverse_uses_candidate_name_for_order_flag_and_cursor_across_
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         json!({
@@ -1943,7 +2090,7 @@ async fn v2_lookup_rejects_union_scope_with_missing_phase_head() -> Result<()> {
         .await?;
     let public_response = v2_lookup_response_for_database(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({
             "inputs": [
                 {"id": "ens-miss", "name": "missing.eth"},
@@ -2087,7 +2234,7 @@ async fn v2_lookup_public_reverse_scope_uses_the_served_namespace_set() -> Resul
 
     let response = v2_lookup_response_for_database_with_public_namespaces(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"address": address}]}),
         &["ens"],
     )
@@ -2104,7 +2251,7 @@ async fn v2_lookup_public_reverse_scope_uses_the_served_namespace_set() -> Resul
 
     let codeployed_page = v2_lookup_response_for_database_with_public_namespaces(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"address": address, "page_size": 1}]}),
         &["ens", "basenames"],
     )
@@ -2116,7 +2263,7 @@ async fn v2_lookup_public_reverse_scope_uses_the_served_namespace_set() -> Resul
         .expect("co-deployed reverse page must include a cursor");
     let changed_set = v2_lookup_response_for_database_with_public_namespaces(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"address": address, "page_size": 1, "cursor": cursor}]}),
         &["ens"],
     )
@@ -2161,7 +2308,7 @@ async fn v2_lookup_production_derivation_uses_the_sepolia_authority_chain() -> R
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v2/lookup")
+                .uri("/v1/lookup")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&json!({
@@ -2224,7 +2371,7 @@ async fn v2_lookup_rejects_manifest_declaration_change_during_public_reverse_rea
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
@@ -2322,7 +2469,7 @@ async fn v2_lookup_rejects_interpret_redo_during_public_reverse_read() -> Result
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
@@ -2386,7 +2533,7 @@ async fn v2_lookup_allows_interpret_live_progress_during_public_reverse_read() -
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
@@ -2466,7 +2613,7 @@ async fn v2_lookup_rejects_public_namespace_becoming_ready_during_reverse_read()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
@@ -2540,7 +2687,7 @@ async fn v2_lookup_allows_manifest_freshness_change_without_authority_change() -
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
@@ -2580,7 +2727,7 @@ async fn v2_lookup_mixed_reverse_and_unserved_forward_namespace_fails_closed() -
 
     let response = v2_lookup_response_for_database_with_public_namespaces(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({
             "inputs": [
                 {"id": "reverse", "address": address},
@@ -2620,7 +2767,7 @@ async fn v2_lookup_rejects_single_scope_with_incompatible_project_generation() -
 
     let response = v2_lookup_response_for_database(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"id": "miss", "name": "missing.eth"}]}),
     )
     .await?;
@@ -2632,37 +2779,81 @@ async fn v2_lookup_rejects_single_scope_with_incompatible_project_generation() -
 }
 
 #[tokio::test]
-async fn v2_lookup_reports_stale_when_project_phase_is_behind_head() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    database
-        .seed_snapshot_selector_chain_positions(&json!({
-            "ethereum": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": 79,
-                "block_hash": "0xlookup-project-behind",
-                "timestamp": "2026-04-17T00:01:19Z"
-            }
-        }))
+async fn v2_lookup_serves_a_project_publication_a_few_blocks_behind_head() -> Result<()> {
+    // Live-follow stores the head before Project publishes for it. A publication within the
+    // lag tolerance is served as the snapshot and reported in `as_of`; one further behind is
+    // still stale so a wedged Project cannot serve arbitrarily old data.
+    for (publication_block, phase_status, expect_served) in [
+        (78_i64, "completed", true),
+        (78_i64, "running", true),
+        (77_i64, "completed", false),
+    ] {
+        let database = TestDatabase::new_migrated().await?;
+        database
+            .seed_snapshot_selector_chain_positions(&json!({
+                "ethereum": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 79,
+                    "block_hash": "0xlookup-project-behind",
+                    "timestamp": "2026-04-17T00:01:19Z"
+                }
+            }))
+            .await?;
+        sqlx::query(
+            "INSERT INTO bigname_phase.chain_lineage
+                 (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+             VALUES ('ethereum-mainnet', '0xlookup-previous', $1,
+                     '2026-04-17T00:01:18Z'::timestamptz,
+                     'finalized'::bigname_phase.canonicality_state)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(publication_block)
+        .execute(&database.pool)
         .await?;
-    sqlx::query(
-        "UPDATE chain_phase_state
-         SET current_block_number = 78, current_block_hash = '0xlookup-previous'
-         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
-    )
-    .execute(&database.lookup_pool)
-    .await?;
+        sqlx::query(
+            "UPDATE chain_phase_state
+             SET current_block_number = $1, current_block_hash = '0xlookup-previous',
+                 phase_status = $2,
+                 finished_at = CASE WHEN $2 = 'running' THEN NULL ELSE finished_at END
+             WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+        )
+        .bind(publication_block)
+        .bind(phase_status)
+        .execute(&database.lookup_pool)
+        .await?;
 
-    let response = v2_lookup_response_for_database(
-        &database,
-        "/v2/lookup",
-        json!({"inputs": [{"id": "miss", "name": "missing.eth"}]}),
-    )
-    .await?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(payload["error"]["code"], json!("stale"));
+        let response = v2_lookup_response_for_database(
+            &database,
+            "/v1/lookup",
+            json!({"inputs": [{"id": "miss", "name": "missing.eth"}]}),
+        )
+        .await?;
+        if expect_served {
+            let status = response.status();
+            let payload: Value = read_json(response).await?;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "publication one block behind ({phase_status}) must be served: {payload}"
+            );
+            assert_eq!(payload["meta"]["as_of"]["1"]["block_number"], json!(78));
+            assert_eq!(
+                payload["meta"]["as_of"]["1"]["block_hash"],
+                json!("0xlookup-previous")
+            );
+        } else {
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "publication beyond the lag tolerance"
+            );
+            let payload: Value = read_json(response).await?;
+            assert_eq!(payload["error"]["code"], json!("stale"));
+        }
 
-    database.cleanup().await
+        database.cleanup().await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -2861,7 +3052,7 @@ async fn v2_lookup_excludes_unsupported_rows_without_leaking_pipeline_reasons() 
 
         let response = v2_lookup_response_for_database(
             &database,
-            "/v2/lookup",
+            "/v1/lookup",
             json!({
                 "profile": "detail",
                 "inputs": [{
@@ -3020,7 +3211,7 @@ async fn v2_lookup_reverse_relation_page_revalidates_generation_before_second_sc
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         json!({
@@ -3548,7 +3739,7 @@ fn lookup_record_names(payload: &Value) -> Vec<&str> {
 }
 
 async fn v2_lookup_json(database: &TestDatabase, body: Value) -> Result<Value> {
-    let response = v2_lookup_response_for_database(database, "/v2/lookup", body).await?;
+    let response = v2_lookup_response_for_database(database, "/v1/lookup", body).await?;
     let status = response.status();
     let payload = read_json(response).await?;
     assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");

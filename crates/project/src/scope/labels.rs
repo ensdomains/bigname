@@ -72,10 +72,13 @@ pub(super) async fn include_changed_children(
              WHERE child.raw_label IS DISTINCT FROM changed.raw_label
                 OR child.decoded_label IS DISTINCT FROM changed.decoded_label
          )
-         INSERT INTO project_scope_children
+         , scoped_children AS (
+             INSERT INTO project_scope_children
+             SELECT child_logical_name_id FROM edges
+             ON CONFLICT DO NOTHING
+         )
+         INSERT INTO project_scope_ancestors
          SELECT parent_logical_name_id FROM edges
-         UNION
-         SELECT child_logical_name_id FROM edges
          ON CONFLICT DO NOTHING",
     )
     .bind(chain_id)

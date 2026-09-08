@@ -10,6 +10,7 @@ pub(crate) async fn swap(
     let deletes = if full_rebuild {
         vec![
             "DELETE FROM address_names_current row USING name_surfaces surface WHERE row.logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
+            "DELETE FROM address_records_current row USING name_surfaces surface WHERE row.logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
             "DELETE FROM children_current row USING name_surfaces surface WHERE row.parent_logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
             "DELETE FROM name_current row USING name_surfaces surface WHERE row.logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
             "DELETE FROM permissions_current row USING resources resource WHERE row.resource_id = resource.resource_id AND resource.chain_id = $1",
@@ -22,6 +23,7 @@ pub(crate) async fn swap(
     } else {
         vec![
             "DELETE FROM address_names_current row WHERE EXISTS (SELECT 1 FROM project_scope_names scope WHERE scope.logical_name_id = row.logical_name_id) OR EXISTS (SELECT 1 FROM project_scope_resources scope WHERE scope.resource_id = row.resource_id)",
+            "DELETE FROM address_records_current row WHERE EXISTS (SELECT 1 FROM project_scope_names scope WHERE scope.logical_name_id = row.logical_name_id) OR EXISTS (SELECT 1 FROM project_scope_resources scope WHERE scope.resource_id IN (row.resource_id, row.record_resource_id))",
             "DELETE FROM children_current row WHERE EXISTS (SELECT 1 FROM project_scope_children scope WHERE scope.logical_name_id IN (row.parent_logical_name_id, row.child_logical_name_id))",
             "DELETE FROM name_current row USING project_scope_names scope WHERE row.logical_name_id = scope.logical_name_id",
             "DELETE FROM permissions_current row USING project_scope_resources scope WHERE row.resource_id = scope.resource_id",
@@ -77,6 +79,10 @@ pub(crate) async fn swap(
         (
             "address_names_current",
             "EXISTS (SELECT 1 FROM project_scope_names scope WHERE scope.logical_name_id = project_stage_address_names_current.logical_name_id) OR EXISTS (SELECT 1 FROM project_scope_resources scope WHERE scope.resource_id = project_stage_address_names_current.resource_id)",
+        ),
+        (
+            "address_records_current",
+            "EXISTS (SELECT 1 FROM project_scope_names scope WHERE scope.logical_name_id = project_stage_address_records_current.logical_name_id) OR EXISTS (SELECT 1 FROM project_scope_resources scope WHERE scope.resource_id IN (project_stage_address_records_current.resource_id, project_stage_address_records_current.record_resource_id))",
         ),
         (
             "primary_names_current",

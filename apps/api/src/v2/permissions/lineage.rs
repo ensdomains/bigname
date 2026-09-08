@@ -76,7 +76,21 @@ fn map_permission_lineage_object(object: &Map<String, Value>) -> V2Result<Value>
     if let Some(powers) = object.get("powers") {
         mapped.insert("powers".to_owned(), permission_powers_value(powers)?);
     }
+    if let Some(relation) = object.get("relation_kind") {
+        mapped.insert(
+            "relation".to_owned(),
+            Value::String(product_lineage_relation(relation)?),
+        );
+    }
     Ok(Value::Object(mapped))
+}
+
+/// The NameWrapper relation behind an `ens_v1_authority` grant or revocation.
+fn product_lineage_relation(value: &Value) -> V2Result<String> {
+    match value.as_str() {
+        Some(relation @ ("holder" | "operator" | "token_approval")) => Ok(relation.to_owned()),
+        _ => Err(lineage_mapping_error()),
+    }
 }
 
 fn product_lineage_kind(value: &Value) -> V2Result<String> {
@@ -145,6 +159,32 @@ mod tests {
         }))
         .expect_err("unknown lineage kinds must fail loudly");
 
+        assert_eq!(error.code(), ErrorCode::InternalError);
+    }
+
+    #[test]
+    fn lineage_mapping_serves_the_wrapper_relation_and_rejects_unknown_ones() {
+        let mapped = map_permission_lineage_value(&json!({
+            "kind": "ens_v1_authority",
+            "authority_kind": "wrapper",
+            "authority_key": "wrapper:ethereum-mainnet:1:0xnode:0xblock:0",
+            "authority_contract": "0x00000000000000000000000000000000000026aa",
+            "relation_kind": "operator",
+            "node": "0xnode",
+            "source_event_kind": "ApprovalForAll",
+            "owner": "0x0000000000000000000000000000000000002611"
+        }))
+        .expect("wrapper relation must map");
+        assert_eq!(
+            mapped,
+            json!({"kind": "ens_v1_authority", "relation": "operator"})
+        );
+
+        let error = map_permission_lineage_value(&json!({
+            "kind": "ens_v1_authority",
+            "relation_kind": "parent"
+        }))
+        .expect_err("unknown relations must fail loudly");
         assert_eq!(error.code(), ErrorCode::InternalError);
     }
 }

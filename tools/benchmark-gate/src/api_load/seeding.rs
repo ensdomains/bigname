@@ -294,7 +294,7 @@ fn weight_cursor_requests(
 }
 
 pub(super) fn cursor_variants(seed: &RequestSpec, body: &Value) -> Vec<RequestSpec> {
-    if seed.method == Method::POST && seed.url.path().ends_with("/v2/lookup") {
+    if seed.method == Method::POST && seed.url.path().ends_with("/v1/lookup") {
         let Some(results) = body.get("data").and_then(Value::as_array) else {
             return Vec::new();
         };
@@ -340,13 +340,13 @@ mod tests {
             .map(|index| {
                 get(
                     &base_url,
-                    &["v2", "events"],
+                    &["v1", "events"],
                     &[("seed", &index.to_string())],
                 )
                 .unwrap()
             })
             .collect::<Vec<_>>();
-        let cursor = get(&base_url, &["v2", "events"], &[("cursor", "next")]).unwrap();
+        let cursor = get(&base_url, &["v1", "events"], &[("cursor", "next")]).unwrap();
         let (weighted, cursor_count) = weight_cursor_requests(base, &[cursor], 10);
 
         assert_eq!(cursor_count, 10);
@@ -363,7 +363,7 @@ mod tests {
         let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
         let mut request = get(
             &base,
-            &["v2", "permissions"],
+            &["v1", "permissions"],
             &[("registration_id", "00000000-0000-0000-0000-000000000043")],
         )
         .unwrap();

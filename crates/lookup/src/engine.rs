@@ -46,12 +46,14 @@ impl LookupEngine {
             .await
     }
 
-    /// Resolves and forward-verifies an ENS address primary name at the readable head.
+    /// Resolves and forward-verifies an ENS address primary name at the readable head of
+    /// `chain_id`, the Ethereum L1 the deployment profile projects (Mainnet or Sepolia).
     pub async fn lookup_ens_primary_name(
         &self,
+        chain_id: &str,
         normalized_address: &str,
     ) -> Result<EnsPrimaryNameLookup> {
-        self.lookup_ens_primary_name_gated(normalized_address, |_| ready(true))
+        self.lookup_ens_primary_name_gated(chain_id, normalized_address, |_| ready(true))
             .await
     }
 
@@ -60,6 +62,7 @@ impl LookupEngine {
     /// `ForwardRefused` result with the reverse answer intact and no forward call made.
     pub async fn lookup_ens_primary_name_gated<G, GFut>(
         &self,
+        chain_id: &str,
         normalized_address: &str,
         admit_forward: G,
     ) -> Result<EnsPrimaryNameLookup>
@@ -67,14 +70,18 @@ impl LookupEngine {
         G: FnOnce(String) -> GFut,
         GFut: Future<Output = bool>,
     {
-        self.lookup_ens_primary_name_before_revalidate(normalized_address, admit_forward, || {
-            ready(())
-        })
+        self.lookup_ens_primary_name_before_revalidate(
+            chain_id,
+            normalized_address,
+            admit_forward,
+            || ready(()),
+        )
         .await
     }
 
     async fn lookup_ens_primary_name_before_revalidate<G, GFut, F, Fut>(
         &self,
+        chain_id: &str,
         normalized_address: &str,
         admit_forward: G,
         before_revalidate: F,
@@ -85,7 +92,7 @@ impl LookupEngine {
         F: FnOnce() -> Fut,
         Fut: Future<Output = ()>,
     {
-        let authority = load_ens_primary_name_authority(&self.pool).await?;
+        let authority = load_ens_primary_name_authority(&self.pool, chain_id).await?;
         let result = lookup_ens_primary_name(
             EnsPrimaryNameRequest {
                 normalized_address,
@@ -208,6 +215,7 @@ impl LookupEngine {
     #[cfg(test)]
     pub(crate) async fn lookup_ens_primary_name_with_before_revalidate<F, Fut>(
         &self,
+        chain_id: &str,
         normalized_address: &str,
         before_revalidate: F,
     ) -> Result<EnsPrimaryNameLookup>
@@ -216,6 +224,7 @@ impl LookupEngine {
         Fut: Future<Output = ()>,
     {
         self.lookup_ens_primary_name_before_revalidate(
+            chain_id,
             normalized_address,
             |_| ready(true),
             before_revalidate,

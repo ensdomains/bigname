@@ -483,7 +483,7 @@ mod tests {
     #[tokio::test]
     async fn no_query_params_rejects_status_controls_with_bad_request() {
         let request = Request::builder()
-            .uri("/v2/status?finality=safe")
+            .uri("/v1/status?finality=safe")
             .body(())
             .expect("request must build");
         let (mut parts, ()) = request.into_parts();

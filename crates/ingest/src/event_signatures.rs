@@ -1,6 +1,7 @@
 pub use bigname_manifests::{
     BASENAMES_BASE_RESOLVER_SOURCE_FAMILY, ENS_V1_RESOLVER_SOURCE_FAMILY,
-    ENS_V2_REGISTRY_SOURCE_FAMILY, ENS_V2_RESOLVER_SOURCE_FAMILY, registry_announcement_topic0,
+    ENS_V2_REGISTRY_SOURCE_FAMILY, ENS_V2_RESOLVER_SOURCE_FAMILY,
+    implementation_announcement_topic0, registry_announcement_topic0,
 };
 
 #[cfg(test)]

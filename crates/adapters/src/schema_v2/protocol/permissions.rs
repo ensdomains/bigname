@@ -7,6 +7,7 @@ use crate::schema_v2::{catalog::Selected, model::RawLogInput};
 pub(super) enum V2Vocabulary {
     Registry,
     Resolver,
+    RecordResolver,
 }
 
 pub(super) struct V2PermissionState<'a> {
@@ -29,7 +30,7 @@ pub(super) fn v2_states(
     let changed_powers = changed_powers(permission.old_bitmap, permission.new_bitmap, vocabulary);
     let source_key = match vocabulary {
         V2Vocabulary::Registry => "registry_contract_instance_id",
-        V2Vocabulary::Resolver => "resolver_contract_instance_id",
+        V2Vocabulary::Resolver | V2Vocabulary::RecordResolver => "resolver_contract_instance_id",
     };
     let scope = match vocabulary {
         V2Vocabulary::Registry => json!({
@@ -37,7 +38,7 @@ pub(super) fn v2_states(
             "chain_id":raw.chain_id,
             "registry_address":raw.emitting_address,
         }),
-        V2Vocabulary::Resolver => json!({
+        V2Vocabulary::Resolver | V2Vocabulary::RecordResolver => json!({
             "kind":"resolver",
             "chain_id":raw.chain_id,
             "resolver_address":raw.emitting_address,
@@ -51,7 +52,7 @@ pub(super) fn v2_states(
                 "registry_address":raw.emitting_address,
                 "upstream_resource":permission.upstream_resource,
             }]),
-            V2Vocabulary::Resolver => json!([{
+            V2Vocabulary::Resolver | V2Vocabulary::RecordResolver => json!([{
                 "kind":"resolver_root_fallback",
                 "chain_id":raw.chain_id,
                 "resolver_address":raw.emitting_address,
@@ -178,6 +179,63 @@ pub(in crate::schema_v2) fn v1_revoke_states(
     )
 }
 
+pub(in crate::schema_v2) struct V1WrapperGrant<'a> {
+    pub subject: &'a str,
+    pub scope: Value,
+    pub powers: &'a [&'a str],
+    pub node: &'a str,
+    pub authority_key: &'a str,
+    pub authority_contract: &'a str,
+    pub relation_kind: &'a str,
+    pub source_event_kind: &'a str,
+}
+
+/// NameWrapper holder, operator, and per-token delegate rows share one source shape so Project
+/// can fan operators out from `relation_kind=holder` rows and the restore path can find the
+/// delegate through `node`.
+pub(in crate::schema_v2) fn v1_wrapper_states(
+    grant: bool,
+    permission: V1WrapperGrant<'_>,
+) -> (Value, Value) {
+    let source = json!({
+        "kind":"ens_v1_authority",
+        "authority_kind":"wrapper",
+        "authority_key":permission.authority_key,
+        "authority_contract":permission.authority_contract,
+        "relation_kind":permission.relation_kind,
+        "node":permission.node,
+        "source_event_kind":permission.source_event_kind,
+    });
+    let transfer_behavior = if permission.relation_kind == "token_approval" {
+        "cleared_on_transfer_unless_cannot_approve"
+    } else {
+        "replace_on_authority_change"
+    };
+    let base = |effective_powers: Value, grant_source: Value, revocation_source: Value| {
+        json!({
+            "subject":permission.subject,
+            "scope":permission.scope,
+            "effective_powers":effective_powers,
+            "grant_source":grant_source,
+            "revocation_source":revocation_source,
+            "inheritance_path":[],
+            "transfer_behavior":transfer_behavior,
+        })
+    };
+    let powers = json!(permission.powers);
+    if grant {
+        (
+            base(json!([]), Value::Null, Value::Null),
+            base(powers, source, Value::Null),
+        )
+    } else {
+        (
+            base(powers, source.clone(), Value::Null),
+            base(json!([]), Value::Null, source),
+        )
+    }
+}
+
 fn powers(bitmap: U256, vocabulary: V2Vocabulary) -> Vec<String> {
     role_bits(vocabulary)
         .iter()
@@ -210,6 +268,7 @@ fn role_bits(vocabulary: V2Vocabulary) -> &'static [(usize, &'static str)] {
     match vocabulary {
         V2Vocabulary::Registry => REGISTRY_ROLE_BITS,
         V2Vocabulary::Resolver => RESOLVER_ROLE_BITS,
+        V2Vocabulary::RecordResolver => super::v2_record_resolver::permissions::ROLE_BITS,
     }
 }
 

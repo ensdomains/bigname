@@ -52,7 +52,7 @@ pub(super) fn validate_intake_shape(chain_id: &str, sources: &[&SourceConfig]) -
                 format!(
                     "chain {chain_id} intake descriptors [{descriptors}] violate the required \
                      shape: exactly one dRPC intake-capable source with ethereum_head seed basis \
-                     and start block 0"
+                     and start block 0 or the admitted hackathon deployment start"
                 )
             }
             _ => format!("chain {chain_id} has an unsupported production intake shape"),
@@ -79,7 +79,7 @@ pub(super) fn validate_sepolia_verification_shape(
         format!(
             "chain {chain_id} verification-only descriptors [{descriptors}] violate the required \
              shape: exactly one dRPC verification-only source with ethereum_head seed basis and \
-             start block 0"
+             start block 0 or the admitted hackathon deployment start"
         ),
     ))
 }
@@ -88,7 +88,7 @@ fn valid_sepolia_drpc_shape(sources: &[&SourceConfig]) -> bool {
     sources.len() == 1
         && normalized_source_kind(&sources[0].source_kind) == "drpc"
         && sources[0].seed_basis == SeedBasis::EthereumHead
-        && sources[0].start_block_number == 0
+        && sources[0].sepolia_start_is_admitted()
 }
 
 pub(super) fn same_source_identity(

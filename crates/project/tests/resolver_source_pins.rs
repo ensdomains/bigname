@@ -252,3 +252,64 @@ async fn duplicate_declarations_project_latest_role_and_features_together() -> T
     database.cleanup().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn public_v2_requires_direct_declaration_and_does_not_enumerate() -> TestResult {
+    for (role, proxy, declared, expected) in [
+        ("public_resolver_v2", "none", true, "supported"),
+        ("public_resolver_v2", "erc1967", true, "unsupported"),
+        ("permissioned_resolver", "erc1967", true, "unsupported"),
+        ("public_resolver_v2", "none", false, "unsupported"),
+    ] {
+        let (database, pool) = migrated_pool().await?;
+        seed_duplicate_declarations(&pool).await?;
+        let payload = json!({"deployment_epoch":"test", "contracts": if declared {
+            json!([{"role":role,"address":RESOLVER,"proxy_kind":proxy,"start_block":20}])
+        } else { json!([]) }});
+        // The events reference the manifest through a composite key that includes
+        // source_family, so detach them while both sides change family.
+        sqlx::query("UPDATE normalized_events SET source_manifest_id = NULL")
+            .execute(&pool)
+            .await?;
+        sqlx::query("UPDATE manifest_versions SET source_family = 'ens_v2_resolver_l1', manifest_payload = $1")
+            .bind(&payload).execute(&pool).await?;
+        sqlx::query("UPDATE normalized_events SET source_family = 'ens_v2_resolver_l1', after_state = CASE WHEN event_kind = 'SourceManifestUpdated' THEN jsonb_set(after_state, '{manifest_payload}', $1) ELSE after_state END, source_manifest_id = (SELECT manifest_id FROM manifest_versions)")
+            .bind(&payload).execute(&pool).await?;
+        Engine::new(pool.clone())
+            .run_batch(BatchRequest {
+                chain_id: CHAIN.to_owned(),
+                target_block: 20,
+                affected_from_block: 20,
+                affected_to_block: 20,
+                resume_current: None,
+                mode: RunMode::Normal,
+            })
+            .await?;
+        let (status, summary): (String, Value) = sqlx::query_as(
+            "SELECT support_status, declared_summary FROM resolver_current WHERE resolver_address = $1",
+        ).bind(RESOLVER).fetch_one(&pool).await?;
+        assert_eq!(status, expected, "{role}/{proxy}/{declared}");
+        if status == "supported" {
+            assert_eq!(
+                summary["classification"]["source_family"],
+                "ens_v2_resolver_l1"
+            );
+            assert_eq!(
+                summary["classification"]["basis"],
+                "manifest_declared_address"
+            );
+            assert_eq!(summary["classification"]["read_features"], json!([]));
+            for section in [
+                "bindings",
+                "aliases",
+                "permissions",
+                "role_holders",
+                "event_summary",
+            ] {
+                assert_eq!(summary[section]["status"], "unsupported");
+            }
+        }
+        database.cleanup().await?;
+    }
+    Ok(())
+}

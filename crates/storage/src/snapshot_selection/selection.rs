@@ -352,38 +352,41 @@ async fn load_phase_head_position(
         }
     };
 
-    let project_is_current: bool = sqlx::query_scalar(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM chain_phase_state
-            WHERE chain_id = $1
-              AND phase_name = 'project'
-              AND phase_status = 'completed'
-              AND current_block_number = $2
-              AND current_block_hash = $3
-              AND input_content_hash = $4
-        )
-        "#,
-    )
-    .bind(&requirement.chain_id)
-    .bind(latest_block_number)
-    .bind(&latest_block_hash)
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| {
-        SnapshotSelectionError::internal(format!(
-            "failed to check the current project phase for chain {}: {error}",
-            requirement.chain_id
-        ))
-    })?;
-    if !project_is_current {
-        return Err(SnapshotSelectionError::stale(format!(
-            "chain {} project phase is not published at its current schema-v2 head",
-            requirement.chain_id
-        )));
-    }
+    // Serve at the project phase's completed publication. Live-follow moves the stored head
+    // the moment a block arrives and Project publishes a few seconds later, so requiring the
+    // publication to sit exactly at the stored head rejected most reads under real block
+    // cadence. A publication a few blocks behind the head is still one consistent, canonical
+    // snapshot; the served position (reported as `as_of`) is the publication when it is behind
+    // the requested position. A publication further behind than
+    // [`PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS`] is still stale.
+    let publication = super::project::load_current_project_publication(pool, &requirement.chain_id)
+        .await?
+        .ok_or_else(|| {
+            SnapshotSelectionError::stale(format!(
+                "chain {} project phase is not published at its current schema-v2 head",
+                requirement.chain_id
+            ))
+        })?;
+    let (block_hash, block_number) = if publication.block_number == latest_block_number
+        && publication.block_hash == latest_block_hash
+    {
+        (block_hash, block_number)
+    } else {
+        if latest_block_number - publication.block_number
+            > super::project::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS
+        {
+            return Err(SnapshotSelectionError::stale(format!(
+                "chain {} project phase is not published at its current schema-v2 head \
+                 (publication at {} lags head {} beyond tolerance)",
+                requirement.chain_id, publication.block_number, latest_block_number
+            )));
+        }
+        if publication.block_number < block_number {
+            (publication.block_hash, publication.block_number)
+        } else {
+            (block_hash, block_number)
+        }
+    };
 
     let block = load_chain_lineage_block(pool, &requirement.chain_id, &block_hash)
         .await

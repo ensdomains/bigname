@@ -10,13 +10,13 @@ Public traffic terminates at Caddy, defined by `docker-compose.public.yml` and
 `docker/caddy/Caddyfile`. Caddy forwards requests to the internal API service at
 `api:3000`.
 
-The public edge remains on the pre-C3 allowlist while the API binary serves
-v2. Its retained matchers are:
+The public edge serves the API under the `/v1` prefix (#315). Its matchers
+are:
 
-- Removed helpers: `GET` and `HEAD` on `/`, `/docs`, `/docs/`, and
-  `/openapi.json`; the API now returns `404` for them.
-- Removed REST: `GET` and `HEAD` on `/v1/*`, `POST /v1/identity:lookup`, and
-  its browser preflight; the API now returns `404` for them.
+- REST reads: `GET` and `HEAD` on `/v1/*`, which covers the lookup, status,
+  product, and diagnostic route families in
+  [`api-v2-routes.md`](api-v2-routes.md).
+- REST lookup: `POST /v1/lookup` and its `OPTIONS` browser preflight.
 - GraphQL: `POST /graphql` and its `OPTIONS` browser preflight. This is an
   unauthenticated first-party ENS Manager compatibility subset governed by the
   [committed SDL fixture](../apps/api/src/tests/fixtures/subgraph_schema.graphql),
@@ -30,9 +30,9 @@ validates the complete operation set against a temporary declaration overlay;
 that overlay is review evidence, not a substitute for updating Manager before
 the schema is deployed.
 
-The binary serves `/v2`, but Caddy does not yet admit it. Therefore no REST
-surface is publicly reachable between this deletion and the maintainer-gated
-C3 edge flip. GraphQL remains the only usable API request through this edge.
+The former documentation-helper matchers (`/`, `/docs`, `/docs/`,
+`/openapi.json`) and the removed `POST /v1/identity:lookup` matcher were
+dropped with the flip; those paths now fall through to the edge's `404`.
 
 The Manager endpoint precondition was checked on 2026-07-21. The deployed
 `https://app.ens.dev` application loaded the hashed
@@ -48,9 +48,9 @@ https://app.ens.dev`, requested method `POST`, and requested header
 replays that real browser origin against the candidate edge. Recheck this
 evidence before cutover: if Manager moves behind a private or same-origin
 backend, the public GraphQL matcher can be removed. Otherwise the compatibility
-endpoint sunsets when Manager migrates to the v2 REST contract after the C3
-edge flip; retaining it beyond that point requires an explicit decision to
-support the SDL independently.
+endpoint sunsets when Manager migrates to the `/v1` REST contract; retaining
+it beyond that point requires an explicit decision to support the SDL
+independently.
 
 Requests outside these method and path matcher groups return `404` at the edge.
 In particular, Caddy does not expose `/healthz`; the compose probe reaches it
@@ -58,10 +58,32 @@ at `127.0.0.1` inside the API container, while the process listens on its
 configured bind address (`0.0.0.0:3000` by default in compose). This narrows the
 helper allowlist introduced by #203 and prevents public traffic from competing
 for the health-specific concurrency ceiling.
-The API returns `404` for the removed v1 and helper paths that Caddy still
-proxies. `/v2/*` remains internal cutover staging and returns `404` publicly.
-`GET /graphql` is also denied, so GraphiQL is not exposed. Phase-runner and
+`GET /graphql` is also denied, so GraphiQL is not exposed. `/v2/*` is not
+served by the binary and not admitted by the edge. Phase-runner and
 PostgreSQL control surfaces are not routed through Caddy.
+
+### Internal-only versus public URLs
+
+Not every URL the API process answers is a public one. Keep the two sets
+apart when writing runbooks, dashboards, or smoke checks:
+
+- Public (through Caddy): `GET`/`HEAD /v1/*`, `POST /v1/lookup`, and
+  `POST /graphql`, plus the two `OPTIONS` preflights. Diagnostics under
+  `/v1/diagnostics/*` are part of the public read surface by design (ADR 0006).
+- Internal only (reachable on the API listener, never through Caddy):
+  `GET /healthz`, GraphiQL (`GET /graphql`), process metrics, and any
+  phase-runner or PostgreSQL control surface. Internal URLs are reached from
+  inside the compose network (`api:3000`) or on the host loopback when
+  `BIGNAME_API_HOST=127.0.0.1` publishes the port.
+
+`scripts/public-edge-smoke` asserts both halves. Its
+`BIGNAME_SMOKE_INTERNAL_API_URL` must therefore be reachable from the host
+running the smoke; on a compose host that is the loopback-published API port,
+not the `api` service name (#205). The smoke also replays the #205
+encoded-traversal probes (`/v1/%2e%2e/v1/status`, `/v1/%2e%2e/v1/lookup`,
+`/v1/%2e%2e/healthz`): Caddy matches on the cleaned path but proxies the raw
+URI, so the API itself must answer `404` for a `..`-bearing path both directly
+and through the edge.
 
 ## Environment
 
@@ -131,14 +153,14 @@ MUST be `true`; otherwise all clients share Caddy's single container-IP bucket
 and the intended per-client limit becomes an accidental global throttle.
 
 The undrain statement timeout remains `25000` as a conservative request-pool
-ceiling. `/v2/status` no longer scans the legacy invalidation backlog: its
+ceiling. `/v1/status` no longer scans the legacy invalidation backlog: its
 schema-v2 status read is bounded by the configured request timeout and uses
 the phase lookup pool.
 
 The RPC deadlines are shorter than the whole-request deadline. A hung provider
 therefore becomes the route's existing in-band execution-failure result rather
 than consuming an API request indefinitely. The request deadline remains a
-backstop on `/healthz` and `/v2/status`; the status route remains
+backstop on `/healthz` and `/v1/status`; the status route remains
 bounded by the phase lookup pool's statement timeout. `/healthz` alone bypasses
 the process-wide concurrency limiter and load shedding. It concurrently runs
 the database-identity query through a persistent one-connection readiness pool
@@ -207,6 +229,8 @@ Check the public edge:
 test "$(curl -sS -o /dev/null -w '%{http_code}' -I http://127.0.0.1/)" = 404
 test "$(curl -sS -o /dev/null -w '%{http_code}' -I http://127.0.0.1/docs)" = 404
 test "$(curl -sS -o /dev/null -w '%{http_code}' -I http://127.0.0.1/openapi.json)" = 404
+test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1/v1/status)" = 200
+test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1/v2/status)" = 404
 ```
 
 Run the positive and default-deny edge checks against Caddy and its internal API
@@ -237,6 +261,4 @@ For hostname/TLS deployments, replace `127.0.0.1` with the public hostname and
   database or execution-node admin ports.
 - Caddy data lives in the `caddy-data` Docker volume. Preserve it across
   container recreates so certificate state survives restarts.
-- Caddy sends HSTS and advertises HTTP/3 when the UDP port is published. The
-  stale helper matcher still adds short-lived cache headers to its `404`
-  responses until the C3 edge flip.
+- Caddy sends HSTS and advertises HTTP/3 when the UDP port is published.

@@ -61,7 +61,7 @@ async fn v2_diagnostics_name_routes_return_declared_state_slices() -> Result<()>
     seed_v2_diagnostics_name_fixture(&database, "ens:alice.eth", 21_000_003).await?;
 
     for case in diagnostic_route_cases() {
-        let uri = format!("/v2/diagnostics/names/Alice.eth/{}", case.suffix);
+        let uri = format!("/v1/diagnostics/names/Alice.eth/{}", case.suffix);
         let payload = request_v2_diagnostics_json(&database, &uri, StatusCode::OK).await?;
 
         assert!(payload.get("page").is_none(), "{uri}");
@@ -121,7 +121,7 @@ async fn v2_diagnostics_name_coverage_synthesizes_missing_unsupported_reason() -
 
     let payload = request_v2_diagnostics_json(
         &database,
-        "/v2/diagnostics/names/unsupported.eth/coverage",
+        "/v1/diagnostics/names/unsupported.eth/coverage",
         StatusCode::OK,
     )
     .await?;
@@ -210,7 +210,7 @@ async fn v2_diagnostics_name_records_executes_ephemeral_lookup_without_legacy_pe
     let response = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/diagnostics/names/Alice.eth/records?keys=addr:60")
+                .uri("/v1/diagnostics/names/Alice.eth/records?keys=addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -325,7 +325,7 @@ async fn v2_diagnostics_name_records_compares_retained_reservation_audit_state()
     )
     .oneshot(
         Request::builder()
-            .uri("/v2/diagnostics/names/Alice.eth/records?keys=addr:60")
+            .uri("/v1/diagnostics/names/Alice.eth/records?keys=addr:60")
             .body(Body::empty())
             .expect("request must build"),
     )
@@ -368,7 +368,7 @@ async fn v2_diagnostics_name_records_at_or_below_cap_has_no_truncation_note() ->
 
     let payload = request_v2_diagnostics_json(
         &database,
-        "/v2/diagnostics/names/Alice.eth/records",
+        "/v1/diagnostics/names/Alice.eth/records",
         StatusCode::OK,
     )
     .await?;
@@ -437,7 +437,7 @@ async fn v2_diagnostics_name_records_reuses_supported_inventory_boundary_fallbac
 
     let payload = request_v2_diagnostics_json(
         &database,
-        "/v2/diagnostics/names/alice.eth/records",
+        "/v1/diagnostics/names/alice.eth/records",
         StatusCode::OK,
     )
     .await?;
@@ -502,7 +502,7 @@ async fn v2_diagnostics_name_records_cache_keeps_non_product_cacheable_selectors
 
     let payload = request_v2_diagnostics_json(
         &database,
-        "/v2/diagnostics/names/alice.eth/records",
+        "/v1/diagnostics/names/alice.eth/records",
         StatusCode::OK,
     )
     .await?;
@@ -549,7 +549,7 @@ async fn v2_diagnostics_name_routes_return_not_found_for_missing_name() -> Resul
     database.seed_default_ens_snapshot_selector_position().await?;
 
     for suffix in ["coverage", "binding", "authority", "records"] {
-        let uri = format!("/v2/diagnostics/names/missing.eth/{suffix}");
+        let uri = format!("/v1/diagnostics/names/missing.eth/{suffix}");
         let payload = request_v2_diagnostics_json(&database, &uri, StatusCode::NOT_FOUND).await?;
 
         assert_eq!(payload["error"]["code"], json!("not_found"), "{uri}");
@@ -572,7 +572,7 @@ async fn v2_diagnostics_name_routes_honor_snapshot_selectors() -> Result<()> {
 
     for suffix in ["coverage", "binding", "authority", "records"] {
         let uri = format!(
-            "/v2/diagnostics/names/alice.eth/{suffix}?at={snapshot_token}&finality=finalized"
+            "/v1/diagnostics/names/alice.eth/{suffix}?at={snapshot_token}&finality=finalized"
         );
         let payload = request_v2_diagnostics_json(&database, &uri, StatusCode::OK).await?;
 
@@ -597,7 +597,7 @@ async fn v2_diagnostics_name_routes_infer_basenames_namespace() -> Result<()> {
     seed_v2_diagnostics_name_fixture(&database, "basenames:alice.base.eth", 84).await?;
 
     for suffix in ["coverage", "binding", "authority", "records"] {
-        let uri = format!("/v2/diagnostics/names/alice.base.eth/{suffix}");
+        let uri = format!("/v1/diagnostics/names/alice.base.eth/{suffix}");
         let payload = request_v2_diagnostics_json(&database, &uri, StatusCode::OK).await?;
 
         assert_eq!(
@@ -621,7 +621,7 @@ async fn v2_diagnostics_name_routes_honor_namespace_override() -> Result<()> {
     seed_v2_diagnostics_name_fixture(&database, "ens:alice.base.eth", 21_000_003).await?;
 
     for suffix in ["coverage", "binding", "authority", "records"] {
-        let uri = format!("/v2/diagnostics/names/alice.base.eth/{suffix}?namespace=ens");
+        let uri = format!("/v1/diagnostics/names/alice.base.eth/{suffix}?namespace=ens");
         let payload = request_v2_diagnostics_json(&database, &uri, StatusCode::OK).await?;
 
         assert_eq!(
@@ -651,7 +651,7 @@ async fn v2_diagnostics_name_routes_reject_malformed_name() -> Result<()> {
     );
 
     for suffix in ["coverage", "binding", "authority", "records"] {
-        let uri = format!("/v2/diagnostics/names/bad%20name.eth/{suffix}");
+        let uri = format!("/v1/diagnostics/names/bad%20name.eth/{suffix}");
         let response = app_router(state.clone())
             .oneshot(
                 Request::builder()
@@ -688,7 +688,7 @@ async fn v2_diagnostics_name_routes_reject_undocumented_query_params() -> Result
             ("address=bad", "unknown query parameter: address"),
             ("page_size=201", "unknown query parameter: page_size"),
         ] {
-            let uri = format!("/v2/diagnostics/names/alice.eth/{suffix}?{query}");
+            let uri = format!("/v1/diagnostics/names/alice.eth/{suffix}?{query}");
             let response = app_router(state.clone())
                 .oneshot(
                     Request::builder()
@@ -715,7 +715,7 @@ async fn v2_diagnostics_name_routes_reject_undocumented_query_params() -> Result
         ("address=bad", "unknown query parameter: address"),
         ("page_size=201", "unknown query parameter: page_size"),
     ] {
-        let uri = format!("/v2/diagnostics/names/alice.eth/records?{query}");
+        let uri = format!("/v1/diagnostics/names/alice.eth/records?{query}");
         let response = app_router(state.clone())
             .oneshot(
                 Request::builder()
@@ -753,19 +753,19 @@ async fn v2_diagnostics_name_records_rejects_malformed_duplicate_and_unknown_que
 
     for (uri, expected_message) in [
         (
-            "/v2/diagnostics/names/alice.eth/records?keys=bad%20key",
+            "/v1/diagnostics/names/alice.eth/records?keys=bad%20key",
             "keys must contain only addr:<coin_type>, text:<key>, avatar, or contenthash",
         ),
         (
-            "/v2/diagnostics/names/alice.eth/records?keys=abi",
+            "/v1/diagnostics/names/alice.eth/records?keys=abi",
             "keys must contain only addr:<coin_type>, text:<key>, avatar, or contenthash",
         ),
         (
-            "/v2/diagnostics/names/alice.eth/records?keys=addr:060,addr:60",
+            "/v1/diagnostics/names/alice.eth/records?keys=addr:060,addr:60",
             "keys must not contain duplicate record keys",
         ),
         (
-            "/v2/diagnostics/names/alice.eth/records?keys=addr:60&source=verified",
+            "/v1/diagnostics/names/alice.eth/records?keys=addr:60&source=verified",
             "unknown query parameter: source",
         ),
     ] {
@@ -798,7 +798,7 @@ async fn v2_diagnostics_name_routes_reject_invalid_namespace_and_at() -> Result<
     seed_v2_diagnostics_name_fixture(&database, "ens:alice.eth", 21_000_003).await?;
 
     for suffix in ["coverage", "binding", "authority", "records"] {
-        let invalid_namespace = format!("/v2/diagnostics/names/alice.eth/{suffix}?namespace=unknown");
+        let invalid_namespace = format!("/v1/diagnostics/names/alice.eth/{suffix}?namespace=unknown");
         let payload =
             request_v2_diagnostics_json(&database, &invalid_namespace, StatusCode::BAD_REQUEST)
                 .await?;
@@ -808,7 +808,7 @@ async fn v2_diagnostics_name_routes_reject_invalid_namespace_and_at() -> Result<
             "{invalid_namespace}"
         );
 
-        let invalid_at = format!("/v2/diagnostics/names/alice.eth/{suffix}?at=not-hex");
+        let invalid_at = format!("/v1/diagnostics/names/alice.eth/{suffix}?at=not-hex");
         let payload =
             request_v2_diagnostics_json(&database, &invalid_at, StatusCode::BAD_REQUEST).await?;
         assert_eq!(payload["error"]["code"], json!("invalid_input"), "{invalid_at}");

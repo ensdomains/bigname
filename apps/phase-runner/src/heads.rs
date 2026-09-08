@@ -3,6 +3,7 @@ mod persist;
 use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::error::{ErrorKind, RunnerError, RunnerResult};
+use crate::head_finality::StoredFinality;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockMarker {
@@ -60,6 +61,94 @@ impl HeadMarkers {
             }
         }
         Ok(())
+    }
+}
+
+/// Keep the stored safe/finalized markers when the provider reports lower ones.
+///
+/// Hosted RPC load balancers hand consecutive polls to different nodes whose safe and
+/// finalized markers can trail each other by tens of blocks. A lower marker from a lagging
+/// node is not a chain event: safe and finalized blocks do not un-finalize. The stored marker
+/// is kept and the provider's is logged, so the monotonic finality check in publication still
+/// catches a genuine regression (a hash change at the same height, or a marker disappearing).
+pub(crate) async fn retain_stored_finality(
+    pool: &PgPool,
+    chain_id: &str,
+    proposed: &HeadMarkers,
+) -> RunnerResult<HeadMarkers> {
+    let stored: Option<StoredFinality> = sqlx::query_as(
+        "
+            SELECT safe_block_number,
+                   safe_block_hash,
+                   finalized_block_number,
+                   finalized_block_hash
+            FROM chain_heads
+            WHERE chain_id = $1
+            ",
+    )
+    .bind(chain_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        RunnerError::transient(format!(
+            "failed to load stored finality markers for chain {chain_id}: {error}"
+        ))
+    })?;
+    let Some((safe_number, safe_hash, finalized_number, finalized_hash)) = stored else {
+        return Ok(proposed.clone());
+    };
+    let stored_safe = safe_number
+        .zip(safe_hash)
+        .map(|(number, hash)| BlockMarker { number, hash });
+    let stored_finalized = finalized_number
+        .zip(finalized_hash)
+        .map(|(number, hash)| BlockMarker { number, hash });
+    Ok(retain_higher_finality(
+        chain_id,
+        proposed,
+        stored_safe.as_ref(),
+        stored_finalized.as_ref(),
+    ))
+}
+
+fn retain_higher_finality(
+    chain_id: &str,
+    proposed: &HeadMarkers,
+    stored_safe: Option<&BlockMarker>,
+    stored_finalized: Option<&BlockMarker>,
+) -> HeadMarkers {
+    HeadMarkers {
+        latest: proposed.latest.clone(),
+        safe: retain_higher_marker(chain_id, "safe", proposed.safe.as_ref(), stored_safe),
+        finalized: retain_higher_marker(
+            chain_id,
+            "finalized",
+            proposed.finalized.as_ref(),
+            stored_finalized,
+        ),
+    }
+}
+
+fn retain_higher_marker(
+    chain_id: &str,
+    label: &str,
+    proposed: Option<&BlockMarker>,
+    stored: Option<&BlockMarker>,
+) -> Option<BlockMarker> {
+    match (proposed, stored) {
+        (Some(proposed), Some(stored)) if proposed.number < stored.number => {
+            tracing::warn!(
+                service = "phase-runner",
+                chain_id,
+                marker = label,
+                provider_height = proposed.number,
+                stored_height = stored.number,
+                "provider reported a {label} head below the stored marker; keeping the stored \
+                 marker (a lagging load-balanced node, not a chain event)"
+            );
+            Some(stored.clone())
+        }
+        (proposed, _) => proposed.cloned(),
     }
 }
 
@@ -472,5 +561,56 @@ pub(crate) fn head_write_error(action: &str, chain_id: &str, error: sqlx::Error)
         RunnerError::transient(message)
     } else {
         RunnerError::data_integrity(message)
+    }
+}
+
+#[cfg(test)]
+mod retain_finality_tests {
+    use super::{BlockMarker, HeadMarkers, retain_higher_finality};
+
+    fn marker(number: i64) -> BlockMarker {
+        BlockMarker {
+            number,
+            hash: format!("0x{number:x}"),
+        }
+    }
+
+    #[test]
+    fn lower_provider_markers_keep_the_stored_ones() {
+        let proposed = HeadMarkers {
+            latest: marker(100),
+            safe: Some(marker(60)),
+            finalized: Some(marker(30)),
+        };
+        let retained =
+            retain_higher_finality("chain", &proposed, Some(&marker(90)), Some(&marker(40)));
+        assert_eq!(retained.latest, marker(100));
+        assert_eq!(retained.safe, Some(marker(90)));
+        assert_eq!(retained.finalized, Some(marker(40)));
+    }
+
+    #[test]
+    fn equal_or_higher_provider_markers_are_published_as_reported() {
+        let proposed = HeadMarkers {
+            latest: marker(100),
+            safe: Some(marker(95)),
+            finalized: Some(marker(40)),
+        };
+        let retained =
+            retain_higher_finality("chain", &proposed, Some(&marker(90)), Some(&marker(40)));
+        assert_eq!(retained, proposed);
+    }
+
+    #[test]
+    fn missing_markers_are_left_for_the_publication_check() {
+        let proposed = HeadMarkers {
+            latest: marker(100),
+            safe: None,
+            finalized: None,
+        };
+        let retained = retain_higher_finality("chain", &proposed, Some(&marker(90)), None);
+        assert_eq!(retained, proposed);
+        let retained = retain_higher_finality("chain", &proposed, None, None);
+        assert_eq!(retained, proposed);
     }
 }

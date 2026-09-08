@@ -8,7 +8,7 @@ pub(super) fn push_product_event_kind_predicate(builder: &mut QueryBuilder<'_, P
             'AuthorityTransferred', 'AuthorityEpochChanged', 'ResolverChanged',
             'RecordChanged', 'RecordVersionChanged', 'ReverseChanged',
             'PermissionChanged', 'PermissionScopeChanged', 'RolesChanged',
-            'EACRolesChanged'
+            'EACRolesChanged', 'SubregistryChanged'
         )",
     );
 }

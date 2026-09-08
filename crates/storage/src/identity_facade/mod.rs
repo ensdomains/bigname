@@ -1,6 +1,7 @@
 mod types;
 
-/// Reusable row predicates for active reverse-identity pagination and count queries.
+/// Reusable predicates over Project-selected reverse identity and relations.
+/// Interpret binding closures take effect here only when Project replaces the selection.
 pub const READABLE_REVERSE_IDENTITY_CTES: &str = r#"
 readable_names AS NOT MATERIALIZED (
     SELECT nc.logical_name_id, nc.raw_name, nc.namespace, nc.namehash
@@ -43,7 +44,6 @@ readable_names AS NOT MATERIALIZED (
               AND resource_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
               AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
               AND binding_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-              AND binding.active_to IS NULL
               AND (
                   nc.token_lineage_id IS NULL
                   OR (
@@ -92,7 +92,6 @@ readable_names AS NOT MATERIALIZED (
       AND resource_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
       AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
       AND binding_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND binding.active_to IS NULL
       AND (
           anc.token_lineage_id IS NULL
           OR (

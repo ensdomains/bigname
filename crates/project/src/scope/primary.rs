@@ -28,7 +28,9 @@ pub(super) async fn seed(transaction: &mut Transaction<'_, Postgres>) -> Result<
          SELECT current.address, current.coin_type, current.namespace
          FROM primary_names_current current
          JOIN project_changed_events event
-           ON event.event_kind = 'ResolverChanged'
+           ON (event.event_kind IN ('ResolverChanged', 'RecordVersionChanged')
+               OR (event.event_kind = 'RecordChanged'
+                   AND event.after_state ->> 'source_event' = 'NameChanged'))
           AND current.claim_provenance ->> 'chain_id' = event.chain_id
           AND lower(event.after_state ->> 'node') =
               lower(current.claim_provenance ->> 'reverse_node')

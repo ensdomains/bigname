@@ -24,6 +24,24 @@ impl WrapperFuses {
         fuses.is_consistent().then_some(fuses)
     }
 
+    /// Expands a raw NameWrapper fuse word into the named Booleans.
+    /// (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10-L20 @ ens_v1@91c966f)
+    pub(crate) const fn from_word(fuses: u32) -> Self {
+        Self {
+            fuses,
+            cannot_unwrap: fuses & 1 != 0,
+            cannot_burn_fuses: fuses & 2 != 0,
+            cannot_transfer: fuses & 4 != 0,
+            cannot_set_resolver: fuses & 8 != 0,
+            cannot_set_ttl: fuses & 16 != 0,
+            cannot_create_subdomain: fuses & 32 != 0,
+            cannot_approve: fuses & 64 != 0,
+            parent_cannot_control: fuses & (1 << 16) != 0,
+            is_dot_eth: fuses & (1 << 17) != 0,
+            can_extend_expiry: fuses & (1 << 18) != 0,
+        }
+    }
+
     fn is_consistent(self) -> bool {
         self.cannot_unwrap == self.has(1)
             && self.cannot_burn_fuses == self.has(2)
