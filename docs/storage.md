@@ -386,10 +386,18 @@ identity, discovery, and binding rows but never names these tables, and
 losing-fork rows survive as evidence. A retained row therefore reads `canonical`
 on an `orphaned` anchor. The column is a stamp of what was true at insert, not a
 current fact. Every reader must anchor on `chain_lineage (chain_id,
-block_number, block_hash)` with a readable-state predicate, or, for
-`migration_event_associations` alone, join `normalized_events` on
-`event_identity`, which embeds the block hash; the other three tables carry no
-`event_identity`, so a lineage anchor is the only correct guard there. Readers
+block_number, block_hash)` with a readable-state predicate. For
+`migration_event_associations` the anchor may be reached through the
+normalized event instead — join `normalized_events` on `event_identity` **and**
+require that event's own `chain_lineage` row to be readable, as the history
+reader does (`crates/storage/src/history/source.rs`). The identity join alone is
+not enough: `normalized_events.canonicality_state` is likewise a stamp at
+insert, head publication orphans the lineage row without touching it, and the
+orphaned events leave the table only when the Interpret redo that follows runs
+(`crates/interpret/src/write.rs`). Between those two moments an association and
+its event both read `canonical` on an orphaned block, and matching identities
+proves only that they describe the same fork. The other three tables carry no
+`event_identity`, so a direct lineage anchor is the only correct guard there. Readers
 that feed projections or history follow this rule today; two scope-widening
 reads — `include_topology_dependents` in `crates/project/src/scope/authority.rs`
 and `capture_child_registration_history` in `crates/interpret/src/write/redo.rs`
