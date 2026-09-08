@@ -472,6 +472,8 @@
             SELECT lower(CASE
                        WHEN event.after_state ->> 'owner_word_unmasked' = 'true'
                            THEN NULL
+                       WHEN selected_registration.is_v2_lifecycle AND event.event_kind = 'TokenControlTransferred'
+                           THEN event.after_state ->> 'to'
                        ELSE COALESCE(
                            event.after_state ->> 'registry_owner',
                            event.after_state ->> 'owner'
@@ -481,6 +483,7 @@
             WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND (
                     event.event_kind IN ('AuthorityTransferred', 'AuthorityEpochChanged')
+                 OR (selected_registration.is_v2_lifecycle AND event.event_kind = 'TokenControlTransferred')
                  OR (event.event_kind = 'SurfaceBound' AND event.after_state @>
                      '{"state_derived":true,"authority_kind":"registry_only"}')
               )
