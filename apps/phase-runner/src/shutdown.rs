@@ -3,6 +3,20 @@
 //! actually operated: the in-flight batch is killed instead of cancelled, and
 //! `chain_phase_state` is left `running` behind a stale heartbeat.
 
+/// Cancel `cancellation` when the process is asked to stop. Install this only
+/// for commands that actually poll the token: registering a SIGTERM listener
+/// replaces the default disposition for the whole process, so a one-shot
+/// command that never reads the token would absorb the signal and keep running
+/// until its supervisor escalates to SIGKILL.
+pub fn cancel_on_signal(cancellation: &tokio_util::sync::CancellationToken) {
+    let cancellation = cancellation.clone();
+    tokio::spawn(async move {
+        if requested().await {
+            cancellation.cancel();
+        }
+    });
+}
+
 /// Resolve when the process is asked to stop. Returns whether a signal was
 /// actually observed, so a failed listener does not read as a stop request.
 pub async fn requested() -> bool {
@@ -32,6 +46,25 @@ mod tests {
     use std::{process::Command, time::Duration};
 
     use tokio::signal::unix::{SignalKind, signal};
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn cancel_on_signal_cancels_the_token_on_sigterm() {
+        let _installed = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        let cancellation = CancellationToken::new();
+        super::cancel_on_signal(&cancellation);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let killed = Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .expect("raise SIGTERM");
+        assert!(killed.success(), "kill -TERM failed: {killed}");
+
+        tokio::time::timeout(Duration::from_secs(5), cancellation.cancelled())
+            .await
+            .expect("token was not cancelled within the timeout");
+    }
 
     #[tokio::test]
     async fn a_sigterm_is_observed_as_a_stop_request() {

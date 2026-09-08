@@ -776,7 +776,14 @@ validation, defaulting to 45000 (45 seconds). Startup rejects a request timeout
 that leaves less than 5000 ms of grace, before database connections or listeners.
 For a 60000 ms request timeout, use at least 65000 ms of grace. Direct launches
 without this optional budget retain their existing request-timeout behavior.
-External stop-timeout overrides must honor the same budget. This API-only
-slice is Part of #641: phase-runner SIGTERM, stop grace, batch settlement,
-heartbeat, restart, and redo behavior remain deferred. It does not authorize
-production rollout or complete the issue.
+External stop-timeout overrides must honor the same budget. The API slice is
+Part of #641. The phase runner handles SIGTERM as well as SIGINT
+(`apps/phase-runner/src/shutdown.rs`), for the supervised run and explicit redo
+only, observing the request at the next batch boundary so the batch in flight
+commits before the loop exits; Compose sets an explicit `stop_grace_period` on
+`phase-runner` (default 120s, `BIGNAME_PHASE_RUNNER_STOP_GRACE_PERIOD`). See the
+runbook's [Pause and resume indexing](runbooks/production-docker.md#pause-and-resume-indexing)
+for what an expired grace leaves behind. Runner heartbeat, restart, and redo
+behaviour under SIGTERM are not separately verified by the container shutdown
+job, which drains the API only. Neither slice authorizes production rollout or
+completes the issue.

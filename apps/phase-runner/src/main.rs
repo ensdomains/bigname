@@ -28,13 +28,6 @@ async fn main() -> Result<()> {
         .json()
         .init();
     let command = Cli::parse().resolve()?;
-    let cancellation = CancellationToken::new();
-    let signal_cancellation = cancellation.clone();
-    tokio::spawn(async move {
-        if phase_runner::shutdown::requested().await {
-            signal_cancellation.cancel();
-        }
-    });
 
     match command {
         ResolvedCommand::InitSchema { database_url } => {
@@ -54,6 +47,10 @@ async fn main() -> Result<()> {
             runtime,
             hydration_rpc_urls,
         } => {
+            // Only the supervised run and an explicit redo poll the token; the
+            // one-shot commands keep the default SIGTERM disposition.
+            let cancellation = CancellationToken::new();
+            phase_runner::shutdown::cancel_on_signal(&cancellation);
             let (manifest_repository, manifest_profile) =
                 load_hashed_manifest_repository(&manifests_root)?;
             validate_deployment_table_set(
@@ -132,6 +129,8 @@ async fn main() -> Result<()> {
             watch_set_coverage_attestations,
             hydration_rpc_urls,
         } => {
+            let cancellation = CancellationToken::new();
+            phase_runner::shutdown::cancel_on_signal(&cancellation);
             let database = RunnerDatabase::connect(&database_url, 4).await?;
             let chains = match chains {
                 RedoChains::Explicit(chains) => chains,

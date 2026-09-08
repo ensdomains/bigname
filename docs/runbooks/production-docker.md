@@ -801,8 +801,25 @@ Compose's 10s default is not that. `stop_grace_period` is set explicitly on the
   routinely takes longer. Nothing in the runner bounds a batch's wall time, so
   this is a starting value, not a derived limit.
 
-A grace period that expires is a SIGKILL. Nothing is corrupted — the batch runs
-in one transaction and rolls back — but the work is lost and the phase lock is
+A grace period that expires is a SIGKILL. Nothing is corrupted, but a batch is
+not one transaction. Each phase commits its own writes before the runner
+records progress: Project commits the projection swap
+(`crates/project/src/engine.rs`) and may then commit a separate canonical-head
+hydration transaction (`apps/phase-runner/src/project_phase.rs`); Interpret
+commits its normalized-event and identity writes
+(`crates/interpret/src/write.rs`); Ingest commits raw facts
+(`crates/ingest/src/write/mod.rs`) and the runner then publishes chain heads.
+Only after the phase returns does the runner write
+`chain_phase_state.current_block_*` and the ingest source cursors
+(`apps/phase-runner/src/runner.rs`). A kill inside any of those gaps leaves
+committed phase output whose progress marker still points at the previous
+batch. That is safe by design: the next start resumes from the durable marker
+and re-executes the batch, and every write path is replay-safe — raw facts
+insert if absent and are verified immutable, Interpret rows upsert on their
+identities and fail closed on divergent data, and Project's publication is a
+set-based delete-and-reinsert of the affected scope — so the redo costs the
+batch's wall time plus fresh `observed_at` timestamps and a new hydration
+attempt ordinal, and produces no duplicate or orphaned rows. The phase lock is
 only released when PostgreSQL reaps the dead session, so the next start can
 find the phase still held.
 
@@ -1035,4 +1052,8 @@ is not graceful success.
 
 Use disposable services for shutdown experiments, never the active production
 API or database. Fixture and container tests are not rollout, restore, or
-beta-launch evidence. No runner stop command or grace is added by this slice.
+beta-launch evidence. The runner's stop command and `stop_grace_period` are
+documented under [Pause and resume indexing](#pause-and-resume-indexing); the
+container shutdown job checks the runner's rendered Compose stop contract but
+drains only the API, so runner settlement, heartbeat, restart, and redo
+behaviour under SIGTERM are not covered by that evidence.

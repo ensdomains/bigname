@@ -22,8 +22,16 @@ PY
 import json,sys,os
 c=json.load(open(sys.argv[1])); a=c['services']['api']; r=c['services']['phase-runner']
 valid=a.get('stop_signal')=='SIGTERM' and a.get('stop_grace_period')==('1m15s' if os.environ.get('BIGNAME_E2E_SHUTDOWN_EXTENDED') else '45s')
-json.dump({'api_contract_present':valid,'api_signal':a.get('stop_signal'),'api_grace':a.get('stop_grace_period'),'runner_unchanged':not any(k in r for k in ['stop_signal','stop_grace_period'])},open(sys.argv[2],'w'))
-assert not any(k in r for k in ['stop_signal','stop_grace_period'])
+# The runner carries its own stop grace (docker-compose.server.yml, default 120s,
+# which Compose renders as 2m0s). An operator override is checked for presence
+# only; its rendering is not predictable here. No stop_signal is expected on the
+# runner: tini forwards Docker's SIGTERM unchanged.
+runner_grace=r.get('stop_grace_period')
+runner_expected=None if os.environ.get('BIGNAME_PHASE_RUNNER_STOP_GRACE_PERIOD') else '2m0s'
+runner_valid=runner_grace is not None and (runner_expected is None or runner_grace==runner_expected)
+json.dump({'api_contract_present':valid,'api_signal':a.get('stop_signal'),'api_grace':a.get('stop_grace_period'),'runner_contract_present':runner_valid,'runner_signal':r.get('stop_signal'),'runner_grace':runner_grace},open(sys.argv[2],'w'))
+assert runner_valid, f'phase-runner Compose stop grace missing or unexpected: {runner_grace!r}'
+assert 'stop_signal' not in r, r.get('stop_signal')
 assert valid or sys.argv[3], 'API Compose stop contract missing'
 PY
   compose=(docker compose -p "$project" -f "$rendered")
