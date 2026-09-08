@@ -10,16 +10,16 @@ Accepted: 2026-09-06
 ## Context
 
 "V1" in this ADR is bigname's first stable read release — not ENSv1, and not
-the prospective V2 specification. The V1 milestone is the work that proves
-that release as a replacement for the retained legacy read surface: parity
-coverage (the slice-1 full-re-walk acceptance comparison and the
-combined-boundary gate that
+the prospective V2 specification. The [V1
+milestone](../glossary.md#v1-milestone) is the work that proves that release
+as a replacement for the retained legacy read surface: parity coverage (the
+slice-1 full-re-walk acceptance comparison and the combined-boundary gate that
 [`consumer-capabilities.md`](../consumer-capabilities.md) requires),
-regression tests over the served routes, and monitoring, all built
-on top of the schema. It ends when those gates pass and the release is signed
-off; the sign-off is recorded by amending the status line of this ADR with its
-date, and until that amendment the freeze applies. That work is expensive to
-redo, so it needs a schema it can rely on. The requirement is not that the
+regression tests over the served routes, and monitoring, all built on top of
+the schema. It ends when those gates pass and the release is signed off; the
+sign-off is recorded by amending the status line of this ADR with its date,
+and until that amendment the freeze applies. That work is expensive to redo,
+so it needs a schema it can rely on. The requirement is not that the
 schema never changes — it is that changes are enumerated in advance rather
 than discovered mid-milestone.
 
@@ -27,8 +27,9 @@ Two prior decisions frame this. [ADR 0006](0006-api-v2-product-surface.md) fixed
 the v2 product surface and rejected GraphQL as the product contract.
 [`consumer-capabilities.md`](../consumer-capabilities.md) defines the ENSv1→ENSv2
 delivery slices. When this ADR was drafted only slice 1 had landed; slices 2A–2E,
-3A, 3B and the final activation have all merged since, so the re-derivation
-boundaries this ADR anticipated are behind us rather than ahead.
+3A, 3B and the final activation have all merged since, so the [re-derivation
+boundaries](../glossary.md#re-derivation-boundary) this ADR anticipated are
+behind us rather than ahead.
 
 Three properties of the current system determine what a freeze can and cannot
 promise:
@@ -43,16 +44,24 @@ promise:
   `normalizer_version` do not (`crates/content-hash/src/tests.rs` pins both),
   and a manifest's `read_features` rotates the separate fingerprint recorded
   by the [manifest-authority marker](../glossary.md#manifest-authority-marker)
-  with a byte-identical interpreter hash (`deployment.md` § manifest-authority
-  marker). Only an interpreter-hash rotation forces a
-  full-history re-walk; the normalizer and manifest-authority paths have their
-  own, narrower redo.
+  with a byte-identical interpreter hash. The three triggers are independent,
+  and none of them is a narrower walk: an interpreter-hash rotation forces
+  the full-history Interpret and Project walk; a fingerprint change on an
+  initialized chain blocks derived work until the same full-range,
+  token-attested Interpret redo and stamped Project redo complete, with the
+  stamped Ingest redo first if the watch plan widened; and
+  a normalizer-version bump is a `recompute-flags` pass over the chain's full
+  retained range followed by a full-range Project redo, which recomputes label
+  verdicts rather than re-walking Interpret
+  ([`deployment.md`](../deployment.md) § Phase-runner configuration, the
+  manifest-authority marker and normalizer-version paragraphs).
 - **The content hash does not cover the schema.** It watches Rust sources,
   manifests, and the lockfile — not `schema-v2/` and not `migrations/`. It cannot
   serve as the freeze anchor.
 - **Slices 2 and 3 each touch Project builders.** Both therefore rotate the hash
-  and invalidate generation-keyed artifacts, independently of whether either
-  changes a line of DDL.
+  and invalidate artifacts keyed to a [projection
+  generation](../glossary.md#projection-generation), independently of whether
+  either changes a line of DDL.
 
 A freeze that promises "no churn" without accounting for this would be false on
 the day it was signed.
@@ -68,10 +77,35 @@ The V1 schema contract is the pair:
   `migrations/20260906120000_exact_zero_addr60_default_derivation.sql`.
 
 The draft named `20260811120200_ens_v2_migration_slice_1_constraints.sql`, which
-was the head when it was written. The 38 schema-migrations that landed between
-the two carried slices 2 and 3, whose schema work this ADR anticipated rather
-than forbade; the head is restated here so the frozen artifact is the tree the
-milestone actually builds on.
+was the head when it was written. The 38 schema-migrations between the two
+landed while this ADR was a draft, under the review-only process § Alternatives
+describes, so none of them is a carve-out under this ADR: they entered the
+frozen artifact by predating the freeze, and the head is restated so the
+frozen artifact is the tree the milestone actually builds on. They are not
+all slice work. Four are the ENSv1→ENSv2 slice schema this ADR anticipated:
+`20260814130000_surface_binding_authority_arm.sql` (slice 2A, #468),
+`20260814131000_project_generation_failure_audit.sql` (slice 2E, #497;
+carve-out 1 below), and
+`20260814132000_project_generation_failure_child_authority.sql` with
+`20260904120000_project_redo_child_registration_history.sql` (slice 3B's
+children publication invariant and its parent-path filter, #499 and #821).
+The other 34 are independent changes that would each have needed a carve-out
+or an amendment had the freeze been in force: phase-runner coordination state
+— heartbeat liveness, unconfigured-phase settlement, Ingest redo
+source-boundary and manifest-authority markers, and the redo attempt
+generation (#427, #556) — and Project incremental-scope and reverse-hydration
+state (#415); the raw-block preimage derivation swap (#519); the Interpret
+decode-skip audit and the manifest applied-change counter (#583, #579);
+`normalized_events` scope indexes and the legacy index drops (#612, #653,
+#762, #636) and the `name_current` serving-resource column (#636); the
+retirement of direct divergences for null-resolver names (#739); the
+discovery-watch admissions snapshot (#747); Project redo expiry-root and
+expiry-resource seeds (#762); and registry operator account permissions
+(#815). Since #849 `apply-check.sh` applies every schema-migration that
+touches the phase schema and fails on one it does not list, so from
+acceptance on a schema-migration of any of these kinds cannot land without
+moving the conformance test, which is where the carve-out or amendment is
+checked for.
 
 An authorized carve-out that lands as a schema-migration becomes the new head,
 and the change that lands it must advance the head named above and the head
@@ -97,30 +131,34 @@ freeze observable rather than aspirational.
 ### What the freeze explicitly does not promise
 
 The published data will change during the milestone even though the schema holds
-still. The ENSv1→ENSv2 slice-2 and slice-3 [re-derivation
-boundaries](../glossary.md#re-derivation-boundary) each rotate the interpreter
-content hash and force a full `interpret` and `project` walk.
+still. The ENSv1→ENSv2 slice-2 and slice-3 re-derivation boundaries each
+rotate the interpreter content hash and force a full `interpret` and `project`
+walk.
 
 Dependent work must therefore key on stable identifiers only:
 
-**Safe to key on:** `logical_name_id`, `resource_id`, `token_lineage_id`, and
-`contract_instance_id`. `event_identity` is safe only within one database
-under a fixed manifest set and interpreter content hash, which is the contract
-`architecture.md` gives it: it incorporates the derivation kind, identity
-suffix, and emission ordinal (`crates/adapters/src/schema_v2/normalized.rs`,
-`raw_log_event_identity`), so a covered adapter change can alter it for a raw
-log that did not change — and it embeds the numeric `source_manifest_id`,
+**Safe to key on:** `logical_name_id`,
+[`resource_id`](../glossary.md#resource),
+[`token_lineage_id`](../glossary.md#token-lineage), and
+[`contract_instance_id`](../glossary.md#contract-instance).
+`event_identity` is safe only within one database under a fixed manifest set
+and interpreter content hash, which is the contract `architecture.md` gives
+it: it incorporates the [derivation kind](../glossary.md#derivation-kind),
+identity suffix, and emission ordinal
+(`crates/adapters/src/schema_v2/normalized.rs`, `raw_log_event_identity`), so
+a covered adapter change can alter it for a raw log that did not change — and
+it embeds the numeric `source_manifest_id`,
 which is sequence-assigned, so installing the same baseline into a fresh
 database changes every identity even with nothing else changed
 (`consumer-capabilities.md` says as much of an empty-schema replacement). An
 artifact that must survive a rebuild carries the retained manifest-ID mapping
 with it or does not key on `event_identity` at all. Across
-the re-derivation boundaries this freeze permits, the anchor is the raw-fact
-position alone — chain, block hash, transaction hash, log index — keyed to
-the set of events emitted for it; an expectation about a particular event is
-scoped to one interpreter hash and re-derived, not carried, across a
-rotation. A namehash is safe only
-together with its namespace — which is what `logical_name_id` is
+the re-derivation boundaries this freeze permits, the anchor is the [raw
+fact](../glossary.md#raw-fact) position alone — chain, block hash,
+transaction hash, log index — keyed to the set of events emitted for it; an
+expectation about a particular event is scoped to one interpreter hash and
+re-derived, not carried, across a rotation. A namehash is safe only together
+with its namespace — which is what `logical_name_id` is
 (`<namespace>:<namehash>`, `architecture.md` § Identity) — because the hash
 does not encode the namespace, and the supported `ens` and `basenames`
 namespaces can carry the same node. A derived normalized name is not an
@@ -132,8 +170,8 @@ normalized name only beside the `logical_name_id` it was derived for and the
 normalizer version it was derived under.
 
 **Not safe to key on:** `normalized_event_id` numeric values, cursor bytes, a
-specific interpreter content hash, projection generation numbers, or row counts
-for a given generation.
+specific interpreter content hash, projection generation numbers, or row
+counts for a given generation.
 
 This is the load-bearing clause. A freeze cannot protect work that is keyed to
 values the system already documents as unstable across a boundary.
@@ -141,7 +179,9 @@ values the system already documents as unstable across a boundary.
 ### Pre-authorized carve-outs
 
 1. **`project_generation_failures`** — the append-only audit for a
-   projection-blocking invariant failure. When this ADR was drafted it was
+   [projection generation
+   failure](../glossary.md#projection-generation-failure),
+   a projection-blocking invariant failure. When this ADR was drafted it was
    already described in [`storage.md`](../storage.md) and
    [`architecture.md`](../architecture.md) as part of the ownership map but did
    not exist; the baseline now carries it as
@@ -175,9 +215,10 @@ values the system already documents as unstable across a boundary.
    is a constraint replacement on a populated table and therefore a new ADR, not
    a carve-out under this one.
 
-3. **Migration-association canonicality** — the four ENSv1→ENSv2 correlation
-   tables retain rows whose anchor block is orphaned, and nothing maintains their
-   `canonicality_state`. Slice 2 adds readers over these tables.
+3. **Migration-association [canonicality](../glossary.md#canonicality)** — the
+   four ENSv1→ENSv2 correlation tables retain rows whose anchor block is
+   orphaned, and nothing maintains their `canonicality_state`. Slice 2 adds
+   readers over these tables.
 
    **Decided: document the reader rule; do not change reorg-time writes.**
    Merged in #885. The rule is a **`chain_lineage` anchor** requirement, not the
@@ -185,17 +226,20 @@ values the system already documents as unstable across a boundary.
    `migration_event_associations`, so three of the four tables cannot satisfy an
    identity join at all. Any reader that treats one of these rows as current must
    anchor the row's own `(chain_id, block_number, block_hash)` on `chain_lineage`
-   with a readable-state predicate. `storage.md` carries the rule and the reorg
-   test that pins the runner-level outcome.
+   with a [readable](../glossary.md#readable--read-safe)-state predicate.
+   `storage.md` carries the rule and the reorg test that pins the runner-level
+   outcome.
 
    One consequence is recorded there rather than hidden: on today's two
    publishing readers the anchor cannot be the reason a row is withheld, because
-   both also require the `registry_announcement` edge joined on the association's
-   own block, and the same Interpret redo orphans both. The rule governs new
-   readers, which is where it is the only guard.
+   both also require the [`registry_announcement`
+   edge](../glossary.md#registry-announcement-edge-registry_announcement)
+   joined on the association's own block, and the same Interpret redo orphans
+   both. The rule governs new readers, which is where it is the only guard.
 
-4. **Label-preimage indexes** — **decided: out of the freeze, pending a
-   measurement; no index is pre-authorized and none is ruled out.** The two
+4. **[Label-preimage](../glossary.md#preimage-observation--label-preimage)
+   indexes** — **decided: out of the freeze, pending a measurement; no index
+   is pre-authorized and none is ruled out.** The two
    named paths differ. The children join reaches rows through the primary key:
    `preimage.labelhash = lower(...)` (`crates/project/src/builders/children.rs`,
    which lowers the other side precisely so the PK stays usable). The
@@ -206,15 +250,20 @@ values the system already documents as unstable across a boundary.
    'ens_rainbow_import'` outright — then orders the union by `labelhash` and
    locks it `FOR UPDATE`. It carries no `normalizer_version` predicate, so the
    baseline's `label_preimages_normalization_idx (normalizer_version,
-   normalized_under_version, labelhash)` cannot serve it, and the PK is not its
-   access path either. `source_kind` is therefore on this path, and after a bulk
-   rainbow import that branch alone returns the whole import on every recompute
-   range.
+   normalized_under_version, labelhash)` cannot serve the selection. The
+   primary key (`labelhash`, `schema-v2/baseline/07_labels.sql`) matches the
+   `ORDER BY`, so the planner's real alternatives are an ordered primary-key
+   scan with the four `OR` branches applied as filters, or a sequential scan
+   plus a sort; neither narrows the rows. `source_kind` is therefore on this
+   path, and after a bulk rainbow import that branch alone returns the whole
+   import on every recompute range.
 
    What that costs is a question for `EXPLAIN` against an imported table, not
-   for this ADR: if the import dominates, the cost is row volume and no index
-   changes it; if it does not, an index is additive and can be authorized when
-   the measurement says so. #364 tracks the `source_kind` filter in
+   for this ADR, and the plan it reports must show which of those two
+   alternatives PostgreSQL picks before an index is judged against it: if the
+   import dominates, the cost is row volume and no index changes it; if it
+   does not, an index is additive and can be authorized when the measurement
+   says so. #364 tracks the `source_kind` filter in
    `crates/project/src/scope/labels.rs`, which is a PK join over a bounded array
    and not the concern here. A bulk import during the milestone does not by
    itself require a schema change.
@@ -311,12 +360,14 @@ point back to this ADR. Worth a comment in the allowlist referencing it.
 
 ## Rollout
 
-Doc-first in intent; in practice three carve-outs landed while this ADR was still
-a draft. Carve-out 1 shipped as its own reviewed schema-migration in August,
-carve-outs 2 and 3 were settled by slice 3 and #885, and this ADR records them
-rather than authorizing them in advance. That is a process miss worth naming: the
-freeze was observable the whole time through `apply-check.sh`, but the written
-contract trailed the schema by three weeks. Carve-out 5 is the one still ahead,
+Doc-first in intent; in practice three carve-outs and 34 unrelated
+schema-migrations landed while this ADR was still a draft. Carve-out 1 shipped
+as its own reviewed schema-migration in August, carve-outs 2 and 3 were
+settled by slice 3 and #885, and this ADR records them rather than authorizing
+them in advance; the 34 others are inventoried under the frozen artifact. That
+is a process miss worth naming: the freeze was observable the whole time
+through `apply-check.sh`, but the written contract trailed the schema by three
+weeks. Carve-out 5 is the one still ahead,
 and it follows the intended order — this ADR first, then the schema-migration
 referencing it.
 
