@@ -1,7 +1,5 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use tokio_util::sync::CancellationToken;
-
 use crate::{
     config::ChainConfig,
     error::{RunnerError, RunnerResult},
@@ -46,19 +44,6 @@ impl PhaseRunner {
     pub fn with_stop_deadline(mut self, deadline: std::time::Duration) -> Self {
         self.stop_clock = Arc::new(crate::runner_support::StopClock::new(deadline));
         self
-    }
-
-    /// Start the stop budget the moment this token is cancelled, so the grace
-    /// period the runbook asks for is the longest batch plus the budget, counted
-    /// from the signal; a wait that observes the stop before this task runs
-    /// starts the budget itself.
-    pub(super) fn start_stop_budget_on(&self, cancellation: &CancellationToken) {
-        let clock = Arc::clone(&self.stop_clock);
-        let token = cancellation.clone();
-        tokio::spawn(async move {
-            token.cancelled().await;
-            clock.start();
-        });
     }
 
     pub fn with_phase_progress(mut self, progress: RunnerPhaseProgress) -> Self {

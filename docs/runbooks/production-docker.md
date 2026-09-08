@@ -805,7 +805,8 @@ given what is left of one ten-second stop budget and then reports a transient
 error that the stopping run does not retry
 (`apps/phase-runner/src/runner_chain.rs`, `bounded_recovery`;
 `apps/phase-runner/src/runner_support.rs`, `StopClock`). The budget starts when
-the stop is accepted and is shared by every wait that follows it — the marker reads that decide what a stopped redo reports, the
+the first of these waits observes the stop — after the batch in flight, which
+is not bounded — and is shared by every wait that follows it — the marker reads that decide what a stopped redo reports, the
 failure or completion records, the lock releases — so they draw it down in
 sequence rather than each taking ten seconds of their own. Nothing is corrupted: for start-up work the next start
 retries the same cleanup, and for a batch the durable state is the one a kill
@@ -857,11 +858,11 @@ Compose's 10s default is not that. `stop_grace_period` is set explicitly on the
 
 - `BIGNAME_PHASE_RUNNER_STOP_GRACE_PERIOD` (default `120s`) — it must cover
   the longest batch at this deployment's block range and hydration settings
-  *plus* the ten-second stop budget, because the budget starts when the
-  signal is accepted, not when the batch ends: a batch that finishes after
-  115 s under a 120 s grace leaves its settlement 5 s of a budget that has
-  been running for 115 s. Nothing in the runner bounds a batch's wall time, so
-  the default is a starting value, not a derived limit. The budget is a fixed
+  *plus* the ten-second stop budget: the batch in flight is not bounded, and
+  the budget starts only when its settlement begins, so a batch that finishes
+  after 115 s under a 120 s grace leaves its settlement five seconds before
+  the kill, not ten. Nothing in the runner bounds a batch's wall time, so the
+  default is a starting value, not a derived limit. The budget is a fixed
   ten seconds that the runner does not derive from this value, and everything
   a stop still waits on shares it, so a grace period at or below `10s` reaches
   SIGKILL before the budget can report, and the bounded exit described above

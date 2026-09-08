@@ -26,9 +26,11 @@ pub(crate) enum PhaseLoopResult {
 /// One budget for everything an accepted stop still has to wait on -- marker
 /// reads, the records of a finished batch or a failed start, lock releases,
 /// start-up recovery. The budget starts the first time any of them observes
-/// the stop and is shared by every chain, so sequential waits draw down the
-/// same ten seconds instead of each taking their own; the runbook's grace
-/// floor is that budget, not a sum of per-site timeouts.
+/// the stop, not at the signal: a batch in flight is deliberately not bounded
+/// and its settlement must still get the whole budget after it. It is shared
+/// by every chain, so sequential waits draw down the same ten seconds instead
+/// of each taking their own; the grace period the runbook asks for is the
+/// longest batch plus this budget.
 pub(crate) struct StopClock {
     budget: Duration,
     started: std::sync::OnceLock<Instant>,
@@ -42,13 +44,6 @@ impl StopClock {
             budget,
             started: std::sync::OnceLock::new(),
         }
-    }
-
-    /// Start the budget now. Called when the stop is accepted, so the budget
-    /// counts from the signal rather than from the first wait that notices it;
-    /// a wait that notices it first starts it itself.
-    pub(crate) fn start(&self) {
-        self.started.get_or_init(Instant::now);
     }
 
     /// What is left of the budget; the first call starts it.
@@ -407,19 +402,6 @@ mod read_after_stop_tests {
         .await
         .expect("an answered read is returned");
         assert_eq!(value, 7);
-    }
-
-    #[tokio::test]
-    async fn a_started_budget_counts_from_the_start_not_the_first_wait() {
-        let clock = super::StopClock::new(Duration::from_millis(80));
-        clock.start();
-        tokio::time::sleep(Duration::from_millis(60)).await;
-        super::read_after_stop(&clock, "late", async {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            Ok::<_, crate::error::RunnerError>(())
-        })
-        .await
-        .expect_err("the first wait must not get the whole budget when the stop is older");
     }
 
     #[tokio::test]
