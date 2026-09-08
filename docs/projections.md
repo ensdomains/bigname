@@ -326,6 +326,13 @@ come from the admitted registry and registrar families. Out-of-profile resolver,
 reverse, primary-name, mainnet, and execution behavior does not become exact-name
 truth.
 
+Within the selected ENSv2 registration lifecycle, `control.registry_owner`
+follows the latest canonical ownership event, including
+`TokenControlTransferred.to`. This represents the registry token's owner;
+role-only permission changes do not transfer it.[^owner-v2] Lifecycle and resource
+association still bound the eligible events. ENSv1 and Basenames retain their
+separate registry-owner and registrar-holder meanings.[^owner-v1][^owner-bn]
+
 For Basenames, exact-name truth comes from the admitted Base registry,
 registrar, and resolver families. Base primary-claim intake and L1 compatibility
 transport do not create alternate exact-name rows.[^bn-readme-l70][^v1-l2rev-base-deploy][^v1-l2rev-event]
@@ -633,12 +640,32 @@ default entry. ENSv1 `ContenthashChanged` normalized state uses
 `address_bytes_hex`, and `value_retained=false`, except that coin type 60 with
 an exactly 20-byte payload preserves the scalar `value` envelope used by the
 legacy `AddrChanged` event.
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L22-L24 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L70 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L43-L66 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L76-L82 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L108-L110 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L116-L121 @ basenames@1809bbc)
 Project reconstructs a retained contenthash entry as
 `value={"encoding":"hex","bytes":"0x..."}` and retains an address entry as
 scalar `value="0x..."`. An empty `contenthash_hex` or `address_bytes_hex`
 payload becomes an exact `not_found` entry with `value` omitted. The nested
 `value.bytes` address compatibility shape receives the same empty-value
 classification.
+
+Project classifies an exact 20-byte-zero `addr:60` as `not_found`, with `value` omitted, behind an
+ENSv1 registry, registrar, or wrapper resolver pointer, or a Basenames registry resolver pointer.
+This covers current scalar and retained nested `value.bytes` envelopes; other origins, types,
+nonempty lengths, and nonzero values remain stored successes. Project keeps the entry and selector, changes
+no raw facts or normalized events, and records selected nonempty exact absences in
+`provenance.exact_nonempty_not_found_record_keys`, a sorted, deduplicated array
+omitted when empty. Only the scoped zero20 predicate adds `addr:60`.
+Rust and SQL block default derivation only for a matching exact `addr:60`
+`not_found` entry. Orphan markers are ignored and exact successes still win.
+Empty or missing exact values retain permitted fallback. This private marker
+adds no read rule or authority; non-authoritative coverage remains unsupported.
+Marker-producing Project, both readers, and rebuilt rows must reach one
+maintainer-selected publication boundary before affected reads become public.
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L81-L84 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L93-L99 @ basenames@1809bbc)
 
 Rows produced under an earlier [interpreter content
 hash](glossary.md#interpreter-content-hash) may retain the nested `value` object
@@ -788,3 +815,7 @@ new truth family.
 [^ensnode-legacy-text-l356]: (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L356 @ ensnode@2017ae6) (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L364 @ ensnode@2017ae6)
 [^ensnode-legacy-revresolver-l311]: (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L311 @ ensnode@2017ae6)
 [^ensnode-legacy-revresolver-l316]: (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L316 @ ensnode@2017ae6)
+
+[^owner-v2]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L482 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L531 @ ens_v2@a971bd64)
+[^owner-v1]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172 @ ens_v1@91c966f)
+[^owner-bn]: (upstream: .refs/basenames/src/L2/Registry.sol:L165 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L285 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L321 @ basenames@1809bbc)

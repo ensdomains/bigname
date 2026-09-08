@@ -24,6 +24,7 @@ struct DatabaseCleanupGuard {
     name: String,
     database_url: String,
     armed: bool,
+    verification_role: Option<String>,
 }
 
 impl HarnessDb {
@@ -64,6 +65,7 @@ impl HarnessDb {
             name,
             database_url: url.clone(),
             armed: true,
+            verification_role: None,
         };
         admin.close().await?;
         super::pipeline::phase_runner_init_schema(&super::repo_root(), &url).await?;
@@ -81,14 +83,57 @@ impl HarnessDb {
         })
     }
 
+    pub async fn verification_url(&mut self) -> Result<String> {
+        if self.cleanup_guard.verification_role.is_none() {
+            let role = unique_database_name("bigname_verify")?;
+            let identifier = quote_identifier(&role);
+            let database = quote_identifier(&self.cleanup_guard.name);
+            let mut transaction = self.pool.begin().await?;
+            sqlx::raw_sql(&format!(
+                "CREATE ROLE {identifier} LOGIN PASSWORD '{role}'
+                     NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
+                     NOREPLICATION NOBYPASSRLS;
+                 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+                 REVOKE CREATE ON DATABASE {database} FROM PUBLIC;
+                 GRANT CONNECT ON DATABASE {database} TO {identifier};
+                 GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO {identifier};
+                 GRANT USAGE ON SCHEMA bigname_phase TO {identifier};
+                 GRANT SELECT ON ALL TABLES IN SCHEMA bigname_phase TO {identifier};"
+            ))
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            self.cleanup_guard.verification_role = Some(role);
+        }
+        let role = self
+            .cleanup_guard
+            .verification_role
+            .as_deref()
+            .context("verification role was not installed")?;
+        let mut url = reqwest::Url::parse(&self.url)?;
+        url.set_username(role)
+            .map_err(|_| anyhow::anyhow!("verification URL cannot carry a username"))?;
+        url.set_password(Some(role))
+            .map_err(|_| anyhow::anyhow!("verification URL cannot carry a password"))?;
+        Ok(url.into())
+    }
+
     pub async fn cleanup(mut self) -> Result<()> {
         if std::env::var_os("BIGNAME_E2E_KEEP_DB").is_some() {
-            eprintln!("BIGNAME_E2E_KEEP_DB set; keeping {}", self.url);
+            eprintln!(
+                "BIGNAME_E2E_KEEP_DB set; keeping {} and reader {:?}",
+                self.url, self.cleanup_guard.verification_role
+            );
             self.cleanup_guard.disarm();
             return Ok(());
         }
         self.pool.close().await;
-        drop_database(&self.cleanup_guard.admin_url, &self.cleanup_guard.name).await?;
+        drop_database(
+            &self.cleanup_guard.admin_url,
+            &self.cleanup_guard.name,
+            self.cleanup_guard.verification_role.as_deref(),
+        )
+        .await?;
         self.cleanup_guard.disarm();
         Ok(())
     }
@@ -110,11 +155,13 @@ impl Drop for DatabaseCleanupGuard {
                 "BIGNAME_E2E_KEEP_DB set; keeping {} after early return or failure",
                 self.database_url
             );
+            eprintln!("keeping verification reader {:?}", self.verification_role);
             return;
         }
 
         let admin_url = self.admin_url.clone();
         let name = self.name.clone();
+        let role = self.verification_role.clone();
         let thread_name = format!("drop-{name}");
         let cleanup = std::thread::Builder::new()
             .name(thread_name)
@@ -123,7 +170,7 @@ impl Drop for DatabaseCleanupGuard {
                     .enable_all()
                     .build()
                     .context("build runtime for e2e database cleanup")?;
-                runtime.block_on(drop_database(&admin_url, &name))
+                runtime.block_on(drop_database(&admin_url, &name, role.as_deref()))
             });
 
         match cleanup {
@@ -146,10 +193,15 @@ impl Drop for DatabaseCleanupGuard {
     }
 }
 
-async fn drop_database(admin_url: &str, name: &str) -> Result<()> {
+async fn drop_database(admin_url: &str, name: &str, role: Option<&str>) -> Result<()> {
     let admin_options = admin_url.parse::<sqlx::postgres::PgConnectOptions>()?;
     let mut admin = PgConnection::connect_with(&admin_options).await?;
     drop_database_with_connection(&mut admin, name).await?;
+    if let Some(role) = role {
+        sqlx::query(&format!("DROP ROLE IF EXISTS {}", quote_identifier(role)))
+            .execute(&mut admin)
+            .await?;
+    }
     admin.close().await?;
     Ok(())
 }
@@ -398,8 +450,27 @@ mod tests {
             return Ok(());
         }
 
-        let (first, second) = tokio::try_join!(HarnessDb::create(), HarnessDb::create())?;
+        let (mut first, mut second) = tokio::try_join!(HarnessDb::create(), HarnessDb::create())?;
         assert_ne!(first.url, second.url);
+        for url in [
+            first.verification_url().await?,
+            second.verification_url().await?,
+        ] {
+            let mut reader = PgConnection::connect(&url).await?;
+            let access: (bool, bool) = sqlx::query_as(
+                "SELECT current_user = session_user,
+                 has_table_privilege(current_user, 'bigname_phase.chain_phase_state', 'UPDATE')",
+            )
+            .fetch_one(&mut reader)
+            .await?;
+            assert_eq!(access, (true, false));
+            reader.close().await?;
+        }
+        let admin_url = first.cleanup_guard.admin_url.clone();
+        let roles = vec![
+            first.cleanup_guard.verification_role.clone(),
+            second.cleanup_guard.verification_role.clone(),
+        ];
         for database in [&first, &second] {
             let applied_migrations: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM public._sqlx_migrations")
@@ -408,6 +479,14 @@ mod tests {
             assert!(applied_migrations > 0, "template clone must be migrated");
         }
         tokio::try_join!(first.cleanup(), second.cleanup())?;
+        let mut admin = PgConnection::connect(&admin_url).await?;
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pg_roles WHERE rolname = ANY($1)")
+                .bind(roles)
+                .fetch_one(&mut admin)
+                .await?;
+        assert_eq!(remaining, 0);
+        admin.close().await?;
         Ok(())
     }
 
@@ -417,7 +496,9 @@ mod tests {
             return Ok(());
         }
 
-        let database = HarnessDb::create().await?;
+        let mut database = HarnessDb::create().await?;
+        database.verification_url().await?;
+        let role = database.cleanup_guard.verification_role.clone();
         let admin_url = database.cleanup_guard.admin_url.clone();
         let name = database.cleanup_guard.name.clone();
         let admin_pool = PgPoolOptions::new()
@@ -439,6 +520,12 @@ mod tests {
                 .fetch_one(&admin_pool)
                 .await?;
         assert!(!exists, "guard drop must remove the harness database");
+        let reader_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)")
+                .bind(role)
+                .fetch_one(&admin_pool)
+                .await?;
+        assert!(!reader_exists, "guard drop must remove the reader role");
         admin_pool.close().await;
         Ok(())
     }
