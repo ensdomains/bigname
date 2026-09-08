@@ -432,17 +432,11 @@ async fn query_reverse_identity_total_counts(
 
     let query = format!(
         r#"
-        WITH {READABLE_REVERSE_IDENTITY_CTES}, requested AS (
+        WITH {READABLE_REVERSE_IDENTITY_CTES}, requested AS MATERIALIZED (
             SELECT *
-            FROM UNNEST($1::TEXT[], $2::TEXT[]) AS requested(address, roles)
-        )
-        SELECT
-            requested.address,
-            requested.roles,
-            COUNT(DISTINCT anc.logical_name_id)::BIGINT AS total_count
-        FROM requested
-        LEFT JOIN LATERAL (
-            SELECT readable_relation.logical_name_id
+            FROM UNNEST($1::TEXT[], $2::TEXT[]) AS request_input(address, roles)
+        ), readable_candidates AS MATERIALIZED (
+            SELECT seed.address, seed.relation, readable_relation.logical_name_id
             FROM bigname_phase.address_names_current seed
             JOIN LATERAL (
                 SELECT anc.logical_name_id
@@ -450,17 +444,36 @@ async fn query_reverse_identity_total_counts(
                 WHERE anc.address = seed.address
                   AND anc.logical_name_id = seed.logical_name_id
                   AND anc.relation = seed.relation
-                -- Keep readability work correlated to this address candidate.
+                -- Recheck this stored relation once before per-input aggregation.
                 OFFSET 0
             ) readable_relation ON TRUE
-            WHERE seed.address = requested.address
+            WHERE seed.address = ANY($1::TEXT[])
               AND seed.namespace = ANY($3::TEXT[])
-              AND (
-                  requested.roles = 'both'
-                  OR (requested.roles = 'owned' AND seed.relation IN ('registrant', 'token_holder'))
-                  OR (requested.roles = 'managed' AND seed.relation = 'effective_controller')
+              AND EXISTS (
+                  SELECT 1 FROM requested request_match
+                  WHERE request_match.address = seed.address
+                    AND (
+                        request_match.roles = 'both'
+                        OR (request_match.roles = 'owned'
+                            AND seed.relation IN ('registrant', 'token_holder'))
+                        OR (request_match.roles = 'managed'
+                            AND seed.relation = 'effective_controller')
+                    )
+                  OFFSET 0
               )
-        ) anc ON TRUE
+        )
+        SELECT
+            requested.address,
+            requested.roles,
+            COUNT(DISTINCT anc.logical_name_id)::BIGINT AS total_count
+        FROM requested
+        LEFT JOIN readable_candidates anc
+          ON anc.address = requested.address
+         AND (
+             requested.roles = 'both'
+             OR (requested.roles = 'owned' AND anc.relation IN ('registrant', 'token_holder'))
+             OR (requested.roles = 'managed' AND anc.relation = 'effective_controller')
+         )
         GROUP BY requested.address, requested.roles
         ORDER BY requested.address, requested.roles
         "#
@@ -469,7 +482,7 @@ async fn query_reverse_identity_total_counts(
     let _ = explain;
     #[cfg(test)]
     let query = if explain {
-        format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {query}")
+        format!("EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON) {query}")
     } else {
         query
     };

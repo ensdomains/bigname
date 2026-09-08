@@ -3641,7 +3641,7 @@ impl ReverseRelationAccess {
 
 // Only split unconditional conjunctions. Preserve parentheses around disjunctions,
 // quoted literals and function arguments; unfamiliar expressions fail closed.
-fn reverse_plan_conjuncts(expression: &str) -> Result<Vec<&str>> {
+fn reverse_plan_parts<'a>(expression: &'a str, separator: &str) -> Result<Vec<&'a str>> {
     let expression = expression.trim();
     let bytes = expression.as_bytes();
     let mut depth = 0usize;
@@ -3670,9 +3670,9 @@ fn reverse_plan_conjuncts(expression: &str) -> Result<Vec<&str>> {
                 _ => {}
             }
             disjunction |= depth == 0 && bytes[index..].starts_with(b" OR ");
-            if depth == 0 && bytes[index..].starts_with(b" AND ") {
-                parts.extend(reverse_plan_conjuncts(&expression[start..index])?);
-                index += 5;
+            if depth == 0 && bytes[index..].starts_with(separator.as_bytes()) {
+                parts.extend(reverse_plan_parts(&expression[start..index], separator)?);
+                index += separator.len();
                 start = index;
                 continue;
             }
@@ -3684,13 +3684,17 @@ fn reverse_plan_conjuncts(expression: &str) -> Result<Vec<&str>> {
         return Ok(vec![expression]);
     }
     if start != 0 {
-        parts.extend(reverse_plan_conjuncts(&expression[start..])?);
+        parts.extend(reverse_plan_parts(&expression[start..], separator)?);
         return Ok(parts);
     }
     if bytes.first() == Some(&b'(') && outer_end == Some(bytes.len() - 1) {
-        return reverse_plan_conjuncts(&expression[1..expression.len() - 1]);
+        return reverse_plan_parts(&expression[1..expression.len() - 1], separator);
     }
     Ok(vec![expression])
+}
+
+fn reverse_plan_conjuncts(expression: &str) -> Result<Vec<&str>> {
+    reverse_plan_parts(expression, " AND ")
 }
 
 fn reverse_plan_has(expression: &str, expected: &str) -> bool {
@@ -3717,10 +3721,24 @@ fn reverse_plan_relation_bound(
     role: ReverseRelationAccess,
     context: ReversePlanContext,
     scan_filter: &str,
+    condition: &str,
+    batch_address: Option<&str>,
 ) -> bool {
     let kind = node["Node Type"].as_str().unwrap_or("");
-    let condition = node["Index Cond"].as_str().unwrap_or("");
     let index = node["Index Name"].as_str().unwrap_or("");
+    if let (ReverseRelationAccess::Seed, Some(address_array)) = (role, batch_address) {
+        if kind == "Seq Scan" {
+            return context.unrelated == 256 && context.relation_rows == 265;
+        }
+        let (expected_index, key) = if context.page {
+            ("address_names_current_address_idx", "lower(address)")
+        } else {
+            ("address_names_current_pkey", "address")
+        };
+        return matches!(kind, "Index Scan" | "Index Only Scan" | "Bitmap Index Scan")
+            && index == expected_index
+            && reverse_plan_has(condition, &format!("{key} = ANY ({address_array})"));
+    }
     if role == ReverseRelationAccess::Seed {
         if kind == "Seq Scan" {
             return context.unrelated == 256
@@ -3755,6 +3773,225 @@ fn reverse_plan_relation_bound(
         }
 }
 
+// Batch role assignment requires real root producers and a complete, planner-visible
+// address set from the verified input Function Scan. Unknown plan syntax fails closed.
+fn reverse_plan_batch_address(plan: &Value, context: ReversePlanContext) -> Result<Option<String>> {
+    fn nodes<'a>(node: &'a Value, output: &mut Vec<&'a Value>) -> Result<()> {
+        output.push(node);
+        if let Some(children) = node.get("Plans") {
+            for child in children.as_array().context("invalid child plans")? {
+                nodes(child, output)?;
+            }
+        }
+        Ok(())
+    }
+    let mut all = Vec::new();
+    nodes(plan, &mut all)?;
+    let producers = all
+        .iter()
+        .filter(|node| {
+            node["Subplan Name"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("CTE "))
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    if producers.is_empty() {
+        anyhow::ensure!(
+            all.iter().all(|n| n.get("CTE Name").is_none()),
+            "orphan CTE scan"
+        );
+        return Ok(None);
+    }
+    let children = plan["Plans"].as_array().context("missing root producers")?;
+    anyhow::ensure!(producers.len() == 2, "unexpected CTE producer count");
+    for name in ["requested", "readable_candidates"] {
+        let label = format!("CTE {name}");
+        anyhow::ensure!(
+            producers
+                .iter()
+                .filter(|n| n["Subplan Name"] == label)
+                .count()
+                == 1
+                && children
+                    .iter()
+                    .any(|n| n["Subplan Name"] == label && n["Parent Relationship"] == "InitPlan"),
+            "missing, duplicate or non-root producer {name}"
+        );
+    }
+    for node in &all {
+        if let Some(name) = node.get("CTE Name") {
+            anyhow::ensure!(
+                node["Node Type"] == "CTE Scan"
+                    && matches!(name.as_str(), Some("requested" | "readable_candidates")),
+                "unverified CTE consumer"
+            );
+        }
+    }
+    let producer = |name: &str| -> &Value {
+        producers
+            .iter()
+            .find(|n| n["Subplan Name"] == format!("CTE {name}"))
+            .unwrap()
+    };
+    let requested = producer("requested");
+    anyhow::ensure!(
+        requested["Node Type"] == "Function Scan"
+            && requested["Alias"] == "request_input"
+            && requested["Output"]
+                .as_array()
+                .is_some_and(|v| v.contains(&json!("request_input.address"))
+                    && v.contains(&json!("request_input.roles")))
+            && requested.get("Plans").is_none(),
+        "unverified input producer"
+    );
+    let call = requested["Function Call"]
+        .as_str()
+        .context("missing input function")?;
+    let arguments = reverse_plan_parts(call, ", ")?;
+    anyhow::ensure!(
+        arguments.len() == if context.page { 12 } else { 2 },
+        "unexpected input arity"
+    );
+    anyhow::ensure!(
+        arguments
+            .iter()
+            .all(|s| s.starts_with("unnest(") && s.ends_with(')')),
+        "unverified input function"
+    );
+    let literal = arguments[usize::from(context.page)]
+        .strip_prefix("unnest('")
+        .and_then(|s| s.strip_suffix("'::text[])"))
+        .context("nonliteral requested addresses")?;
+    // The fixed plan fixture uses hexadecimal addresses; do not guess at SQL escapes,
+    // arbitrary collations, nulls or unknown parameter values when proving the array.
+    let addresses = literal
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .context("invalid address array")?;
+    anyhow::ensure!(
+        !addresses.is_empty()
+            && addresses.split(',').all(|s| !s.is_empty()
+                && s.bytes()
+                    .all(|b| b.is_ascii_hexdigit() || matches!(b, b'x' | b'X'))),
+        "unverified address literal"
+    );
+    let literal = if context.page {
+        literal.to_ascii_lowercase()
+    } else {
+        literal.to_owned()
+    };
+    let address_array = format!("'{literal}'::text[]");
+    let readable = producer("readable_candidates");
+    let operations = readable["Plans"]
+        .as_array()
+        .context("missing readability inputs")?
+        .iter()
+        .filter(|n| matches!(n["Parent Relationship"].as_str(), Some("Outer" | "Inner")))
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        readable["Node Type"] == "Nested Loop"
+            && operations.len() == 2
+            && operations[0]["Parent Relationship"] == "Outer"
+            && operations[1]["Parent Relationship"] == "Inner",
+        "readability is not correlated directly to a seed"
+    );
+    let seed = operations[0];
+    anyhow::ensure!(
+        seed["Relation Name"] == "address_names_current"
+            && seed["Schema"] == "bigname_phase"
+            && seed["Alias"] == "seed"
+            && seed["Output"].as_array().is_some_and(|v| [
+                "seed.address",
+                "seed.logical_name_id",
+                "seed.relation"
+            ]
+            .iter()
+            .all(|field| v.contains(&json!(field))))
+            && matches!(
+                seed["Node Type"].as_str(),
+                Some("Seq Scan" | "Index Scan" | "Bitmap Heap Scan")
+            ),
+        "batch seed is not the stored physical identity"
+    );
+    for producer in [requested, readable, seed] {
+        let loops = producer["Actual Loops"]
+            .as_f64()
+            .context("missing producer loops")?;
+        anyhow::ensure!(
+            loops.is_finite() && (0.0..=1.0).contains(&loops),
+            "repeated batch producer"
+        );
+    }
+    let subplans = seed["Plans"]
+        .as_array()
+        .context("missing seed input proof")?;
+    let matches = subplans
+        .iter()
+        .filter(|n| n["Parent Relationship"] == "SubPlan")
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        matches.len() == 1
+            && subplans.len() == 1 + usize::from(seed["Node Type"] == "Bitmap Heap Scan"),
+        "unexpected raw seed child access"
+    );
+    let matcher = matches[0];
+    let match_name = matcher["Subplan Name"]
+        .as_str()
+        .context("missing request SubPlan")?;
+    anyhow::ensure!(
+        match_name.starts_with("SubPlan ") && match_name[8..].parse::<usize>().is_ok(),
+        "invalid match SubPlan"
+    );
+    let address = if context.page {
+        "lower(request_match.address) = lower(seed.address)"
+    } else {
+        "request_match.address = seed.address"
+    };
+    let roles = "(request_match.roles = 'both'::text) OR ((request_match.roles = 'owned'::text) AND (seed.relation = ANY ('{registrant,token_holder}'::text[]))) OR ((request_match.roles = 'managed'::text) AND (seed.relation = 'effective_controller'::text))";
+    let filter = matcher["Filter"]
+        .as_str()
+        .context("missing same-request filter")?;
+    anyhow::ensure!(
+        matcher["Node Type"] == "CTE Scan"
+            && matcher["CTE Name"] == "requested"
+            && matcher["Alias"] == "request_match"
+            && matcher.get("Plans").is_none()
+            && reverse_plan_has(filter, address)
+            && reverse_plan_has(filter, roles),
+        "address and roles do not belong to the same request"
+    );
+    let filter = seed["Filter"]
+        .as_str()
+        .context("missing batch seed filter")?;
+    anyhow::ensure!(
+        reverse_plan_has(filter, "seed.namespace = ANY ('{ens,basenames}'::text[])")
+            && reverse_plan_has(filter, match_name),
+        "seed input restrictions are conditional or missing"
+    );
+    let address_key = if context.page {
+        "lower(seed.address)"
+    } else {
+        "seed.address"
+    };
+    let condition = format!("{address_key} = ANY ({address_array})");
+    anyhow::ensure!(
+        reverse_plan_has(filter, &condition)
+            || reverse_plan_has(seed["Index Cond"].as_str().unwrap_or(""), &condition)
+            || seed["Node Type"] == "Bitmap Heap Scan",
+        "missing complete batch address restriction"
+    );
+    Ok(Some(address_array))
+}
+
+fn reverse_plan_unqualify(expression: &str, alias: &str) -> String {
+    if alias.is_empty() {
+        expression.to_owned()
+    } else {
+        expression.replace(&format!("{alias}."), "")
+    }
+}
+
 fn reverse_plan_growth(smaller: &ReversePlanWork, larger: &ReversePlanWork) -> Result<()> {
     for (table, values) in larger {
         if table != "chain_lineage" {
@@ -3781,14 +4018,36 @@ fn reverse_plan_scan_work(plan: &Value, context: ReversePlanContext) -> Result<R
         bitmap_table: Option<&str>,
         context: ReversePlanContext,
         role: Option<ReverseRelationAccess>,
-        inherited_filter: &str,
+        inherited_scan: (&str, &str),
+        batch_address: Option<&str>,
         totals: &mut ReversePlanWork,
     ) -> Result<bool> {
         let kind = node["Node Type"].as_str().context("missing node type")?;
-        anyhow::ensure!(
-            node["CTE Name"] != "readable_names",
-            "materialized readable names"
-        );
+        let alias = node["Alias"].as_str().unwrap_or(inherited_scan.1);
+        let filter =
+            reverse_plan_unqualify(node["Filter"].as_str().unwrap_or(inherited_scan.0), alias);
+        let condition = reverse_plan_unqualify(node["Index Cond"].as_str().unwrap_or(""), alias);
+        let children = node
+            .get("Plans")
+            .map(|v| v.as_array().context("invalid child plans"))
+            .transpose()?
+            .into_iter()
+            .flatten()
+            .map(|child| {
+                (
+                    child,
+                    matches!(
+                        child["Parent Relationship"].as_str(),
+                        Some("InitPlan" | "SubPlan")
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let operations = children
+            .iter()
+            .filter(|(_, side)| !side)
+            .map(|(child, _)| *child)
+            .collect::<Vec<_>>();
         let bitmap = matches!(kind, "BitmapAnd" | "BitmapOr" | "Bitmap Index Scan");
         anyhow::ensure!(bitmap == bitmap_table.is_some(), "invalid bitmap context");
         let declared = node
@@ -3797,6 +4056,10 @@ fn reverse_plan_scan_work(plan: &Value, context: ReversePlanContext) -> Result<R
             .transpose()?;
         anyhow::ensure!(!bitmap || declared.is_none(), "ambiguous bitmap relation");
         let table = declared.or(bitmap_table);
+        anyhow::ensure!(
+            batch_address.is_none() || declared.is_none() || node["Schema"] == "bigname_phase",
+            "unverified physical schema"
+        );
         if matches!(
             kind,
             "Seq Scan" | "Index Scan" | "Index Only Scan" | "Bitmap Heap Scan"
@@ -3810,18 +4073,28 @@ fn reverse_plan_scan_work(plan: &Value, context: ReversePlanContext) -> Result<R
             Some("surface_bindings") => Some("surface_binding_id"),
             Some("token_lineages") => Some("token_lineage_id"),
             Some("chain_lineage") => Some("block_hash"),
-            _ => None,
+            Some(_) => anyhow::bail!("unexpected physical relation"),
+            None => None,
         };
-        let mut bounded = false;
-        let scan_filter = node["Filter"].as_str().unwrap_or(inherited_filter);
-        if role == Some(ReverseRelationAccess::Seed) && kind != "Bitmap Heap Scan" && !bitmap {
-            anyhow::ensure!(
-                node.get("Plans")
-                    .is_none_or(|children| children.as_array().is_some_and(Vec::is_empty)),
-                "raw seed contains a child access"
-            );
+        if role == Some(ReverseRelationAccess::Seed)
+            && batch_address.is_none()
+            && kind != "Bitmap Heap Scan"
+            && !bitmap
+        {
+            anyhow::ensure!(children.is_empty(), "raw seed contains a child access");
         }
-        if let Some(key) = key {
+        let cte = node["CTE Name"].as_str();
+        anyhow::ensure!(
+            cte.is_none() || batch_address.is_some(),
+            "unverified CTE scan"
+        );
+        let input = (node["Subplan Name"] == "CTE requested").then_some("request_input");
+        let work_table = table
+            .map(str::to_owned)
+            .or_else(|| cte.map(|name| format!("cte:{name}")))
+            .or_else(|| input.map(str::to_owned));
+        let mut bounded = false;
+        if let Some(work_table) = work_table {
             anyhow::ensure!(kind.contains("Scan") || bitmap, "malformed monitored node");
             if kind.contains("Scan") {
                 let counter = |field: &str, optional: bool| -> Result<f64> {
@@ -3833,10 +4106,15 @@ fn reverse_plan_scan_work(plan: &Value, context: ReversePlanContext) -> Result<R
                     Ok(value)
                 };
                 let loops = counter("Actual Loops", false)?;
+                anyhow::ensure!(
+                    batch_address.is_none()
+                        || role != Some(ReverseRelationAccess::Seed)
+                        || loops <= 1.0,
+                    "repeated batch seed"
+                );
                 let rows = counter("Actual Rows", false)?;
                 let filtered = counter("Rows Removed by Filter", true)?;
                 let rechecked = counter("Rows Removed by Index Recheck", true)?;
-                let values = totals.entry(table.unwrap().to_owned()).or_default();
                 let counters = [
                     loops * (rows + filtered + rechecked).max(1.0),
                     loops * rows,
@@ -3844,87 +4122,88 @@ fn reverse_plan_scan_work(plan: &Value, context: ReversePlanContext) -> Result<R
                     loops * rechecked,
                     loops,
                 ];
-                for (total, value) in values.iter_mut().zip(counters) {
+                for (total, value) in totals
+                    .entry(work_table)
+                    .or_default()
+                    .iter_mut()
+                    .zip(counters)
+                {
                     *total += value;
                 }
                 if table == Some("address_names_current") {
                     let role = role.context("unclassified relation access")?;
-                    let subtotal = totals.entry(role.subtotal().to_owned()).or_default();
-                    for (total, value) in subtotal.iter_mut().zip(counters) {
+                    for (total, value) in totals
+                        .entry(role.subtotal().to_owned())
+                        .or_default()
+                        .iter_mut()
+                        .zip(counters)
+                    {
                         *total += value;
                     }
                     eprintln!("reverse relation role={role:?} counters={counters:?} node={node}");
-                }
-                let key = if context.page && key == "address" {
-                    "lower(address)"
-                } else {
-                    key
-                };
-                bounded = matches!(kind, "Index Scan" | "Index Only Scan" | "Bitmap Index Scan")
-                    && node["Index Cond"].as_str().is_some_and(|condition| {
-                        !condition.contains(" OR ")
+                    bounded = reverse_plan_relation_bound(
+                        node,
+                        role,
+                        context,
+                        &filter,
+                        &condition,
+                        batch_address,
+                    );
+                } else if let Some(key) = key {
+                    bounded =
+                        matches!(kind, "Index Scan" | "Index Only Scan" | "Bitmap Index Scan")
+                            && !condition.contains(" OR ")
                             && condition.split(" AND ").any(|term| {
                                 term.trim_start_matches('(')
                                     .starts_with(&format!("{key} = "))
-                            })
-                    });
-                if table == Some("address_names_current") {
-                    bounded = reverse_plan_relation_bound(
-                        node,
-                        role.context("unclassified relation access")?,
-                        context,
-                        scan_filter,
-                    );
+                            });
                 }
             }
         }
-        let children = node
-            .get("Plans")
-            .map(|v| v.as_array().context("invalid child plans"))
-            .transpose()?;
         if kind == "Bitmap Index Scan" {
-            anyhow::ensure!(
-                children.is_none_or(|v| v.is_empty()),
-                "bitmap index has children"
-            );
+            anyhow::ensure!(children.is_empty(), "bitmap index has children");
         }
         let inherits = bitmap || kind == "Bitmap Heap Scan";
-        let inherited = if inherits { table } else { None };
-        // The raw seed must be the direct outer scan of the correlated nested loop.
-        // Merely renaming a scan to seed cannot assign it this role.
+        // Only the verified global producer may assign batch roles. Historical scalar
+        // controls use the same direct outer physical seed / inner recheck relationship.
         let seed_join = role.is_none()
             && kind == "Nested Loop"
-            && children.is_some_and(|children| {
-                children.len() == 2
-                    && children[0]["Relation Name"] == "address_names_current"
-                    && children[0]["Alias"] == "seed"
-                    && children[0]["Parent Relationship"] == "Outer"
-                    && children[1]["Parent Relationship"] == "Inner"
-            });
-        let bounds = children
-            .into_iter()
-            .flatten()
-            .enumerate()
-            .map(|(index, child)| {
-                let child_role = if seed_join {
-                    Some(if index == 0 {
-                        ReverseRelationAccess::Seed
-                    } else {
-                        ReverseRelationAccess::Recheck
-                    })
+            && operations.len() == 2
+            && operations[0]["Relation Name"] == "address_names_current"
+            && operations[0]["Alias"] == "seed"
+            && operations[0]["Parent Relationship"] == "Outer"
+            && operations[1]["Parent Relationship"] == "Inner"
+            && (batch_address.is_none() || node["Subplan Name"] == "CTE readable_candidates");
+        let mut bounds = Vec::new();
+        for (child, side) in children {
+            let child_role = if side {
+                None
+            } else if seed_join {
+                Some(if child["Parent Relationship"] == "Outer" {
+                    ReverseRelationAccess::Seed
                 } else {
-                    role
-                };
-                visit(
-                    child,
-                    inherited,
-                    context,
-                    child_role,
-                    if inherits { scan_filter } else { "" },
-                    totals,
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
+                    ReverseRelationAccess::Recheck
+                })
+            } else {
+                role
+            };
+            let bound = visit(
+                child,
+                if inherits && !side { table } else { None },
+                context,
+                child_role,
+                if inherits && !side {
+                    (&filter, alias)
+                } else {
+                    ("", "")
+                },
+                batch_address,
+                totals,
+            )?;
+            if !side {
+                bounds.push(bound);
+            }
+        }
         if inherits && kind != "Bitmap Index Scan" {
             anyhow::ensure!(
                 !bounds.is_empty()
@@ -3946,7 +4225,16 @@ fn reverse_plan_scan_work(plan: &Value, context: ReversePlanContext) -> Result<R
     let roots = plan.as_array().context("invalid plan root")?;
     anyhow::ensure!(roots.len() == 1, "expected one plan root");
     let mut totals = std::collections::BTreeMap::new();
-    visit(&roots[0]["Plan"], None, context, None, "", &mut totals)?;
+    let batch_address = reverse_plan_batch_address(&roots[0]["Plan"], context)?;
+    visit(
+        &roots[0]["Plan"],
+        None,
+        context,
+        None,
+        ("", ""),
+        batch_address.as_deref(),
+        &mut totals,
+    )?;
     let seed = totals.get("address_seed").map_or(0.0, |v| v[0]);
     let recheck = totals.get("address_recheck").map_or(0.0, |v| v[0]);
     anyhow::ensure!(
@@ -4018,6 +4306,243 @@ fn reverse_plan_relation_example(page: bool) -> Value {
         "Actual Rows": 1, "Actual Loops": 5
     });
     json!([{"Plan": {"Node Type": "Nested Loop", "Plans": [seed, recheck]}}])
+}
+
+fn reverse_plan_batch_example(page: bool, addresses: &str) -> Value {
+    let address = if page {
+        "lower(seed.address)"
+    } else {
+        "seed.address"
+    };
+    let request_address = if page {
+        "lower(request_match.address)"
+    } else {
+        "request_match.address"
+    };
+    let arguments = if page {
+        vec![
+            "'{0}'::integer[]",
+            "'{A}'::text[]",
+            "'{60}'::text[]",
+            "'{both}'::text[]",
+            "'{\"{}\"}'::jsonb[]",
+            "'{2}'::bigint[]",
+            "'{f}'::boolean[]",
+            "'{NULL}'::boolean[]",
+            "'{NULL}'::smallint[]",
+            "'{NULL}'::text[]",
+            "'{NULL}'::text[]",
+            "'{NULL}'::text[]",
+        ]
+    } else {
+        vec!["'{a}'::text[]", "'{both}'::text[]"]
+    };
+    let calls = arguments
+        .iter()
+        .map(|value| format!("unnest({value})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let calls = calls.replace(if page { "{A}" } else { "{a}" }, addresses);
+    let address_array = if page {
+        addresses.to_ascii_lowercase()
+    } else {
+        addresses.to_owned()
+    };
+    let roles = "(request_match.roles = 'both'::text) OR ((request_match.roles = 'owned'::text) AND (seed.relation = ANY ('{registrant,token_holder}'::text[]))) OR ((request_match.roles = 'managed'::text) AND (seed.relation = 'effective_controller'::text))";
+    let mut recheck = reverse_plan_relation_example(page)[0]["Plan"]["Plans"][1].clone();
+    recheck["Alias"] = json!("relation_check");
+    recheck["Schema"] = json!("bigname_phase");
+    recheck["Index Cond"] = json!(
+        "((relation_check.logical_name_id = seed.logical_name_id) AND (relation_check.relation = seed.relation))"
+    );
+    recheck["Filter"] = json!("relation_check.address = seed.address");
+    json!([{"Plan":{"Node Type":"Nested Loop", "Plans":[
+        {"Node Type":"Function Scan", "Alias":"request_input", "Parent Relationship":"InitPlan",
+         "Subplan Name":"CTE requested", "Function Call":calls,
+         "Output":["request_input.address", "request_input.roles"], "Actual Rows":addresses.split(',').count(), "Actual Loops":1},
+        {"Node Type":"Nested Loop", "Parent Relationship":"InitPlan", "Subplan Name":"CTE readable_candidates",
+         "Actual Loops":1, "Plans":[
+            {"Node Type":"Seq Scan", "Alias":"seed", "Relation Name":"address_names_current",
+             "Schema":"bigname_phase", "Output":["seed.address", "seed.logical_name_id", "seed.relation"],
+             "Parent Relationship":"Outer", "Filter":format!("(({address} = ANY ('{address_array}'::text[])) AND (seed.namespace = ANY ('{{ens,basenames}}'::text[])) AND (SubPlan 2))"),
+             "Actual Rows":5, "Rows Removed by Filter":260, "Actual Loops":1, "Plans":[
+                {"Node Type":"CTE Scan", "CTE Name":"requested", "Alias":"request_match", "Parent Relationship":"SubPlan",
+                 "Subplan Name":"SubPlan 2", "Filter":format!("(({request_address} = {address}) AND ({roles}))"),
+                 "Actual Rows":1, "Actual Loops":5}]}, recheck]},
+        {"Node Type":"CTE Scan", "CTE Name":"readable_candidates", "Alias":"candidate",
+         "Actual Rows":5, "Actual Loops":5}
+    ]}}])
+}
+
+#[test]
+fn reverse_plan_validator_checks_batch_producers() {
+    for page in [true, false] {
+        let context = ReversePlanContext {
+            page,
+            unrelated: 256,
+            relation_rows: 265,
+        };
+        let plan = reverse_plan_batch_example(page, if page { "{A}" } else { "{a}" });
+        let work = reverse_plan_scan_work(&plan, context).unwrap();
+        assert_eq!(
+            (work["address_seed"][0], work["address_recheck"][0]),
+            (265.0, 5.0)
+        );
+        assert_eq!(
+            (
+                work["request_input"][0],
+                work["cte:requested"][0],
+                work["cte:readable_candidates"][0]
+            ),
+            (1.0, 5.0, 25.0)
+        );
+        let large = ReversePlanContext {
+            unrelated: 2048,
+            relation_rows: 2057,
+            ..context
+        };
+        assert!(reverse_plan_scan_work(&plan, large).is_err());
+        let seed_path = "/0/Plan/Plans/1/Plans/0";
+        let mut indexed = plan.clone();
+        let seed = indexed.pointer_mut(seed_path).unwrap();
+        seed["Node Type"] = json!("Index Scan");
+        seed["Index Name"] = json!(if page {
+            "address_names_current_address_idx"
+        } else {
+            "address_names_current_pkey"
+        });
+        seed["Index Cond"] = json!(if page {
+            "lower(seed.address) = ANY ('{a}'::text[])"
+        } else {
+            "seed.address = ANY ('{a}'::text[])"
+        });
+        seed["Rows Removed by Filter"] = json!(0);
+        assert!(reverse_plan_scan_work(&indexed, large).is_ok());
+        for (pointer, replacement) in [
+            ("/0/Plan/Plans/0/Actual Loops", json!(2)),
+            ("/0/Plan/Plans/1/Actual Loops", json!(2)),
+            ("/0/Plan/Plans/1/Plans/0/Actual Loops", json!(2)),
+            ("/0/Plan/Plans/2/Actual Loops", json!(513)),
+            ("/0/Plan/Plans/1/Plans/0/Plans/0/Actual Loops", json!(513)),
+            ("/0/Plan/Plans/0/Alias", json!("requested")),
+            ("/0/Plan/Plans/1/Plans/0/Plans/0/CTE Name", json!("other")),
+            (
+                "/0/Plan/Plans/1/Plans/1/Filter",
+                json!("relation_check.address = other.address"),
+            ),
+            ("/0/Plan/Plans/1/Parent Relationship", json!("SubPlan")),
+            ("/0/Plan/Plans/2/CTE Name", json!("readable_relations")),
+            ("/0/Plan/Plans/1/Plans/0/Schema", json!("other")),
+            ("/0/Plan/Plans/1/Plans/1/Schema", json!("other")),
+            (
+                "/0/Plan/Plans/1/Plans/0/Index Cond",
+                json!("seed.address = ANY ($99)"),
+            ),
+        ] {
+            let mut bad = indexed.clone();
+            *bad.pointer_mut(pointer).unwrap() = replacement;
+            assert!(
+                reverse_plan_scan_work(&bad, context).is_err(),
+                "accepted {pointer}"
+            );
+        }
+        for pointer in [
+            "/0/Plan/Plans/1/Plans/0/Filter",
+            "/0/Plan/Plans/1/Plans/0/Plans/0/Filter",
+        ] {
+            let original = plan.pointer(pointer).unwrap().as_str().unwrap();
+            for replacement in [
+                format!("({original}) OR true"),
+                original.replace("seed.", "other."),
+                original.replace("request_match.roles", "other.roles"),
+            ] {
+                if replacement == original {
+                    continue;
+                }
+                let mut bad = plan.clone();
+                *bad.pointer_mut(pointer).unwrap() = json!(replacement);
+                assert!(reverse_plan_scan_work(&bad, context).is_err());
+            }
+        }
+        let multiple = reverse_plan_batch_example(page, if page { "{A,B}" } else { "{a,b}" });
+        assert!(reverse_plan_scan_work(&multiple, context).is_ok());
+        let mut parameter = indexed.clone();
+        let calls = parameter[0]["Plan"]["Plans"][0]["Function Call"]
+            .as_str()
+            .unwrap();
+        parameter[0]["Plan"]["Plans"][0]["Function Call"] = json!(calls.replace(
+            if page {
+                "unnest('{A}'::text[])"
+            } else {
+                "unnest('{a}'::text[])"
+            },
+            "unnest($99::text[])"
+        ));
+        assert!(reverse_plan_scan_work(&parameter, context).is_err());
+        for literal in ["{b}", "{a,b}", "{NULL}", "{a\\b}"] {
+            let mut bad = indexed.clone();
+            let calls = bad[0]["Plan"]["Plans"][0]["Function Call"]
+                .as_str()
+                .unwrap()
+                .replace(if page { "{A}" } else { "{a}" }, literal);
+            bad[0]["Plan"]["Plans"][0]["Function Call"] = json!(calls);
+            assert!(reverse_plan_scan_work(&bad, context).is_err());
+        }
+        let mut duplicate = plan.clone();
+        duplicate[0]["Plan"]["Plans"]
+            .as_array_mut()
+            .unwrap()
+            .push(plan[0]["Plan"]["Plans"][1].clone());
+        assert!(reverse_plan_scan_work(&duplicate, context).is_err());
+        for relationship in ["InitPlan", "SubPlan"] {
+            let extra = json!({"Node Type":"Index Scan", "Schema":"bigname_phase", "Relation Name":"name_current",
+                "Alias":"nc", "Index Cond":"nc.logical_name_id = seed.logical_name_id",
+                "Parent Relationship":relationship, "Actual Rows":1, "Actual Loops":1});
+            let mut nested = indexed.clone();
+            let siblings = nested[0]["Plan"]["Plans"][1]["Plans"]
+                .as_array_mut()
+                .unwrap();
+            siblings.push(extra);
+            assert_eq!(
+                reverse_plan_scan_work(&nested, context).unwrap()["name_current"][0],
+                1.0
+            );
+            nested[0]["Plan"]["Plans"][1]["Plans"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap()["Actual Loops"] = json!(513);
+            assert!(reverse_plan_scan_work(&nested, context).is_err());
+        }
+        let mut bitmap = indexed.clone();
+        let seed = bitmap.pointer_mut(seed_path).unwrap();
+        seed["Node Type"] = json!("Bitmap Heap Scan");
+        let leaf = json!({"Node Type":"Bitmap Index Scan", "Index Name":seed["Index Name"], "Index Cond":seed["Index Cond"], "Actual Rows":5, "Actual Loops":1});
+        seed.as_object_mut().unwrap().remove("Index Name");
+        seed.as_object_mut().unwrap().remove("Index Cond");
+        seed["Plans"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"Node Type":"BitmapAnd", "Plans":[leaf.clone(), leaf]}));
+        assert!(reverse_plan_scan_work(&bitmap, large).is_ok());
+        for relationship in ["InitPlan", "SubPlan"] {
+            bitmap[0]["Plan"]["Plans"][1]["Plans"].as_array_mut().unwrap().push(json!({
+                "Node Type":"Result", "Parent Relationship":relationship, "Actual Rows":1, "Actual Loops":1}));
+        }
+        assert!(reverse_plan_scan_work(&bitmap, large).is_ok());
+        bitmap[0]["Plan"]["Plans"][1]["Plans"][0]["Plans"][1]["Plans"][1]["Index Cond"] =
+            json!("logical_name_id = seed.logical_name_id");
+        assert!(reverse_plan_scan_work(&bitmap, large).is_err());
+        let mut missing = plan.clone();
+        missing[0]["Plan"]["Plans"][1]["Plans"][0]["Plans"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("Actual Loops");
+        assert!(reverse_plan_scan_work(&missing, context).is_err());
+        let mut growth = work.clone();
+        growth.get_mut("cte:readable_candidates").unwrap()[0] = 83.0;
+        assert!(reverse_plan_growth(&work, &growth).is_err());
+    }
 }
 
 #[test]

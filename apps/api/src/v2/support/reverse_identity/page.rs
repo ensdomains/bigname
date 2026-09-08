@@ -74,18 +74,52 @@ async fn query_reverse_identity_page_rows(
         .map(|input| input.cursor.as_ref().map(|cursor| cursor.namehash.clone()))
         .collect::<Vec<_>>();
 
+    // Keep the requested values visible to the planner while preserving SQL lower().
+    let address_candidates = (1..=inputs.len())
+        .map(|index| format!("lower(($2::TEXT[])[{index}])"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let query = format!(
         r#"
-        WITH {READABLE_REVERSE_IDENTITY_CTES}, requested AS (
+        WITH {READABLE_REVERSE_IDENTITY_CTES}, requested AS MATERIALIZED (
             SELECT * FROM UNNEST(
                 $1::INT[], $2::TEXT[], $3::TEXT[], $4::TEXT[], $5::JSONB[],
                 $6::BIGINT[], $7::BOOLEAN[], $8::BOOLEAN[], $9::SMALLINT[],
                 $10::TEXT[], $11::TEXT[], $12::TEXT[]
-            ) AS requested(
+            ) AS request_input(
                 input_index, address, coin_type, roles, primary_names, page_size,
                 cursor_present, cursor_is_primary, cursor_role_rank,
                 cursor_normalized_name, cursor_namespace, cursor_namehash
             )
+        ), readable_candidates AS MATERIALIZED (
+            SELECT seed.address, anc.*
+            FROM bigname_phase.address_names_current seed
+            JOIN LATERAL (
+                SELECT readable_relation.logical_name_id, readable_relation.namespace,
+                       readable_relation.namehash, readable_relation.relation, identity_nc.raw_name
+                FROM readable_relations readable_relation
+                JOIN readable_names identity_nc
+                  ON identity_nc.logical_name_id = readable_relation.logical_name_id
+                WHERE readable_relation.address = seed.address
+                  AND readable_relation.logical_name_id = seed.logical_name_id
+                  AND readable_relation.relation = seed.relation
+                -- Recheck this stored relation once before per-input pagination.
+                OFFSET 0
+            ) anc ON TRUE
+            WHERE lower(seed.address) = ANY(ARRAY[{address_candidates}])
+              AND seed.namespace = ANY($13::TEXT[])
+              AND EXISTS (
+                  SELECT 1 FROM requested request_match
+                  WHERE lower(request_match.address) = lower(seed.address)
+                    AND (
+                        request_match.roles = 'both'
+                        OR (request_match.roles = 'owned'
+                            AND seed.relation IN ('registrant', 'token_holder'))
+                        OR (request_match.roles = 'managed'
+                            AND seed.relation = 'effective_controller')
+                    )
+                  OFFSET 0
+              )
         )
         SELECT requested.input_index, candidate.logical_name_id, candidate.raw_name,
                requested.primary_names -> candidate.namespace AS primary_name
@@ -106,27 +140,14 @@ async fn query_reverse_identity_page_rows(
                        anc.raw_name AS raw_name,
                        anc.namespace,
                        anc.namehash
-                FROM bigname_phase.address_names_current seed
-                JOIN LATERAL (
-                    SELECT readable_relation.logical_name_id, readable_relation.namespace,
-                           readable_relation.namehash, readable_relation.relation, identity_nc.raw_name
-                    FROM readable_relations readable_relation
-                    JOIN readable_names identity_nc
-                      ON identity_nc.logical_name_id = readable_relation.logical_name_id
-                    WHERE readable_relation.address = seed.address
-                      AND readable_relation.logical_name_id = seed.logical_name_id
-                      AND readable_relation.relation = seed.relation
-                    -- Keep readability work correlated to this address candidate.
-                    OFFSET 0
-                ) anc ON TRUE
-                WHERE lower(seed.address) = lower(requested.address)
-                  AND seed.namespace = ANY($13::TEXT[])
+                FROM readable_candidates anc
+                WHERE lower(anc.address) = lower(requested.address)
                   AND (
                       requested.roles = 'both'
                       OR (requested.roles = 'owned'
-                          AND seed.relation IN ('registrant', 'token_holder'))
+                          AND anc.relation IN ('registrant', 'token_holder'))
                       OR (requested.roles = 'managed'
-                          AND seed.relation = 'effective_controller')
+                          AND anc.relation = 'effective_controller')
                   )
                 GROUP BY anc.logical_name_id, anc.raw_name,
                          anc.namespace, anc.namehash
@@ -158,7 +179,7 @@ async fn query_reverse_identity_page_rows(
     let _ = explain;
     #[cfg(test)]
     let query = if explain {
-        format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {query}")
+        format!("EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON) {query}")
     } else {
         query
     };
