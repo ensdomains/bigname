@@ -6,10 +6,11 @@ Accepted: 2026-09-11
 
 > Every carve-out below is decided. Three were settled by work that has since
 > merged and are recorded here as history; the rest are decisions this ADR makes.
-> The acceptance date is the day the last of that history landed (#885, the
-> canonicality rule of carve-out 3; the frozen head itself landed on
-> 2026-09-07); the freeze applies from this ADR's merge, and every
-> schema-migration up to the head named below predates it.
+> The freeze is effective from the acceptance date, 2026-09-11 — the day the
+> last of that history landed (#885, the canonicality rule of carve-out 3;
+> the pre-acceptance head landed on 2026-09-07). Every schema-migration up to
+> that day predates the freeze; the twelve that landed after it, before this
+> ADR merged, are the first breach and are recorded as such below.
 
 ## Context
 
@@ -98,12 +99,14 @@ The V1 schema contract is the pair:
   `migrations/20260915120000_address_records_optional_authority.sql`.
 
 The draft named `20260811120200_ens_v2_migration_slice_1_constraints.sql`, which
-was the head when it was written. The 38 schema-migrations between the two
-landed while this ADR was a draft, under the review-only process § Alternatives
-describes, so none of them is a carve-out under this ADR: they entered the
-frozen artifact by predating the freeze, and the head is restated so the
-frozen artifact is the tree the milestone actually builds on. They are not
-all slice work. Four are the ENSv1→ENSv2 slice schema this ADR anticipated:
+was the head when it was written. Fifty schema-migrations follow it up to the
+head named above: 38 landed before acceptance, while this ADR was a draft,
+under the review-only process § Alternatives describes, so none of them is a
+carve-out under this ADR — they entered the frozen artifact by predating the
+freeze — and twelve landed after acceptance, which the next paragraphs
+record. The head is restated so the frozen artifact is the tree the
+milestone actually builds on. The 38 are not all slice work. Four are the
+ENSv1→ENSv2 slice schema this ADR anticipated:
 `20260814130000_surface_binding_authority_arm.sql` (slice 2A, #468),
 `20260814131000_project_generation_failure_audit.sql` (slice 2E, #497;
 carve-out 1 below), and
@@ -134,10 +137,11 @@ is one more independent change:
 exact zero `addr:60` stays absent when a default derivation exists — a
 serving-semantics change, and the last schema-migration before acceptance.
 
-Twelve more landed after acceptance and before this ADR merged, all in #893
-(2026-09-16), and none as a carve-out or with an amendment: they are the
-first breach of the freeze, recorded here rather than reclassified as
-history. `20260909120000`–`120200_resolver_record_id_events` widen the
+The remaining twelve landed after acceptance and before this ADR merged, all
+in #893 (2026-09-16), and none as a carve-out or with an amendment: under the
+effective date above they are the first breach of the freeze, recorded here
+rather than reclassified as history.
+`20260909120000`–`120200_resolver_record_id_events` widen the
 `normalized_events` event-kind CHECK in three steps — a constraint
 replacement on a populated table; `20260911120000` and `20260911120200` add
 `normalized_events` and `name_current` indexes; `20260911120100` creates the
