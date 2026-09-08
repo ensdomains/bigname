@@ -125,9 +125,9 @@ Since #849 `apply-check.sh` applies every schema-migration that names a
 that literal token, so a migration written against the connection's search
 path would not be in it; the same script therefore rejects any migration
 newer than the legacy-schema drop that names no `bigname_phase` object unless
-every object it creates, alters, drops, or writes is schema-qualified, and
-proves that check against a planted search-path-relative statement on each
-run. From acceptance on, a schema-migration of any of these kinds cannot land
+every object it creates, alters, drops, or writes carries a schema qualifier,
+quoted or bare, and proves that check against planted search-path-relative
+statements on each run. From acceptance on, a schema-migration of any of these kinds cannot land
 without moving the conformance test, which is where the carve-out or
 amendment is checked for.
 
@@ -218,7 +218,8 @@ values the system already documents as unstable across a boundary.
    allowlist, because the table name matches the forbidden-name regex on
    `generation`.
 
-   **Decided: landed, ahead of slice 2, as its own schema-migration.**
+   **Decided: landed as slice 2E's own schema-migration (#497, 2026-08-20),
+   after slices 2A–2C.**
    `migrations/20260814131000_project_generation_failure_audit.sql` creates the
    table and `20260814132000_project_generation_failure_child_authority.sql`
    extends it. All three prerequisites are in place: the table appears in both
@@ -394,7 +395,7 @@ point back to this ADR. Worth a comment in the allowlist referencing it.
 
 Doc-first in intent; in practice three carve-outs and 34 unrelated
 schema-migrations landed while this ADR was still a draft. Carve-out 1 shipped
-as its own reviewed schema-migration in August, carve-outs 2 and 3 were
+as slice 2E's reviewed schema-migration on 2026-08-20, carve-outs 2 and 3 were
 settled by slice 3 and #885, and this ADR records them rather than authorizing
 them in advance; the 34 others are inventoried under the frozen artifact. That
 is a process miss worth naming: the freeze was observable the whole time
