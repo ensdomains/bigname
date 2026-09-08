@@ -44,6 +44,13 @@ impl StopClock {
         }
     }
 
+    /// Start the budget now. Called when the stop is accepted, so the budget
+    /// counts from the signal rather than from the first wait that notices it;
+    /// a wait that notices it first starts it itself.
+    pub(crate) fn start(&self) {
+        self.started.get_or_init(Instant::now);
+    }
+
     /// What is left of the budget; the first call starts it.
     pub(crate) fn remaining(&self) -> Duration {
         self.budget
@@ -419,6 +426,19 @@ mod read_after_stop_tests {
         .await
         .expect("an answered read is returned");
         assert_eq!(value, 7);
+    }
+
+    #[tokio::test]
+    async fn a_started_budget_counts_from_the_start_not_the_first_wait() {
+        let clock = super::StopClock::new(Duration::from_millis(80));
+        clock.start();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        super::read_after_stop(&clock, "late", async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok::<_, crate::error::RunnerError>(())
+        })
+        .await
+        .expect_err("the first wait must not get the whole budget when the stop is older");
     }
 
     #[tokio::test]

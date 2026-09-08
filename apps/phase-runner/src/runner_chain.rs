@@ -33,6 +33,7 @@ impl PhaseRunner {
         config: &RuntimeConfig,
         cancellation: CancellationToken,
     ) -> RunnerResult<SupervisorReport> {
+        self.start_stop_budget_on(&cancellation);
         // Settlement closes out phases recorded against chains this start no longer
         // configures. It is required cleanup, not new work: abandoning it midway
         // leaves those phases active and blocks the next start, so it runs to

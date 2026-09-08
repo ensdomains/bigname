@@ -207,19 +207,48 @@ pub(crate) fn redo_rerun_instruction(
     let range_argument = range
         .map(|range| format!(" --from-block {} --to-block {}", range.from, range.to))
         .unwrap_or_default();
-    // The stamp records neither sources nor the verifier URL, and the CLI rejects
-    // the bare command without them, so the instruction names what it cannot fill.
-    let options = if redo_mode == Some("recompute_flags") {
-        ""
-    } else if phase == PhaseName::Verify {
-        " with the chain's configured sources as --source options and --verification-database-url"
+    let options = redo_rerun_options(if redo_mode == Some("recompute_flags") {
+        RedoRerun::RecomputeFlags
     } else {
-        " with the chain's configured sources as --source options"
-    };
+        RedoRerun::Phase(phase)
+    });
     format!(
         "rerun `phase-runner redo --chain {chain_id} --phase {phase_argument}{range_argument}`\
          {options}"
     )
+}
+
+pub(crate) enum RedoRerun {
+    Phase(PhaseName),
+    All,
+    RecomputeFlags,
+}
+
+/// The stamp records neither the sources, the verifier URL, nor the hydration
+/// RPC, and the CLI or the Project phase rejects the bare command without them,
+/// so every rerun instruction names what it cannot fill. Hydration belongs to
+/// every path that runs Project: Project itself, Interpret (which cascades into
+/// it), all phases, and recompute-flags.
+pub(crate) fn redo_rerun_options(rerun: RedoRerun) -> &'static str {
+    match rerun {
+        RedoRerun::RecomputeFlags => {
+            " with --hydration-rpc for the chain (or BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS)"
+        }
+        RedoRerun::All => {
+            " with the chain's configured sources as --source options, \
+             --verification-database-url, and --hydration-rpc for the chain (or \
+             BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS)"
+        }
+        RedoRerun::Phase(PhaseName::Verify) => {
+            " with the chain's configured sources as --source options and \
+             --verification-database-url"
+        }
+        RedoRerun::Phase(PhaseName::Interpret | PhaseName::Project) => {
+            " with the chain's configured sources as --source options and --hydration-rpc \
+             for the chain (or BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS)"
+        }
+        RedoRerun::Phase(_) => " with the chain's configured sources as --source options",
+    }
 }
 
 fn require_compatible_active_phase(

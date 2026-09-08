@@ -26,6 +26,7 @@ impl PhaseRunner {
         range: BlockRange,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
+        self.start_stop_budget_on(&cancellation);
         if selection.requires_intake_sources() {
             chain.require_intake_sources()?;
         }
@@ -161,6 +162,7 @@ impl PhaseRunner {
         range: BlockRange,
         cancellation: CancellationToken,
     ) -> RunnerResult<SupervisorReport> {
+        self.start_stop_budget_on(&cancellation);
         let mut report = SupervisorReport::default();
         let mut generation_tokens = Vec::with_capacity(chains.len());
         for chain in chains {

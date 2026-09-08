@@ -8,6 +8,7 @@ use crate::{
     runner_support::{
         cancelled_redo_error, read_after_stop, release_lock_racing_stop, resumable_recompute_marker,
     },
+    transitions::{RedoRerun, redo_rerun_options},
 };
 
 use super::{PendingProjectRedoRow, PhaseRunner};
@@ -142,8 +143,10 @@ impl PhaseRunner {
                     "recompute-flags for chain {chain_id} stopped after its scoped Project refresh \
                      {from}..={to} was stamped; the refresh blocks Project until it is resumed; \
                      rerun `phase-runner redo --chain {chain_id} --phase recompute-flags \
-                     --from-block {} --to-block {}`",
-                    range.from, range.to
+                     --from-block {} --to-block {}`{}",
+                    range.from,
+                    range.to,
+                    redo_rerun_options(RedoRerun::RecomputeFlags)
                 ),
             )),
             RecomputeSetupReport::ExtendedPendingRedo { from, to } => Ok(RunnerError::new(
@@ -153,8 +156,10 @@ impl PhaseRunner {
                      on the pending Project redo {from}..={to}, before the flags were \
                      recomputed; that redo runs as usual, and the flags still need rerunning: \
                      `phase-runner redo --chain {chain_id} --phase recompute-flags --from-block \
-                     {} --to-block {}`",
-                    range.from, range.to
+                     {} --to-block {}`{}",
+                    range.from,
+                    range.to,
+                    redo_rerun_options(RedoRerun::RecomputeFlags)
                 ),
             )),
         }
@@ -411,8 +416,12 @@ fn recompute_stopped(chain: &ChainConfig, range: BlockRange, when: &str) -> Runn
         format!(
             "recompute-flags for chain {} stopped {when} its scoped Project refresh; the \
              refresh blocks Project until it is resumed; rerun `phase-runner redo --chain {} \
-             --phase recompute-flags --from-block {} --to-block {}`",
-            chain.chain_id, chain.chain_id, range.from, range.to
+             --phase recompute-flags --from-block {} --to-block {}`{}",
+            chain.chain_id,
+            chain.chain_id,
+            range.from,
+            range.to,
+            redo_rerun_options(RedoRerun::RecomputeFlags)
         ),
     )
 }

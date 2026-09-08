@@ -805,8 +805,7 @@ given what is left of one ten-second stop budget and then reports a transient
 error that the stopping run does not retry
 (`apps/phase-runner/src/runner_chain.rs`, `bounded_recovery`;
 `apps/phase-runner/src/runner_support.rs`, `StopClock`). The budget starts when
-the first of these waits observes the stop and is shared by every wait that
-follows it — the marker reads that decide what a stopped redo reports, the
+the stop is accepted and is shared by every wait that follows it — the marker reads that decide what a stopped redo reports, the
 failure or completion records, the lock releases — so they draw it down in
 sequence rather than each taking ten seconds of their own. Nothing is corrupted: for start-up work the next start
 retries the same cleanup, and for a batch the durable state is the one a kill
@@ -838,11 +837,13 @@ exists reports the redo as *incomplete*: the
 stamp survives and blocks the phase from normal restart until the command is
 run again. That error says which command, built from the stamped mode and
 range — `rerun \`phase-runner redo --chain <chain> --phase <phase>
---from-block <n> --to-block <n>\` with the chain's configured sources as --source options` —
-because the stamp records neither the sources nor the verifier URL and the CLI
-rejects the bare command without them: add back the `--source` options the
-chain runs with, and `--verification-database-url` when the phase is Verify
-or `all`. A redo over several chains that is stopped between two of them exits
+--from-block <n> --to-block <n>\` with the chain's configured sources as --source
+options …` — because the stamp records neither the sources, the verifier URL,
+nor the hydration RPC, and the CLI or the Project phase rejects the bare
+command without them: add back the `--source` options the chain runs with,
+`--verification-database-url` when the phase is Verify or `all`, and
+`--hydration-rpc` for the chain (or `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS`)
+whenever Project runs — Project, Interpret, `all`, and `recompute-flags`. A redo over several chains that is stopped between two of them exits
 nonzero as well, reporting each chain it never started, since only a prefix
 was redone and nothing was stamped for the rest; rerun the command for those
 chains. Distinguish all of these from an exit `137`, which
@@ -854,15 +855,17 @@ The runner therefore needs a stop grace period longer than one batch, and
 Compose's 10s default is not that. `stop_grace_period` is set explicitly on the
 `phase-runner` service and is tunable per deployment:
 
-- `BIGNAME_PHASE_RUNNER_STOP_GRACE_PERIOD` (default `120s`) — raise it if a
-  single batch at this deployment's block range and hydration settings
-  routinely takes longer. Nothing in the runner bounds a batch's wall time, so
-  this is a starting value, not a derived limit. It has a floor, though: the
-  stop budget above is a fixed ten seconds that the runner does not derive
-  from this value, and everything a stop still waits on shares that one
-  budget, so a grace period at or below `10s` reaches SIGKILL before the
-  budget can report, and the bounded exit described above cannot happen.
-  Compose accepts such a value without complaint.
+- `BIGNAME_PHASE_RUNNER_STOP_GRACE_PERIOD` (default `120s`) — it must cover
+  the longest batch at this deployment's block range and hydration settings
+  *plus* the ten-second stop budget, because the budget starts when the
+  signal is accepted, not when the batch ends: a batch that finishes after
+  115 s under a 120 s grace leaves its settlement 5 s of a budget that has
+  been running for 115 s. Nothing in the runner bounds a batch's wall time, so
+  the default is a starting value, not a derived limit. The budget is a fixed
+  ten seconds that the runner does not derive from this value, and everything
+  a stop still waits on shares it, so a grace period at or below `10s` reaches
+  SIGKILL before the budget can report, and the bounded exit described above
+  cannot happen. Compose accepts such a value without complaint.
 
 A grace period that expires is a SIGKILL. Nothing is corrupted, but a batch is
 not one transaction. Each phase commits its own writes before the runner
