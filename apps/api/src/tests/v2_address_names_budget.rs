@@ -307,6 +307,21 @@ async fn v2_address_names_permission_id_does_not_resolve_name_again() -> Result<
 
 #[tokio::test]
 async fn v2_address_names_grant_budget_maximum_page_operators_and_default_plan() -> Result<()> {
+    fn summary_row_visits(node: &Value) -> u64 {
+        let mut visits = 0;
+        if node["Relation Name"] == "permissions_current_resource_summary" {
+            let returned = node["Actual Rows"].as_u64().expect("actual summary rows");
+            let filtered = node["Rows Removed by Filter"].as_u64().unwrap_or(0);
+            let rechecked = node["Rows Removed by Index Recheck"].as_u64().unwrap_or(0);
+            let loops = node["Actual Loops"].as_u64().expect("actual summary loops");
+            visits = (returned + filtered + rechecked) * loops;
+        }
+        if let Some(children) = node["Plans"].as_array() {
+            visits += children.iter().map(summary_row_visits).sum::<u64>();
+        }
+        visits
+    }
+
     let database = TestDatabase::new_migrated().await?;
     let mut specs = v2_address_name_specs();
     specs.truncate(1);
@@ -441,6 +456,15 @@ async fn v2_address_names_grant_budget_maximum_page_operators_and_default_plan()
     );
     assert_eq!(plan[0]["Plan"]["Node Type"], json!("Limit"));
     assert_eq!(plan[0]["Plan"]["Actual Rows"], json!(1001));
+    // This fixture has exactly one eligible summary per selected resource. Inspect every
+    // scan of that relation, regardless of alias: the former plan revisited its 200 rows
+    // 1,025 times. This guards those rescans, not arbitrary query work or latency.
+    let summary_visits = summary_row_visits(&plan[0]["Plan"]);
+    assert!(
+        summary_visits > 0 && summary_visits <= ids.len() as u64,
+        "selected summaries were rescanned: {summary_visits} row visits for {} resources",
+        ids.len()
+    );
     // Pure operator overflow is independently rejected.
     sqlx::query("DELETE FROM bigname_phase.permissions_current")
         .execute(&database.pool)
