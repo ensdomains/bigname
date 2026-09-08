@@ -33,7 +33,11 @@ the v2 product surface and rejected GraphQL as the product contract.
 delivery slices. When this ADR was drafted only slice 1 had landed; slices 2A–2E,
 3A, 3B and the final activation have all merged since, so the [re-derivation
 boundaries](../glossary.md#re-derivation-boundary) this ADR anticipated are
-behind us rather than ahead.
+behind us as code. They are not necessarily behind every deployment: a
+boundary is a full walk that a deployment takes when it first deploys the
+rotated hash, so a deployment still running an older hash has those walks
+ahead of it, and the keying rule below is written for artifacts that must
+survive them either way.
 
 Three properties of the current system determine what a freeze can and cannot
 promise:
@@ -53,7 +57,8 @@ promise:
   full-history Interpret and Project walk; a fingerprint change on an
   initialized chain blocks derived work until the same full-range,
   token-attested Interpret redo and stamped Project redo complete, with the
-  stamped Ingest redo first if the watch plan widened. A normalizer bump is
+  stamped Ingest redo first if the [watch
+  plan](../glossary.md#watch-plan--watched-tuple) widened. A normalizer bump is
   two of these at once: the `ENS_NORMALIZER_VERSION` constant lives in
   `crates/domain/src/normalization.rs`, which the content hash covers
   (`crates/content-hash/src/compute.rs`), so changing it is an
@@ -115,11 +120,16 @@ expiry-resource seeds (#762); and registry operator account permissions
 2026-09-07) replaces the `write_resolution_divergence` function so that an
 exact zero `addr:60` stays absent when a default derivation exists — a
 serving-semantics change, and the last schema-migration before acceptance.
-Since #849 `apply-check.sh` applies every schema-migration that
-touches the phase schema and fails on one it does not list, so from
-acceptance on a schema-migration of any of these kinds cannot land without
-moving the conformance test, which is where the carve-out or amendment is
-checked for.
+Since #849 `apply-check.sh` applies every schema-migration that names a
+`bigname_phase` object and fails on one it does not list. Its inventory is
+that literal token, so a migration written against the connection's search
+path would not be in it; the same script therefore rejects any migration
+newer than the legacy-schema drop that names no `bigname_phase` object unless
+every object it creates, alters, drops, or writes is schema-qualified, and
+proves that check against a planted search-path-relative statement on each
+run. From acceptance on, a schema-migration of any of these kinds cannot land
+without moving the conformance test, which is where the carve-out or
+amendment is checked for.
 
 An authorized carve-out that lands as a schema-migration becomes the new head,
 and the change that lands it must advance the head named above and the head
@@ -144,10 +154,12 @@ freeze observable rather than aspirational.
 
 ### What the freeze explicitly does not promise
 
-The published data will change during the milestone even though the schema holds
-still. The ENSv1→ENSv2 slice-2 and slice-3 re-derivation boundaries each
-rotate the interpreter content hash and force a full `interpret` and `project`
-walk.
+The published data can change during the milestone even though the schema
+holds still. Every interpreter-hash rotation — the ENSv1→ENSv2 slice-2 and
+slice-3 re-derivation boundaries, the two later rotations recorded under
+[Derivation-side changes](#derivation-side-changes-that-are-not-schema-changes),
+and any that follows — forces a full `interpret` and `project` walk on each
+deployment that first deploys it, and the walk re-derives the published data.
 
 Dependent work must therefore key on stable identifiers only:
 
@@ -363,8 +375,9 @@ Neither needs scheduling again.
 ## Consequences
 
 **Positive.** Parity, regression, and monitoring work gets a named contract with
-a conformance test behind it. The two re-derivation boundaries become scheduled
-events with a documented invalidation rule instead of surprises. The
+a conformance test behind it. The re-derivation boundaries are documented
+events with an invalidation rule instead of surprises — merged as code, taken
+as a full walk by each deployment that adopts them. The
 stable/unstable identifier split gives downstream authors a rule they can follow
 without understanding the whole replay model.
 

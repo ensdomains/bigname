@@ -68,6 +68,59 @@ phase_migration_uses_production_schema() {
         END { exit !found }
     ' "$1"
 }
+# A migration outside the inventory is never applied here, so a phase migration
+# written against the connection's search path would change bigname_phase
+# unlisted and untested. Since the legacy public schema was dropped, every such
+# file must name each object it creates, alters, drops, or writes with its
+# schema (for CREATE INDEX, the table); the check prints what is unqualified.
+legacy_public_schema_drop="20260806120000_drop_legacy_public_schema.sql"
+migration_objects_are_schema_qualified() {
+    awk '
+        { sub(/--.*$/, ""); text = text " " $0 }
+        END {
+            gsub(/[[:space:]]+/, " ", text)
+            n = split(toupper(text), statements, ";")
+            for (i = 1; i <= n; i++) {
+                s = statements[i]
+                sub(/^ +/, "", s)
+                if (s ~ /^CREATE( UNIQUE)? INDEX /) {
+                    if (match(s, / ON [^ (]+/)) { object = substr(s, RSTART + 4, RLENGTH - 4) } else { continue }
+                } else if (match(s, /^(CREATE( OR REPLACE)?|ALTER|DROP)( MATERIALIZED)? (TABLE|INDEX|FUNCTION|VIEW|SEQUENCE|TYPE|TRIGGER)( CONCURRENTLY)?( IF( NOT)? EXISTS)?( ONLY)? [^ (]+/)) {
+                    m = split(substr(s, RSTART, RLENGTH), words, " "); object = words[m]
+                } else if (match(s, /^(INSERT INTO|UPDATE|DELETE FROM|TRUNCATE( TABLE)?|COMMENT ON (TABLE|INDEX|FUNCTION|COLUMN)) [^ (]+/)) {
+                    m = split(substr(s, RSTART, RLENGTH), words, " "); object = words[m]
+                } else { continue }
+                if (object ~ /^[A-Z_][A-Z0-9_]*$/) { unqualified = unqualified " " object }
+            }
+            if (unqualified != "") { print unqualified; exit 1 }
+            exit 0
+        }
+    ' "$1"
+}
+assert_uninventoried_migrations_are_schema_qualified() {
+    local migration_file migration_basename unqualified
+    if unqualified="$(printf 'CREATE INDEX x ON chain_phase_state (a);\nUPDATE public.t SET a = 1;\n' \
+        | migration_objects_are_schema_qualified /dev/stdin)"; then
+        printf '%s\n' "schema-qualification check accepted a search-path-relative statement" >&2
+        exit 1
+    fi
+    if [ "$unqualified" != " CHAIN_PHASE_STATE" ]; then
+        printf '%s\n' "schema-qualification check misreported the search-path-relative statement: $unqualified" >&2
+        exit 1
+    fi
+    for migration_file in "$ROOT"/migrations/*.sql; do
+        migration_basename="$(basename "$migration_file")"
+        [[ "$migration_basename" > "$legacy_public_schema_drop" ]] || continue
+        if phase_migration_uses_production_schema "$migration_file"; then
+            continue
+        fi
+        if ! unqualified="$(migration_objects_are_schema_qualified "$migration_file")"; then
+            printf '%s\n' \
+                "$migration_basename names no bigname_phase object and relies on the search path for:$unqualified; qualify each object with bigname_phase or public" >&2
+            exit 1
+        fi
+    done
+}
 report_timing() {
     local elapsed=$((SECONDS - timing_started - ${2:-0}))
     if [ "${SCHEMA_V2_APPLY_CHECK_TIMING:-0}" = 1 ]; then
@@ -7203,6 +7256,7 @@ SQL
 
 report_timing specialized-predecessor "$refusal_probe_seconds"
 if [ "${SCHEMA_V2_APPLY_CHECK_TIMING:-0}" = 1 ]; then printf 'schema-v2 timing: refusal-probes=%ss\n' "$refusal_probe_seconds"; fi
+assert_uninventoried_migrations_are_schema_qualified
 assert_reviewed_phase_migrations_applied
 if [ "$refusal_assertions_passed" -ne "$expected_refusal_assertions" ]; then
     printf '%s\n' \
