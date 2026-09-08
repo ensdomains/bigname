@@ -2933,6 +2933,18 @@ async fn project_later_wrapper_delta(
     )
     .await?;
     seed_binding_provenance(&pool, CONTROL_BINDING, 0, 3).await?;
+    sqlx::query("DELETE FROM surface_bindings WHERE surface_binding_id = $1::uuid")
+        .bind(OWNERLESS_BINDING)
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE name_surfaces SET block_number = 9, block_hash = $2
+         WHERE logical_name_id = $1",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .bind(block_hash(9))
+    .execute(&pool)
+    .await?;
     sqlx::query(
         "INSERT INTO token_lineages (
              token_lineage_id, chain_id, block_hash, block_number, canonicality_state
@@ -2954,7 +2966,12 @@ async fn project_later_wrapper_delta(
             "fixture:incremental-old-registration",
             OLD_REGISTRAR_RESOURCE,
             "RegistrationGranted",
-            8,
+            // A later grant on an unrelated lineage must not supply registered_at.
+            if matches!(delta, LaterWrapperDelta::RegistryUpdateAfterRelease) {
+                10
+            } else {
+                8
+            },
             0,
             json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:old","registrant":PRIOR_CONTROLLER,"expiry":1111,"namehash":OWNERLESS_NAMEHASH}),
         ),
@@ -2962,23 +2979,25 @@ async fn project_later_wrapper_delta(
             "fixture:incremental-registration",
             OWNERLESS_RESOURCE,
             "RegistrationGranted",
-            8,
+            if born_wrapped { 9 } else { 8 },
             1,
-            json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:current","registrant":CONTROL_OWNER,"expiry":4242,"namehash":OWNERLESS_NAMEHASH}),
+            json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:current","registrant":if born_wrapped { WRAPPER_CONTRACT } else { CONTROL_OWNER },"expiry":4242,"namehash":OWNERLESS_NAMEHASH}),
         ),
         (
             "fixture:incremental-expiry",
             OWNERLESS_RESOURCE,
             "ExpiryChanged",
-            8,
-            2,
-            json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:current","registrant":CONTROL_OWNER,"expiry":4242,"namehash":OWNERLESS_NAMEHASH}),
+            if born_wrapped { 9 } else { 8 },
+            if born_wrapped { 1 } else { 2 },
+            json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:current","registrant":if born_wrapped { WRAPPER_CONTRACT } else { CONTROL_OWNER },"expiry":4242,"namehash":OWNERLESS_NAMEHASH}),
         ),
     ] {
         seed_normalized_event(
             &pool,
             identity,
-            None,
+            (resource == OLD_REGISTRAR_RESOURCE
+                && matches!(delta, LaterWrapperDelta::RegistryUpdateAfterRelease))
+            .then_some(OWNERLESS_LOGICAL),
             Some(resource),
             kind,
             "ens_v1_registrar_l1",
@@ -2995,7 +3014,7 @@ async fn project_later_wrapper_delta(
             OWNERLESS_RESOURCE,
             "TokenControlTransferred",
             "ens_v1_registrar_l1",
-            1,
+            2,
             json!({"source_event":"Transfer","from":CONTROL_OWNER,"to":WRAPPER_CONTRACT,"namehash":OWNERLESS_NAMEHASH}),
             json!({}),
         ),
@@ -3036,6 +3055,9 @@ async fn project_later_wrapper_delta(
             json!({}),
         ),
     ] {
+        if born_wrapped && identity == "fixture:incremental-wrap-transfer" {
+            continue;
+        }
         seed_normalized_event(
             &pool,
             identity,
@@ -3057,11 +3079,30 @@ async fn project_later_wrapper_delta(
              WHERE event_identity = 'fixture:incremental-wrapper-binding'
          )
          WHERE event_identity = 'fixture:incremental-wrap-transfer'
-            OR ($1 AND event_identity = 'fixture:incremental-registration')",
+            OR ($1 AND event_identity IN (
+                 'fixture:incremental-registration', 'fixture:incremental-expiry'
+             ))",
     )
     .bind(born_wrapped)
     .execute(&pool)
     .await?;
+
+    let (registrar_bindings, grant_is_resource_only): (i64, bool) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM surface_bindings WHERE resource_id = $1::uuid),
+                logical_name_id IS NULL FROM normalized_events
+         WHERE event_identity = 'fixture:incremental-registration'",
+    )
+    .bind(OWNERLESS_RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        registrar_bindings, 0,
+        "wrapping must not invent a registrar binding"
+    );
+    assert!(
+        grant_is_resource_only,
+        "the original numeric grant must remain resource-only"
+    );
 
     if incremental {
         run_project(&pool, 9, 8, None).await?;
@@ -3577,9 +3618,16 @@ async fn registry_update_after_wrapper_release_preserves_registration_history() 
                 OWNERLESS_RESOURCE
             })
         );
-        // These resource-only grants are outside the selected registry authority
-        // after release, so its timestamp lookup has no grant in either rebuild.
-        assert_eq!(incremental.registered_at, None);
+        // Born-wrapped registration starts in the wrapping block; later wrapping
+        // retains the earlier start. The unrelated block-10 grant cannot win.
+        assert_eq!(
+            incremental.registered_at.as_deref(),
+            Some(if born_wrapped {
+                "2026-08-01T00:00:09+00:00"
+            } else {
+                "2026-08-01T00:00:08+00:00"
+            })
+        );
         assert_eq!(
             incremental.registrant.as_deref(),
             Some("0x7777777777777777777777777777777777777777")

@@ -326,8 +326,13 @@ When an ENSv1 registrar lease expires while wrapped, the registrar release does
 select the released lifecycle state and retained lease expiry even after release
 closes the wrapper binding and selects the retained registry-only authority. The
 exact `wrapped_registrar_resource_id` on the immediately preceding wrapper binding
-admits that registrar release to the lifecycle fold, but the release does not
-replace the last wrapper holder in the served registrant fold: the registrar token
+admits that registrar's release and original registration grant to the lifecycle
+fold. The linked grant retains `registered_at`, the current registration start,
+including when registration predates wrapping or no registrar surface binding
+was created before the wrapper first made the name readable. A resource-only
+grant is attributed through that same exact preceding wrapper association;
+an unrelated registrar lineage cannot supply the timestamp. The release does not replace the last wrapper
+holder in the served registrant fold: the registrar token
 is held in NameWrapper custody, while the wrapper token records the user-facing
 holder. An active selected registry-only binding still publishes that non-null
 registrant in `address_names_current`. A released cross-resource lifecycle does so

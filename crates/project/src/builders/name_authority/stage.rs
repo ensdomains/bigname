@@ -129,8 +129,29 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                             SELECT 1 FROM project_events selected_wrapper
                             WHERE selected_wrapper.logical_name_id =
                                   authority.logical_name_id
-                              AND selected_wrapper.resource_id =
-                                  authority.selected_resource_id
+                              AND (
+                                  selected_wrapper.resource_id = authority.selected_resource_id
+                                  OR (event.event_kind = 'RegistrationGranted'
+                                      AND selected_wrapper.resource_id = (
+                                          SELECT predecessor.resource_id
+                                          FROM project_binding_candidates predecessor
+                                          JOIN project_bindings selected_binding
+                                            ON selected_binding.logical_name_id = predecessor.logical_name_id
+                                          WHERE selected_binding.logical_name_id = authority.logical_name_id
+                                            AND predecessor.authority_arm = authority.selected_authority_arm
+                                            AND (predecessor.block_number,
+                                                 COALESCE((predecessor.provenance ->> 'transaction_index')::bigint, -1),
+                                                 COALESCE((predecessor.provenance ->> 'log_index')::bigint, -1))
+                                                < (selected_binding.block_number,
+                                                   COALESCE((selected_binding.provenance ->> 'transaction_index')::bigint, -1),
+                                                   COALESCE((selected_binding.provenance ->> 'log_index')::bigint, -1))
+                                          ORDER BY predecessor.block_number DESC,
+                                                   COALESCE((predecessor.provenance ->> 'transaction_index')::bigint, -1) DESC,
+                                                   COALESCE((predecessor.provenance ->> 'log_index')::bigint, -1) DESC,
+                                                   predecessor.surface_binding_id DESC
+                                          LIMIT 1
+                                      ))
+                              )
                               AND selected_wrapper.source_family =
                                   'ens_v1_wrapper_l1'
                               AND selected_wrapper.event_kind = 'SurfaceBound'
@@ -321,7 +342,9 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                                  AND (
                                      predecessor.resource_id = event.resource_id
                                      OR (
-                                         event.event_kind = 'RegistrationReleased'
+                                         event.event_kind IN (
+                                             'RegistrationGranted', 'RegistrationReleased'
+                                         )
                                          AND event.source_family =
                                              'ens_v1_registrar_l1'
                                          AND EXISTS (
@@ -345,7 +368,10 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                                  AND (
                                      (
                                          event.source_family = 'ens_v1_registrar_l1'
-                                         AND predecessor.resource_id = event.resource_id
+                                         AND (
+                                             predecessor.resource_id = event.resource_id
+                                             OR event.event_kind = 'RegistrationGranted'
+                                         )
                                      )
                                      OR (
                                          event.block_number,
