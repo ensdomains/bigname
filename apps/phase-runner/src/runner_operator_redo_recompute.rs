@@ -81,6 +81,7 @@ impl PhaseRunner {
     ) -> RunnerResult<RunnerError> {
         let chain_id = chain.chain_id.as_str();
         let refresh: Option<ProjectMarkerRow> = read_after_stop(
+            &self.stop_clock,
             &format!("the recompute-flags project refresh for chain {chain_id}"),
             async {
                 sqlx::query_as(
@@ -124,7 +125,13 @@ impl PhaseRunner {
         );
         match report {
             RecomputeSetupReport::NeverStarted => {
-                cancelled_redo_error(&self.store, chain_id, PhaseName::Interpret).await
+                cancelled_redo_error(
+                    &self.stop_clock,
+                    &self.store,
+                    chain_id,
+                    PhaseName::Interpret,
+                )
+                .await
             }
             // The refresh is clipped to Project's current block, so the marker's
             // range is not the range to rerun: the rerun repeats the requested
@@ -187,9 +194,14 @@ impl PhaseRunner {
                 self.run_phase_with_restart(chain, PhaseName::Interpret, mode, cancellation),
             )
             .await;
-        let release =
-            release_lock_racing_stop(project_lock, &chain.chain_id, PhaseName::Project, &stopped)
-                .await;
+        let release = release_lock_racing_stop(
+            &self.stop_clock,
+            project_lock,
+            &chain.chain_id,
+            PhaseName::Project,
+            &stopped,
+        )
+        .await;
         match (result, release) {
             (Ok(()), Ok(())) => Ok(()),
             (Ok(()), Err(error)) | (Err(error), Ok(())) => Err(error),

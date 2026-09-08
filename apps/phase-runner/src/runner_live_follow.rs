@@ -88,6 +88,7 @@ impl PhaseRunner {
             )
             .await;
         let release = release_lock_racing_stop(
+            &self.stop_clock,
             verify_fence,
             &chain.chain_id,
             PhaseName::Verify,
@@ -196,6 +197,7 @@ impl PhaseRunner {
                 })
                 .await;
             let release = release_lock_racing_stop(
+                &self.stop_clock,
                 ingest_fence,
                 &chain.chain_id,
                 PhaseName::Ingest,
@@ -380,6 +382,7 @@ impl PhaseRunner {
                 return match live_mismatch.get() {
                     Some(reason) => {
                         record_live_mismatch_after_stop(
+                            &self.stop_clock,
                             &self.database,
                             &self.store,
                             &chain.chain_id,

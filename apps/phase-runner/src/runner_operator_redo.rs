@@ -5,12 +5,11 @@ use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
     phase::{BlockRange, PhaseName, RunMode},
     runner_support::{
-        cancelled_redo_error, read_after_stop, report_undispatched_redo,
-        require_all_phase_range_within_verify,
+        cancelled_redo_error, report_undispatched_redo, require_all_phase_range_within_verify,
     },
 };
 
-use super::{PhaseRunner, RedoPhase, SupervisorReport};
+use super::{PhaseRunner, RedoPhase, SupervisorReport, chain::bounded_recovery};
 
 #[path = "runner_operator_redo_pending.rs"]
 mod pending;
@@ -89,7 +88,9 @@ impl PhaseRunner {
         .await?;
         match prepared {
             Some(()) => Ok(()),
-            None => Err(cancelled_redo_error(&self.store, chain_id, phase).await?),
+            None => {
+                Err(cancelled_redo_error(&self.stop_clock, &self.store, chain_id, phase).await?)
+            }
         }
     }
 
@@ -122,9 +123,13 @@ impl PhaseRunner {
         })
         .await?
         else {
-            return Err(
-                cancelled_redo_error(&self.store, &chain.chain_id, PhaseName::Project).await?,
-            );
+            return Err(cancelled_redo_error(
+                &self.stop_clock,
+                &self.store,
+                &chain.chain_id,
+                PhaseName::Project,
+            )
+            .await?);
         };
         if let Some(range) = project {
             self.redo_phase_only(chain, PhaseName::Project, range, cancellation)
@@ -240,7 +245,13 @@ impl PhaseRunner {
         })
         .await?;
         if prepared.is_none() {
-            return Err(cancelled_redo_error(&self.store, chain_id, PhaseName::Ingest).await?);
+            return Err(cancelled_redo_error(
+                &self.stop_clock,
+                &self.store,
+                chain_id,
+                PhaseName::Ingest,
+            )
+            .await?);
         }
         self.run_all_redo_phase(chain, PhaseName::Ingest, range, range, cancellation.clone())
             .await?;
@@ -272,7 +283,7 @@ impl PhaseRunner {
         .await?
         else {
             return self
-                .all_phase_stopped(chain, PhaseName::Project, range)
+                .all_phase_stopped(chain, PhaseName::Project, range, &cancellation)
                 .await;
         };
         let project_range = project_stamp.unwrap_or(range);
@@ -296,7 +307,7 @@ impl PhaseRunner {
         .await?
         else {
             return self
-                .all_phase_stopped(chain, PhaseName::Verify, range)
+                .all_phase_stopped(chain, PhaseName::Verify, range, &cancellation)
                 .await;
         };
         let verify_range = verify_stamp.unwrap_or(range);
@@ -333,14 +344,18 @@ impl PhaseRunner {
         recovery_all_range: BlockRange,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
-        let stopped = cancellation.clone();
         match self
-            .run_phase_with_restart(chain, phase, RunMode::Redo(phase_range), cancellation)
+            .run_phase_with_restart(
+                chain,
+                phase,
+                RunMode::Redo(phase_range),
+                cancellation.clone(),
+            )
             .await
         {
             Ok(()) => Ok(()),
             Err(error) => Err(self
-                .with_all_phase_recovery(chain, recovery_all_range, error, stopped.is_cancelled())
+                .with_all_phase_recovery(chain, recovery_all_range, error, &cancellation)
                 .await),
         }
     }
@@ -352,40 +367,38 @@ impl PhaseRunner {
         chain: &ChainConfig,
         next: PhaseName,
         recovery_all_range: BlockRange,
+        cancellation: &CancellationToken,
     ) -> RunnerResult<()> {
-        let error = cancelled_redo_error(&self.store, &chain.chain_id, next).await?;
+        let error =
+            cancelled_redo_error(&self.stop_clock, &self.store, &chain.chain_id, next).await?;
         Err(self
-            .with_all_phase_recovery(chain, recovery_all_range, error, true)
+            .with_all_phase_recovery(chain, recovery_all_range, error, cancellation)
             .await)
     }
 
-    /// Attach the all-phase recovery instruction to a phase's error. After a stop
-    /// the lookup is bounded, since the stop may have won on a stalled database.
+    /// Attach the all-phase recovery instruction to a phase's error. The lookup
+    /// is bounded once a stop is pending, whether it was already or arrives
+    /// during it, since the stop may have won on a stalled database.
     async fn with_all_phase_recovery(
         &self,
         chain: &ChainConfig,
         recovery_all_range: BlockRange,
         error: RunnerError,
-        stopped: bool,
+        cancellation: &CancellationToken,
     ) -> RunnerError {
-        let lookup = self.require_no_pending_redo_for_all(
+        let recovery = bounded_recovery(
+            &self.stop_clock,
+            "loading the all-phase redo recovery",
             &chain.chain_id,
-            None,
-            None,
-            Some(recovery_all_range),
-        );
-        let recovery = if stopped {
-            read_after_stop(
-                &format!(
-                    "loading the all-phase redo recovery for chain {}",
-                    chain.chain_id
-                ),
-                lookup,
-            )
-            .await
-        } else {
-            lookup.await
-        };
+            cancellation,
+            self.require_no_pending_redo_for_all(
+                &chain.chain_id,
+                None,
+                None,
+                Some(recovery_all_range),
+            ),
+        )
+        .await;
         match recovery {
             Err(recovery) if recovery.kind() == ErrorKind::DataIntegrity => {
                 RunnerError::new(error.kind(), format!("{error}; {recovery}"))

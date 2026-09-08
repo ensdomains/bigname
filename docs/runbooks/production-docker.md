@@ -801,9 +801,14 @@ settlement or stopped-phase recovery, or the writes that record a batch that
 has already finished — its head publication, progress, completion, and
 heartbeat, and the phase's completion or failure record. None of that is
 abandoned, since the batch's own writes are already committed, but it is
-given a bounded ten seconds from the stop and then reports a transient error
-that the stopping run does not retry (`apps/phase-runner/src/runner_chain.rs`,
-`bounded_recovery`). Nothing is corrupted: for start-up work the next start
+given what is left of one ten-second stop budget and then reports a transient
+error that the stopping run does not retry
+(`apps/phase-runner/src/runner_chain.rs`, `bounded_recovery`;
+`apps/phase-runner/src/runner_support.rs`, `StopClock`). The budget starts when
+the first of these waits observes the stop and is shared by every wait that
+follows it — the marker reads that decide what a stopped redo reports, the
+failure or completion records, the lock releases — so they draw it down in
+sequence rather than each taking ten seconds of their own. Nothing is corrupted: for start-up work the next start
 retries the same cleanup, and for a batch the durable state is the one a kill
 between the batch and its progress write leaves, which the next start handles
 the same way. Row contention is one cause — another process holding
@@ -853,10 +858,11 @@ Compose's 10s default is not that. `stop_grace_period` is set explicitly on the
   single batch at this deployment's block range and hydration settings
   routinely takes longer. Nothing in the runner bounds a batch's wall time, so
   this is a starting value, not a derived limit. It has a floor, though: the
-  recovery deadline above is a fixed ten seconds that the runner does not
-  derive from this value, so a grace period at or below `10s` reaches SIGKILL
-  before the deadline can report, and the bounded-recovery exit described
-  above cannot happen. Compose accepts such a value without complaint.
+  stop budget above is a fixed ten seconds that the runner does not derive
+  from this value, and everything a stop still waits on shares that one
+  budget, so a grace period at or below `10s` reaches SIGKILL before the
+  budget can report, and the bounded exit described above cannot happen.
+  Compose accepts such a value without complaint.
 
 A grace period that expires is a SIGKILL. Nothing is corrupted, but a batch is
 not one transaction. Each phase commits its own writes before the runner

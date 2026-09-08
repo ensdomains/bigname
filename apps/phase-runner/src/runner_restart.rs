@@ -28,15 +28,20 @@ impl PhaseRunner {
             self.record_loop_progress(&chain.chain_id);
             if cancellation.is_cancelled() {
                 if mode.is_redo() {
-                    return Err(
-                        cancelled_redo_error(&self.store, &chain.chain_id, phase_name).await?,
-                    );
+                    return Err(cancelled_redo_error(
+                        &self.stop_clock,
+                        &self.store,
+                        &chain.chain_id,
+                        phase_name,
+                    )
+                    .await?);
                 }
                 if phase_name == PhaseName::Live
                     && matches!(mode, RunMode::Normal)
                     && let Some(reason) = live_mismatch.as_deref().and_then(OnceLock::get)
                 {
                     record_live_mismatch_after_stop(
+                        &self.stop_clock,
                         &self.database,
                         &self.store,
                         &chain.chain_id,
@@ -71,6 +76,7 @@ impl PhaseRunner {
                         () = cancellation.cancelled() => {
                             if mode.is_redo() {
                                 return Err(cancelled_redo_error(
+                                    &self.stop_clock,
                                     &self.store,
                                     &chain.chain_id,
                                     phase_name,
@@ -82,6 +88,7 @@ impl PhaseRunner {
                                     live_mismatch.as_deref().and_then(OnceLock::get)
                             {
                                 record_live_mismatch_after_stop(
+                                    &self.stop_clock,
                                     &self.database,
                                     &self.store,
                                     &chain.chain_id,

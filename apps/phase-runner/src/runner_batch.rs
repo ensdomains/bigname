@@ -42,7 +42,7 @@ impl PhaseRunner {
     /// may run past an accepted stop before the run gives it up. Ten seconds
     /// unless a test shortens it.
     pub fn with_stop_deadline(mut self, deadline: std::time::Duration) -> Self {
-        self.stop_deadline = deadline;
+        self.stop_clock = Arc::new(crate::runner_support::StopClock::new(deadline));
         self
     }
 

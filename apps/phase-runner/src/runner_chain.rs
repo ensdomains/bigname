@@ -8,6 +8,7 @@ use crate::{
     error::{RunnerError, RunnerResult},
     phase::{PhaseName, RunMode},
     phase_lock::PhaseLock,
+    runner_support::StopClock,
 };
 
 use super::{PhaseRunner, RedoPhase, SupervisorReport};
@@ -38,7 +39,7 @@ impl PhaseRunner {
         // completion even when a stop is already pending. It is bounded in time
         // instead, so an accepted stop cannot wait on it past the grace period.
         bounded_recovery(
-            self.stop_deadline,
+            &self.stop_clock,
             "start-up settlement",
             "",
             &cancellation,
@@ -112,7 +113,7 @@ impl PhaseRunner {
         // start refuses. Both are bounded in time instead, so an accepted stop cannot
         // wait on them past the grace period.
         bounded_recovery(
-            self.stop_deadline,
+            &self.stop_clock,
             "start-up recovery",
             &chain.chain_id,
             &cancellation,
@@ -191,10 +192,8 @@ impl PhaseRunner {
 /// none of those statements carries its own timeout, so without this a stalled
 /// connection or a row-lock wait could hold an accepted stop until the
 /// supervisor escalates to SIGKILL.
-pub(super) const STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
-
 pub(super) async fn bounded_recovery<T>(
-    deadline: std::time::Duration,
+    clock: &StopClock,
     what: &str,
     chain_id: &str,
     cancellation: &CancellationToken,
@@ -210,10 +209,11 @@ pub(super) async fn bounded_recovery<T>(
     // wait it out past the supervisor's grace period. With no stop pending there is no
     // deadline at all: ordinary contention on a `chain_phase_state` row should delay a
     // start, not truncate its settlement pass.
+    let deadline = clock.remaining();
     match tokio::time::timeout(deadline, work).await {
         Ok(result) => result,
         Err(_elapsed) => Err(RunnerError::stop_bound_expired(format!(
-            "{what}{} did not finish within {:.1} s of an accepted stop; another process may hold its rows",
+            "{what}{} did not finish within the {:.1} s left of the stop budget; another process may hold its rows",
             if chain_id.is_empty() {
                 String::new()
             } else {
@@ -230,12 +230,16 @@ mod recovery_deadline_tests {
 
     const DEADLINE: std::time::Duration = std::time::Duration::from_millis(50);
 
+    fn clock() -> crate::runner_support::StopClock {
+        crate::runner_support::StopClock::new(DEADLINE)
+    }
+
     #[tokio::test]
     async fn recovery_that_never_finishes_fails_once_a_stop_is_accepted() {
         let cancellation = CancellationToken::new();
         cancellation.cancel();
         let error = super::bounded_recovery(
-            DEADLINE,
+            &clock(),
             "start-up recovery",
             "some-chain",
             &cancellation,
@@ -253,7 +257,7 @@ mod recovery_deadline_tests {
     async fn recovery_outlasts_the_deadline_when_no_stop_is_pending() {
         // No stop, so contention must delay the start rather than truncate it.
         super::bounded_recovery(
-            DEADLINE,
+            &clock(),
             "recovery",
             "some-chain",
             &CancellationToken::new(),
@@ -270,7 +274,7 @@ mod recovery_deadline_tests {
     async fn recovery_that_finishes_inside_the_deadline_is_untouched() {
         let cancellation = CancellationToken::new();
         cancellation.cancel();
-        super::bounded_recovery(DEADLINE, "recovery", "some-chain", &cancellation, async {
+        super::bounded_recovery(&clock(), "recovery", "some-chain", &cancellation, async {
             tokio::time::sleep(DEADLINE / 5).await;
             Ok(())
         })

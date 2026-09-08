@@ -1,5 +1,7 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
+use tokio_util::sync::CancellationToken;
+
 use crate::{
     config::ChainConfig,
     error::{RunnerError, RunnerResult},
@@ -10,7 +12,7 @@ use crate::{
     state_persistence::validate_progress,
 };
 
-use super::PhaseRunner;
+use super::{PhaseRunner, chain::bounded_recovery};
 
 pub(super) type BeforePhaseContext =
     Arc<dyn Fn(PhaseName) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
@@ -99,6 +101,7 @@ impl PhaseRunner {
         chain: &ChainConfig,
         phase: Arc<dyn Phase>,
         phase_lock: &mut PhaseLock,
+        cancellation: &CancellationToken,
         recovering: bool,
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
@@ -138,6 +141,7 @@ impl PhaseRunner {
                     phase_name,
                     &RunMode::Normal,
                     phase_lock,
+                    cancellation,
                     error,
                 )
                 .await
@@ -150,6 +154,7 @@ impl PhaseRunner {
         chain: &ChainConfig,
         phase: Arc<dyn Phase>,
         phase_lock: &mut PhaseLock,
+        cancellation: &CancellationToken,
     ) -> RunnerResult<bool> {
         match self
             .store
@@ -158,12 +163,12 @@ impl PhaseRunner {
         {
             StartDisposition::Started => Ok(true),
             StartDisposition::AlreadyCompleted => {
-                self.finish_completed_phase(chain, phase, phase_lock, false)
+                self.finish_completed_phase(chain, phase, phase_lock, cancellation, false)
                     .await?;
                 Ok(false)
             }
             StartDisposition::RecoveringCompleted => {
-                self.finish_completed_phase(chain, phase, phase_lock, true)
+                self.finish_completed_phase(chain, phase, phase_lock, cancellation, true)
                     .await?;
                 Ok(false)
             }
@@ -176,38 +181,47 @@ impl PhaseRunner {
         phase: PhaseName,
         mode: &RunMode,
         phase_lock: &mut PhaseLock,
+        cancellation: &CancellationToken,
         error: RunnerError,
     ) -> RunnerResult<()> {
         if error.is_retryable() || !matches!(mode, RunMode::Normal) {
             return Err(error);
         }
-        let status = match self.store.status(chain_id, phase).await {
-            Ok(status) => status,
-            Err(status_error) => {
-                return Err(error.with_secondary(
-                    "load phase state before recording completed-phase failure",
-                    status_error,
-                ));
-            }
-        };
-        if status != PhaseStatus::Completed {
-            return Err(error);
-        }
-        if let Err(lock_error) = phase_lock.check_alive().await {
-            return Err(error.with_secondary(
-                "confirm phase lock before recording completed-phase failure",
-                lock_error,
-            ));
-        }
-        let failure_reason = format!(
-            "{}{error}",
-            crate::error::COMPLETED_VALIDATION_FAILURE_PREFIX
-        );
-        match self
-            .store
-            .fail_completed_validation(chain_id, phase, &failure_reason)
-            .await
-        {
+        // The status read, the probe, and the failure record all wait on the
+        // database; once a stop is pending they draw on the stop budget, and the
+        // validation error is what is reported either way.
+        let recorded = bounded_recovery(
+            &self.stop_clock,
+            "recording the completed-phase validation failure",
+            chain_id,
+            cancellation,
+            async {
+                let step = |what: &str, step_error: RunnerError| {
+                    RunnerError::new(step_error.kind(), format!("{what}: {step_error}"))
+                };
+                let status = self
+                    .store
+                    .status(chain_id, phase)
+                    .await
+                    .map_err(|status_error| step("load phase state", status_error))?;
+                if status != PhaseStatus::Completed {
+                    return Ok(());
+                }
+                phase_lock
+                    .check_alive()
+                    .await
+                    .map_err(|lock_error| step("confirm phase lock", lock_error))?;
+                let failure_reason = format!(
+                    "{}{error}",
+                    crate::error::COMPLETED_VALIDATION_FAILURE_PREFIX
+                );
+                self.store
+                    .fail_completed_validation(chain_id, phase, &failure_reason)
+                    .await
+            },
+        )
+        .await;
+        match recorded {
             Ok(()) => Err(error),
             Err(record_error) => {
                 Err(error.with_secondary("record completed-phase validation failure", record_error))

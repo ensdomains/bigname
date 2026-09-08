@@ -23,28 +23,50 @@ pub(crate) enum PhaseLoopResult {
     Cancelled,
 }
 
-/// How long a stop already accepted may wait on the database to learn what to
-/// report. The read runs after the race is lost, often because that same
-/// database stalled, so it cannot be allowed to hold the stop itself.
-#[cfg(not(test))]
-pub(crate) const STOPPED_MARKER_LOOKUP: Duration = Duration::from_secs(5);
-#[cfg(test)]
-pub(crate) const STOPPED_MARKER_LOOKUP: Duration = Duration::from_millis(50);
+/// One budget for everything an accepted stop still has to wait on -- marker
+/// reads, the records of a finished batch or a failed start, lock releases,
+/// start-up recovery. The budget starts the first time any of them observes
+/// the stop and is shared by every chain, so sequential waits draw down the
+/// same ten seconds instead of each taking their own; the runbook's grace
+/// floor is that budget, not a sum of per-site timeouts.
+pub(crate) struct StopClock {
+    budget: Duration,
+    started: std::sync::OnceLock<Instant>,
+}
 
-/// Touch the database after a stop has been accepted, giving up within
-/// [`STOPPED_MARKER_LOOKUP`] with an error that says what was left undone.
+impl StopClock {
+    pub(crate) const DEFAULT_BUDGET: Duration = Duration::from_secs(10);
+
+    pub(crate) fn new(budget: Duration) -> Self {
+        Self {
+            budget,
+            started: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// What is left of the budget; the first call starts it.
+    pub(crate) fn remaining(&self) -> Duration {
+        self.budget
+            .saturating_sub(self.started.get_or_init(Instant::now).elapsed())
+    }
+}
+
+/// Touch the database after a stop has been accepted, giving up when the stop
+/// budget runs out, with an error that says what was left undone.
 pub(crate) async fn read_after_stop<T>(
+    clock: &StopClock,
     what: &str,
     read: impl std::future::Future<Output = RunnerResult<T>>,
 ) -> RunnerResult<T> {
-    match tokio::time::timeout(STOPPED_MARKER_LOOKUP, read).await {
+    let remaining = clock.remaining();
+    match tokio::time::timeout(remaining, read).await {
         Ok(result) => result,
         Err(_) => Err(RunnerError::new(
             ErrorKind::InvalidTransition,
             format!(
-                "stopped, and the database did not answer within {}s while {what}; inspect \
-                 chain_phase_state once it responds",
-                STOPPED_MARKER_LOOKUP.as_secs_f64()
+                "stopped, and the database did not answer within the {:.1}s left of the stop \
+                 budget while {what}; inspect chain_phase_state once it responds",
+                remaining.as_secs_f64()
             ),
         )),
     }
@@ -56,6 +78,7 @@ pub(crate) async fn read_after_stop<T>(
 /// rest of it is bounded; a lock dropped on expiry closes its session, which
 /// releases it. Without a stop the release waits as long as it needs to.
 pub(crate) async fn release_lock_racing_stop(
+    clock: &StopClock,
     phase_lock: PhaseLock,
     chain_id: &str,
     phase: PhaseName,
@@ -68,7 +91,7 @@ pub(crate) async fn release_lock_racing_stop(
         released = &mut release => return released,
         () = cancellation.cancelled() => {}
     }
-    match tokio::time::timeout(STOPPED_MARKER_LOOKUP, release).await {
+    match tokio::time::timeout(clock.remaining(), release).await {
         Ok(released) => released,
         Err(_elapsed) => {
             tracing::warn!(
@@ -86,6 +109,7 @@ pub(crate) async fn release_lock_racing_stop(
 /// The recording is bounded; the marker already says the redo is incomplete,
 /// so the error to report is the same either way.
 pub(crate) async fn finish_stopped_redo_start(
+    clock: &StopClock,
     store: &PhaseStore,
     phase_lock: &mut PhaseLock,
     chain_id: &str,
@@ -94,6 +118,7 @@ pub(crate) async fn finish_stopped_redo_start(
     error: RunnerError,
 ) -> RunnerError {
     let recorded = read_after_stop(
+        clock,
         &format!("recording the stopped redo start for chain {chain_id} phase {phase}"),
         async {
             phase_lock.check_alive().await?;
@@ -116,11 +141,13 @@ pub(crate) async fn finish_stopped_redo_start(
 }
 
 pub(crate) async fn cancelled_redo_error(
+    clock: &StopClock,
     store: &PhaseStore,
     chain_id: &str,
     phase: PhaseName,
 ) -> RunnerResult<RunnerError> {
     let marker = read_after_stop(
+        clock,
         &format!("reading the redo for chain {chain_id} phase {phase}"),
         load_redo_marker(store.pool(), chain_id, phase),
     )
@@ -229,12 +256,14 @@ pub(crate) fn redo_outcome(result: &RunnerResult<PhaseLoopResult>) -> RedoOutcom
 /// of which can be the stall that let the stop win, so it is bounded; the error
 /// on expiry says the failure state is not persisted.
 pub(crate) async fn record_live_mismatch_after_stop(
+    clock: &StopClock,
     database: &RunnerDatabase,
     store: &PhaseStore,
     chain_id: &str,
     reason: &str,
 ) -> RunnerResult<()> {
     read_after_stop(
+        clock,
         &format!("recording the live verification mismatch for chain {chain_id}"),
         record_live_mismatch_with_lock(database, store, chain_id, reason),
     )
@@ -359,16 +388,23 @@ mod tests {
 
 #[cfg(test)]
 mod read_after_stop_tests {
+    use std::time::Duration;
+
     use crate::error::{ErrorKind, RunnerResult};
+
+    fn clock() -> super::StopClock {
+        super::StopClock::new(Duration::from_millis(50))
+    }
 
     #[tokio::test]
     async fn a_read_that_never_answers_reports_the_state_as_unread() {
-        let error =
-            super::read_after_stop("the redo for chain some-chain phase interpret", async {
-                std::future::pending::<RunnerResult<()>>().await
-            })
-            .await
-            .expect_err("a read that never answers must not hold the stop");
+        let error = super::read_after_stop(
+            &clock(),
+            "the redo for chain some-chain phase interpret",
+            async { std::future::pending::<RunnerResult<()>>().await },
+        )
+        .await
+        .expect_err("a read that never answers must not hold the stop");
         assert_eq!(error.kind(), ErrorKind::InvalidTransition);
         let message = error.to_string();
         assert!(message.contains("did not answer within"), "{message}");
@@ -377,10 +413,30 @@ mod read_after_stop_tests {
 
     #[tokio::test]
     async fn a_read_that_answers_in_time_is_passed_through() {
-        let value =
-            super::read_after_stop("nothing", async { Ok::<_, crate::error::RunnerError>(7) })
-                .await
-                .expect("an answered read is returned");
+        let value = super::read_after_stop(&clock(), "nothing", async {
+            Ok::<_, crate::error::RunnerError>(7)
+        })
+        .await
+        .expect("an answered read is returned");
         assert_eq!(value, 7);
+    }
+
+    #[tokio::test]
+    async fn sequential_waits_draw_down_one_budget() {
+        let clock = super::StopClock::new(Duration::from_millis(80));
+        super::read_after_stop(&clock, "first", async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok::<_, crate::error::RunnerError>(())
+        })
+        .await
+        .expect("the first wait fits the budget");
+        // The second wait alone would fit a fresh 80 ms; it does not fit what the
+        // first one left.
+        super::read_after_stop(&clock, "second", async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok::<_, crate::error::RunnerError>(())
+        })
+        .await
+        .expect_err("the second wait must not get a budget of its own");
     }
 }

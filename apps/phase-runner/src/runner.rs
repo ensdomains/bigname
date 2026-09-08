@@ -15,8 +15,9 @@ use crate::{
     phase_lock::PhaseLock,
     progress_monitor::RunnerPhaseProgress,
     runner_support::{
-        HeartbeatThrottle, PhaseLoopResult, cancelled_redo_error, finish_failed_redo_start,
-        finish_stopped_redo_start, read_after_stop, redo_outcome, release_lock_racing_stop,
+        HeartbeatThrottle, PhaseLoopResult, StopClock, cancelled_redo_error,
+        finish_failed_redo_start, finish_stopped_redo_start, read_after_stop, redo_outcome,
+        release_lock_racing_stop,
     },
     shutdown::until_cancelled,
     state::PhaseStore,
@@ -74,7 +75,7 @@ pub struct PhaseRunner {
     after_required_redo_catch_up: Option<live_follow::AfterRequiredRedoCatchUp>,
     loop_heartbeat: Option<crate::metrics::RunnerLoopHeartbeat>,
     phase_progress: RunnerPhaseProgress,
-    stop_deadline: std::time::Duration,
+    stop_clock: Arc<StopClock>,
 }
 
 impl PhaseRunner {
@@ -108,7 +109,7 @@ impl PhaseRunner {
             after_required_redo_catch_up: None,
             loop_heartbeat: None,
             phase_progress: RunnerPhaseProgress::default(),
-            stop_deadline: chain::STOP_DEADLINE,
+            stop_clock: Arc::new(StopClock::new(StopClock::DEFAULT_BUDGET)),
         })
     }
 
@@ -139,7 +140,13 @@ impl PhaseRunner {
         mode: &RunMode,
     ) -> RunnerResult<()> {
         if mode.is_redo() {
-            return Err(cancelled_redo_error(&self.store, &chain.chain_id, phase_name).await?);
+            return Err(cancelled_redo_error(
+                &self.stop_clock,
+                &self.store,
+                &chain.chain_id,
+                phase_name,
+            )
+            .await?);
         }
         Ok(())
     }
@@ -178,8 +185,14 @@ impl PhaseRunner {
                 &mut phase_lock,
             )
             .await;
-        let release =
-            release_lock_racing_stop(phase_lock, &chain.chain_id, phase_name, &cancellation).await;
+        let release = release_lock_racing_stop(
+            &self.stop_clock,
+            phase_lock,
+            &chain.chain_id,
+            phase_name,
+            &cancellation,
+        )
+        .await;
         match (result, release) {
             (Ok(()), Ok(())) => Ok(()),
             (Ok(()), Err(error)) => Err(error),
@@ -228,6 +241,7 @@ impl PhaseRunner {
                         phase_name,
                         &mode,
                         phase_lock,
+                        &cancellation,
                         error,
                     )
                     .await;
@@ -263,7 +277,7 @@ impl PhaseRunner {
         } else {
             let started = until_cancelled(
                 &cancellation,
-                self.start_normal_phase(chain, Arc::clone(&phase), phase_lock),
+                self.start_normal_phase(chain, Arc::clone(&phase), phase_lock, &cancellation),
             )
             .await?;
             if started != Some(true) {
@@ -287,8 +301,15 @@ impl PhaseRunner {
                 let Some(session) = redo_session else {
                     return Ok(());
                 };
-                let error = cancelled_redo_error(&self.store, &chain.chain_id, phase_name).await?;
+                let error = cancelled_redo_error(
+                    &self.stop_clock,
+                    &self.store,
+                    &chain.chain_id,
+                    phase_name,
+                )
+                .await?;
                 return Err(finish_stopped_redo_start(
+                    &self.stop_clock,
                     &self.store,
                     phase_lock,
                     &chain.chain_id,
@@ -308,7 +329,7 @@ impl PhaseRunner {
                 return Err(error);
             };
             return bounded_recovery(
-                self.stop_deadline,
+                &self.stop_clock,
                 "phase start failure recording",
                 &chain.chain_id,
                 &cancellation,
@@ -338,11 +359,14 @@ impl PhaseRunner {
                 phase_lock,
             )
             .await;
-        let stopped = cancellation.is_cancelled();
         let result = match result {
-            Ok(PhaseLoopResult::Cancelled) if mode.is_redo() => {
-                Err(cancelled_redo_error(&self.store, &chain.chain_id, phase_name).await?)
-            }
+            Ok(PhaseLoopResult::Cancelled) if mode.is_redo() => Err(cancelled_redo_error(
+                &self.stop_clock,
+                &self.store,
+                &chain.chain_id,
+                phase_name,
+            )
+            .await?),
             result => result,
         };
         if let Err(error) = &result
@@ -351,32 +375,28 @@ impl PhaseRunner {
             return Err(error.clone());
         }
         if let Some(session) = redo_session {
-            // After a stop the lock's connection may be the stall that won the
-            // race; the probe and the redo bookkeeping on it are bounded then.
-            let record = async {
-                phase_lock.check_alive().await?;
-                self.store
-                    .finish_redo(
-                        phase_lock.connection(),
-                        &chain.chain_id,
-                        phase_name,
-                        session,
-                        redo_outcome(&result),
-                    )
-                    .await
-            };
-            let restore = if stopped {
-                read_after_stop(
-                    &format!(
-                        "recording the stopped redo for chain {} phase {phase_name}",
-                        chain.chain_id
-                    ),
-                    record,
-                )
-                .await
-            } else {
-                record.await
-            };
+            // The lock's connection may be the stall a stop is waiting out; the
+            // probe and the redo bookkeeping on it are bounded once a stop is
+            // pending, whether it was already or arrives during them.
+            let restore = bounded_recovery(
+                &self.stop_clock,
+                "redo bookkeeping",
+                &chain.chain_id,
+                &cancellation,
+                async {
+                    phase_lock.check_alive().await?;
+                    self.store
+                        .finish_redo(
+                            phase_lock.connection(),
+                            &chain.chain_id,
+                            phase_name,
+                            session,
+                            redo_outcome(&result),
+                        )
+                        .await
+                },
+            )
+            .await;
             return match (result, restore) {
                 (Ok(_), Ok(())) => Ok(()),
                 (Ok(_), Err(error)) => Err(error),
@@ -392,7 +412,7 @@ impl PhaseRunner {
         match result {
             Ok(PhaseLoopResult::Completed(progress)) => {
                 bounded_recovery(
-                    self.stop_deadline,
+                    &self.stop_clock,
                     "phase completion",
                     &chain.chain_id,
                     &cancellation,
@@ -417,6 +437,7 @@ impl PhaseRunner {
                 if phase_name == PhaseName::Live
                     && let Some(reason) = live_mismatch.and_then(OnceLock::get)
                     && !read_after_stop(
+                        &self.stop_clock,
                         &format!(
                             "recording the live verification mismatch for chain {}",
                             chain.chain_id
@@ -445,7 +466,7 @@ impl PhaseRunner {
                     error.to_string()
                 };
                 let record = bounded_recovery(
-                    self.stop_deadline,
+                    &self.stop_clock,
                     "phase failure recording",
                     &chain.chain_id,
                     &cancellation,
@@ -522,7 +543,7 @@ impl PhaseRunner {
             // transient error and the durable state is what a kill between the batch
             // and its progress write would have left, which the next start handles.
             let (outcome, progress) = bounded_recovery(
-                self.stop_deadline,
+                &self.stop_clock,
                 "post-batch settlement",
                 &chain.chain_id,
                 &cancellation,
