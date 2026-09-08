@@ -742,12 +742,47 @@ runner before a rewind, or budget `6` more connections for the duration:
 `14` for one chain, `24` for three. A rewind against a chain whose writer
 phase is running fails on the held lock rather than waiting.
 
+`phase-runner redo` is likewise a separate, and potentially long-running,
+process: a writer pool of up to `4` (`apps/phase-runner/src/main.rs:131`), a
+verifier pool of `1` when the redo reaches the Verify phase
+(`apps/phase-runner/src/main.rs:173`), and up to two locks at once — the Project
+lock is held while the Interpret phase runs beneath it
+(`apps/phase-runner/src/runner_operator_redo.rs:131-141`), and every phase run
+takes its own lock (`apps/phase-runner/src/runner.rs:223`). The advisory locks
+let it run beside a supervised runner that holds a non-conflicting phase such as
+Live. Either stop the supervised runner before an explicit redo, or budget `7`
+more for its duration. Only one of redo or rewind can hold a chain's writer
+locks, so budget the larger of the two, not both.
+
+**The superuser reservation.** The writer login created from `POSTGRES_USER` is
+a superuser; `bigname_api` and `bigname_verify` are created `NOSUPERUSER`
+(the grant blocks above). PostgreSQL 16 keeps
+`superuser_reserved_connections` (default `3`, set explicitly in the compose
+files as `POSTGRES_SUPERUSER_RESERVED_CONNECTIONS`) usable by superusers only,
+so a non-superuser connection is refused once `max_connections` minus that
+reservation is in use — even though the superuser writer pool, its advisory
+locks, and a redo or rewind can still connect. A ceiling set exactly to the
+service sum therefore starves the API and the verifier first. Count the
+reservation in the ceiling rather than relying on it as headroom.
+
 Set the server's own ceiling explicitly with `POSTGRES_MAX_CONNECTIONS` rather
-than inheriting the PostgreSQL default, and size it from the peak above plus
-`BIGNAME_DATABASE_MAX_CONNECTIONS + 1` per API process. Budget it against
-`work_mem`: a single backend can hold several `work_mem` allocations at once, so
-the worst case a server commits to is roughly `max_connections x work_mem x
-concurrent sort or hash nodes`, on top of `shared_buffers`.
+than inheriting the PostgreSQL default, and size it as the sum of:
+
+| Term | Value |
+| --- | --- |
+| Supervised runner peak | `max(2C, 4) + max(C, 1) + 3C` |
+| One concurrent explicit process | `7` (redo) — larger than rewind's `6` |
+| Superuser reservation | `superuser_reserved_connections`, `3` by default |
+| Administrative headroom | `2` for `psql` and `sqlx migrate` |
+| Each API process | `BIGNAME_DATABASE_MAX_CONNECTIONS + 1` |
+
+One chain with one API process at the default pool of `10`:
+`8 + 7 + 3 + 2 + 11 = 31`. Three chains: `18 + 7 + 3 + 2 + 11 = 41`. The
+shipped default of `100` clears both; the arithmetic matters when the ceiling
+is lowered to fit `work_mem`. Then budget it against `work_mem`: a single
+backend can hold several `work_mem` allocations at once, so the worst case a
+server commits to is roughly `max_connections x work_mem x concurrent sort or
+hash nodes`, on top of `shared_buffers`.
 
 ## Owner-ratified Sepolia source-role rollout
 

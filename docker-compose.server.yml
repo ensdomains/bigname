@@ -44,6 +44,12 @@ services:
       # inherited: each backend can hold several work_mem allocations at once.
       - -c
       - max_connections=${POSTGRES_MAX_CONNECTIONS:-100}
+      # PostgreSQL refuses non-superuser logins (bigname_api, bigname_verify) once
+      # max_connections minus this reservation is reached, while the superuser
+      # writer, its advisory locks, redo and rewind can fill the rest. Size the
+      # ceiling with it: docs/deployment.md § Database connection budget.
+      - -c
+      - superuser_reserved_connections=${POSTGRES_SUPERUSER_RESERVED_CONNECTIONS:-3}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-bigname}
       POSTGRES_USER: ${POSTGRES_USER:-bigname}

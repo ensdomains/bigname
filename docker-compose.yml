@@ -31,6 +31,8 @@ services:
       - random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}
       - -c
       - max_connections=${POSTGRES_MAX_CONNECTIONS:-100}
+      - -c
+      - superuser_reserved_connections=${POSTGRES_SUPERUSER_RESERVED_CONNECTIONS:-3}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-bigname}
       POSTGRES_USER: ${POSTGRES_USER:-bigname}
