@@ -66,9 +66,12 @@ promise:
   additionally requires the `recompute-flags` pass over each chain's full
   retained range and the full-range Project redo that recompute the label
   verdicts. Only the manifest field `normalizer_version` is hash-insensitive,
-  and it changes nothing on its own ([`deployment.md`](../deployment.md)
-  § Phase-runner configuration, the manifest-authority marker and
-  normalizer-version paragraphs).
+  and it cannot move on its own: manifest loading rejects a value that differs
+  from the compiled constant (`crates/manifests/src/lib/repository.rs`,
+  `validate_manifest_metadata`), so an edit to the field alone is an invalid manifest, not
+  a no-op, and a real bump changes the field in lockstep with the constant
+  ([`deployment.md`](../deployment.md) § Phase-runner configuration, the
+  manifest-authority marker and normalizer-version paragraphs).
 - **The content hash does not cover the schema.** It watches Rust sources,
   manifests, and the lockfile — not `schema-v2/` and not `migrations/`. It cannot
   serve as the freeze anchor.
@@ -132,11 +135,15 @@ that literal token, so a schema-migration written against the connection's
 search path would not be in it; the same script therefore rejects any
 schema-migration newer than the legacy-schema drop that names no
 `bigname_phase` object unless each of its statements is one the check
-recognizes and names every object it creates, alters, drops, or writes with a
-schema qualifier, quoted or bare — a statement it cannot read, such as a
-`WITH`-prefixed write or a `DO` block, is rejected rather than assumed safe —
-and proves that check against planted search-path-relative statements on each
-run. From acceptance on, a schema-migration of any of these kinds cannot land
+recognizes and every relation it names — the object it creates, alters,
+drops, or writes, and any it inherits, partitions, references, copies, or
+reads — carries a schema qualifier, quoted or bare; a statement or lexical
+form it cannot read (a `WITH`-prefixed write, a `DO` block, a block comment,
+a dollar-quoted, escape, or unicode string) is rejected rather than assumed
+safe, as is any spelling of the phase schema other than `bigname_phase`,
+which PostgreSQL would fold to production while the check would neither
+inventory nor rewrite it. The check proves itself against planted
+search-path-relative statements on each run. From acceptance on, a schema-migration of any of these kinds cannot land
 without moving the conformance test, which is where the carve-out or
 amendment is checked for.
 

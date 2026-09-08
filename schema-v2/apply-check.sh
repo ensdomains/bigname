@@ -145,22 +145,57 @@ migration_objects_are_schema_qualified() {
                     continue
                 }
                 gsub(/"/, "", object)
-                if (object !~ /\./) { unqualified = unqualified " " object }
+                if (object !~ /\./) { unqualified = unqualified " " object; reported[object] = 1 }
+            }
+            # Any relation a clause names -- a parent to inherit or partition from,
+            # a foreign key target, a LIKE source, a FROM/JOIN/INTO/ON relation --
+            # must be qualified too, not only the target the statement acts on.
+            # Index and trigger names are unqualified by grammar and are not
+            # relations, so INDEX and TRIGGER are not relation keywords here.
+            n = split(toupper(text), tokens, " ")
+            for (i = 1; i < n; i++) {
+                keyword = tokens[i]; sub(/^\(+/, "", keyword)
+                if (keyword ~ /^(INHERITS|OF|PARTITION|REFERENCES|LIKE|JOIN|FROM|INTO|ON|TABLE|VIEW|SEQUENCE)$/ || keyword ~ /^INHERITS\(/) {
+                    object = tokens[i + 1]
+                    if (keyword ~ /^INHERITS\(/) { object = substr(keyword, 10) }
+                    sub(/^\(+/, "", object); sub(/[),;].*$/, "", object); gsub(/"/, "", object)
+                    if (object ~ /^[A-Z_]/ && object !~ /\./ \
+                        && object !~ /^(CONFLICT|DELETE|UPDATE|INSERT|SELECT|TRUE|FALSE|NULL|COMMIT|ONLY|IF|EXISTS|NOT|UNIQUE|CONCURRENTLY|DISTINCT|EACH|STATEMENT|ROW|CASCADE|RESTRICT|VALUES|COLUMN|CONSTRAINT|FUNCTION|OR|AND|IN|AS|IS|SET|WHERE|PARTITION|OF|DEFAULT|SCHEMA|EXTENSION|TYPE|ATTACH|DETACH|FOR|BY|TABLE|INDEX|VIEW|SEQUENCE|TRIGGER|MATERIALIZED|TEMP|TEMPORARY|UNLOGGED)$/ \
+                        && !(object in reported)) {
+                        reported[object] = 1
+                        unqualified = unqualified " " object
+                    }
+                }
             }
             if (unqualified != "") { print unqualified; exit 1 }
             exit 0
         }
     ' "$1"
 }
+# Lexical forms the check does not read -- block comments, dollar-quoted or
+# tagged strings, escape and unicode strings -- can hide a statement from it,
+# so an uninventoried post-cutoff schema-migration may not use them at all.
+migration_uses_unsupported_lexical_forms() {
+    grep -Eqi '/\*|\$[A-Za-z0-9_]*\$|(^|[^A-Za-z0-9_])[EBX]'"'"'|U&'"'"'' "$1"
+}
 assert_uninventoried_migrations_are_schema_qualified() {
     local migration_file migration_basename unqualified
-    if unqualified="$(printf 'CREATE INDEX x ON chain_phase_state (a);\nUPDATE public.t SET a = 1;\nALTER TABLE "name_surfaces" ADD COLUMN c int;\nDROP INDEX "public"."ok_idx";\nWITH chosen AS (SELECT 1) UPDATE chain_phase_state SET a = 1;\nDROP INDEX IF EXISTS public.old_idx, name_current_lookup_idx CASCADE;\nTRUNCATE public.a, "resources";\nCOMMENT ON COLUMN chain_phase_state.phase_name IS '"'"'x'"'"';\nCOMMENT ON COLUMN public.t.c IS '"'"'y'"'"';\nCOMMENT ON TABLE public.audit IS '"'"'--'"'"'; UPDATE resources SET a = 1;\nCOMMENT ON TABLE public.b IS '"'"'it'"'"''"'"'s -- fine'"'"'; -- DROP TABLE nope\n' \
+    if unqualified="$(printf 'CREATE INDEX x ON chain_phase_state (a);\nUPDATE public.t SET a = 1;\nALTER TABLE "name_surfaces" ADD COLUMN c int;\nDROP INDEX "public"."ok_idx";\nWITH chosen AS (SELECT 1) UPDATE chain_phase_state SET a = 1;\nDROP INDEX IF EXISTS public.old_idx, name_current_lookup_idx CASCADE;\nTRUNCATE public.a, "resources";\nCOMMENT ON COLUMN chain_phase_state.phase_name IS '"'"'x'"'"';\nCOMMENT ON COLUMN public.t.c IS '"'"'y'"'"';\nCOMMENT ON TABLE public.audit IS '"'"'--'"'"'; UPDATE resources SET a = 1;\nCOMMENT ON TABLE public.b IS '"'"'it'"'"''"'"'s -- fine'"'"'; -- DROP TABLE nope\nCREATE TABLE public.shadow () INHERITS (chain_phase_state);\nCREATE TABLE public.part PARTITION OF resources FOR VALUES IN (1);\nALTER TABLE public.child ADD CONSTRAINT fk FOREIGN KEY (a) REFERENCES name_surfaces (id);\nCREATE TABLE public.copy (LIKE token_lineages);\n' \
         | migration_objects_are_schema_qualified /dev/stdin)"; then
         printf '%s\n' "schema-qualification check accepted a search-path-relative statement" >&2
         exit 1
     fi
-    if [ "$unqualified" != " CHAIN_PHASE_STATE NAME_SURFACES [unrecognized statement: WITH CHOSEN] NAME_CURRENT_LOOKUP_IDX RESOURCES CHAIN_PHASE_STATE.PHASE_NAME RESOURCES" ]; then
+    if [ "$unqualified" != " CHAIN_PHASE_STATE NAME_SURFACES [unrecognized statement: WITH CHOSEN] NAME_CURRENT_LOOKUP_IDX RESOURCES CHAIN_PHASE_STATE.PHASE_NAME RESOURCES TOKEN_LINEAGES" ]; then
         printf '%s\n' "schema-qualification check misreported the search-path-relative statement: $unqualified" >&2
+        exit 1
+    fi
+    if ! printf 'COMMENT ON TABLE public.audit IS $msg$text -- literal$msg$;\n' \
+        | migration_uses_unsupported_lexical_forms /dev/stdin \
+        || ! printf 'UPDATE public.audit SET a = 1 /* -- harmless */;\n' \
+        | migration_uses_unsupported_lexical_forms /dev/stdin \
+        || printf 'UPDATE public.audit SET a = '"'"'$ 5'"'"';\n' \
+        | migration_uses_unsupported_lexical_forms /dev/stdin; then
+        printf '%s\n' "lexical-form check does not reject what it should, or rejects what it should not" >&2
         exit 1
     fi
     for migration_file in "$ROOT"/migrations/*.sql; do
@@ -168,15 +203,20 @@ assert_uninventoried_migrations_are_schema_qualified() {
         [[ "$migration_basename" > "$legacy_public_schema_drop" ]] || continue
         # PostgreSQL folds an unquoted BIGNAME_PHASE to the production schema, but
         # the inventory and the scratch-schema rewrite match the lowercase literal
-        # only, so any other spelling would reach production unlisted: refuse it.
-        if grep -qi 'bigname_phase' "$migration_file" \
-            && ! phase_migration_uses_production_schema "$migration_file"; then
+        # only, so any other spelling anywhere -- even beside a lowercase one --
+        # would reach production unlisted and unrewritten: refuse it.
+        if grep -oi 'bigname_phase' "$migration_file" | grep -qv '^bigname_phase$'; then
             printf '%s\n' \
-                "$migration_basename spells the phase schema other than bigname_phase; PostgreSQL folds it to the production schema but this check would not inventory it" >&2
+                "$migration_basename spells the phase schema other than bigname_phase; PostgreSQL folds it to the production schema but this check would neither inventory nor rewrite it" >&2
             exit 1
         fi
         if phase_migration_uses_production_schema "$migration_file"; then
             continue
+        fi
+        if migration_uses_unsupported_lexical_forms "$migration_file"; then
+            printf '%s\n' \
+                "$migration_basename names no bigname_phase object and uses a lexical form this check does not read (block comment, dollar-quoted or tagged string, escape or unicode string); rewrite it without them or name bigname_phase" >&2
+            exit 1
         fi
         if ! unqualified="$(migration_objects_are_schema_qualified "$migration_file")"; then
             printf '%s\n' \
