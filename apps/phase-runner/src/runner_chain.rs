@@ -39,7 +39,7 @@ impl PhaseRunner {
         // completion even when a stop is already pending. It is bounded in time
         // instead, so an accepted stop cannot wait on it past the grace period.
         bounded_recovery(
-            &self.stop_clock,
+            &self.chain_stop_clock(""),
             "start-up settlement",
             "",
             &cancellation,
@@ -113,7 +113,7 @@ impl PhaseRunner {
         // start refuses. Both are bounded in time instead, so an accepted stop cannot
         // wait on them past the grace period.
         bounded_recovery(
-            &self.stop_clock,
+            &self.chain_stop_clock(&chain.chain_id),
             "start-up recovery",
             &chain.chain_id,
             &cancellation,

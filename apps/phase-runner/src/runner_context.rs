@@ -8,6 +8,7 @@ use crate::{
     heads::{HeadMarkers, load_available_heads, load_marker},
     phase::{Phase, PhaseContext, PhaseName, RedoAttemptFence, RunMode},
     phase_lock::PhaseLock,
+    runner_support::StopClock,
     state::{PhaseStatus, StartDisposition},
     state_persistence::validate_progress,
 };
@@ -98,6 +99,7 @@ impl PhaseRunner {
 
     pub(super) async fn finish_completed_phase(
         &self,
+        stop_clock: &StopClock,
         chain: &ChainConfig,
         phase: Arc<dyn Phase>,
         phase_lock: &mut PhaseLock,
@@ -137,6 +139,7 @@ impl PhaseRunner {
             Ok(()) => Ok(()),
             Err(error) => {
                 self.record_phase_validation_failure(
+                    stop_clock,
                     &chain.chain_id,
                     phase_name,
                     &RunMode::Normal,
@@ -151,6 +154,7 @@ impl PhaseRunner {
 
     pub(super) async fn start_normal_phase(
         &self,
+        stop_clock: &StopClock,
         chain: &ChainConfig,
         phase: Arc<dyn Phase>,
         phase_lock: &mut PhaseLock,
@@ -163,20 +167,36 @@ impl PhaseRunner {
         {
             StartDisposition::Started => Ok(true),
             StartDisposition::AlreadyCompleted => {
-                self.finish_completed_phase(chain, phase, phase_lock, cancellation, false)
-                    .await?;
+                self.finish_completed_phase(
+                    stop_clock,
+                    chain,
+                    phase,
+                    phase_lock,
+                    cancellation,
+                    false,
+                )
+                .await?;
                 Ok(false)
             }
             StartDisposition::RecoveringCompleted => {
-                self.finish_completed_phase(chain, phase, phase_lock, cancellation, true)
-                    .await?;
+                self.finish_completed_phase(
+                    stop_clock,
+                    chain,
+                    phase,
+                    phase_lock,
+                    cancellation,
+                    true,
+                )
+                .await?;
                 Ok(false)
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn record_phase_validation_failure(
         &self,
+        stop_clock: &StopClock,
         chain_id: &str,
         phase: PhaseName,
         mode: &RunMode,
@@ -191,7 +211,7 @@ impl PhaseRunner {
         // database; once a stop is pending they draw on the stop budget, and the
         // validation error is what is reported either way.
         let recorded = bounded_recovery(
-            &self.stop_clock,
+            stop_clock,
             "recording the completed-phase validation failure",
             chain_id,
             cancellation,

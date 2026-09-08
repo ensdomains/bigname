@@ -42,8 +42,27 @@ impl PhaseRunner {
     /// may run past an accepted stop before the run gives it up. Ten seconds
     /// unless a test shortens it.
     pub fn with_stop_deadline(mut self, deadline: std::time::Duration) -> Self {
-        self.stop_clock = Arc::new(crate::runner_support::StopClock::new(deadline));
+        self.stop_budget = deadline;
+        self.chain_stop_clocks
+            .lock()
+            .expect("stop clocks lock")
+            .clear();
         self
+    }
+
+    /// The stop budget for a chain's own waits -- start-up recovery, fence
+    /// releases, mismatch records, recovery lookups -- as opposed to a phase
+    /// attempt's, which each attempt starts for itself at its batch boundary.
+    pub(super) fn chain_stop_clock(&self, chain_id: &str) -> Arc<crate::runner_support::StopClock> {
+        Arc::clone(
+            self.chain_stop_clocks
+                .lock()
+                .expect("stop clocks lock")
+                .entry(chain_id.to_owned())
+                .or_insert_with(|| {
+                    Arc::new(crate::runner_support::StopClock::new(self.stop_budget))
+                }),
+        )
     }
 
     pub fn with_phase_progress(mut self, progress: RunnerPhaseProgress) -> Self {

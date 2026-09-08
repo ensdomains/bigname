@@ -82,7 +82,7 @@ impl PhaseRunner {
     ) -> RunnerResult<RunnerError> {
         let chain_id = chain.chain_id.as_str();
         let refresh: Option<ProjectMarkerRow> = read_after_stop(
-            &self.stop_clock,
+            &self.chain_stop_clock(&chain.chain_id),
             &format!("the recompute-flags project refresh for chain {chain_id}"),
             async {
                 sqlx::query_as(
@@ -127,7 +127,7 @@ impl PhaseRunner {
         match report {
             RecomputeSetupReport::NeverStarted => {
                 cancelled_redo_error(
-                    &self.stop_clock,
+                    &self.chain_stop_clock(&chain.chain_id),
                     &self.store,
                     chain_id,
                     PhaseName::Interpret,
@@ -200,7 +200,7 @@ impl PhaseRunner {
             )
             .await;
         let release = release_lock_racing_stop(
-            &self.stop_clock,
+            &self.chain_stop_clock(&chain.chain_id),
             project_lock,
             &chain.chain_id,
             PhaseName::Project,

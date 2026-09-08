@@ -28,7 +28,7 @@ impl PhaseRunner {
             if cancellation.is_cancelled() {
                 if mode.is_redo() {
                     return Err(cancelled_redo_error(
-                        &self.stop_clock,
+                        &self.chain_stop_clock(&chain.chain_id),
                         &self.store,
                         &chain.chain_id,
                         phase_name,
@@ -63,7 +63,7 @@ impl PhaseRunner {
                         () = cancellation.cancelled() => {
                             if mode.is_redo() {
                                 return Err(cancelled_redo_error(
-                                    &self.stop_clock,
+                                    &self.chain_stop_clock(&chain.chain_id),
                                     &self.store,
                                     &chain.chain_id,
                                     phase_name,

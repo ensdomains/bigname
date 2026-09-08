@@ -86,7 +86,7 @@ impl PhaseRunner {
             )
             .await;
         let release = release_lock_racing_stop(
-            &self.stop_clock,
+            &self.chain_stop_clock(&chain.chain_id),
             verify_fence,
             &chain.chain_id,
             PhaseName::Verify,
@@ -195,7 +195,7 @@ impl PhaseRunner {
                 })
                 .await;
             let release = release_lock_racing_stop(
-                &self.stop_clock,
+                &self.chain_stop_clock(&chain.chain_id),
                 ingest_fence,
                 &chain.chain_id,
                 PhaseName::Ingest,
@@ -444,7 +444,7 @@ impl PhaseRunner {
             return Ok(());
         };
         bounded_recovery(
-            &self.stop_clock,
+            &self.chain_stop_clock(&chain.chain_id),
             "recording the live verification mismatch",
             &chain.chain_id,
             process_stop,

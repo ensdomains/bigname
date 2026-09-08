@@ -291,7 +291,7 @@ impl PhaseRunner {
                 // Settling a stopped Live is required cleanup before the redo, so
                 // a pending stop bounds it instead of skipping it.
                 bounded_recovery(
-                    &self.stop_clock,
+                    &self.chain_stop_clock(&chain.chain_id),
                     "start-up stopped Live recovery",
                     &chain.chain_id,
                     &cancellation,

@@ -804,11 +804,14 @@ abandoned, since the batch's own writes are already committed, but it is
 given what is left of one ten-second stop budget and then reports a transient
 error that the stopping run does not retry
 (`apps/phase-runner/src/runner_chain.rs`, `bounded_recovery`;
-`apps/phase-runner/src/runner_support.rs`, `StopClock`). The budget starts when
-the first of these waits observes the stop — after the batch in flight, which
-is not bounded — and is shared by every wait that follows it — the marker reads that decide what a stopped redo reports, the
-failure or completion records, the lock releases — so they draw it down in
-sequence rather than each taking ten seconds of their own. Nothing is corrupted: for start-up work the next start
+`apps/phase-runner/src/runner_support.rs`, `StopClock`). The budget is per
+phase attempt and per chain: an attempt's records and lock release share one
+ten seconds that starts when the first of them observes the stop — after the
+attempt's batch, which is not bounded, and independently of another chain's
+or the paired phase's batch — and the chain's own waits that follow (fence
+releases, the mismatch record, the marker reads that decide what a stopped
+redo reports) share a second ten seconds of their own; within each budget the
+waits draw it down in sequence rather than each taking ten seconds. Nothing is corrupted: for start-up work the next start
 retries the same cleanup, and for a batch the durable state is the one a kill
 between the batch and its progress write leaves, which the next start handles
 the same way. Row contention is one cause — another process holding
@@ -858,15 +861,15 @@ Compose's 10s default is not that. `stop_grace_period` is set explicitly on the
 
 - `BIGNAME_PHASE_RUNNER_STOP_GRACE_PERIOD` (default `120s`) — it must cover
   the longest batch at this deployment's block range and hydration settings
-  *plus* the ten-second stop budget: the batch in flight is not bounded, and
-  the budget starts only when its settlement begins, so a batch that finishes
-  after 115 s under a 120 s grace leaves its settlement five seconds before
-  the kill, not ten. Nothing in the runner bounds a batch's wall time, so the
-  default is a starting value, not a derived limit. The budget is a fixed
-  ten seconds that the runner does not derive from this value, and everything
-  a stop still waits on shares it, so a grace period at or below `10s` reaches
-  SIGKILL before the budget can report, and the bounded exit described above
-  cannot happen. Compose accepts such a value without complaint.
+  *plus* twenty seconds of stop budget: the batch in flight is not bounded,
+  the attempt's own ten-second budget starts only when its settlement begins,
+  and the chain-level waits that follow have ten seconds more, so a batch that
+  finishes after 100 s under a 120 s grace leaves exactly the cleanup room
+  the runner may use. Nothing in the runner bounds a batch's wall time, so the
+  default is a starting value, not a derived limit. Each budget is a fixed
+  ten seconds that the runner does not derive from this value, so a grace
+  period at or below `10s` reaches SIGKILL before the first budget can report,
+  and the bounded exit described above cannot happen. Compose accepts such a value without complaint.
 
 A grace period that expires is a SIGKILL. Nothing is corrupted, but a batch is
 not one transaction. Each phase commits its own writes before the runner

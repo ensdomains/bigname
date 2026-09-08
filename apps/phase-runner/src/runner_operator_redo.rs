@@ -88,9 +88,13 @@ impl PhaseRunner {
         .await?;
         match prepared {
             Some(()) => Ok(()),
-            None => {
-                Err(cancelled_redo_error(&self.stop_clock, &self.store, chain_id, phase).await?)
-            }
+            None => Err(cancelled_redo_error(
+                &self.chain_stop_clock(&chain.chain_id),
+                &self.store,
+                chain_id,
+                phase,
+            )
+            .await?),
         }
     }
 
@@ -124,7 +128,7 @@ impl PhaseRunner {
         .await?
         else {
             return Err(cancelled_redo_error(
-                &self.stop_clock,
+                &self.chain_stop_clock(&chain.chain_id),
                 &self.store,
                 &chain.chain_id,
                 PhaseName::Project,
@@ -246,7 +250,7 @@ impl PhaseRunner {
         .await?;
         if prepared.is_none() {
             return Err(cancelled_redo_error(
-                &self.stop_clock,
+                &self.chain_stop_clock(&chain.chain_id),
                 &self.store,
                 chain_id,
                 PhaseName::Ingest,
@@ -369,8 +373,13 @@ impl PhaseRunner {
         recovery_all_range: BlockRange,
         cancellation: &CancellationToken,
     ) -> RunnerResult<()> {
-        let error =
-            cancelled_redo_error(&self.stop_clock, &self.store, &chain.chain_id, next).await?;
+        let error = cancelled_redo_error(
+            &self.chain_stop_clock(&chain.chain_id),
+            &self.store,
+            &chain.chain_id,
+            next,
+        )
+        .await?;
         Err(self
             .with_all_phase_recovery(chain, recovery_all_range, error, cancellation)
             .await)
@@ -387,7 +396,7 @@ impl PhaseRunner {
         cancellation: &CancellationToken,
     ) -> RunnerError {
         let recovery = bounded_recovery(
-            &self.stop_clock,
+            &self.chain_stop_clock(&chain.chain_id),
             "loading the all-phase redo recovery",
             &chain.chain_id,
             cancellation,
