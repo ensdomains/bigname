@@ -375,17 +375,6 @@ after slice 3, each as its own content-hash rotation (#745 on 2026-08-31 and
 
 Neither needs scheduling again.
 
-## Upstream anchors
-
-This ADR governs bigname's own schema and has one upstream dependency, in the
-derivation-side outcome above:
-
-- `.refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L48
-  @ ens_v2@a971bd64` — anchors `ROLE_WAS_RESERVED` (bit 32) as an ENSv2
-  registry role, mirrored by `REGISTRY_ROLE_BITS` in
-  `crates/adapters/src/schema_v2/protocol/permissions.rs`. Mirrored, not
-  diverged; no `upstream.md` entry.
-
 ### Explicitly out of scope
 
 - **V2 schema sign-off.** The V2 spec is still shaping. This ADR records V1 only;
@@ -398,6 +387,17 @@ derivation-side outcome above:
   by name. Keeping a freeze at all means deferring it past the milestone. It
   stays tracked as its own readiness item; a decision to pull it forward
   supersedes this ADR rather than amending it.
+
+## Upstream anchors
+
+This ADR governs bigname's own schema and has one upstream dependency, in the
+derivation-side outcome above:
+
+- `.refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L48
+  @ ens_v2@a971bd64` — anchors `ROLE_WAS_RESERVED` (bit 32) as an ENSv2
+  registry role, mirrored by `REGISTRY_ROLE_BITS` in
+  `crates/adapters/src/schema_v2/protocol/permissions.rs`. Mirrored, not
+  diverged; no `upstream.md` entry.
 
 ## Consequences
 
