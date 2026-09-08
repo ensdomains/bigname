@@ -85,7 +85,7 @@ impl PhaseRunner {
         mode: RunMode,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
-        self.run_phase_with_restart_inner(chain, phase_name, mode, cancellation, None, false)
+        self.run_phase_with_restart_inner(chain, phase_name, mode, cancellation, false)
             .await
     }
 
@@ -100,7 +100,6 @@ impl PhaseRunner {
             PhaseName::Ingest,
             RunMode::Redo(range),
             cancellation,
-            None,
             true,
         )
         .await

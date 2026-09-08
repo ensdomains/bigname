@@ -16,12 +16,11 @@ use crate::{
     progress_monitor::RunnerPhaseProgress,
     runner_support::{
         HeartbeatThrottle, PhaseLoopResult, StopClock, cancelled_redo_error,
-        finish_failed_redo_start, finish_stopped_redo_start, read_after_stop, redo_outcome,
+        finish_failed_redo_start, finish_stopped_redo_start, redo_outcome,
         release_lock_racing_stop,
     },
     shutdown::until_cancelled,
     state::PhaseStore,
-    state_persistence::record_live_verification_mismatch,
 };
 
 #[path = "runner_batch.rs"]
@@ -157,7 +156,6 @@ impl PhaseRunner {
         phase: Arc<dyn Phase>,
         mode: RunMode,
         cancellation: CancellationToken,
-        live_mismatch: Option<&OnceLock<String>>,
         automatic_discovery_ingest: bool,
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
@@ -180,7 +178,6 @@ impl PhaseRunner {
                 phase,
                 mode,
                 cancellation.clone(),
-                live_mismatch,
                 automatic_discovery_ingest,
                 &mut phase_lock,
             )
@@ -216,7 +213,6 @@ impl PhaseRunner {
         phase: Arc<dyn Phase>,
         mode: RunMode,
         cancellation: CancellationToken,
-        live_mismatch: Option<&OnceLock<String>>,
         automatic_discovery_ingest: bool,
         phase_lock: &mut PhaseLock,
     ) -> RunnerResult<()> {
@@ -433,28 +429,8 @@ impl PhaseRunner {
             Ok(PhaseLoopResult::Cancelled) => {
                 // Only a stop produces this arm, so a probe of the lock here would
                 // wait on the connection whose stall may have won; the release
-                // that follows is bounded and detects a lost lock itself.
-                if phase_name == PhaseName::Live
-                    && let Some(reason) = live_mismatch.and_then(OnceLock::get)
-                    && !read_after_stop(
-                        &self.stop_clock,
-                        &format!(
-                            "recording the live verification mismatch for chain {}",
-                            chain.chain_id
-                        ),
-                        record_live_verification_mismatch(
-                            self.store.pool(),
-                            &chain.chain_id,
-                            reason,
-                        ),
-                    )
-                    .await?
-                {
-                    return Err(RunnerError::data_integrity(format!(
-                        "verification mismatch could not mark live failed for chain {}",
-                        chain.chain_id
-                    )));
-                }
+                // that follows is bounded and detects a lost lock itself. A Live
+                // mismatch is recorded by the live-follow loop that owns it.
                 Ok(())
             }
             Err(error) => {

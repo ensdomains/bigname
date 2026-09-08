@@ -7,12 +7,10 @@ use crate::{
     error::{ErrorKind, RunnerResult},
     phase::{PhaseName, RunMode},
     phase_lock::PhaseLock,
-    runner_support::{
-        record_live_mismatch_after_stop, record_live_mismatch_with_lock, release_lock_racing_stop,
-    },
+    runner_support::{record_live_mismatch_with_lock, release_lock_racing_stop},
 };
 
-use super::{LiveMismatchReason, PhaseRunner};
+use super::{LiveMismatchReason, PhaseRunner, chain::bounded_recovery};
 
 pub(super) type AfterRequiredRedoCatchUp =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
@@ -289,6 +287,7 @@ impl PhaseRunner {
         let live = self.run_live_follow_with_mismatch(
             chain,
             pair_cancellation.clone(),
+            &cancellation,
             Arc::clone(&live_mismatch),
         );
         tokio::pin!(verify);
@@ -304,7 +303,10 @@ impl PhaseRunner {
                     pair_cancellation.cancel();
                     let live_result = live.await;
                     let error = if verification_mismatch {
-                        match self.record_mismatch_if_present(chain, &live_mismatch).await {
+                        match self
+                            .record_mismatch_if_present(chain, &live_mismatch, &cancellation)
+                            .await
+                        {
                             Ok(()) => error,
                             Err(record_error) => error.with_secondary(
                                 "record live stop after verification failed",
@@ -336,7 +338,10 @@ impl PhaseRunner {
                                 "run the paired live phase",
                                 live_error,
                             );
-                            match self.record_mismatch_if_present(chain, &live_mismatch).await {
+                            match self
+                            .record_mismatch_if_present(chain, &live_mismatch, &cancellation)
+                            .await
+                        {
                                 Ok(()) => Err(error),
                                 Err(record_error) => Err(error.with_secondary(
                                     "record live stop after verification failed",
@@ -355,7 +360,10 @@ impl PhaseRunner {
                 match verify.await {
                     Err(error) if error.kind() == ErrorKind::VerificationMismatch => {
                         let _ = live_mismatch.set(error.to_string());
-                        match self.record_mismatch_if_present(chain, &live_mismatch).await {
+                        match self
+                            .record_mismatch_if_present(chain, &live_mismatch, &cancellation)
+                            .await
+                        {
                             Ok(()) => Err(error),
                             Err(record_error) => Err(error.with_secondary(
                                 "record live stop after verification failed",
@@ -369,47 +377,44 @@ impl PhaseRunner {
         }
     }
 
+    /// `cancellation` is the pair token, which a Verify failure cancels as well
+    /// as a process stop; `process_stop` is the process token alone. The mismatch
+    /// writes on the pair token's exits are bounded only when the process is
+    /// stopping, so a Verify failure records its mismatch at leisure and does
+    /// not start the stop budget.
     async fn run_live_follow_with_mismatch(
         &self,
         chain: &ChainConfig,
         cancellation: CancellationToken,
+        process_stop: &CancellationToken,
         live_mismatch: LiveMismatchReason,
     ) -> RunnerResult<()> {
         loop {
             if cancellation.is_cancelled() {
-                // After an accepted stop the recording is bounded, as in the
-                // restart loop; the verify-failure paths above are not stops.
-                return match live_mismatch.get() {
-                    Some(reason) => {
-                        record_live_mismatch_after_stop(
-                            &self.stop_clock,
-                            &self.database,
-                            &self.store,
-                            &chain.chain_id,
-                            reason,
-                        )
-                        .await
-                    }
-                    None => Ok(()),
-                };
+                return self
+                    .record_mismatch_if_present(chain, &live_mismatch, process_stop)
+                    .await;
             }
             self.run_phase_with_restart_inner(
                 chain,
                 PhaseName::Live,
                 RunMode::Normal,
                 cancellation.clone(),
-                Some(Arc::clone(&live_mismatch)),
                 false,
             )
             .await?;
             if cancellation.is_cancelled() {
-                return self.record_mismatch_if_present(chain, &live_mismatch).await;
+                return self
+                    .record_mismatch_if_present(chain, &live_mismatch, process_stop)
+                    .await;
             }
             self.catch_up_for_required_redo(chain, cancellation.clone())
                 .await?;
             self.after_required_redo_catch_up().await;
             if cancellation.is_cancelled() {
-                return self.record_mismatch_if_present(chain, &live_mismatch).await;
+                return self
+                    .record_mismatch_if_present(chain, &live_mismatch, process_stop)
+                    .await;
             }
             Box::pin(self.run_post_live_downstream(chain, cancellation.clone())).await?;
             if !self.phases.continuous_live_follow() {
@@ -417,22 +422,34 @@ impl PhaseRunner {
             }
             tokio::select! {
                 () = cancellation.cancelled() => {
-                    return self.record_mismatch_if_present(chain, &live_mismatch).await;
+                    return self
+                    .record_mismatch_if_present(chain, &live_mismatch, process_stop)
+                    .await;
                 },
                 () = tokio::time::sleep(self.timing.live_poll_interval) => {}
             }
         }
     }
 
+    /// Record a Verify mismatch against Live. The write opens, probes, writes
+    /// through, and releases a connection; once the process is stopping --
+    /// already, or during it -- the rest of it draws on the stop budget.
     async fn record_mismatch_if_present(
         &self,
         chain: &ChainConfig,
         live_mismatch: &OnceLock<String>,
+        process_stop: &CancellationToken,
     ) -> RunnerResult<()> {
-        if let Some(reason) = live_mismatch.get() {
-            record_live_mismatch_with_lock(&self.database, &self.store, &chain.chain_id, reason)
-                .await?;
-        }
-        Ok(())
+        let Some(reason) = live_mismatch.get() else {
+            return Ok(());
+        };
+        bounded_recovery(
+            &self.stop_clock,
+            "recording the live verification mismatch",
+            &chain.chain_id,
+            process_stop,
+            record_live_mismatch_with_lock(&self.database, &self.store, &chain.chain_id, reason),
+        )
+        .await
     }
 }

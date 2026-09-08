@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -7,10 +7,10 @@ use crate::{
     config::ChainConfig,
     error::RunnerResult,
     phase::{PhaseName, RunMode},
-    runner_support::{Backoff, cancelled_redo_error, record_live_mismatch_after_stop},
+    runner_support::{Backoff, cancelled_redo_error},
 };
 
-use super::{LiveMismatchReason, PhaseRunner};
+use super::PhaseRunner;
 
 impl PhaseRunner {
     pub(super) async fn run_phase_with_restart_inner(
@@ -19,7 +19,6 @@ impl PhaseRunner {
         phase_name: PhaseName,
         mode: RunMode,
         cancellation: CancellationToken,
-        live_mismatch: Option<LiveMismatchReason>,
         automatic_discovery_ingest: bool,
     ) -> RunnerResult<()> {
         let phase = self.phases.get(phase_name);
@@ -36,19 +35,8 @@ impl PhaseRunner {
                     )
                     .await?);
                 }
-                if phase_name == PhaseName::Live
-                    && matches!(mode, RunMode::Normal)
-                    && let Some(reason) = live_mismatch.as_deref().and_then(OnceLock::get)
-                {
-                    record_live_mismatch_after_stop(
-                        &self.stop_clock,
-                        &self.database,
-                        &self.store,
-                        &chain.chain_id,
-                        reason,
-                    )
-                    .await?;
-                }
+                // A Live mismatch is recorded by the live-follow loop that owns it,
+                // against the process token, once this returns.
                 return Ok(());
             }
             let result = Box::pin(self.run_phase_once(
@@ -56,7 +44,6 @@ impl PhaseRunner {
                 Arc::clone(&phase),
                 mode.clone(),
                 cancellation.clone(),
-                live_mismatch.as_deref(),
                 automatic_discovery_ingest,
             ))
             .await;
@@ -82,19 +69,6 @@ impl PhaseRunner {
                                     phase_name,
                                 )
                                 .await?);
-                            }
-                            if phase_name == PhaseName::Live
-                                && let Some(reason) =
-                                    live_mismatch.as_deref().and_then(OnceLock::get)
-                            {
-                                record_live_mismatch_after_stop(
-                                    &self.stop_clock,
-                                    &self.database,
-                                    &self.store,
-                                    &chain.chain_id,
-                                    reason,
-                                )
-                                .await?;
                             }
                             return Ok(());
                         }
