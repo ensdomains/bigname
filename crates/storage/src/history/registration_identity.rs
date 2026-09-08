@@ -39,6 +39,8 @@ pub(super) async fn is_public_registration_id(
               )",
         );
     }
+    builder.push(" AND ");
+    push_registration_lifecycle_witness(&mut builder);
     builder.push(" AND (");
     push_product_registration_id(&mut builder);
     builder.push(" = ");
@@ -102,11 +104,49 @@ pub(super) fn push_registration_binding_at_event(
                    OR ne.logical_name_id = history_binding.logical_name_id)",
     );
     super::source::push_history_canonicality_filter(builder, canonical_only);
+    builder.push(" AND ");
+    push_registration_lifecycle_witness(builder);
     builder.push(" AND (");
     push_product_registration_id(builder);
     builder.push(" = ");
     builder.push_bind(registration_id);
     builder.push(")))");
+}
+
+// Producers emit RegistrationGranted for new lifecycles, including renewal-first
+// recovery. A wrapper binding can witness only its explicitly linked registrar grant.
+fn push_registration_lifecycle_witness(builder: &mut QueryBuilder<'_, Postgres>) {
+    builder.push(
+        "(ne.event_kind = 'RegistrationGranted'
+          OR (
+              ne.event_kind = 'SurfaceBound'
+              AND ne.source_family = 'ens_v1_wrapper_l1'
+              AND EXISTS (
+                  SELECT 1
+                  FROM (
+                      SELECT * FROM bigname_phase.normalized_events grant_event
+                      WHERE grant_event.resource_id =
+                            (ne.after_state ->> 'wrapped_registrar_resource_id')::uuid
+                        AND grant_event.resource_id IS NOT NULL
+                        AND grant_event.consumer_visibility = 'activated'
+                        AND grant_event.canonicality_state IN ('canonical', 'safe', 'finalized')
+                      OFFSET 0
+                  ) lifecycle_grant
+                  LEFT JOIN bigname_phase.chain_lineage lifecycle_lineage
+                    ON lifecycle_lineage.chain_id = lifecycle_grant.chain_id
+                   AND lifecycle_lineage.block_hash = lifecycle_grant.block_hash
+                  WHERE lifecycle_grant.event_kind = 'RegistrationGranted'
+                    AND lifecycle_grant.source_family = 'ens_v1_registrar_l1'
+                    AND lifecycle_grant.chain_id = ne.chain_id
+                    AND (lifecycle_grant.logical_name_id IS NULL
+                         OR lifecycle_grant.logical_name_id = ne.logical_name_id)
+                    AND (lifecycle_grant.block_hash IS NULL
+                         OR lifecycle_lineage.canonicality_state IN (
+                             'canonical', 'safe', 'finalized'
+                         ))
+              )
+          ))",
+    );
 }
 
 pub(super) fn push_product_registration_id(builder: &mut QueryBuilder<'_, Postgres>) {

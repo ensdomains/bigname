@@ -481,6 +481,180 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
 }
 
 #[tokio::test]
+async fn v2_registry_only_binding_does_not_admit_resource_less_registration_history() -> Result<()>
+{
+    assert_registry_binding_does_not_witness_registration(false).await
+}
+
+#[tokio::test]
+async fn v2_retained_registry_after_release_does_not_admit_registration_history() -> Result<()> {
+    assert_registry_binding_does_not_witness_registration(true).await
+}
+
+async fn assert_registry_binding_does_not_witness_registration(released: bool) -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let name = "registry-witness.eth";
+    let logical_name_id = "ens:registry-witness.eth";
+    let registry = Uuid::from_u128(0x7132);
+    let registrar = Uuid::from_u128(0x7133);
+    seed_identity_name(
+        &database,
+        logical_name_id,
+        name,
+        name,
+        "node:registry-witness.eth",
+        registry,
+        Uuid::from_u128(0x8132),
+        Uuid::from_u128(0x9132),
+        "0x0000000000000000000000000000000000007132",
+        bigname_storage::AddressNameRelation::EffectiveController,
+        80,
+    )
+    .await?;
+    seed_v2_history_blocks(&database, 120..=125).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.surface_bindings
+         SET active_from = to_timestamp($2)
+         WHERE resource_id = $1",
+    )
+    .bind(registry)
+    .bind(if released {
+        1_700_000_123_f64
+    } else {
+        1_700_000_120_f64
+    })
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET serving_resource_id = $1, resource_id = NULL, token_lineage_id = NULL,
+             surface_binding_id = NULL, binding_kind = NULL,
+             declared_summary = jsonb_build_object(
+                 'registration', jsonb_build_object('status', 'unregistered'),
+                 'control', jsonb_build_object('status', $2::text)
+             )
+         WHERE resource_id = $1",
+    )
+    .bind(registry)
+    .bind(if released { "unregistered" } else { "active" })
+    .execute(&database.pool)
+    .await?;
+    for query in [
+        "UPDATE bigname_phase.address_names_current SET token_lineage_id = NULL WHERE resource_id = $1",
+        "UPDATE bigname_phase.resources SET token_lineage_id = NULL WHERE resource_id = $1",
+    ] {
+        sqlx::query(query)
+            .bind(registry)
+            .execute(&database.pool)
+            .await?;
+    }
+    let mut binding = v2_history_event(
+        "registry-witness-binding",
+        Some(logical_name_id),
+        Some(registry),
+        "SurfaceBound",
+        if released { 123 } else { 120 },
+    );
+    binding.source_family = "ens_v1_registry_l1".to_owned();
+    let mut record = v2_history_event(
+        "registry-witness-record",
+        Some(logical_name_id),
+        None,
+        "RecordChanged",
+        124,
+    );
+    record.source_family = "ens_v1_resolver_l1".to_owned();
+    let mut events = vec![binding, record];
+    if released {
+        upsert_test_resources(
+            &database.pool,
+            &[address_name_resource(
+                registrar,
+                None,
+                "0xregistry-witness-registrar",
+                81,
+            )],
+        )
+        .await?;
+        let mut old_binding = address_name_surface_binding(
+            Uuid::from_u128(0x9133),
+            logical_name_id,
+            registrar,
+            "0xhistory120",
+            120,
+            1_700_000_120,
+        );
+        old_binding.active_to = Some(timestamp(1_700_000_123));
+        upsert_test_surface_bindings(&database.pool, &[old_binding]).await?;
+        for (kind, block, resource) in [
+            ("RegistrationGranted", 120, Some(registrar)),
+            ("RecordChanged", 121, None),
+            ("RegistrationReleased", 122, Some(registrar)),
+        ] {
+            events.push(v2_history_event(
+                &format!("registry-witness-{kind}"),
+                Some(logical_name_id),
+                resource,
+                kind,
+                block,
+            ));
+        }
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    let filtered = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/events?registration_id={registry}&page_size=20"),
+    )
+    .await?;
+    assert!(
+        filtered["data"].as_array().is_some_and(Vec::is_empty),
+        "registry binding admitted a resource-less row: {filtered:?}"
+    );
+    assert_eq!(filtered["page"]["has_more"], json!(false));
+    for route in [
+        format!("/v2/names/{name}/history?scope=both&page_size=20"),
+        format!("/v2/events?name={name}&page_size=20"),
+    ] {
+        let payload = v2_history_payload_for_database(&database, &route).await?;
+        let rows = payload["data"].as_array().expect("name history rows");
+        assert_eq!(
+            rows.len(),
+            if released { 4 } else { 1 },
+            "{route}: {rows:?}"
+        );
+        assert_eq!(rows[0]["type"], json!("record"));
+        assert_eq!(rows[0]["block_number"], json!(124));
+        assert_eq!(rows[0]["registration_id"], Value::Null);
+    }
+    let diagnostics = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/diagnostics/events?name={name}&page_size=20"),
+    )
+    .await?;
+    assert_eq!(
+        diagnostics["data"].as_array().map(Vec::len),
+        Some(if released { 5 } else { 2 })
+    );
+    if released {
+        let previous = v2_history_payload_for_database(
+            &database,
+            &format!("/v2/events?registration_id={registrar}&page_size=20"),
+        )
+        .await?;
+        let rows = previous["data"]
+            .as_array()
+            .expect("released registration history");
+        assert_eq!(
+            history_types(rows),
+            vec!["release", "record", "registration"]
+        );
+        assert_eq!(rows[1]["block_number"], json!(121));
+        assert_eq!(rows[1]["registration_id"], Value::Null);
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()> {
     const ADDRESS: &str = "0x0000000000000000000000000000000000007140";
     let database = TestDatabase::new_migrated().await?;

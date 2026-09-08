@@ -950,7 +950,10 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   readable binding to its lifecycle, on the event's chain and at its recorded
   block time plus log-index position. The start is inclusive and the end is
   exclusive; an older registration does not acquire later registrations' name
-  events. This selection also governs page counts, summaries, and cursor anchors.
+  events. The binding must be backed by a registration grant, directly or through
+  a wrapper's explicit registrar link; a registry-control binding alone does not
+  admit resource-less events under its resource UUID. This selection also governs
+  page counts, summaries, and cursor anchors.
   `scope=name` returns only rows carrying the name's
   `logical_name_id`. A row on a resource that was never bound to the name is
   reachable through `GET /v2/diagnostics/events` via the registry resource
