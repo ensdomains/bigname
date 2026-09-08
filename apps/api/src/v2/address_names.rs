@@ -8,7 +8,7 @@ use axum::{
 use bigname_storage::{
     AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe,
     AddressNamesCurrentOrder, AddressNamesCurrentSort, EffectivePermissionRow, NameCurrentRow,
-    PermissionGrantRelation, PrimaryNameClaimStatus, load_effective_permissions_by_resource_ids,
+    PermissionGrantRelation, PrimaryNameClaimStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -38,6 +38,7 @@ pub(crate) use self::cursor::{
 };
 
 mod cursor;
+mod role_summary;
 
 pub(crate) struct AddressNamesQueryParams;
 
@@ -65,6 +66,7 @@ pub(crate) struct AddressName {
     pub(crate) display_name: String,
     pub(crate) namespace: String,
     pub(crate) namehash: String,
+    pub(crate) permission_resource_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) owner: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -209,21 +211,21 @@ pub(crate) async fn get_address_names(
     });
     let permission_namespace = namespace_filter.as_deref();
     let permissions_by_resource = if let Some(resource_ids) = role_resource_ids.as_deref() {
-        load_effective_permissions_by_resource_ids(&state.pool, resource_ids, permission_namespace)
-            .await
-            .map_err(|_| {
-                V2Error::internal_error(format!(
-                    "failed to load address-name role summaries for {normalized_address}"
-                ))
-            })?
-            .into_iter()
-            .fold(BTreeMap::new(), |mut grouped, row| {
-                grouped
-                    .entry(row.resource_id)
-                    .or_insert_with(Vec::new)
-                    .push(row);
-                grouped
-            })
+        role_summary::load_rows(
+            &state.pool,
+            resource_ids,
+            permission_namespace,
+            &storage_page.entries,
+        )
+        .await?
+        .into_iter()
+        .fold(BTreeMap::new(), |mut grouped, row| {
+            grouped
+                .entry(row.resource_id)
+                .or_insert_with(Vec::new)
+                .push(row);
+            grouped
+        })
     } else {
         std::collections::BTreeMap::new()
     };
@@ -371,6 +373,7 @@ pub(crate) fn build_address_name(
         display_name: entry.canonical_display_name.clone(),
         namespace: entry.namespace.clone(),
         namehash: entry.namehash.clone(),
+        permission_resource_id: entry.resource_id.to_string(),
         owner: registration.owner,
         registrant: registration.registrant,
         registration_status: registration.registration_status,

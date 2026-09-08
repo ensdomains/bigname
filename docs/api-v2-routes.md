@@ -1207,6 +1207,10 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Response shape: `data` is an array of record-shaped rows with `name`,
   `display_name`, `namespace`, `namehash`, `owner`, `registrant`,
   `registration_status`, `registered_at`, `created_at`, and `expires_at`.
+  Every address-name row also returns `permission_resource_id`, the selected
+  permission authority resource UUID used by its inline summary. It remains
+  available without `include=role_summary` and does not redefine name detail's
+  `registration_id`.
   Address-name rows add `is_primary` and `relations`, where `relations` is the
   subset of `owner`, `manager`, and `registrant` that matched. `is_primary` is
   evaluated against that row namespace's coin-type-60 primary-name claim, not a
@@ -1230,6 +1234,20 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   registry-operator grants carry `grant_relation=operator`, the account scope,
   and `powers=["registry_control"]`. Operator grants expand roles for resources
   already on the page but never add or remove address-name membership rows.
+  The include supports at most 1,000 grant rows across all returned summaries,
+  counting each grant again when multiple names share a resource. This is a
+  total nested expansion budget, not a per-name or per-subject limit. Overflows
+  return a whole-request `422 unsupported` with no partial data or truncation.
+  Omit the include, then paginate
+  `GET /v2/permissions?registration_id=<permission_resource_id>` for each selected
+  resource. Preserve `namespace` only if it was explicitly present on the names
+  request; do not add `name` or `address` filters. This reads the same supported
+  permission relation, including supported rows on an unsupported name anchor.
+  Existing unsupported permission families remain unsupported. Reducing the name
+  page can help, but one resource can exceed the limit by itself. These are
+  current-state reads: changes between requests can alter grants, and there is
+  no cross-request snapshot guarantee. The 1,000-row cap bounds returned grant
+  rows, not bytes or total database work. The name page maximum remains 200.
 - Pagination behavior: standard collection pagination. Cursors are bound to
   address, optional namespace filter, normalized relation set, `q`, dedupe
   mode, sort, and order.

@@ -1,3 +1,9 @@
+mod bounded;
+pub use bounded::{
+    explain_bounded_effective_permissions_by_resource_ids,
+    load_bounded_effective_permissions_by_resource_ids,
+};
+
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};

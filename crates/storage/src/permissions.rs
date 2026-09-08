@@ -9,9 +9,11 @@ mod types;
 pub use canonicality::DEFAULT_PERMISSIONS_CURRENT_READ_FILTER;
 
 pub use effective::{
+    explain_bounded_effective_permissions_by_resource_ids,
     explain_effective_permissions_account_resource_page,
     explain_effective_permissions_account_resource_summary,
     explain_effective_permissions_by_resource_ids,
+    load_bounded_effective_permissions_by_resource_ids,
     load_effective_permissions_account_resource_page,
     load_effective_permissions_account_resource_page_count_summary,
     load_effective_permissions_by_resource_ids,

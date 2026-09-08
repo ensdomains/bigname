@@ -118,6 +118,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `meta` | response metadata object for snapshot, completeness, unsupported, and source details | `provenance`, `coverage`, `chain_positions`, `consistency`, `last_updated` top-level peers |
 | `subname_count` | count of direct subnames when requested | `subname_count` (unchanged; now the only count name for child rows) |
 | `record_count` | count of known record keys when requested | `record_count` (unchanged) |
+| `permission_resource_id` | selected address-name permission authority UUID; pass to the permissions route’s `registration_id` filter | new in v2 |
 | `role_summary` | grouped permission powers for dashboard-style name rows | `role_summary` (unchanged; rewritten to dictionary field names inside) |
 | `authority_context` | required permission-row marker from the [per-name ownership rule](consumer-capabilities.md#ensv1ensv2-mixed-history-ownership); [`current_for_name`](glossary.md#current-for-name-authority-context) means a `name` filter selected the current registration, while [`resource_audit`](glossary.md#resource-audit-context) makes no current-name claim | new in v2 |
 | `capabilities` | product-facing summary of supported namespace capabilities | capability flag summaries when exposed to product routes |
