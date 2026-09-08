@@ -101,7 +101,14 @@ migration_objects_are_schema_qualified() {
                     continue
                 } else if (match(s, /^(CREATE( OR REPLACE)?|ALTER)( MATERIALIZED)? (TABLE|INDEX|FUNCTION|VIEW|SEQUENCE|TYPE|TRIGGER)( IF NOT EXISTS)?( ONLY)? [^ (]+/)) {
                     m = split(substr(s, RSTART, RLENGTH), words, " "); object = words[m]
-                } else if (match(s, /^(INSERT INTO|UPDATE|DELETE FROM|COMMENT ON (TABLE|INDEX|FUNCTION|COLUMN)) [^ (]+/)) {
+                } else if (match(s, /^COMMENT ON COLUMN [^ (]+/)) {
+                    # A column comment names schema.table.column; two parts is a
+                    # search-path-relative table with a column, not a qualified one.
+                    m = split(substr(s, RSTART, RLENGTH), words, " "); object = words[m]
+                    gsub(/"/, "", object)
+                    if (split(object, parts, ".") < 3) { unqualified = unqualified " " object }
+                    continue
+                } else if (match(s, /^(INSERT INTO|UPDATE|DELETE FROM|COMMENT ON (TABLE|INDEX|FUNCTION)) [^ (]+/)) {
                     m = split(substr(s, RSTART, RLENGTH), words, " "); object = words[m]
                 } else if (s == "") {
                     continue
@@ -122,18 +129,27 @@ migration_objects_are_schema_qualified() {
 }
 assert_uninventoried_migrations_are_schema_qualified() {
     local migration_file migration_basename unqualified
-    if unqualified="$(printf 'CREATE INDEX x ON chain_phase_state (a);\nUPDATE public.t SET a = 1;\nALTER TABLE "name_surfaces" ADD COLUMN c int;\nDROP INDEX "public"."ok_idx";\nWITH chosen AS (SELECT 1) UPDATE chain_phase_state SET a = 1;\nDROP INDEX IF EXISTS public.old_idx, name_current_lookup_idx CASCADE;\nTRUNCATE public.a, "resources";\n' \
+    if unqualified="$(printf 'CREATE INDEX x ON chain_phase_state (a);\nUPDATE public.t SET a = 1;\nALTER TABLE "name_surfaces" ADD COLUMN c int;\nDROP INDEX "public"."ok_idx";\nWITH chosen AS (SELECT 1) UPDATE chain_phase_state SET a = 1;\nDROP INDEX IF EXISTS public.old_idx, name_current_lookup_idx CASCADE;\nTRUNCATE public.a, "resources";\nCOMMENT ON COLUMN chain_phase_state.phase_name IS '"'"'x'"'"';\nCOMMENT ON COLUMN public.t.c IS '"'"'y'"'"';\n' \
         | migration_objects_are_schema_qualified /dev/stdin)"; then
         printf '%s\n' "schema-qualification check accepted a search-path-relative statement" >&2
         exit 1
     fi
-    if [ "$unqualified" != " CHAIN_PHASE_STATE NAME_SURFACES [unrecognized statement: WITH CHOSEN] NAME_CURRENT_LOOKUP_IDX RESOURCES" ]; then
+    if [ "$unqualified" != " CHAIN_PHASE_STATE NAME_SURFACES [unrecognized statement: WITH CHOSEN] NAME_CURRENT_LOOKUP_IDX RESOURCES CHAIN_PHASE_STATE.PHASE_NAME" ]; then
         printf '%s\n' "schema-qualification check misreported the search-path-relative statement: $unqualified" >&2
         exit 1
     fi
     for migration_file in "$ROOT"/migrations/*.sql; do
         migration_basename="$(basename "$migration_file")"
         [[ "$migration_basename" > "$legacy_public_schema_drop" ]] || continue
+        # PostgreSQL folds an unquoted BIGNAME_PHASE to the production schema, but
+        # the inventory and the scratch-schema rewrite match the lowercase literal
+        # only, so any other spelling would reach production unlisted: refuse it.
+        if grep -qi 'bigname_phase' "$migration_file" \
+            && ! phase_migration_uses_production_schema "$migration_file"; then
+            printf '%s\n' \
+                "$migration_basename spells the phase schema other than bigname_phase; PostgreSQL folds it to the production schema but this check would not inventory it" >&2
+            exit 1
+        fi
         if phase_migration_uses_production_schema "$migration_file"; then
             continue
         fi
