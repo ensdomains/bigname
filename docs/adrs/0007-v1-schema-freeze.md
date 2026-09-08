@@ -104,11 +104,17 @@ content hash and force a full `interpret` and `project` walk.
 Dependent work must therefore key on stable identifiers only:
 
 **Safe to key on:** `logical_name_id`, `resource_id`, `token_lineage_id`, and
-`contract_instance_id`. `event_identity` is safe under a fixed manifest set and
-interpreter content hash, which is the contract `architecture.md` gives it: it
-incorporates the derivation kind, identity suffix, and emission ordinal
-(`crates/adapters/src/schema_v2/normalized.rs`, `raw_log_event_identity`), so a
-covered adapter change can alter it for a raw log that did not change. Across
+`contract_instance_id`. `event_identity` is safe only within one database
+under a fixed manifest set and interpreter content hash, which is the contract
+`architecture.md` gives it: it incorporates the derivation kind, identity
+suffix, and emission ordinal (`crates/adapters/src/schema_v2/normalized.rs`,
+`raw_log_event_identity`), so a covered adapter change can alter it for a raw
+log that did not change — and it embeds the numeric `source_manifest_id`,
+which is sequence-assigned, so installing the same baseline into a fresh
+database changes every identity even with nothing else changed
+(`consumer-capabilities.md` says as much of an empty-schema replacement). An
+artifact that must survive a rebuild carries the retained manifest-ID mapping
+with it or does not key on `event_identity` at all. Across
 the re-derivation boundaries this freeze permits, the anchor is the raw-fact
 position alone — chain, block hash, transaction hash, log index — keyed to
 the set of events emitted for it; an expectation about a particular event is
