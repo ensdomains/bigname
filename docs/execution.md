@@ -105,22 +105,24 @@ reaches the network:
 - **Response size.** The body read is capped at 1 MiB; a longer response fails
   that gateway rather than streaming into the request.
 - **Fan-out and time.** Each gateway HTTP request has a 1000 ms connect and a
-  1500 ms total timeout; those are per request, not per lookup. For each
+  1500 ms total timeout; those bound one request, not the lookup. For each
   CCIP-Read step the resolver's URL list is tried in order, at most four URLs,
-  and a timed-out or unreachable URL falls through to the next, so one step can
-  spend up to 6 s on gateways; a resolution follows at most four steps, each
-  paying that plus one JSON-RPC callback bounded by `BIGNAME_API_RPC_TIMEOUT_MS`.
-  The `x-batch-gateway:true` form fans its inner requests out concurrently with
-  no in-process cap on their number. What bounds the gateway side of the whole
-  resolution is a 6 s budget of cumulative gateway time per CCIP-Read
-  resolution, shared across every step and URL and measured around the gateway
-  requests only; the callback `eth_call`s between steps are bounded by
-  `BIGNAME_API_RPC_TIMEOUT_MS` and do not draw on it, so a slow provider cannot
-  starve a healthy gateway. When the budget runs out the record fails in band
-  as `resolver_call_failed`, the same way a configured RPC timeout does,
-  instead of holding the request until the 30 s `BIGNAME_API_REQUEST_TIMEOUT_MS`
-  fails it as a whole. The worst case for one record is therefore 6 s of
-  gateway time plus up to four callbacks at the RPC timeout.
+  and a timed-out or unreachable URL falls through to the next; a resolution
+  follows at most four steps, each followed by one JSON-RPC callback bounded by
+  `BIGNAME_API_RPC_TIMEOUT_MS`. The `x-batch-gateway:true` form fans its inner
+  requests out concurrently with no in-process cap on their number. Across all
+  of that, the gateway side of one CCIP-Read resolution shares a single 6 s
+  budget: it is initialised once, every gateway request runs under whatever
+  remains, and each completed request's elapsed time is subtracted, so later
+  steps and URLs get only the remainder — four steps never get 6 s each. The
+  budget is measured around the gateway requests only; the callback
+  `eth_call`s between steps are bounded by `BIGNAME_API_RPC_TIMEOUT_MS` and do
+  not draw on it, so a slow provider cannot starve a healthy gateway. When the
+  budget runs out the record fails in band as `resolver_call_failed`, the same
+  way a configured RPC timeout does, instead of holding the request until the
+  30 s `BIGNAME_API_REQUEST_TIMEOUT_MS` fails it as a whole. The worst case for
+  one record is therefore 6 s of gateway time in total plus up to four
+  callbacks at the RPC timeout.
 
 **What is deliberately not enforced in process: destination host or IP.** The
 gateway may resolve to any address the container can route to, including link
