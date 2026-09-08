@@ -290,3 +290,7 @@ pub(super) async fn state_values(
 #[cfg(test)]
 #[path = "prior_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "ops_owner_replay_tests.rs"]
+mod ops_owner_replay_tests;

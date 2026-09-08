@@ -684,6 +684,13 @@ async fn divergent_normalized_event_identity_errors_loudly() -> Result<()> {
     let chain = "interpret-event-conflict";
     seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
     run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    let original: serde_json::Value = sqlx::query_scalar(
+        "SELECT after_state FROM normalized_events WHERE chain_id = $1 AND event_kind = 'RegistrationGranted'",
+    ).bind(chain).fetch_one(scratch.pool()).await?;
+    sqlx::query("UPDATE chain_lineage SET canonicality_state = 'safe' WHERE chain_id = $1")
+        .bind(chain)
+        .execute(scratch.pool())
+        .await?;
     sqlx::query(
         "UPDATE normalized_events SET after_state = '{\"tampered\":true}'::jsonb WHERE chain_id = $1 AND event_kind = 'RegistrationGranted'",
     )
@@ -691,6 +698,13 @@ async fn divergent_normalized_event_identity_errors_loudly() -> Result<()> {
     .execute(scratch.pool())
     .await?;
 
+    let snapshot_sql = "SELECT jsonb_build_object(
+        'names', (SELECT jsonb_agg(to_jsonb(row) ORDER BY logical_name_id) FROM name_surfaces row WHERE chain_id = $1),
+        'events', (SELECT jsonb_agg(to_jsonb(row) ORDER BY normalized_event_id) FROM normalized_events row WHERE chain_id = $1))";
+    let before: serde_json::Value = sqlx::query_scalar(snapshot_sql)
+        .bind(chain)
+        .fetch_one(scratch.pool())
+        .await?;
     let error = Engine::new(scratch.pool().clone())
         .run_batch(BatchRequest {
             chain_id: chain.to_owned(),
@@ -703,6 +717,25 @@ async fn divergent_normalized_event_identity_errors_loudly() -> Result<()> {
         .expect_err("a stable event identity must not overwrite divergent data");
     assert_eq!(error.kind(), InterpretErrorKind::DataIntegrity);
     assert!(error.to_string().contains("different event data"));
+    let after: serde_json::Value = sqlx::query_scalar(snapshot_sql)
+        .bind(chain)
+        .fetch_one(scratch.pool())
+        .await?;
+    assert_eq!(
+        after, before,
+        "earlier identity writes and event effects must roll back"
+    );
+    sqlx::query("UPDATE normalized_events SET after_state = $2 WHERE chain_id = $1 AND event_kind = 'RegistrationGranted'")
+        .bind(chain).bind(original).execute(scratch.pool()).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    let states: Vec<String> = sqlx::query_scalar(
+        "SELECT canonicality_state::text FROM name_surfaces WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert!(!states.is_empty());
+    assert!(states.iter().all(|state| state == "safe"));
     scratch.cleanup().await
 }
 
