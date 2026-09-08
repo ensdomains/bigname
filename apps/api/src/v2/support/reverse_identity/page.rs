@@ -17,11 +17,12 @@ struct CandidateNameForms {
     labelhash_count: Option<i32>,
 }
 
-pub(super) async fn load_reverse_identity_page_rows(
+async fn query_reverse_identity_page_rows(
     pool: &PgPool,
     inputs: &[ReverseIdentityStorageInput],
     public_namespaces: &[String],
-) -> Result<Vec<ReverseIdentityPageRow>> {
+    explain: bool,
+) -> Result<Vec<sqlx::postgres::PgRow>> {
     if inputs.is_empty() {
         return Ok(Vec::new());
     }
@@ -143,6 +144,14 @@ pub(super) async fn load_reverse_identity_page_rows(
                  candidate.namespace, candidate.namehash
         "#
     );
+    #[cfg(not(test))]
+    let _ = explain;
+    #[cfg(test)]
+    let query = if explain {
+        format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {query}")
+    } else {
+        query
+    };
     let rows = sqlx::query(&query)
         .bind(&input_indexes)
         .bind(&addresses)
@@ -165,6 +174,33 @@ pub(super) async fn load_reverse_identity_page_rows(
                 inputs.len()
             )
         })?;
+
+    Ok(rows)
+}
+
+#[cfg(test)]
+pub(crate) async fn explain_reverse_identity_page(
+    pool: &PgPool,
+    inputs: &[ReverseIdentityStorageInput],
+    public_namespaces: &[String],
+) -> Result<Option<Value>> {
+    if inputs.is_empty() {
+        return Ok(None);
+    }
+    let rows = query_reverse_identity_page_rows(pool, inputs, public_namespaces, true).await?;
+    anyhow::ensure!(rows.len() == 1, "expected exactly one reverse page plan");
+    Ok(Some(rows[0].try_get("QUERY PLAN")?))
+}
+
+pub(super) async fn load_reverse_identity_page_rows(
+    pool: &PgPool,
+    inputs: &[ReverseIdentityStorageInput],
+    public_namespaces: &[String],
+) -> Result<Vec<ReverseIdentityPageRow>> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = query_reverse_identity_page_rows(pool, inputs, public_namespaces, false).await?;
 
     #[cfg(test)]
     super::primary_coherence_test_hooks::candidate_read_complete(pool).await?;

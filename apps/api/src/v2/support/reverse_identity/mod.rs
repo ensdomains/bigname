@@ -11,6 +11,9 @@ use sqlx::{PgPool, Row};
 mod page;
 
 #[cfg(test)]
+pub(crate) use page::explain_reverse_identity_page;
+
+#[cfg(test)]
 pub(crate) mod relation_page_test_hooks {
     use std::sync::{
         Arc,
@@ -408,14 +411,12 @@ fn reverse_identity_record(
     })
 }
 
-async fn load_reverse_identity_total_counts_live(
+async fn query_reverse_identity_total_counts(
     pool: &PgPool,
     inputs: &[ReverseIdentityStorageInput],
     public_namespaces: &[String],
-) -> Result<BTreeMap<(String, ReverseIdentityRoles), u64>> {
-    #[cfg(test)]
-    test_hooks::record(pool).await?;
-
+    explain: bool,
+) -> Result<Vec<sqlx::postgres::PgRow>> {
     let requests = inputs
         .iter()
         .map(|input| (input.address.clone(), input.roles))
@@ -452,6 +453,14 @@ async fn load_reverse_identity_total_counts_live(
         ORDER BY requested.address, requested.roles
         "#
     );
+    #[cfg(not(test))]
+    let _ = explain;
+    #[cfg(test)]
+    let query = if explain {
+        format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {query}")
+    } else {
+        query
+    };
     let rows = sqlx::query(&query)
         .bind(&addresses)
         .bind(&roles)
@@ -464,6 +473,29 @@ async fn load_reverse_identity_total_counts_live(
                 inputs.len()
             )
         })?;
+
+    Ok(rows)
+}
+
+#[cfg(test)]
+pub(crate) async fn explain_reverse_identity_count(
+    pool: &PgPool,
+    inputs: &[ReverseIdentityStorageInput],
+    public_namespaces: &[String],
+) -> Result<serde_json::Value> {
+    let rows = query_reverse_identity_total_counts(pool, inputs, public_namespaces, true).await?;
+    anyhow::ensure!(rows.len() == 1, "expected exactly one reverse count plan");
+    Ok(rows[0].try_get("QUERY PLAN")?)
+}
+
+async fn load_reverse_identity_total_counts_live(
+    pool: &PgPool,
+    inputs: &[ReverseIdentityStorageInput],
+    public_namespaces: &[String],
+) -> Result<BTreeMap<(String, ReverseIdentityRoles), u64>> {
+    #[cfg(test)]
+    test_hooks::record(pool).await?;
+    let rows = query_reverse_identity_total_counts(pool, inputs, public_namespaces, false).await?;
 
     rows.into_iter()
         .map(|row| {

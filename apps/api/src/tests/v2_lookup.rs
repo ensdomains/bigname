@@ -3614,3 +3614,463 @@ async fn v2_lookup_response_for_database_with_public_namespaces(
         .await
         .context("v2 lookup request failed")
 }
+
+type ReversePlanWork = std::collections::BTreeMap<String, [f64; 5]>;
+
+fn reverse_plan_scan_work(plan: &Value, page: bool) -> Result<ReversePlanWork> {
+    fn visit(
+        node: &Value,
+        bitmap_table: Option<&str>,
+        page: bool,
+        totals: &mut ReversePlanWork,
+    ) -> Result<bool> {
+        let kind = node["Node Type"].as_str().context("missing node type")?;
+        anyhow::ensure!(
+            node["CTE Name"] != "readable_names",
+            "materialized readable names"
+        );
+        let bitmap = matches!(kind, "BitmapAnd" | "BitmapOr" | "Bitmap Index Scan");
+        anyhow::ensure!(bitmap == bitmap_table.is_some(), "invalid bitmap context");
+        let declared = node
+            .get("Relation Name")
+            .map(|v| v.as_str().context("invalid relation"))
+            .transpose()?;
+        anyhow::ensure!(!bitmap || declared.is_none(), "ambiguous bitmap relation");
+        let table = declared.or(bitmap_table);
+        if matches!(
+            kind,
+            "Seq Scan" | "Index Scan" | "Index Only Scan" | "Bitmap Heap Scan"
+        ) {
+            anyhow::ensure!(declared.is_some(), "missing scan relation");
+        }
+        let key = match table {
+            Some("address_names_current") => Some("address"),
+            Some("name_current" | "name_surfaces") => Some("logical_name_id"),
+            Some("resources") => Some("resource_id"),
+            Some("surface_bindings") => Some("surface_binding_id"),
+            Some("token_lineages") => Some("token_lineage_id"),
+            Some("chain_lineage") => Some("block_hash"),
+            _ => None,
+        };
+        let mut bounded = false;
+        if let Some(key) = key {
+            anyhow::ensure!(kind.contains("Scan") || bitmap, "malformed monitored node");
+            if kind.contains("Scan") {
+                let counter = |field: &str, optional: bool| -> Result<f64> {
+                    if optional && node.get(field).is_none() {
+                        return Ok(0.0);
+                    }
+                    let value = node[field].as_f64().context(format!("missing {field}"))?;
+                    anyhow::ensure!(value.is_finite() && value >= 0.0, "invalid {field}");
+                    Ok(value)
+                };
+                let loops = counter("Actual Loops", false)?;
+                let rows = counter("Actual Rows", false)?;
+                let filtered = counter("Rows Removed by Filter", true)?;
+                let rechecked = counter("Rows Removed by Index Recheck", true)?;
+                let values = totals.entry(table.unwrap().to_owned()).or_default();
+                for (total, value) in values.iter_mut().zip([
+                    loops * (rows + filtered + rechecked).max(1.0),
+                    loops * rows,
+                    loops * filtered,
+                    loops * rechecked,
+                    loops,
+                ]) {
+                    *total += value;
+                }
+                bounded = matches!(kind, "Index Scan" | "Index Only Scan" | "Bitmap Index Scan")
+                    && node["Index Cond"].as_str().is_some_and(|condition| {
+                        condition.contains(key)
+                            && condition.contains(" = ")
+                            && (!page || key != "address" || condition.contains("lower("))
+                    });
+            }
+        }
+        let children = node
+            .get("Plans")
+            .map(|v| v.as_array().context("invalid child plans"))
+            .transpose()?;
+        if kind == "Bitmap Index Scan" {
+            anyhow::ensure!(
+                children.is_none_or(|v| v.is_empty()),
+                "bitmap index has children"
+            );
+        }
+        let inherits = bitmap || kind == "Bitmap Heap Scan";
+        let inherited = if inherits { table } else { None };
+        let bounds = children
+            .into_iter()
+            .flatten()
+            .map(|child| visit(child, inherited, page, totals))
+            .collect::<Result<Vec<_>>>()?;
+        if inherits && kind != "Bitmap Index Scan" {
+            anyhow::ensure!(
+                !bounds.is_empty()
+                    && table.is_some()
+                    && (kind != "Bitmap Heap Scan" || bounds.len() == 1),
+                "empty or orphan bitmap tree"
+            );
+            bounded = if kind == "BitmapOr" {
+                bounds.iter().all(|v| *v)
+            } else {
+                bounds.iter().any(|v| *v)
+            };
+        }
+        if key.is_some() && table != Some("chain_lineage") && !bitmap {
+            anyhow::ensure!(bounded, "broad or unbounded monitored access: {node}");
+        }
+        Ok(bounded)
+    }
+    let roots = plan.as_array().context("invalid plan root")?;
+    anyhow::ensure!(roots.len() == 1, "expected one plan root");
+    let mut totals = std::collections::BTreeMap::new();
+    visit(&roots[0]["Plan"], None, page, &mut totals)?;
+    for (table, values) in &totals {
+        anyhow::ensure!(
+            table == "chain_lineage" || values[0] <= 512.0,
+            "excess scan/probe work: {totals:?}"
+        );
+    }
+    Ok(totals)
+}
+
+#[test]
+fn reverse_plan_validator_rejects_hidden_work() {
+    let scan = json!({"Node Type":"Index Scan", "Relation Name":"name_current",
+        "Index Cond":"(logical_name_id = anc.logical_name_id)", "Actual Rows":1, "Actual Loops":1});
+    let plan = json!([{"Plan":{"Node Type":"Nested Loop","Plans":[scan.clone()]}}]);
+    assert!(reverse_plan_scan_work(&plan, true).is_ok());
+    let broad = json!({"Node Type":"Seq Scan", "Relation Name":"resources",
+        "Actual Rows":264, "Actual Loops":1});
+    let mut probes = scan.clone();
+    probes["Actual Rows"] = json!(0);
+    probes["Actual Loops"] = json!(513);
+    let mut missing = scan.clone();
+    missing.as_object_mut().unwrap().remove("Actual Rows");
+    for bad in [broad, probes, missing] {
+        let plan = json!([{"Plan":{"Node Type":"Nested Loop","Plans":[scan.clone(), bad]}}]);
+        assert!(reverse_plan_scan_work(&plan, true).is_err());
+    }
+}
+
+async fn seed_reverse_plan_name(
+    database: &TestDatabase,
+    name: &str,
+    address: &str,
+    relation: bigname_storage::AddressNameRelation,
+    id: u128,
+) -> Result<()> {
+    let namespace = if name.ends_with(".base.eth") {
+        "basenames"
+    } else {
+        "ens"
+    };
+    let hash = bigname_lookup::ens_namehash_hex(name)?;
+    seed_identity_name(
+        database,
+        &format!("{namespace}:{name}"),
+        name,
+        name,
+        &hash,
+        Uuid::from_u128(id),
+        Uuid::from_u128(id + 1),
+        Uuid::from_u128(id + 2),
+        address,
+        relation,
+        42,
+    )
+    .await
+}
+
+async fn reverse_plan_stable_state(database: &TestDatabase, address: &str) -> Result<Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+            'heads', (SELECT jsonb_agg(to_jsonb(h) - 'updated_at' ORDER BY chain_id) FROM chain_heads h),
+            'lineage', (SELECT count(*) FROM chain_lineage),
+            'primary', (SELECT jsonb_agg(to_jsonb(p) ORDER BY namespace, coin_type)
+                        FROM primary_names_current p WHERE address = $1))"
+    ).bind(address).fetch_one(&database.lookup_pool).await?)
+}
+
+async fn reverse_plan_pages(
+    database: &TestDatabase,
+    input: &bigname_storage::ReverseIdentityStorageInput,
+    namespaces: &[String],
+    expected: &[&str],
+) -> Result<bigname_storage::ReverseIdentityCursor> {
+    use bigname_storage::{AddressNameRelation, ReverseIdentityCursor};
+    let mut request = input.clone();
+    let mut names = Vec::new();
+    let mut first_cursor = None;
+    loop {
+        let groups = crate::v2::support::load_reverse_identity_records_live(
+            &database.lookup_pool,
+            &[request.clone()],
+            namespaces,
+        )
+        .await?;
+        assert_eq!(groups.len(), 1);
+        let group = &groups[0];
+        assert_eq!(group.total_count, Some(expected.len() as u64));
+        assert!(group.entries.len() <= input.page_size as usize);
+        for entry in &group.entries {
+            let row = &entry.name_record.row;
+            assert!(namespaces.contains(&row.namespace));
+            let facets = match row.normalized_name.as_str() {
+                "amber.eth" | "dune.base.eth" => vec![AddressNameRelation::Registrant],
+                "birch.eth" => vec![
+                    AddressNameRelation::TokenHolder,
+                    AddressNameRelation::EffectiveController,
+                ],
+                "bob.eth" | "cedar.eth" | "elm.base.eth" => {
+                    vec![AddressNameRelation::EffectiveController]
+                }
+                _ => vec![AddressNameRelation::TokenHolder],
+            };
+            let mut facets = facets
+                .into_iter()
+                .filter(|r| input.roles.includes(*r))
+                .collect::<Vec<_>>();
+            facets.sort();
+            assert_eq!(entry.relation_facets, facets);
+            let is_primary = entry
+                .primary_name
+                .as_ref()
+                .and_then(|p| p.normalized_claim_name.as_deref())
+                == Some(row.normalized_name.as_str());
+            assert_eq!(is_primary, row.normalized_name == "alice.eth");
+            names.push(row.normalized_name.clone());
+            assert_eq!(names.last().unwrap(), expected[names.len() - 1]);
+        }
+        let last = group
+            .entries
+            .last()
+            .context("expected nonempty fixture page")?;
+        let row = &last.name_record.row;
+        let cursor = ReverseIdentityCursor {
+            is_primary: row.normalized_name == "alice.eth",
+            role_rank: if last.relation_facets.iter().any(|r| {
+                matches!(
+                    r,
+                    AddressNameRelation::Registrant | AddressNameRelation::TokenHolder
+                )
+            }) {
+                0
+            } else {
+                1
+            },
+            normalized_name: row.normalized_name.clone(),
+            namespace: row.namespace.clone(),
+            namehash: row.namehash.clone(),
+        };
+        first_cursor.get_or_insert_with(|| cursor.clone());
+        if !group.has_more {
+            break;
+        }
+        anyhow::ensure!(names.len() < expected.len(), "repeated or endless pages");
+        request.cursor = Some(cursor);
+    }
+    assert_eq!(names, expected);
+    first_cursor.context("missing first cursor")
+}
+
+#[tokio::test]
+async fn reverse_readability_plans_follow_address_candidates() -> Result<()> {
+    use crate::v2::support::{
+        explain_reverse_identity_count, explain_reverse_identity_page,
+        load_reverse_identity_records_live,
+    };
+    use bigname_storage::{
+        AddressNameRelation as Relation, ReverseIdentityRoles as Roles, ReverseIdentityStorageInput,
+    };
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let other = "0x0000000000000000000000000000000000000def";
+    let absent = "0x0000000000000000000000000000000000000123";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    let long_name = (0..64)
+        .map(|i| format!("label{i:03}{}", "a".repeat(40)))
+        .collect::<Vec<_>>()
+        .join(".")
+        + ".eth";
+    assert_eq!(long_name.len(), 3139);
+    assert_eq!(
+        bigname_domain::normalization::normalize_name(&long_name)
+            .map_err(|error| anyhow::anyhow!(error.message().to_owned()))?
+            .normalized_name,
+        long_name
+    );
+    for (name, relation, id) in [
+        ("amber.eth", Relation::Registrant, 0x842100),
+        ("birch.eth", Relation::TokenHolder, 0x842110),
+        ("birch.eth", Relation::EffectiveController, 0x842110),
+        ("cedar.eth", Relation::EffectiveController, 0x842120),
+        (long_name.as_str(), Relation::TokenHolder, 0x842130),
+        ("dune.base.eth", Relation::Registrant, 0x842140),
+        ("elm.base.eth", Relation::EffectiveController, 0x842150),
+    ] {
+        seed_reverse_plan_name(&database, name, address, relation, id).await?;
+    }
+    let namespaces = vec!["ens".to_owned(), "basenames".to_owned()];
+    let expected = [
+        vec![
+            "alice.eth",
+            "amber.eth",
+            "birch.eth",
+            "dune.base.eth",
+            long_name.as_str(),
+        ],
+        vec!["birch.eth", "bob.eth", "cedar.eth", "elm.base.eth"],
+        vec![
+            "alice.eth",
+            "amber.eth",
+            "birch.eth",
+            "dune.base.eth",
+            long_name.as_str(),
+            "bob.eth",
+            "cedar.eth",
+            "elm.base.eth",
+        ],
+    ];
+    let inputs =
+        [Roles::Owned, Roles::Managed, Roles::Both].map(|roles| ReverseIdentityStorageInput {
+            address: address.to_owned(),
+            coin_type: "60".to_owned(),
+            roles,
+            page_size: 2,
+            cursor: None,
+        });
+    let empty = load_reverse_identity_records_live(&database.lookup_pool, &[], &namespaces).await?;
+    assert!(empty.is_empty());
+    assert!(
+        explain_reverse_identity_page(&database.lookup_pool, &[], &namespaces)
+            .await?
+            .is_none()
+    );
+    let missing = ReverseIdentityStorageInput {
+        address: absent.to_owned(),
+        ..inputs[2].clone()
+    };
+    let stable = reverse_plan_stable_state(&database, address).await?;
+    let mut previous = Vec::<ReversePlanWork>::new();
+    let mut plans = 0;
+    for (phase, range) in [(0, 0..256), (1, 256..2048)] {
+        for index in range {
+            seed_reverse_plan_name(
+                &database,
+                &format!("unrelated{index:04}.eth"),
+                other,
+                Relation::TokenHolder,
+                0x900000 + index as u128 * 4,
+            )
+            .await?;
+        }
+        assert_eq!(reverse_plan_stable_state(&database, address).await?, stable);
+        let counts: (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT count(DISTINCT logical_name_id) FILTER (WHERE address = $1),
+                    count(*) FILTER (WHERE address = $1),
+                    count(DISTINCT logical_name_id) FILTER (WHERE address = $2),
+                    count(*) FILTER (WHERE address = $2) FROM address_names_current",
+        )
+        .bind(address)
+        .bind(other)
+        .fetch_one(&database.lookup_pool)
+        .await?;
+        let population = if phase == 0 { 256 } else { 2048 };
+        assert_eq!(counts, (8, 9, population, population));
+        for table in [
+            "address_names_current",
+            "name_current",
+            "name_surfaces",
+            "resources",
+            "surface_bindings",
+            "token_lineages",
+            "chain_lineage",
+            "primary_names_current",
+        ] {
+            sqlx::query(&format!("ANALYZE bigname_phase.{table}"))
+                .execute(&database.lookup_pool)
+                .await?;
+        }
+        let mut cases = Vec::new();
+        for (index, input) in inputs.iter().enumerate() {
+            let cursor =
+                reverse_plan_pages(&database, input, &namespaces, &expected[index]).await?;
+            let ens = expected[index]
+                .iter()
+                .copied()
+                .filter(|n| !n.ends_with(".base.eth"))
+                .collect::<Vec<_>>();
+            assert_eq!(ens.len(), [4, 3, 6][index]);
+            reverse_plan_pages(&database, input, &["ens".to_owned()], &ens).await?;
+            cases.push(vec![input.clone()]);
+            cases.push(vec![ReverseIdentityStorageInput {
+                cursor: Some(cursor),
+                ..input.clone()
+            }]);
+        }
+        let batch = vec![
+            cases[0][0].clone(),
+            cases[3][0].clone(),
+            cases[4][0].clone(),
+            cases[5][0].clone(),
+            missing.clone(),
+        ];
+        let groups =
+            load_reverse_identity_records_live(&database.lookup_pool, &batch, &namespaces).await?;
+        let expected_batch = [
+            &expected[0][..2],
+            &expected[1][2..4],
+            &expected[2][..2],
+            &expected[2][2..4],
+            &[],
+        ];
+        assert_eq!(groups.len(), 5);
+        for (i, group) in groups.iter().enumerate() {
+            assert_eq!(group.input, batch[i]);
+            assert_eq!(group.total_count, Some([5, 4, 8, 8, 0][i]));
+            assert_eq!(
+                group
+                    .entries
+                    .iter()
+                    .map(|e| e.name_record.row.normalized_name.as_str())
+                    .collect::<Vec<_>>(),
+                expected_batch[i]
+            );
+        }
+        cases.push(batch.clone());
+        for (case, requests) in cases.iter().chain(std::iter::once(&batch)).enumerate() {
+            let page = case != 7;
+            let plan = if page {
+                explain_reverse_identity_page(&database.lookup_pool, requests, &namespaces)
+                    .await?
+                    .context("missing nonempty plan")?
+            } else {
+                explain_reverse_identity_count(&database.lookup_pool, requests, &namespaces).await?
+            };
+            plans += 1;
+            eprintln!("reverse population={population} case={case} page={page} plan={plan}");
+            let work = reverse_plan_scan_work(&plan, page)?;
+            anyhow::ensure!(
+                work.contains_key("address_names_current") && work.contains_key("name_current"),
+                "missing monitored access"
+            );
+            eprintln!("reverse population={population} case={case} page={page} work={work:?}");
+            if phase == 0 {
+                previous.push(work);
+            } else {
+                for (table, values) in &work {
+                    if table != "chain_lineage" {
+                        let smaller = previous[case].get(table).map_or(0.0, |v| v[0]);
+                        anyhow::ensure!(
+                            values[0] <= 2.0 * smaller + 32.0,
+                            "population-driven {table}: {work:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(plans, 16);
+    database.cleanup().await
+}
