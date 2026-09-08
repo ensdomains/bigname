@@ -476,7 +476,14 @@ cargo phase rewind \
 It takes the ingest, interpret, project, and live advisory locks so no head
 publisher or downstream writer can overlap it, requires the exact ancestor to
 be stored and readable, refuses to cross the safe head, and invokes normal head
-publication. It does not write raw facts or normalized events. An uncompleted
+publication. Before publication, it refuses a rewind below the retained end of
+an unfinished operator Ingest redo. The refusal leaves heads, lineage, cursors,
+and redo state unchanged and reports the ancestor, retained range, and covering
+Ingest redo command. Complete that repair with the configured sources before
+retrying the rewind; an interrupted repair resumes from its retained checkpoint.
+This check does not depend on whether a checkpoint has already been saved or on
+the phase's lifecycle status. It does not repair state stranded by an earlier
+rewind. It does not write raw facts or normalized events. An uncompleted
 required Ingest redo remains stamped if its end moves above the readable head.
 The next supervised run uses Live intake to publish the winning suffix under
 the current watch plan, then repeats the required Ingest command prefix and

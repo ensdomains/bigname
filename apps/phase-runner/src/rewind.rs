@@ -4,8 +4,10 @@ use crate::{
     database::RunnerDatabase,
     error::{RunnerError, RunnerResult},
     heads::{BlockMarker, HeadMarkers, publish_heads},
-    phase::PhaseName,
+    phase::{BlockRange, PhaseName},
     phase_lock::PhaseLock,
+    redo_stamp::owns_required_redo,
+    transitions::redo_rerun_instruction,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -167,6 +169,7 @@ async fn rewind_with_lock(
             safe.as_ref().expect("checked safe marker").number
         )));
     }
+    require_rewind_preserves_operator_redo(pool, chain_id, ancestor.number).await?;
     publish_heads(
         pool,
         chain_id,
@@ -178,6 +181,49 @@ async fn rewind_with_lock(
     )
     .await?;
     Ok(RewindOutcome { previous, ancestor })
+}
+
+async fn require_rewind_preserves_operator_redo(
+    pool: &PgPool,
+    chain_id: &str,
+    ancestor: i64,
+) -> RunnerResult<()> {
+    let row: Option<(Option<i64>, Option<i64>, Option<String>)> = sqlx::query_as(
+        "SELECT redo_from_block_number, redo_to_block_number, last_error
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest' AND redo_in_progress",
+    )
+    .bind(chain_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        RunnerError::database(
+            format!("failed to load retained Ingest redo before rewinding chain {chain_id}"),
+            error,
+        )
+    })?;
+    let Some((from, to, last_error)) = row else {
+        return Ok(());
+    };
+    // Required Ingest work can recover its readable suffix through Live intake.
+    if last_error.as_deref().is_some_and(owns_required_redo) {
+        return Ok(());
+    }
+    let (from, to) = from.zip(to).ok_or_else(|| {
+        RunnerError::data_integrity(format!(
+            "retained Ingest redo for chain {chain_id} is missing its range before rewind"
+        ))
+    })?;
+    let range = BlockRange::new(from, to)?;
+    if range.to > ancestor {
+        let instruction = redo_rerun_instruction(chain_id, PhaseName::Ingest, None, Some(range));
+        return Err(RunnerError::data_integrity(format!(
+            "cannot rewind chain {chain_id} to ancestor block {ancestor}: interrupted Ingest \
+             redo {from}..{to} would lose its readable range end; {instruction} with the \
+             configured sources to complete the covering Ingest repair before rewinding"
+        )));
+    }
+    Ok(())
 }
 
 fn paired_marker(
