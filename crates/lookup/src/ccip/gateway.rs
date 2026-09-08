@@ -17,8 +17,8 @@ const GATEWAY_CONNECT_TIMEOUT: Duration = Duration::from_millis(1000);
 const GATEWAY_CONNECT_TIMEOUT: Duration = Duration::from_millis(100);
 const GATEWAY_TIMEOUT: Duration = Duration::from_millis(1500);
 /// A CCIP-Read answer is one ABI-encoded resolver result. Cap the read so a
-/// gateway URL taken out of an untrusted revert cannot stream unbounded bytes
-/// into the serving path within the request timeout.
+/// gateway URL decoded from revert data cannot stream unbounded bytes into the
+/// serving path within the request timeout.
 const MAX_GATEWAY_RESPONSE_BYTES: usize = 1 << 20;
 
 static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
@@ -215,9 +215,13 @@ async fn fetch_one(template: &str, sender: &str, data: &str) -> Result<Vec<u8>> 
     decode_body(&body).with_context(|| format!("failed to decode CCIP gateway response from {url}"))
 }
 
-/// The URL arrives inside an `OffchainLookup` revert, so the emitting contract
-/// chooses it. Restrict it to the two schemes a gateway is defined over before
-/// the client is handed the string.
+/// The URL list is a field of the `OffchainLookup` error the reverting contract
+/// raises (upstream: .refs/ens_v1/contracts/ccipRead/EIP3668.sol:L6-L12 @ ens_v1@91c966f),
+/// filled from that contract's own state — the Basenames L1 resolver copies its
+/// `url` storage into it (upstream: .refs/basenames/src/L1/L1Resolver.sol:L171-L173 @ basenames@1809bbc)
+/// — so `lookup.urls` is contract-chosen input decoded from revert data.
+/// Restrict it to the two schemes a gateway is defined over before the client
+/// is handed the string.
 fn ensure_fetchable_scheme(url: &str) -> Result<()> {
     let parsed = reqwest::Url::parse(url)
         .with_context(|| format!("CCIP gateway URL is not a valid absolute URL: {url}"))?;
@@ -321,8 +325,10 @@ mod tests {
         for url in ["http://gateway.invalid/q", "https://gateway.invalid/q"] {
             assert!(ensure_fetchable_scheme(url).is_ok(), "rejected {url}");
         }
-        // The emitting contract picks this string, so a non-HTTP scheme and a
-        // relative reference must both fail before the client sees them.
+        // `lookup.urls` is decoded from the reverting contract's `OffchainLookup`
+        // data (upstream: .refs/ens_v1/contracts/ccipRead/EIP3668.sol:L6-L12 @ ens_v1@91c966f),
+        // so a non-HTTP scheme and a relative reference must both fail before
+        // the client sees them.
         for url in [
             "file:///etc/passwd",
             "ftp://gateway.invalid/q",
