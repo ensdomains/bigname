@@ -96,29 +96,39 @@ async fn query_reverse_identity_page_rows(
                 SELECT anc.logical_name_id,
                        bool_or(COALESCE(
                            requested.primary_names -> anc.namespace
-                               ->> 'normalized_claim_name' = identity_nc.raw_name,
+                               ->> 'normalized_claim_name' = anc.raw_name,
                            false
                        )) AS is_primary,
                        min(CASE
                            WHEN anc.relation IN ('registrant', 'token_holder') THEN 0
                            ELSE 1
                        END)::SMALLINT AS role_rank,
-                       identity_nc.raw_name AS raw_name,
+                       anc.raw_name AS raw_name,
                        anc.namespace,
                        anc.namehash
-                FROM readable_relations anc
-                JOIN readable_names identity_nc
-                  ON identity_nc.logical_name_id = anc.logical_name_id
-                WHERE lower(anc.address) = lower(requested.address)
-                  AND anc.namespace = ANY($13::TEXT[])
+                FROM bigname_phase.address_names_current seed
+                JOIN LATERAL (
+                    SELECT readable_relation.logical_name_id, readable_relation.namespace,
+                           readable_relation.namehash, readable_relation.relation, identity_nc.raw_name
+                    FROM readable_relations readable_relation
+                    JOIN readable_names identity_nc
+                      ON identity_nc.logical_name_id = readable_relation.logical_name_id
+                    WHERE readable_relation.address = seed.address
+                      AND readable_relation.logical_name_id = seed.logical_name_id
+                      AND readable_relation.relation = seed.relation
+                    -- Keep readability work correlated to this address candidate.
+                    OFFSET 0
+                ) anc ON TRUE
+                WHERE lower(seed.address) = lower(requested.address)
+                  AND seed.namespace = ANY($13::TEXT[])
                   AND (
                       requested.roles = 'both'
                       OR (requested.roles = 'owned'
-                          AND anc.relation IN ('registrant', 'token_holder'))
+                          AND seed.relation IN ('registrant', 'token_holder'))
                       OR (requested.roles = 'managed'
-                          AND anc.relation = 'effective_controller')
+                          AND seed.relation = 'effective_controller')
                   )
-                GROUP BY anc.logical_name_id, identity_nc.raw_name,
+                GROUP BY anc.logical_name_id, anc.raw_name,
                          anc.namespace, anc.namehash
             ) grouped
             WHERE NOT requested.cursor_present

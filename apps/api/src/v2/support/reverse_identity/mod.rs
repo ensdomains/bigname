@@ -441,14 +441,26 @@ async fn query_reverse_identity_total_counts(
             requested.roles,
             COUNT(DISTINCT anc.logical_name_id)::BIGINT AS total_count
         FROM requested
-        LEFT JOIN readable_relations anc
-          ON anc.address = requested.address
-         AND anc.namespace = ANY($3::TEXT[])
-         AND (
-             requested.roles = 'both'
-             OR (requested.roles = 'owned' AND anc.relation IN ('registrant', 'token_holder'))
-             OR (requested.roles = 'managed' AND anc.relation = 'effective_controller')
-         )
+        LEFT JOIN LATERAL (
+            SELECT readable_relation.logical_name_id
+            FROM bigname_phase.address_names_current seed
+            JOIN LATERAL (
+                SELECT anc.logical_name_id
+                FROM readable_relations anc
+                WHERE anc.address = seed.address
+                  AND anc.logical_name_id = seed.logical_name_id
+                  AND anc.relation = seed.relation
+                -- Keep readability work correlated to this address candidate.
+                OFFSET 0
+            ) readable_relation ON TRUE
+            WHERE seed.address = requested.address
+              AND seed.namespace = ANY($3::TEXT[])
+              AND (
+                  requested.roles = 'both'
+                  OR (requested.roles = 'owned' AND seed.relation IN ('registrant', 'token_holder'))
+                  OR (requested.roles = 'managed' AND seed.relation = 'effective_controller')
+              )
+        ) anc ON TRUE
         GROUP BY requested.address, requested.roles
         ORDER BY requested.address, requested.roles
         "#
