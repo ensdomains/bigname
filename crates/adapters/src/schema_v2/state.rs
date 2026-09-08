@@ -21,6 +21,8 @@ mod releases;
 #[path = "state_wrapper.rs"]
 mod wrapper;
 
+#[path = "state_materialization.rs"]
+mod materialization;
 #[path = "state_surfaces.rs"]
 mod surfaces;
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,7 +77,7 @@ mod v2_pointers;
 #[path = "state_v2_tests.rs"]
 mod v2_tests;
 
-pub(in crate::schema_v2) use self::surfaces::V1SurfaceMaterialization;
+pub(in crate::schema_v2) use self::materialization::V1SurfaceMaterialization;
 pub(in crate::schema_v2) use self::topology::v2_expiry_is_live;
 pub(super) use self::v2::{V2NameState, V2NameTransition, V2RawNameState, V2TokenState};
 #[cfg(test)]
@@ -87,6 +89,7 @@ pub(super) use self::v2_refresh::{reset_v2_refresh_visits, v2_refresh_visits};
 pub(super) struct V1Release {
     pub namehash: String,
     pub registrar: V1NameState,
+    pub label_less: bool,
     pub release_was_active: bool,
     pub previous_authority: Option<V1NameState>,
     pub next_authority: Option<V1NameState>,
@@ -120,6 +123,9 @@ pub(super) struct State {
     restore_error: Option<String>,
     v1_migrated_nodes: OrdSet<String>,
     v1_materialized_surfaces: OrdSet<String>,
+    /// Registrar authorities the fallback observed with no label: their facts
+    /// serve no name link until a label-bearing event names the surface.
+    v1_label_less_registrars: OrdSet<String>,
     known_surfaces: OrdSet<String>,
     restored_surface_sources: OrdMap<String, OrdSet<String>>,
     restored_surface_counts: OrdMap<String, usize>,
@@ -238,6 +244,19 @@ impl State {
         self.update_v1_expiry_index(&key, previous_expiry, expiry);
         if make_current {
             self.v1_names.insert(key, value);
+        }
+    }
+    pub(super) fn set_v1_registrar_label_less(
+        &mut self,
+        namespace: &str,
+        namehash: &str,
+        label_less: bool,
+    ) {
+        let key = v1_key(namespace, namehash);
+        if label_less {
+            self.v1_label_less_registrars.insert(key);
+        } else {
+            self.v1_label_less_registrars.remove(&key);
         }
     }
     pub(super) fn v1_name(&self, namespace: &str, namehash: &str) -> Option<V1NameState> {

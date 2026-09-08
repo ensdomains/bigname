@@ -29,6 +29,7 @@ impl State {
             let Some(registrar) = self.v1_registrars.remove(&key) else {
                 continue;
             };
+            let label_less = self.v1_label_less_registrars.remove(&key).is_some();
             let previous_authority = self.v1_names.get(&key).cloned();
             let release_is_active = previous_authority.as_ref().is_some_and(|active| {
                 active.resource_id == registrar.resource_id
@@ -48,6 +49,7 @@ impl State {
                 namehash: namehash.to_owned(),
                 resolver: self.v1_resolvers.get(&key).cloned(),
                 registrar,
+                label_less,
                 release_was_active: release_is_active,
                 previous_authority,
                 next_authority,

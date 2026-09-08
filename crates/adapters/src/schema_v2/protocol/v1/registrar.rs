@@ -242,6 +242,16 @@ fn name_fact(
                 current.authority_source_family != "ens_v1_wrapper_l1"
                     && (registration || same_family)
             }));
+    // A registrar authority the fallback observed without its label is named by
+    // this event: its surface is bound here rather than at the observation, and
+    // the name learns of its registration here, as a synthetic grant, since the
+    // observed grant serves no name link.
+    let names_fallback = surface_known
+        && make_current
+        && prior_registrar
+            .as_ref()
+            .is_some_and(|prior| !prior.surface_known && prior.resource_id == resource_id);
+    let synthetic_grant = synthetic_grant || names_fallback;
     let labelhash = format!("{explicit_labelhash:#x}");
     state.observe_v1_registrar(
         &selected.source.namespace,
@@ -259,6 +269,11 @@ fn name_fact(
         false,
         make_current,
     );
+    state.set_v1_registrar_label_less(
+        &selected.source.namespace,
+        &raw_namehash,
+        raw_label.is_none() && !surface_known,
+    );
     if !ens_v1_registrar {
         state.sync_registry_surface_from_registrar(
             &selected.source.namespace,
@@ -268,7 +283,13 @@ fn name_fact(
             Some(&labelhash),
         );
     }
-    let surface_materialization = if surface_known && ens_v1_registrar {
+    let surface_materialization = if names_fallback && ens_v1_registrar {
+        Some(state.name_v1_registrar_surface(
+            &selected.source.namespace,
+            &raw_namehash,
+            &logical_name_id,
+        )?)
+    } else if surface_known && ens_v1_registrar {
         Some(state.materialize_or_sync_v1_active_surface(
             &selected.source.namespace,
             &raw_namehash,

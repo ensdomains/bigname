@@ -2,6 +2,8 @@
 //! source of `.eth` registration and expiry facts when no admitted controller
 //! event carries the label in the same transaction.
 
+use serde_json::Value;
+
 use super::*;
 
 const REGISTRAR: &str = "0x00000000000000000000000000000000000000c2";
@@ -81,7 +83,102 @@ fn manifest() -> ManifestInput {
                     "PreimageObserved",
                 ],
             ),
+            (
+                "NameRenewed",
+                "event NameRenewed(string name, bytes32 indexed label, uint256 expires)",
+                &["legacy_registrar_controller"],
+                &[
+                    "RegistrationGranted",
+                    "RegistrationRenewed",
+                    "ExpiryChanged",
+                    "SurfaceUnbound",
+                    "SurfaceBound",
+                    "AuthorityEpochChanged",
+                    "ResolverChanged",
+                    "PreimageObserved",
+                ],
+            ),
         ],
+    )
+}
+
+const REGISTRY: &str = "0x00000000000000000000000000000000000000c7";
+const RESOLVER: &str = "0x00000000000000000000000000000000000000c8";
+const REGISTRY_MANIFEST_ID: i64 = 7142;
+
+fn registry_manifest() -> ManifestInput {
+    manifest_with_events(
+        REGISTRY_MANIFEST_ID,
+        "ens",
+        "ens_v1_registry_l1",
+        &[
+            (
+                "NewOwner",
+                "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+                &["registry"],
+                &[
+                    "SubregistryChanged",
+                    "AuthorityTransferred",
+                    "ResolverChanged",
+                    "PermissionChanged",
+                ],
+            ),
+            (
+                "NewResolver",
+                "event NewResolver(bytes32 indexed node, address resolver)",
+                &["registry"],
+                &["ResolverChanged", "PermissionChanged"],
+            ),
+        ],
+    )
+}
+
+fn node() -> B256 {
+    super::common::namehash(&[String::from_utf8(LABEL.to_vec()).unwrap(), "eth".to_owned()])
+        .parse()
+        .unwrap()
+}
+
+fn registry_new_owner(block: i64, log_index: i64) -> RawLogInput {
+    raw_at(
+        v1_registry::NewOwner {
+            node: super::common::namehash(&["eth".to_owned()])
+                .parse()
+                .unwrap(),
+            label: keccak256(LABEL),
+            owner: OWNER.parse().unwrap(),
+        }
+        .encode_log_data(),
+        block,
+        log_index,
+        REGISTRY,
+    )
+}
+
+fn registry_new_resolver(block: i64, log_index: i64) -> RawLogInput {
+    raw_at(
+        v1_registry::NewResolver {
+            node: node(),
+            resolver: RESOLVER.parse().unwrap(),
+        }
+        .encode_log_data(),
+        block,
+        log_index,
+        REGISTRY,
+    )
+}
+
+fn controller_renewed(block: i64, log_index: i64, expiry: i64) -> RawLogInput {
+    raw_at(
+        NameRenewed {
+            name: String::from_utf8(LABEL.to_vec()).unwrap(),
+            label: keccak256(LABEL),
+            expires: U256::from(expiry),
+        }
+        .encode_log_data(),
+        block,
+        log_index,
+        CONTROLLER,
     )
 }
 
@@ -192,6 +289,14 @@ fn empty_block(block_number: i64) -> RawBlockInput {
 }
 
 fn interpret(raw_logs: Vec<RawLogInput>, extra_blocks: &[i64]) -> anyhow::Result<BatchOutput> {
+    interpret_with(raw_logs, extra_blocks, false)
+}
+
+fn interpret_with(
+    raw_logs: Vec<RawLogInput>,
+    extra_blocks: &[i64],
+    registry: bool,
+) -> anyhow::Result<BatchOutput> {
     let mut blocks = raw_logs
         .iter()
         .map(|raw| raw.block_number)
@@ -199,11 +304,19 @@ fn interpret(raw_logs: Vec<RawLogInput>, extra_blocks: &[i64]) -> anyhow::Result
         .collect::<Vec<_>>();
     blocks.sort_unstable();
     blocks.dedup();
+    let mut manifests = vec![manifest()];
+    let mut admissions = admissions();
+    if registry {
+        manifests.push(registry_manifest());
+        let mut registry = admission(REGISTRY_MANIFEST_ID, "registry");
+        registry.address = REGISTRY.to_owned();
+        admissions.push(registry);
+    }
     interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
-        manifests: vec![manifest()],
+        manifests,
         discovery_rules: Vec::new(),
-        admissions: admissions(),
+        admissions,
         prior_events: Vec::new(),
         blocks: blocks.into_iter().map(empty_block).collect(),
         raw_logs,
@@ -318,6 +431,47 @@ fn without_the_fallback_renewal_the_stale_expiry_settles_a_release() -> anyhow::
     let releases = kinds(&output, "RegistrationReleased");
     assert_eq!(releases.len(), 1, "{:#?}", output.normalized_events);
     assert_eq!(releases[0].block_number, Some(first_release));
+    assert!(
+        releases[0].logical_name_id.is_some(),
+        "the admitted registration named the surface the release links to"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_label_less_registration_releases_detached_from_the_name() -> anyhow::Result<()> {
+    // The fallback grant serves no name link; neither may its boundary release,
+    // or a later-named surface replays a release with no grant before it.
+    let first_release = 1_000 + GRACE + 1;
+    let output = interpret(vec![registrar_registered(10, 0, 1_000)], &[first_release])?;
+    let granted = kinds(&output, "RegistrationGranted");
+    assert_eq!(granted.len(), 1, "{:#?}", output.normalized_events);
+    assert!(granted[0].logical_name_id.is_none());
+    let releases = kinds(&output, "RegistrationReleased");
+    assert_eq!(releases.len(), 1, "{:#?}", output.normalized_events);
+    assert_eq!(releases[0].block_number, Some(first_release));
+    assert!(releases[0].logical_name_id.is_none(), "{:#?}", releases[0]);
+    assert_eq!(releases[0].resource_id, granted[0].resource_id);
+
+    // The same boundary reached from a restored batch: the fact's label-less
+    // state has to restore, or the release would name the surface after all.
+    let registered = interpret(vec![registrar_registered(10, 0, 1_000)], &[])?;
+    let restored = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest()],
+        discovery_rules: Vec::new(),
+        admissions: admissions(),
+        prior_events: registered
+            .normalized_events
+            .iter()
+            .map(prior_event)
+            .collect(),
+        blocks: vec![empty_block(first_release)],
+        raw_logs: Vec::new(),
+    })?;
+    let releases = kinds(&restored, "RegistrationReleased");
+    assert_eq!(releases.len(), 1, "{:#?}", restored.normalized_events);
+    assert!(releases[0].logical_name_id.is_none(), "{:#?}", releases[0]);
     Ok(())
 }
 
@@ -479,6 +633,103 @@ fn a_controller_announced_in_the_same_transaction_does_not_silence_the_fallback(
         1,
         "{:#?}",
         output.normalized_events
+    );
+    Ok(())
+}
+
+/// The e2e shape: a registration through an unadmitted controller, the
+/// resolver set while the label is still unknown, then a renewal through an
+/// admitted controller. The renewal names the surface, and the resolver set
+/// before it must be replayed onto that surface as it is for a registry-only
+/// authority.
+#[test]
+fn a_pre_surface_resolver_is_replayed_when_an_admitted_renewal_names_the_fallback_registration()
+-> anyhow::Result<()> {
+    let logical_name_id = format!("ens:{:#x}", node());
+    let replayed = |output: &BatchOutput| -> Vec<NormalizedEvent> {
+        kinds(output, "ResolverChanged")
+            .into_iter()
+            .filter(|event| event.after_state["state_derived"] == true)
+            .cloned()
+            .collect()
+    };
+
+    // Before the renewal there is no surface to replay onto.
+    let before = interpret_with(
+        vec![
+            in_transaction(registry_new_owner(10, 0), 0),
+            in_transaction(registrar_registered(10, 1, 1_000), 0),
+            registry_new_resolver(11, 0),
+        ],
+        &[],
+        true,
+    )?;
+    let granted = kinds(&before, "RegistrationGranted");
+    assert_eq!(granted.len(), 1, "{:#?}", before.normalized_events);
+    assert_eq!(granted[0].after_state["controller_admitted"], false);
+    assert!(granted[0].logical_name_id.is_none());
+    assert!(
+        replayed(&before).is_empty(),
+        "nothing names the surface yet: {:#?}",
+        before.normalized_events
+    );
+
+    let output = interpret_with(
+        vec![
+            in_transaction(registry_new_owner(10, 0), 0),
+            in_transaction(registrar_registered(10, 1, 1_000), 0),
+            registry_new_resolver(11, 0),
+            in_transaction(registrar_renewed(12, 0, 20_000_000), 0),
+            in_transaction(controller_renewed(12, 1, 20_000_000), 0),
+        ],
+        &[],
+        true,
+    )?;
+    let renewals = kinds(&output, "RegistrationRenewed");
+    assert_eq!(renewals.len(), 1, "{:#?}", output.normalized_events);
+    assert_eq!(renewals[0].after_state["controller_admitted"], Value::Null);
+    assert_eq!(
+        renewals[0].logical_name_id.as_deref(),
+        Some(logical_name_id.as_str())
+    );
+    // The name learns of its registration here: the observed grant is on the
+    // resource only, so the naming event carries a grant the name can serve.
+    let grants = kinds(&output, "RegistrationGranted");
+    assert_eq!(grants.len(), 2, "{:#?}", output.normalized_events);
+    assert_eq!(grants[1].block_number, Some(12));
+    assert_eq!(
+        grants[1].logical_name_id.as_deref(),
+        Some(logical_name_id.as_str())
+    );
+    assert_eq!(grants[1].resource_id, grants[0].resource_id);
+    assert_eq!(grants[1].after_state["registrant"], OWNER);
+    assert_eq!(grants[1].after_state["controller_admitted"], Value::Null);
+    let replayed = replayed(&output);
+    assert_eq!(replayed.len(), 1, "{:#?}", output.normalized_events);
+    assert_eq!(replayed[0].block_number, Some(12));
+    assert_eq!(
+        replayed[0].logical_name_id.as_deref(),
+        Some(logical_name_id.as_str())
+    );
+    assert_eq!(replayed[0].resource_id, renewals[0].resource_id);
+    assert_eq!(replayed[0].after_state["resolver"], RESOLVER);
+    assert_eq!(replayed[0].after_state["surface_materialization"], true);
+    assert_eq!(replayed[0].after_state["authority_kind"], "registrar");
+    assert_eq!(replayed[0].before_state["resolver"], Value::Null);
+    // The naming event binds the surface to the registrar authority the fallback
+    // observed; the observation itself could not, having no surface to bind.
+    let bound = kinds(&output, "SurfaceBound")
+        .into_iter()
+        .filter(|event| event.after_state["surface_materialization"] == true)
+        .collect::<Vec<_>>();
+    assert_eq!(bound.len(), 1, "{:#?}", output.normalized_events);
+    assert_eq!(bound[0].block_number, Some(12));
+    assert_eq!(bound[0].resource_id, renewals[0].resource_id);
+    assert_eq!(bound[0].after_state["authority_kind"], "registrar");
+    assert!(
+        kinds(&before, "SurfaceBound").is_empty(),
+        "{:#?}",
+        before.normalized_events
     );
     Ok(())
 }

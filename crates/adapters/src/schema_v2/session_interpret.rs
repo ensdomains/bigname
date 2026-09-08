@@ -149,9 +149,12 @@ fn materialize_interpreted(
 /// has been read; but the fact has to exist at the registrar's own position,
 /// because a later log in the same transaction — the controller transferring
 /// the token it registered to itself — reads the state it establishes. So a
-/// transaction that holds a registrar log is interpreted twice: a trial on a
-/// copy decides which held logs go unclaimed, then the transaction is replayed
-/// on the real state with those logs interpreted as the fallback where they sit.
+/// transaction that holds a registrar log is interpreted twice: a trial decides
+/// which held logs go unclaimed, then the transaction is interpreted for real
+/// with those logs interpreted as the fallback where they sit. The trial only
+/// answers that question: it runs on a copy of the state (structurally shared,
+/// so cheap) with scratch output that is discarded, never on a copy of the
+/// output accumulated so far, which would grow with every earlier transaction.
 pub(super) fn interpret_transaction(
     catalog: &mut Catalog,
     transaction: &[RawLogInput],
@@ -161,7 +164,7 @@ pub(super) fn interpret_transaction(
 ) -> anyhow::Result<()> {
     let holds_registrar_log = transaction
         .iter()
-        .map(|raw| is_registrar_lifecycle_log(catalog, raw))
+        .map(|raw| is_fallback_registrar_log(catalog, raw))
         .collect::<anyhow::Result<Vec<_>>>()?
         .into_iter()
         .any(|held| held);
@@ -172,15 +175,15 @@ pub(super) fn interpret_transaction(
         return Ok(());
     }
     let mut trial_state = state.clone();
-    let mut trial_output = output.clone();
-    let mut trial_observations = migration_observations.clone();
+    let mut scratch_output = BatchOutput::default();
+    let mut scratch_observations = Vec::new();
     for raw in transaction {
         interpret_raw(
             catalog,
             raw,
             &mut trial_state,
-            &mut trial_output,
-            &mut trial_observations,
+            &mut scratch_output,
+            &mut scratch_observations,
         )?;
     }
     let unclaimed = trial_state
@@ -188,29 +191,31 @@ pub(super) fn interpret_transaction(
         .into_iter()
         .map(|raw| raw.log_index)
         .collect::<BTreeSet<_>>();
-    if unclaimed.is_empty() {
-        *state = trial_state;
-        *output = trial_output;
-        *migration_observations = trial_observations;
-        return Ok(());
-    }
     for raw in transaction {
         interpret_raw(catalog, raw, state, output, migration_observations)?;
         if unclaimed.contains(&raw.log_index) {
             interpret_held_registrar(catalog, raw, state, output)?;
         }
     }
-    // The replay held the same logs again; they are interpreted now.
+    // The real pass held the same logs again; they are interpreted now.
     state.take_v1_pending_registrar_logs();
     Ok(())
 }
 
-fn is_registrar_lifecycle_log(catalog: &Catalog, raw: &RawLogInput) -> anyhow::Result<bool> {
+/// A registrar lifecycle log that the manifest has opted into the fallback for,
+/// by declaring `RegistrationGranted` on it. A manifest that declares only
+/// migration output never holds the log, so its transactions need no trial.
+fn is_fallback_registrar_log(catalog: &Catalog, raw: &RawLogInput) -> anyhow::Result<bool> {
     Ok(catalog.select(raw)?.is_some_and(|selected| {
         selected.source.source_family == "ens_v1_registrar_l1"
             && matches!(
                 selected.event.signature.as_str(),
                 "NameRegistered(uint256,address,uint256)" | "NameRenewed(uint256,uint256)"
             )
+            && selected
+                .event
+                .normalized_events
+                .iter()
+                .any(|kind| kind == "RegistrationGranted")
     }))
 }
