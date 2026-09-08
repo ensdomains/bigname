@@ -2547,6 +2547,58 @@ async fn hanging_gateways_are_cut_off_by_the_ccip_read_budget_in_band() -> AnyRe
 }
 
 #[tokio::test]
+async fn slow_callbacks_do_not_consume_the_gateway_budget() -> AnyResult<()> {
+    // Two healthy gateways answer at once; the callback between them stalls
+    // longer than the whole test budget. Only gateway time may be charged, so
+    // the second step must still get its full share and the resolution succeed.
+    let (first_gateway, first_gateway_handle) = spawn_gateway(vec![0xca, 0xfe]).await?;
+    let (second_gateway, second_gateway_handle) = spawn_gateway(vec![0xbe, 0xef]).await?;
+    let sender = Address::from_str(BASE_L1_RESOLVER)?;
+    let first = encode_offchain_lookup_for_test(
+        sender,
+        vec![first_gateway],
+        vec![0x12, 0x34],
+        [0x01, 0x02, 0x03, 0x04],
+        vec![0xab],
+    );
+    let second = encode_offchain_lookup_for_test(
+        sender,
+        vec![second_gateway],
+        vec![0x56, 0x78],
+        [0x01, 0x02, 0x03, 0x04],
+        vec![0xcd],
+    );
+    let (rpc_url, rpc_handle) =
+        spawn_two_step_ccip_rpc(first, second, Duration::from_millis(600)).await?;
+    let fixture = setup_fixture(FixtureKind::Basenames, INDEXED_VALUE).await?;
+
+    let result = run_lookup(&fixture, &rpc_url).await?;
+
+    let record = &result.records[0];
+    assert!(record.ccip_read);
+    assert_eq!(
+        record.value,
+        Some(json!(LIVE_VALUE)),
+        "a stalled callback must not exhaust the gateway budget: {record:?}"
+    );
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(
+        requests.len(),
+        3,
+        "initial call, slow callback, final callback"
+    );
+    first_gateway_handle
+        .await
+        .context("first gateway task was cancelled")??;
+    second_gateway_handle
+        .await
+        .context("second gateway task was cancelled")??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn mixed_ccip_and_direct_batch_persists_only_the_direct_disagreement() -> AnyResult<()> {
     let (gateway_url, gateway_handle) = spawn_gateway(vec![0xca, 0xfe]).await?;
     let offchain_data = encode_offchain_lookup_for_test(
@@ -3799,6 +3851,43 @@ fn encoded_address_result(address: &str) -> AnyResult<Value> {
     let record_result = Address::from_str(address)?.abi_encode();
     let universal_result = (Bytes::from(record_result), Address::ZERO).abi_encode_params();
     Ok(Value::String(hex_string(&universal_result)))
+}
+
+/// Initial call reverts with `first`; the callback stalls for `callback_delay`
+/// and reverts with `second`; the final callback answers with the live value.
+async fn spawn_two_step_ccip_rpc(
+    first: String,
+    second: String,
+    callback_delay: Duration,
+) -> AnyResult<(String, JoinHandle<AnyResult<Vec<Value>>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let mut requests = Vec::with_capacity(3);
+        for step in 0..3 {
+            let (mut socket, _) = listener.accept().await?;
+            requests.push(read_http_json_body(&mut socket).await?);
+            let response = match step {
+                0 => RpcResponse::Error {
+                    code: 3,
+                    message: "execution reverted".to_owned(),
+                    data: Value::String(first.clone()),
+                },
+                1 => {
+                    tokio::time::sleep(callback_delay).await;
+                    RpcResponse::Error {
+                        code: 3,
+                        message: "execution reverted".to_owned(),
+                        data: Value::String(second.clone()),
+                    }
+                }
+                _ => RpcResponse::Result(encoded_basenames_text_result(LIVE_VALUE)),
+            };
+            write_rpc_response(&mut socket, response).await?;
+        }
+        Ok(requests)
+    });
+    Ok((url, handle))
 }
 
 async fn spawn_mock_rpc(

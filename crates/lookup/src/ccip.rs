@@ -14,12 +14,15 @@ use crate::{
 mod gateway;
 
 const MAX_CCIP_REDIRECTS: usize = 4;
-/// Gateway time one CCIP-Read resolution may spend in total, across every
-/// continuation and every URL tried. The per-request timeouts in `gateway.rs`
-/// bound one HTTP attempt only; without this, four continuations of four stalled
-/// URLs each can hold a record for 24 s inside a request whose only other
-/// ceiling is the 30 s request timeout, which fails the whole request out of
-/// band instead of this one record in band.
+/// Gateway time one CCIP-Read resolution may spend in total, summed over every
+/// continuation and every URL tried, and measured around the gateway requests
+/// only. The per-request timeouts in `gateway.rs` bound one HTTP attempt;
+/// without this, four continuations of four stalled URLs each can hold a record
+/// for 24 s inside a request whose only other ceiling is the 30 s request
+/// timeout, which fails the whole request out of band instead of this one
+/// record in band. Callback `eth_call`s do not draw on it: they are bounded by
+/// the JSON-RPC client's own timeout, and charging them here would let a slow
+/// provider starve an otherwise healthy gateway of its documented budget.
 #[cfg(not(test))]
 const CCIP_READ_BUDGET: Duration = Duration::from_millis(6000);
 #[cfg(test)]
@@ -107,7 +110,7 @@ pub(crate) async fn follow_ccip_read(
         return Ok(None);
     };
     let mut expected_sender = expected_sender.to_owned();
-    let deadline = tokio::time::Instant::now() + CCIP_READ_BUDGET;
+    let mut gateway_budget = CCIP_READ_BUDGET;
     for redirect_index in 0..MAX_CCIP_REDIRECTS {
         if !lookup.sender.eq_ignore_ascii_case(&expected_sender) {
             return Err(CcipReadError::malformed(format!(
@@ -115,8 +118,9 @@ pub(crate) async fn follow_ccip_read(
                 lookup.sender, expected_sender
             )));
         }
+        let gateway_started = tokio::time::Instant::now();
         let gateway_response =
-            match tokio::time::timeout_at(deadline, gateway::fetch(&lookup)).await {
+            match tokio::time::timeout(gateway_budget, gateway::fetch(&lookup)).await {
                 Err(_elapsed) => {
                     return Err(CcipReadError::transport(
                         format!(
@@ -126,7 +130,10 @@ pub(crate) async fn follow_ccip_read(
                         true,
                     ));
                 }
-                Ok(Ok(response)) => response,
+                Ok(Ok(response)) => {
+                    gateway_budget = gateway_budget.saturating_sub(gateway_started.elapsed());
+                    response
+                }
                 Ok(Err(error)) if error.is_transport_failure() => {
                     return Err(CcipReadError::transport(
                         error.to_string(),

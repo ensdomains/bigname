@@ -111,11 +111,16 @@ reaches the network:
   spend up to 6 s on gateways; a resolution follows at most four steps, each
   paying that plus one JSON-RPC callback bounded by `BIGNAME_API_RPC_TIMEOUT_MS`.
   The `x-batch-gateway:true` form fans its inner requests out concurrently with
-  no in-process cap on their number. What bounds the whole resolution is a
-  6 s gateway budget per CCIP-Read resolution, shared across every step and
-  URL: when it runs out the record fails in band as `resolver_call_failed`,
-  the same way a configured RPC timeout does, instead of holding the request
-  until the 30 s `BIGNAME_API_REQUEST_TIMEOUT_MS` fails it as a whole.
+  no in-process cap on their number. What bounds the gateway side of the whole
+  resolution is a 6 s budget of cumulative gateway time per CCIP-Read
+  resolution, shared across every step and URL and measured around the gateway
+  requests only; the callback `eth_call`s between steps are bounded by
+  `BIGNAME_API_RPC_TIMEOUT_MS` and do not draw on it, so a slow provider cannot
+  starve a healthy gateway. When the budget runs out the record fails in band
+  as `resolver_call_failed`, the same way a configured RPC timeout does,
+  instead of holding the request until the 30 s `BIGNAME_API_REQUEST_TIMEOUT_MS`
+  fails it as a whole. The worst case for one record is therefore 6 s of
+  gateway time plus up to four callbacks at the RPC timeout.
 
 **What is deliberately not enforced in process: destination host or IP.** The
 gateway may resolve to any address the container can route to, including link
