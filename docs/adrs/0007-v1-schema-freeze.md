@@ -2,10 +2,14 @@
 
 Status: Accepted
 Date: 2026-08-15
-Accepted: 2026-09-06
+Accepted: 2026-09-11
 
 > Every carve-out below is decided. Three were settled by work that has since
 > merged and are recorded here as history; the rest are decisions this ADR makes.
+> The acceptance date is the day the last of that history landed (#885, the
+> canonicality rule of carve-out 3; the frozen head itself landed on
+> 2026-09-07); the freeze applies from this ADR's merge, and every
+> schema-migration up to the head named below predates it.
 
 ## Context
 
@@ -44,17 +48,22 @@ promise:
   `normalizer_version` do not (`crates/content-hash/src/tests.rs` pins both),
   and a manifest's `read_features` rotates the separate fingerprint recorded
   by the [manifest-authority marker](../glossary.md#manifest-authority-marker)
-  with a byte-identical interpreter hash. The three triggers are independent,
-  and none of them is a narrower walk: an interpreter-hash rotation forces
-  the full-history Interpret and Project walk; a fingerprint change on an
+  with a byte-identical interpreter hash. The triggers are independent, and
+  none of them is a narrower walk: an interpreter-hash rotation forces the
+  full-history Interpret and Project walk; a fingerprint change on an
   initialized chain blocks derived work until the same full-range,
   token-attested Interpret redo and stamped Project redo complete, with the
-  stamped Ingest redo first if the watch plan widened; and
-  a normalizer-version bump is a `recompute-flags` pass over the chain's full
-  retained range followed by a full-range Project redo, which recomputes label
-  verdicts rather than re-walking Interpret
-  ([`deployment.md`](../deployment.md) § Phase-runner configuration, the
-  manifest-authority marker and normalizer-version paragraphs).
+  stamped Ingest redo first if the watch plan widened. A normalizer bump is
+  two of these at once: the `ENS_NORMALIZER_VERSION` constant lives in
+  `crates/domain/src/normalization.rs`, which the content hash covers
+  (`crates/content-hash/src/compute.rs`), so changing it is an
+  interpreter-hash rotation with the full-history walk that entails, and it
+  additionally requires the `recompute-flags` pass over each chain's full
+  retained range and the full-range Project redo that recompute the label
+  verdicts. Only the manifest field `normalizer_version` is hash-insensitive,
+  and it changes nothing on its own ([`deployment.md`](../deployment.md)
+  § Phase-runner configuration, the manifest-authority marker and
+  normalizer-version paragraphs).
 - **The content hash does not cover the schema.** It watches Rust sources,
   manifests, and the lockfile — not `schema-v2/` and not `migrations/`. It cannot
   serve as the freeze anchor.
@@ -101,7 +110,12 @@ decode-skip audit and the manifest applied-change counter (#583, #579);
 retirement of direct divergences for null-resolver names (#739); the
 discovery-watch admissions snapshot (#747); Project redo expiry-root and
 expiry-resource seeds (#762); and registry operator account permissions
-(#815). Since #849 `apply-check.sh` applies every schema-migration that
+(#815). The head itself is one more independent change:
+`20260906120000_exact_zero_addr60_default_derivation.sql` (#869, landed
+2026-09-07) replaces the `write_resolution_divergence` function so that an
+exact zero `addr:60` stays absent when a default derivation exists — a
+serving-semantics change, and the last schema-migration before acceptance.
+Since #849 `apply-check.sh` applies every schema-migration that
 touches the phase schema and fails on one it does not list, so from
 acceptance on a schema-migration of any of these kinds cannot land without
 moving the conformance test, which is where the carve-out or amendment is
@@ -269,9 +283,14 @@ values the system already documents as unstable across a boundary.
    itself require a schema change.
 
 5. **Serving indexes the projections never had** — no index in
-   `bigname_phase` supports a name-text filter or a name sort, so `/v2/search`
-   and the GraphQL `name_contains` and name-ordered paths are sequential scans
-   plus external sorts. The predecessor is not where the draft looked for it:
+   `bigname_phase` supports a name-text filter or a name sort, which is all
+   this ADR asserts about `/v2/search` and the GraphQL `name_contains` and
+   name-ordered paths. What the planner does instead is unmeasured: a
+   namespace-scoped request can walk `name_current_lookup_idx (namespace,
+   namehash, logical_name_id)` before filtering `raw_name`, and a sort is
+   external only past `work_mem`, so whether these paths scan and spill is
+   #404's `EXPLAIN` to record, not a claim here. The predecessor is not where
+   the draft looked for it:
    every index the retired `public.address_names_current` carried led with
    `address`, including the one prefix index that named `normalized_name`
    (`address_names_current_address_normalized_name_prefix_idx`,
