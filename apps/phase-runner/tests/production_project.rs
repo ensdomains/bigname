@@ -7444,6 +7444,94 @@ async fn record_inventory_normalizes_empty_address_shapes_and_coin60_siblings() 
 }
 
 #[tokio::test]
+async fn record_inventory_normalizes_a_cleared_contenthash_in_the_nested_value_shape() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("production_project_empty_contenthash_shape").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    for after_state in [
+        json!({
+            "resolver":RESOLVER,
+            "source_event":"ContenthashChanged",
+            "record_key":"contenthash",
+            "record_family":"contenthash",
+            "value":{"encoding":"hex","bytes":"0xe3010170122011"}
+        }),
+        json!({
+            "resolver":RESOLVER,
+            "source_event":"ContenthashChanged",
+            "record_key":"contenthash",
+            "record_family":"contenthash",
+            "value":{"encoding":"hex","bytes":"0x"}
+        }),
+        json!({
+            "resolver":RESOLVER,
+            "source_event":"TextChanged",
+            "record_key":"text:url",
+            "record_family":"text",
+            "selector_key":"url",
+            "value":"https://example.invalid"
+        }),
+    ] {
+        insert_event(
+            scratch.pool(),
+            CHAIN,
+            3,
+            Some("ens:0xalice"),
+            Some(RESOURCE),
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            after_state,
+            json!({"emitting_address":RESOLVER}),
+        )
+        .await?;
+    }
+    // Order the set before the clear so the retained entry is the cleared one.
+    sqlx::query(
+        "UPDATE normalized_events
+         SET transaction_index = 0,
+             transaction_hash = '0xcontenthashclear',
+             log_index = CASE
+                 WHEN after_state #>> '{value,bytes}' = '0x' THEN 11
+                 ELSE 10
+             END
+         WHERE chain_id = $1
+           AND block_number = 3
+           AND after_state ->> 'record_key' = 'contenthash'",
+    )
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let entries: Value =
+        sqlx::query_scalar("SELECT entries FROM record_inventory_current WHERE resource_id = $1")
+            .bind(Uuid::parse_str(RESOURCE)?)
+            .fetch_one(scratch.pool())
+            .await?;
+    let contenthash = entries
+        .as_array()
+        .expect("entries array")
+        .iter()
+        .find(|entry| entry["record_key"] == "contenthash")
+        .expect("missing contenthash");
+    assert_eq!(contenthash["status"], json!("not_found"));
+    assert!(
+        contenthash.get("value").is_none(),
+        "cleared contenthash retained a value"
+    );
+    // The empty-value normalization is scoped to contenthash and addr; a text
+    // record on the same resource must still publish its value.
+    let text = entries
+        .as_array()
+        .expect("entries array")
+        .iter()
+        .find(|entry| entry["record_key"] == "text:url")
+        .expect("missing text:url");
+    assert_eq!(text["status"], json!("success"));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn record_inventory_coin60_pair_does_not_override_a_later_same_transaction_write()
 -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_coin60_pair_scope").await?;
