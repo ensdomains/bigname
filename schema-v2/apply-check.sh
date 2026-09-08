@@ -87,9 +87,21 @@ migration_objects_are_schema_qualified() {
                 sub(/^ +/, "", s)
                 if (s ~ /^CREATE( UNIQUE)? INDEX /) {
                     if (match(s, / ON [^ (]+/)) { object = substr(s, RSTART + 4, RLENGTH - 4) } else { continue }
-                } else if (match(s, /^(CREATE( OR REPLACE)?|ALTER|DROP)( MATERIALIZED)? (TABLE|INDEX|FUNCTION|VIEW|SEQUENCE|TYPE|TRIGGER)( CONCURRENTLY)?( IF( NOT)? EXISTS)?( ONLY)? [^ (]+/)) {
+                } else if (match(s, /^(DROP( MATERIALIZED)? (TABLE|INDEX|FUNCTION|VIEW|SEQUENCE|TYPE|TRIGGER)( CONCURRENTLY)?( IF EXISTS)?|TRUNCATE( TABLE)?( ONLY)?) /)) {
+                    # DROP and TRUNCATE take a list; every target is checked, and one
+                    # that reaches a keyword (CASCADE, RESTRICT, ON, ...) ends the list.
+                    rest = substr(s, RSTART + RLENGTH)
+                    sub(/ (CASCADE|RESTRICT|RESTART IDENTITY|CONTINUE IDENTITY|ON ).*$/, "", rest)
+                    t = split(rest, targets, ",")
+                    for (j = 1; j <= t; j++) {
+                        object = targets[j]; gsub(/^ +| +$/, "", object); sub(/[ (].*$/, "", object)
+                        gsub(/"/, "", object)
+                        if (object != "" && object !~ /\./) { unqualified = unqualified " " object }
+                    }
+                    continue
+                } else if (match(s, /^(CREATE( OR REPLACE)?|ALTER)( MATERIALIZED)? (TABLE|INDEX|FUNCTION|VIEW|SEQUENCE|TYPE|TRIGGER)( IF NOT EXISTS)?( ONLY)? [^ (]+/)) {
                     m = split(substr(s, RSTART, RLENGTH), words, " "); object = words[m]
-                } else if (match(s, /^(INSERT INTO|UPDATE|DELETE FROM|TRUNCATE( TABLE)?|COMMENT ON (TABLE|INDEX|FUNCTION|COLUMN)) [^ (]+/)) {
+                } else if (match(s, /^(INSERT INTO|UPDATE|DELETE FROM|COMMENT ON (TABLE|INDEX|FUNCTION|COLUMN)) [^ (]+/)) {
                     m = split(substr(s, RSTART, RLENGTH), words, " "); object = words[m]
                 } else if (s == "") {
                     continue
@@ -110,12 +122,12 @@ migration_objects_are_schema_qualified() {
 }
 assert_uninventoried_migrations_are_schema_qualified() {
     local migration_file migration_basename unqualified
-    if unqualified="$(printf 'CREATE INDEX x ON chain_phase_state (a);\nUPDATE public.t SET a = 1;\nALTER TABLE "name_surfaces" ADD COLUMN c int;\nDROP INDEX "public"."ok_idx";\nWITH chosen AS (SELECT 1) UPDATE chain_phase_state SET a = 1;\n' \
+    if unqualified="$(printf 'CREATE INDEX x ON chain_phase_state (a);\nUPDATE public.t SET a = 1;\nALTER TABLE "name_surfaces" ADD COLUMN c int;\nDROP INDEX "public"."ok_idx";\nWITH chosen AS (SELECT 1) UPDATE chain_phase_state SET a = 1;\nDROP INDEX IF EXISTS public.old_idx, name_current_lookup_idx CASCADE;\nTRUNCATE public.a, "resources";\n' \
         | migration_objects_are_schema_qualified /dev/stdin)"; then
         printf '%s\n' "schema-qualification check accepted a search-path-relative statement" >&2
         exit 1
     fi
-    if [ "$unqualified" != " CHAIN_PHASE_STATE NAME_SURFACES [unrecognized statement: WITH CHOSEN]" ]; then
+    if [ "$unqualified" != " CHAIN_PHASE_STATE NAME_SURFACES [unrecognized statement: WITH CHOSEN] NAME_CURRENT_LOOKUP_IDX RESOURCES" ]; then
         printf '%s\n' "schema-qualification check misreported the search-path-relative statement: $unqualified" >&2
         exit 1
     fi
