@@ -431,6 +431,79 @@ async fn a_stop_while_phase_start_waits_on_a_held_row_returns_without_it() -> Re
 }
 
 #[tokio::test]
+async fn a_stop_while_post_batch_settlement_waits_on_a_held_row_is_bounded() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_settlement_waits_on_row").await?;
+    let chain_id = "settlement-waits-on-row-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 3).await?;
+    PhaseStore::new(scratch.runner().pool().clone())
+        .initialize_chain(chain_id)
+        .await?;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let blocking = Arc::new(BlockingIngestPhase {
+        heads: HeadMarkers {
+            latest: BlockMarker::new(3, format!("{chain_id}-block-3"))?,
+            safe: Some(BlockMarker::new(2, format!("{chain_id}-block-2"))?),
+            finalized: Some(BlockMarker::new(1, format!("{chain_id}-block-1"))?),
+        },
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    });
+    let runner = runner(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Ingest, blocking)?,
+        available_capacity(),
+        "settlement-waits-on-row-runner",
+    )?
+    .with_stop_deadline(Duration::from_millis(200));
+    let chain = chain(chain_id)?;
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let task = tokio::spawn(async move { runner.run_chain(&chain, run_cancellation).await });
+
+    // The batch is running, so its start has committed and the row is free to
+    // hold. The progress write that follows the batch then blocks on it.
+    entered.notified().await;
+    let mut holder = scratch.pool().begin().await?;
+    sqlx::query(
+        "SELECT 1 FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'ingest' FOR UPDATE",
+    )
+    .bind(chain_id)
+    .execute(&mut *holder)
+    .await?;
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'
+                   AND query LIKE '%chain_phase_state%'",
+            )
+            .fetch_one(scratch.pool())
+            .await?;
+            if waiting >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+
+    cancellation.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .map_err(|_| anyhow::anyhow!("the stop was held by the post-batch settlement"))??;
+    let error = outcome.expect_err("a settlement that outran the stop's deadline is reported");
+    let message = error.to_string();
+    assert!(message.contains("post-batch settlement"), "{message}");
+    assert!(message.contains("did not finish within"), "{message}");
+    assert!(message.contains(chain_id), "{message}");
+    holder.rollback().await?;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn runner_writes_transitions_cursors_heads_and_heartbeats() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_writes").await?;
     let chain_id = "write-chain";
@@ -5812,6 +5885,35 @@ impl Phase for BlockingPhase {
             self.entered.notify_one();
             self.release.notified().await;
             Ok(PhaseBatchOutcome::Complete(PhaseProgress::default()))
+        })
+    }
+}
+
+/// A blocking Ingest batch that completes with a real head, so the settlement
+/// that follows it -- head publication, progress -- runs for real.
+struct BlockingIngestPhase {
+    heads: HeadMarkers,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl Phase for BlockingIngestPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Ingest
+    }
+
+    fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            self.entered.notify_one();
+            self.release.notified().await;
+            let marker = Some(self.heads.latest.clone());
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress {
+                current: marker.clone(),
+                target: marker.clone(),
+                live_handoff: marker,
+                heads: Some(self.heads.clone()),
+                ..PhaseProgress::default()
+            }))
         })
     }
 }

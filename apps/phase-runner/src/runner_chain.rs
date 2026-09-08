@@ -38,7 +38,8 @@ impl PhaseRunner {
         // completion even when a stop is already pending. It is bounded in time
         // instead, so an accepted stop cannot wait on it past the grace period.
         bounded_recovery(
-            "settlement",
+            self.stop_deadline,
+            "start-up settlement",
             "",
             &cancellation,
             self.settle_unconfigured_phases(config),
@@ -110,10 +111,16 @@ impl PhaseRunner {
         // on a pending stop: doing so leaves those phases stuck and the next phase
         // start refuses. Both are bounded in time instead, so an accepted stop cannot
         // wait on them past the grace period.
-        bounded_recovery("recovery", &chain.chain_id, &cancellation, async {
-            self.store.initialize_chain(&chain.chain_id).await?;
-            self.recover_stopped_phases(chain).await
-        })
+        bounded_recovery(
+            self.stop_deadline,
+            "start-up recovery",
+            &chain.chain_id,
+            &cancellation,
+            async {
+                self.store.initialize_chain(&chain.chain_id).await?;
+                self.recover_stopped_phases(chain).await
+            },
+        )
         .await?;
         if cancellation.is_cancelled() {
             return Ok(());
@@ -179,22 +186,20 @@ impl PhaseRunner {
     }
 }
 
-/// Start-up recovery is required cleanup, so a pending stop does not abandon it.
-/// It is bounded in wall-clock instead: settling one phase is a `pg_try_advisory_lock`
-/// plus a single-row update, and neither the connection attempt nor the update carries
-/// its own timeout, so without this a stalled connection or a row-lock wait could hold
-/// an accepted stop until the supervisor escalates to SIGKILL.
-#[cfg(not(test))]
-const RECOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
-#[cfg(test)]
-const RECOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_millis(50);
+/// Required work that a pending stop must not abandon -- start-up recovery, and
+/// the writes that record a finished batch -- is bounded in wall-clock instead:
+/// none of those statements carries its own timeout, so without this a stalled
+/// connection or a row-lock wait could hold an accepted stop until the
+/// supervisor escalates to SIGKILL.
+pub(super) const STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
-pub(super) async fn bounded_recovery(
+pub(super) async fn bounded_recovery<T>(
+    deadline: std::time::Duration,
     what: &str,
     chain_id: &str,
     cancellation: &CancellationToken,
-    work: impl std::future::Future<Output = RunnerResult<()>>,
-) -> RunnerResult<()> {
+    work: impl std::future::Future<Output = RunnerResult<T>>,
+) -> RunnerResult<T> {
     tokio::pin!(work);
     tokio::select! {
         result = &mut work => return result,
@@ -205,16 +210,16 @@ pub(super) async fn bounded_recovery(
     // wait it out past the supervisor's grace period. With no stop pending there is no
     // deadline at all: ordinary contention on a `chain_phase_state` row should delay a
     // start, not truncate its settlement pass.
-    match tokio::time::timeout(RECOVERY_DEADLINE, work).await {
+    match tokio::time::timeout(deadline, work).await {
         Ok(result) => result,
-        Err(_elapsed) => Err(RunnerError::transient(format!(
-            "start-up {what}{} did not finish within {} s of an accepted stop; another process may hold its rows",
+        Err(_elapsed) => Err(RunnerError::stop_bound_expired(format!(
+            "{what}{} did not finish within {:.1} s of an accepted stop; another process may hold its rows",
             if chain_id.is_empty() {
                 String::new()
             } else {
                 format!(" for chain {chain_id}")
             },
-            RECOVERY_DEADLINE.as_secs()
+            deadline.as_secs_f64()
         ))),
     }
 }
@@ -223,15 +228,22 @@ pub(super) async fn bounded_recovery(
 mod recovery_deadline_tests {
     use tokio_util::sync::CancellationToken;
 
+    const DEADLINE: std::time::Duration = std::time::Duration::from_millis(50);
+
     #[tokio::test]
     async fn recovery_that_never_finishes_fails_once_a_stop_is_accepted() {
         let cancellation = CancellationToken::new();
         cancellation.cancel();
-        let error = super::bounded_recovery("recovery", "some-chain", &cancellation, async {
-            std::future::pending::<super::RunnerResult<()>>().await
-        })
+        let error = super::bounded_recovery(
+            DEADLINE,
+            "start-up recovery",
+            "some-chain",
+            &cancellation,
+            async { std::future::pending::<super::RunnerResult<()>>().await },
+        )
         .await
         .expect_err("a recovery that never finishes must not return Ok");
+        assert!(!error.is_retryable(), "the stopping run must not retry it");
         let message = error.to_string();
         assert!(message.contains("did not finish within"), "{message}");
         assert!(message.contains("some-chain"), "{message}");
@@ -240,10 +252,16 @@ mod recovery_deadline_tests {
     #[tokio::test]
     async fn recovery_outlasts_the_deadline_when_no_stop_is_pending() {
         // No stop, so contention must delay the start rather than truncate it.
-        super::bounded_recovery("recovery", "some-chain", &CancellationToken::new(), async {
-            tokio::time::sleep(super::RECOVERY_DEADLINE * 3).await;
-            Ok(())
-        })
+        super::bounded_recovery(
+            DEADLINE,
+            "recovery",
+            "some-chain",
+            &CancellationToken::new(),
+            async {
+                tokio::time::sleep(DEADLINE * 3).await;
+                Ok(())
+            },
+        )
         .await
         .expect("without a stop there is no deadline");
     }
@@ -252,8 +270,8 @@ mod recovery_deadline_tests {
     async fn recovery_that_finishes_inside_the_deadline_is_untouched() {
         let cancellation = CancellationToken::new();
         cancellation.cancel();
-        super::bounded_recovery("recovery", "some-chain", &cancellation, async {
-            tokio::time::sleep(super::RECOVERY_DEADLINE / 5).await;
+        super::bounded_recovery(DEADLINE, "recovery", "some-chain", &cancellation, async {
+            tokio::time::sleep(DEADLINE / 5).await;
             Ok(())
         })
         .await

@@ -796,15 +796,21 @@ nonzero (`apps/phase-runner/src/runner.rs`, `apps/phase-runner/src/main.rs`).
 That is the incomplete-redo signal, not a failed shutdown: the redo stamp
 survives, the next start resumes it, and the exit code should not be read as
 corruption. Expect it whenever you stop a runner mid-redo. The second case is a
-stop that arrives while start-up settlement or stopped-phase recovery is blocked
-on its rows: recovery is required cleanup, so it is not abandoned, but it is
+stop that arrives while required work is blocked on its rows: start-up
+settlement or stopped-phase recovery, or the writes that record a batch that
+has already finished — its head publication, progress, completion, and
+heartbeat, and the phase's completion or failure record. None of that is
+abandoned, since the batch's own writes are already committed, but it is
 given a bounded ten seconds from the stop and then reports a transient error
-(`apps/phase-runner/src/runner_chain.rs`, `bounded_recovery`). Nothing is
-corrupted and the next start retries the same cleanup. Row contention is one
-cause — another process holding `chain_phase_state` — but not the only one:
-the same deadline covers opening the lock's own connection and waiting on the
-pool, so a stalled database or a saturated pool reports the same way. Check
-connectivity before hunting for a lock holder.
+that the stopping run does not retry (`apps/phase-runner/src/runner_chain.rs`,
+`bounded_recovery`). Nothing is corrupted: for start-up work the next start
+retries the same cleanup, and for a batch the durable state is the one a kill
+between the batch and its progress write leaves, which the next start handles
+the same way. Row contention is one cause — another process holding
+`chain_phase_state` — but not the only one: the same deadline covers opening
+the lock's own connection and waiting on the pool, so a stalled database or a
+saturated pool reports the same way. Check connectivity before hunting for a
+lock holder.
 
 An explicit `phase-runner redo` exits nonzero on a stop for the same reason, but
 it needs a different response. A stop during its setup, or at a batch boundary

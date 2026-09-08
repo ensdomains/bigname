@@ -11,8 +11,6 @@ use crate::{
     config::{ChainConfig, TimingConfig},
     database::RunnerDatabase,
     error::{ErrorKind, RunnerError, RunnerResult, VERIFICATION_MISMATCH_PREFIX},
-    heads::publish_heads,
-    ingest_progress,
     phase::{Phase, PhaseBatchOutcome, PhaseName, PhaseSet, RunMode},
     phase_lock::PhaseLock,
     progress_monitor::RunnerPhaseProgress,
@@ -22,7 +20,7 @@ use crate::{
     },
     shutdown::until_cancelled,
     state::PhaseStore,
-    state_persistence::{record_live_verification_mismatch, validate_progress},
+    state_persistence::record_live_verification_mismatch,
 };
 
 #[path = "runner_batch.rs"]
@@ -31,6 +29,7 @@ mod batch;
 mod capacity_wait;
 #[path = "runner_chain.rs"]
 mod chain;
+use chain::bounded_recovery;
 #[path = "runner_context.rs"]
 mod context;
 #[path = "runner_live_follow.rs"]
@@ -75,6 +74,7 @@ pub struct PhaseRunner {
     after_required_redo_catch_up: Option<live_follow::AfterRequiredRedoCatchUp>,
     loop_heartbeat: Option<crate::metrics::RunnerLoopHeartbeat>,
     phase_progress: RunnerPhaseProgress,
+    stop_deadline: std::time::Duration,
 }
 
 impl PhaseRunner {
@@ -108,6 +108,7 @@ impl PhaseRunner {
             after_required_redo_catch_up: None,
             loop_heartbeat: None,
             phase_progress: RunnerPhaseProgress::default(),
+            stop_deadline: chain::STOP_DEADLINE,
         })
     }
 
@@ -376,12 +377,29 @@ impl PhaseRunner {
                 }
             };
         }
+        // Completion and failure are recorded on the lock's connection, which after
+        // a stop may be the stall that ended the loop; both are bounded then, like
+        // the redo bookkeeping above.
         match result {
             Ok(PhaseLoopResult::Completed(progress)) => {
-                phase_lock.check_alive().await?;
-                self.store
-                    .complete_phase_with_lock(phase_lock, &chain.chain_id, phase_name, &progress)
-                    .await
+                bounded_recovery(
+                    self.stop_deadline,
+                    "phase completion",
+                    &chain.chain_id,
+                    &cancellation,
+                    async {
+                        phase_lock.check_alive().await?;
+                        self.store
+                            .complete_phase_with_lock(
+                                phase_lock,
+                                &chain.chain_id,
+                                phase_name,
+                                &progress,
+                            )
+                            .await
+                    },
+                )
+                .await
             }
             Ok(PhaseLoopResult::Cancelled) => {
                 // Only a stop produces this arm, so a probe of the lock here would
@@ -410,7 +428,6 @@ impl PhaseRunner {
                 Ok(())
             }
             Err(error) => {
-                phase_lock.check_alive().await?;
                 let failure_reason = if phase_name == PhaseName::Verify
                     && error.kind() == ErrorKind::VerificationMismatch
                 {
@@ -418,11 +435,20 @@ impl PhaseRunner {
                 } else {
                     error.to_string()
                 };
-                if let Err(record_error) = self
-                    .store
-                    .fail_phase(&chain.chain_id, phase_name, &failure_reason)
-                    .await
-                {
+                let record = bounded_recovery(
+                    self.stop_deadline,
+                    "phase failure recording",
+                    &chain.chain_id,
+                    &cancellation,
+                    async {
+                        phase_lock.check_alive().await?;
+                        self.store
+                            .fail_phase(&chain.chain_id, phase_name, &failure_reason)
+                            .await
+                    },
+                )
+                .await;
+                if let Err(record_error) = record {
                     return Err(error.with_secondary("record phase failure", record_error));
                 }
                 Err(error)
@@ -481,72 +507,30 @@ impl PhaseRunner {
             let outcome = phase_lock
                 .run_while_alive(self.timing.live_poll_interval, batch)
                 .await;
-            phase_lock.check_alive().await?;
-            let outcome = outcome?;
-            let progress = outcome.progress().clone();
-            validate_progress(
-                phase_name,
-                &progress,
-                matches!(&outcome, PhaseBatchOutcome::Complete(_)),
-            )?;
-            if phase_name == PhaseName::Verify {
-                crate::verify_phase::validate_reported_level(
-                    &chain.chain_id,
-                    &chain.sources,
-                    progress.verification_level,
-                )?;
-            }
-            if phase_name == PhaseName::Ingest && matches!(mode, RunMode::Normal) {
-                ingest_progress::validate(
-                    &chain.intake_sources(),
-                    &progress,
-                    matches!(&outcome, PhaseBatchOutcome::Complete(_)),
-                )?;
-            }
-            if progress.heads.is_some()
-                && !matches!(phase_name, PhaseName::Ingest | PhaseName::Live)
-            {
-                return Err(RunnerError::data_integrity(format!(
-                    "phase {phase_name} cannot publish chain heads; only ingest and live own \
-                     chain-head updates"
-                )));
-            }
-            if matches!(mode, RunMode::Normal)
-                && let Some(heads) = &progress.heads
-            {
-                phase_lock.check_alive().await?;
-                publish_heads(self.store.pool(), &chain.chain_id, heads).await?;
-            }
-            phase_lock.check_alive().await?;
-            if mode.is_redo() {
-                self.before_redo_progress_write().await;
-            }
-            if phase_name == PhaseName::Ingest && matches!(mode, RunMode::Normal) {
-                phase_lock.check_alive().await?;
-                self.store
-                    .record_ingest_progress(&chain.chain_id, &chain.intake_sources(), &progress)
-                    .await?;
-            } else {
-                self.store
-                    .record_progress(&chain.chain_id, phase_name, &mode, redo_attempt, &progress)
-                    .await?;
-            }
-            self.phase_progress
-                .record_committed(progress_token, &outcome);
-            if matches!(outcome, PhaseBatchOutcome::Complete(_)) {
-                self.confirm_progress(context).await?;
-            }
-            if phase_name == PhaseName::Verify && matches!(mode, RunMode::Normal) {
-                crate::verify_level::warn_optional_downgrade(
-                    &chain.chain_id,
+            // The batch has finished; what follows records it and is required, since
+            // the batch's own writes are already committed. A stop accepted meanwhile
+            // does not abandon it, but bounds it: on expiry the run exits with a
+            // transient error and the durable state is what a kill between the batch
+            // and its progress write would have left, which the next start handles.
+            let (outcome, progress) = bounded_recovery(
+                self.stop_deadline,
+                "post-batch settlement",
+                &chain.chain_id,
+                &cancellation,
+                self.settle_batch(
+                    chain,
+                    phase_name,
+                    &mode,
+                    redo_attempt,
+                    context,
+                    outcome,
+                    progress_token,
                     retained_verification_level,
-                    progress.verification_level,
-                );
-            }
-            phase_lock.check_alive().await?;
-            heartbeat
-                .record_if_due(&self.store, &self.instance_id, &chain.chain_id, phase_name)
-                .await?;
+                    heartbeat,
+                    phase_lock,
+                ),
+            )
+            .await?;
             self.record_loop_progress(&chain.chain_id);
             reserved_write_bytes = progress.estimated_write_bytes;
 
