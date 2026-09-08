@@ -3932,7 +3932,7 @@ fn reverse_plan_scan_work(plan: &Value, context: ReversePlanContext) -> Result<R
                     && (kind != "Bitmap Heap Scan" || bounds.len() == 1),
                 "empty or orphan bitmap tree"
             );
-            bounded = if kind == "BitmapOr" {
+            bounded = if kind == "BitmapOr" || table == Some("address_names_current") {
                 bounds.iter().all(|v| *v)
             } else {
                 bounds.iter().any(|v| *v)
@@ -4146,9 +4146,14 @@ fn reverse_plan_validator_distinguishes_relation_access() {
         heap.as_object_mut().unwrap().remove("Index Cond");
         heap["Plans"] = json!([{"Node Type": "BitmapOr", "Plans": [leaf.clone(), leaf.clone()]}]);
         assert!(reverse_plan_scan_work(&bitmap, large).is_ok());
+        let mut valid_and = bitmap.clone();
+        valid_and[0]["Plan"]["Plans"][0]["Plans"][0]["Node Type"] = json!("BitmapAnd");
+        assert!(reverse_plan_scan_work(&valid_and, large).is_ok());
         let mut hidden = bitmap.clone();
         hidden[0]["Plan"]["Plans"][0]["Plans"][0]["Plans"][1]["Index Cond"] =
             json!("logical_name_id > ''::text");
+        assert!(reverse_plan_scan_work(&hidden, large).is_err());
+        hidden[0]["Plan"]["Plans"][0]["Plans"][0]["Node Type"] = json!("BitmapAnd");
         assert!(reverse_plan_scan_work(&hidden, large).is_err());
         let mut repeated = bitmap.clone();
         repeated[0]["Plan"]["Plans"][0]["Plans"][0]["Plans"][1]["Actual Rows"] = json!(0);
