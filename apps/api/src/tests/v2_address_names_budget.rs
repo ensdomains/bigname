@@ -207,8 +207,17 @@ async fn v2_address_names_permission_id_recovery_ignores_name_anchor_and_product
     for product_id in [Uuid::from_u128(0xb100), id] {
         for kind in ["registry_only", "registrar", "wrapper"] {
             for unsupported in [false, true] {
-                sqlx::query("UPDATE bigname_phase.name_current SET declared_summary=jsonb_set(declared_summary, '{registration,resource_id}', to_jsonb($1::text)), coverage=jsonb_build_object('status', $2::text) WHERE raw_name='alpha.eth'")
-                    .bind(product_id.to_string()).bind(if unsupported { "unsupported" } else { "projected" }).execute(&database.pool).await?;
+                sqlx::query(
+                    "UPDATE bigname_phase.name_current
+                     SET declared_summary=jsonb_set(declared_summary, '{registration,resource_id}', to_jsonb($1::text)),
+                         support_status=$2, unsupported_reason=$3
+                     WHERE raw_name='alpha.eth'",
+                )
+                .bind(product_id.to_string())
+                .bind(if unsupported { "unsupported" } else { "supported" })
+                .bind(unsupported.then_some("conflicting_current_ens_authority"))
+                .execute(&database.pool)
+                .await?;
                 // Preserve the registry binding that supplies the operator grant.
                 sqlx::query("UPDATE bigname_phase.permissions_current_resource_summary SET authority_kind=$1 WHERE resource_id=$2")
                     .bind(kind).bind(id).execute(&database.pool).await?;
