@@ -25,14 +25,14 @@ use crate::projection_helpers::{
 
 const ACCOUNT_READ_FILTER: &str = r#"
  AND aps.canonicality_summary->>'state' IN ('canonical','safe','finalized')
- AND EXISTS (SELECT 1 FROM bigname_phase.chain_lineage account_lineage
+ AND (SELECT account_lineage.canonicality_state FROM bigname_phase.chain_lineage account_lineage
    WHERE account_lineage.chain_id=aps.chain_id
-     AND account_lineage.block_hash=aps.chain_positions->>'target_block_hash'
-     AND account_lineage.canonicality_state IN ('canonical','safe','finalized'))
- AND EXISTS (SELECT 1 FROM bigname_phase.chain_lineage binding_lineage
+     AND account_lineage.block_hash=aps.chain_positions->>'target_block_hash')
+   IN ('canonical','safe','finalized')
+ AND (SELECT binding_lineage.canonicality_state FROM bigname_phase.chain_lineage binding_lineage
    WHERE binding_lineage.chain_id=summary.registry_binding_provenance->>'chain_id'
-     AND binding_lineage.block_hash=summary.registry_binding_chain_positions->>'block_hash'
-     AND binding_lineage.canonicality_state IN ('canonical','safe','finalized'))
+     AND binding_lineage.block_hash=summary.registry_binding_chain_positions->>'block_hash')
+   IN ('canonical','safe','finalized')
 "#;
 
 const DIRECT_COLUMNS: &str = r#"pc.resource_id,pc.subject,pc.scope AS scope_storage_key,
