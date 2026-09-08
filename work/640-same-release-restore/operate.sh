@@ -170,7 +170,8 @@ while :; do
   remaining=$((until - SECONDS))
   ((remaining > 0)) || { echo 'Owned PostgreSQL TCP readiness expired' >&2; exit 1; }
   ((remaining <= BIGNAME_RESTORE_COMMAND_SECS)) || remaining=$BIGNAME_RESTORE_COMMAND_SECS
-  [[ $(timeout --kill-after="$BIGNAME_RESTORE_SHUTDOWN_SECS" "$remaining" "$docker_binary" inspect --format '{{.State.Running}}' "$container") == true ]]
+  if running=$(timeout --kill-after="$BIGNAME_RESTORE_SHUTDOWN_SECS" "$remaining" "$docker_binary" inspect --format '{{.State.Running}}' "$container"); then :; else exit $?; fi
+  [[ $running == true ]]
   remaining=$((until - SECONDS))
   ((remaining > 0)) || { echo 'Owned PostgreSQL TCP readiness expired' >&2; exit 1; }
   ((remaining <= BIGNAME_RESTORE_COMMAND_SECS)) || remaining=$BIGNAME_RESTORE_COMMAND_SECS
