@@ -48,8 +48,12 @@ promise:
   `crates/adapters/src`, `crates/interpret/src/write`, and
   `crates/manifests/src`, to a manifest's `[[abi.events]]` declarations, to the
   named semantic source files, or to the pinned lockfile families does.
-  `#[cfg(test)]` modules under those roots and a manifest's
-  `normalizer_version` do not (`crates/content-hash/src/tests.rs` pins both),
+  A `#[cfg(test)]`-gated *external* module file under those roots does not
+  (`crates/content-hash/src/compute.rs`, `source_exclusion`, pinned by
+  `crates/content-hash/src/tests.rs`), but an inline `#[cfg(test)] mod` inside
+  a covered file is hashed with the file, so a test-only edit there rotates
+  the hash like any other edit; a manifest's `normalizer_version` does not
+  rotate it either,
   and a manifest's `read_features` rotates the separate fingerprint recorded
   by the [manifest-authority marker](../glossary.md#manifest-authority-marker)
   with a byte-identical interpreter hash. The triggers are independent, and

@@ -102,6 +102,19 @@ phase_migration_uses_production_schema() {
 legacy_public_schema_drop="20260806120000_drop_legacy_public_schema.sql"
 migration_objects_are_schema_qualified() {
     awk "$sql_comment_stripper"'
+        # A name is qualified when a dot separates two identifiers, each bare or
+        # double-quoted; a dot inside one quoted identifier ("phase.audit") does
+        # not count. `parts` is how many such identifiers the name has.
+        function parts(name,    n, i, c, inq) {
+            n = 1; inq = 0
+            for (i = 1; i <= length(name); i++) {
+                c = substr(name, i, 1)
+                if (c == "\"") { inq = !inq } else if (c == "." && !inq) { n++ }
+            }
+            return n
+        }
+        function qualified(name) { return parts(name) >= 2 }
+        function bare(name) { gsub(/"/, "", name); return name }
         { text = text " " strip_sql_comments($0) }
         END {
             if (quote != "") { print " [unterminated quote at end of file]"; exit 1 }
@@ -120,8 +133,7 @@ migration_objects_are_schema_qualified() {
                     t = split(rest, targets, ",")
                     for (j = 1; j <= t; j++) {
                         object = targets[j]; gsub(/^ +| +$/, "", object); sub(/[ (].*$/, "", object)
-                        gsub(/"/, "", object)
-                        if (object != "" && object !~ /\./) { unqualified = unqualified " " object }
+                        if (object != "" && !qualified(object)) { unqualified = unqualified " " bare(object) }
                     }
                     continue
                 } else if (match(s, /^(CREATE( OR REPLACE)?|ALTER)( MATERIALIZED)? (TABLE|INDEX|FUNCTION|VIEW|SEQUENCE|TYPE|TRIGGER)( IF NOT EXISTS)?( ONLY)? [^ (]+/)) {
@@ -130,8 +142,7 @@ migration_objects_are_schema_qualified() {
                     # A column comment names schema.table.column; two parts is a
                     # search-path-relative table with a column, not a qualified one.
                     m = split(substr(s, RSTART, RLENGTH), words, " "); object = words[m]
-                    gsub(/"/, "", object)
-                    if (split(object, parts, ".") < 3) { unqualified = unqualified " " object }
+                    if (parts(object) < 3) { unqualified = unqualified " " bare(object) }
                     continue
                 } else if (match(s, /^(INSERT INTO|UPDATE|DELETE FROM|COMMENT ON (TABLE|INDEX|FUNCTION)) [^ (]+/)) {
                     m = split(substr(s, RSTART, RLENGTH), words, " "); object = words[m]
@@ -144,8 +155,7 @@ migration_objects_are_schema_qualified() {
                     unqualified = unqualified " [unrecognized statement: " words[1] " " words[2] "]"
                     continue
                 }
-                gsub(/"/, "", object)
-                if (object !~ /\./) { unqualified = unqualified " " object; reported[object] = 1 }
+                if (!qualified(object)) { unqualified = unqualified " " bare(object); reported[bare(object)] = 1 }
             }
             # Any relation a clause names -- a parent to inherit or partition from,
             # a foreign key target, a LIKE source, a FROM/JOIN/INTO/ON relation --
@@ -155,15 +165,18 @@ migration_objects_are_schema_qualified() {
             n = split(toupper(text), tokens, " ")
             for (i = 1; i < n; i++) {
                 keyword = tokens[i]; sub(/^\(+/, "", keyword)
-                if (keyword ~ /^(INHERITS|OF|PARTITION|REFERENCES|LIKE|JOIN|FROM|INTO|ON|TABLE|VIEW|SEQUENCE)$/ || keyword ~ /^INHERITS\(/) {
+                if (keyword ~ /^(INHERITS|OF|PARTITION|REFERENCES|LIKE|JOIN|FROM|INTO|ON|USING|TABLE|VIEW|SEQUENCE)$/ || keyword ~ /^INHERITS\(/) {
                     object = tokens[i + 1]
                     if (keyword ~ /^INHERITS\(/) { object = substr(keyword, 10) }
-                    sub(/^\(+/, "", object); sub(/[),;].*$/, "", object); gsub(/"/, "", object)
-                    if (object ~ /^[A-Z_]/ && object !~ /\./ \
+                    # USING also introduces an index method, a column list, or a
+                    # cast expression; those are not relations.
+                    if (keyword == "USING" && (object ~ /^\(/ || object ~ /::/ || object ~ /^(BTREE|HASH|GIN|GIST|SPGIST|BRIN)$/)) { continue }
+                    sub(/^\(+/, "", object); sub(/[),;].*$/, "", object)
+                    if (object ~ /^["A-Z_]/ && !qualified(object) \
                         && object !~ /^(CONFLICT|DELETE|UPDATE|INSERT|SELECT|TRUE|FALSE|NULL|COMMIT|ONLY|IF|EXISTS|NOT|UNIQUE|CONCURRENTLY|DISTINCT|EACH|STATEMENT|ROW|CASCADE|RESTRICT|VALUES|COLUMN|CONSTRAINT|FUNCTION|OR|AND|IN|AS|IS|SET|WHERE|PARTITION|OF|DEFAULT|SCHEMA|EXTENSION|TYPE|ATTACH|DETACH|FOR|BY|TABLE|INDEX|VIEW|SEQUENCE|TRIGGER|MATERIALIZED|TEMP|TEMPORARY|UNLOGGED)$/ \
-                        && !(object in reported)) {
-                        reported[object] = 1
-                        unqualified = unqualified " " object
+                        && !(bare(object) in reported)) {
+                        reported[bare(object)] = 1
+                        unqualified = unqualified " " bare(object)
                     }
                 }
             }
@@ -180,12 +193,12 @@ migration_uses_unsupported_lexical_forms() {
 }
 assert_uninventoried_migrations_are_schema_qualified() {
     local migration_file migration_basename unqualified
-    if unqualified="$(printf 'CREATE INDEX x ON chain_phase_state (a);\nUPDATE public.t SET a = 1;\nALTER TABLE "name_surfaces" ADD COLUMN c int;\nDROP INDEX "public"."ok_idx";\nWITH chosen AS (SELECT 1) UPDATE chain_phase_state SET a = 1;\nDROP INDEX IF EXISTS public.old_idx, name_current_lookup_idx CASCADE;\nTRUNCATE public.a, "resources";\nCOMMENT ON COLUMN chain_phase_state.phase_name IS '"'"'x'"'"';\nCOMMENT ON COLUMN public.t.c IS '"'"'y'"'"';\nCOMMENT ON TABLE public.audit IS '"'"'--'"'"'; UPDATE resources SET a = 1;\nCOMMENT ON TABLE public.b IS '"'"'it'"'"''"'"'s -- fine'"'"'; -- DROP TABLE nope\nCREATE TABLE public.shadow () INHERITS (chain_phase_state);\nCREATE TABLE public.part PARTITION OF resources FOR VALUES IN (1);\nALTER TABLE public.child ADD CONSTRAINT fk FOREIGN KEY (a) REFERENCES name_surfaces (id);\nCREATE TABLE public.copy (LIKE token_lineages);\n' \
+    if unqualified="$(printf 'CREATE INDEX x ON chain_phase_state (a);\nUPDATE public.t SET a = 1;\nALTER TABLE "name_surfaces" ADD COLUMN c int;\nDROP INDEX "public"."ok_idx";\nWITH chosen AS (SELECT 1) UPDATE chain_phase_state SET a = 1;\nDROP INDEX IF EXISTS public.old_idx, name_current_lookup_idx CASCADE;\nTRUNCATE public.a, "resources";\nCOMMENT ON COLUMN chain_phase_state.phase_name IS '"'"'x'"'"';\nCOMMENT ON COLUMN public.t.c IS '"'"'y'"'"';\nCOMMENT ON TABLE public.audit IS '"'"'--'"'"'; UPDATE resources SET a = 1;\nCOMMENT ON TABLE public.b IS '"'"'it'"'"''"'"'s -- fine'"'"'; -- DROP TABLE nope\nCREATE TABLE public.shadow () INHERITS (chain_phase_state);\nCREATE TABLE public.part PARTITION OF resources FOR VALUES IN (1);\nALTER TABLE public.child ADD CONSTRAINT fk FOREIGN KEY (a) REFERENCES name_surfaces (id);\nCREATE TABLE public.copy (LIKE token_lineages);\nCREATE TABLE "phase.audit" (id int);\nDELETE FROM public.audit USING chain_lineage WHERE true;\nCREATE INDEX i ON public.audit USING btree (id);\n' \
         | migration_objects_are_schema_qualified /dev/stdin)"; then
         printf '%s\n' "schema-qualification check accepted a search-path-relative statement" >&2
         exit 1
     fi
-    if [ "$unqualified" != " CHAIN_PHASE_STATE NAME_SURFACES [unrecognized statement: WITH CHOSEN] NAME_CURRENT_LOOKUP_IDX RESOURCES CHAIN_PHASE_STATE.PHASE_NAME RESOURCES TOKEN_LINEAGES" ]; then
+    if [ "$unqualified" != " CHAIN_PHASE_STATE NAME_SURFACES [unrecognized statement: WITH CHOSEN] NAME_CURRENT_LOOKUP_IDX RESOURCES CHAIN_PHASE_STATE.PHASE_NAME RESOURCES PHASE.AUDIT TOKEN_LINEAGES CHAIN_LINEAGE" ]; then
         printf '%s\n' "schema-qualification check misreported the search-path-relative statement: $unqualified" >&2
         exit 1
     fi
