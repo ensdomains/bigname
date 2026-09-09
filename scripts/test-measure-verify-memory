@@ -244,6 +244,42 @@ class ValidatorTests(unittest.TestCase):
                 self.assertEqual((used / "watch.toml").stat().st_mode & 0o222, 0)
             return result
 
+    def test_full_measurement_requires_positive_loaded_native_query(self):
+        empty = [event(stage, rows=0, logical_bytes=0, max_item_bytes=0, stored_rows=0, stored_bytes=0, provider_rows=0, provider_bytes=0, receipt_bytes=0, hash_bytes=0, output_bytes=0)
+                 for stage in ("reth_native_query_start", "reth_native_query_empty", "reth_complete_receipt_peak", "provider_query_return")]
+        a = fixture()
+        for side in ("stored", "provider"): a[side] = dict.fromkeys(a[side], 0)
+        reader = module.Observations(a)
+        values = [v for v in complete_stream() if v["fields"]["stage"] not in module.NATIVE_WITNESSES]
+        with self.assertRaisesRegex(ValueError, "positive loaded"):
+            for sequence, value in enumerate(values, 1):
+                f = value["fields"]; f["sequence"] = sequence
+                if f["stage"] == "reth_native_query_loaded": f["stage"] = "reth_native_query_empty"
+                for key in ("rows", "logical_bytes", "max_item_bytes", "stored_rows", "stored_bytes", "provider_rows", "provider_bytes", "receipt_bytes", "hash_bytes", "output_bytes"): f[key] = 0
+                reader.accept(value)
+            reader.finish()
+        reader = module.Observations(fixture())
+        for sequence, value in enumerate(empty + complete_stream(), 1):
+            value["fields"]["sequence"] = sequence; reader.accept(value)
+        reader.finish()
+
+    def test_main_uses_same_admission_bytes_after_path_replacement(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory); path = root / "input.json"; out = root / "output"
+            a = fixture(); raw = json.dumps(a).encode(); path.write_bytes(raw)
+            changed = json.dumps(dict(a, run_id="replacement")); read, digest = Path.read_bytes, module.digest
+            def replacing_read(file):
+                data = read(file)
+                if file == path: path.write_text(changed)
+                return data
+            def replacing_digest(file):
+                value = digest(file); path.write_text(changed); return value
+            argv = ["collector", "--admission", str(path), "--admission-sha256", hashlib.sha256(raw).hexdigest(), "--output", str(out)]
+            with patch.object(module.sys, "argv", argv), patch.object(Path, "read_bytes", replacing_read), patch.object(module, "digest", replacing_digest), patch.object(module, "run", return_value={"valid": True}) as run:
+                self.assertEqual(module.main(), 0)
+                self.assertEqual(run.call_args.args[0], a); self.assertEqual(read(out / "admission.json"), raw)
+                self.assertNotEqual(read(path), raw)
+
     def test_collector_rejects_retry_even_when_final_inventory_matches(self):
         for partial in ([], [event("stored_map_before_query_consume")]):
             reader = module.Observations(fixture()); values = partial + complete_stream()
@@ -380,6 +416,54 @@ class ValidatorTests(unittest.TestCase):
                     for bad in (row.replace(":EA60", ":EA61"), row.replace(" 99", " 98"), row + row):
                         (root / "net" / table).write_text("header\n" + bad)
                         with self.assertRaises(ValueError): module.postgres_connection(a, value)
+
+    def test_stream_requires_all_actual_connection_roles_and_bounds_count(self):
+        reader = module.Observations(fixture())
+        reader.database_check = lambda f: {"role": f["database_role"]}; reader.database_witnesses = []
+        with self.assertRaisesRegex(ValueError, "database connection witnesses missing"):
+            for value in complete_stream(): reader.accept(value)
+            reader.finish()
+        reader = module.Observations(fixture(), lambda f: {"role": f["database_role"]})
+        values = [event("postgres_connection", attempt=0, database_role=role) for role in ("writer", "reader", "manifest_lock", "phase_lock")]
+        for sequence, value in enumerate(values + complete_stream(), 1):
+            value["fields"]["sequence"] = sequence; reader.accept(value)
+        reader.finish()
+        while len(reader.database_witnesses) < 128:
+            reader.accept(event("postgres_connection", reader.sequence + 1, attempt=0, database_role="writer"))
+        with self.assertRaisesRegex(ValueError, "connection ceiling"):
+            reader.accept(event("postgres_connection", reader.sequence + 1, attempt=0, database_role="writer"))
+
+    def test_actual_database_witness_requires_both_live_endpoint_owners(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for pid, inner, inode in ((901, 77, 99), (902, 88, 100)):
+                proc = root / str(pid)
+                for child in ("fd", "net", "ns"): (proc / child).mkdir(parents=True)
+                (proc / "status").write_text(f"NSpid: {pid} {inner}\n")
+                (proc / "fd/3").symlink_to(f"socket:[{inode}]")
+                (proc / "ns/pid").symlink_to(f"pid:[{pid}]"); (proc / "ns/net").symlink_to("net:[34]")
+            a = dict(database=dict(name="fixture", oid=1, system_identifier="cluster"), postgres_cgroup="pg", runner_cgroup="runner")
+            value = dict(a["database"], backend_pid=77, server_address="127.0.0.1", server_port=5432, client_address="127.0.0.1", client_port=60000)
+            fields = dict(database_role="writer", runner_pid=88, database=json.dumps(value))
+            rows = {901: "0: 0100007F:1538 0100007F:EA60 01 0:0 0:0 0 0 0 99\n", 902: "0: 0100007F:EA60 0100007F:1538 01 0:0 0:0 0 0 0 100\n"}
+            for pid, row in rows.items(): (root / str(pid) / "net/tcp").write_text("header\n" + row)
+            members = {"pg": "901", "runner": "902"}
+            with patch.object(module, "Path", side_effect=lambda *args: root / args[1] if len(args) == 2 and args[0] == "/proc" else Path(*args)), patch.object(module, "cgroup", side_effect=lambda group: {"cgroup.procs": members[group]}):
+                witness = module.runner_database(a, fields, float("inf"))
+                self.assertEqual((witness["backend"]["host_pid"], witness["runner"]["host_pid"]), (901, 902))
+                for group in members:
+                    saved = members[group]; members[group] = ""
+                    with self.subTest(group=group), self.assertRaises(ValueError): module.runner_database(a, fields, float("inf"))
+                    members[group] = saved
+                self.assertEqual(module.postgres_connection(a, value)["host_pid"], 901)
+                (root / "902/net/tcp").write_text("header\n" + rows[902].replace(":EA60", ":EA61"))
+                with self.assertRaisesRegex(ValueError, "runner cgroup"): module.runner_database(a, fields, float("inf"))
+                (root / "902/net/tcp").write_text("header\n" + rows[902])
+                with self.assertRaisesRegex(ValueError, "identity"):
+                    module.runner_database(a, dict(fields, database=json.dumps(dict(value, system_identifier="other"))), float("inf"))
+                with self.assertRaisesRegex(ValueError, "deadline"): module.runner_database(a, fields, 0)
+                (root / "901/fd/3").unlink()
+                with self.assertRaisesRegex(ValueError, "PostgreSQL cgroup"): module.runner_database(a, fields, float("inf"))
 
     def test_collector_deadline_includes_startup_and_cleanup(self):
         for options in ({"seconds": 10}, {"cleanup_elapsed": 31}):

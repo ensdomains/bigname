@@ -111,30 +111,51 @@ def counters(text):
     return {key: int(value) for key, value in (line.split() for line in text.splitlines())}
 
 
-def postgres_connection(a, value):
+def tcp_connection(group, value, namespace_pid, reverse, deadline):
     require(value["server_address"] and value["client_address"], "direct TCP PostgreSQL observation required")
     family = socket.AF_INET6 if ":" in value["server_address"] else socket.AF_INET
+    def check(): require(time.monotonic() < deadline, "database socket scan deadline")
     def address(host, port):
         raw = socket.inet_pton(family, host)
         return "".join(f"{int.from_bytes(raw[i:i+4], sys.byteorder):08X}" for i in range(0, len(raw), 4)) + f":{port:04X}"
     endpoints = [address(value["server_address"], value["server_port"]), address(value["client_address"], value["client_port"])]
+    if reverse: endpoints.reverse()
     matches = []
-    for pid in cgroup(a["postgres_cgroup"])["cgroup.procs"].split():
-        proc = Path("/proc", pid)
+    for pid in cgroup(group)["cgroup.procs"].split():
+        check(); proc = Path("/proc", pid)
         try:
             hierarchy = next((line.split()[1:] for line in (proc / "status").read_text().splitlines() if line.startswith("NSpid:")), [])
-            if not hierarchy or hierarchy[0] != pid or int(hierarchy[-1]) != value["backend_pid"]: continue
-            descriptors = {str(fd.readlink()) for fd in (proc / "fd").iterdir()}
-            table = (proc / "net" / ("tcp6" if family == socket.AF_INET6 else "tcp")).read_text().splitlines()[1:]
-            for line in table:
-                fields = line.split()
-                if fields[1:3] == endpoints and fields[3] == "01" and f"socket:[{fields[9]}]" in descriptors:
-                    matches.append(dict(host_pid=int(pid), namespace_pids=hierarchy, socket_inode=fields[9],
-                                        pid_namespace=str((proc / "ns/pid").readlink()), net_namespace=str((proc / "ns/net").readlink())))
+            if not hierarchy or hierarchy[0] != pid or int(hierarchy[-1]) != namespace_pid: continue
+            descriptors = set()
+            for fd in (proc / "fd").iterdir(): check(); descriptors.add(str(fd.readlink()))
+            with (proc / "net" / ("tcp6" if family == socket.AF_INET6 else "tcp")).open() as table:
+                next(table, None)
+                for line in table:
+                    check(); fields = line.split()
+                    if fields[1:3] == endpoints and fields[3] == "01" and f"socket:[{fields[9]}]" in descriptors:
+                        matches.append(dict(host_pid=int(pid), namespace_pids=hierarchy, socket_inode=fields[9],
+                                            pid_namespace=str((proc / "ns/pid").readlink()), net_namespace=str((proc / "ns/net").readlink())))
         except FileNotFoundError:
             continue
-    require(len(matches) == 1, "PostgreSQL cgroup attribution is absent or ambiguous")
+    check(); require(len(matches) == 1, ("runner" if reverse else "PostgreSQL") + " cgroup attribution is absent or ambiguous")
     return matches[0]
+
+
+def postgres_connection(a, value, deadline=float("inf")):
+    return tcp_connection(a["postgres_cgroup"], value, value["backend_pid"], False, min(deadline, time.monotonic() + 1))
+
+
+DATABASE_ROLES = {"writer", "reader", "manifest_lock", "phase_lock"}
+
+
+def runner_database(a, fields, deadline):
+    require(fields["database_role"] in DATABASE_ROLES, "unknown database connection role")
+    value = json.loads(fields["database"])
+    require({k: value[k] for k in ("name", "oid", "system_identifier")} == a["database"], "runner database identity differs")
+    until = min(time.monotonic() + 1, deadline - CLEANUP_RESERVE)
+    return {"role": fields["database_role"], "database": value,
+            "backend": postgres_connection(a, value, until),
+            "runner": tcp_connection(a["runner_cgroup"], value, fields["runner_pid"], True, until)}
 
 
 def postgres_observation(a, deadline, launch_env, url_name):
@@ -166,7 +187,7 @@ def postgres_observation(a, deadline, launch_env, url_name):
             data += chunk
         value = json.loads(data)
         require({k: value[k] for k in ("name", "oid", "system_identifier")} == a["database"], "database identity differs")
-        value["cgroup_connection"] = postgres_connection(a, value)
+        value["cgroup_connection"] = postgres_connection(a, value, until)
         require(time.monotonic() < until, "PostgreSQL observation deadline")
         return value
     finally:
@@ -186,7 +207,7 @@ def postgres(a, deadline=float("inf"), launch_env=None):
 
 
 ROOT_STAGES = {"process_start", "redo_initialized", "redo_cli_complete"}
-KNOWN_STAGES = REQUIRED | {"provider_trusted", "compared_rpc", "stored_map_before_query_consume",
+KNOWN_STAGES = REQUIRED | {"postgres_connection", "provider_trusted", "compared_rpc", "stored_map_before_query_consume",
     "identity_high_water", "stored_before_sort", "provider_before_sort", "reference_announcements",
     "stored_identity_conflict", "provider_identity_conflict", "scratch_run_high_water", "diagnostic_before_truncate",
     "reth_requested_numbers", "reth_resolve_input", "reth_resolve_owned_numbers", "reth_resolve_headers",
@@ -202,9 +223,10 @@ NATIVE_QUERY = NATIVE_WITNESSES | {"reth_native_query_loaded", "reth_native_quer
 
 
 class Observations:
-    def __init__(self, a):
+    def __init__(self, a, database_check=None):
+        self.database_check, self.database_witnesses = database_check, []
         self.a, self.stages, self.sequence = a, set(), 0
-        self.native = None
+        self.native, self.loaded_native = None, False
         self.root, self.final, self.last, self.largest, self.compared = set(), {}, {}, dict(stored=0, provider=0), False
 
     def accept(self, value):
@@ -216,6 +238,11 @@ class Observations:
         stage = f["stage"]
         require(stage in KNOWN_STAGES, "unknown stage")
         require(stage not in ("provider_trusted", "compared_rpc"), "wrong reference path")
+        if stage == "postgres_connection":
+            require(f["attempt"] == 0 and self.database_check is not None, "database witness checker missing")
+            require(len(self.database_witnesses) < 128, "database connection ceiling")
+            self.database_witnesses.append(self.database_check(f))
+            return
         if stage in ROOT_STAGES:
             require(f["attempt"] == 0, "root attempt")
             self.root.add(stage)
@@ -226,10 +253,11 @@ class Observations:
         key = tuple(f[k] for k in ("attempt", "query_kind", "query_ordinal", "from", "to"))
         if stage == "reth_native_query_start":
             require(self.native is None and f["query_kind"] in ("ordinary", "supplemental") and type(f["query_ordinal"]) is int and f["query_ordinal"] >= 0, "native query start")
-            self.native = {"key": key, "witnesses": set(), "outcome": None}
+            self.native = {"key": key, "witnesses": set(), "outcome": None, "positive_receipts": False}
         if stage in NATIVE_QUERY:
             require(self.native is not None and self.native["key"] == key, "native query attribution")
             if stage in NATIVE_WITNESSES: self.native["witnesses"].add(stage)
+            if stage == "reth_complete_receipt_peak" and f["receipt_bytes"] > 0: self.native["positive_receipts"] = True
             if stage in ("reth_native_query_loaded", "reth_native_query_empty"):
                 require(self.native["outcome"] is None, "duplicate native end")
                 self.native["outcome"] = stage
@@ -239,6 +267,7 @@ class Observations:
                 require(f["rows"] == 0 and f["logical_bytes"] == 0 and f["max_item_bytes"] == 0 and not self.native["witnesses"], "false empty native path")
             else:
                 require(self.native["outcome"] == "reth_native_query_loaded" and NATIVE_WITNESSES <= self.native["witnesses"], "missing native witnesses")
+                self.loaded_native |= self.native["positive_receipts"]
             self.native = None
         self.last = f
         for side in ("stored", "provider"):
@@ -265,6 +294,9 @@ class Observations:
 
     def finish(self):
         require(self.native is None, "unfinished native query")
+        if self.database_check is not None:
+            require(DATABASE_ROLES <= {v["role"] for v in self.database_witnesses}, "runner database connection witnesses missing")
+        require(self.loaded_native, "no positive loaded native query")
         require(ROOT_STAGES <= self.root and REQUIRED - ROOT_STAGES <= self.stages and self.compared, "missing successful-attempt stages")
         for side in ("stored", "provider"):
             f, admitted = self.final[side + "_final"], self.a[side]
@@ -388,7 +420,7 @@ def run_guarded(a, out):
         Path(a["runner_cgroup"], "cgroup.procs").write_text(str(os.getpid()))
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-    observer = Observations(a)
+    observer = Observations(a, lambda fields: runner_database(a, fields, deadline))
     last_sample, peak_rss, runner_seen = None, 0, False
     process = None
     try:
@@ -447,7 +479,7 @@ def run_guarded(a, out):
         require("Maximum resident set size (kbytes):" in time_text, "GNU time peak missing")
         after = {key: cgroup(a[key + "_cgroup"]) for key in ("runner", "postgres")}
         for key in after: unchanged_memory_events(before[key], after[key])
-        result = {"valid": True, "sampled_runner_hwm_bytes": peak_rss, "postgres_before": db_before,
+        result = {"valid": True, "database_connections": observer.database_witnesses, "sampled_runner_hwm_bytes": peak_rss, "postgres_before": db_before,
                   "postgres_after": db_after, "before": before,
                   "after": after,
                   "not_exercised": ["rpc", "selected_facts"], "seconds": time.monotonic() - started}
@@ -475,10 +507,11 @@ def main():
     parser.add_argument("--admission-sha256", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
-    require(digest(args.admission) == args.admission_sha256, "admission digest differs")
-    a = admission(json.loads(Path(args.admission).read_text()))
+    raw = Path(args.admission).read_bytes()
+    require(hashlib.sha256(raw).hexdigest() == args.admission_sha256, "admission digest differs")
+    a = admission(json.loads(raw))
     out = Path(args.output); out.mkdir(exist_ok=False)
-    (out / "admission.json").write_bytes(Path(args.admission).read_bytes())
+    (out / "admission.json").write_bytes(raw)
     try:
         result = run(a, out)
     except (ValueError, OSError, KeyError, subprocess.SubprocessError, json.JSONDecodeError, KeyboardInterrupt) as error:

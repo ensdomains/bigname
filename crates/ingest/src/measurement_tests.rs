@@ -30,6 +30,23 @@ fn logical_content_is_distinct_from_capacity() {
     assert_eq!(values.footprint().rows, 1);
 }
 
+#[test]
+fn transaction_scalars_count_logical_bytes_without_owned_capacity() {
+    let transaction = Transaction {
+        hash: String::new(),
+        block_hash: String::new(),
+        block_number: i64::MAX,
+        index: 0,
+        from: String::new(),
+        to: None,
+        input: Vec::new(),
+        value: String::new(),
+    };
+    assert_eq!(transaction.footprint().bytes, 16);
+    assert_eq!(transaction.footprint().owned, 0);
+    assert_eq!(vec![transaction].footprint().bytes, 16);
+}
+
 #[tokio::test]
 async fn duplicate_replacement_counts_content_once() {
     let session = Session::new("replacement").unwrap();

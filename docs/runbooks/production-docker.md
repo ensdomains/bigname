@@ -1038,7 +1038,8 @@ read a live private database to make this experiment possible.
 
 The finite `scripts/measure-verify-memory` collector consumes existing resources;
 it cannot provision, restore, build or allocate them. Supply `--admission`, its
-reviewed `--admission-sha256`, and a new `--output` directory. Database URLs and
+reviewed `--admission-sha256`, and a new `--output` directory. The admission is
+read once; those exact verified bytes are parsed and archived. Database URLs and
 source endpoint values remain environment variables. The allocation owner
 supplies the directly authenticated SELECT-only verification role, writer role,
 and source descriptors. Set the usual `BIGNAME_DATABASE_URL` and
@@ -1050,7 +1051,19 @@ TCP endpoints and socket inode to the admitted PostgreSQL cgroup. Empty,
 unrelated, ambiguous or unreadable attribution fails admission; no proxy,
 Unix-socket fallback or additional SQL privilege is used. The observation client
 has bounded query/read/exit waits included in startup and total elapsed time.
-Both connection witnesses and states are retained; their states must agree.
+Both observation witnesses and states are retained; their states must agree.
+In measurement mode, every actual writer/reader pool connection (including
+replacements), manifest startup lock and phase lock emits a connection witness
+before use through the same sequenced diagnostic stream. Each identity query
+has a two-second timeout; failure invalidates measurement and rejects that
+connection. The collector requires all four roles and at most 128 connection
+records. Within one second per record and the overall cleanup reserve, it
+matches the backend socket to the PostgreSQL cgroup and the reciprocal socket
+to the runner cgroup. A closed, unreadable or unmatched socket invalidates the
+measurement, even when the separate observation probes passed. These records
+are evidence, not an acknowledgement protocol: successful real Linux validation
+must establish that startup and lock lifetimes allow a usable valid collection.
+Ordinary execution and verification-reader read-only settings are unchanged.
 
 Admission JSON records `run_id`, `chain`, numeric `chain_id`, inclusive `from`/
 `to`, `binary`, `binary_sha256`, `instrumentation_commit`, `base_tree`,
@@ -1157,7 +1170,9 @@ attempts after the first, and reconciles exact cumulative/largest-item inventory
 A constant-size current-query summary requires both native witnesses when receipts
 were loaded, checks their exact query/attempt identity and query bounds, and is
 finalized at provider return. An explicitly empty native path requires zero rows
-and no fabricated witnesses. These summaries do not retain per-query history.
+and no fabricated witnesses. Completion requires at least one loaded query with
+a positive receipt witness; an entirely empty run cannot establish this measurement.
+These summaries do not retain per-query history.
 Drains have a fixed budget and enforce deadline/output bytes during each read.
 A collector SIGTERM raises into cleanup; repeated TERM is ignored during cleanup
 and the caller's signal handler is restored afterward. SIGTERM delivery is deferred

@@ -1,4 +1,5 @@
 //! Opt-in diagnostics. Content sizes are not allocator or RSS measurements.
+pub mod database;
 use crate::{
     VerificationLog,
     provider::{Block, BlockBundle, Log, Receipt, ResolvedBlock, Transaction},
@@ -13,13 +14,13 @@ use std::{
     },
     time::Instant,
 };
-
 #[derive(Default)]
 struct Run {
     invalid: AtomicBool,
     emission: Mutex<()>,
     sequence: AtomicU64,
     attempts: AtomicU64,
+    database_connections: AtomicU64,
     stored_rows: AtomicU64,
     stored_bytes: AtomicU64,
     provider_rows: AtomicU64,
@@ -298,7 +299,17 @@ impl Measured for ResolvedBlock {
     }
 }
 macro_rules! fields { ($t:ty, $($field:ident),+) => { impl Measured for $t { fn footprint(&self) -> Footprint { let mut f = Footprint::default(); $(f = f.combine(self.$field.footprint());)+ f.rows = 1; f } } }; }
-fields!(Transaction, hash, block_hash, from, to, input, value);
+fields!(
+    Transaction,
+    hash,
+    block_hash,
+    block_number,
+    index,
+    from,
+    to,
+    input,
+    value
+);
 fields!(
     Receipt,
     transaction_hash,
@@ -561,7 +572,6 @@ pub fn native(
     }
 }
 type RpcDetail<'a> = (u64, &'a str, Option<u64>, Option<u64>, &'a str, Option<u64>);
-
 fn emit_detail(
     c: &Context,
     stage: &'static str,
