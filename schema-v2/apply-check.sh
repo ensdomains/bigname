@@ -100,181 +100,81 @@ phase_migration_uses_production_schema() {
 # table), quoted or not; the check prints what carries no schema qualifier and
 # any statement it cannot read.
 legacy_public_schema_drop="20260806120000_drop_legacy_public_schema.sql"
-migration_objects_are_schema_qualified() {
+# A post-cutoff schema-migration that names no bigname_phase object is never
+# applied by this check, so the rule for one is closed rather than parsed: it
+# may consist only of `DROP INDEX|TABLE|SEQUENCE|VIEW|FUNCTION|PROCEDURE`
+# statements (with CONCURRENTLY, IF EXISTS, CASCADE, RESTRICT) whose every
+# target is `schema.name`, written with plain identifiers and no strings,
+# quoted identifiers, dollar quoting, block comments, or other lexical forms.
+# Anything else -- any DDL that creates or alters, any DML, any expression,
+# any routine call -- must name `bigname_phase` and thereby join the
+# inventory, where it is applied and observed. A search-path-relative name
+# cannot be written under this rule, whatever statement shape carries it.
+migration_is_closed_form_drop() {
     awk "$sql_comment_stripper"'
-        # A name is qualified when a dot separates two identifiers, each bare or
-        # double-quoted; a dot inside one quoted identifier ("phase.audit") does
-        # not count. `parts` is how many such identifiers the name has.
-        function parts(name,    n, i, c, inq) {
-            n = 1; inq = 0
-            for (i = 1; i <= length(name); i++) {
-                c = substr(name, i, 1)
-                if (c == "\"") { inq = !inq } else if (c == "." && !inq) { n++ }
-            }
-            return n
-        }
-        function qualified(name) { return parts(name) >= 2 }
-        function bare(name) { gsub(/"/, "", name); return name }
         { text = text " " strip_sql_comments($0) }
         END {
             if (quote != "") { print " [unterminated quote at end of file]"; exit 1 }
+            if (text ~ /["\047$]/ || text ~ /\/\*/) { print " [quoted identifier, string, dollar quoting, or block comment]"; exit 1 }
             gsub(/[[:space:]]+/, " ", text)
-            n = split(toupper(text), statements, ";")
+            n = split(text, statements, ";")
             for (i = 1; i <= n; i++) {
-                s = statements[i]
-                sub(/^ +/, "", s)
-                if (s ~ /^CREATE( UNIQUE)? INDEX /) {
-                    if (match(s, / ON [^ (]+/)) { object = substr(s, RSTART + 4, RLENGTH - 4) } else { continue }
-                } else if (match(s, /^(DROP( MATERIALIZED)? (TABLE|INDEX|FUNCTION|VIEW|SEQUENCE|TYPE|TRIGGER)( CONCURRENTLY)?( IF EXISTS)?|TRUNCATE( TABLE)?( ONLY)?) /)) {
-                    # DROP and TRUNCATE take a list; every target is checked, and one
-                    # that reaches a keyword (CASCADE, RESTRICT, ON, ...) ends the list.
-                    rest = substr(s, RSTART + RLENGTH)
-                    sub(/ (CASCADE|RESTRICT|RESTART IDENTITY|CONTINUE IDENTITY|ON ).*$/, "", rest)
-                    t = split(rest, targets, ",")
-                    for (j = 1; j <= t; j++) {
-                        object = targets[j]; gsub(/^ +| +$/, "", object); sub(/[ (].*$/, "", object)
-                        if (object != "" && !qualified(object)) { unqualified = unqualified " " bare(object) }
-                    }
-                    continue
-                } else if (s ~ /^(CREATE( OR REPLACE)?|ALTER) (FUNCTION|PROCEDURE) /) {
-                    # A routine body is a string the check does not read, and the
-                    # routine can be called from anywhere later; not accepted here.
-                    unqualified = unqualified " [unrecognized statement: routine definition]"
-                    continue
-                } else if (match(s, /^(CREATE( OR REPLACE)?|ALTER)( MATERIALIZED)? (TABLE|INDEX|VIEW|SEQUENCE|TYPE|TRIGGER)( IF NOT EXISTS)?( ONLY)? [^ (]+/)) {
-                    m = split(substr(s, RSTART, RLENGTH), words, " "); object = words[m]
-                } else if (match(s, /^COMMENT ON COLUMN [^ (]+/)) {
-                    # A column comment names schema.table.column; two parts is a
-                    # search-path-relative table with a column, not a qualified one.
-                    m = split(substr(s, RSTART, RLENGTH), words, " "); object = words[m]
-                    if (parts(object) < 3) { unqualified = unqualified " " bare(object) }
-                    continue
-                } else if (match(s, /^(INSERT INTO|UPDATE|DELETE FROM|COMMENT ON (TABLE|INDEX|FUNCTION)) [^ (]+/)) {
-                    m = split(substr(s, RSTART, RLENGTH), words, " "); object = words[m]
-                } else if (s == "") {
-                    continue
-                } else {
-                    # A statement the check cannot read -- a WITH-prefixed write, a DO
-                    # block, SET search_path -- is not assumed safe.
-                    split(s, words, " ")
-                    unqualified = unqualified " [unrecognized statement: " words[1] " " words[2] "]"
+                s = statements[i]; sub(/^ +/, "", s); sub(/ +$/, "", s)
+                if (s == "") continue
+                u = toupper(s)
+                if (!match(u, /^DROP (INDEX( CONCURRENTLY)?|TABLE|SEQUENCE|VIEW|MATERIALIZED VIEW|FUNCTION|PROCEDURE)( IF EXISTS)? /)) {
+                    bad = bad " [not a closed-form drop: " substr(s, 1, 40) "]"
                     continue
                 }
-                if (!qualified(object)) { unqualified = unqualified " " bare(object); reported[bare(object)] = 1 }
-            }
-            # ALTER TABLE ... [NO] INHERIT parent names a single parent.
-            upper = toupper(text)
-            while (match(upper, /(^| )(NO )?INHERIT +[^ ;,)]+/)) {
-                hit = substr(upper, RSTART, RLENGTH)
-                sub(/^ ?(NO )?INHERIT +/, "", hit)
-                if (hit != "" && !qualified(hit) && !(bare(hit) in reported)) {
-                    reported[bare(hit)] = 1
-                    unqualified = unqualified " " bare(hit)
-                }
-                upper = substr(upper, RSTART + RLENGTH)
-            }
-            # Every parent in an INHERITS list, not only the first.
-            upper = toupper(text)
-            while (match(upper, /INHERITS *\([^)]*\)/)) {
-                list = substr(upper, RSTART, RLENGTH)
-                sub(/^INHERITS *\(/, "", list); sub(/\)$/, "", list)
-                t = split(list, parents, ",")
+                rest = substr(u, RSTART + RLENGTH)
+                sub(/ (CASCADE|RESTRICT)$/, "", rest)
+                t = split(rest, targets, ",")
                 for (j = 1; j <= t; j++) {
-                    object = parents[j]; gsub(/^ +| +$/, "", object)
-                    if (object != "" && !qualified(object) && !(bare(object) in reported)) {
-                        reported[bare(object)] = 1
-                        unqualified = unqualified " " bare(object)
-                    }
-                }
-                upper = substr(upper, RSTART + RLENGTH)
-            }
-            # A routine called by a bare name -- `write_resolution_divergence(...)`
-            # inside a CREATE TABLE AS, an INSERT, a DEFAULT, a CHECK -- resolves
-            # through the search path like a relation; only qualified calls, and
-            # functions and keywords PostgreSQL itself provides, are accepted.
-            lower = tolower(text)
-            while (match(lower, /[a-z_][a-z0-9_.]* *\(/)) {
-                call = substr(lower, RSTART, RLENGTH); sub(/ *\($/, "", call)
-                rest = substr(lower, RSTART + RLENGTH)
-                before = (RSTART > 1) ? substr(lower, RSTART - 1, 1) : " "
-                lower = rest
-                if (before ~ /[a-z0-9_."]/) { continue }
-                if (call ~ /\./) { continue }
-                if (call ~ /^(nextval|currval|setval|to_regclass|to_regproc|pg_get_serial_sequence|now|coalesce|nullif|greatest|least|lower|upper|length|left|right|substr|substring|trim|btrim|ltrim|rtrim|replace|regexp_replace|regexp_match|regexp_matches|split_part|concat|concat_ws|format|abs|round|floor|ceil|ceiling|sign|mod|power|sqrt|random|md5|sha256|digest|encode|decode|gen_random_uuid|uuid_generate_v4|jsonb_build_object|json_build_object|jsonb_build_array|json_build_array|jsonb_strip_nulls|jsonb_set|jsonb_typeof|jsonb_array_elements|jsonb_array_elements_text|jsonb_each|jsonb_each_text|jsonb_object_keys|jsonb_extract_path|jsonb_extract_path_text|to_jsonb|to_json|row_to_json|array_agg|string_agg|array_length|array_position|array_remove|array_append|array_cat|unnest|cardinality|count|sum|min|max|avg|bool_and|bool_or|exists|any|all|some|in|not|and|or|is|as|on|using|values|select|insert|update|delete|from|where|with|case|when|then|else|end|cast|extract|date_trunc|date_part|make_timestamptz|to_timestamp|to_char|clock_timestamp|statement_timestamp|transaction_timestamp|current_timestamp|current_date|current_time|localtime|localtimestamp|current_user|session_user|current_schema|current_database|pg_advisory_lock|pg_advisory_unlock|pg_try_advisory_lock|pg_advisory_xact_lock|pg_notify|pg_sleep|set_config|current_setting|version|obj_description|col_description|pg_typeof|pg_column_size|pg_total_relation_size|pg_relation_size|hashtext|hashtextextended|generate_series|lag|lead|row_number|rank|dense_rank|first_value|last_value|nth_value|percentile_cont|percentile_disc|mode|over|partition|order|group|having|limit|offset|returning|conflict|do|nothing|default|primary|key|references|check|unique|constraint|foreign|index|table|column|type|function|trigger|schema|extension|sequence|view|if|for|each|row|statement|execute|procedure|language|returns|begin|declare|raise|notice|exception|perform|return|loop|while|elsif|elseif|only|cascade|restrict|inherits|inherit|of|like|including|excluding|generated|always|by|identity|start|increment|minvalue|maxvalue|cache|cycle|owned|to|set|reset|alter|create|drop|add|rename|comment|grant|revoke|analyze|vacuum|cluster|truncate|copy|lock|listen|unlisten|notify|discard|explain|values|array|interval|numeric|decimal|varchar|char|text|bytea|boolean|bool|int|integer|bigint|smallint|real|double|precision|timestamptz|timestamp|date|time|uuid|jsonb|json|bit|varbit|xml|point|line|regclass|regproc|regtype|oid|name|tsvector|tsquery|inet|cidr|macaddr|money|serial|bigserial|int2|int4|int8|float4|float8|btree|hash|gin|gist|spgist|brin|bloom)$/) { continue }
-                if (!(toupper(call) in reported)) {
-                    reported[toupper(call)] = 1
-                    unqualified = unqualified " " toupper(call) "()"
-                }
-            }
-            # An object named as a string inside an expression -- nextval,
-            # currval, setval, a ::regclass or ::regproc cast, to_regclass,
-            # pg_get_serial_sequence -- resolves through the search path like any
-            # bare identifier; the string must be qualified too. The original
-            # text is scanned, since strip_sql_comments kept its strings intact.
-            lower = tolower(text)
-            while (match(lower, /(nextval|currval|setval|to_regclass|to_regproc|pg_get_serial_sequence) *\( *\047[^\047]*\047/) || match(lower, /\047[^\047]*\047 *:: *(regclass|regproc|regprocedure|regtype)/)) {
-                hit = substr(lower, RSTART, RLENGTH)
-                if (match(hit, /\047[^\047]*\047/)) {
-                    object = substr(hit, RSTART + 1, RLENGTH - 2)
-                    if (object != "" && !qualified(object) && !(toupper(bare(object)) in reported)) {
-                        reported[toupper(bare(object))] = 1
-                        unqualified = unqualified " " toupper(bare(object))
-                    }
-                }
-                lower = substr(lower, RSTART + RLENGTH)
-            }
-            # Any relation a clause names -- a parent to inherit or partition from,
-            # a foreign key target, a LIKE source, a FROM/JOIN/INTO/ON relation --
-            # must be qualified too, not only the target the statement acts on.
-            # Index and trigger names are unqualified by grammar and are not
-            # relations, so INDEX and TRIGGER are not relation keywords here.
-            n = split(toupper(text), tokens, " ")
-            for (i = 1; i < n; i++) {
-                keyword = tokens[i]; sub(/^\(+/, "", keyword)
-                if (keyword ~ /^(INHERITS|OF|PARTITION|REFERENCES|LIKE|JOIN|FROM|INTO|ON|USING|TABLE|VIEW|SEQUENCE)$/ || keyword ~ /^INHERITS\(/) {
-                    object = tokens[i + 1]
-                    if (keyword ~ /^INHERITS\(/) { object = substr(keyword, 10) }
-                    # USING also introduces an index method, a column list, or a
-                    # cast expression; those are not relations.
-                    if (keyword == "USING" && (object ~ /^\(/ || object ~ /::/ || object ~ /^(BTREE|HASH|GIN|GIST|SPGIST|BRIN)$/)) { continue }
-                    sub(/^\(+/, "", object); sub(/[),;].*$/, "", object)
-                    if (object ~ /^["A-Z_]/ && !qualified(object) \
-                        && object !~ /^(CONFLICT|DELETE|UPDATE|INSERT|SELECT|TRUE|FALSE|NULL|COMMIT|ONLY|IF|EXISTS|NOT|UNIQUE|CONCURRENTLY|DISTINCT|EACH|STATEMENT|ROW|CASCADE|RESTRICT|VALUES|COLUMN|CONSTRAINT|FUNCTION|OR|AND|IN|AS|IS|SET|WHERE|PARTITION|OF|DEFAULT|SCHEMA|EXTENSION|TYPE|ATTACH|DETACH|FOR|BY|TABLE|INDEX|VIEW|SEQUENCE|TRIGGER|MATERIALIZED|TEMP|TEMPORARY|UNLOGGED)$/ \
-                        && !(bare(object) in reported)) {
-                        reported[bare(object)] = 1
-                        unqualified = unqualified " " bare(object)
+                    target = targets[j]; gsub(/^ +| +$/, "", target)
+                    sub(/ *\(.*$/, "", target)
+                    if (target !~ /^[A-Z_][A-Z0-9_]*\.[A-Z_][A-Z0-9_]*$/) {
+                        bad = bad " " (target == "" ? "[empty target]" : target)
                     }
                 }
             }
-            if (unqualified != "") { print unqualified; exit 1 }
+            if (bad != "") { print bad; exit 1 }
             exit 0
         }
     ' "$1"
 }
-# Lexical forms the check does not read -- block comments, dollar-quoted or
-# tagged strings, escape and unicode strings -- can hide a statement from it,
-# so an uninventoried post-cutoff schema-migration may not use them at all.
-migration_uses_unsupported_lexical_forms() {
-    grep -Eqi '/\*|\$[A-Za-z0-9_]*\$|(^|[^A-Za-z0-9_])[EBX]'"'"'|U&'"'"'' "$1"
-}
 assert_uninventoried_migrations_are_schema_qualified() {
-    local migration_file migration_basename unqualified
-    if unqualified="$(printf 'CREATE INDEX x ON chain_phase_state (a);\nUPDATE public.t SET a = 1;\nALTER TABLE "name_surfaces" ADD COLUMN c int;\nDROP INDEX "public"."ok_idx";\nWITH chosen AS (SELECT 1) UPDATE chain_phase_state SET a = 1;\nDROP INDEX IF EXISTS public.old_idx, name_current_lookup_idx CASCADE;\nTRUNCATE public.a, "resources";\nCOMMENT ON COLUMN chain_phase_state.phase_name IS '"'"'x'"'"';\nCOMMENT ON COLUMN public.t.c IS '"'"'y'"'"';\nCOMMENT ON TABLE public.audit IS '"'"'--'"'"'; UPDATE resources SET a = 1;\nCOMMENT ON TABLE public.b IS '"'"'it'"'"''"'"'s -- fine'"'"'; -- DROP TABLE nope\nCREATE TABLE public.shadow () INHERITS (chain_phase_state);\nCREATE TABLE public.part PARTITION OF resources FOR VALUES IN (1);\nALTER TABLE public.child ADD CONSTRAINT fk FOREIGN KEY (a) REFERENCES name_surfaces (id);\nCREATE TABLE public.copy (LIKE token_lineages);\nCREATE TABLE "phase.audit" (id int);\nDELETE FROM public.audit USING chain_lineage WHERE true;\nCREATE INDEX i ON public.audit USING btree (id);\nCREATE TABLE public.shadow2 () INHERITS (public.audit, token_lineages);\nCREATE FUNCTION public.touch() RETURNS int LANGUAGE sql AS '"'"'SELECT 1'"'"';\nINSERT INTO public.audit VALUES (nextval('"'"'reverse_hydration_attempt_ordinal_seq'"'"'));\nINSERT INTO public.audit VALUES (nextval('"'"'public.fine_seq'"'"'));\nALTER TABLE public.shadow INHERIT name_current;\nALTER TABLE public.shadow NO INHERIT public.parent;\nCREATE TABLE pg_temp.audit AS SELECT write_resolution_divergence(1);\nINSERT INTO public.audit VALUES (public.touch(), now(), coalesce(1, 2));\n' \
-        | migration_objects_are_schema_qualified /dev/stdin)"; then
-        printf '%s\n' "schema-qualification check accepted a search-path-relative statement" >&2
-        exit 1
-    fi
-    if [ "$unqualified" != " CHAIN_PHASE_STATE NAME_SURFACES [unrecognized statement: WITH CHOSEN] NAME_CURRENT_LOOKUP_IDX RESOURCES CHAIN_PHASE_STATE.PHASE_NAME RESOURCES PHASE.AUDIT [unrecognized statement: routine definition] NAME_CURRENT TOKEN_LINEAGES WRITE_RESOLUTION_DIVERGENCE() REVERSE_HYDRATION_ATTEMPT_ORDINAL_SEQ CHAIN_LINEAGE" ]; then
-        printf '%s\n' "schema-qualification check misreported the search-path-relative statement: $unqualified" >&2
-        exit 1
-    fi
-    if ! printf 'COMMENT ON TABLE public.audit IS $msg$text -- literal$msg$;\n' \
-        | migration_uses_unsupported_lexical_forms /dev/stdin \
-        || ! printf 'UPDATE public.audit SET a = 1 /* -- harmless */;\n' \
-        | migration_uses_unsupported_lexical_forms /dev/stdin \
-        || printf 'UPDATE public.audit SET a = '"'"'$ 5'"'"';\n' \
-        | migration_uses_unsupported_lexical_forms /dev/stdin; then
-        printf '%s\n' "lexical-form check does not reject what it should, or rejects what it should not" >&2
+    local migration_file migration_basename reason
+    # The rule proves itself on every run: each planted form must be refused
+    # with its reason, and the closed form must be accepted.
+    local -a refused=(
+        'DROP INDEX IF EXISTS public.old_idx, name_current_lookup_idx CASCADE;'
+        'DROP INDEX CONCURRENTLY IF EXISTS "public"."ok_idx";'
+        'DROP TABLE "phase.audit";'
+        'DROP TABLE U&"bigname\005Fphase".chain_phase_state;'
+        'CREATE INDEX x ON public.t (a);'
+        'UPDATE public.t SET a = 1;'
+        'ALTER TABLE public.shadow INHERIT chain_phase_state;'
+        'CREATE TABLE public.shadow () INHERITS (public.audit, chain_phase_state);'
+        'WITH chosen AS (SELECT 1) UPDATE chain_phase_state SET a = 1;'
+        'CREATE TABLE public.audit AS SELECT * FROM ONLY chain_phase_state;'
+        'CREATE TABLE public.audit AS SELECT * FROM public.safe, chain_phase_state;'
+        'CREATE TABLE pg_temp.audit AS SELECT write_resolution_divergence(1);'
+        'CREATE TABLE public.audit AS SELECT "write_resolution_divergence"(1);'
+        'INSERT INTO public.audit VALUES (nextval('"'"'reverse_hydration_attempt_ordinal_seq'"'"'));'
+        'COMMENT ON TABLE public.audit IS $msg$text -- literal$msg$; UPDATE chain_phase_state SET a = 1;'
+        'DROP TABLE public.a /* -- */; UPDATE chain_phase_state SET a = 1;'
+        'CREATE FUNCTION public.touch() RETURNS int LANGUAGE sql AS '"'"'SELECT 1'"'"';'
+        'DROP TABLE public.a; DROP TABLE b;'
+    )
+    for reason in "${refused[@]}"; do
+        if printf '%s\n' "$reason" | migration_is_closed_form_drop /dev/stdin >/dev/null; then
+            printf '%s\n' "closed-form check accepted a form it must refuse: $reason" >&2
+            exit 1
+        fi
+    done
+    if ! printf -- '-- no-transaction\nDROP INDEX CONCURRENTLY IF EXISTS\n    public.old_idx;\nDROP TABLE IF EXISTS public.a, public.b CASCADE;\nDROP FUNCTION IF EXISTS public.fn(integer);\n' \
+        | migration_is_closed_form_drop /dev/stdin >/dev/null; then
+        printf '%s\n' "closed-form check refused the closed form" >&2
         exit 1
     fi
     for migration_file in "$ROOT"/migrations/*.sql; do
@@ -292,14 +192,9 @@ assert_uninventoried_migrations_are_schema_qualified() {
         if phase_migration_uses_production_schema "$migration_file"; then
             continue
         fi
-        if migration_uses_unsupported_lexical_forms "$migration_file"; then
+        if ! reason="$(migration_is_closed_form_drop "$migration_file")"; then
             printf '%s\n' \
-                "$migration_basename names no bigname_phase object and uses a lexical form this check does not read (block comment, dollar-quoted or tagged string, escape or unicode string); rewrite it without them or name bigname_phase" >&2
-            exit 1
-        fi
-        if ! unqualified="$(migration_objects_are_schema_qualified "$migration_file")"; then
-            printf '%s\n' \
-                "$migration_basename names no bigname_phase object and relies on the search path for:$unqualified; qualify each object with bigname_phase or public" >&2
+                "$migration_basename names no bigname_phase object, so it may only drop schema-qualified objects; it contains:$reason. Name bigname_phase to have it inventoried and applied, or qualify every drop target" >&2
             exit 1
         fi
     done

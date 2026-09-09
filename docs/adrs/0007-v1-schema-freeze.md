@@ -157,20 +157,17 @@ holds; the breach is the subject of the Rollout section below.
 Since #849 `apply-check.sh` applies every schema-migration that names a
 `bigname_phase` object and fails on one it does not list. Its inventory is
 that literal token, so a schema-migration written against the connection's
-search path would not be in it; the same script therefore rejects any
-schema-migration newer than the legacy-schema drop that names no
-`bigname_phase` object unless each of its statements is one the check
-recognizes and every relation it names — the object it creates, alters,
-drops, or writes, any it inherits, partitions, references, copies, or reads,
-any it names as a string in an expression (`nextval`, a `::regclass` cast),
-and any routine it calls by a bare name other than the functions PostgreSQL
-itself provides — carries a schema qualifier, quoted or bare; a statement or lexical
-form it cannot read (a `WITH`-prefixed write, a `DO` block, a block comment,
-a dollar-quoted, escape, or unicode string) is rejected rather than assumed
-safe, as is any spelling of the phase schema other than `bigname_phase`,
-which PostgreSQL would fold to production while the check would neither
-inventory nor rewrite it. The check proves itself against planted
-search-path-relative statements on each run. From acceptance on, a
+search path would not be in it; the same script therefore closes that door
+by rule rather than by parsing: a schema-migration newer than the
+legacy-schema drop that names no `bigname_phase` object may consist only of
+`DROP` statements whose every target is `schema.name`, written with plain
+identifiers and nothing quoted — no strings, quoted identifiers, dollar
+quoting, or block comments. Any other statement, any expression, any routine
+call, and any spelling of the phase schema other than `bigname_phase` is
+refused, so a search-path-relative name cannot be written outside the
+inventory whatever statement carries it. The check proves itself on every
+run against a planted set of the forms it refuses and the one it accepts.
+From acceptance on, a
 schema-migration of any of these kinds cannot land without moving the
 conformance test, which is where the carve-out or amendment is checked for.
 
