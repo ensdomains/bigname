@@ -744,8 +744,8 @@ phase is running fails on the held lock rather than waiting.
 
 `phase-runner redo` is likewise a separate, and potentially long-running,
 process: a writer pool of up to `4` (`apps/phase-runner/src/main.rs:131`), a
-verifier pool of `1` when the redo reaches the Verify phase
-(`apps/phase-runner/src/main.rs:173`), and up to two locks at once — the Project
+verifier pool of `1` opened at start whenever the requested redo includes
+Verify (`apps/phase-runner/src/main.rs:165-173`), and up to two locks at once — the Project
 lock is held while the Interpret phase runs beneath it
 (`apps/phase-runner/src/runner_operator_redo.rs:131-141`), and every phase run
 takes its own lock (`apps/phase-runner/src/runner.rs:223`). The advisory locks
