@@ -35,6 +35,36 @@ def digest(path):
     return h.hexdigest()
 
 
+def manifest_tree(root, snapshot=None, deadline=float("inf")):
+    root = Path(root)
+    require(root.is_dir() and not root.is_symlink(), "manifest root differs")
+    entries, total = [], 0
+    for path in root.rglob("*"):
+        require(time.monotonic() < deadline - CLEANUP_RESERVE, "manifest deadline")
+        require(not path.is_symlink(), "manifest symlink")
+        if path.is_dir(): continue
+        require(path.is_file(), "manifest file type")
+        if path.suffix != ".toml": continue
+        require(len(entries) < 4096, "manifest file envelope")
+        with path.open("rb") as stream:
+            data = stream.read(64 * 2**20 - total + 1)
+        total += len(data)
+        require(total <= 64 * 2**20, "manifest byte envelope")
+        relative = path.relative_to(root)
+        entries.append([relative.as_posix(), hashlib.sha256(data).hexdigest()])
+        if snapshot is not None:
+            target = snapshot / relative
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with target.open("xb") as stream: stream.write(data)
+            target.chmod(0o400)
+    require(entries, "manifest tree empty")
+    if snapshot is not None:
+        for path in sorted(snapshot.rglob("*"), reverse=True):
+            if path.is_dir(): path.chmod(0o500)
+        snapshot.chmod(0o500)
+    return hashlib.sha256(json.dumps(sorted(entries), ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 def admission(a):
     require(a["chain"] == "ethereum-mainnet" and a["chain_id"] == 1, "Mainnet required")
     require(0 <= a["from"] <= a["to"] and a["to"] - a["from"] < 131072, "range")
@@ -284,7 +314,7 @@ def source_environment(a):
     names = []
     for descriptor in a["source_descriptors"]:
         fields, name = descriptor.split("=", 1); fields = fields.split(":")
-        require(len(fields) in (5, 6) and fields[0] == "ethereum-mainnet" and fields[2] == "reth-db", "source descriptor differs")
+        require(len(fields) in (5, 6) and fields[0] == "ethereum-mainnet" and fields[2].strip().lower().replace("-", "_") == "reth_db", "source descriptor differs")
         names.append(name)
     require(len(set(names)) == 2 and set(names) == set(a["source_endpoints"]), "source endpoint inventory differs")
     paths = {Path(source["path"]).resolve() for source in a["source_objects"]}
@@ -308,6 +338,9 @@ def run(a, out):
     started = time.monotonic()
     deadline = started + a["seconds"]
     require(digest(a["binary"]) == a["binary_sha256"], "binary differs")
+    snapshot = out / "manifests"
+    snapshot.mkdir(mode=0o700)
+    require(manifest_tree(a["manifests_root"], snapshot, deadline) == a["manifest_sha256"], "manifest differs")
     env = source_environment(a)
     require(Path(a["runner_cgroup"], "cgroup.kill").exists(), "atomic owned cleanup unavailable")
     before = {"runner": cgroup(a["runner_cgroup"]), "postgres": cgroup(a["postgres_cgroup"])}
@@ -320,7 +353,7 @@ def run(a, out):
     (out / "before.json").write_text(json.dumps({"cgroups": before, "postgres": db_before}))
     command = [a["binary"], "redo", "--chain", "ethereum-mainnet", "--phase", "verify",
                "--from-block", str(a["from"]), "--to-block", str(a["to"]),
-               "--manifests-root", a["manifests_root"], "--minimum-free-disk-bytes", "107374182400",
+               "--manifests-root", str(snapshot), "--minimum-free-disk-bytes", "107374182400",
                "--writable-path", a["writable_path"]]
     for descriptor in a["source_descriptors"]:
         command.extend(["--source", descriptor])

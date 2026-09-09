@@ -1068,6 +1068,16 @@ and `rocksdb` identity in the admitted inventory. Include
 `runner_cgroup`, `postgres_cgroup`, memory ceilings `runner_bytes` and
 `postgres_bytes`, deadline `seconds`, and `build_test_chains_including_this`.
 
+`manifest_sha256` binds raw TOML bytes and relative POSIX filenames: SHA-256 of
+UTF-8 compact JSON (no ASCII escaping or whitespace) containing sorted
+`[filename, lowercase_sha256_of_file_bytes]` pairs. This includes normalizer
+version lines and is distinct from the runner's semantic manifest hash.
+Before database observation, the collector verifies an owned read-only copy
+under the output directory and passes that snapshot to redo. Symlinks, empty
+trees, more than 4,096 TOML files or 64 MiB of TOML bytes are rejected.
+Source kinds accept the runner's case, surrounding whitespace and hyphen/underscore
+normalization (`reth-db` / `reth_db`); launch retains each exact descriptor.
+
 Include `database` (name, OID, system_identifier), `initial_state`,
 `expected_final_state` (phase_status, current_block_number/current_block_hash,
 verification_level, redo_in_progress), `ingest_start`, `finalized_end_hash`,
