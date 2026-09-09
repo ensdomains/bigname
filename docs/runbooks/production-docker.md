@@ -1027,7 +1027,8 @@ introduces no production row/byte limit or new verification behavior.
 
 The first dense Mainnet experiment requires a separately approved admission
 record and runtime allocation. It must use real stored facts and an independent
-local reth reference through the supported CLI. A provider-trusted pass, fake
+local reth reference through the supported CLI. A
+[provider-trusted](../glossary.md#verification-level) pass, fake
 reference or RPC fixture does not satisfy Mainnet evidence. Admission includes
 historical source independence, opened storage-object identities, unpruned
 reference data, legal exact-range Verify-only redo, retained extent/level and
@@ -1042,6 +1043,14 @@ source endpoint values remain environment variables. The allocation owner
 supplies the directly authenticated SELECT-only verification role, writer role,
 and source descriptors. Set the usual `BIGNAME_DATABASE_URL` and
 `BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL` values privately.
+The collector requires direct TCP PostgreSQL access and host `/proc` visibility.
+It checks both writer and verification-reader URLs from the frozen launch
+environment. It holds each observation connection open and matches its backend namespace PID,
+TCP endpoints and socket inode to the admitted PostgreSQL cgroup. Empty,
+unrelated, ambiguous or unreadable attribution fails admission; no proxy,
+Unix-socket fallback or additional SQL privilege is used. The observation client
+has bounded query/read/exit waits included in startup and total elapsed time.
+Both connection witnesses and states are retained; their states must agree.
 
 Admission JSON records `run_id`, `chain`, numeric `chain_id`, inclusive `from`/
 `to`, `binary`, `binary_sha256`, `instrumentation_commit`, `base_tree`,
@@ -1051,6 +1060,10 @@ Admission JSON records `run_id`, `chain`, numeric `chain_id`, inclusive `from`/
 `manifest_sync_unchanged`; these refer to the sealed supporting records and do
 not replace them. Include `source_objects` with path/device/inode for both
 source datadirs and opened storage children, two `source_descriptors`,
+plus `source_endpoints` mapping each descriptor’s environment-variable name to
+its admitted absolute local reth datadir. The collector binds the exact launch
+environment to those endpoints and requires each datadir, `db`, `static_files`
+and `rocksdb` identity in the admitted inventory. Include
 `manifests_root`, `writable_path`, `disk_paths`, owned `pg_temp_dirs`,
 `runner_cgroup`, `postgres_cgroup`, memory ceilings `runner_bytes` and
 `postgres_bytes`, deadline `seconds`, and `build_test_chains_including_this`.
@@ -1068,7 +1081,7 @@ cleanup, 4 GiB runner and 2 GiB PostgreSQL, no swap escape, and at least 100 GiB
 free. Per side: 250,000 selected rows/128 MiB logical content, 500,000 cumulative
 query rows/256 MiB content including duplicates and supplemental queries, and
 1 MiB per log. Lower admitted ceilings are allowed; these are not deployment
-budgets. The collector reserves the last 15 seconds for termination. Four
+budgets. The collector reserves the last 20 seconds for termination. Four
 concurrent build/test execution chains, including nested work, remain the limit.
 
 Log logical bytes are 24 for three i64 fields plus UTF-8 block hash, transaction

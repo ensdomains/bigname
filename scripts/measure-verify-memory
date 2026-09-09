@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import signal
+import select
+import socket
 import subprocess
 import sys
 import time
@@ -16,6 +18,7 @@ REQUIRED = {"process_start", "redo_initialized", "compared_local_reth", "stored_
             "provider_identity_map", "reference_target_rechecked", "provider_final",
             "both_vectors", "compare_position_maps", "compare_position_union",
             "compare_matched", "compared_end", "redo_cli_complete"}
+CLEANUP_RESERVE = 20
 LIMITS = {"runner_bytes": 4 * 2**30, "postgres_bytes": 2 * 2**30, "seconds": 1800}
 
 
@@ -77,9 +80,37 @@ def counters(text):
     return {key: int(value) for key, value in (line.split() for line in text.splitlines())}
 
 
-def postgres(a):
-    # Only fixture identity, phase markers and cumulative statistics; never raw logs.
+def postgres_connection(a, value):
+    require(value["server_address"] and value["client_address"], "direct TCP PostgreSQL observation required")
+    family = socket.AF_INET6 if ":" in value["server_address"] else socket.AF_INET
+    def address(host, port):
+        raw = socket.inet_pton(family, host)
+        return "".join(f"{int.from_bytes(raw[i:i+4], sys.byteorder):08X}" for i in range(0, len(raw), 4)) + f":{port:04X}"
+    endpoints = [address(value["server_address"], value["server_port"]), address(value["client_address"], value["client_port"])]
+    matches = []
+    for pid in cgroup(a["postgres_cgroup"])["cgroup.procs"].split():
+        proc = Path("/proc", pid)
+        try:
+            hierarchy = next((line.split()[1:] for line in (proc / "status").read_text().splitlines() if line.startswith("NSpid:")), [])
+            if not hierarchy or hierarchy[0] != pid or int(hierarchy[-1]) != value["backend_pid"]: continue
+            descriptors = {str(fd.readlink()) for fd in (proc / "fd").iterdir()}
+            table = (proc / "net" / ("tcp6" if family == socket.AF_INET6 else "tcp")).read_text().splitlines()[1:]
+            for line in table:
+                fields = line.split()
+                if fields[1:3] == endpoints and fields[3] == "01" and f"socket:[{fields[9]}]" in descriptors:
+                    matches.append(dict(host_pid=int(pid), namespace_pids=hierarchy, socket_inode=fields[9],
+                                        pid_namespace=str((proc / "ns/pid").readlink()), net_namespace=str((proc / "ns/net").readlink())))
+        except FileNotFoundError:
+            continue
+    require(len(matches) == 1, "PostgreSQL cgroup attribution is absent or ambiguous")
+    return matches[0]
+
+
+def postgres_observation(a, deadline, launch_env, url_name):
+    # Keep this direct observation session alive while checking its backend's socket ownership.
     query = """SELECT json_build_object(
+      'backend_pid',pg_backend_pid(),'server_address',inet_server_addr(),'server_port',inet_server_port(),
+      'client_address',inet_client_addr(),'client_port',inet_client_port(),
       'name',current_database(),'oid',(SELECT oid FROM pg_database WHERE datname=current_database()),
       'system_identifier',(SELECT system_identifier::text FROM pg_control_system()),
       'state',(SELECT json_build_object('phase_status',phase_status,
@@ -88,14 +119,39 @@ def postgres(a):
          FROM bigname_phase.chain_phase_state WHERE chain_id='ethereum-mainnet' AND phase_name='verify'),
       'temp_bytes',temp_bytes,'temp_files',temp_files,'stats_reset',stats_reset)
       FROM pg_stat_database WHERE datname=current_database()"""
-    env = dict(os.environ, PGDATABASE=os.environ["BIGNAME_DATABASE_URL"], PGCONNECT_TIMEOUT="5")
-    result = subprocess.run(["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-c", query],
-                            env=env, capture_output=True, timeout=10, check=False)
-    require(result.returncode == 0, "fixture PostgreSQL observation failed")
-    value = json.loads(result.stdout)
-    require({k: value[k] for k in ("name", "oid", "system_identifier")} == a["database"],
-            "database identity differs")
-    return value
+    until = min(time.monotonic() + 3, deadline - 10)
+    require(time.monotonic() < until, "deadline before PostgreSQL observation")
+    env = dict(launch_env, PGDATABASE=launch_env[url_name], PGCONNECT_TIMEOUT="2",
+               PGOPTIONS=launch_env.get("PGOPTIONS", "") + " -c statement_timeout=2000")
+    process = subprocess.Popen(["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1"], env=env,
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        process.stdin.write((query + ";\n").encode()); process.stdin.flush()
+        data = b""
+        while b"\n" not in data:
+            require(select.select([process.stdout], [], [], max(0, until - time.monotonic()))[0], "PostgreSQL observation deadline")
+            chunk = os.read(process.stdout.fileno(), 65537 - len(data))
+            require(chunk and len(data) + len(chunk) <= 65536, "PostgreSQL observation missing or oversized")
+            data += chunk
+        value = json.loads(data)
+        require({k: value[k] for k in ("name", "oid", "system_identifier")} == a["database"], "database identity differs")
+        value["cgroup_connection"] = postgres_connection(a, value)
+        require(time.monotonic() < until, "PostgreSQL observation deadline")
+        return value
+    finally:
+        process.stdin.close()
+        try: process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill(); process.wait(timeout=1)
+        finally: process.stdout.close()
+
+
+def postgres(a, deadline=float("inf"), launch_env=None):
+    env = dict(os.environ) if launch_env is None else launch_env
+    writer = postgres_observation(a, deadline, env, "BIGNAME_DATABASE_URL")
+    reader = postgres_observation(a, deadline, env, "BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL")
+    require(writer["state"] == reader["state"], "writer/reader observation state differs")
+    return dict(writer, verification_reader=reader)
 
 
 ROOT_STAGES = {"process_start", "redo_initialized", "redo_cli_complete"}
@@ -223,22 +279,43 @@ def status(pid):
     return value
 
 
+def source_environment(a):
+    env = dict(os.environ, BIGNAME_VERIFY_MEMORY_RUN_ID=a["run_id"], RUST_LOG="bigname_memory=info")
+    names = []
+    for descriptor in a["source_descriptors"]:
+        fields, name = descriptor.split("=", 1); fields = fields.split(":")
+        require(len(fields) in (5, 6) and fields[0] == "ethereum-mainnet" and fields[2] == "reth-db", "source descriptor differs")
+        names.append(name)
+    require(len(set(names)) == 2 and set(names) == set(a["source_endpoints"]), "source endpoint inventory differs")
+    paths = {Path(source["path"]).resolve() for source in a["source_objects"]}
+    for name in names:
+        endpoint = a["source_endpoints"][name]
+        require(isinstance(endpoint, str) and Path(endpoint).is_absolute() and env.get(name) == endpoint, "source endpoint differs")
+        require(all((Path(endpoint) / child).resolve() in paths for child in ("", "db", "static_files", "rocksdb")), "source storage inventory differs")
+    for source in a["source_objects"]:
+        st = Path(source["path"]).stat()
+        require((st.st_dev, st.st_ino) == (source["device"], source["inode"]), "source identity differs")
+    require(len({(s["device"], s["inode"]) for s in a["source_objects"]}) == len(a["source_objects"]), "aliased source objects")
+    return env
+
+
+def unchanged_memory_events(before, after):
+    previous, current = counters(before["memory.events"]), counters(after["memory.events"])
+    require(all(current[key] == previous[key] for key in ("max", "oom", "oom_kill")), "memory limit encountered")
+
+
 def run(a, out):
     started = time.monotonic()
     deadline = started + a["seconds"]
     require(digest(a["binary"]) == a["binary_sha256"], "binary differs")
-    for source in a["source_objects"]:
-        st = Path(source["path"]).stat()
-        require((st.st_dev, st.st_ino) == (source["device"], source["inode"]), "source identity differs")
-    require(len({(s["device"], s["inode"]) for s in a["source_objects"]}) == len(a["source_objects"]),
-            "aliased source objects")
+    env = source_environment(a)
     require(Path(a["runner_cgroup"], "cgroup.kill").exists(), "atomic owned cleanup unavailable")
     before = {"runner": cgroup(a["runner_cgroup"]), "postgres": cgroup(a["postgres_cgroup"])}
     require(not before["runner"]["cgroup.procs"], "runner allocation is occupied")
     for key in ("runner", "postgres"):
         require(int(before[key]["memory.max"]) == a[key + "_bytes"], "effective memory ceiling")
         require(before[key]["memory.swap.max"] == "0", "unaccounted swap")
-    db_before = postgres(a)
+    db_before = postgres(a, deadline, env)
     require(db_before["state"] == a["initial_state"], "initial redo state differs")
     (out / "before.json").write_text(json.dumps({"cgroups": before, "postgres": db_before}))
     command = [a["binary"], "redo", "--chain", "ethereum-mainnet", "--phase", "verify",
@@ -247,7 +324,6 @@ def run(a, out):
                "--writable-path", a["writable_path"]]
     for descriptor in a["source_descriptors"]:
         command.extend(["--source", descriptor])
-    env = dict(os.environ, BIGNAME_VERIFY_MEMORY_RUN_ID=a["run_id"], RUST_LOG="bigname_memory=info")
     def enter():
         os.setsid()
         Path(a["runner_cgroup"], "cgroup.procs").write_text(str(os.getpid()))
@@ -256,28 +332,27 @@ def run(a, out):
     process = None
     try:
         with open(out / "events.jsonl", "xb", buffering=0) as log, open(out / "stderr.txt", "xb") as err:
+            require(time.monotonic() < deadline - CLEANUP_RESERVE, "deadline; startup exhausted cleanup reserve")
             process = subprocess.Popen(["/usr/bin/time", "-v", "-o", str(out / "time.txt"), *command],
                                        stdout=log, stderr=err, env=env, preexec_fn=enter)
             with open(out / "events.jsonl", "r") as events, open(out / "samples.jsonl", "x") as samples:
                 pending = ""
                 while True:
                     now = time.monotonic()
-                    require(now < deadline - 15, "deadline; cleanup reserve reached")
+                    require(now < deadline - CLEANUP_RESERVE, "deadline; cleanup reserve reached")
                     for path in a["disk_paths"]:
                         fs = os.statvfs(path)
                         require(fs.f_bavail * fs.f_frsize >= 100 * 2**30, "disk floor")
                     require((out / "events.jsonl").stat().st_size + (out / "stderr.txt").stat().st_size <= 64 * 2**20,
                             "diagnostic disk envelope")
                     def envelope():
-                        require(time.monotonic() < deadline - 15, "deadline; cleanup reserve reached")
+                        require(time.monotonic() < deadline - CLEANUP_RESERVE, "deadline; cleanup reserve reached")
                         require((out / "events.jsonl").stat().st_size + (out / "stderr.txt").stat().st_size <= 64 * 2**20, "diagnostic disk envelope")
                     pending = drain(events, pending, observer, envelope)
                     sample = {"seconds": now - started, "gap": None if last_sample is None else now - last_sample}
                     for role in ("runner", "postgres"):
                         cg = cgroup(a[role + "_cgroup"])
-                        delta = counters(cg["memory.events"])
-                        previous = counters(before[role]["memory.events"])
-                        require(all(delta[k] == previous[k] for k in ("max", "oom", "oom_kill")), "memory limit encountered")
+                        unchanged_memory_events(before[role], cg)
                         sample[role] = {"cgroup_current": int(cg["memory.current"]), "processes": {}}
                         for pid in cg["cgroup.procs"].split():
                             try:
@@ -298,14 +373,18 @@ def run(a, out):
         require(process.returncode == 0, "runner failed")
         require(runner_seen and peak_rss > 0, "actual runner RSS missing")
         observer.finish()
-        db_after = postgres(a)
+        db_after = postgres(a, deadline, env)
         require(db_after["state"] == a["expected_final_state"], "durable final state differs")
-        require(db_after["stats_reset"] == db_before["stats_reset"], "PostgreSQL statistics reset")
+        for observation in (None, "verification_reader"):
+            old, new = (db_before, db_after) if observation is None else (db_before[observation], db_after[observation])
+            require(new["stats_reset"] == old["stats_reset"], "PostgreSQL statistics reset")
         time_text = (out / "time.txt").read_text()
         require("Maximum resident set size (kbytes):" in time_text, "GNU time peak missing")
+        after = {key: cgroup(a[key + "_cgroup"]) for key in ("runner", "postgres")}
+        for key in after: unchanged_memory_events(before[key], after[key])
         result = {"valid": True, "sampled_runner_hwm_bytes": peak_rss, "postgres_before": db_before,
                   "postgres_after": db_after, "before": before,
-                  "after": {key: cgroup(a[key + "_cgroup"]) for key in ("runner", "postgres")},
+                  "after": after,
                   "not_exercised": ["rpc", "selected_facts"], "seconds": time.monotonic() - started}
         return result
     finally:
@@ -315,7 +394,12 @@ def run(a, out):
         except (OSError, ValueError, subprocess.SubprocessError) as cleanup:
             (out / "cleanup-failure.json").write_text(json.dumps({"cleanup": str(cleanup), "original": str(original)}))
             if original is None: raise
-        (out / "after-cgroups.json").write_text(json.dumps({key: cgroup(a[key + "_cgroup"]) for key in ("runner", "postgres")}))
+        final = {key: cgroup(a[key + "_cgroup"]) for key in ("runner", "postgres")}
+        (out / "after-cgroups.json").write_text(json.dumps(final))
+        if original is None:
+            for key in final: unchanged_memory_events(before[key], final[key])
+            result["seconds"] = time.monotonic() - started
+            require(result["seconds"] < a["seconds"], "deadline exceeded during completion")
         # Preallocated PostgreSQL and cgroups belong to allocation owner; never destroy them here.
 
 
