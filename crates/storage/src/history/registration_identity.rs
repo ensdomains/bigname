@@ -181,8 +181,8 @@ fn push_registration_resource_witness(
     builder.push("))");
 }
 
-// Registry resolver events can already refer to a token-backed registrar resource
-// before a registration grant or plaintext name has been enriched.
+// The retained event proves registrar attribution. The resource row contributes
+// only its immutable chain/token relationship; its reorg anchor can move.
 fn push_public_registration_witness(
     builder: &mut QueryBuilder<'_, Postgres>,
     canonical_only: bool,
@@ -191,28 +191,17 @@ fn push_public_registration_witness(
     builder.push("(");
     push_registration_lifecycle_witness(builder, canonical_only, anchors);
     builder.push(
-        " OR EXISTS (
-            SELECT 1 FROM bigname_phase.resources registration_resource
-            LEFT JOIN bigname_phase.chain_lineage resource_lineage
-              ON resource_lineage.chain_id = registration_resource.chain_id
-             AND resource_lineage.block_hash = registration_resource.block_hash
-            WHERE registration_resource.resource_id = ne.resource_id
-              AND registration_resource.chain_id = ne.chain_id
-              AND registration_resource.token_lineage_id IS NOT NULL",
+        " OR (
+            (ne.source_family IN ('ens_v1_registrar_l1', 'basenames_base_registrar')
+             OR (ne.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+                 AND ne.event_kind = 'ResolverChanged'
+                 AND ne.after_state ->> 'authority_kind' = 'registrar'))
+            AND EXISTS (
+                SELECT 1 FROM bigname_phase.resources registration_resource
+                WHERE registration_resource.resource_id = ne.resource_id
+                  AND registration_resource.chain_id = ne.chain_id
+                  AND registration_resource.token_lineage_id IS NOT NULL)))",
     );
-    if canonical_only {
-        builder.push(
-            " AND registration_resource.canonicality_state IN ('canonical', 'safe', 'finalized')
-              AND resource_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')",
-        );
-    }
-    builder.push(" AND ");
-    builder.push(same_fork_as(
-        "registration_resource",
-        anchors,
-        canonical_only,
-    ));
-    builder.push("))");
 }
 
 // Producers emit RegistrationGranted for new lifecycles, including renewal-first
@@ -480,7 +469,10 @@ fn push_product_registration_id_with_anchors(
                                 SELECT 1
                                 FROM bigname_phase.resources event_resource
                                 WHERE event_resource.resource_id = ne.resource_id
-                                  AND {resource_fork}
+                                  AND ({resource_fork} OR (
+                                      ne.after_state ->> 'authority_kind' = 'registrar'
+                                      AND event_resource.chain_id = ne.chain_id
+                                  ))
                                   AND event_resource.token_lineage_id IS NOT NULL
                             )
                             AND NOT EXISTS (

@@ -453,13 +453,12 @@ pub(super) fn interpret(
             )
             .as_ref()
             .map(|link| link.resolver_address.clone());
-        if let Some(event) = output.events.first_mut() {
-            event.explicit_before = Some(json!({"resolver":previous_resolver}));
-            if let Some((resource_id, logical_name_id)) = event_anchor {
-                event.resource_id = Some(*resource_id);
-                event.logical_name_id = logical_name_id.clone();
-            }
-        }
+        surface::link_resolver_event(
+            output.events.first_mut(),
+            previous_resolver.as_deref(),
+            event_anchor,
+            linked.as_ref(),
+        );
         if let Some((resource_id, _)) = registry_anchor.as_ref() {
             output.resources.push(ResourceDraft {
                 resource_id: *resource_id,

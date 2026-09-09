@@ -954,7 +954,11 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   a wrapper's explicit registrar link; a registry-control binding alone does not
   establish a public registration handle. Resource-bearing events may also use a
   token-backed registrar resource before a grant or name enrichment is available;
-  a registry-only resource without token lineage does not qualify on that basis.
+  retained registrar-source events or registry resolver events explicitly attributed
+  to registrar authority establish that exception. A token lineage alone does not
+  qualify a reservation or registry-only resource. Noncanonical history uses the
+  retained event's branch evidence even after the resource's current block anchor
+  moves to a replacement branch.
   An invalid handle selects no product
   rows, whether resource-bearing or resource-less. This selection also governs
   page counts, summaries, and cursor anchors; raw diagnostics retains resource filtering.

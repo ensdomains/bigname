@@ -59,3 +59,23 @@ pub(in crate::schema_v2::protocol::v1) fn append_bound_event(
         state_scope: String::new(),
     });
 }
+
+pub(super) fn link_resolver_event(
+    event: Option<&mut EventDraft>,
+    previous_resolver: Option<&str>,
+    anchor: Option<&(uuid::Uuid, Option<String>)>,
+    authority: Option<&V1NameState>,
+) {
+    let Some(event) = event else { return };
+    event.explicit_before = Some(serde_json::json!({"resolver": previous_resolver}));
+    if let Some((resource_id, logical_name_id)) = anchor {
+        event.resource_id = Some(*resource_id);
+        event.logical_name_id = logical_name_id.clone();
+    }
+    if let Some(authority) = authority
+        && event.resource_id == Some(authority.resource_id)
+        && authority_kind(authority) == "registrar"
+    {
+        event.after_state["authority_kind"] = Value::String("registrar".to_owned());
+    }
+}

@@ -321,6 +321,7 @@ async fn pre_enrichment_registrar_resolver_keeps_the_registration_handle() -> Re
     resolver.after_state = json!({
         "source_event": "NewResolver",
         "node": "node:pre-enrichment-resolver.eth",
+        "authority_kind": "registrar",
         "resolver": "0x00000000000000000000000000000000000000aa"
     });
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[resolver]).await?;
@@ -2960,6 +2961,7 @@ async fn pre_enrichment_registration_handle_requires_token_lineage() -> Result<(
         event.source_family = "ens_v1_registry_l1".to_owned();
         event.after_state = json!({"source_event": "NewResolver",
             "node": "node:pre-enrichment-token-history.eth",
+            "authority_kind": if resource == registrar { "registrar" } else { "registry_only" },
             "resolver": "0x00000000000000000000000000000000000000aa"});
         events.push(event);
     }
@@ -2999,6 +3001,242 @@ async fn pre_enrichment_registration_handle_requires_token_lineage() -> Result<(
         if resource == registrar {
             assert_eq!(rows[0]["type"], json!("resolver"));
             assert_eq!(rows[0]["registration_id"], json!(registrar.to_string()));
+        }
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn reserved_token_resource_is_not_a_public_registration_handle() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource = Uuid::from_u128(0x7190);
+    let token = Uuid::from_u128(0x8190);
+    seed_v2_history_blocks(&database, 120..=122).await?;
+    upsert_test_token_lineages(
+        &database.pool,
+        &[address_name_token_lineage(token, "0xhistory120", 120)],
+    )
+    .await?;
+    upsert_test_resources(
+        &database.pool,
+        &[address_name_resource(
+            resource,
+            Some(token),
+            "0xhistory120",
+            120,
+        )],
+    )
+    .await?;
+    // Match the reservation producer: token identity, no binding or grant, then
+    // resource-bearing expiry and resolver updates while still reserved.
+    let mut events = Vec::new();
+    for (kind, source_event, number) in [
+        ("RegistrationReserved", "LabelReserved", 120),
+        ("ExpiryChanged", "ExpiryUpdated", 121),
+        ("ResolverChanged", "ResolverUpdated", 122),
+    ] {
+        let mut event = v2_history_event(
+            &format!("reserved-handle-{number}"),
+            None,
+            Some(resource),
+            kind,
+            number,
+        );
+        event.source_family = "ens_v2_registry_l1".to_owned();
+        event.derivation_kind = "ens_v2_registry_resource_surface".to_owned();
+        event.after_state["source_event"] = json!(source_event);
+        events.push(event);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    for canonical_only in [true, false] {
+        let rows = bigname_storage::load_event_history(
+            &database.pool,
+            bigname_storage::EventHistoryFilter {
+                resource_id: Some(resource),
+                ..Default::default()
+            },
+            canonical_only,
+        )
+        .await?;
+        assert!(rows.is_empty(), "reservation acquired a handle: {rows:?}");
+        let payload = v2_history_payload_for_database(
+            &database,
+            &format!("/v2/events?registration_id={resource}&page_size=1"),
+        )
+        .await?;
+        assert_eq!(payload["data"], json!([]), "{payload:?}");
+        assert_eq!(payload["page"]["has_more"], json!(false));
+    }
+    let diagnostics = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/diagnostics/events?registration_id={resource}&page_size=20"),
+    )
+    .await?;
+    assert_eq!(
+        diagnostics["data"]
+            .as_array()
+            .expect("diagnostic rows")
+            .len(),
+        3
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn retained_registrar_resolver_survives_resource_reanchoring() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource = Uuid::from_u128(0x7191);
+    let token = Uuid::from_u128(0x8191);
+    let mut blocks = vec![raw_block(
+        "ethereum-mainnet",
+        "0xreanchor-common",
+        None,
+        129,
+        1_700_000_129,
+    )];
+    for branch in ["a", "b"] {
+        for number in 130..=131 {
+            let parent = if number == 130 {
+                "0xreanchor-common".to_owned()
+            } else {
+                format!("0xreanchor-{branch}-130")
+            };
+            let mut block = raw_block(
+                "ethereum-mainnet",
+                &format!("0xreanchor-{branch}-{number}"),
+                Some(&parent),
+                number,
+                1_700_000_000 + number,
+            );
+            if branch == "a" {
+                block.canonicality_state = CanonicalityState::Orphaned;
+            }
+            blocks.push(block);
+        }
+    }
+    upsert_phase_raw_blocks(&database.pool, &blocks).await?;
+    upsert_test_token_lineages(
+        &database.pool,
+        &[address_name_token_lineage(token, "0xreanchor-a-130", 130)],
+    )
+    .await?;
+    upsert_test_resources(
+        &database.pool,
+        &[address_name_resource(
+            resource,
+            Some(token),
+            "0xreanchor-a-130",
+            130,
+        )],
+    )
+    .await?;
+    let mut events = Vec::new();
+    for branch in ["a", "b"] {
+        let mut event = v2_history_event(
+            &format!("reanchor-{branch}"),
+            None,
+            Some(resource),
+            "ResolverChanged",
+            131,
+        );
+        event.source_family = "ens_v1_registry_l1".to_owned();
+        event.block_hash = Some(format!("0xreanchor-{branch}-131"));
+        event.transaction_hash = Some(format!("0xreanchor-{branch}-tx"));
+        event.after_state["source_event"] = json!("NewResolver");
+        event.after_state["authority_kind"] = json!("registrar");
+        if branch == "a" {
+            event.canonicality_state = CanonicalityState::Orphaned;
+        }
+        events.push(event);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    // Reproduce the identity writer's post-reorg result. The normalized event
+    // on A remains, while both singleton identity anchors now refer to B.
+    sqlx::query(
+        "UPDATE bigname_phase.resources SET block_hash = '0xreanchor-b-130',
+         block_number = 130, canonicality_state = 'canonical' WHERE resource_id = $1",
+    )
+    .bind(resource)
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.token_lineages SET block_hash = '0xreanchor-b-130',
+         block_number = 130, canonicality_state = 'canonical' WHERE token_lineage_id = $1",
+    )
+    .bind(token)
+    .execute(&database.pool)
+    .await?;
+    for (canonical_only, count) in [(true, 1), (false, 2)] {
+        let rows = bigname_storage::load_event_history(
+            &database.pool,
+            bigname_storage::EventHistoryFilter {
+                resource_id: Some(resource),
+                ..Default::default()
+            },
+            canonical_only,
+        )
+        .await?;
+        assert_eq!(rows.len(), count, "retained branch history: {rows:?}");
+        for summary_mode in [
+            bigname_storage::HistorySummaryMode::Count,
+            bigname_storage::HistorySummaryMode::Full,
+        ] {
+            let page = bigname_storage::load_event_history_page(
+                &database.pool,
+                bigname_storage::EventHistoryFilter {
+                    resource_id: Some(resource),
+                    ..Default::default()
+                },
+                canonical_only,
+                None,
+                1,
+                summary_mode,
+                false,
+            )
+            .await?;
+            assert_eq!(
+                page.summary.as_ref().expect("summary").total_count,
+                count as u64
+            );
+            assert_eq!(page.rows.len(), 1);
+            if canonical_only {
+                assert_eq!(page.rows[0].event_identity, "reanchor-b");
+                assert!(page.next_cursor.is_none());
+            } else {
+                let next = bigname_storage::load_event_history_page(
+                    &database.pool,
+                    bigname_storage::EventHistoryFilter {
+                        resource_id: Some(resource),
+                        ..Default::default()
+                    },
+                    false,
+                    page.next_cursor.as_ref(),
+                    1,
+                    summary_mode,
+                    false,
+                )
+                .await?;
+                assert!(page.next_cursor.is_some());
+                assert_eq!(next.rows.len(), 1);
+                let mut identities = vec![
+                    page.rows[0].event_identity.as_str(),
+                    next.rows[0].event_identity.as_str(),
+                ];
+                identities.sort();
+                assert_eq!(identities, vec!["reanchor-a", "reanchor-b"]);
+                assert!(next.next_cursor.is_none());
+            }
+        }
+        if canonical_only {
+            let payload = v2_history_payload_for_database(
+                &database,
+                &format!("/v2/events?registration_id={resource}&page_size=1"),
+            )
+            .await?;
+            assert_eq!(
+                history_transaction_hashes(&payload),
+                vec!["0xreanchor-b-tx"]
+            );
         }
     }
     database.cleanup().await

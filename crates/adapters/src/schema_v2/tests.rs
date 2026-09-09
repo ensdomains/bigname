@@ -10165,6 +10165,11 @@ fn ens_v1_registry_and_match_all_resolver_reuse_the_registered_authority() -> an
         .find(|event| event.event_kind == "RegistrationGranted")
         .and_then(|event| event.resource_id)
         .expect("registration resource");
+    assert!(output.normalized_events.iter().any(|event| {
+        event.event_kind == "ResolverChanged"
+            && event.resource_id == Some(resource_id)
+            && event.after_state["authority_kind"] == "registrar"
+    }));
     for kind in ["ResolverChanged", "PermissionChanged", "RecordChanged"] {
         assert!(
             output.normalized_events.iter().any(|event| {
