@@ -22,9 +22,13 @@ COPY schema-v2 schema-v2
 ARG BIGNAME_BUILD_SHA=unknown
 ENV BIGNAME_BUILD_SHA=${BIGNAME_BUILD_SHA}
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    cargo build --locked --release --workspace --bins
+# Keep dependency sources and release objects together across source revisions.
+# Copy the finished executables out of the mount into the image layer.
+RUN --mount=type=cache,target=/build-cache,sharing=locked \
+    CARGO_HOME=/build-cache/cargo cargo build --locked --release --workspace --bins \
+        --target-dir /build-cache/target \
+    && mkdir -p /out \
+    && cp /build-cache/target/release/bigname-api /build-cache/target/release/phase-runner /out/
 
 FROM ubuntu:24.04 AS runtime
 
@@ -36,8 +40,8 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/bigname-api /usr/local/bin/bigname-api
-COPY --from=builder /app/target/release/phase-runner /usr/local/bin/phase-runner
+COPY --from=builder /out/bigname-api /usr/local/bin/bigname-api
+COPY --from=builder /out/phase-runner /usr/local/bin/phase-runner
 COPY --from=builder --chown=bigname:bigname /app/manifests /app/manifests
 COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/bigname
 

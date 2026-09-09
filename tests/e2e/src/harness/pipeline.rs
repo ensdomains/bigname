@@ -14,15 +14,15 @@ const RUNTIME_PROFILE_MIRROR_PREFIX: &str = ".bigname-e2e-runtime-profile-";
 
 struct CachedProfileRunner {
     snapshot: ProfileSnapshot,
-    binary: Weak<ProfileRunnerBinary>,
-    managed_lease: Option<Arc<ProfileRunnerBinary>>,
+    binary: Weak<OwnedProofBinary>,
+    managed_lease: Option<Arc<OwnedProofBinary>>,
 }
 
-struct ProfileRunnerBinary {
+struct OwnedProofBinary {
     path: PathBuf,
 }
 
-struct ProfileBuildLock {
+pub(crate) struct ProfileBuildLock {
     _file: std::fs::File,
 }
 
@@ -59,13 +59,13 @@ fn open_profile_build_lock(path: &Path) -> Result<std::fs::File> {
         .with_context(|| format!("open deployment-profile Cargo build lock at {path:?}"))
 }
 
-impl ProfileRunnerBinary {
+impl OwnedProofBinary {
     fn new(path: PathBuf) -> Self {
         Self { path }
     }
 }
 
-impl std::ops::Deref for ProfileRunnerBinary {
+impl std::ops::Deref for OwnedProofBinary {
     type Target = Path;
 
     fn deref(&self) -> &Self::Target {
@@ -73,13 +73,13 @@ impl std::ops::Deref for ProfileRunnerBinary {
     }
 }
 
-impl Drop for ProfileRunnerBinary {
+impl Drop for OwnedProofBinary {
     fn drop(&mut self) {
         if let Err(error) = std::fs::remove_file(&self.path)
             && error.kind() != std::io::ErrorKind::NotFound
         {
             eprintln!(
-                "failed to remove temporary deployment-profile phase-runner {:?}: {error}",
+                "failed to remove temporary proof executable {:?}: {error}",
                 self.path
             );
         }
@@ -175,7 +175,7 @@ async fn canonical_phase_runner(repo_root: &Path) -> Result<&'static PathBuf> {
 async fn profile_phase_runner(
     repo_root: &Path,
     manifests_root: &Path,
-) -> Result<Arc<ProfileRunnerBinary>> {
+) -> Result<Arc<OwnedProofBinary>> {
     let snapshot = profile_snapshot(manifests_root)?;
     let runners = PROFILE_PHASE_RUNNERS.get_or_init(|| tokio::sync::Mutex::new(Vec::new()));
     let mut runners = runners.lock().await;
@@ -187,7 +187,7 @@ async fn profile_phase_runner(
     {
         return Ok(binary);
     }
-    let binary = Arc::new(ProfileRunnerBinary::new(
+    let binary = Arc::new(OwnedProofBinary::new(
         build_phase_runner_binary(repo_root, Some(manifests_root)).await?,
     ));
     let managed_lease = std::env::var_os(PROFILE_BINARY_DIR_ENV).map(|_| binary.clone());
@@ -234,6 +234,13 @@ async fn build_phase_runner_binary(
     let linked_path = hard_link_profile_binary(&executable)?;
     drop(runtime_profile);
     Ok(linked_path)
+}
+
+pub(crate) async fn lock_api_build(repo_root: &Path) -> Result<ProfileBuildLock> {
+    let path = profile_build_lock_path(repo_root).with_file_name(".bigname-e2e-api-build.lock");
+    tokio::task::spawn_blocking(move || ProfileBuildLock::acquire(&path))
+        .await
+        .context("join API build-and-copy lock task")?
 }
 
 fn profile_build_lock_path(repo_root: &Path) -> PathBuf {
@@ -1266,7 +1273,7 @@ pub struct SequentialFixtureReplay {
     database_url: String,
     manifests_root: PathBuf,
     chain_rpc_urls: Vec<(String, String)>,
-    _binary: Arc<ProfileRunnerBinary>,
+    _binary: Arc<OwnedProofBinary>,
 }
 
 impl SequentialFixtureReplay {
@@ -2201,6 +2208,7 @@ pub async fn prove_normal_sepolia_http(
     let cargo = std::env::var_os("BIGNAME_E2E_REAL_CARGO")
         .or_else(|| std::env::var_os("CARGO"))
         .unwrap_or_else(|| "cargo".into());
+    let build_lock = lock_api_build(repo_root).await?;
     let mut build = Command::new(&cargo);
     build.env("CARGO", &cargo).current_dir(repo_root).args([
         "build",
@@ -2223,10 +2231,15 @@ pub async fn prove_normal_sepolia_http(
             api_binary = message["executable"].as_str().map(PathBuf::from);
         }
     }
-    let api_binary = api_binary.context("Cargo did not produce the exact-source API")?;
+    let executable = api_binary.context("Cargo did not produce the exact-source API")?;
+    let (snapshot_path, snapshot_file) = create_process_log_file("api-binary", "ops-http-api")?;
+    let api_binary = OwnedProofBinary::new(snapshot_path);
+    drop(snapshot_file);
+    std::fs::copy(executable, &api_binary.path)?;
+    drop(build_lock);
     eprintln!(
-        "OPS producer binary {:?}; API binary {api_binary:?}",
-        binary.path
+        "OPS producer binary {:?}; API binary {:?}",
+        binary.path, api_binary.path
     );
     let mut command = pipeline_command(repo_root, &binary);
     command.args([
@@ -2509,7 +2522,7 @@ mod tests {
         let linked_metadata = std::fs::metadata(&linked_path)?;
         let shares_inode = source_metadata.dev() == linked_metadata.dev()
             && source_metadata.ino() == linked_metadata.ino();
-        let runner = ProfileRunnerBinary::new(linked_path.clone());
+        let runner = OwnedProofBinary::new(linked_path.clone());
 
         drop(runner);
 

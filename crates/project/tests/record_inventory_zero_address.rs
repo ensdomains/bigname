@@ -48,94 +48,111 @@ enum Execution {
 }
 
 #[tokio::test]
-async fn default_fallback_tracks_exact_replacement_and_version_reset() -> Result<()> {
-    for state in ["missing", "empty", "nonzero", "version_reset"] {
-        let mut fixture = composed_fixture(true)?;
-        fixture.events = vec![scalar(10, 1, 10, "AddressChanged", "2147483648", LATER20)];
-        if state != "missing" {
-            fixture.events.extend([
-                scalar(11, 1, 11, "AddressChanged", "60", ZERO20),
-                scalar(11, 2, 11, "AddrChanged", "60", ZERO20),
-            ]);
-        }
-        if matches!(state, "empty" | "nonzero") {
-            let mut empty = flat(12, "60", "0x");
-            empty.transaction = 12;
-            fixture
-                .events
-                .extend([empty, scalar(12, 2, 12, "AddrChanged", "60", ZERO20)]);
-        }
-        if state == "nonzero" {
-            fixture
-                .events
-                .push(scalar(13, 1, 13, "AddrChanged", "60", NONZERO20));
-        }
-        if state == "version_reset" {
-            fixture.events.extend([
-                event(13, 0, 13, json!({"node":NODE, "record_version":"1"})),
-                scalar(13, 1, 13, "AddressChanged", "2147483648", LATER20),
-            ]);
-        }
+async fn default_fallback_missing_tracks_exact_replacement() -> Result<()> {
+    assert_default_fallback("missing").await
+}
+
+#[tokio::test]
+async fn default_fallback_empty_tracks_exact_replacement() -> Result<()> {
+    assert_default_fallback("empty").await
+}
+
+#[tokio::test]
+async fn default_fallback_nonzero_tracks_exact_replacement() -> Result<()> {
+    assert_default_fallback("nonzero").await
+}
+
+#[tokio::test]
+async fn default_fallback_version_reset_tracks_exact_replacement() -> Result<()> {
+    assert_default_fallback("version_reset").await
+}
+
+async fn assert_default_fallback(state: &str) -> Result<()> {
+    let mut fixture = composed_fixture(true)?;
+    fixture.events = vec![scalar(10, 1, 10, "AddressChanged", "2147483648", LATER20)];
+    if state != "missing" {
+        fixture.events.extend([
+            scalar(11, 1, 11, "AddressChanged", "60", ZERO20),
+            scalar(11, 2, 11, "AddrChanged", "60", ZERO20),
+        ]);
+    }
+    if matches!(state, "empty" | "nonzero") {
+        let mut empty = flat(12, "60", "0x");
+        empty.transaction = 12;
         fixture
             .events
-            .push(scalar(13, 9, 13, "AddressChanged", "61", NONZERO20));
-        let mut previous = None;
-        for execution in [
-            Execution::FromZero,
-            Execution::PerBlock,
-            Execution::TwoByTwo,
-            Execution::Idempotent,
-            Execution::RedoZeroBlock,
-        ] {
-            let (database, row) = project_case_with_database(&fixture, 13, execution).await?;
-            assert_marker(&row, false);
-            let answer = evaluate_indexed_record(
-                &row["entries"],
-                &row["provenance"],
-                &row["provenance"]["coverage"],
-                "addr:60",
-                "addr",
-                Some("60"),
-            );
+            .extend([empty, scalar(12, 2, 12, "AddrChanged", "60", ZERO20)]);
+    }
+    if state == "nonzero" {
+        fixture
+            .events
+            .push(scalar(13, 1, 13, "AddrChanged", "60", NONZERO20));
+    }
+    if state == "version_reset" {
+        fixture.events.extend([
+            event(13, 0, 13, json!({"node":NODE, "record_version":"1"})),
+            scalar(13, 1, 13, "AddressChanged", "2147483648", LATER20),
+        ]);
+    }
+    fixture
+        .events
+        .push(scalar(13, 9, 13, "AddressChanged", "61", NONZERO20));
+    let mut previous = None;
+    for execution in [
+        Execution::FromZero,
+        Execution::PerBlock,
+        Execution::TwoByTwo,
+        Execution::Idempotent,
+        Execution::RedoZeroBlock,
+    ] {
+        let (database, row) = project_case_with_database(&fixture, 13, execution).await?;
+        assert_marker(&row, false);
+        let answer = evaluate_indexed_record(
+            &row["entries"],
+            &row["provenance"],
+            &row["provenance"]["coverage"],
+            "addr:60",
+            "addr",
+            Some("60"),
+        );
+        assert_eq!(
+            answer.status,
+            IndexedRecordStatus::Success,
+            "{state}: {answer:?}"
+        );
+        assert_eq!(
+            answer.value,
+            Some(json!(if state == "nonzero" {
+                NONZERO20
+            } else {
+                LATER20
+            }))
+        );
+        assert_eq!(answer.derivation.is_some(), state != "nonzero");
+        let exact = row["entries"]
+            .as_array()
+            .context("produced entries")?
+            .iter()
+            .find(|entry| entry["record_key"] == "addr:60");
+        if state == "empty" {
             assert_eq!(
-                answer.status,
-                IndexedRecordStatus::Success,
-                "{state}: {answer:?}"
+                exact.context("retained empty exact entry")?["status"],
+                "not_found"
             );
-            assert_eq!(
-                answer.value,
-                Some(json!(if state == "nonzero" {
-                    NONZERO20
-                } else {
-                    LATER20
-                }))
-            );
-            assert_eq!(answer.derivation.is_some(), state != "nonzero");
-            let exact = row["entries"]
-                .as_array()
-                .context("produced entries")?
-                .iter()
-                .find(|entry| entry["record_key"] == "addr:60");
-            if state == "empty" {
-                assert_eq!(
-                    exact.context("retained empty exact entry")?["status"],
-                    "not_found"
-                );
-            } else if state != "nonzero" {
-                assert!(exact.is_none(), "{state} retained an exact entry: {row}");
-            }
-            if state == "version_reset" {
-                assert_eq!(
-                    row["record_version_boundary"]["event_kind"],
-                    "RecordVersionChanged"
-                );
-            }
-            if let Some(previous) = &previous {
-                assert_eq!(&row, previous, "{state} under {execution:?} drifted");
-            }
-            previous = Some(row);
-            database.cleanup().await?;
+        } else if state != "nonzero" {
+            assert!(exact.is_none(), "{state} retained an exact entry: {row}");
         }
+        if state == "version_reset" {
+            assert_eq!(
+                row["record_version_boundary"]["event_kind"],
+                "RecordVersionChanged"
+            );
+        }
+        if let Some(previous) = &previous {
+            assert_eq!(&row, previous, "{state} under {execution:?} drifted");
+        }
+        previous = Some(row);
+        database.cleanup().await?;
     }
     Ok(())
 }

@@ -38,20 +38,41 @@ async fn multicoin_address_set_clear_set_projects_latest_value() -> Result<()> {
 }
 
 #[tokio::test]
-async fn record_clear_sequences_are_replay_safe() -> Result<()> {
-    for fixture in cases()? {
-        let all_at_once = project_case(&fixture, Execution::AllAtOnce).await?;
-        let incremental = project_case(&fixture, Execution::Incremental).await?;
-        let repeated = project_case(&fixture, Execution::RepeatedPredecessor).await?;
-        let redo = project_case(&fixture, Execution::Redo).await?;
-        let case_id = fixture["case"]["id"].as_str().context("case id")?;
-        assert_eq!(incremental, all_at_once, "{case_id}: incremental drift");
-        assert_eq!(
-            repeated, all_at_once,
-            "{case_id}: repeated predecessor drift"
-        );
-        assert_eq!(redo, all_at_once, "{case_id}: redo drift");
-    }
+async fn ens_v1_contenthash_clear_after_set_is_replay_safe() -> Result<()> {
+    assert_replay_safe("ens_v1_contenthash_clear_after_set").await
+}
+
+#[tokio::test]
+async fn ens_v1_contenthash_set_clear_set_is_replay_safe() -> Result<()> {
+    assert_replay_safe("ens_v1_contenthash_set_clear_set").await
+}
+
+#[tokio::test]
+async fn basenames_multicoin_address_clear_after_set_is_replay_safe() -> Result<()> {
+    assert_replay_safe("basenames_multicoin_address_clear_after_set").await
+}
+
+#[tokio::test]
+async fn basenames_multicoin_address_set_clear_set_is_replay_safe() -> Result<()> {
+    assert_replay_safe("basenames_multicoin_address_set_clear_set").await
+}
+
+async fn assert_replay_safe(case_id: &str) -> Result<()> {
+    let fixture = cases()?
+        .into_iter()
+        .find(|fixture| fixture["case"]["id"] == case_id)
+        .with_context(|| format!("missing record-clear fixture {case_id}"))?;
+    let all_at_once = project_case(&fixture, Execution::AllAtOnce).await?;
+    let incremental = project_case(&fixture, Execution::Incremental).await?;
+    let repeated = project_case(&fixture, Execution::RepeatedPredecessor).await?;
+    let redo = project_case(&fixture, Execution::Redo).await?;
+    let case_id = fixture["case"]["id"].as_str().context("case id")?;
+    assert_eq!(incremental, all_at_once, "{case_id}: incremental drift");
+    assert_eq!(
+        repeated, all_at_once,
+        "{case_id}: repeated predecessor drift"
+    );
+    assert_eq!(redo, all_at_once, "{case_id}: redo drift");
     Ok(())
 }
 

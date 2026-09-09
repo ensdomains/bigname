@@ -186,8 +186,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: api
+          - name: api shard 1/3
             packages: "-p bigname-api"
+            api_shard: 1
+          - name: api shard 2/3
+            packages: "-p bigname-api"
+            api_shard: 2
+          - name: api shard 3/3
+            packages: "-p bigname-api"
+            api_shard: 3
           - name: core
             packages: >-
               -p bigname-domain
@@ -216,13 +223,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Sync pinned upstream checkouts
-        if: matrix.name == 'api'
+        if: matrix.api_shard
         run: |
           scripts/sync-refs
           scripts/sync-refs --check
 
       - name: Verify GraphQL oracle tooling (offline)
-        if: matrix.name == 'api'
+        if: matrix.api_shard
         run: |
           scripts/graphql-compat-oracle verify-fixtures --offline
           (cd scripts && bash test-graphql-compat-oracle)
@@ -255,13 +262,28 @@ jobs:
           scripts/sync-refs
           scripts/sync-refs --check
 
+      - name: Install cargo-nextest
+        if: matrix.api_shard
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.143
+
+      - name: API tests
+        if: matrix.api_shard
+        run: cargo nextest run -p bigname-api --all-features --no-fail-fast --partition slice:${{ matrix.api_shard }}/3
+
       - name: cargo test
+        if: matrix.name == 'core'
         run: cargo test ${{ matrix.packages }} --all-features
 
-  phase_runner_shard_1:
-    name: test (phase-runner shard 1/3)
+  phase_runner_shard:
+    name: test (phase-runner shard ${{ matrix.shard }}/8)
     runs-on: ubuntu-24.04
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     services:
       postgres:
         image: postgres:16-alpine
@@ -345,7 +367,7 @@ jobs:
             echo "- Exact hit: \`$CACHE_HIT\`"
           } >>"$GITHUB_STEP_SUMMARY"
 
-      - name: cargo nextest (slice 1/3)
+      - name: cargo nextest (slice ${{ matrix.shard }}/8)
         run: >-
           ./scripts/test-db -- cargo nextest run
           -p phase-runner
@@ -358,9 +380,10 @@ jobs:
           -p bigname-metrics
           --all-features
           --no-fail-fast
-          --partition slice:1/3
+          --partition slice:${{ matrix.shard }}/8
 
       - name: cargo test (doctests)
+        if: matrix.shard == 1
         run: >-
           ./scripts/test-db -- cargo test
           -p phase-runner
@@ -374,228 +397,18 @@ jobs:
           --all-features
           --doc
 
-  phase_runner_shard_2:
-    name: test (phase-runner shard 2/3)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 35
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: bigname
-          POSTGRES_USER: bigname
-          POSTGRES_PASSWORD: bigname
-          POSTGRES_INITDB_ARGS: "--set=max_connections=300"
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U bigname -d bigname"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      BIGNAME_TEST_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
-      CARGO_INCREMENTAL: "0"
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install pinned Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-
-      - name: Install native build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang libclang-dev
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.143
-
-      - name: Set up sccache
-        id: sccache
-        continue-on-error: true
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Fall back without sccache
-        if: steps.sccache.outcome != 'success'
-        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-
-      - name: Compute phase-runner dependency-cache key
-        id: phase_runner_cache_key
-        run: |
-          root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
-          e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
-          prefix="v1-rust-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
-          runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
-          primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
-          echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
-          echo "primary=$primary" >>"$GITHUB_OUTPUT"
-          echo "phase-runner dependency-cache primary key: $primary"
-
-      - name: Cache phase-runner Cargo dependencies
-        id: phase_runner_cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: ${{ steps.phase_runner_cache_key.outputs.prefix }}
-          shared-key: phase-runner
-          add-job-id-key: false
-          add-rust-environment-hash-key: false
-          workspaces: ". -> target"
-          cache-workspace-crates: false
-
-      - name: Report phase-runner dependency cache
-        env:
-          CACHE_HIT: ${{ steps.phase_runner_cache.outputs.cache-hit }}
-          CACHE_PRIMARY_KEY: ${{ steps.phase_runner_cache_key.outputs.primary }}
-        run: |
-          echo "phase-runner dependency-cache primary key: $CACHE_PRIMARY_KEY"
-          echo "phase-runner dependency-cache hit: $CACHE_HIT"
-          {
-            echo "### phase-runner dependency cache"
-            echo
-            echo "- Primary key: \`$CACHE_PRIMARY_KEY\`"
-            echo "- Exact hit: \`$CACHE_HIT\`"
-          } >>"$GITHUB_STEP_SUMMARY"
-
-      - name: cargo nextest (slice 2/3)
-        run: >-
-          ./scripts/test-db -- cargo nextest run
-          -p phase-runner
-          -p bigname-ingest
-          -p bigname-interpret
-          -p bigname-content-hash
-          -p bigname-benchmark-gate
-          -p bigname-lookup
-          -p bigname-project
-          -p bigname-metrics
-          --all-features
-          --no-fail-fast
-          --partition slice:2/3
-
-  phase_runner_shard_3:
-    name: test (phase-runner shard 3/3)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 35
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: bigname
-          POSTGRES_USER: bigname
-          POSTGRES_PASSWORD: bigname
-          POSTGRES_INITDB_ARGS: "--set=max_connections=300"
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U bigname -d bigname"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      BIGNAME_TEST_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
-      CARGO_INCREMENTAL: "0"
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install pinned Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-
-      - name: Install native build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang libclang-dev
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.143
-
-      - name: Set up sccache
-        id: sccache
-        continue-on-error: true
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Fall back without sccache
-        if: steps.sccache.outcome != 'success'
-        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-
-      - name: Compute phase-runner dependency-cache key
-        id: phase_runner_cache_key
-        run: |
-          root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
-          e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
-          prefix="v1-rust-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
-          runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
-          primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
-          echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
-          echo "primary=$primary" >>"$GITHUB_OUTPUT"
-          echo "phase-runner dependency-cache primary key: $primary"
-
-      - name: Cache phase-runner Cargo dependencies
-        id: phase_runner_cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: ${{ steps.phase_runner_cache_key.outputs.prefix }}
-          shared-key: phase-runner
-          add-job-id-key: false
-          add-rust-environment-hash-key: false
-          workspaces: ". -> target"
-          cache-workspace-crates: false
-
-      - name: Report phase-runner dependency cache
-        env:
-          CACHE_HIT: ${{ steps.phase_runner_cache.outputs.cache-hit }}
-          CACHE_PRIMARY_KEY: ${{ steps.phase_runner_cache_key.outputs.primary }}
-        run: |
-          echo "phase-runner dependency-cache primary key: $CACHE_PRIMARY_KEY"
-          echo "phase-runner dependency-cache hit: $CACHE_HIT"
-          {
-            echo "### phase-runner dependency cache"
-            echo
-            echo "- Primary key: \`$CACHE_PRIMARY_KEY\`"
-            echo "- Exact hit: \`$CACHE_HIT\`"
-          } >>"$GITHUB_STEP_SUMMARY"
-
-      - name: cargo nextest (slice 3/3)
-        run: >-
-          ./scripts/test-db -- cargo nextest run
-          -p phase-runner
-          -p bigname-ingest
-          -p bigname-interpret
-          -p bigname-content-hash
-          -p bigname-benchmark-gate
-          -p bigname-lookup
-          -p bigname-project
-          -p bigname-metrics
-          --all-features
-          --no-fail-fast
-          --partition slice:3/3
-
   phase_runner:
     name: test (phase-runner)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
-      - phase_runner_shard_1
-      - phase_runner_shard_2
-      - phase_runner_shard_3
+      - phase_runner_shard
     if: always()
     steps:
       - name: Check phase-runner shards
         run: |
-          if [ "${{ needs.phase_runner_shard_1.result }}" != "success" ] ||
-             [ "${{ needs.phase_runner_shard_2.result }}" != "success" ] ||
-             [ "${{ needs.phase_runner_shard_3.result }}" != "success" ]; then
-            echo "phase-runner shard 1/3: ${{ needs.phase_runner_shard_1.result }}"
-            echo "phase-runner shard 2/3: ${{ needs.phase_runner_shard_2.result }}"
-            echo "phase-runner shard 3/3: ${{ needs.phase_runner_shard_3.result }}"
+          if [ "${{ needs.phase_runner_shard.result }}" != "success" ]; then
+            echo "phase-runner shards: ${{ needs.phase_runner_shard.result }}"
             exit 1
           fi
 
@@ -747,10 +560,14 @@ jobs:
             echo "- Action digest: \`${{ steps.artifact_upload.outputs.artifact-digest }}\`"
           } >>"$GITHUB_STEP_SUMMARY"
 
-  e2e_shard_1:
-    name: test (e2e shard 1/2)
+  e2e_shard:
+    name: test (e2e shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     needs:
       - e2e_build
     # Start after the artifact and cache build; e2e results remain independently aggregated.
@@ -773,7 +590,7 @@ jobs:
     env:
       BIGNAME_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
       BIGNAME_E2E_TEST_THREADS: "8"
-      BIGNAME_E2E_SHARD: "1"
+      BIGNAME_E2E_SHARD: ${{ matrix.shard }}
       CARGO_INCREMENTAL: "0"
       RUSTC_WRAPPER: ""
     steps:
@@ -814,116 +631,15 @@ jobs:
           cache-workspace-crates: false
           save-if: false
 
-      - name: Report phase-runner dependency cache
-        env:
-          CACHE_HIT: ${{ steps.phase_runner_cache.outputs.cache-hit }}
-          CACHE_PRIMARY_KEY: ${{ steps.phase_runner_cache_key.outputs.primary }}
+      - name: Wait before a second dependency-cache restore
+        if: ${{ steps.phase_runner_cache.outputs.cache-hit != 'true' }}
         run: |
-          echo "phase-runner dependency-cache primary key: $CACHE_PRIMARY_KEY"
-          echo "phase-runner dependency-cache hit: $CACHE_HIT"
-          {
-            echo "### phase-runner dependency cache"
-            echo
-            echo "- Primary key: \`$CACHE_PRIMARY_KEY\`"
-            echo "- Exact hit: \`$CACHE_HIT\`"
-          } >>"$GITHUB_STEP_SUMMARY"
+          echo "No exact dependency-cache hit; waiting 30 seconds before one more restore."
+          sleep 30
 
-      - name: Install foundry (anvil)
-        uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: ${{ env.FOUNDRY_VERSION }}
-
-      - name: Sync pinned upstream checkouts
-        run: |
-          scripts/sync-refs
-          scripts/sync-refs --check
-
-      - name: Download phase-runner artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: ${{ needs.e2e_build.outputs.artifact-name }}
-          path: target/bigname-e2e-download
-          digest-mismatch: error
-
-      - name: Verify phase-runner artifact
-        run: |
-          artifact_dir="$GITHUB_WORKSPACE/target/bigname-e2e-artifact"
-          mkdir -p "$artifact_dir"
-          tar -xf target/bigname-e2e-download/phase-runner-e2e.tar -C "$artifact_dir"
-          (
-            cd "$artifact_dir"
-            sha256sum -c SHA256SUMS
-            grep -Fx "source SHA: $GITHUB_SHA" BUILD-METADATA
-            test -x phase-runner
-            file phase-runner
-            ldd phase-runner | tee dynamic-dependencies.txt
-            if grep -F "not found" dynamic-dependencies.txt; then
-              echo "phase-runner artifact has a missing dynamic dependency" >&2
-              exit 1
-            fi
-          )
-          echo "BIGNAME_E2E_CANONICAL_PHASE_RUNNER=$artifact_dir/phase-runner" >>"$GITHUB_ENV"
-
-      - name: Run e2e shard 1/2
-        run: tests/e2e/run-gate
-
-  e2e_shard_2:
-    name: test (e2e shard 2/2)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    needs:
-      - e2e_build
-    # Start after the artifact and cache build; e2e results remain independently aggregated.
-    if: ${{ !cancelled() && needs.e2e_build.result == 'success' }}
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: bigname
-          POSTGRES_USER: bigname
-          POSTGRES_PASSWORD: bigname
-          POSTGRES_INITDB_ARGS: "--set=max_connections=300"
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U bigname -d bigname"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      BIGNAME_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
-      BIGNAME_E2E_TEST_THREADS: "8"
-      BIGNAME_E2E_SHARD: "2"
-      CARGO_INCREMENTAL: "0"
-      RUSTC_WRAPPER: ""
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install pinned Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-
-      - name: Install native build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang libclang-dev
-
-      - name: Compute phase-runner dependency-cache key
-        id: phase_runner_cache_key
-        run: |
-          root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
-          e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
-          prefix="v1-rust-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
-          runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
-          primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
-          echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
-          echo "primary=$primary" >>"$GITHUB_OUTPUT"
-          echo "phase-runner dependency-cache primary key: $primary"
-
-      - name: Restore e2e phase-runner Cargo dependencies
-        id: phase_runner_cache
+      - name: Retry e2e phase-runner dependency-cache restore
+        id: phase_runner_cache_retry
+        if: ${{ steps.phase_runner_cache.outputs.cache-hit != 'true' }}
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: ${{ steps.phase_runner_cache_key.outputs.prefix }}
@@ -936,15 +652,24 @@ jobs:
 
       - name: Report phase-runner dependency cache
         env:
-          CACHE_HIT: ${{ steps.phase_runner_cache.outputs.cache-hit }}
+          FIRST_CACHE_HIT: ${{ steps.phase_runner_cache.outputs.cache-hit }}
+          RETRY_CACHE_HIT: ${{ steps.phase_runner_cache_retry.outputs.cache-hit }}
+          RETRY_OUTCOME: ${{ steps.phase_runner_cache_retry.outcome }}
+          CACHE_HIT: ${{ steps.phase_runner_cache.outputs.cache-hit == 'true' || steps.phase_runner_cache_retry.outputs.cache-hit == 'true' }}
           CACHE_PRIMARY_KEY: ${{ steps.phase_runner_cache_key.outputs.primary }}
         run: |
           echo "phase-runner dependency-cache primary key: $CACHE_PRIMARY_KEY"
+          echo "phase-runner dependency-cache first hit: $FIRST_CACHE_HIT"
+          echo "phase-runner dependency-cache retry outcome: $RETRY_OUTCOME"
+          echo "phase-runner dependency-cache retry hit: $RETRY_CACHE_HIT"
           echo "phase-runner dependency-cache hit: $CACHE_HIT"
           {
             echo "### phase-runner dependency cache"
             echo
             echo "- Primary key: \`$CACHE_PRIMARY_KEY\`"
+            echo "- First exact hit: \`$FIRST_CACHE_HIT\`"
+            echo "- Retry outcome: \`$RETRY_OUTCOME\`"
+            echo "- Retry exact hit: \`$RETRY_CACHE_HIT\`"
             echo "- Exact hit: \`$CACHE_HIT\`"
           } >>"$GITHUB_STEP_SUMMARY"
 
@@ -984,8 +709,90 @@ jobs:
           )
           echo "BIGNAME_E2E_CANONICAL_PHASE_RUNNER=$artifact_dir/phase-runner" >>"$GITHUB_ENV"
 
-      - name: Run e2e shard 2/2
+      - name: Run e2e shard ${{ matrix.shard }}/4
+        env:
+          BIGNAME_E2E_SHUTDOWN_EVIDENCE: ${{ runner.temp }}/native-api-shutdown
         run: tests/e2e/run-gate
+
+      - name: Retain native API shutdown evidence
+        if: ${{ always() && matrix.shard == 3 }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-api-shutdown
+          path: ${{ runner.temp }}/native-api-shutdown
+          if-no-files-found: warn
+          retention-days: 3
+
+  production_image:
+    name: build (production image)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      artifact-name: production-image-${{ github.run_id }}-${{ github.run_attempt }}
+      image-id: ${{ steps.shutdown_image.outputs.imageid }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Restore production release Cargo cache
+        id: release_cache
+        uses: actions/cache@v4
+        with:
+          path: target/docker-release-cache
+          key: docker-release-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-${{ hashFiles('Dockerfile', 'Cargo.lock', '.cargo/**', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            docker-release-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-${{ hashFiles('Dockerfile', 'Cargo.lock', '.cargo/**', 'rust-toolchain.toml') }}-
+
+      - name: Reuse production release Cargo cache in BuildKit
+        uses: reproducible-containers/buildkit-cache-dance@4b2444fec0c0fb9dbf175a96c094720a692ef810 # v2.1.4
+        with:
+          cache-source: target/docker-release-cache
+          cache-target: /build-cache
+          scratch-dir: target/docker-cache-dance
+          skip-extraction: ${{ steps.release_cache.outputs.cache-hit }}
+
+      - name: Build exact production image
+        id: shutdown_image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          platforms: linux/amd64
+          build-args: |
+            RUST_VERSION=${{ env.RUST_VERSION }}
+            BIGNAME_BUILD_SHA=${{ github.sha }}
+          tags: bigname-api-shutdown:${{ github.sha }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Package exact production image
+        env:
+          IMAGE_ID: ${{ steps.shutdown_image.outputs.imageid }}
+        run: |
+          package_dir="$GITHUB_WORKSPACE/target/bigname-image-package"
+          mkdir -p "$package_dir"
+          actual_id="$(docker image inspect --format '{{.Id}}' "bigname-api-shutdown:$GITHUB_SHA")"
+          test "$actual_id" = "$IMAGE_ID"
+          actual_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE_ID")"
+          test "$actual_revision" = "$GITHUB_SHA"
+          docker save "bigname-api-shutdown:$GITHUB_SHA" --output "$package_dir/production-image.tar"
+          (
+            cd "$package_dir"
+            sha256sum production-image.tar >SHA256SUMS
+            printf 'source SHA: %s\nimage ID: %s\n' "$GITHUB_SHA" "$IMAGE_ID" >BUILD-METADATA
+          )
+
+      - name: Upload exact production image
+        uses: actions/upload-artifact@v7
+        with:
+          name: production-image-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/bigname-image-package
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
 
   api_container_shutdown:
     name: test (API container shutdown)
@@ -993,7 +800,8 @@ jobs:
     timeout-minutes: 90
     needs:
       - e2e_build
-    if: ${{ !cancelled() && needs.e2e_build.result == 'success' }}
+      - production_image
+    if: ${{ !cancelled() && needs.e2e_build.result == 'success' && needs.production_image.result == 'success' }}
     services:
       postgres:
         image: postgres:16-alpine
@@ -1095,29 +903,30 @@ jobs:
           )
           echo "BIGNAME_E2E_CANONICAL_PHASE_RUNNER=$artifact_dir/phase-runner" >>"$GITHUB_ENV"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build exact production image
-        id: shutdown_image
-        uses: docker/build-push-action@v6
+      - name: Download exact production image
+        uses: actions/download-artifact@v8
         with:
-          context: .
-          file: ./Dockerfile
-          load: true
-          platforms: linux/amd64
-          build-args: |
-            RUST_VERSION=${{ env.RUST_VERSION }}
-            BIGNAME_BUILD_SHA=${{ github.sha }}
-          tags: bigname-api-shutdown:${{ github.sha }}
-          labels: org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          name: ${{ needs.production_image.outputs.artifact-name }}
+          path: target/bigname-image-download
+          digest-mismatch: error
+
+      - name: Verify and load exact production image
+        env:
+          IMAGE_ID: ${{ needs.production_image.outputs.image-id }}
+        run: |
+          image_dir="$GITHUB_WORKSPACE/target/bigname-image-download"
+          (
+            cd "$image_dir"
+            sha256sum -c SHA256SUMS
+            grep -Fx "source SHA: $GITHUB_SHA" BUILD-METADATA
+            grep -Fx "image ID: $IMAGE_ID" BUILD-METADATA
+          )
+          docker load --input "$image_dir/production-image.tar"
 
       - name: Prove exact-image API shutdown
         env:
           BIGNAME_E2E_SHUTDOWN_IMAGE: bigname-api-shutdown:${{ github.sha }}
-          BIGNAME_E2E_SHUTDOWN_IMAGE_ID: ${{ steps.shutdown_image.outputs.imageid }}
+          BIGNAME_E2E_SHUTDOWN_IMAGE_ID: ${{ needs.production_image.outputs.image-id }}
         run: scripts/test-container-shutdown
       - name: Retain shutdown evidence
         if: always()
@@ -1133,21 +942,21 @@ jobs:
     timeout-minutes: 5
     needs:
       - e2e_build
-      - e2e_shard_1
-      - e2e_shard_2
+      - production_image
+      - e2e_shard
       - api_container_shutdown
     if: always()
     steps:
       - name: Check e2e builder and shards
         run: |
-          if [ "${{ needs.e2e_build.result }}" != "success" ] ||
-             [ "${{ needs.e2e_shard_1.result }}" != "success" ] ||
-             [ "${{ needs.e2e_shard_2.result }}" != "success" ] ||
+          if [ "${{ needs.production_image.result }}" != "success" ] ||
+             [ "${{ needs.e2e_build.result }}" != "success" ] ||
+             [ "${{ needs.e2e_shard.result }}" != "success" ] ||
              [ "${{ needs.api_container_shutdown.result }}" != "success" ]; then
+            echo "image builder: ${{ needs.production_image.result }}"
             echo "API container: ${{ needs.api_container_shutdown.result }}"
             echo "e2e builder:   ${{ needs.e2e_build.result }}"
-            echo "e2e shard 1/2: ${{ needs.e2e_shard_1.result }}"
-            echo "e2e shard 2/2: ${{ needs.e2e_shard_2.result }}"
+            echo "e2e shards:    ${{ needs.e2e_shard.result }}"
             exit 1
           fi
 

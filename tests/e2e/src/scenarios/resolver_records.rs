@@ -35,6 +35,7 @@ async fn compact_records(run: &support::PipelineRun, name: &str, query: &str) ->
 
 pub(super) struct V2Api {
     child: Child,
+    _binary: std::sync::Arc<support::TempDir>,
     pub(super) base_url: String,
     pub(super) client: reqwest::Client,
 }
@@ -54,6 +55,7 @@ pub(super) async fn start_v2_api(
     let cargo = std::env::var_os("BIGNAME_E2E_REAL_CARGO")
         .or_else(|| std::env::var_os("CARGO"))
         .unwrap_or_else(|| "cargo".into());
+    let build_lock = pipeline::lock_api_build(&root).await?;
     let status = tokio::process::Command::new(cargo)
         .current_dir(&root)
         .args("build --locked -p bigname-api --bin=bigname-api".split_whitespace())
@@ -61,8 +63,12 @@ pub(super) async fn start_v2_api(
         .await?;
     ensure!(status.success(), "build real API binary for e2e");
     let target = root.join(std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into()));
-    let binary = target.join("debug/bigname-api");
-    ensure!(binary.is_file(), "API binary missing at {binary:?}");
+    let executable = target.join("debug/bigname-api");
+    ensure!(executable.is_file(), "API binary missing at {executable:?}");
+    let snapshot = std::sync::Arc::new(support::TempDir::create()?);
+    let binary = snapshot.path().join("bigname-api");
+    std::fs::copy(executable, &binary)?;
+    drop(build_lock);
     let ready_timeout_secs = pipeline::ready_timeout_secs()?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(ready_timeout_secs);
     let mut last_exit = None;
@@ -87,6 +93,7 @@ pub(super) async fn start_v2_api(
         }
         let mut api = V2Api {
             child: command.spawn()?,
+            _binary: snapshot.clone(),
             base_url: format!("http://{bind_addr}"),
             client: reqwest::Client::new(),
         };

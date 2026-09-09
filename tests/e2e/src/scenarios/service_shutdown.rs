@@ -101,24 +101,68 @@ async fn api_signals_drain_accepted_indexed_name_read() -> Result<()> {
         api_pool.close().await;
         let before = durable_rows(&run.db.pool).await?;
         save(&evidence, "rows-before", &before)?;
-        let target = root.join("target").join(format!("shutdown-api-{sha}"));
-        let mut build = Command::new("cargo");
-        build
-            .current_dir(&root)
-            .args([
-                "build",
-                "--locked",
-                "--package",
-                "bigname-api",
-                "--bin",
-                "bigname-api",
-            ])
-            .env("BIGNAME_BUILD_SHA", sha)
-            .env("CARGO_TARGET_DIR", &target);
-        if mode == "direct" {
-            pipeline::run_to_completion(build, "shutdown API build").await?;
-        }
-        let binary = target.join("debug/bigname-api");
+        let private_binary = if mode == "direct" {
+            Some(support::TempDir::create()?)
+        } else {
+            None
+        };
+        let binary = if let Some(directory) = private_binary.as_ref() {
+            let mut build = Command::new("cargo");
+            build
+                .current_dir(&root)
+                .args([
+                    "build",
+                    "--locked",
+                    "--message-format=json-render-diagnostics",
+                    "--package",
+                    "bigname-api",
+                    "--bin",
+                    "bigname-api",
+                ])
+                .env("BIGNAME_BUILD_SHA", sha);
+            // Inherit Cargo's target settings so restored dependencies remain reusable.
+            let lock_started = Instant::now();
+            let build_lock = pipeline::lock_api_build(&root).await?;
+            let lock_elapsed = lock_started.elapsed();
+            let build_started = Instant::now();
+            let output = pipeline::run_to_completion(build, "shutdown API build").await?;
+            let build_elapsed = build_started.elapsed();
+            let mut executable = None;
+            for line in output.lines() {
+                let message: Value = serde_json::from_str(line)?;
+                if message["reason"] == "compiler-artifact"
+                    && message["target"]["name"] == "bigname-api"
+                    && message["target"]["kind"]
+                        .as_array()
+                        .is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"))
+                    && message["manifest_path"].as_str().map(Path::new)
+                        == Some(root.join("apps/api/Cargo.toml").as_path())
+                {
+                    let path = message["executable"]
+                        .as_str()
+                        .context("Cargo omitted the shutdown API executable")?;
+                    ensure!(
+                        executable.replace(root.join(path)).is_none(),
+                        "Cargo reported duplicate shutdown API executables"
+                    );
+                }
+            }
+            let executable = executable.context("Cargo did not produce the shutdown API")?;
+            let snapshot = directory.path().join("bigname-api");
+            // Hash and run a test-owned copy, never the mutable Cargo output path.
+            std::fs::copy(&executable, &snapshot)?;
+            drop(build_lock);
+            save(
+                &evidence,
+                "native-build-timing",
+                &json!({"source_sha": sha, "lock_wait_ms": lock_elapsed.as_millis(),
+                    "build_ms": build_elapsed.as_millis()}),
+            )?;
+            snapshot
+        } else {
+            root.join("target")
+                .join(format!("shutdown-api-{sha}/debug/bigname-api"))
+        };
         let mut digest = Command::new("sha256sum");
         digest.arg(&binary);
         let binary_hash = if mode == "direct" {
