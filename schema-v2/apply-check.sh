@@ -128,7 +128,17 @@ migration_is_closed_form_drop() {
                 }
                 rest = substr(u, RSTART + RLENGTH)
                 sub(/ (CASCADE|RESTRICT)$/, "", rest)
-                t = split(rest, targets, ",")
+                # A routine target carries its argument signature; commas inside
+                # its parentheses separate arguments, not targets.
+                t = 0; depth = 0; target = ""
+                for (k = 1; k <= length(rest); k++) {
+                    c = substr(rest, k, 1)
+                    if (c == "(") depth++
+                    else if (c == ")") depth--
+                    if (c == "," && depth == 0) { targets[++t] = target; target = "" } else target = target c
+                }
+                targets[++t] = target
+                if (depth != 0) bad = bad " [unbalanced parentheses: " substr(s, 1, 40) "]"
                 for (j = 1; j <= t; j++) {
                     target = targets[j]; gsub(/^ +| +$/, "", target)
                     sub(/ *\(.*$/, "", target)
@@ -142,8 +152,11 @@ migration_is_closed_form_drop() {
         }
     ' "$1"
 }
+migration_uses_unicode_escape() {
+    grep -qiE "U&[\"']" "$1"
+}
 assert_uninventoried_migrations_are_schema_qualified() {
-    local migration_file migration_basename reason
+    local migration_file migration_basename reason noncanonical
     # The rule proves itself on every run: each planted form must be refused
     # with its reason, and the closed form must be accepted.
     local -a refused=(
@@ -156,6 +169,8 @@ assert_uninventoried_migrations_are_schema_qualified() {
         'ALTER TABLE public.shadow INHERIT chain_phase_state;'
         'CREATE TABLE public.shadow () INHERITS (public.audit, chain_phase_state);'
         'WITH chosen AS (SELECT 1) UPDATE chain_phase_state SET a = 1;'
+        'DROP FUNCTION IF EXISTS public.fn(integer, text), g(integer);'
+        'DROP FUNCTION IF EXISTS public.fn(integer, text;'
         'CREATE TABLE public.audit AS SELECT * FROM ONLY chain_phase_state;'
         'CREATE TABLE public.audit AS SELECT * FROM public.safe, chain_phase_state;'
         'CREATE TABLE pg_temp.audit AS SELECT write_resolution_divergence(1);'
@@ -172,7 +187,17 @@ assert_uninventoried_migrations_are_schema_qualified() {
             exit 1
         fi
     done
-    if ! printf -- '-- no-transaction\nDROP INDEX CONCURRENTLY IF EXISTS\n    public.old_idx;\nDROP TABLE IF EXISTS public.a, public.b CASCADE;\nDROP FUNCTION IF EXISTS public.fn(integer);\n' \
+    if ! printf '%s\n' 'COMMENT ON TABLE U&"bigname\005Fphase".chain_phase_state IS '"'"'bigname_phase'"'"';' \
+        | migration_uses_unicode_escape /dev/stdin \
+        || ! printf '%s\n' "COMMENT ON TABLE u&'bigname_phase'.t IS '';" | migration_uses_unicode_escape /dev/stdin; then
+        printf '%s\n' "unicode-escape check missed a planted U& form" >&2
+        exit 1
+    fi
+    if printf '%s\n' 'DROP TABLE IF EXISTS bigname_phase.audit_u_and_v;' | migration_uses_unicode_escape /dev/stdin; then
+        printf '%s\n' "unicode-escape check refused a plain identifier" >&2
+        exit 1
+    fi
+    if ! printf -- '-- no-transaction\nDROP INDEX CONCURRENTLY IF EXISTS\n    public.old_idx;\nDROP TABLE IF EXISTS public.a, public.b CASCADE;\nDROP FUNCTION IF EXISTS public.fn(integer, text), public.g(numeric(10,2));\nDROP PROCEDURE public.p(integer, text) RESTRICT;\n' \
         | migration_is_closed_form_drop /dev/stdin >/dev/null; then
         printf '%s\n' "closed-form check refused the closed form" >&2
         exit 1
@@ -184,9 +209,21 @@ assert_uninventoried_migrations_are_schema_qualified() {
         # the inventory and the scratch-schema rewrite match the lowercase literal
         # only, so any other spelling anywhere -- even beside a lowercase one --
         # would reach production unlisted and unrewritten: refuse it.
-        if grep -oi 'bigname_phase' "$migration_file" | grep -qv '^bigname_phase$'; then
+        # `grep -q` would close the pipe on its first hit and, under pipefail,
+        # turn the producer's SIGPIPE into a failed test; read every match.
+        noncanonical="$(grep -oi 'bigname_phase' "$migration_file" | grep -v '^bigname_phase$' || true)"
+        if [ -n "$noncanonical" ]; then
             printf '%s\n' \
                 "$migration_basename spells the phase schema other than bigname_phase; PostgreSQL folds it to the production schema but this check would neither inventory nor rewrite it" >&2
+            exit 1
+        fi
+        # A Unicode-escaped identifier or string (U&"..." / U&'...') can spell
+        # bigname_phase without containing the literal, so neither the
+        # inventory match nor the scratch-schema rewrite would see it; there is
+        # no schema-migration that needs the form, so refuse it outright.
+        if migration_uses_unicode_escape "$migration_file"; then
+            printf '%s\n' \
+                "$migration_basename uses a Unicode-escaped identifier or string (U&), which this check can neither inventory nor rewrite" >&2
             exit 1
         fi
         if phase_migration_uses_production_schema "$migration_file"; then

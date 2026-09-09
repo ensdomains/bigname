@@ -18,7 +18,8 @@ Accepted: 2026-09-11
 the prospective V2 specification. The [V1
 milestone](../glossary.md#v1-milestone) is the work that proves that release
 as a replacement for the retained legacy read surface: parity coverage (the
-slice-1 full-re-walk acceptance comparison and the combined-boundary gate that
+slice-1 full-re-walk acceptance comparison — a rebuild from raw chain data at a
+[re-derivation boundary](../glossary.md#re-derivation-boundary) — and the combined-boundary gate that
 [`consumer-capabilities.md`](../consumer-capabilities.md) requires),
 regression tests over the served routes, and monitoring, all built on top of
 the schema. It ends when those gates pass and the release is signed off; the
@@ -408,6 +409,14 @@ after slice 3, each as its own content-hash rotation (#745 on 2026-08-31 and
   records, which published a cleared record as `status: "success"`, is
   corrected: `crates/project/src/builders/record_inventory.rs` classifies those
   as `not_found`, pinned by the `v1-record-clears.json` interpreter fixture.
+  The classification follows the contracts: both resolver families store the
+  supplied byte payload verbatim and their reads return the stored bytes, so an
+  empty payload is what a clear leaves behind and what a read then returns
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/ContentHashResolver.sol:L14-L28 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L85 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/resolver/ContentHashResolver.sol:L32-L43 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L57-L99 @ basenames@1809bbc);
+  [`api-v2.md`](../api-v2.md#status-vocabulary) § Status Vocabulary carries the read-side rule.
 
 Neither needs scheduling again.
 
@@ -426,14 +435,25 @@ Neither needs scheduling again.
 
 ## Upstream anchors
 
-This ADR governs bigname's own schema and has one upstream dependency, in the
-derivation-side outcome above:
+This ADR governs bigname's own schema; its upstream dependencies are the two
+derivation-side outcomes above:
 
-- `.refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L48
+- `.refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48
   @ ens_v2@a971bd64` — anchors `ROLE_WAS_RESERVED` (bit 32) as an ENSv2
   registry role, mirrored by `REGISTRY_ROLE_BITS` in
-  `crates/adapters/src/schema_v2/protocol/permissions.rs`. Mirrored, not
-  diverged; no `upstream.md` entry.
+  `crates/adapters/src/schema_v2/protocol/permissions.rs`. The bit itself is
+  mirrored, not diverged. What bigname does with it — exposing the token-only
+  marker as `was_reserved` in `effective_powers` although it grants no
+  authorization — is the divergence `upstream.md` § Known divergences already
+  records as "ENSv2 reservation-history marker appears in the permission
+  vocabulary"; this ADR adds no second entry for it.
+- `.refs/ens_v1/contracts/resolvers/profiles/ContentHashResolver.sol:L14-L28`,
+  `.refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L85`
+  `@ ens_v1@91c966f`, and
+  `.refs/basenames/src/L2/resolver/ContentHashResolver.sol:L32-L43`,
+  `.refs/basenames/src/L2/resolver/AddrResolver.sol:L57-L99`
+  `@ basenames@1809bbc` — anchor the verbatim byte storage and reads behind the
+  record-clear `not_found` classification above. Mirrored, not diverged.
 
 ## Consequences
 
