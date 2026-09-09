@@ -1067,6 +1067,11 @@ and `rocksdb` identity in the admitted inventory. Include
 `manifests_root`, `writable_path`, `disk_paths`, owned `pg_temp_dirs`,
 `runner_cgroup`, `postgres_cgroup`, memory ceilings `runner_bytes` and
 `postgres_bytes`, deadline `seconds`, and `build_test_chains_including_this`.
+Resolved runner and PostgreSQL cgroup paths must be disjoint: equal paths and
+ancestor/descendant allocations are rejected before observation. The executable
+is copied and hashed before observation, limited to 256 MiB and the startup
+deadline; redo launches that owned read-only copy, which remains in the output.
+Account for this additional artifact alongside the manifest and diagnostic files.
 
 `manifest_sha256` binds raw TOML bytes and relative POSIX filenames: SHA-256 of
 UTF-8 compact JSON (no ASCII escaping or whitespace) containing sorted
@@ -1147,14 +1152,18 @@ those paths are not exercised by the direct local-reth Verify comparison.
 Missing stages, wrong source, cap encounters, timeout, incomplete comparison,
 wrong final state or output loss invalidate evidence. Preserve every failure and
 its identities; no silent shrinking/retry. Sequence assignment and emission are
-serialized; the collector rejects gaps, duplicates, unknown stages and mixed
-successful-attempt evidence, and reconciles exact cumulative/largest-item inventory.
+serialized; the collector rejects gaps, duplicates, unknown stages and all
+attempts after the first, and reconciles exact cumulative/largest-item inventory.
 A constant-size current-query summary requires both native witnesses when receipts
 were loaded, checks their exact query/attempt identity and query bounds, and is
 finalized at provider return. An explicitly empty native path requires zero rows
 and no fabricated witnesses. These summaries do not retain per-query history.
 Drains have a fixed budget and enforce deadline/output bytes during each read.
-Cleanup sends TERM to the exclusively assigned cgroup, then uses `cgroup.kill`
+A collector SIGTERM raises into cleanup; repeated TERM is ignored during cleanup
+and the caller's signal handler is restored afterward. SIGTERM delivery is deferred
+through launch and process assignment; the child restores default TERM handling
+and its inherited signal mask after joining the owned cgroup. Cleanup sends TERM to the
+exclusively assigned cgroup, then uses `cgroup.kill`
 for survivors independently of the GNU-time leader and checks the group is empty.
 Original and cleanup failures are both retained. The allocation owner then returns/removes
 only its disposable database/cgroups and records cleanup; no shared prune or live

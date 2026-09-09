@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """One admitted Verify-only experiment. Never provisions, restores, or builds."""
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -202,7 +203,7 @@ NATIVE_QUERY = NATIVE_WITNESSES | {"reth_native_query_loaded", "reth_native_quer
 
 class Observations:
     def __init__(self, a):
-        self.a, self.stages, self.sequence, self.attempt = a, set(), 0, 0
+        self.a, self.stages, self.sequence = a, set(), 0
         self.native = None
         self.root, self.final, self.last, self.largest, self.compared = set(), {}, {}, dict(stored=0, provider=0), False
 
@@ -220,10 +221,7 @@ class Observations:
             self.root.add(stage)
         else:
             require(f["chain"] == self.a["chain"] and self.a["from"] <= f["from"] <= f["to"] <= self.a["to"], "stage range/chain")
-            require(f["attempt"] > 0 and f["attempt"] >= self.attempt, "attempt attribution")
-            if f["attempt"] != self.attempt:
-                self.attempt, self.stages, self.final, self.compared = f["attempt"], set(), {}, False
-                self.native = None
+            require(f["attempt"] == 1, "Verify attempt must remain first; retry invalidates evidence")
             self.stages.add(stage)
         key = tuple(f[k] for k in ("attempt", "query_kind", "query_ordinal", "from", "to"))
         if stage == "reth_native_query_start":
@@ -334,10 +332,38 @@ def unchanged_memory_events(before, after):
     require(all(current[key] == previous[key] for key in ("max", "oom", "oom_kill")), "memory limit encountered")
 
 
+def binary_snapshot(a, out, deadline):
+    target = out / "runner"
+    h, total = hashlib.sha256(), 0
+    with open(a["binary"], "rb") as source, target.open("xb") as copy:
+        for data in iter(lambda: source.read(1024 * 1024), b""):
+            require(time.monotonic() < deadline - CLEANUP_RESERVE, "binary deadline")
+            total += len(data)
+            require(total <= 256 * 2**20, "binary artifact envelope")
+            h.update(data); copy.write(data)
+    require(h.hexdigest() == a["binary_sha256"], "binary differs")
+    target.chmod(0o500)
+    return target
+
+
+@contextmanager
+def termination_guard():
+    def terminate(signum, frame): raise InterruptedError("collector SIGTERM")
+    previous = signal.signal(signal.SIGTERM, terminate)
+    try: yield
+    finally: signal.signal(signal.SIGTERM, previous)
+
+
 def run(a, out):
+    with termination_guard(): return run_guarded(a, out)
+
+
+def run_guarded(a, out):
     started = time.monotonic()
     deadline = started + a["seconds"]
-    require(digest(a["binary"]) == a["binary_sha256"], "binary differs")
+    runner, postgres_group = (Path(a[key + "_cgroup"]).resolve() for key in ("runner", "postgres"))
+    require(not runner.is_relative_to(postgres_group) and not postgres_group.is_relative_to(runner), "cgroup overlap")
+    binary = binary_snapshot(a, out, deadline)
     snapshot = out / "manifests"
     snapshot.mkdir(mode=0o700)
     require(manifest_tree(a["manifests_root"], snapshot, deadline) == a["manifest_sha256"], "manifest differs")
@@ -351,7 +377,7 @@ def run(a, out):
     db_before = postgres(a, deadline, env)
     require(db_before["state"] == a["initial_state"], "initial redo state differs")
     (out / "before.json").write_text(json.dumps({"cgroups": before, "postgres": db_before}))
-    command = [a["binary"], "redo", "--chain", "ethereum-mainnet", "--phase", "verify",
+    command = [str(binary), "redo", "--chain", "ethereum-mainnet", "--phase", "verify",
                "--from-block", str(a["from"]), "--to-block", str(a["to"]),
                "--manifests-root", str(snapshot), "--minimum-free-disk-bytes", "107374182400",
                "--writable-path", a["writable_path"]]
@@ -360,14 +386,20 @@ def run(a, out):
     def enter():
         os.setsid()
         Path(a["runner_cgroup"], "cgroup.procs").write_text(str(os.getpid()))
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
     observer = Observations(a)
     last_sample, peak_rss, runner_seen = None, 0, False
     process = None
     try:
         with open(out / "events.jsonl", "xb", buffering=0) as log, open(out / "stderr.txt", "xb") as err:
             require(time.monotonic() < deadline - CLEANUP_RESERVE, "deadline; startup exhausted cleanup reserve")
-            process = subprocess.Popen(["/usr/bin/time", "-v", "-o", str(out / "time.txt"), *command],
-                                       stdout=log, stderr=err, env=env, preexec_fn=enter)
+            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+            try:
+                process = subprocess.Popen(["/usr/bin/time", "-v", "-o", str(out / "time.txt"), *command],
+                                           stdout=log, stderr=err, env=env, preexec_fn=enter)
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
             with open(out / "events.jsonl", "r") as events, open(out / "samples.jsonl", "x") as samples:
                 pending = ""
                 while True:
@@ -391,7 +423,7 @@ def run(a, out):
                             try:
                                 values = status(pid)
                                 sample[role]["processes"][pid] = values
-                                if role == "runner" and Path(f"/proc/{pid}/exe").resolve() == Path(a["binary"]).resolve():
+                                if role == "runner" and Path(f"/proc/{pid}/exe").resolve() == binary.resolve():
                                     peak_rss = max(peak_rss, values.get("VmHWM", 0)); runner_seen = True
                             except FileNotFoundError:
                                 pass
@@ -421,6 +453,7 @@ def run(a, out):
                   "not_exercised": ["rpc", "selected_facts"], "seconds": time.monotonic() - started}
         return result
     finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)  # Finish owned cleanup even after repeated TERM.
         original = sys.exc_info()[1]
         try:
             terminate_owned(a["runner_cgroup"], process)
