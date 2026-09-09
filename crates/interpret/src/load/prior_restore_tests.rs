@@ -4,7 +4,7 @@ use bigname_adapters::schema_v2::seam::{
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{Connection, PgConnection, PgPool};
 
 type Result<T = ()> = anyhow::Result<T>;
 
@@ -398,9 +398,6 @@ async fn exact_result_boundaries_and_all_readable_states() -> Result {
 #[tokio::test]
 #[ignore = "bounded restore resource fixture"]
 async fn wide_history_streams_identically_under_prepared_plan_modes() -> Result {
-    use futures_util::TryStreamExt;
-    use std::time::Instant;
-
     let db = database().await?;
     sqlx::query("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,raw_fact_ref,derivation_kind,canonicality_state,after_state) SELECT 'resource-'||n,'ens','RecordChanged','test',1,'restore-test',1+n%4,'block-'||(1+n%4),jsonb_build_object($1::text,repeat('k',512)||(n/4)), 'ens_v2_resolver','canonical',jsonb_build_object('payload',(SELECT string_agg(md5((n+j)::text),'') FROM generate_series(1,128) j)) FROM generate_series(1,16384) n")
         .bind(INTERPRETER_STATE_KEY).execute(db.pool()).await?;
@@ -416,7 +413,10 @@ async fn wide_history_streams_identically_under_prepared_plan_modes() -> Result 
                 .await?;
         }
         for mode in ["force_custom_plan", "force_generic_plan", "auto"] {
-            let mut tx = db.pool().begin().await?;
+            // A detached connection closes on error instead of returning named statements
+            // to the pool. Each mode and distribution starts with a fresh session.
+            let mut connection = db.pool().acquire().await?.detach();
+            let mut tx = connection.begin().await?;
             sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
                 .execute(&mut *tx)
                 .await?;
@@ -437,90 +437,59 @@ async fn wide_history_streams_identically_under_prepared_plan_modes() -> Result 
                 ("original", reference_statement()),
                 ("candidate", restore_statement()),
             ] {
-                let plan: Value = sqlx::query_scalar(&format!(
-                    "EXPLAIN (ANALYZE, BUFFERS, VERBOSE, SETTINGS, FORMAT JSON) {statement}"
-                ))
-                .bind("restore-test")
-                .bind(5_i64)
-                .fetch_one(&mut *tx)
-                .await?;
-                let wide = has_wide_global_store(&plan[0]["Plan"]);
-                assert_eq!(
-                    wide,
-                    name == "original",
-                    "{name} distinct={distinct} mode={mode}: {plan}"
-                );
-                eprintln!("restore-plan distinct={distinct} mode={mode} query={name} json={plan}");
-                let started = Instant::now();
-                let mut stream = sqlx::query_as::<_, Row>(&statement)
-                    .bind("restore-test")
-                    .bind(5_i64)
-                    .fetch(&mut *tx);
-                let mut page = Vec::with_capacity(1024);
-                let mut count = 0;
-                let mut high_water = 0;
-                let mut digest = alloy_primitives::Keccak256::new();
-                while let Some(row) = stream.try_next().await? {
-                    // Hash all returned fields individually; only the current page is retained.
-                    page.push(row);
-                    high_water = high_water.max(page.len());
-                    if page.len() == 1024 {
-                        for row in page.drain(..) {
-                            digest.update(
-                                format!(
-                                    "{:?}",
-                                    (
-                                        &row.0, &row.1, &row.2, &row.3, &row.4, &row.5, &row.6,
-                                        &row.7
-                                    )
-                                )
-                                .as_bytes(),
-                            );
-                            digest.update(
-                                format!(
-                                    "{:?}",
-                                    (
-                                        &row.8, &row.9, &row.10, &row.11, &row.12, &row.13,
-                                        &row.14, &row.15
-                                    )
-                                )
-                                .as_bytes(),
-                            );
-                            count += 1;
-                        }
-                    }
-                }
-                drop(stream);
-                for row in page.drain(..) {
-                    digest.update(
-                        format!(
-                            "{:?}",
-                            (
-                                &row.0, &row.1, &row.2, &row.3, &row.4, &row.5, &row.6, &row.7
-                            )
-                        )
-                        .as_bytes(),
+                let prepared = format!("restore_fixture_{name}");
+                sqlx::raw_sql(&format!("PREPARE {prepared} (text, bigint) AS {statement}"))
+                    .execute(&mut *tx)
+                    .await?;
+                assert_eq!(plan_counts(&mut tx, &prepared).await?, (0, 0));
+                let execute = format!("EXECUTE {prepared}('restore-test', 5)");
+                // Auto starts with five custom choices, then makes its cost-based choice.
+                // Every EXPLAIN ANALYZE EXECUTE counts as an execution in that history.
+                for execution in 1..=if mode == "auto" { 6 } else { 1 } {
+                    let before = plan_counts(&mut tx, &prepared).await?;
+                    let plan: Value = sqlx::query_scalar(&format!(
+                        "EXPLAIN (ANALYZE, BUFFERS, VERBOSE, SETTINGS, FORMAT JSON) {execute}"
+                    ))
+                    .persistent(false)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    let after = plan_counts(&mut tx, &prepared).await?;
+                    let generic = assert_plan_choice(before, after, mode, execution);
+                    let expressions = plan[0]["Plan"].to_string();
+                    assert_eq!(expressions.contains("$1"), generic, "{plan}");
+                    assert_eq!(expressions.contains("$2"), generic, "{plan}");
+                    assert_eq!(
+                        has_wide_global_store(&plan[0]["Plan"]),
+                        name == "original",
+                        "{name} distinct={distinct} mode={mode}: {plan}"
                     );
-                    digest.update(
-                        format!(
-                            "{:?}",
-                            (
-                                &row.8, &row.9, &row.10, &row.11, &row.12, &row.13, &row.14,
-                                &row.15
-                            )
-                        )
-                        .as_bytes(),
+                    eprintln!(
+                        "restore-plan distinct={distinct} mode={mode} query={name} execution={execution} before={before:?} after={after:?} generic={generic} json={plan}"
                     );
-                    count += 1;
                 }
-                let result = (count, digest.finalize());
-                assert_eq!(count, if distinct { 16384 } else { 4097 });
-                assert_eq!(high_water, 1024);
+                let before = plan_counts(&mut tx, &prepared).await?;
+                let result = stream_digest(&mut tx, &execute, false).await?;
+                let after = plan_counts(&mut tx, &prepared).await?;
+                let generic =
+                    assert_plan_choice(before, after, mode, if mode == "auto" { 7 } else { 2 });
+                // Retain the original bound SQLx stream as separate semantic evidence.
+                // Its SQL-text cache entry is not the named statement inspected above.
+                let bound = stream_digest(&mut tx, &statement, true).await?;
+                assert_eq!(result, bound);
+                assert_eq!(result.0, if distinct { 16384 } else { 4097 });
                 eprintln!(
-                    "restore-resource distinct={distinct} mode={mode} query={name} rows={count} page_high_water={high_water} elapsed_ms={} digest={}",
-                    started.elapsed().as_millis(),
-                    result.1
+                    "restore-resource distinct={distinct} mode={mode} query={name} rows={} digest={} named_stream_before={before:?} named_stream_after={after:?} generic={generic}",
+                    result.0, result.1
                 );
+                sqlx::raw_sql(&format!("DEALLOCATE {prepared}"))
+                    .execute(&mut *tx)
+                    .await?;
+                let remaining: i64 =
+                    sqlx::query_scalar("SELECT count(*) FROM pg_prepared_statements WHERE name=$1")
+                        .bind(&prepared)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                assert_eq!(remaining, 0);
                 if let Some(ref expected) = expected {
                     assert_eq!(&result, expected);
                 } else {
@@ -528,6 +497,7 @@ async fn wide_history_streams_identically_under_prepared_plan_modes() -> Result 
                 }
             }
             tx.commit().await?;
+            connection.close().await?;
         }
     }
     db.cleanup().await?;
@@ -549,4 +519,89 @@ fn has_wide_global_store(node: &Value) -> bool {
         || node["Plans"]
             .as_array()
             .is_some_and(|children| children.iter().any(has_wide_global_store))
+}
+
+// Counters belong to the SQL-level SELECT, not SQLx's utility-statement wrappers.
+async fn plan_counts(connection: &mut PgConnection, name: &str) -> Result<(i64, i64)> {
+    let (custom, generic, from_sql, types): (i64, i64, bool, Vec<String>) = sqlx::query_as(
+        "SELECT custom_plans, generic_plans, from_sql, parameter_types::text[] FROM pg_prepared_statements WHERE name=$1",
+    ).bind(name).fetch_one(connection).await?;
+    assert!(from_sql);
+    assert_eq!(types, ["text", "bigint"]);
+    Ok((custom, generic))
+}
+
+fn assert_plan_choice(before: (i64, i64), after: (i64, i64), mode: &str, execution: i64) -> bool {
+    let delta = (after.0 - before.0, after.1 - before.1);
+    assert!(matches!(delta, (1, 0) | (0, 1)), "{before:?} -> {after:?}");
+    assert_eq!(after.0 + after.1, execution);
+    match mode {
+        "force_custom_plan" => assert_eq!(delta, (1, 0)),
+        "force_generic_plan" => assert_eq!(delta, (0, 1)),
+        "auto" if execution <= 5 => assert_eq!(delta, (1, 0)),
+        "auto" => {}
+        _ => unreachable!(),
+    }
+    delta == (0, 1)
+}
+
+async fn stream_digest(
+    connection: &mut PgConnection,
+    statement: &str,
+    bound: bool,
+) -> Result<(usize, alloy_primitives::B256)> {
+    use futures_util::TryStreamExt;
+    let started = std::time::Instant::now();
+    let query = sqlx::query_as::<_, Row>(statement);
+    let query = if bound {
+        query.bind("restore-test").bind(5_i64)
+    } else {
+        query.persistent(false)
+    };
+    let mut stream = query.fetch(connection);
+    let mut page = Vec::with_capacity(1024);
+    let mut count = 0;
+    let mut high_water = 0;
+    let mut digest = alloy_primitives::Keccak256::new();
+    while let Some(row) = stream.try_next().await? {
+        page.push(row);
+        high_water = high_water.max(page.len());
+        if page.len() == 1024 {
+            for row in page.drain(..) {
+                digest_row(&mut digest, &row);
+                count += 1;
+            }
+        }
+    }
+    for row in page.drain(..) {
+        digest_row(&mut digest, &row);
+        count += 1;
+    }
+    assert_eq!(high_water, 1024);
+    eprintln!(
+        "restore-stream bound={bound} rows={count} page_high_water={high_water} elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
+    Ok((count, digest.finalize()))
+}
+
+fn digest_row(digest: &mut alloy_primitives::Keccak256, row: &Row) {
+    digest.update(
+        format!(
+            "{:?}",
+            (
+                &row.0, &row.1, &row.2, &row.3, &row.4, &row.5, &row.6, &row.7
+            )
+        )
+        .as_bytes(),
+    );
+    digest.update(
+        format!(
+            "{:?}",
+            (
+                &row.8, &row.9, &row.10, &row.11, &row.12, &row.13, &row.14, &row.15
+            )
+        )
+        .as_bytes(),
+    );
 }

@@ -95,7 +95,7 @@ pub(super) async fn restore_events(
 
 fn restore_statement() -> String {
     // Keep winner ordering ahead of the per-ID payload lookup. The bounded plan fixture
-    // checks this placement under custom and generic plans; OFFSET alone is not proof.
+    // inspects named SELECT plans through EXPLAIN EXECUTE; OFFSET alone is not proof.
     // The content-hashed adapter owns the opaque state key. Rows without one stay keyed by event
     // identity, and its clear marker alone retains one additional row.
     format!(
