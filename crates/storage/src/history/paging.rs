@@ -342,6 +342,12 @@ pub(super) fn push_history_filters<'a>(
         builder.push(" AND ");
         push_registration_binding_at_event(builder, *registration_id, canonical_only);
         builder.push(") OR (");
+        super::registration_identity::push_public_registration_at_event(
+            builder,
+            *registration_id,
+            canonical_only,
+        );
+        builder.push(" AND ");
         push_product_registration_id(builder, canonical_only);
         builder.push(" = ");
         builder.push_bind(registration_id);

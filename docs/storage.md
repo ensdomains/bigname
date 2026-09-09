@@ -82,6 +82,10 @@ reusable row reads, and database invariants. These rules are shared across calle
 below route code even when a route composes them into a larger query.
 History loaders with `canonical_only=false` include activated losing-branch events
 and use the same canonicality mode for registration grants, bindings, and ID mapping.
+Each registration-history binding and identity witness must lie on the event's
+parent-hash path. Overlapping binding times or matching canonicality states do not
+connect different retained forks. Nested grant, wrapper, and recovered-name witnesses
+must also agree with one another on that path.
 The HTTP product history routes continue to request canonical-only reads.
 
 `apps/api` owns route-specific joins, pagination, wire shaping, and GraphQL compatibility.

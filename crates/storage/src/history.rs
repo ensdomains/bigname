@@ -4,6 +4,7 @@ mod duplicates;
 mod event_page;
 #[cfg(any(test, feature = "test-support"))]
 pub mod history_anchor_read_test_hooks;
+mod lineage;
 mod paging;
 #[cfg(any(test, feature = "test-support"))]
 mod query_plan;

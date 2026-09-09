@@ -1542,17 +1542,31 @@ async fn noncanonical_born_wrapped_history_keeps_one_registration_handle() -> Re
         )],
     )
     .await?;
-    seed_v2_history_blocks(&database, 130..=133).await?;
+    let blocks = (130..=133)
+        .map(|block_number| {
+            let parent = (block_number > 130).then(|| format!("0xhistory{}", block_number - 1));
+            raw_block(
+                "ethereum-mainnet",
+                &format!("0xhistory{block_number}"),
+                parent.as_deref(),
+                block_number,
+                1_700_000_000 + block_number,
+            )
+        })
+        .collect::<Vec<_>>();
+    upsert_phase_raw_blocks(&database.pool, &blocks).await?;
     sqlx::query(
         "UPDATE bigname_phase.surface_bindings
-         SET active_from = to_timestamp(1700000130), canonicality_state = 'orphaned'
+         SET active_from = to_timestamp(1700000130), canonicality_state = 'orphaned',
+             block_hash = '0xhistory130', block_number = 130
          WHERE resource_id = $1",
     )
     .bind(wrapper)
     .execute(&database.pool)
     .await?;
     sqlx::query(
-        "UPDATE bigname_phase.name_surfaces SET canonicality_state = 'orphaned'
+        "UPDATE bigname_phase.name_surfaces
+         SET canonicality_state = 'orphaned', block_hash = '0xhistory130', block_number = 130
          WHERE logical_name_id = $1",
     )
     .bind(&logical_name_id)
@@ -2666,4 +2680,326 @@ fn history_transaction_hashes(payload: &Value) -> Vec<&str> {
                 .expect("history row transaction_hash")
         })
         .collect()
+}
+
+#[tokio::test]
+async fn noncanonical_registration_history_keeps_resource_less_events_on_their_fork() -> Result<()>
+{
+    const NAME: &str = "fork-registration-history.eth";
+    const SEED: &str = "ens:fork-registration-history.eth";
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
+    let registration_a = Uuid::from_u128(0x7170);
+    let registration_b = Uuid::from_u128(0x7171);
+    seed_identity_name(
+        &database,
+        SEED,
+        NAME,
+        NAME,
+        "node:fork-registration-history.eth",
+        registration_a,
+        Uuid::from_u128(0x8170),
+        Uuid::from_u128(0x9170),
+        "0x0000000000000000000000000000000000007170",
+        bigname_storage::AddressNameRelation::Registrant,
+        80,
+    )
+    .await?;
+    upsert_test_resources(
+        &database.pool,
+        &[address_name_resource(
+            registration_b,
+            None,
+            "0xfork-resource-b",
+            79,
+        )],
+    )
+    .await?;
+    let mut blocks = vec![raw_block(
+        "ethereum-mainnet",
+        "0xfork-common",
+        None,
+        129,
+        1_700_000_129,
+    )];
+    for branch in ["a", "b"] {
+        for number in 130..=131 {
+            let parent = if number == 130 {
+                "0xfork-common".to_owned()
+            } else {
+                format!("0xfork-{branch}-130")
+            };
+            let mut block = raw_block(
+                "ethereum-mainnet",
+                &format!("0xfork-{branch}-{number}"),
+                Some(&parent),
+                number,
+                1_700_000_000 + number,
+            );
+            if branch == "b" {
+                block.canonicality_state = CanonicalityState::Orphaned;
+            }
+            blocks.push(block);
+        }
+    }
+    upsert_phase_raw_blocks(&database.pool, &blocks).await?;
+    // Both active intervals cover exactly the same wall-clock times. Fork hashes
+    // are the only valid discriminator for the resource-less records below.
+    sqlx::query(
+        "UPDATE bigname_phase.surface_bindings
+        SET block_hash = '0xfork-a-130', block_number = 130,
+            active_from = to_timestamp(1700000130), active_to = NULL
+        WHERE resource_id = $1",
+    )
+    .bind(registration_a)
+    .execute(&database.pool)
+    .await?;
+    let mut binding_b = address_name_surface_binding(
+        Uuid::from_u128(0x9171),
+        SEED,
+        registration_b,
+        "0xfork-b-130",
+        130,
+        1_700_000_130,
+    );
+    binding_b.canonicality_state = CanonicalityState::Orphaned;
+    upsert_test_surface_bindings(&database.pool, &[binding_b]).await?;
+    let mut events = Vec::new();
+    for (branch, resource, state) in [
+        ("a", registration_a, CanonicalityState::Canonical),
+        ("b", registration_b, CanonicalityState::Orphaned),
+    ] {
+        for (suffix, kind, number, resource_id) in [
+            ("grant", "RegistrationGranted", 130, Some(resource)),
+            ("record", "RecordChanged", 131, None),
+        ] {
+            let mut event = v2_history_event(
+                &format!("fork-{branch}-{suffix}"),
+                Some(&logical_name_id),
+                resource_id,
+                kind,
+                number,
+            );
+            event.block_hash = Some(format!("0xfork-{branch}-{number}"));
+            event.transaction_hash = Some(format!("0xfork-{branch}-tx-{number}"));
+            event.canonicality_state = state;
+            if resource_id.is_none() {
+                event.source_family = "ens_v1_resolver_l1".to_owned();
+            }
+            events.push(event);
+        }
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    // Repeat with both branches orphaned, so a canonicality-state equality
+    // substitute cannot satisfy the regression.
+    for both_orphaned in [false, true] {
+        if both_orphaned {
+            for table in ["normalized_events", "surface_bindings", "chain_lineage"] {
+                sqlx::query(&format!("UPDATE bigname_phase.{table}
+                    SET canonicality_state = 'orphaned'
+                    WHERE chain_id = 'ethereum-mainnet' AND block_hash IN ('0xfork-a-130', '0xfork-a-131')"))
+                    .execute(&database.pool).await?;
+            }
+        }
+        let name_rows = bigname_storage::load_name_history(
+            &database.pool,
+            &logical_name_id,
+            &[registration_a, registration_b],
+            bigname_storage::HistoryScope::Both,
+            false,
+        )
+        .await?;
+        assert_eq!(name_rows.len(), 4, "{name_rows:?}");
+        for (branch, resource, other_resource) in [
+            ("a", registration_a, registration_b),
+            ("b", registration_b, registration_a),
+        ] {
+            let filter = bigname_storage::EventHistoryFilter {
+                resource_id: Some(resource),
+                ..Default::default()
+            };
+            let rows =
+                bigname_storage::load_event_history(&database.pool, filter.clone(), false).await?;
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row.event_identity.as_str())
+                    .collect::<Vec<_>>(),
+                vec![
+                    format!("fork-{branch}-record"),
+                    format!("fork-{branch}-grant")
+                ]
+            );
+            assert_eq!(rows[0].registration_id, None);
+            assert_eq!(rows[1].registration_id, Some(resource));
+            let canonical =
+                bigname_storage::load_event_history(&database.pool, filter.clone(), true).await?;
+            assert_eq!(
+                canonical.len(),
+                if branch == "a" && !both_orphaned {
+                    2
+                } else {
+                    0
+                }
+            );
+            for summary_mode in [
+                bigname_storage::HistorySummaryMode::Count,
+                bigname_storage::HistorySummaryMode::Full,
+            ] {
+                let page = bigname_storage::load_event_history_page(
+                    &database.pool,
+                    filter.clone(),
+                    false,
+                    None,
+                    1,
+                    summary_mode,
+                    false,
+                )
+                .await?;
+                assert_eq!(page.rows.len(), 1);
+                assert_eq!(page.rows[0].event_identity, format!("fork-{branch}-record"));
+                assert_eq!(page.summary.as_ref().unwrap().total_count, 2);
+                let cursor = page.next_cursor.as_ref().expect("same-fork grant remains");
+                let next = bigname_storage::load_event_history_page(
+                    &database.pool,
+                    filter.clone(),
+                    false,
+                    Some(cursor),
+                    1,
+                    summary_mode,
+                    false,
+                )
+                .await?;
+                assert_eq!(next.rows.len(), 1);
+                assert_eq!(next.rows[0].event_identity, format!("fork-{branch}-grant"));
+                assert!(next.next_cursor.is_none());
+                let error = bigname_storage::load_event_history_page(
+                    &database.pool,
+                    bigname_storage::EventHistoryFilter {
+                        resource_id: Some(other_resource),
+                        ..Default::default()
+                    },
+                    false,
+                    Some(cursor),
+                    1,
+                    summary_mode,
+                    false,
+                )
+                .await
+                .expect_err("another fork's record must not anchor this registration");
+                assert!(
+                    error
+                        .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
+                        .is_some()
+                );
+            }
+        }
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn pre_enrichment_registration_handle_requires_token_lineage() -> Result<()> {
+    const NAME: &str = "pre-enrichment-token-history.eth";
+    const SEED: &str = "ens:pre-enrichment-token-history.eth";
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
+    let registrar = Uuid::from_u128(0x7180);
+    let registry = Uuid::from_u128(0x7181);
+    seed_identity_name(
+        &database,
+        SEED,
+        NAME,
+        NAME,
+        "node:pre-enrichment-token-history.eth",
+        registrar,
+        Uuid::from_u128(0x8180),
+        Uuid::from_u128(0x9180),
+        "0x0000000000000000000000000000000000007180",
+        bigname_storage::AddressNameRelation::Registrant,
+        80,
+    )
+    .await?;
+    upsert_test_resources(
+        &database.pool,
+        &[address_name_resource(registry, None, "0xresource", 99)],
+    )
+    .await?;
+    seed_v2_history_blocks(&database, 120..=121).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.surface_bindings
+        SET block_hash = '0xhistory120', block_number = 120,
+            active_from = to_timestamp(1700000120), active_to = to_timestamp(1700000121)
+        WHERE resource_id = $1",
+    )
+    .bind(registrar)
+    .execute(&database.pool)
+    .await?;
+    upsert_test_surface_bindings(
+        &database.pool,
+        &[address_name_surface_binding(
+            Uuid::from_u128(0x9181),
+            SEED,
+            registry,
+            "0xhistory121",
+            121,
+            1_700_000_121,
+        )],
+    )
+    .await?;
+    let mut events = Vec::new();
+    for (suffix, resource, block_number) in
+        [("registrar", registrar, 120), ("registry", registry, 121)]
+    {
+        let mut event = v2_history_event(
+            &format!("pre-enrichment-token-{suffix}"),
+            None,
+            Some(resource),
+            "ResolverChanged",
+            block_number,
+        );
+        event.source_family = "ens_v1_registry_l1".to_owned();
+        event.after_state = json!({"source_event": "NewResolver",
+            "node": "node:pre-enrichment-token-history.eth",
+            "resolver": "0x00000000000000000000000000000000000000aa"});
+        events.push(event);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    // Each event lies inside its resource's non-overlapping canonical binding
+    // epoch, so both rows retain identity. The public-handle check distinguishes token lineage.
+    let name_rows = bigname_storage::load_name_history(
+        &database.pool,
+        &logical_name_id,
+        &[registrar, registry],
+        bigname_storage::HistoryScope::Both,
+        true,
+    )
+    .await?;
+    assert_eq!(name_rows.len(), 2, "{name_rows:?}");
+    for resource in [registrar, registry] {
+        assert!(
+            name_rows
+                .iter()
+                .any(|row| row.registration_id == Some(resource)),
+            "the identity mapper must not hide the handle eligibility regression: {name_rows:?}"
+        );
+    }
+    // There is no grant, wrapper event or event-level name attribution for either
+    // resource. Accepting arbitrary bound resources fails the negative assertion.
+    for (resource, count) in [(registrar, 1), (registry, 0)] {
+        let payload = v2_history_payload_for_database(
+            &database,
+            &format!("/v2/events?registration_id={resource}&page_size=20"),
+        )
+        .await?;
+        let rows = payload["data"]
+            .as_array()
+            .expect("registration history rows");
+        assert_eq!(rows.len(), count, "{resource}: {payload:?}");
+        assert_eq!(payload["page"]["has_more"], json!(false));
+        if resource == registrar {
+            assert_eq!(rows[0]["type"], json!("resolver"));
+            assert_eq!(rows[0]["registration_id"], json!(registrar.to_string()));
+        }
+    }
+    database.cleanup().await
 }

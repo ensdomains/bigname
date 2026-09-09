@@ -952,7 +952,10 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   exclusive; an older registration does not acquire later registrations' name
   events. The binding must be backed by a registration grant, directly or through
   a wrapper's explicit registrar link; a registry-control binding alone does not
-  establish a public registration handle. An invalid handle selects no product
+  establish a public registration handle. Resource-bearing events may also use a
+  token-backed registrar resource before a grant or name enrichment is available;
+  a registry-only resource without token lineage does not qualify on that basis.
+  An invalid handle selects no product
   rows, whether resource-bearing or resource-less. This selection also governs
   page counts, summaries, and cursor anchors; raw diagnostics retains resource filtering.
   `scope=name` returns only rows carrying the name's
