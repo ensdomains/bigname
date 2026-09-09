@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use alloy_primitives::Address;
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::harness::{
     anvil::Anvil,
