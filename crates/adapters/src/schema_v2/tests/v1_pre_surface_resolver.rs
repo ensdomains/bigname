@@ -2338,3 +2338,242 @@ fn admitted_registrar_self_transfer_reconciles_authority_permissions() -> anyhow
     );
     Ok(())
 }
+
+mod public_v2_records {
+    use super::*;
+    use crate::schema_v2::catalog::Catalog;
+    sol! {
+        event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress);
+        event ContenthashChanged(bytes32 indexed node, bytes hash);
+    }
+    fn manifest() -> ManifestInput {
+        let events = [
+            "event AddrChanged(bytes32 indexed node, address a)",
+            "event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress)",
+            "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+            "event ContenthashChanged(bytes32 indexed node, bytes hash)",
+            "event VersionChanged(bytes32 indexed node, uint64 newVersion)",
+        ];
+        let kinds = [["RecordChanged"], ["RecordVersionChanged"]];
+        let roles = ["public_resolver_v2"];
+        let events = events
+            .iter()
+            .map(|abi| {
+                let name = abi.split([' ', '(']).nth(1).unwrap();
+                (
+                    name,
+                    *abi,
+                    roles.as_slice(),
+                    kinds[usize::from(name == "VersionChanged")].as_slice(),
+                )
+            })
+            .collect::<Vec<_>>();
+        manifest_with_events(6190, "ens", "ens_v2_resolver_l1", &events)
+    }
+    #[test]
+    fn node_values_and_version_skip_materialized_v1_resource() -> anyhow::Result<()> {
+        let (mut manifests, mut admissions, node) = fixture();
+        manifests.push(manifest());
+        admissions.push(admission(6190, "public_resolver_v2"));
+        let mut logs = prefix(OWNER, node, false)?;
+        logs.push(renewal(3));
+        let text = |value: &str| {
+            resolver_strings::TextChanged {
+                node,
+                indexedKey: keccak256(b"url"),
+                key: "url".to_owned(),
+                value: value.to_owned(),
+            }
+            .encode_log_data()
+        };
+        let zero = resolver::AddrChanged {
+            node,
+            a: ZERO_ADDRESS.parse()?,
+        }
+        .encode_log_data();
+        let encoded = [
+            AddressChanged {
+                node,
+                coinType: U256::from(60),
+                newAddress: vec![0; 20].into(),
+            }
+            .encode_log_data(),
+            zero.clone(),
+            AddressChanged {
+                node,
+                coinType: U256::from(60),
+                newAddress: Vec::new().into(),
+            }
+            .encode_log_data(),
+            zero.clone(),
+            text(""),
+            ContenthashChanged {
+                node,
+                hash: Vec::new().into(),
+            }
+            .encode_log_data(),
+            resolver::VersionChanged {
+                node,
+                newVersion: 1,
+            }
+            .encode_log_data(),
+            text("new"),
+        ];
+        for (index, event) in encoded.into_iter().enumerate() {
+            logs.push(raw_at(event, 4, i64::try_from(index)?, CONTRACT));
+        }
+        let output = interpret_test_batch(input(manifests, admissions, Vec::new(), logs))?;
+        let records = output
+            .normalized_events
+            .iter()
+            .filter(|event| event.source_family == "ens_v2_resolver_l1")
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 8);
+        for event in &records {
+            assert!(event.logical_name_id.is_none() && event.resource_id.is_none());
+            assert_eq!(event.after_state["node"], json!(format!("{node:#x}")));
+            assert_eq!(event.after_state["resolver"], json!(CONTRACT));
+            assert!(event.after_state["resolver_contract_instance_id"].is_string());
+        }
+        assert_eq!(records[0].after_state["value"], json!(ZERO_ADDRESS));
+        assert_eq!(records[2].after_state["address_bytes_hex"], json!("0x"));
+        assert_eq!(records[4].after_state["value"], json!(""));
+        assert_eq!(records[5].after_state["contenthash_hex"], json!("0x"));
+        assert_eq!(records[6].event_kind, "RecordVersionChanged");
+        assert_eq!(records[6].after_state["record_version"], json!(1));
+        assert_eq!(records[7].after_state["value"], json!("new"));
+        Ok(())
+    }
+    #[test]
+    fn wrong_role_and_undeclared_address_do_not_admit_public_node_decoder() -> anyhow::Result<()> {
+        let event = raw(resolver::AddrChanged {
+            node: B256::ZERO,
+            a: ZERO_ADDRESS.parse()?,
+        }
+        .encode_log_data());
+        for admissions in [Vec::new(), vec![admission(6190, "permissioned_resolver")]] {
+            let output = interpret_test_batch(input(
+                vec![manifest()],
+                admissions,
+                Vec::new(),
+                vec![event.clone()],
+            ))?;
+            assert!(output.normalized_events.is_empty());
+        }
+        let mut discovered = admission(6190, "public_resolver_v2");
+        discovered.discovery_edge_kind = Some("resolver".to_owned());
+        let batch = input(vec![manifest()], vec![discovered], Vec::new(), vec![event]);
+        assert!(interpret_test_batch(batch).is_err());
+        for (name, fragment, signature) in [
+            (
+                "NameChanged",
+                "event NameChanged(bytes32 indexed node, string name)",
+                "NameChanged(bytes32,string)",
+            ),
+            (
+                "AliasChanged",
+                "event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)",
+                "AliasChanged(bytes,bytes,bytes,bytes)",
+            ),
+        ] {
+            let shared = manifest_with_events(
+                6191,
+                "ens",
+                "ens_v2_resolver_l1",
+                &[(name, fragment, &[], &["RecordChanged"])],
+            );
+            let event = raw_with_topic0(format!("{:#x}", keccak256(signature)));
+            for (role, admitted) in [
+                ("public_resolver_v2", false),
+                ("permissioned_resolver", true),
+            ] {
+                let catalog = Catalog::new(
+                    vec![shared.clone()],
+                    Vec::new(),
+                    vec![admission(6191, role)],
+                )?;
+                assert_eq!(catalog.select(&event)?.is_some(), admitted);
+            }
+            let registry = manifest_with_events(6193, "ens", "ens_v2_registry_l1", &[]);
+            let mut discovery = admission(6193, "registry");
+            discovery.discovery_edge_kind = Some("resolver".to_owned());
+            for (namespace, full_abi) in [
+                ("ens", true),
+                ("ens", false),
+                ("foreign", true),
+                ("foreign", false),
+            ] {
+                let mut declared = if full_abi { shared.clone() } else { manifest() };
+                declared.manifest_id = 6192;
+                declared.namespace = namespace.to_owned();
+                let public = admission(6192, "public_resolver_v2");
+                let conflict = Catalog::new(
+                    vec![shared.clone(), declared.clone()],
+                    Vec::new(),
+                    vec![public.clone(), admission(6191, "permissioned_resolver")],
+                )?;
+                assert!(conflict.select(&event).is_err());
+                for admissions in [
+                    vec![public.clone(), discovery.clone()],
+                    vec![discovery.clone(), public],
+                ] {
+                    let catalog = Catalog::new(
+                        vec![shared.clone(), registry.clone(), declared.clone()],
+                        Vec::new(),
+                        admissions,
+                    )?;
+                    let selected = catalog.select(&event)?;
+                    if namespace == "ens" {
+                        assert!(selected.is_none());
+                    } else {
+                        assert_eq!(selected.unwrap().source.manifest_id, shared.manifest_id);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn shared_node_events_collapse_legacy_roles_but_keep_public_role() -> anyhow::Result<()> {
+        let mut source = manifest();
+        let mut payload: serde_json::Value = serde_json::from_str(&source.payload_json)?;
+        let events = payload["abi"]["events"].as_array_mut().unwrap();
+        events.retain(|event| event["name"] != "AddrChanged");
+        for event in events.iter_mut() {
+            event["emitter_roles"] = json!([]);
+        }
+        source.payload_json = serde_json::to_string(&payload)?;
+        for event in payload["abi"]["events"].as_array().unwrap() {
+            let fragment = event["fragment"].as_str().unwrap();
+            let raw = raw_with_topic0(
+                alloy_json_abi::Event::parse(fragment)?
+                    .selector()
+                    .to_string(),
+            );
+            let absent = manifest_with_events(6194, "foreign", "ens_v2_resolver_l1", &[]);
+            for ids in [[6194, 6190], [6190, 6194]] {
+                let admissions = ids
+                    .into_iter()
+                    .map(|id| admission(id, "public_resolver_v2"))
+                    .collect();
+                let catalog =
+                    Catalog::new(vec![absent.clone(), source.clone()], Vec::new(), admissions)?;
+                assert!(catalog.select(&raw).is_err());
+            }
+            for roles in [
+                ["first_legacy_role", "second_legacy_role"],
+                ["public_resolver_v2", "public_resolver_v2"],
+            ] {
+                let admissions = roles.iter().map(|role| admission(6190, role)).collect();
+                let catalog = Catalog::new(vec![source.clone()], Vec::new(), admissions)?;
+                let selected = catalog.select(&raw)?.unwrap();
+                assert_eq!(
+                    selected.emitter_role.as_deref(),
+                    (roles[0] == "public_resolver_v2").then_some("public_resolver_v2")
+                );
+            }
+        }
+        Ok(())
+    }
+}

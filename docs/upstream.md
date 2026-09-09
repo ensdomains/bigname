@@ -12,6 +12,8 @@ bigname anchors every ENSv1, ENSv2, Basenames, admitted upstream app-metadata, r
 | `ens_v1_sepolia_ac32490` | `ensdomains/ens-contracts` | `ac324904` | Historical deployment ABI for the admitted `0x8FADE66…` Sepolia PublicResolver only |
 | `ens_v1_lll` | `ensdomains/ens` | `7e377df8` | Historical evidence for the 2017 LLL registry only |
 | `ens_v2` | `ensdomains/contracts-v2` | `a971bd64` | Post-audit ENSv2 contracts and pinned Sepolia deployment evidence |
+| `ens_v2_sepolia_20260903` | `ensdomains/contracts-v2` | `5da83f6a` | Record-ID PermissionedResolver and direct PublicResolverV2 source evidence; not deployment-address authority |
+| `ens_v1_publicresolver_5141a2a` | `ensdomains/ens-contracts` | `5141a2ac` | Inherited PublicResolverV2 node-record source evidence only |
 | `ens_v2_sepolia_20260629` | `ensdomains/contracts-v2` | `ccaeb58b` | Historical implementation evidence for the admitted 2026-06-29 old-model Sepolia deployment only |
 | `ens_v2_sepolia_dev` | `ensdomains/contracts-v2` | `554c309b` | Historical evidence cited by deprecated pre-audit `sepolia-dev` manifests only |
 | `basenames` | `base-org/basenames` | `1809bbc9` | Canonical Basenames Solidity |
@@ -25,8 +27,20 @@ bigname anchors every ENSv1, ENSv2, Basenames, admitted upstream app-metadata, r
 
 Full pin records (including per-ref `authoritative_for` lists) live in `.refs/MANIFEST.toml`. Sync with `scripts/sync-refs`.
 
-`ens_v2` is the sole current ENSv2 semantic and deployment authority. The
-`ens_v2_sepolia_20260629` checkout retains implementation evidence for the
+`ens_v2` remains the general ENSv2 semantic and deployment authority. The
+`ens_v2_sepolia_20260903` pin supplies the record-ID resolver's matching
+`PermissionedResolver`, `AbstractRecordResolver`, resolver interfaces and
+`PermissionedResolverLib` sources. It does not establish correspondence of the
+entire checkout to a deployed build; in particular its EnhancedAccessControl
+dependency must not substitute for exact deployment compiler input. Its record
+selection is defined by the resolver's `_record` implementation
+(upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/PermissionedResolver.sol:L381 @ ens_v2_sepolia_20260903@5da83f6a).
+The same pin also supplies direct PublicResolverV2 composition and authorization
+source evidence. `ens_v1_publicresolver_5141a2a` supplies its inherited node-record
+behavior from the pinned ENS submodule. These sources do not establish a
+public-chain deployment or rotate either canonical authority; the separately
+selected hackathon corpus uses the explicit external-evidence exception below.
+The `ens_v2_sepolia_20260629` checkout retains implementation evidence for the
 admitted 2026-06-29 old-model Sepolia families only where the archived ABI does
 not prove the claim; it is not authority for a future deployment or current
 ENSv2 source semantics. The `ens_v2_sepolia_dev` checkout is retained only so deprecated manifest versions
@@ -92,6 +106,24 @@ only then deploy the matching API as required by the
 [deployment order](deployment.md#replacing-an-initialized-phase-schema).
 
 ## Known divergences
+
+> **Numeric ENSv1 expiry representation** — admitted BaseRegistrar numeric registration and renewal retain expiry above the signed timestamp range as `i64::MAX`. Grace overflow does not release that retained lease; raw logs keep the original word. This does not narrow the on-chain event or change the exact Graveyard cleanup predicate.
+> **Upstream**: BaseRegistrar emits and stores uint256 registration and renewal expiry. (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f)
+> **Our rule / why**: See [storage semantics](storage.md). The adapter keeps its signed timestamp representation without failing an otherwise valid numeric lifecycle observation. No controller string-decoder width change is included in this composition.
+> **Since**: `2026-09-10`
+
+> **Sepolia hackathon external deployment provenance** — The separately selected
+> `sepolia-hackathon` corpus uses the address, creation-inclusion and fixed-block
+> runtime evidence recorded in `docs/manifests.md` § Sepolia hackathon deployment
+> evidence. This is an explicit exception to requiring a pinned upstream
+> deployment artifact for addresses. Canonical June/July deployment artifacts
+> do not establish these addresses; source citations retain their narrower ABI
+> and behavior scope. Four partial source reproductions retain their metadata
+> qualifications, and implementation creation does not admit a proxy interval.
+> **Why**: deliver the separately evidenced cohort without inventing address
+> provenance or weakening discovery and implementation-history requirements.
+> **Since**: `2026-09-09`
+
 
 Intentional differences between our docs/manifests and upstream. Every divergence lives here so that citations reading "differently than upstream" are legible instead of looking like bugs. If a divergence is not in this list, it should be treated as drift and closed — either by updating our doc or by adding the entry.
 
@@ -527,6 +559,12 @@ to the applicable entries below.
 > **Our rule**: `docs/architecture.md` § Normalized Event Taxonomy.
 > **Why**: expose the audited upstream vocabulary without changing the shape of already-persisted historical renewal events or dropping their published `base` key.
 > **Since**: `2026-07-10`
+
+> **Direct PublicResolverV2 record admission narrowing** — an owned-chain manifest or the separately evidenced `sepolia-hackathon` candidate can declare an exact `public_resolver_v2` address with `proxy_kind = "none"` in `ens_v2_resolver_l1`. Its admitted node-event set is limited to `AddrChanged`, `AddressChanged`, value-bearing `TextChanged`, `ContenthashChanged`, and `VersionChanged`. Reusing the node decoder does not classify it as ENSv1 or attach a stale ENSv1 resource. Current ENSv2 pointer, namespace, and emitter matching govern Project inventory attribution.
+> **Upstream**: PublicResolverV2 composes address, contenthash, and text profiles (upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/PublicResolverV2.sol:L23-L35 @ ens_v2_sepolia_20260903@5da83f6). Authorization resolves a NameWrapper-known node through current exact ENSv2 ownership or owner approvals (upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/PublicResolverV2.sol:L174-L184 @ ens_v2_sepolia_20260903@5da83f6) (upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/PublicResolverV2.sol:L192-L194 @ ens_v2_sepolia_20260903@5da83f6). The inherited address setter emits `AddressChanged` and additionally `AddrChanged` for coin type 60, preserving bytes in versioned storage (upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/AddrResolver.sol:L47-L65 @ ens_v1_publicresolver_5141a2a@5141a2a). Text and contenthash setters preserve their values, including empty values (upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/TextResolver.sol:L15-L21 @ ens_v1_publicresolver_5141a2a@5141a2a) (upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/ContentHashResolver.sol:L14-L19 @ ens_v1_publicresolver_5141a2a@5141a2a). `clearRecords` increments the node version and emits `VersionChanged` (upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/ResolverBase.sol:L20-L22 @ ens_v1_publicresolver_5141a2a@5141a2a).
+> **Our rule**: `docs/manifests.md` § Direct PublicResolverV2 declarations on an owned local chain; `docs/consumer-capabilities.md` § Direct PublicResolverV2 record support; `docs/storage.md` § Interpret process memory. These supplementary pins prove source semantics only. Exact local deployment address/start/provenance and runtime acceptance require separate evidence. PermissionedResolver proxies retain canonical upgrade-history checks, and the existing `sepolia` profile retains its admission rule below. The `sepolia-hackathon` candidate has the separate external deployment-provenance exception above. This direct node-record path establishes no exhaustive binding, alias, permission, or selector enumeration and adds no schema, REST, or record-ID vocabulary.
+> **Why**: admit only the demonstrated node-record family under exact manifest authority without treating compatible events or source availability as deployment admission or runtime success.
+> **Since**: `2026-09-09`
 
 <a id="ensv2-data-event-admission-narrowing"></a>
 > **ENSv2 post-audit Sepolia source-, event-, and resolver-classification narrowing** — bigname admits `ens_v2_root_l1`, `ens_v2_registry_l1`, `ens_v2_registrar_l1`, `ens_v2_resolver_l1`, and the migration-aware `ens_v2_migration_l1` ENSv1→ENSv2 migration source family from the admitted post-audit Sepolia deployment of 2026-06-29. That migration family activates only [complete correlation groups](glossary.md#complete-group); refused and incomplete groups remain candidate. Registry `RegistryCreated` is matched across all emitters, announces the new registry, normalizes as `RegistryCreated`, and starts address-scoped intake at that event position; parent linkage decides authority separately. ERC-1967 `Upgraded` logs on manifest-declared and event-announced contracts are retained as normalized contract history instead of being inferred from code-hash drift. The widened match-all sets do not retroactively supply history: the mandatory one-time historical fetch for pre-widening `RegistryCreated` and `Upgraded` logs remains a separate ingest operation. Registry `URIUpdated` and resolver `DataChanged` / `NamedDataResource` remain outside normalized-event admission. The separately deployed `ETHRenewerV1` is admitted only as an ENSv1→ENSv2 migration-family correlation and event input, not as an `ens_v2_registrar_l1` emitter. For a resolver proxy, the project phase classifies the latest canonical `Upgraded` implementation against the active resolver manifest's declared implementation list; no runtime code hash participates. `PublicResolverV2` can become a discovery-watched contract instance for configured generic record observations, but it remains unsupported unless that canonical upgrade history matches a declared implementation. Current record visibility remains limited to the current resolver emitter. A resolver manifest admission event causes inline scoped reclassification without a journal or queue. The `RegistryCreated` widening and declared-history classification are maintainer-ratified.

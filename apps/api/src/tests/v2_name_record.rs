@@ -4649,6 +4649,177 @@ async fn v2_get_subnames_rejects_wrong_sort_but_ignores_legacy_snapshot_componen
     Ok(())
 }
 
+#[tokio::test]
+async fn v2_sepolia_indexed_inventory_serves_name_and_records_at_snapshot() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_sepolia_indexed_inventory(&database).await?;
+    let name = v2_name_record_payload_for_database(
+        &database,
+        &format!("/v2/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?source=indexed"),
+    )
+    .await?;
+    assert_eq!(name["data"]["chain_id"], json!(11155111));
+    assert_eq!(
+        name["data"]["addresses"]["60"],
+        json!("0x0000000000000000000000000000000000000abc")
+    );
+    assert_eq!(
+        name["data"]["text_records"]["com.twitter"],
+        json!("sepolia-record")
+    );
+    let at = name["meta"]["as_of_token"]
+        .as_str()
+        .expect("snapshot token");
+    for source in ["indexed", "auto"] {
+        let records = v2_name_record_payload_for_database(&database, &format!(
+            "/v2/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}/records?source={source}&at={at}&keys=addr:60,text:com.twitter&include=inventory",
+        )).await?;
+        assert_eq!(records["meta"]["source"], json!("indexed"));
+        assert_eq!(records["meta"]["as_of"], name["meta"]["as_of"]);
+        assert_eq!(records["data"]["records"]["addr:60"]["status"], json!("ok"));
+        assert_eq!(
+            records["data"]["records"]["text:com.twitter"]["value"],
+            json!("sepolia-record")
+        );
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_sepolia_verified_inventory_remains_unsupported() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_sepolia_indexed_inventory(&database).await?;
+    let name = v2_name_record_payload_for_database(
+        &database,
+        &format!("/v2/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?source=verified"),
+    )
+    .await?;
+    assert_eq!(name["data"]["status"], json!("unsupported"));
+    assert_eq!(
+        name["data"]["unsupported_reason"],
+        json!("verified_records_not_supported")
+    );
+    let records = v2_name_record_payload_for_database(
+        &database,
+        &format!("/v2/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}/records?source=verified&keys=addr:60",),
+    )
+    .await?;
+    assert_eq!(
+        records["data"]["records"]["addr:60"],
+        json!({
+            "status": "unsupported", "unsupported_reason": "verified_records_not_supported"
+        })
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_sepolia_indexed_inventory_missing_or_wrong_snapshot_is_not_served() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_sepolia_only_phase_head_name(&database).await?;
+    let records_uri =
+        format!("/v2/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}/records?source=indexed&keys=addr:60",);
+    let missing = v2_name_record_payload_for_database(&database, &records_uri).await?;
+    assert_eq!(
+        missing["data"]["records"]["addr:60"],
+        json!({
+            "status": "unsupported", "unsupported_reason": "inventory_not_available"
+        })
+    );
+    let missing_name = v2_name_record_payload_for_database(
+        &database,
+        &format!("/v2/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?source=indexed"),
+    )
+    .await?;
+    assert!(missing_name["data"].get("addresses").is_none());
+    assert!(missing_name["data"]["unsupported_fields"]
+        .as_array()
+        .expect("unsupported fields")
+        .contains(&json!("addresses")));
+    insert_v2_sepolia_indexed_inventory(&database).await?;
+    // Keep the inventory SQL-loadable but ahead of the selected publication snapshot.
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_lineage
+         (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES ('ethereum-sepolia', '0xfuture-inventory', $1,
+                 '2026-04-17T00:10:21Z', 'canonical'::bigname_phase.canonicality_state)",
+    )
+    .bind(V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK + 1)
+    .execute(&database.pool)
+    .await?;
+    let future_target = json!({
+        "block_number": V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK + 1,
+        "block_hash": "0xfuture-inventory",
+        "target_block_number": V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK + 1,
+        "target_block_hash": "0xfuture-inventory",
+    });
+    sqlx::query(
+        "UPDATE bigname_phase.record_inventory_current
+         SET chain_positions = $2, canonicality_summary = $3
+         WHERE resource_id = $1",
+    )
+    .bind(Uuid::from_u128(0x7e30))
+    .bind(future_target)
+    .bind(json!({
+        "state": "canonical_lineage",
+        "target_block_number": V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK + 1,
+        "target_block_hash": "0xfuture-inventory",
+    }))
+    .execute(&database.pool)
+    .await?;
+    for uri in [
+        format!("/v2/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?source=indexed"),
+        records_uri,
+    ] {
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+    database.cleanup().await
+}
+
+async fn seed_v2_sepolia_indexed_inventory(database: &TestDatabase) -> Result<()> {
+    seed_v2_sepolia_only_phase_head_name(database).await?;
+    insert_v2_sepolia_indexed_inventory(database).await
+}
+
+async fn insert_v2_sepolia_indexed_inventory(database: &TestDatabase) -> Result<()> {
+    let logical_name_id =
+        bigname_storage::logical_name_id_for_name("ens", V2_SEPOLIA_ONLY_SNAPSHOT_NAME);
+    let row = bigname_storage::load_name_current(&database.pool, &logical_name_id)
+        .await?
+        .expect("seeded Sepolia name");
+    let resource_id = row
+        .record_serving_resource_id()
+        .expect("declared serving resource");
+    let mut inventory = record_inventory_current_row(&logical_name_id, resource_id);
+    inventory.record_version_boundary = json!({
+        "logical_name_id": logical_name_id, "resource_id": resource_id,
+        "normalized_event_id": null, "event_kind": null,
+        "chain_position": row.chain_positions["ethereum-sepolia"],
+    });
+    inventory.chain_positions = row.chain_positions;
+    inventory.last_change = None;
+    for selector in inventory.selectors.as_array_mut().expect("selectors array") {
+        if selector["record_key"] == "text:com.twitter" {
+            selector["cacheable"] = json!(true);
+        }
+    }
+    inventory.entries.as_array_mut().expect("entries array").push(json!({
+        "record_key": "text:com.twitter", "record_family": "text", "selector_key": "com.twitter",
+        "status": "success", "value": {"value": "sepolia-record"},
+    }));
+    database
+        .insert_record_inventory_current_row(inventory)
+        .await
+}
+
 const V2_MAINNET_SNAPSHOT_NAME: &str = "mainnet-pin.eth";
 const V2_MAINNET_SNAPSHOT_HASH: &str = "0xv2-mainnet-pin";
 const V2_MAINNET_SNAPSHOT_BLOCK: i64 = 21_000_011;

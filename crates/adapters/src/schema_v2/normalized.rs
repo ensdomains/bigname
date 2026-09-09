@@ -39,7 +39,14 @@ pub(super) fn materialize_for_provenance(
     state: &mut State,
     output: &mut BatchOutput,
 ) {
-    for (ordinal, draft) in events.into_iter().enumerate() {
+    for (ordinal, mut draft) in events.into_iter().enumerate() {
+        state.retain_registrar_evidence(
+            source,
+            raw,
+            &draft.event_kind,
+            draft.resource_id,
+            &mut draft.after_state,
+        );
         let before_state_explicit = draft.explicit_before.is_some();
         let before_state = state.transition(
             &source.namespace,

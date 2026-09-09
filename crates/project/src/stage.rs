@@ -2,6 +2,7 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{Marker, ProjectError, Result};
 
+mod linked_records;
 pub(crate) mod node_record_events;
 
 use node_record_events::SCOPED_NODE_RECORD_EVENT_IDS_SQL;
@@ -47,6 +48,7 @@ pub(crate) async fn inputs(
     full_rebuild: bool,
 ) -> Result<()> {
     create_events(transaction, chain_id, target.number, full_rebuild).await?;
+    linked_records::include(transaction, chain_id, target.number, full_rebuild).await?;
     create_identity_views(transaction, chain_id, target, full_rebuild).await?;
     Ok(())
 }
@@ -127,7 +129,10 @@ async fn create_declared_resolver_addresses(
          CROSS JOIN LATERAL jsonb_array_elements(COALESCE(
              manifest.manifest_payload -> 'contracts', '[]'::jsonb
          )) WITH ORDINALITY declarations(declaration, declaration_ordinality)
-         WHERE manifest.source_family = 'ens_v1_resolver_l1'
+         WHERE (manifest.source_family = 'ens_v1_resolver_l1'
+                OR (manifest.source_family = 'ens_v2_resolver_l1'
+                    AND declaration ->> 'role' = 'public_resolver_v2'
+                    AND declaration ->> 'proxy_kind' = 'none'))
            AND declaration ->> 'address' IS NOT NULL
            AND btrim(declaration ->> 'address') <> ''
            AND lower(declaration ->> 'address') <>
@@ -135,7 +140,17 @@ async fn create_declared_resolver_addresses(
            AND (
                declaration ->> 'start_block' IS NULL
                OR (declaration ->> 'start_block')::bigint <= $1
-           )",
+           )
+           AND (manifest.source_family <> 'ens_v2_resolver_l1' OR NOT EXISTS (
+               SELECT 1 FROM jsonb_array_elements(
+                   manifest.manifest_payload -> 'contracts'
+               ) WITH ORDINALITY later(item, ordinal)
+               WHERE lower(item ->> 'address') = lower(declaration ->> 'address')
+                 AND COALESCE((item ->> 'start_block')::bigint, 0) <= $1
+                 AND (COALESCE((item ->> 'start_block')::bigint, 0), ordinal) >
+                     (COALESCE((declaration ->> 'start_block')::bigint, 0),
+                      declaration_ordinality)
+           ))",
     )
     .bind(target_block)
     .execute(&mut **transaction)

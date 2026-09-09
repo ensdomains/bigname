@@ -304,7 +304,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=7
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=24
+expected_predecessor_shape_proof_count=27
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -380,7 +380,10 @@ for migration_file in \
     "$ROOT/migrations/20260902160100_registry_operator_account_permissions_validate.sql" \
     "$ROOT/migrations/20260902160200_registry_operator_account_permissions_swap.sql" \
     "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql" \
-    "$ROOT/migrations/20260906120000_exact_zero_addr60_default_derivation.sql"
+    "$ROOT/migrations/20260906120000_exact_zero_addr60_default_derivation.sql" \
+    "$ROOT/migrations/20260909120000_resolver_record_id_events.sql" \
+    "$ROOT/migrations/20260909120100_resolver_record_id_events_validate.sql" \
+    "$ROOT/migrations/20260909120200_resolver_record_id_events_swap.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -418,6 +421,18 @@ report_timing empty-schema
 apply_baseline
 apply_baseline
 report_timing baseline-install
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+BEGIN;
+INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+    manifest_version, chain_id, derivation_kind)
+SELECT 'fresh-record-id-' || kind, 'schema-v2-check', kind, 'ens_v2_resolver_l1',
+    1, 'schema-v2-check', 'ens_v2_resolver'
+FROM unnest(ARRAY['ResolverRecordLinked', 'ResolverPermissionArgument']) AS kinds(kind);
+ROLLBACK;
+SQL
+} | run_psql
 
 
 {
@@ -557,7 +572,13 @@ for migration_file in \
     "$ROOT/migrations/20260902160200_registry_operator_account_permissions_swap.sql" \
     "$ROOT/migrations/20260902160200_registry_operator_account_permissions_swap.sql" \
     "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql" \
-    "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql"
+    "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql" \
+    "$ROOT/migrations/20260909120000_resolver_record_id_events.sql" \
+    "$ROOT/migrations/20260909120000_resolver_record_id_events.sql" \
+    "$ROOT/migrations/20260909120100_resolver_record_id_events_validate.sql" \
+    "$ROOT/migrations/20260909120100_resolver_record_id_events_validate.sql" \
+    "$ROOT/migrations/20260909120200_resolver_record_id_events_swap.sql" \
+    "$ROOT/migrations/20260909120200_resolver_record_id_events_swap.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -1617,6 +1638,55 @@ SQL
         emit_phase_migration "$migration_file" preceding-shape
     done
 } | run_psql
+
+# The preceding vocabulary reconstruction ends with the exact 20260902 constraint.
+record_id_add="$ROOT/migrations/20260909120000_resolver_record_id_events.sql"
+record_id_validate="$ROOT/migrations/20260909120100_resolver_record_id_events_validate.sql"
+record_id_swap="$ROOT/migrations/20260909120200_resolver_record_id_events_swap.sql"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+    manifest_version, chain_id, derivation_kind, after_state)
+VALUES ('record-id-predecessor', 'schema-v2-check', 'RecordChanged', 'ens_v2_resolver_l1',
+    1, 'schema-v2-check', 'ens_v2_resolver', '{"retained":true}');
+CREATE TEMP TABLE record_id_predecessor AS
+    SELECT * FROM normalized_events WHERE event_identity = 'record-id-predecessor';
+SQL
+    emit_phase_migration "$record_id_add" preceding-shape
+    emit_phase_migration "$record_id_swap" preceding-shape
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'normalized_events'::regclass
+          AND conname = 'normalized_events_event_kind_check' AND convalidated)
+    OR NOT EXISTS (SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'normalized_events'::regclass
+          AND conname = 'normalized_events_event_kind_check_record_id' AND NOT convalidated)
+    THEN RAISE EXCEPTION 'unvalidated record-ID replacement removed prior protection'; END IF;
+END $$;
+SQL
+    emit_phase_migration "$record_id_validate" preceding-shape
+    emit_phase_migration "$record_id_swap" preceding-shape
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF EXISTS (SELECT * FROM record_id_predecessor EXCEPT
+        SELECT * FROM normalized_events WHERE event_identity = 'record-id-predecessor')
+    THEN RAISE EXCEPTION 'record-ID upgrade changed existing facts'; END IF;
+END $$;
+DELETE FROM normalized_events WHERE event_identity = 'record-id-predecessor';
+SQL
+} | run_psql
+for migration_file in "$record_id_add" "$record_id_validate" "$record_id_swap"; do
+    emit_phase_migration "$migration_file" preceding-shape | run_psql
+    assert_migration_context_count "$migration_file" empty-schema 1
+    assert_migration_context_count "$migration_file" baseline-first 2
+    expected_record_id_applications=2
+    if [ "$migration_file" = "$record_id_swap" ]; then expected_record_id_applications=3; fi
+    assert_migration_context_count "$migration_file" preceding-shape "$expected_record_id_applications"
+done
 
 # The production functions intentionally bind their SECURITY DEFINER lookups
 # to bigname_phase. Prove that contract before rebinding only this scratch
@@ -5273,6 +5343,14 @@ BEGIN
                 RAISE;
             END IF;
     END;
+
+    INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+        manifest_version, chain_id, derivation_kind)
+    SELECT 'valid-record-id-' || kind, 'schema-v2-check', kind, 'ens_v2_resolver_l1',
+        1, 'schema-v2-check', 'ens_v2_resolver'
+    FROM unnest(ARRAY['ResolverRecordLinked', 'ResolverPermissionArgument']) AS kinds(kind);
+    DELETE FROM normalized_events WHERE event_identity IN (
+        'valid-record-id-ResolverRecordLinked', 'valid-record-id-ResolverPermissionArgument');
 
     INSERT INTO normalized_events (
         event_identity,

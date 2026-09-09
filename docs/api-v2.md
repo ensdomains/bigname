@@ -131,6 +131,16 @@ step-3-gate vocabulary needed by the route schemas:
 | `to_block` | inclusive upper block-number filter | `to_block` (unchanged) |
 | `data` | envelope root payload, and event-row payload when nested inside an event row | compact event payload objects |
 
+An admitted controller-free ENSv1 numeric registration can retain its resource and token lifecycle
+before its plaintext name is known. Such normalized events have no logical-name attachment.
+Once admitted name evidence and the current ENSv1 authority establish a name binding, normal
+name reads can use that registrar owner and expiry. Earlier resource-only events remain unchanged;
+name evidence alone does not reactivate a dormant registrar authority. See [storage semantics](storage.md)
+for the numeric registration and restoration rules. This does not widen route or history coverage.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f)
+
+For a registrar lease first identified by a later readable observation, registration time remains the original numeric grant time. Compact product history omits only snapshots with both `state_derived=true` and `registrar_surface_snapshot=true`, before pagination and cursor validation. Diagnostics retains the marked snapshot at its later readable trigger; original resource-only history and all unmarked events remain unchanged. See [storage semantics](storage.md).
+
 `GET /v2/permissions` and `GET /v2/addresses/{address}/names?include=role_summary`
 read current permission rows and per-resource permission summaries. Canonical
 identity checks exclude rows from an orphaned chain lineage. These routes do

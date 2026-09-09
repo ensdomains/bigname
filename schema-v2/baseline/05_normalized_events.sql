@@ -85,6 +85,8 @@ CREATE TABLE IF NOT EXISTS normalized_events (
                 'RegistrationReserved',
                 'RegistryCreated',
                 'ResolverChanged',
+                'ResolverPermissionArgument',
+                'ResolverRecordLinked',
                 'ReverseChanged',
                 'RootPermissionChanged',
                 'SourceManifestUpdated',

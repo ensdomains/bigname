@@ -44,6 +44,31 @@ sol! {
     event Upgraded(address indexed implementation);
 }
 
+pub(in crate::schema_v2) fn public_resolver_v2_signature(signature: &str) -> bool {
+    matches!(
+        signature,
+        "AddrChanged(bytes32,address)"
+            | "AddressChanged(bytes32,uint256,bytes)"
+            | "TextChanged(bytes32,string,string,string)"
+            | "ContenthashChanged(bytes32,bytes)"
+            | "VersionChanged(bytes32,uint64)"
+    )
+}
+
+pub(super) fn is_public_node_event(selected: &Selected) -> bool {
+    match (
+        selected.source.source_family.as_str(),
+        selected.event.name.as_str(),
+    ) {
+        (
+            "ens_v2_resolver_l1",
+            "AddrChanged" | "AddressChanged" | "TextChanged" | "ContenthashChanged"
+            | "VersionChanged",
+        ) => selected.emitter_role.as_deref() == Some("public_resolver_v2"),
+        _ => false,
+    }
+}
+
 pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
@@ -434,7 +459,7 @@ fn permission(
     Ok(output)
 }
 
-fn upgraded(selected: &Selected, raw: &RawLogInput) -> anyhow::Result<Interpreted> {
+pub(super) fn upgraded(selected: &Selected, raw: &RawLogInput) -> anyhow::Result<Interpreted> {
     let event = decode_event_log::<Upgraded>(&raw.topics, &raw.data, "Upgraded log is malformed")?;
     ensure_declared(selected, &["Upgraded"])?;
     let implementation = address_hex(event.implementation);
@@ -480,7 +505,7 @@ fn name_draft(
     }
 }
 
-fn observe_resolver_name(
+pub(super) fn observe_resolver_name(
     selected: &Selected,
     state: &mut State,
     output: &mut Interpreted,
@@ -514,7 +539,7 @@ fn resource_id(raw: &RawLogInput, selected: &Selected, resource: U256) -> Uuid {
     )
 }
 
-fn single_event(
+pub(super) fn single_event(
     kind: &str,
     logical_name_id: Option<String>,
     resource_id: Option<Uuid>,

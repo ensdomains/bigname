@@ -765,6 +765,14 @@ Field ownership:
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/records` and record
   sections of `GET /v1/profiles/names/{name}`.
 
+For an admitted [record-ID resolver generation](architecture.md), declared
+records use the existing inventory response shapes. Values belong to the
+currently selected record, including pre-link writes; shared records may appear
+for several names. A zero exact link selects the default record when one exists.
+Link changes participate in inventory provenance without being presented as
+record-version resets. Permissions keep their existing resolver/resource scope
+shapes: a numeric resolver record ID is never a bigname permission resource ID.
+
 #### Public record-field completeness
 
 The product record-key grammar is deliberately closed. The same grammar applies
@@ -1472,6 +1480,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `GET /v1/names`; exact name profiles move to `GET /v2/names/{name}`.
 
 ### `GET /v2/events`
+
+For a registrar lease first identified by a later readable observation, registration time remains the original numeric grant time. Compact product history omits only snapshots with both `state_derived=true` and `registrar_surface_snapshot=true`, before pagination and cursor validation. Diagnostics retains the marked snapshot at its later readable trigger; original resource-only history and all unmarked events remain unchanged. See [storage semantics](storage.md).
 
 - Method/path: `GET /v2/events`
 - Tier: product read.

@@ -57,13 +57,13 @@ normalized_events = ["PermissionChanged"]
 name = "NameRegistered"
 fragment = "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)"
 emitter_roles = ["registrar"]
-normalized_events = ["RegistrationReleased"]
+normalized_events = ["RegistrationGranted", "ExpiryChanged", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "RegistrationReleased"]
 
 [[abi.events]]
 name = "NameRenewed"
 fragment = "event NameRenewed(uint256 indexed id, uint256 expires)"
 emitter_roles = ["registrar"]
-normalized_events = ["RegistrationRenewed", "ExpiryChanged"]
+normalized_events = ["RegistrationGranted", "RegistrationRenewed", "ExpiryChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged"]
 
 # BaseRegistrar authorization checks both ERC-721 token approvals and
 # owner-wide operators; only the registrar is declared on Sepolia.

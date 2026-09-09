@@ -187,6 +187,39 @@ mandatory full Interpret and Project redos.
 | `project_generation_failures` | phase runner after Project rollback | Append-only audit evidence for a [projection generation failure](glossary.md#projection-generation-failure); never a product projection. |
 | `resolution_divergences` | guarded lookup functions; Project publication may only clear outdated direct observations | Active live/indexed resolver disagreements and retained observations retired after the exact resolver becomes null; diagnostic only. |
 
+When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
+Interpret retains the registrar resource, token lineage, owner and expiry independently of
+registrar-controller logs. Before an admitted plaintext label is known, these lifecycle rows
+have no `logical_name_id`, and the numeric event creates no name surface. A previously admitted,
+non-shadow preimage in the same namespace can make the name known before numeric registration;
+with matching current-registry ownership setup, that registration binds the registrar resource.
+A later admitted controller preimage binds the current retained ENSv1 authority, while a preimage
+from another ENS source alone does not choose registrar authority. A subsequent numeric event can
+bind a now-known name when the registrar remains current. Earlier resource-only rows are not rewritten.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f)
+
+A canonical, admitted, normalization-valid readable observation may also disclose a retained unnamed ENSv1 registrar lease to its exact namehash and labelhash only when that same live resource and token lineage are already the selected authority. Current admitted ENS registry ownership evidence must match the registrar's nonzero current owner; missing ownership evidence, a different authority, expiry, release, or migration retirement prevents attachment. A readable observation does not select authority. The binding begins at the observation. Earlier resource-only events remain unchanged.
+
+`registration_window` retains whether restoration reconciles preceding setup logs or the complete
+registration transaction. `registration_registry_setup` retains proof of registry setup matching
+the registrar owner. `registry_migrated` retains the current-registry ownership observation needed
+to continue suppressing the retired registry, and `surface_known` retains whether an active
+plaintext name was known at the authority observation. These are normalized-event restoration
+fields, not new identity anchors or projection writes. Resource-only restoration derives an
+internal name identity from namespace and namehash without publishing a readable-name binding.
+Current-registry `Transfer` also restores terminal [registry fallback handoff](glossary.md#registry-fallback-handoff),
+independently of the registration marker.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L29-L34 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L68 @ ens_v1@91c966f)
+
+Numeric BaseRegistrar expiry above the signed timestamp range is retained as `i64::MAX`.
+Settlement treats an expiry whose grace addition overflows that range as live; public timestamp
+rendering keeps the existing `null` representation for unrepresentable dates. Co-admitted
+ENSv1→ENSv2 migration evidence retains over-`u64` expiry as decimal text and does not use it for
+wrapper-expiry correlation. Exact Graveyard cleanup still requires its owner and expiry predicate.
+The block-local unwrapped reconciliation and exact predecessor cleanup rules below are unchanged.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f)
+
 Adapters provide interpretation behavior. They do not write projections. API
 code reads projections and lookup output only, except for the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write.
@@ -733,6 +766,27 @@ The redo need not belong to that watch; let it complete and retry, or split a co
 all-emitter removal so its redo completes first. The transaction leaves the
 previous watch plan and redo state unchanged.
 
+### Resolver record IDs
+
+For the record-ID resolver generation described in [architecture](architecture.md),
+Interpret retains link and value changes as immutable normalized events. Project
+alone joins canonical links to record values and publishes per-name inventory.
+Interpret never stores a current record-value map for later event fan-out.
+`ResolverPermissionArgument` retains the permission resource's raw argument;
+Interpret may restore this bounded selector metadata to interpret subsequent
+role changes. It is not a name binding or a record value. The fresh schema admits
+`ResolverRecordLinked` and `ResolverPermissionArgument` in the normalized-event
+kind constraint; both retain the existing `ens_v2_resolver` derivation kind.
+Initialized databases require the three `20260909120000`–`20260909120200`
+schema-migrations before enabling this resolver generation. They add a wider
+constraint without validating old rows, validate it in a separate transaction,
+and then replace the old constraint. No rows or identity keys change.
+The old constraint continues to reject the new kinds until the final swap.
+A failed stage leaves the preceding constraint effective; fix the failure and
+resume the ordered schema-migrations. After new facts exist, retain the wider
+constraint when rolling back application code so those immutable facts remain
+valid. An application rollback must also stop interpreting this generation.
+
 ## Interpretation replay
 
 Normalized-event writes preserve immutable event identities and payloads,
@@ -848,6 +902,10 @@ This behavior requires no
 Surface-materialization and per-log authority-transition resolver copies carry
 `after_state.resolver_source_role`, preserving their old- or current-registry origin
 so compacted restoration survives a later global resolver selection.
+
+The additive named `RegistrationGranted` is a [state-derived normalized event](glossary.md#state-derived-normalized-event), marked `state_derived`, `surface_materialization`, and `registrar_surface_snapshot`. It reports the retained lease's original registration timestamp and current expiry, owner, resolver, and ownership permissions. Its raw position is the readable trigger; a bounded provenance object retains the original numeric grant and latest registrar-owner, registry-owner, and resolver evidence. Subsequent retained state carries these references without accumulating history. Restoration handles the marked snapshot separately from an on-chain registration. Project uses the verified original timestamp only for this marked case; compact product history omits rows with both markers `state_derived=true` and `registrar_surface_snapshot=true` before pagination, while diagnostics retains them. Missing, null, or false markers do not exclude any row; other state-derived events and the original resource-only grant keep their existing history behavior.
+
+For this disclosure rule, launch-bounded transfers to the manifest-declared Graveyard and admitted cleanup observations carry `registrar_surface_retired` in their existing event payload. The bounded retained evidence records that retirement separately from the ENSv1 current-registry fallback marker. It prevents a later preimage from reopening that lease and does not replace migration correlation or relax exact cleanup evidence. A subsequent independently proven new numeric grant has a new lease identity.
 
 Only active manifests participate in raw-log selection and watch authority.
 Interpret separately retains metadata for stored deprecated manifest versions
@@ -991,7 +1049,27 @@ resolver has a final supported `ens_v1_resolver_l1` classification from an
 applicable exact declaration, and that classifying manifest's namespace
 matches the pointer's namespace. Incremental staging applies the same guarded
 exception by requiring the pointer namespace and exact declared resolver
-address to match. A `basenames_base_resolver` event without logical-name
+address to match.
+
+For an exact direct `public_resolver_v2` declaration in `ens_v2_resolver_l1`,
+node-keyed `RecordChanged` and `RecordVersionChanged` observations retain their
+resolver instance, node, selector, value, and version provenance without an
+ENSv1 `resource_id`, even if an old ENSv1 resource is materialized. Project uses
+the existing guarded node-inventory join against a selected `ens_v2_registry_l1`
+or `ens_v2_root_l1` pointer only when the namespace and exact declared resolver
+address match. Record-only and version-only incremental changes select that
+same resource; a stale pointer or different emitter cannot contribute records.
+Canonical retraction and cold replay rebuild from the same retained source facts.
+The active version is tracked per resolver and node, and inventory includes
+only that version's observations. Explicit empty writes are retained; a version
+change invalidates older values without deleting their historical observations.
+The inherited reset increments `recordVersions[node]` and emits `VersionChanged`.
+(upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/ResolverBase.sol:L8-L22 @ ens_v1_publicresolver_5141a2a@5141a2a)
+This reuses existing normalized-event and inventory storage; no schema or
+record-ID mapping is added. It does not supply PermissionedResolver aliases,
+permission resources, or resolver binding enumeration.
+
+A `basenames_base_resolver` event without logical-name
 attribution may join only through a `basenames_base_registry` pointer on the
 same chain, node, and resolver emitter. Basenames keeps the current resolver by
 node, authorizes its registrar controller and reverse registrar independently

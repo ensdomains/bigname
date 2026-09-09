@@ -162,6 +162,7 @@ pub(crate) async fn get_name_record(
             &row,
             &selected_snapshot,
             include_resolution_auxiliary,
+            route_source,
         )
         .await
         .map_err(|error| {

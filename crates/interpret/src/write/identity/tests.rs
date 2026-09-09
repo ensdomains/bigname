@@ -1408,3 +1408,428 @@ fn raw_block_binding_open_orders_before_the_first_log() {
             < BindingOperation::Close(&closure).order_key()
     );
 }
+
+use bigname_adapters::schema_v2 as adapter_api;
+#[path = "../../../../adapters/tests/fixtures/interpreters/numeric_short_lease.rs"]
+mod numeric_short_lease_fixture;
+
+mod numeric_short_lease_connected {
+    use super::numeric_short_lease_fixture as fixture;
+    use anyhow::{Context, Result};
+    use bigname_adapters::schema_v2::{
+        self as adapter, BatchInput, BatchOutput, StateCacheCapacity,
+    };
+    use bigname_project::{BatchRequest, Engine, Marker, RunMode};
+    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+    use serde_json::Value;
+    use sqlx::{PgPool, types::Uuid};
+
+    async fn database(input: &BatchInput) -> Result<TestDatabase> {
+        let database = TestDatabase::create(TestDatabaseConfig::new("numeric_short_lease")).await?;
+        let pool = database.pool();
+        sqlx::raw_sql("CREATE SCHEMA bigname_phase")
+            .execute(pool)
+            .await?;
+        pool.set_connect_options(
+            pool.connect_options()
+                .as_ref()
+                .clone()
+                .options([("search_path", "bigname_phase,public")]),
+        );
+        let mut connections = Vec::new();
+        for _ in 0..pool.options().get_max_connections() {
+            let mut connection = pool.acquire().await?;
+            sqlx::raw_sql("SET search_path TO bigname_phase, public")
+                .execute(&mut *connection)
+                .await?;
+            connections.push(connection);
+        }
+        drop(connections);
+        for script in [
+            include_str!("../../../../../schema-v2/baseline/01_chain.sql"),
+            include_str!("../../../../../schema-v2/baseline/02_raw_facts.sql"),
+            include_str!("../../../../../schema-v2/baseline/03_identity.sql"),
+            include_str!("../../../../../schema-v2/baseline/04_manifests.sql"),
+            include_str!("../../../../../schema-v2/baseline/05_normalized_events.sql"),
+            include_str!("../../../../../schema-v2/baseline/06_projections.sql"),
+            include_str!("../../../../../schema-v2/baseline/07_labels.sql"),
+            include_str!("../../../../../schema-v2/baseline/08_heartbeats.sql"),
+            include_str!("../../../../../schema-v2/baseline/09_divergence.sql"),
+            include_str!("../../../../../schema-v2/baseline/10_phase_state.sql"),
+            include_str!(
+                "../../../../../schema-v2/baseline/11_manifest_authority_attestations.sql"
+            ),
+            include_str!("../../../../../schema-v2/baseline/12_project_generation_failures.sql"),
+            include_str!("../../../../../schema-v2/baseline/13_interpret_decode_skips.sql"),
+            include_str!("../../../../../schema-v2/baseline/14_discovery_watch_admissions.sql"),
+        ] {
+            sqlx::raw_sql(script).execute(pool).await?;
+        }
+        for block in &input.blocks {
+            sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,$3,$4,$5::canonicality_state)")
+                .bind(&block.chain_id).bind(&block.block_hash).bind(block.block_number)
+                .bind(block.block_timestamp).bind(&block.canonicality_state).execute(pool).await?;
+        }
+        // Only declared fixture inputs are seeded. Identity, events and projections come from adapters.
+        for manifest in &input.manifests {
+            let payload: Value = serde_json::from_str(&manifest.payload_json)?;
+            sqlx::query("INSERT INTO manifest_versions (manifest_id,manifest_version,namespace,source_family,chain_id,deployment_label,rollout_status,normalizer_version,file_path,manifest_payload) OVERRIDING SYSTEM VALUE VALUES ($1,$2,$3,$4,$5,$6,'active',$7,$8,$9)")
+                .bind(manifest.manifest_id).bind(manifest.manifest_version).bind(&manifest.namespace)
+                .bind(&manifest.source_family).bind(&manifest.chain_id).bind(&manifest.deployment_label)
+                .bind(&manifest.normalizer_version).bind(format!("fixture/{}",manifest.source_family))
+                .bind(payload).execute(pool).await?;
+        }
+        for admission in &input.admissions {
+            sqlx::query("INSERT INTO contract_instances (contract_instance_id,chain_id,contract_kind) VALUES ($1,$2,'contract')")
+                .bind(admission.contract_instance_id).bind(fixture::CHAIN).execute(pool).await?;
+            sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id,chain_id,address,active_from_block_number,source_manifest_id) VALUES ($1,$2,$3,0,$4)")
+                .bind(admission.contract_instance_id).bind(fixture::CHAIN).bind(&admission.address)
+                .bind(admission.source_manifest_id).execute(pool).await?;
+        }
+        Ok(database)
+    }
+
+    async fn write(pool: &PgPool, input: &BatchInput, output: &BatchOutput) -> Result<()> {
+        let mut output = output.clone();
+        // Existing identity-writer tests isolate diagnostic persistence in the same way.
+        output.migration_event_associations.clear();
+        output.migration_discovery_associations.clear();
+        output.migration_candidate_identity_effects.clear();
+        output.migration_candidate_discovery_effects.clear();
+        let lineage = input
+            .blocks
+            .iter()
+            .map(|block| (block.block_number, block.block_hash.clone()))
+            .collect::<Vec<_>>();
+        crate::write::batch(
+            pool,
+            fixture::CHAIN,
+            None,
+            false,
+            false,
+            0,
+            &lineage,
+            &output,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn project(
+        pool: &PgPool,
+        from: i64,
+        target: i64,
+        previous: Option<Marker>,
+    ) -> Result<Marker> {
+        Ok(Engine::new(pool.clone())
+            .run_batch(BatchRequest {
+                chain_id: fixture::CHAIN.to_owned(),
+                target_block: target,
+                affected_from_block: from,
+                affected_to_block: target,
+                resume_current: previous,
+                mode: RunMode::Normal,
+            })
+            .await?
+            .current)
+    }
+
+    async fn summary(pool: &PgPool, logical: &str) -> Result<Value> {
+        Ok(
+            sqlx::query_scalar(
+                "SELECT declared_summary FROM name_current WHERE logical_name_id=$1",
+            )
+            .bind(logical)
+            .fetch_one(pool)
+            .await?,
+        )
+    }
+
+    async fn assert_pre(pool: &PgPool, expected: &Value, resource: Uuid) -> Result<Value> {
+        let logical = format!("ens:{}", expected["node"].as_str().unwrap());
+        let summary = summary(pool, &logical).await?;
+        assert_eq!(
+            summary["registration"]["registrant"],
+            expected["expected_owner"]
+        );
+        assert_eq!(summary["registration"]["expiry"], expected["v1_expiry"]);
+        assert_eq!(
+            summary["resolver"]["address"],
+            expected["expected_resolver"]
+        );
+        let registered_at: i64 = sqlx::query_scalar("SELECT extract(epoch FROM (declared_summary #>> '{registration,registered_at}')::timestamptz)::bigint FROM name_current WHERE logical_name_id=$1")
+            .bind(&logical).fetch_one(pool).await?;
+        assert_eq!(
+            registered_at,
+            expected["registration_timestamp"].as_i64().unwrap()
+        );
+        let permissions: i64 = sqlx::query_scalar("SELECT count(*) FROM permissions_current WHERE resource_id=$1 AND lower(subject)=$2 AND jsonb_array_length(effective_powers)>0")
+            .bind(resource).bind(expected["expected_owner"].as_str().unwrap()).fetch_one(pool).await?;
+        assert!(
+            permissions > 0,
+            "current owner has no projected ownership permissions"
+        );
+        let registry_owner: String = sqlx::query_scalar(
+            "SELECT registry_owner FROM permissions_current_resource_summary WHERE resource_id=$1",
+        )
+        .bind(resource)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(registry_owner, expected["expected_owner"].as_str().unwrap());
+        let inventory: Value =
+            sqlx::query_scalar("SELECT entries FROM record_inventory_current WHERE resource_id=$1")
+                .bind(resource)
+                .fetch_one(pool)
+                .await?;
+        for (key, value) in expected["expected_records"].as_object().unwrap() {
+            let record = inventory
+                .as_array()
+                .context("record inventory entries")?
+                .iter()
+                .find(|record| record["record_key"] == *key)
+                .with_context(|| format!("record {key}"))?;
+            assert_eq!(&record["value"], value, "pre-migration record {key}");
+        }
+        Ok(summary)
+    }
+
+    #[tokio::test]
+    async fn declared_controller_enrichment_opens_one_registrar_binding_through_writer()
+    -> Result<()> {
+        use alloy_primitives::{U256, keccak256};
+        use alloy_sol_types::{SolEvent, sol};
+        use serde_json::json;
+        sol! { event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires); }
+        let captured = fixture::input()?;
+        let expected = fixture::fixture()?;
+        let mut input = fixture::range(&captured, 403, 407);
+        // Explicit synthetic controller variant: retain numeric lease and registry setup,
+        // replace the later V2 receipt with a declared readable controller observation.
+        let mut raw = input
+            .raw_logs
+            .iter()
+            .find(|raw| raw.block_number == 407)
+            .unwrap()
+            .clone();
+        input.raw_logs.retain(|raw| raw.block_number < 407);
+        let controller = "0x0000000000000000000000000000000000000099";
+        let label = expected["name"]
+            .as_str()
+            .unwrap()
+            .strip_suffix(".eth")
+            .unwrap();
+        let log = NameRegistered {
+            name: label.to_owned(),
+            label: keccak256(label.as_bytes()),
+            owner: expected["expected_owner"].as_str().unwrap().parse()?,
+            expires: U256::from(expected["v1_expiry"].as_i64().unwrap() as u64),
+        }
+        .encode_log_data();
+        raw.emitting_address = controller.to_owned();
+        raw.topics = log
+            .topics()
+            .iter()
+            .map(|topic| format!("{topic:#x}"))
+            .collect();
+        raw.data = log.data.to_vec();
+        raw.log_index = 0;
+        input.raw_logs.push(raw);
+        let manifest = input
+            .manifests
+            .iter_mut()
+            .find(|manifest| manifest.source_family == "ens_v1_registrar_l1")
+            .unwrap();
+        let mut payload: Value = serde_json::from_str(&manifest.payload_json)?;
+        let mut contract = payload["contracts"][0].clone();
+        contract["role"] = json!("controller");
+        contract["address"] = json!(controller);
+        payload["contracts"].as_array_mut().unwrap().push(contract);
+        payload["abi"]["events"].as_array_mut().unwrap().push(json!({
+            "name":"NameRegistered",
+            "fragment":"event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+            "emitter_roles":["controller"],"normalized_events":["PreimageObserved"],
+        }));
+        manifest.payload_json = serde_json::to_string(&payload)?;
+        let mut admission = input
+            .admissions
+            .iter()
+            .find(|admission| admission.source_manifest_id == Some(manifest.manifest_id))
+            .unwrap()
+            .clone();
+        admission.address = controller.to_owned();
+        admission.role = Some("controller".to_owned());
+        admission.contract_instance_id = Uuid::from_u128(999_999);
+        input.admissions.push(admission);
+        let (output, _) = adapter::prepare_schema_v2_batch_incremental(
+            input.clone(),
+            None,
+            StateCacheCapacity::Unlimited,
+        )?
+        .finish(Vec::new())?;
+        assert_eq!(
+            output
+                .normalized_events
+                .iter()
+                .filter(|event| event.event_kind == "RegistrationGranted")
+                .count(),
+            1
+        );
+        assert!(
+            !output
+                .normalized_events
+                .iter()
+                .any(|event| event.after_state["registrar_surface_snapshot"] == true)
+        );
+        let resource = fixture::registrar_grant(&output).resource_id.unwrap();
+        assert_eq!(
+            output
+                .surface_bindings
+                .iter()
+                .filter(|binding| binding.resource_id == resource)
+                .count(),
+            1
+        );
+        let database = database(&input).await?;
+        let result = async {
+            write(database.pool(), &input, &output).await?;
+            let count: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM surface_bindings WHERE resource_id=$1")
+                    .bind(resource)
+                    .fetch_one(database.pool())
+                    .await?;
+            assert_eq!(count, 1);
+            Ok(())
+        }
+        .await;
+        database.cleanup().await?;
+        result
+    }
+
+    #[tokio::test]
+    async fn actual_order_raw_receipts_write_project_and_cold_restore_through_old_expiry()
+    -> Result<()> {
+        let input = fixture::input()?;
+        fixture::assert_receipt_order(&input);
+        let expected = fixture::fixture()?;
+        let logical = format!("ens:{}", expected["node"].as_str().unwrap());
+        let mut mode_summaries = Vec::new();
+        for cold in [false, true] {
+            let database = database(&input).await?;
+            let pool = database.pool();
+            let mut session = None;
+            let mut retained = Vec::new();
+            let mut marker = None;
+            let mut registrar_resource = None;
+            let mut original_row = None;
+            let mut summaries = Vec::new();
+            for (from, to) in [(403, 403), (405, 406), (407, 414), (415, 415), (416, 416)] {
+                let mut part = fixture::range(&input, from, to);
+                if cold {
+                    part.prior_events = retained.clone();
+                }
+                let (output, next) = adapter::prepare_schema_v2_batch_incremental(
+                    part.clone(),
+                    session.take(),
+                    StateCacheCapacity::Unlimited,
+                )?
+                .finish(Vec::new())?;
+                retained = adapter::seam::fold_prior_events(
+                    retained,
+                    &output.normalized_events,
+                    &part.blocks,
+                )?;
+                if !cold {
+                    session = Some(next);
+                }
+                if to == 403 {
+                    registrar_resource = fixture::registrar_grant(&output).resource_id;
+                }
+                if to == 415 {
+                    assert_eq!(
+                        output.migration_authority_transitions.len(),
+                        1,
+                        "real migration must activate"
+                    );
+                    assert!(
+                        output
+                            .normalized_events
+                            .iter()
+                            .any(|event| event.event_kind == "TokenControlTransferred"
+                                && event.log_index == Some(4)
+                                && event.resource_id == registrar_resource)
+                    );
+                }
+                write(pool, &part, &output).await?;
+                if to == 403 {
+                    original_row = Some(sqlx::query_scalar::<_,Value>("SELECT to_jsonb(event) - 'inserted_at' FROM normalized_events event WHERE event_identity=$1")
+                        .bind(&fixture::registrar_grant(&output).event_identity).fetch_one(pool).await?);
+                }
+                marker = Some(project(pool, from, to, marker).await?);
+                if to == 414 {
+                    summaries.push(assert_pre(pool, &expected, registrar_resource.unwrap()).await?);
+                }
+                if to >= 415 {
+                    let selected: (Uuid,String) = sqlx::query_as("SELECT current.resource_id,binding.authority_arm FROM name_current current JOIN surface_bindings binding ON binding.surface_binding_id=current.surface_binding_id WHERE current.logical_name_id=$1")
+                        .bind(&logical).fetch_one(pool).await?;
+                    assert_ne!(Some(selected.0), registrar_resource);
+                    assert_eq!(selected.1, "ens_v2");
+                    let current = summary(pool, &logical).await?;
+                    assert_eq!(current["registration"]["expiry"], expected["v2_expiry"]);
+                    summaries.push(current);
+                    let closed: bool = sqlx::query_scalar("SELECT bool_and(active_to IS NOT NULL) FROM surface_bindings WHERE resource_id=$1 AND authority_arm='ens_v1'")
+                        .bind(registrar_resource).fetch_one(pool).await?;
+                    assert!(
+                        closed,
+                        "unchanged strict cleanup writer did not close prior V1 authority"
+                    );
+                }
+            }
+            let preserved: Value = sqlx::query_scalar("SELECT to_jsonb(event) - 'inserted_at' FROM normalized_events event WHERE source_family='ens_v1_registrar_l1' AND event_kind='RegistrationGranted' AND block_number=403")
+                .fetch_one(pool).await?;
+            assert_eq!(
+                Some(preserved),
+                original_row,
+                "later readability rewrote a retained raw grant"
+            );
+            mode_summaries.push(summaries);
+            database.cleanup().await?;
+        }
+        assert_eq!(
+            mode_summaries[0], mode_summaries[1],
+            "live and cold Project results differ"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn later_readable_timestamp_does_not_move_public_registered_at() -> Result<()> {
+        let mut input = fixture::input()?;
+        for raw in input
+            .raw_logs
+            .iter_mut()
+            .filter(|raw| raw.block_number == 407)
+        {
+            raw.block_timestamp += time::Duration::seconds(5);
+        }
+        for block in input
+            .blocks
+            .iter_mut()
+            .filter(|block| block.block_number == 407)
+        {
+            block.block_timestamp += time::Duration::seconds(5);
+        }
+        let input = fixture::range(&input, 403, 414);
+        let database = database(&input).await?;
+        let output = adapter::interpret_schema_v2_batch(input.clone())?;
+        write(database.pool(), &input, &output).await?;
+        project(database.pool(), 403, 414, None).await?;
+        assert_pre(
+            database.pool(),
+            &fixture::fixture()?,
+            fixture::registrar_grant(&output).resource_id.unwrap(),
+        )
+        .await?;
+        database.cleanup().await?;
+        Ok(())
+    }
+}

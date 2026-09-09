@@ -6,7 +6,7 @@ pub(super) async fn include_changed_node_record_dependents(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
 ) -> Result<()> {
-    // Start from this window's node-only v1 record changes and follow only the pointer ID cited by
+    // Start from this window's node-only record changes and follow only the pointer ID cited by
     // the published inventory; redo expands retracted pointer dependents independently. The plain
     // namehash equality keeps the targeted index lookup while the lowercase equality, declaration,
     // and namespace joins mirror the guarded arm in builders/record_inventory.rs.
@@ -37,8 +37,12 @@ pub(super) async fn include_changed_node_record_dependents(
           AND lower(resolver.resolver_address) =
               lower(pointer.after_state ->> 'resolver')
           AND resolver.support_status = 'supported'
-          AND resolver.declared_summary #>> '{classification,source_family}' =
+          AND (resolver.declared_summary #>> '{classification,source_family}' =
               'ens_v1_resolver_l1'
+           OR (resolver.declared_summary #>> '{classification,source_family}' =
+                   'ens_v2_resolver_l1'
+               AND resolver.declared_summary #>> '{classification,role}' =
+                   'public_resolver_v2'))
           AND resolver.declared_summary #>> '{classification,basis}' =
               'manifest_declared_address'
          JOIN project_declared_resolver_addresses declaration
@@ -49,7 +53,11 @@ pub(super) async fn include_changed_node_record_dependents(
               lower(pointer.after_state ->> 'resolver')
          WHERE record.chain_id = $1
            AND record.event_kind IN ('RecordChanged', 'RecordVersionChanged')
-           AND record.source_family = 'ens_v1_resolver_l1'
+           AND record.source_family =
+               resolver.declared_summary #>> '{classification,source_family}'
+           AND (record.source_family <> 'ens_v2_resolver_l1'
+                OR (record.namespace = pointer.namespace
+                    AND record.source_manifest_id = declaration.manifest_id))
            AND record.logical_name_id IS NULL
            AND lower(COALESCE(
                    NULLIF(record.after_state ->> 'resolver', ''),

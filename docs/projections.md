@@ -536,6 +536,23 @@ unknown support rather than wrapper support or an internal server error.
 
 ## Resolver and records
 
+### Records shared through resolver links
+
+For the [record-ID resolver generation](architecture.md), Project selects the
+latest canonical link for each materialized name and emitting resolver, falling
+back to the resolver's zero-node link only when the exact link is absent or zero.
+It then ranks updates within the selected record ID by selector. Relinking does
+not discard values written before the link, and an explicit empty value cannot
+fall back to a previous link or to a different record. The latest link selection
+and value event both contribute provenance. No unknown name acquires a serving
+row solely because its resolver emitted a link.
+
+A change or retraction to a link or shared-record update rebuilds all current
+name and resource consumers of that resolver. Incremental staging includes the
+resolver's canonical link and record history through the target, including
+updates with null name/resource fields. Full rebuild and redo use the same
+selection rule; retracted events never remain as synthetic per-name facts.
+
 `resolver_current` summarizes one resolver contract across readable bound names,
 aliases, roles, record evidence, and normalized events. Embedded binding,
 alias, permission, and role-holder summaries store `total_count`,

@@ -159,6 +159,7 @@ impl Catalog {
             .map(|source| source.namespace.as_str())
             .collect::<BTreeSet<_>>();
         let mut candidates = Vec::new();
+        let mut public_refusals = Vec::new();
         for admission in self.admissions.iter().filter(|admission| {
             admission.discovery_edge_kind.as_deref() != Some(MIGRATION_REGISTRY_ASSOCIATION_KIND)
                 && applies(admission, raw)
@@ -180,6 +181,16 @@ impl Catalog {
                 // rather than the declaration fallback ranked around registry announcements.
                 _ => 0,
             };
+            if admission.discovery_edge_kind.is_none()
+                && admission.role.as_deref() == Some("public_resolver_v2")
+                && source.source_family == "ens_v2_resolver_l1"
+                && !source.events.iter().any(|event| {
+                    event.topic0.eq_ignore_ascii_case(topic0)
+                        && protocol::public_resolver_v2_signature(&event.signature)
+                })
+            {
+                public_refusals.push(((rank, 0), source.manifest_id));
+            }
             let target_family = inferred_family(
                 &source.source_family,
                 admission.discovery_edge_kind.as_deref(),
@@ -242,6 +253,21 @@ impl Catalog {
                     },
                 ));
             }
+        }
+        if let Some(rank) = public_refusals.iter().map(|(rank, _)| *rank).min()
+            && !candidates
+                .iter()
+                .any(|candidate| (candidate.0, candidate.1) < rank)
+        {
+            if candidates.iter().any(|candidate| {
+                (candidate.0, candidate.1) == rank
+                    && !(candidate.2.source.source_family == "ens_v2_resolver_l1"
+                        && candidate.2.emitter_role.as_deref() == Some("public_resolver_v2")
+                        && public_refusals.contains(&(rank, candidate.2.source.manifest_id)))
+            }) {
+                bail!("PublicResolverV2 event refusal conflicts with an equally ranked adapter");
+            }
+            return Ok(None);
         }
         select_unambiguous(raw, candidates)
     }
@@ -444,14 +470,23 @@ impl Catalog {
                 u8::from(required_rule.is_some_and(|edge_kind| {
                     self.rule(source.manifest_id, edge_kind, role).is_none()
                 }));
-            let emitter_role =
-                if protocol::role_insensitivity_justification(&source.source_family, &event.name)
-                    .is_some()
-                {
-                    None
-                } else {
-                    role.map(str::to_owned)
-                };
+            let public_role =
+                source.source_family == "ens_v2_resolver_l1" && role == Some("public_resolver_v2");
+            let legacy_node = source.source_family == "ens_v2_resolver_l1"
+                && event.name != "AddrChanged"
+                && protocol::public_resolver_v2_signature(&event.signature);
+            let emitter_role = if !public_role
+                && (legacy_node
+                    || protocol::role_insensitivity_justification(
+                        &source.source_family,
+                        &event.name,
+                    )
+                    .is_some())
+            {
+                None
+            } else {
+                role.map(str::to_owned)
+            };
             output.push((
                 rank,
                 discovery_authority_rank,

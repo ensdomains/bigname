@@ -311,6 +311,7 @@ include!("tests/graphql_oracle.rs");
 include!("tests/graphql_oracle_input_scopes.rs");
 include!("tests/graphql_oracle_enum_scopes.rs");
 include!("tests/v2_name_record.rs");
+include!("tests/record_id_resolver.rs");
 include!("tests/v2_diagnostics_names.rs");
 include!("tests/v2_history.rs");
 include!("tests/v2_history_redo.rs");

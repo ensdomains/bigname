@@ -292,7 +292,13 @@
                      event.log_index DESC NULLS LAST, event.normalized_event_id DESC LIMIT 1
         ) v2_registration_latest ON TRUE
         LEFT JOIN project_resources resource ON resource.resource_id = row_identity.event_resource_id LEFT JOIN LATERAL (
-            SELECT event.*, lineage.block_timestamp
+            SELECT event.*, CASE
+                WHEN event.source_family = 'ens_v1_registrar_l1'
+                 AND event.after_state ->> 'state_derived' = 'true'
+                 AND event.after_state ->> 'surface_materialization' = 'true'
+                 AND event.after_state ->> 'registrar_surface_snapshot' = 'true'
+                THEN to_timestamp((event.after_state ->> 'original_registered_at')::bigint)
+                ELSE lineage.block_timestamp END AS block_timestamp
             FROM project_authority_events event
             LEFT JOIN chain_lineage lineage
               ON lineage.chain_id = event.chain_id

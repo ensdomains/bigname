@@ -7,6 +7,7 @@ use crate::schema_v2::{catalog::Selected, model::RawLogInput};
 pub(super) enum V2Vocabulary {
     Registry,
     Resolver,
+    RecordResolver,
 }
 
 pub(super) struct V2PermissionState<'a> {
@@ -29,7 +30,7 @@ pub(super) fn v2_states(
     let changed_powers = changed_powers(permission.old_bitmap, permission.new_bitmap, vocabulary);
     let source_key = match vocabulary {
         V2Vocabulary::Registry => "registry_contract_instance_id",
-        V2Vocabulary::Resolver => "resolver_contract_instance_id",
+        V2Vocabulary::Resolver | V2Vocabulary::RecordResolver => "resolver_contract_instance_id",
     };
     let scope = match vocabulary {
         V2Vocabulary::Registry => json!({
@@ -37,7 +38,7 @@ pub(super) fn v2_states(
             "chain_id":raw.chain_id,
             "registry_address":raw.emitting_address,
         }),
-        V2Vocabulary::Resolver => json!({
+        V2Vocabulary::Resolver | V2Vocabulary::RecordResolver => json!({
             "kind":"resolver",
             "chain_id":raw.chain_id,
             "resolver_address":raw.emitting_address,
@@ -51,7 +52,7 @@ pub(super) fn v2_states(
                 "registry_address":raw.emitting_address,
                 "upstream_resource":permission.upstream_resource,
             }]),
-            V2Vocabulary::Resolver => json!([{
+            V2Vocabulary::Resolver | V2Vocabulary::RecordResolver => json!([{
                 "kind":"resolver_root_fallback",
                 "chain_id":raw.chain_id,
                 "resolver_address":raw.emitting_address,
@@ -210,6 +211,7 @@ fn role_bits(vocabulary: V2Vocabulary) -> &'static [(usize, &'static str)] {
     match vocabulary {
         V2Vocabulary::Registry => REGISTRY_ROLE_BITS,
         V2Vocabulary::Resolver => RESOLVER_ROLE_BITS,
+        V2Vocabulary::RecordResolver => super::v2_record_resolver::permissions::ROLE_BITS,
     }
 }
 

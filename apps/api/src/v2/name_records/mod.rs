@@ -15,8 +15,8 @@ use serde_json::Value;
 use crate::AppState;
 use crate::v2::support::{
     ResolutionLookupError, ResolutionRecordKey, load_name_current_for_selected_snapshot,
-    load_supported_record_inventory_current_for_snapshot, map_internal_api_error,
-    normalize_inferred_route_name, parse_resolution_record_key, snapshot_selection_api_error,
+    load_record_inventory_for_source, map_internal_api_error, normalize_inferred_route_name,
+    parse_resolution_record_key, snapshot_selection_api_error,
 };
 
 use super::support::execute_resolution_lookup;
@@ -181,6 +181,7 @@ pub(crate) async fn get_name_records(
         params.at.as_ref(),
         params.finality,
         include_resolution_auxiliary,
+        params.source,
     )
     .await?;
 
@@ -284,6 +285,7 @@ pub(crate) async fn get_name_records(
                                 params.at.as_ref(),
                                 params.finality,
                                 true,
+                                RequestSource::Verified,
                             )
                             .await?;
                         let refreshed_fallback_records =
@@ -376,6 +378,7 @@ async fn load_name_records_snapshot_state(
     at: Option<&AtSelector>,
     finality: Finality,
     include_resolution_auxiliary: bool,
+    source: RequestSource,
 ) -> V2Result<(
     SelectedSnapshot,
     NameCurrentRow,
@@ -417,7 +420,7 @@ async fn load_name_records_snapshot_state(
     })?;
 
     let record_inventory = if super::name_record::row_has_current_registration(&row) {
-        load_supported_record_inventory_current_for_snapshot(&state.pool, &row, &selected_snapshot)
+        load_record_inventory_for_source(&state.pool, &row, &selected_snapshot, source)
             .await
             .map_err(|error| {
                 api_error_to_v2_for_resource(

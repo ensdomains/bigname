@@ -12,7 +12,7 @@ JOIN chain_lineage surface_lineage
      (surface.block_number, surface.block_hash)
 JOIN (
     SELECT DISTINCT event.resource_id, event.logical_name_id,
-           event.source_family AS pointer_source_family,
+           event.source_family AS pointer_source_family, event.namespace,
            lower(event.after_state ->> 'resolver') AS resolver_address
     FROM project_scope_resources resource_scope
     JOIN normalized_events event USING (resource_id)
@@ -57,6 +57,28 @@ JOIN LATERAL (
               NULLIF(event.after_state ->> 'resolver', ''),
               NULLIF(event.raw_fact_ref ->> 'emitting_address', '')
           )) = pointer.resolver_address
+      AND event.block_number <= $2
+      AND event.consumer_visibility = 'activated'
+      AND event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
+      AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+    UNION ALL
+    SELECT event.normalized_event_id, event.chain_id,
+           event.block_number, event.block_hash
+    FROM normalized_events event
+    JOIN project_declared_resolver_addresses declaration
+      ON declaration.namespace = pointer.namespace
+     AND declaration.resolver_address = pointer.resolver_address
+     AND declaration.source_family = 'ens_v2_resolver_l1'
+     AND declaration.classification_role = 'public_resolver_v2'
+     AND declaration.manifest_id = event.source_manifest_id
+    WHERE pointer.pointer_source_family IN ('ens_v2_registry_l1', 'ens_v2_root_l1')
+      AND event.chain_id = $1 AND event.namespace = pointer.namespace
+      AND event.logical_name_id IS NULL
+      AND event.source_family = 'ens_v2_resolver_l1'
+      AND lower(event.after_state ->> 'node') = lower(surface.namehash)
+      AND lower(COALESCE(NULLIF(event.after_state ->> 'resolver', ''),
+                        NULLIF(event.raw_fact_ref ->> 'emitting_address', ''))) =
+          pointer.resolver_address
       AND event.block_number <= $2
       AND event.consumer_visibility = 'activated'
       AND event.event_kind IN ('RecordChanged', 'RecordVersionChanged')

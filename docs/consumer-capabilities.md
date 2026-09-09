@@ -39,6 +39,43 @@ it does not preserve the deleted v1 DTOs.
 | Namespace metadata | `GET /v2/namespaces/{namespace}` | Product-facing namespace and capability metadata. |
 | Pipeline diagnostics | `/v2/diagnostics/*` | Explicit diagnostic tier, separate from product reads. |
 
+The [record-ID resolver generation](architecture.md) supplies declared records
+and resolver permissions through the existing routes and response shapes once
+its manifest and end-to-end implementation are admitted. Record sharing, link
+replacement, zero-link default selection, and empty values are part of that
+capability. Ownership-only ingestion does not establish this capability, and a
+source pin or successful decode alone is not replacement evidence.
+
+## Direct PublicResolverV2 record support
+
+For an owned local chain or the separately evidenced `sepolia-hackathon`
+candidate, the exact `public_resolver_v2` declaration described in
+[`manifests.md`](manifests.md#direct-publicresolverv2-declarations-on-an-owned-local-chain)
+permits the existing record reads to use canonical address, text, and contenthash
+observations plus node record-version boundaries. Attribution requires the
+current ENSv2 pointer, matching namespace, node, and exact resolver emitter.
+A supported record classification does not prove exhaustive selector history,
+resolver binding enumeration, aliases, or permission-holder enumeration;
+coverage remains limited to the retained observations and admitted capabilities.
+No new REST route, schema, or record-ID interpretation is implied.
+
+Empty address bytes, empty text, and empty contenthash remain explicit write
+observations. Twenty zero address bytes remain distinct from empty bytes in the
+stored observation; public reads retain their existing decode rules. The
+inherited setters store values under `recordVersions[node]`, and `clearRecords`
+increments that version and emits `VersionChanged`.
+(upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/AddrResolver.sol:L47-L65 @ ens_v1_publicresolver_5141a2a@5141a2a)
+(upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/TextResolver.sol:L15-L21 @ ens_v1_publicresolver_5141a2a@5141a2a)
+(upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/ContentHashResolver.sol:L14-L19 @ ens_v1_publicresolver_5141a2a@5141a2a)
+(upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/ResolverBase.sol:L20-L22 @ ens_v1_publicresolver_5141a2a@5141a2a)
+
+Later writes contribute only within the current version; old-version values do
+not return after a reset. Contract source establishes reachability, not runtime
+acceptance of these reads or transactions. The source support alone does not establish public-chain deployment
+provenance; the hackathon candidate uses its separate manifest evidence. Zero pointers, undeclared/custom resolver addresses,
+and unsupported roles preserve their explicit unsupported behavior. Existing
+ENSv1 resolver support and PermissionedResolver proxy classification stay intact.
+
 ## Resolver address read modes
 
 The records route, exact-name detail, and name results in batch lookup share

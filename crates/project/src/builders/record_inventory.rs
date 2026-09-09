@@ -13,36 +13,7 @@ pub(super) async fn build(
     // clear suppresses the inventory row.
     sqlx::query(
         r#"
-        WITH latest_pointers AS (
-            SELECT DISTINCT ON (event.resource_id)
-                   event.resource_id,
-                   event.logical_name_id,
-                   event.namespace AS pointer_namespace,
-                   event.source_family AS pointer_source_family,
-                   lower(surface.namehash) AS namehash,
-                   lower(event.after_state ->> 'resolver') AS resolver_address,
-                   event.manifest_version AS pointer_manifest_version,
-                   event.normalized_event_id AS pointer_event_id,
-                   event.block_number AS pointer_block_number,
-                   event.block_hash AS pointer_block_hash
-            FROM project_events event
-            JOIN project_surfaces surface USING (logical_name_id)
-            WHERE event.event_kind = 'ResolverChanged'
-              AND event.resource_id IS NOT NULL
-              AND event.logical_name_id IS NOT NULL
-            ORDER BY event.resource_id,
-                     event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST,
-                     event.normalized_event_id DESC
-        ),
-        pointers AS (
-            SELECT * FROM latest_pointers
-            WHERE resolver_address IS NOT NULL
-              AND resolver_address NOT IN (
-                  '0x0000000000000000000000000000000000000000', ''
-              )
-        ),
+        WITH pointers AS (SELECT * FROM project_record_pointers),
         pointer_eligibility AS (
             SELECT pointer.resource_id,
                    COALESCE(
@@ -133,8 +104,12 @@ pub(super) async fn build(
               ON resolver.chain_id = $1
              AND resolver.resolver_address = pointer.resolver_address
              AND resolver.support_status = 'supported'
-             AND resolver.declared_summary #>> '{classification,source_family}' =
+             AND (resolver.declared_summary #>> '{classification,source_family}' =
                  'ens_v1_resolver_l1'
+              OR (resolver.declared_summary #>> '{classification,source_family}' =
+                      'ens_v2_resolver_l1'
+                  AND resolver.declared_summary #>> '{classification,role}' =
+                      'public_resolver_v2'))
              AND resolver.declared_summary #>> '{classification,basis}' =
                  'manifest_declared_address'
             JOIN project_manifests declaration_manifest
@@ -144,7 +119,11 @@ pub(super) async fn build(
             JOIN project_events event
               ON event.chain_id = $1
              AND event.logical_name_id IS NULL
-             AND event.source_family = 'ens_v1_resolver_l1'
+             AND event.source_family =
+                 resolver.declared_summary #>> '{classification,source_family}'
+             AND (event.source_family <> 'ens_v2_resolver_l1'
+                  OR (event.namespace = pointer.pointer_namespace
+                      AND event.source_manifest_id = declaration_manifest.manifest_id))
              AND lower(event.after_state ->> 'node') = pointer.namehash
              AND lower(COALESCE(
                     NULLIF(event.after_state ->> 'resolver', ''),
@@ -154,6 +133,13 @@ pub(super) async fn build(
               AND pointer.pointer_source_family IN (
                   'ens_v2_registry_l1', 'ens_v2_root_l1'
               )
+            UNION ALL
+            SELECT pointer.resource_id AS attributed_resource_id,
+                   pointer.pointer_source_family AS attributed_pointer_source_family,
+                   event.*
+            FROM project_linked_record_events attributed
+            JOIN pointers pointer USING (resource_id)
+            JOIN project_events event USING (normalized_event_id)
         ),
         ranked_versions AS (
             SELECT event.*,
@@ -165,7 +151,7 @@ pub(super) async fn build(
                                 event.normalized_event_id DESC
                    ) AS version_rank
             FROM attributed_events event
-            WHERE event.event_kind = 'RecordVersionChanged'
+            WHERE event.event_kind IN ('RecordVersionChanged', 'ResolverRecordLinked')
         ),
         versions AS (
             SELECT * FROM ranked_versions WHERE version_rank = 1
@@ -217,6 +203,7 @@ pub(super) async fn build(
             WHERE event.event_kind = 'RecordChanged'
               AND (
                   version.normalized_event_id IS NULL
+                  OR version.event_kind = 'ResolverRecordLinked'
                   OR ROW(
                       event.block_number,
                       COALESCE(event.transaction_index, -1),
@@ -430,11 +417,11 @@ pub(super) async fn build(
                    COALESCE(version.normalized_event_id::text, ''), ';',
                    octet_length(CASE
                        WHEN version.normalized_event_id IS NOT NULL
-                           THEN 'RecordVersionChanged'
+                           THEN version.event_kind
                        ELSE ''
                    END), ':',
                    CASE WHEN version.normalized_event_id IS NOT NULL
-                       THEN 'RecordVersionChanged' ELSE '' END, ';',
+                       THEN version.event_kind ELSE '' END, ';',
                    octet_length($1::text), ':', $1::text, ';',
                    octet_length(boundary.block_number::text), ':',
                    boundary.block_number::text, ';',
@@ -448,7 +435,7 @@ pub(super) async fn build(
                    'normalized_event_id', version.normalized_event_id,
                    'event_kind', CASE
                        WHEN version.normalized_event_id IS NOT NULL
-                           THEN 'RecordVersionChanged'
+                           THEN version.event_kind
                        ELSE NULL
                    END,
                    'chain_position', jsonb_strip_nulls(jsonb_build_object(
@@ -466,14 +453,14 @@ pub(super) async fn build(
                        'unsupported_reason', eligibility.unsupported_reason
                    ))
                END,
-               COALESCE(records.last_change, jsonb_build_object(
+               COALESCE(link_change.last_change, records.last_change, jsonb_build_object(
                    'normalized_event_id', COALESCE(
                        version.normalized_event_id,
                        pointer.pointer_event_id
                    ),
                    'event_kind', CASE
                        WHEN version.normalized_event_id IS NOT NULL
-                           THEN 'RecordVersionChanged'
+                           THEN version.event_kind
                        ELSE 'ResolverChanged'
                    END,
                    'chain_position', jsonb_strip_nulls(jsonb_build_object(
@@ -492,7 +479,9 @@ pub(super) async fn build(
                    'logical_name_id', pointer.logical_name_id,
                    'resolver_address', pointer.resolver_address,
                    'resolver_pointer_event_id', pointer.pointer_event_id,
-                   'record_event_ids', COALESCE(records.event_ids, '[]'::jsonb),
+                   'record_event_ids', COALESCE(records.event_ids, '[]'::jsonb)
+                       || COALESCE(link_change.event_ids, '[]'::jsonb),
+                   'record_link_event_ids', COALESCE(link_change.event_ids, '[]'::jsonb),
                    'read_rules', CASE WHEN COALESCE(
                        resolver.declared_summary -> 'classification' -> 'read_features',
                        '[]'::jsonb
@@ -543,6 +532,8 @@ pub(super) async fn build(
          )
         LEFT JOIN record_rollups records
           ON records.resource_id = pointer.resource_id
+        LEFT JOIN project_linked_record_changes link_change
+          ON link_change.resource_id = pointer.resource_id
         LEFT JOIN latest_positions latest_position
           ON latest_position.resource_id = pointer.resource_id
         ORDER BY pointer.resource_id
