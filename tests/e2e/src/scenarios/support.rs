@@ -621,17 +621,17 @@ pub async fn ingest_ens_v1_v2_migration_sepolia_and_serve(
 
 /// Declare the local plain registration controller before validating/hashing the
 /// [deployment profile](../../../../docs/glossary.md#deployment-profile). This fixture declaration does not admit a public Sepolia controller.
-pub async fn ingest_plain_migration_and_serve(
+pub async fn prove_plain_migration_http(
     harness: &ConnectedMigrationHarness,
-) -> Result<PipelineRun> {
-    let chains = [LocalChain {
-        anvil: &harness.anvil,
-        id: "ethereum-sepolia",
-    }];
-    ingest_local_chains(&chains, true, None, |scratch, root| {
+    name: &str,
+    owner: Address,
+) -> Result<()> {
+    let root = repo_root();
+    let scratch = TempDir::create()?;
+    let profile = {
         let profile = manifests::generate_local_sepolia_migration_profile(
-            scratch,
-            root,
+            scratch.path(),
+            &root,
             &harness.ens_v1.manifest_targets(),
             &harness.ens_v2.manifest_targets(),
             &ens_v2_migration::migration_manifest_targets(&harness.migration),
@@ -676,9 +676,21 @@ pub async fn ingest_plain_migration_and_serve(
             }
         }
         std::fs::write(path, toml::to_string(&local)?)?;
-        Ok(profile)
-    })
-    .await
+        profile
+    };
+    let mut db = HarnessDb::create().await?;
+    let head = i64::try_from(harness.anvil.client().block_number().await?)?;
+    pipeline::prove_normal_sepolia_http(
+        &root,
+        &mut db,
+        &profile.root,
+        &harness.anvil.url,
+        head,
+        &[(name, format!("{owner:#x}"))],
+        true,
+    )
+    .await?;
+    db.cleanup().await
 }
 
 /// Replay both mainnet deployment-profile chains into one corpus with the full
@@ -841,8 +853,16 @@ pub async fn prove_ens_v2_normal_http(
     )?;
     let mut db = HarnessDb::create().await?;
     let head = i64::try_from(anvil.client().block_number().await?)?;
-    pipeline::prove_normal_sepolia_http(&root, &mut db, &profile.root, &anvil.url, head, owners)
-        .await?;
+    pipeline::prove_normal_sepolia_http(
+        &root,
+        &mut db,
+        &profile.root,
+        &anvil.url,
+        head,
+        owners,
+        false,
+    )
+    .await?;
     db.cleanup().await
 }
 

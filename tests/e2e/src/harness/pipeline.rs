@@ -2195,6 +2195,7 @@ pub async fn prove_normal_sepolia_http(
     rpc_url: &str,
     head: i64,
     owners: &[(&str, String)],
+    require_unwrapped_migration: bool,
 ) -> Result<()> {
     let reader = db.verification_url().await?;
     let binary = profile_phase_runner(repo_root, manifests_root).await?;
@@ -2329,6 +2330,94 @@ pub async fn prove_normal_sepolia_http(
             body["data"]["chain_id"] == 11155111 && body["data"]["network"] == "ethereum-sepolia",
             "wrong network: {body}"
         );
+        if require_unwrapped_migration {
+            let logical = format!("ens:{:#x}", super::ens_v1::namehash(name));
+            let activated: bool = sqlx::query_scalar(
+                "SELECT count(*) = 1 AND bool_and(consumer_visibility = 'activated' AND after_state->>'consumer_visibility' = 'activated' AND after_state->>'migration_path' = 'unwrapped' AND after_state->>'candidate_authority_transition' = 'false')
+                 FROM normalized_events WHERE source_family = 'ens_v2_migration_l1' AND event_kind = 'MigrationApplied' AND canonicality_state = 'canonical' AND logical_name_id = $1",
+            ).bind(&logical).fetch_one(&db.pool).await?;
+            anyhow::ensure!(activated, "expected one activated unwrapped migration");
+            let (v1, v2): (i64, i64) = sqlx::query_as(
+                "SELECT count(*) FILTER (WHERE authority_arm = 'ens_v1'), count(*) FILTER (WHERE authority_arm = 'ens_v2')
+                 FROM surface_bindings WHERE logical_name_id = $1 AND active_to IS NULL AND canonicality_state = 'canonical'",
+            ).bind(&logical).fetch_one(&db.pool).await?;
+            anyhow::ensure!(
+                (v1, v2) == (0, 1),
+                "current authority bindings: V1={v1}, V2={v2}"
+            );
+            let resource: sqlx::types::Uuid = sqlx::query_scalar(
+                "SELECT resource_id FROM surface_bindings WHERE logical_name_id = $1 AND authority_arm = 'ens_v2' AND active_to IS NULL AND canonicality_state = 'canonical'",
+            ).bind(&logical).fetch_one(&db.pool).await?;
+            let published: sqlx::types::Uuid = sqlx::query_scalar(
+                "SELECT resource_id FROM name_current WHERE logical_name_id = $1",
+            )
+            .bind(&logical)
+            .fetch_one(&db.pool)
+            .await?;
+            anyhow::ensure!(
+                published == resource && body["data"]["registration_id"] == resource.to_string(),
+                "published/indexed name must select V2 resource {resource}: {body}"
+            );
+            let mut cursor: Option<String> = None;
+            let mut seen = std::collections::BTreeSet::new();
+            let mut grants = Vec::new();
+            loop {
+                let mut request = client
+                    .get(format!("http://{address}/v2/permissions"))
+                    .query(&[
+                        ("name", *name),
+                        ("namespace", "ens"),
+                        ("finality", "latest"),
+                    ]);
+                if let Some(cursor) = cursor.as_ref() {
+                    request = request.query(&[("cursor", cursor)]);
+                }
+                let response = request.send().await?;
+                let status = response.status();
+                let permissions: Value = response.json().await?;
+                anyhow::ensure!(
+                    status.is_success(),
+                    "permissions HTTP {name}: {status} {permissions}"
+                );
+                grants.extend(
+                    permissions["data"]
+                        .as_array()
+                        .context("permissions grants")?
+                        .iter()
+                        .cloned(),
+                );
+                let has_more = permissions["page"]["has_more"]
+                    .as_bool()
+                    .context("permissions has_more")?;
+                eprintln!("OPS permissions HTTP {name}: {permissions}");
+                if !has_more {
+                    anyhow::ensure!(
+                        permissions["page"]["next_cursor"].is_null(),
+                        "unexpected terminal cursor"
+                    );
+                    break;
+                }
+                let next = permissions["page"]["next_cursor"]
+                    .as_str()
+                    .context("permissions next cursor")?
+                    .to_owned();
+                anyhow::ensure!(
+                    seen.len() < 100 && seen.insert(next.clone()),
+                    "permissions pagination did not terminate"
+                );
+                cursor = Some(next);
+            }
+            anyhow::ensure!(
+                !grants.is_empty() && grants.iter().any(|grant| grant["address"] == *owner),
+                "V2 owner grants must be published: {grants:?}"
+            );
+            anyhow::ensure!(
+                grants
+                    .iter()
+                    .all(|grant| grant["registration_id"] == resource.to_string()),
+                "V1 permission leaked into current-name HTTP: {grants:?}"
+            );
+        }
         eprintln!("OPS indexed HTTP {name}: {body}");
     }
     anyhow::ensure!(
