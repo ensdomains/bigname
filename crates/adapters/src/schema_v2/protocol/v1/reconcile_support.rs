@@ -1,5 +1,7 @@
 mod event_index;
 mod side_index;
+mod unwrapped_migration;
+pub(in crate::schema_v2::protocol) use unwrapped_migration::reconcile as reconcile_unwrapped_migrations;
 
 use std::collections::{BTreeMap, BTreeSet};
 

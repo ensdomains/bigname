@@ -91,6 +91,44 @@ pub(super) fn interpret(
     }
 }
 
+pub(super) fn reconcile_block(
+    catalog: &crate::schema_v2::catalog::Catalog,
+    block: &crate::schema_v2::model::RawBlockInput,
+    raw_logs: &[crate::schema_v2::model::RawLogInput],
+    observations: &[super::MigrationObservation],
+    committed_state: &crate::schema_v2::state::State,
+    block_state: &mut crate::schema_v2::state::State,
+    output: &mut BatchOutput,
+) -> anyhow::Result<()> {
+    reconcile_same_transaction_setups(output);
+    let proofs = crate::schema_v2::migration::unwrapped_reconciliations(
+        catalog,
+        observations,
+        raw_logs,
+        block,
+        committed_state,
+        output,
+    )?;
+    reconcile_support::reconcile_unwrapped_migrations(output, &proofs);
+    if output
+        .normalized_events
+        .iter()
+        .any(|event| event.source_family.starts_with("ens_v1_"))
+    {
+        let delta = crate::schema_v2::seam::fold_prior_events(
+            Vec::new(),
+            &output.normalized_events,
+            std::slice::from_ref(block),
+        )?;
+        let mut replayed_state = committed_state.clone();
+        replayed_state.apply_prior_event_delta(delta);
+        // Live interpretation saw provisional transitions. Advance ENSv1 using only the
+        // reconciled observations; preserve other protocols' uninterrupted state.
+        block_state.replace_ens_v1_protocol_state_from_replay(replayed_state);
+    }
+    Ok(())
+}
+
 pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
     let event_order = output
         .normalized_events

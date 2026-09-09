@@ -87,6 +87,76 @@ async fn parent_migration_path(run: &support::PipelineRun, parent: &str) -> Resu
 }
 
 #[tokio::test]
+async fn plain_unwrapped_eleven_log_migration_publishes_only_v2_authority() -> Result<()> {
+    const LABEL: &str = "plain-migration";
+    const NAME: &str = "plain-migration.eth";
+    let harness = support::deploy_connected_migration_harness().await?;
+    let rpc = harness.anvil.client();
+    let owner = rpc.accounts().await?[1];
+    ens_v1::register_eth_name(
+        &rpc,
+        &harness.ens_v1,
+        LABEL,
+        owner,
+        YEAR,
+        harness.ens_v1.public_resolver.address,
+    )
+    .await?;
+    let expiry = ens_v1::eth_name_expiry(&rpc, &harness.ens_v1, LABEL).await?;
+    ens_v2_migration::reserve_eth_label(&rpc, &harness.ens_v2, LABEL, expiry).await?;
+    let receipt = ens_v2_migration::migrate_unwrapped(
+        &rpc,
+        &harness.ens_v1,
+        &harness.migration,
+        owner,
+        LABEL,
+    )
+    .await?;
+    let receipt_body = rpc
+        .call(
+            "eth_getTransactionReceipt",
+            serde_json::json!([receipt.tx_hash]),
+        )
+        .await?;
+    assert_eq!(
+        receipt_body["logs"]
+            .as_array()
+            .context("migration logs")?
+            .len(),
+        11
+    );
+    let run = support::ingest_plain_migration_and_serve(&harness).await?;
+    assert_eq!(parent_migration_path(&run, NAME).await?, "unwrapped");
+    let logical = format!("ens:{:#x}", ens_v1::namehash(NAME));
+    let (v1, v2): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE authority_arm = 'ens_v1'), count(*) FILTER (WHERE authority_arm = 'ens_v2')
+         FROM surface_bindings WHERE logical_name_id = $1 AND active_to IS NULL AND canonicality_state = 'canonical'",
+    ).bind(&logical).fetch_one(&run.db.pool).await?;
+    assert_eq!((v1, v2), (0, 1));
+    let (status, name) = body(&run, "/v2/names/plain-migration.eth?source=indexed").await?;
+    assert_eq!(status, 200, "name read failed: {name}");
+    let resource: sqlx::types::Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM surface_bindings WHERE logical_name_id = $1 AND authority_arm = 'ens_v2' AND active_to IS NULL AND canonicality_state = 'canonical'",
+    ).bind(&logical).fetch_one(&run.db.pool).await?;
+    assert_eq!(name["data"]["owner"], format!("{owner:#x}"));
+    assert_eq!(name["data"]["registration_id"], resource.to_string());
+    let (status, permissions) = body(&run, "/v2/permissions?name=plain-migration.eth").await?;
+    assert_eq!(status, 200, "permission read failed: {permissions}");
+    let grants = permissions["data"]
+        .as_array()
+        .context("current-name permissions")?;
+    assert!(!grants.is_empty(), "V2 owner permissions must be published");
+    assert!(
+        grants
+            .iter()
+            .all(|grant| grant["registration_id"] == resource.to_string()),
+        "V1 permission leaked into current-name read: {permissions}"
+    );
+    run.db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn unlocked_parent_hides_retained_ens_v1_children() -> Result<()> {
     let harness = support::deploy_connected_migration_harness().await?;
     let path = support::create_unlocked_migration_path(&harness).await?;

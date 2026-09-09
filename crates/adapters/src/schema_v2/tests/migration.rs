@@ -4753,3 +4753,438 @@ fn assert_synchronized_pair(output: &BatchOutput) -> String {
     );
     bridge.migration_correlation_ids[0].clone()
 }
+
+// The eleven-log shape includes the conditional TTL clear observed in the local plain-name
+// failure. These constructed logs use the existing adapter fixture's admitted addresses.
+// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
+// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174-L188 @ ens_v1@91c966f)
+fn plain_unwrapped_input() -> anyhow::Result<BatchInput> {
+    sol! { event NewTTL(bytes32 indexed node, uint64 ttl); }
+    let fixture = fixture()?;
+    let addresses = &fixture["addresses"];
+    let scenario = &fixture["scenarios"]["U-01"];
+    let block = scenario["migration_block"].as_i64().unwrap();
+    let label = scenario["label"].as_str().unwrap();
+    let labelhash = keccak256(label.as_bytes());
+    let node = scenario["namehash"].as_str().unwrap().parse::<B256>()?;
+    let eth_node = super::common::namehash(&["eth".to_owned()]).parse()?;
+    let token = decimal_u256(&scenario["v2_token_id"])?;
+    let owner = Address::from([0x51; 20]);
+    let controller = address(addresses, "unlocked_controller")?;
+    let graveyard = address(addresses, "graveyard")?;
+    let registrar = addresses["base_registrar"].as_str().unwrap();
+    let v2 = addresses["eth_registry"].as_str().unwrap();
+    let registry = "0x0000000000000000000000000000000000000099";
+    let registration_controller = "0x0000000000000000000000000000000000000098";
+    let resolver = Address::from([0x61; 20]);
+    let at = |event, at, log, emitter| raw_at_transaction(event, at, 0, log, emitter);
+    let mut input = batch(
+        vec![
+            at(
+                super::v1_registry::NewOwner {
+                    node: eth_node,
+                    label: labelhash,
+                    owner,
+                }
+                .encode_log_data(),
+                block - 1,
+                0,
+                registry,
+            ),
+            at(
+                super::NameRegistered {
+                    name: label.to_owned(),
+                    label: labelhash,
+                    owner,
+                    expires: U256::from(scenario["stored_expiry"].as_u64().unwrap()),
+                }
+                .encode_log_data(),
+                block - 1,
+                1,
+                registration_controller,
+            ),
+            at(
+                super::v1_registry::NewResolver { node, resolver }.encode_log_data(),
+                block - 1,
+                2,
+                registry,
+            ),
+            at(
+                NewTTL { node, ttl: 60 }.encode_log_data(),
+                block - 1,
+                3,
+                registry,
+            ),
+            registrar_transfer_at(owner, controller, labelhash, block, 0, registrar),
+            at(
+                super::v1_registry::NewOwner {
+                    node: eth_node,
+                    label: labelhash,
+                    owner: controller,
+                }
+                .encode_log_data(),
+                block,
+                1,
+                registry,
+            ),
+            at(
+                super::v1_registry::Transfer {
+                    node,
+                    owner: graveyard,
+                }
+                .encode_log_data(),
+                block,
+                2,
+                registry,
+            ),
+            at(
+                super::v1_registry::NewResolver {
+                    node,
+                    resolver: Address::ZERO,
+                }
+                .encode_log_data(),
+                block,
+                3,
+                registry,
+            ),
+            at(
+                NewTTL { node, ttl: 0 }.encode_log_data(),
+                block,
+                4,
+                registry,
+            ),
+            registrar_transfer_at(controller, graveyard, labelhash, block, 5, registrar),
+            at(
+                super::v2_registry::LabelRegistered {
+                    tokenId: token,
+                    labelHash: labelhash,
+                    label: label.to_owned(),
+                    owner,
+                    expiry: scenario["stored_expiry"].as_u64().unwrap(),
+                    sender: controller,
+                }
+                .encode_log_data(),
+                block,
+                6,
+                v2,
+            ),
+            at(
+                super::v2_registry::TransferSingle {
+                    operator: controller,
+                    from: Address::ZERO,
+                    to: owner,
+                    id: token,
+                    value: U256::from(1),
+                }
+                .encode_log_data(),
+                block,
+                7,
+                v2,
+            ),
+            at(
+                super::v2_registry::TokenResource {
+                    tokenId: token,
+                    resource: token,
+                }
+                .encode_log_data(),
+                block,
+                8,
+                v2,
+            ),
+            at(
+                super::EACRolesChanged {
+                    resource: token,
+                    account: owner,
+                    oldRoleBitmap: U256::ZERO,
+                    newRoleBitmap: U256::from(1),
+                }
+                .encode_log_data(),
+                block,
+                9,
+                v2,
+            ),
+            at(
+                super::v2_registry::ResolverUpdated {
+                    tokenId: token,
+                    resolver,
+                    sender: controller,
+                }
+                .encode_log_data(),
+                block,
+                10,
+                v2,
+            ),
+        ],
+        &fixture,
+        true,
+    );
+    let kinds = &[
+        "SubregistryChanged",
+        "AuthorityTransferred",
+        "PermissionChanged",
+        "SurfaceBound",
+        "SurfaceUnbound",
+        "AuthorityEpochChanged",
+        "ResolverChanged",
+    ];
+    input.manifests.push(manifest_with_events(
+        V1_REGISTRY_MANIFEST_ID,
+        "ens",
+        "ens_v1_registry_l1",
+        &[
+            (
+                "NewOwner",
+                "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+                &["registry"],
+                kinds,
+            ),
+            (
+                "Transfer",
+                "event Transfer(bytes32 indexed node, address owner)",
+                &["registry"],
+                kinds,
+            ),
+            (
+                "NewResolver",
+                "event NewResolver(bytes32 indexed node, address resolver)",
+                &["registry"],
+                kinds,
+            ),
+            (
+                "NewTTL",
+                "event NewTTL(bytes32 indexed node, uint64 ttl)",
+                &["registry"],
+                &[],
+            ),
+        ],
+    ));
+    input.admissions.push(admission_at(
+        V1_REGISTRY_MANIFEST_ID,
+        "registry",
+        registry,
+        102,
+    ));
+    input.admissions.push(admission_at(
+        V1_REGISTRAR_MANIFEST_ID,
+        "registrar_controller",
+        registration_controller,
+        104,
+    ));
+    let registrar_manifest = input
+        .manifests
+        .iter_mut()
+        .find(|manifest| manifest.manifest_id == V1_REGISTRAR_MANIFEST_ID)
+        .unwrap();
+    let mut payload: Value = serde_json::from_str(&registrar_manifest.payload_json)?;
+    payload["abi"]["events"].as_array_mut().unwrap().push(json!({
+        "name":"NameRegistered", "fragment":"event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+        "emitter_roles":["registrar_controller"], "normalized_events":["RegistrationGranted", "PreimageObserved", "PermissionChanged", "SurfaceBound", "AuthorityEpochChanged"]
+    }));
+    registrar_manifest.payload_json = payload.to_string();
+    let registry_manifest = input
+        .manifests
+        .iter_mut()
+        .find(|manifest| manifest.manifest_id == REGISTRY_MANIFEST_ID)
+        .unwrap();
+    let mut payload: Value = serde_json::from_str(&registry_manifest.payload_json)?;
+    payload["abi"]["events"].as_array_mut().unwrap().push(json!({
+        "name":"EACRolesChanged", "fragment":"event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)",
+        "emitter_roles":["registry"], "normalized_events":["PermissionChanged"]
+    }));
+    registry_manifest.payload_json = payload.to_string();
+    Ok(input)
+}
+
+#[test]
+fn plain_unwrapped_cleanup_keeps_one_predecessor_without_v1_reopenings() -> anyhow::Result<()> {
+    let input = plain_unwrapped_input()?;
+    let block = input.raw_logs.last().unwrap().block_number;
+    assert_eq!(
+        input
+            .raw_logs
+            .iter()
+            .filter(|raw| raw.block_number == block)
+            .count(),
+        11
+    );
+    let output = interpret_test_batch(input)?;
+    let predecessor = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.source_family == "ens_v1_registrar_l1"
+                && event.event_kind == "RegistrationGranted"
+        })
+        .unwrap()
+        .resource_id
+        .unwrap();
+    assert_eq!(output.migration_authority_transitions.len(), 1);
+    assert!(
+        output
+            .surface_bindings
+            .iter()
+            .all(|binding| binding.block_number < block || binding.authority_arm != "ens_v1")
+    );
+    assert!(
+        output
+            .binding_closures
+            .iter()
+            .all(|closure| closure.block_number < block || closure.authority_arm != "ens_v1")
+    );
+    let migrated = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.block_number == Some(block) && event.source_family.starts_with("ens_v1_")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        migrated
+            .iter()
+            .filter(|event| event.event_kind == "TokenControlTransferred")
+            .count(),
+        2
+    );
+    assert!(migrated.iter().all(|event| !matches!(
+        event.event_kind.as_str(),
+        "SurfaceBound" | "SurfaceUnbound" | "AuthorityEpochChanged"
+    )));
+    assert!(
+        migrated
+            .iter()
+            .filter(|event| event.source_family == "ens_v1_registry_l1")
+            .all(|event| {
+                event.resource_id == Some(predecessor)
+                    && event.after_state.get("authority_kind").is_none()
+                    && event.after_state.get("authority_key").is_none()
+            })
+    );
+    assert!(
+        migrated
+            .iter()
+            .any(|event| event.after_state["source_event"] == "NewResolver"
+                && event.after_state["resolver"] == ZERO_ADDRESS)
+    );
+    Ok(())
+}
+
+#[test]
+fn plain_unwrapped_cleanup_is_identical_after_cold_predecessor_restore() -> anyhow::Result<()> {
+    let mut whole = plain_unwrapped_input()?;
+    let block = whole.raw_logs.last().unwrap().block_number;
+    let full = interpret_test_batch(whole.clone())?;
+    let mut setup = whole.clone();
+    setup.raw_logs.retain(|raw| raw.block_number < block);
+    let blocks = setup
+        .raw_logs
+        .iter()
+        .map(|raw| RawBlockInput {
+            chain_id: raw.chain_id.clone(),
+            block_hash: raw.block_hash.clone(),
+            block_number: raw.block_number,
+            block_timestamp: raw.block_timestamp,
+            canonicality_state: raw.canonicality_state.clone(),
+        })
+        .collect::<Vec<_>>();
+    let setup = interpret_test_batch(setup)?;
+    whole.raw_logs.retain(|raw| raw.block_number == block);
+    whole.prior_events =
+        super::super::seam::fold_prior_events(Vec::new(), &setup.normalized_events, &blocks)?;
+    let resumed = interpret_test_batch(whole)?;
+    assert_eq!(
+        full.normalized_events
+            .into_iter()
+            .filter(|event| event.block_number == Some(block))
+            .collect::<Vec<_>>(),
+        resumed.normalized_events
+    );
+    assert_eq!(
+        full.migration_authority_transitions,
+        resumed.migration_authority_transitions
+    );
+    assert_eq!(
+        full.surface_bindings
+            .into_iter()
+            .filter(|binding| binding.block_number == block)
+            .collect::<Vec<_>>(),
+        resumed.surface_bindings
+    );
+    Ok(())
+}
+
+#[test]
+fn incomplete_unwrapped_cleanup_keeps_ordinary_authority_effects() -> anyhow::Result<()> {
+    for missing_log in [0, 1, 2, 3, 5, 6, 7, 8, 9, 11, 12, 13] {
+        let mut input = plain_unwrapped_input()?;
+        let block = input.raw_logs.last().unwrap().block_number;
+        input
+            .raw_logs
+            .retain(|raw| raw.block_number != block || raw.log_index != missing_log);
+        if missing_log == 11 {
+            let foreign = "0x0000000000000000000000000000000000000097";
+            input.admissions.push(admission_at(
+                V1_REGISTRAR_MANIFEST_ID,
+                "registrar",
+                foreign,
+                107,
+            ));
+            input
+                .raw_logs
+                .iter_mut()
+                .find(|raw| raw.block_number == block && raw.log_index == 5)
+                .unwrap()
+                .emitting_address = foreign.to_owned();
+        } else if missing_log == 12 {
+            input
+                .raw_logs
+                .iter_mut()
+                .find(|raw| raw.block_number == block && raw.log_index == 1)
+                .unwrap()
+                .topics[2] = format!("{:#x}", B256::ZERO);
+        } else if missing_log == 13 {
+            *input
+                .raw_logs
+                .iter_mut()
+                .find(|raw| raw.block_number == block && raw.log_index == 4)
+                .unwrap()
+                .data
+                .last_mut()
+                .unwrap() = 1;
+        }
+        let mut ordinary = input.clone();
+        ordinary
+            .manifests
+            .retain(|manifest| manifest.source_family != "ens_v2_migration_l1");
+        ordinary
+            .admissions
+            .retain(|admission| admission.source_manifest_id != Some(MIGRATION_MANIFEST_ID));
+        let output = interpret_test_batch(input)?;
+        let ordinary = interpret_test_batch(ordinary)?;
+        let v1_events = |output: &BatchOutput| {
+            output
+                .normalized_events
+                .iter()
+                .filter(|event| event.source_family.starts_with("ens_v1_"))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            v1_events(&output),
+            v1_events(&ordinary),
+            "incomplete or mismatched proof {missing_log} must preserve ordinary observations and permissions"
+        );
+        let v1_bindings = |output: BatchOutput| {
+            output
+                .surface_bindings
+                .into_iter()
+                .filter(|binding| binding.authority_arm == "ens_v1")
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            v1_bindings(output),
+            v1_bindings(ordinary),
+            "missing log {missing_log} must not authorize reconciliation"
+        );
+    }
+    Ok(())
+}

@@ -15,12 +15,14 @@ mod child;
 mod registry;
 mod renewals;
 mod support;
+mod unwrapped_reconcile;
 use activation::activate_complete_groups;
 #[cfg(any(test, feature = "test-activation"))]
 pub use activation::inject_activated_transition_for_test;
 use registry::correlate_registry_creation;
 use renewals::correlate_renewals;
 use support::*;
+pub(super) use unwrapped_reconcile::{UnwrappedReconciliation, unwrapped_reconciliations};
 
 const MIGRATION_FAMILY: &str = "ens_v2_migration_l1";
 const V1_REGISTRAR_FAMILY: &str = "ens_v1_registrar_l1";

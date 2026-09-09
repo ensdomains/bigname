@@ -318,38 +318,32 @@ fn interpret_loaded(
     committed_state.begin_batch();
     for block in blocks {
         let mut block_output = BatchOutput::default();
+        let mut block_raw_logs = Vec::new();
+        let first_migration_observation = migration_observations.len();
         let mut block_state = committed_state.clone();
         super::settle_block_boundary(catalog, block, &mut block_state, &mut block_output)?;
         while raw_logs.peek().is_some_and(|raw| {
             raw.block_number == block.block_number && raw.block_hash == block.block_hash
         }) {
-            let raw = raw_logs.next().expect("peeked raw log");
+            block_raw_logs.push(raw_logs.next().expect("peeked raw log"));
+            let raw = block_raw_logs.last().expect("collected raw log");
             interpret_raw(
                 catalog,
-                &raw,
+                raw,
                 &mut block_state,
                 &mut block_output,
                 &mut migration_observations,
             )?;
         }
-        super::protocol::reconcile_batch(&mut block_output);
-        if block_output
-            .normalized_events
-            .iter()
-            .any(|event| event.source_family.starts_with("ens_v1_"))
-        {
-            let delta = super::seam::fold_prior_events(
-                Vec::new(),
-                &block_output.normalized_events,
-                std::slice::from_ref(block),
-            )?;
-            let mut replayed_state = committed_state.clone();
-            replayed_state.apply_prior_event_delta(delta);
-            // Same-transaction reconciliation can remove or retarget ENSv1 transitions after live
-            // state observed them. Rebuild only ENSv1's durable protocol state from the survivors;
-            // other protocol state keeps the uninterrupted-walk behavior outside this fix's scope.
-            block_state.replace_ens_v1_protocol_state_from_replay(replayed_state);
-        }
+        super::protocol::reconcile_block(
+            catalog,
+            block,
+            &block_raw_logs,
+            &migration_observations[first_migration_observation..],
+            &committed_state,
+            &mut block_state,
+            &mut block_output,
+        )?;
         committed_state = block_state;
         append_output(&mut output, block_output);
     }

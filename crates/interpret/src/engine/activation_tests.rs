@@ -204,16 +204,14 @@ async fn checked_in_sepolia_manifests_materialize_exactly_one_transition_predece
     // `TransferSingle`, `EACRolesChanged`, and `ResolverUpdated` logs, while it
     // injects `RegistryCreated` and `ProxyDeployed` logs absent from U-01. It
     // proves exactly-one predecessor materialization, not a production
-    // publication path. The faithful path remains ignored below until #822 is
-    // resolved.
+    // publication path. The complete transaction is covered separately below.
 
     database.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
-#[ignore = "#822: activated ENSv1→ENSv2 migration boundary has 0 active ENSv1 predecessors matching its resource selector; expected exactly one"]
-async fn faithful_unwrapped_migration_reaches_predecessor_refusal() -> TestResult {
+async fn faithful_unwrapped_migration_retires_all_v1_bindings() -> TestResult {
     let database = database("interpret_faithful_unwrapped_predecessor").await?;
     let pool = database.pool();
     let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -252,31 +250,45 @@ async fn faithful_unwrapped_migration_reaches_predecessor_refusal() -> TestResul
     // U-01 logs 0-9, using the checked-in Sepolia deployment and fixture values.
     // The pre-state is a wrapped-then-unwrapped name held by the eventual
     // ENSv1→ENSv2 migration sender; U-01 instead uses a plain registration with resolver
-    // state, so plain-registration predecessor materialization remains a
-    // separate open question. This test flips to an activation and publication
-    // assertion when #822 lands.
+    // state. The plain-registration path is covered separately; this test retains
+    // the wrapped-then-unwrapped predecessor as an independent regression.
     stamp_interpreter_hash(pool, bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
     seed_faithful_unwrapped_migration(pool, label, labelhash, namehash).await?;
-    let error = Engine::new(pool.clone())
-        .run_batch(BatchRequest {
-            chain_id: CHAIN.to_owned(),
-            from_block: MIGRATION_BLOCK,
-            to_block: MIGRATION_BLOCK,
-            resume_current: Some(Marker {
-                number: PREDECESSOR_BLOCK,
-                hash: block_hash(PREDECESSOR_BLOCK),
-            }),
-            mode: RunMode::Normal,
-        })
-        .await
-        .expect_err("the faithful unwrapped sequence currently reaches the known refusal");
-    let message = error.to_string();
-    assert!(
-        message.contains(
-            "has 0 active ENSv1 predecessors matching its resource selector; expected exactly one"
-        ),
-        "unexpected faithful-path failure: {message}"
-    );
+    for mode in [RunMode::Normal, RunMode::Redo] {
+        Engine::new(pool.clone())
+            .run_batch(BatchRequest {
+                chain_id: CHAIN.to_owned(),
+                from_block: MIGRATION_BLOCK,
+                to_block: MIGRATION_BLOCK,
+                resume_current: Some(Marker {
+                    number: PREDECESSOR_BLOCK,
+                    hash: block_hash(PREDECESSOR_BLOCK),
+                }),
+                mode,
+            })
+            .await?;
+        let (v1, v2): (i64, i64) = sqlx::query_as(
+            "SELECT count(*) FILTER (WHERE authority_arm = 'ens_v1'),
+                    count(*) FILTER (WHERE authority_arm = 'ens_v2')
+             FROM surface_bindings WHERE chain_id = $1 AND logical_name_id = $2
+               AND active_to IS NULL AND canonicality_state = 'canonical'",
+        )
+        .bind(CHAIN)
+        .bind(&logical_name_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!((v1, v2), (0, 1), "cleanup must retire every V1 binding");
+        let (boundaries, transfers): (i64, i64) = sqlx::query_as(
+            "SELECT count(*) FILTER (WHERE event_kind = 'MigrationApplied' AND consumer_visibility = 'activated'),
+                    count(*) FILTER (WHERE event_kind = 'TokenControlTransferred' AND source_family = 'ens_v1_registrar_l1')
+             FROM normalized_events WHERE chain_id = $1 AND logical_name_id = $2 AND block_number = $3",
+        ).bind(CHAIN).bind(&logical_name_id).bind(MIGRATION_BLOCK).fetch_one(pool).await?;
+        assert_eq!(
+            (boundaries, transfers),
+            (1, 2),
+            "both registrar observations remain auditable"
+        );
+    }
     database.cleanup().await?;
     Ok(())
 }

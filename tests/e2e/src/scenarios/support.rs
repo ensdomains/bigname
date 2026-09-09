@@ -619,6 +619,68 @@ pub async fn ingest_ens_v1_v2_migration_sepolia_and_serve(
     .await
 }
 
+/// Add only the locally deployed plain registration controller before profile validation/hash
+/// computation. This fixture declaration does not admit a public Sepolia controller.
+pub async fn ingest_plain_migration_and_serve(
+    harness: &ConnectedMigrationHarness,
+) -> Result<PipelineRun> {
+    let chains = [LocalChain {
+        anvil: &harness.anvil,
+        id: "ethereum-sepolia",
+    }];
+    ingest_local_chains(&chains, true, None, |scratch, root| {
+        let profile = manifests::generate_local_sepolia_migration_profile(
+            scratch,
+            root,
+            &harness.ens_v1.manifest_targets(),
+            &harness.ens_v2.manifest_targets(),
+            &ens_v2_migration::migration_manifest_targets(&harness.migration),
+            &ens_v2_migration::migration_correlation_addresses(&harness.ens_v1),
+        )?;
+        let path = profile
+            .root
+            .join("ethereum/ens/ens_v1_registrar_l1/v1.toml");
+        let mut local: toml::Value = std::fs::read_to_string(&path)?.parse()?;
+        let mainnet: toml::Value = std::fs::read_to_string(
+            root.join("manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml"),
+        )?
+        .parse()?;
+        let role = "unwrapped_registrar_controller";
+        let mut contract = mainnet["contracts"]
+            .as_array()
+            .context("controller declarations")?
+            .iter()
+            .find(|contract| contract["role"].as_str() == Some(role))
+            .context("plain controller declaration")?
+            .clone();
+        contract["address"] =
+            toml::Value::String(format!("{:#x}", harness.ens_v1.controller.address));
+        contract["start_block"] =
+            toml::Value::Integer(i64::try_from(harness.ens_v1.controller.block_number)?);
+        local["contracts"]
+            .as_array_mut()
+            .context("local contracts")?
+            .push(contract);
+        for event in mainnet["abi"]["events"]
+            .as_array()
+            .context("controller ABI")?
+        {
+            if event["emitter_roles"]
+                .as_array()
+                .is_some_and(|roles| roles.iter().any(|value| value.as_str() == Some(role)))
+            {
+                local["abi"]["events"]
+                    .as_array_mut()
+                    .context("local ABI")?
+                    .push(event.clone());
+            }
+        }
+        std::fs::write(path, toml::to_string(&local)?)?;
+        Ok(profile)
+    })
+    .await
+}
+
 /// Replay both mainnet deployment-profile chains into one corpus with the full
 /// composed deployment profile (ENSv1 + Basenames + the Ethereum-chain glue
 /// families).

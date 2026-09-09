@@ -268,8 +268,24 @@ pub(super) fn interpret(
     Ok(output)
 }
 
-pub(super) fn reconcile_batch(output: &mut super::model::BatchOutput) {
-    v1::reconcile_same_transaction_setups(output);
+pub(super) fn reconcile_block(
+    catalog: &super::catalog::Catalog,
+    block: &super::model::RawBlockInput,
+    raw_logs: &[super::model::RawLogInput],
+    observations: &[MigrationObservation],
+    committed_state: &super::state::State,
+    block_state: &mut super::state::State,
+    output: &mut super::model::BatchOutput,
+) -> anyhow::Result<()> {
+    v1::reconcile_block(
+        catalog,
+        block,
+        raw_logs,
+        observations,
+        committed_state,
+        block_state,
+        output,
+    )
 }
 
 fn state_scope(selected: &Selected, raw: &RawLogInput, event: &EventDraft) -> String {

@@ -454,7 +454,20 @@ closed its wrapper binding and reactivated its registrar position before that
 recorded transfer. If no prior registrar identity was materialized, that exact
 transfer confirms the fallback identity with its binding effective from the
 preceding `NameUnwrapped`; the cleanup-relative time predicate remains strict.
-For registrar-token `unwrapped`, [issue #822](https://github.com/ensdomains/bigname/issues/822) currently makes valid input present a false zero at that exact-predecessor check and rolls back the [physical Interpret batch](glossary.md#batch-grid). Zero remains an integrity error; the path above describes the required behavior after the writer resolves the actual predecessor.
+For an existing registrar-token `unwrapped` migration, adapters reconcile the
+complete transaction before folding that block's retained ENSv1 state. The
+proof requires the admitted BaseRegistrar holder-to-controller transfer,
+registry reclaim to that controller, registry transfer to Graveyard, any
+emitted resolver/TTL clears, the matching registrar transfer to Graveyard,
+and exactly one complete ENSv2 successor for the same name and transaction.
+Reconciliation retains raw facts and normalized ownership/cleanup observations,
+but removes intervening ENSv1 authority bindings and their derived permission
+changes. Registry metadata remains attached to the existing registrar resource
+without fields that would restore temporary registry-only authority. Thus the
+actual registrar predecessor stays eligible immediately before cleanup, and
+no replacement ENSv1 binding survives the strict cross-arm transition. Missing,
+ambiguous, or mismatched proof leaves ordinary interpretation unchanged; zero
+or multiple eligible predecessors remain integrity errors in the writer.
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
