@@ -978,7 +978,18 @@ The restore-or-re-roll decision was validated on 2026-07-29.
 
 Use the bounded `phase-runner inspect` commands for stored lineage, block
 canonicality, and raw-event evidence. Use `phase-runner rewind` only after
-identifying an exact stored readable ancestor. Verification mismatches require
+identifying an exact stored readable ancestor. If rewind reports an interrupted
+Ingest redo whose retained end is above that ancestor, leave the retained state
+intact. Complete the covering `phase-runner redo --chain <chain> --phase ingest
+--from-block <retained-start> --to-block <retained-end>` command reported by the
+refusal, using the same configured sources and deployment profile. A retained
+checkpoint lets that repair resume without restarting the completed prefix.
+After successful repair, retry the original rewind. Do not clear redo markers,
+edit cursors, or lower the range end to force it through. Required Ingest work
+keeps its documented Live recovery path when rewind moves its end above the
+readable head; this refusal applies to operator Ingest redo.
+
+Verification mismatches require
 the chain-scoped repair procedure in
 [`deployment.md`](../deployment.md#verification-mismatch-repair); do not edit
 immutable raw facts or mark a phase complete manually.
