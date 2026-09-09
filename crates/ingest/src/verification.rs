@@ -264,7 +264,7 @@ async fn fetch_queries(
             accounting.consume(&log);
             if let Some(previous) = accounting.inserted(
                 selected_by_identity.insert(key.clone(), log.clone()),
-                &selected_by_identity,
+                selected_by_identity,
                 &key,
             ) && previous != log
             {

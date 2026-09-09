@@ -129,10 +129,7 @@ impl JsonRpcProvider {
                     memory::observe("rpc_intake_split_response", || {
                         let f = logs.footprint();
                         let mut nested = f;
-                        nested.owned = nested
-                            .owned
-                            .checked_sub(memory::inline(&logs).owned)
-                            .unwrap_or(0);
+                        nested.owned = nested.owned.saturating_sub(memory::inline(&logs).owned);
                         raw_footprint = raw_footprint.combine(nested);
                         f
                     });
@@ -236,10 +233,7 @@ impl JsonRpcProvider {
                     memory::observe("rpc_verification_split_response", || {
                         let f = logs.footprint();
                         let mut nested = f;
-                        nested.owned = nested
-                            .owned
-                            .checked_sub(memory::inline(&logs).owned)
-                            .unwrap_or(0);
+                        nested.owned = nested.owned.saturating_sub(memory::inline(&logs).owned);
                         raw_footprint = raw_footprint.combine(nested);
                         f
                     });

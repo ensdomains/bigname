@@ -347,11 +347,20 @@ mod measurement_tests {
         let result: Result<()> =
             session
                 .scope(async {
-                    let mut progress = NativeProgress::default();
-                    progress.block = 10;
-                    progress.receipts = memory::Footprint {
-                        bytes: 1000,
-                        ..Default::default()
+                    let mut progress = NativeProgress {
+                        block: 10,
+                        receipts: memory::Footprint {
+                            bytes: 1000,
+                            ..Default::default()
+                        },
+                        visited: 0,
+                        receipt_block: 0,
+                        hash_map: None,
+                        hashes: Default::default(),
+                        output: Default::default(),
+                        receipt_peak: Default::default(),
+                        logical: None,
+                        capacity: None,
                     };
                     progress.update(
                         memory::Footprint {

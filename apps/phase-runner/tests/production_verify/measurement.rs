@@ -1,5 +1,5 @@
 use super::*;
-use bigname_ingest::measurement::{self as memory, Session};
+use bigname_ingest::measurement::Session;
 
 fn observations(logs: &CapturedLogs) -> Vec<Value> {
     logs.text()

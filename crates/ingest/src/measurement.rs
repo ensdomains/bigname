@@ -540,7 +540,7 @@ fn emit(c: &Context, stage: &'static str, f: Footprint) {
     emit_detail(c, stage, f, None, None, None);
 }
 pub fn progress_due(index: usize) -> bool {
-    index % 256 == 0
+    index.is_multiple_of(256)
 }
 pub fn native(
     stage: &'static str,
@@ -560,13 +560,15 @@ pub fn native(
         );
     }
 }
+type RpcDetail<'a> = (u64, &'a str, Option<u64>, Option<u64>, &'a str, Option<u64>);
+
 fn emit_detail(
     c: &Context,
     stage: &'static str,
     f: Footprint,
     marker: Option<(i64, &str, &str)>,
     native: Option<(i64, Footprint, Footprint, Footprint)>,
-    rpc: Option<(u64, &str, Option<u64>, Option<u64>, &str, Option<u64>)>,
+    rpc: Option<RpcDetail<'_>>,
 ) {
     let run = &c.session.run;
     let Ok(_guard) = run.emission.lock() else {
