@@ -1541,8 +1541,11 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   lifecycle owner/resource participating in renewal, so one synchronized
   renewal transaction contains two `renewal` rows — the renewal-bridge arm and
   the ENSv1-registrar arm — and two `expiry` rows. Reservation-scoped state
-  changes remain reservation/resource facts and do not produce registration
-  renewal rows; no synthetic collapsed renewal is created. The candidate
+  changes remain reservation/resource facts, carry a null `registration_id`, and
+  do not acquire registration identity through renewal-bridge rows. This
+  classification uses retained lifecycle facts at the event on its own fork; a
+  later registration does not change earlier reservation rows. Block-only expiry
+  releases use their retained pre-release status, without inventing a log position. No synthetic collapsed renewal is created. The candidate
   `MigrationApplied` and
   `ContractDiscovered` kinds have no product event type. During slice 1, every
   correlation-dependent row carrying `consumer_visibility=candidate` is excluded

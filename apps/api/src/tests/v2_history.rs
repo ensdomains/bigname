@@ -3083,6 +3083,170 @@ async fn reserved_token_resource_is_not_a_public_registration_handle() -> Result
 }
 
 #[tokio::test]
+async fn reservation_product_rows_omit_registration_identity() -> Result<()> {
+    const NAME: &str = "reserved-product-history.eth";
+    const SEED: &str = "ens:reserved-product-history.eth";
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
+    let reservation = Uuid::from_u128(0x71a0);
+    let registration = reservation;
+    let blocks = (120..=125)
+        .map(|number| {
+            raw_block(
+                "ethereum-mainnet",
+                &format!("0xhistory{number}"),
+                (number > 120)
+                    .then(|| format!("0xhistory{}", number - 1))
+                    .as_deref(),
+                number,
+                1_700_000_000 + number,
+            )
+        })
+        .collect::<Vec<_>>();
+    upsert_phase_raw_blocks(&database.pool, &blocks).await?;
+    seed_identity_name(
+        &database,
+        SEED,
+        NAME,
+        NAME,
+        "node:reserved-product-history.eth",
+        registration,
+        Uuid::from_u128(0x81a0),
+        Uuid::from_u128(0x91a1),
+        "0x00000000000000000000000000000000000071a1",
+        bigname_storage::AddressNameRelation::EffectiveController,
+        120,
+    )
+    .await?;
+    upsert_test_token_lineages(
+        &database.pool,
+        &[address_name_token_lineage(
+            Uuid::from_u128(0x81a0),
+            "0xhistory120",
+            120,
+        )],
+    )
+    .await?;
+    upsert_test_resources(
+        &database.pool,
+        &[address_name_resource(
+            reservation,
+            Some(Uuid::from_u128(0x81a0)),
+            "0xhistory120",
+            120,
+        )],
+    )
+    .await?;
+    let mut events = Vec::new();
+    // A claim can retain the reservation resource; earlier rows must stay unregistered.
+    for (resource, kind, source_event, number) in [
+        (reservation, "RegistrationReserved", "LabelReserved", 120),
+        (reservation, "ExpiryChanged", "ExpiryUpdated", 121),
+        (reservation, "ResolverChanged", "ResolverUpdated", 122),
+        (registration, "RegistrationGranted", "LabelRegistered", 123),
+        (registration, "ExpiryChanged", "ExpiryUpdated", 124),
+        (registration, "ResolverChanged", "ResolverUpdated", 125),
+    ] {
+        let mut event = v2_history_event(
+            &format!("reservation-product-{number}"),
+            Some(&logical_name_id),
+            Some(resource),
+            kind,
+            number,
+        );
+        event.source_family = "ens_v2_registry_l1".to_owned();
+        event.derivation_kind = "ens_v2_registry_resource_surface".to_owned();
+        event.after_state["source_event"] = json!(source_event);
+        if kind == "RegistrationGranted" {
+            event.after_state["authority_kind"] = json!("ens_v2_registry");
+        }
+        events.push(event);
+    }
+    for number in [122, 125] {
+        let mut bridge = v2_history_event(
+            &format!("reservation-product-bridge-{number}"),
+            Some(&logical_name_id),
+            Some(registration),
+            "RegistrationRenewed",
+            number,
+        );
+        bridge.source_family = "ens_v2_migration_l1".to_owned();
+        bridge.derivation_kind = "ens_v2_migration".to_owned();
+        bridge.log_index = Some(1);
+        bridge.after_state = json!({"source_event":"NameRenewed","duration":100});
+        events.push(bridge);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    sqlx::query("UPDATE bigname_phase.normalized_events SET derivation_kind = 'ens_v2_migration' WHERE event_identity LIKE 'reservation-product-bridge-%'")
+        .execute(&database.pool).await?;
+    for canonical_only in [true, false] {
+        let rows = bigname_storage::load_event_history(
+            &database.pool,
+            bigname_storage::EventHistoryFilter {
+                logical_name_id: Some(logical_name_id.clone()),
+                event_kinds: vec![
+                    "RegistrationGranted".to_owned(),
+                    "RegistrationRenewed".to_owned(),
+                    "ExpiryChanged".to_owned(),
+                    "ResolverChanged".to_owned(),
+                ],
+                ..Default::default()
+            },
+            canonical_only,
+        )
+        .await?;
+        assert_eq!(rows.len(), 7, "canonical_only={canonical_only}: {rows:?}");
+        for row in rows {
+            let expected = (row.block_number.expect("block number") >= 123).then_some(registration);
+            assert_eq!(row.registration_id, expected, "{row:?}");
+        }
+    }
+    for route in [
+        format!("/v2/names/{NAME}/history?scope=name&page_size=20"),
+        format!("/v2/names/{NAME}/history?scope=both&page_size=20"),
+        format!("/v2/events?name={NAME}&page_size=20"),
+        "/v2/events?page_size=20".to_owned(),
+    ] {
+        let payload = v2_history_payload_for_database(&database, &route).await?;
+        let rows = payload["data"].as_array().expect("product history rows");
+        assert_eq!(rows.len(), 7, "{route}: {payload:?}");
+        for row in rows {
+            let number = row["block_number"].as_i64().expect("block number");
+            let expected = if number < 123 {
+                Value::Null
+            } else {
+                json!(registration)
+            };
+            assert_eq!(row["registration_id"], expected, "{route}: {row:?}");
+        }
+    }
+    let payload = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/events?registration_id={registration}&page_size=20"),
+    )
+    .await?;
+    assert_eq!(
+        payload["data"]
+            .as_array()
+            .expect("registration history")
+            .len(),
+        4
+    );
+    let diagnostics = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/diagnostics/events?registration_id={reservation}&page_size=20"),
+    )
+    .await?;
+    let rows = diagnostics["data"].as_array().expect("diagnostic rows");
+    assert_eq!(rows.len(), 8);
+    assert!(
+        rows.iter()
+            .all(|row| row["registration_id"] == json!(reservation))
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn retained_registrar_resolver_survives_resource_reanchoring() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let resource = Uuid::from_u128(0x7191);
@@ -3239,5 +3403,131 @@ async fn retained_registrar_resolver_survives_resource_reanchoring() -> Result<(
             );
         }
     }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn block_only_reservation_release_omits_registration_identity() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let reserved = Uuid::from_u128(0x71b0);
+    let registered = Uuid::from_u128(0x71b1);
+    let current = raw_block(
+        "ethereum-mainnet",
+        "0xhistory120",
+        Some("0xhistory119"),
+        120,
+        1_700_000_120,
+    );
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[
+            raw_block("ethereum-mainnet", "0xhistory119", None, 119, 1_700_000_119),
+            current,
+        ],
+    )
+    .await?;
+    for (resource, token, number) in [
+        (reserved, Uuid::from_u128(0x81b0), 120),
+        (registered, Uuid::from_u128(0x81b1), 119),
+    ] {
+        upsert_test_token_lineages(
+            &database.pool,
+            &[address_name_token_lineage(
+                token,
+                &format!("0xhistory{number}"),
+                number,
+            )],
+        )
+        .await?;
+        upsert_test_resources(
+            &database.pool,
+            &[address_name_resource(
+                resource,
+                Some(token),
+                &format!("0xhistory{number}"),
+                number,
+            )],
+        )
+        .await?;
+    }
+    let mut events = Vec::new();
+    for (resource, kind, source_event, number) in [
+        (reserved, "RegistrationReserved", "LabelReserved", 120),
+        (registered, "RegistrationGranted", "LabelRegistered", 119),
+    ] {
+        let mut event = v2_history_event(
+            &format!("block-only-origin-{resource}"),
+            None,
+            Some(resource),
+            kind,
+            number,
+        );
+        event.source_family = "ens_v2_registry_l1".to_owned();
+        event.derivation_kind = "ens_v2_registry_resource_surface".to_owned();
+        event.log_index = Some(7);
+        event.after_state["source_event"] = json!(source_event);
+        events.push(event);
+    }
+    for (resource, status) in [(reserved, "reserved"), (registered, "registered")] {
+        let mut release = v2_history_event(
+            &format!("block-only-release-{resource}"),
+            None,
+            Some(resource),
+            "RegistrationReleased",
+            120,
+        );
+        release.source_family = "ens_v2_registry_l1".to_owned();
+        release.derivation_kind = "ens_v2_registry_resource_surface".to_owned();
+        release.log_index = None;
+        release.transaction_hash = None;
+        release.raw_fact_ref = json!({"kind":"raw_block","chain_id":"ethereum-mainnet","block_hash":"0xhistory120","block_number":120});
+        release.before_state = json!({"status":status,"expiry":1_700_000_120});
+        release.after_state = json!({"source_event":"RegistryPathExpired","derived_from":"interpreter_state","terminal_reason":"registry_name_binding_expired","status":"released","expiry":1_700_000_120});
+        events.push(release);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    for canonical_only in [true, false] {
+        let rows = bigname_storage::load_event_history(
+            &database.pool,
+            bigname_storage::EventHistoryFilter {
+                event_kinds: vec!["RegistrationReleased".to_owned()],
+                ..Default::default()
+            },
+            canonical_only,
+        )
+        .await?;
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        for row in rows {
+            let expected = row
+                .event_identity
+                .ends_with(&registered.to_string())
+                .then_some(registered);
+            assert_eq!(row.registration_id, expected, "{row:?}");
+            assert!(row.log_index.is_none());
+        }
+    }
+    let payload = v2_history_payload_for_database(&database, "/v2/events?page_size=20").await?;
+    let rows = payload["data"].as_array().expect("product rows");
+    let releases = rows
+        .iter()
+        .filter(|row| row["type"] == "release")
+        .collect::<Vec<_>>();
+    assert_eq!(releases.len(), 2, "{payload:?}");
+    assert_eq!(
+        releases
+            .iter()
+            .filter(|row| row["registration_id"].is_null())
+            .count(),
+        1,
+        "{payload:?}"
+    );
+    assert_eq!(
+        releases
+            .iter()
+            .filter(|row| row["registration_id"] == json!(registered))
+            .count(),
+        1,
+        "{payload:?}"
+    );
     database.cleanup().await
 }

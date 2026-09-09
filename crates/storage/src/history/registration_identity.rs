@@ -279,6 +279,9 @@ fn push_product_registration_id_with_anchors(
     );
     let grant_fork = fork("registrar_grant");
     let wrapper_fork = fork("wrapper_binding");
+    // Classify the event from retained lifecycle facts, never current resource state.
+    // A later grant must not turn earlier reservation updates into registration rows.
+    let reservation_fork = fork("reservation_state");
     let resource_fork = fork("event_resource");
     let binding_fork = fork("binding");
     // Emit a Boolean literal so canonical reads retain constant-folded index predicates.
@@ -286,6 +289,44 @@ fn push_product_registration_id_with_anchors(
         r#"
         CASE
             WHEN ne.resource_id IS NULL THEN NULL::uuid
+            WHEN ne.source_family IN ('ens_v2_registry_l1', 'ens_v2_migration_l1') AND (
+                ne.event_kind = 'RegistrationReserved'
+                OR CASE WHEN ne.event_kind = 'RegistrationReleased'
+                    AND ne.after_state ->> 'source_event' = 'RegistryPathExpired'
+                    AND ne.after_state ->> 'derived_from' = 'interpreter_state'
+                    THEN ne.before_state ->> 'status' = 'reserved'
+                ELSE (
+                    SELECT reservation_state.event_kind = 'RegistrationReserved'
+                    FROM bigname_phase.normalized_events reservation_state
+                    LEFT JOIN bigname_phase.chain_lineage reservation_lineage
+                      ON reservation_lineage.chain_id = reservation_state.chain_id
+                     AND reservation_lineage.block_hash = reservation_state.block_hash
+                    WHERE reservation_state.resource_id = ne.resource_id
+                      AND reservation_state.chain_id = ne.chain_id
+                      AND reservation_state.source_family = 'ens_v2_registry_l1'
+                      AND reservation_state.consumer_visibility = 'activated'
+                      AND reservation_state.event_kind IN (
+                          'RegistrationReserved', 'RegistrationGranted'
+                      )
+                      AND (reservation_state.block_number, reservation_state.log_index) <=
+                          (ne.block_number, ne.log_index)
+                      AND {reservation_fork}
+                      AND (NOT {canonical_only} OR reservation_state.canonicality_state IN (
+                          'canonical'::bigname_phase.canonicality_state,
+                          'safe'::bigname_phase.canonicality_state,
+                          'finalized'::bigname_phase.canonicality_state
+                      ))
+                      AND (NOT {canonical_only} OR reservation_lineage.canonicality_state IN (
+                          'canonical'::bigname_phase.canonicality_state,
+                          'safe'::bigname_phase.canonicality_state,
+                          'finalized'::bigname_phase.canonicality_state
+                      ))
+                    ORDER BY reservation_state.block_number DESC,
+                             reservation_state.log_index DESC NULLS LAST,
+                             (reservation_state.event_kind = 'RegistrationGranted') DESC
+                    LIMIT 1
+                ) END
+            ) THEN NULL::uuid
             ELSE COALESCE(
                 (
                     SELECT born_wrapper.resource_id
