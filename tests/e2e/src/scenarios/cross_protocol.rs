@@ -93,7 +93,7 @@ async fn plain_unwrapped_eleven_log_migration_publishes_only_v2_authority() -> R
     let harness = support::deploy_connected_migration_harness().await?;
     let rpc = harness.anvil.client();
     let owner = rpc.accounts().await?[1];
-    ens_v1::register_eth_name(
+    let registered = ens_v1::register_eth_name(
         &rpc,
         &harness.ens_v1,
         LABEL,
@@ -102,6 +102,9 @@ async fn plain_unwrapped_eleven_log_migration_publishes_only_v2_authority() -> R
         harness.ens_v1.public_resolver.address,
     )
     .await?;
+    // Instant Anvil blocks can share a timestamp and invert cross-block log times.
+    // Keep this registration before migration in both chain position and header time.
+    rpc.increase_time(1).await?;
     let expiry = ens_v1::eth_name_expiry(&rpc, &harness.ens_v1, LABEL).await?;
     ens_v2_migration::reserve_eth_label(&rpc, &harness.ens_v2, LABEL, expiry).await?;
     let receipt = ens_v2_migration::migrate_unwrapped(
@@ -112,6 +115,23 @@ async fn plain_unwrapped_eleven_log_migration_publishes_only_v2_authority() -> R
         LABEL,
     )
     .await?;
+    let mut timestamps = Vec::new();
+    for block in [registered.register_block, receipt.block_number] {
+        let header = rpc
+            .call(
+                "eth_getBlockByNumber",
+                serde_json::json!([format!("{block:#x}"), false]),
+            )
+            .await?;
+        let timestamp = header["timestamp"]
+            .as_str()
+            .context("registration/migration header timestamp")?;
+        timestamps.push(u64::from_str_radix(timestamp.trim_start_matches("0x"), 16)?);
+    }
+    assert!(
+        timestamps[1] > timestamps[0],
+        "migration header timestamp must follow registration: {timestamps:?}"
+    );
     let receipt_body = rpc
         .call(
             "eth_getTransactionReceipt",
