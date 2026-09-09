@@ -2248,7 +2248,17 @@ pub async fn prove_normal_sepolia_http(
     let mut runner = OwnedProofProcess::spawn(command, "ops-normal-run")?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
     loop {
-        runner.ensure_running()?;
+        if let Err(error) = runner.ensure_running() {
+            let snapshot = std::env::temp_dir().join(format!(
+                "bigname-e2e-failed-normal-{}.json",
+                std::process::id()
+            ));
+            std::fs::write(
+                &snapshot,
+                serde_json::to_vec_pretty(&proof_tables(&db.pool).await?)?,
+            )?;
+            return Err(error.context(format!("persisted database snapshot: {snapshot:?}")));
+        }
         let complete: bool = sqlx::query_scalar(
             "SELECT count(*) = 3 AND bool_and(COALESCE(current_block_number >= $1, false) AND NOT redo_in_progress AND last_error IS NULL) FROM chain_phase_state WHERE chain_id = 'ethereum-sepolia' AND phase_name IN ('interpret', 'project', 'live')",
         ).bind(head).fetch_one(&db.pool).await?;
