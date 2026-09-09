@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use crate::measurement::{self as memory, Measured};
 use anyhow::{Result, bail};
 use reqwest::Url;
 
@@ -121,6 +122,15 @@ impl ChainProvider {
         match self {
             Self::JsonRpc(_) => self.resolve(&[to_block]).await,
             Self::RethDb(_) => {
+                memory::observe("reth_requested_numbers", || {
+                    memory::Footprint::entries::<i64>(
+                        to_block
+                            .checked_sub(from_block)
+                            .and_then(|n| n.checked_add(1))
+                            .and_then(|n| usize::try_from(n).ok())
+                            .unwrap_or(usize::MAX),
+                    )
+                });
                 self.resolve(&(from_block..=to_block).collect::<Vec<_>>())
                     .await
             }
@@ -147,6 +157,7 @@ impl ChainProvider {
                     .filter(|block| (from_block..=to_block).contains(&block.number))
                     .cloned()
                     .collect::<Vec<_>>();
+                memory::observe("reth_query_selection", || blocks.footprint());
                 provider.logs(&blocks, addresses, topics).await
             }
         }

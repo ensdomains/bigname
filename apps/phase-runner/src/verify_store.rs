@@ -1,3 +1,4 @@
+use bigname_ingest::measurement::{self as memory, Measured};
 use std::collections::BTreeMap;
 
 use bigname_ingest::{VerificationLog, WatchFilter};
@@ -39,7 +40,8 @@ impl VerificationStore {
         let end = self.finalized_marker(chain_id, to_block).await?;
 
         let mut by_identity = BTreeMap::new();
-        for query in filter.queries() {
+        let mut accounting = memory::Identity::default();
+        for (ordinal, query) in filter.queries().into_iter().enumerate() {
             let addresses = query
                 .addresses
                 .iter()
@@ -50,7 +52,11 @@ impl VerificationStore {
                 .iter()
                 .map(|topic| topic.to_ascii_lowercase())
                 .collect::<Vec<_>>();
-            let rows =
+            let rows = memory::query(
+                "stored",
+                ordinal,
+                query.from_block,
+                query.to_block,
                 sqlx::query_as::<_, (String, i64, String, i64, i64, String, Vec<String>, Vec<u8>)>(
                     "SELECT raw.block_hash,
                         raw.block_number,
@@ -80,18 +86,50 @@ impl VerificationStore {
                 .bind(query.to_block)
                 .bind(topic0s)
                 .bind(addresses)
-                .fetch_all(pool)
-                .await
-                .map_err(|error| {
-                    RunnerError::database(
-                        format!(
-                            "failed to scan stored verification logs for chain {chain_id} over \
+                .fetch_all(pool),
+            )
+            .await
+            .map_err(|error| {
+                RunnerError::database(
+                    format!(
+                        "failed to scan stored verification logs for chain {chain_id} over \
                          {}..={}",
-                            query.from_block, query.to_block
-                        ),
-                        error,
-                    )
-                })?;
+                        query.from_block, query.to_block
+                    ),
+                    error,
+                )
+            })?;
+            let raw = memory::returned(
+                "stored",
+                "stored",
+                ordinal,
+                query.from_block,
+                query.to_block,
+                || {
+                    let mut f = memory::Footprint::entries::<(
+                        String,
+                        i64,
+                        String,
+                        i64,
+                        i64,
+                        String,
+                        Vec<String>,
+                        Vec<u8>,
+                    )>(rows.capacity());
+                    f.owned = f.bytes;
+                    f.bytes = 0;
+                    f.rows = rows.len() as u64;
+                    for row in &rows {
+                        let v = memory::log(&row.0, &row.2, &row.5, &row.6, &row.7);
+                        f.bytes = memory::sum(f.bytes, v.bytes);
+                        f.owned = memory::sum(f.owned, v.owned);
+                        f.max_item = f.max_item.max(v.max_item);
+                    }
+                    f
+                },
+            );
+            accounting.query(raw, memory::inline(&rows).owned);
+            accounting.emit("stored_map_before_query_consume");
             for row in rows {
                 let log = VerificationLog {
                     block_hash: row.0,
@@ -104,9 +142,14 @@ impl VerificationStore {
                     data: row.7,
                 };
                 let key = (log.block_hash.clone(), log.log_index);
-                if let Some(previous) = by_identity.insert(key.clone(), log.clone())
-                    && previous != log
+                accounting.consume(&log);
+                if let Some(previous) = accounting.inserted(
+                    by_identity.insert(key.clone(), log.clone()),
+                    &by_identity,
+                    &key,
+                ) && previous != log
                 {
+                    accounting.emit("stored_identity_conflict");
                     return Err(RunnerError::data_integrity(format!(
                         "stored verification scan found conflicting log identity {} {}",
                         key.0, key.1
@@ -114,6 +157,7 @@ impl VerificationStore {
                 }
             }
         }
+        accounting.emit("stored_identity_map");
         let mut logs = by_identity
             .into_values()
             .filter(|log| {
@@ -122,6 +166,7 @@ impl VerificationStore {
                     .is_some_and(|topic0| filter.includes(&log.address, topic0, log.block_number))
             })
             .collect::<Vec<_>>();
+        memory::observe("stored_before_sort", || logs.footprint());
         logs.sort_by_key(|log| {
             (
                 log.block_number,
@@ -130,6 +175,8 @@ impl VerificationStore {
                 log.block_hash.clone(),
             )
         });
+        memory::observe("stored_final", || logs.footprint());
+        memory::observe("stored_retained", || logs.footprint());
         Ok(StoredVerificationBatch { end, filter, logs })
     }
 

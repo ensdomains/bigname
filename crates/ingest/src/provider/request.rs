@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, time::Duration};
 
+use crate::measurement::{self as memory, Measured};
 use anyhow::{Context, Result, bail};
 use reqwest::Url;
 use serde_json::{Value, json};
@@ -124,6 +125,7 @@ impl JsonRpcProvider {
     async fn send(&self, request: Value) -> Result<Value> {
         self.request_attempts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut observation = SendObservation::new(&request);
         let (client, client_id) = self.client.snapshot();
         let response = match client
             .post(self.endpoint.clone())
@@ -138,18 +140,91 @@ impl JsonRpcProvider {
                 return Err(error).context("failed to send JSON-RPC request");
             }
         };
+        observation.outcome = "read_failed_or_cancelled";
         let status = response.status();
         let body = response
             .text()
             .await
             .context("failed to read JSON-RPC response")?;
+        observation.bytes = Some(body.len() as u64);
+        observation.outcome = "http_error";
+        memory::transport(body.len());
+        memory::observe("rpc_response_text", || body.footprint());
         if !status.is_success() {
             bail!(
                 "provider request failed with HTTP {status}: {}",
                 truncate(&body)
             );
         }
-        serde_json::from_str(&body).context("failed to decode JSON-RPC response")
+        observation.outcome = "decode_error";
+        serde_json::from_str::<Value>(&body)
+            .inspect(|parsed| {
+                if observation.context.is_some() {
+                    observation.outcome = if parsed.get("error").is_some()
+                        || parsed.as_array().is_some_and(|items| {
+                            items.iter().any(|item| item.get("error").is_some())
+                        }) {
+                        "rpc_error"
+                    } else {
+                        "success"
+                    };
+                }
+                memory::observe("rpc_text_and_json", || {
+                    body.footprint().combine(parsed.footprint())
+                })
+            })
+            .context("failed to decode JSON-RPC response")
+    }
+}
+
+// No request or response payload is retained by this cancellation-safe diagnostic guard.
+struct SendObservation {
+    context: Option<(memory::Context, u64)>,
+    method: &'static str,
+    range: (Option<u64>, Option<u64>),
+    outcome: &'static str,
+    bytes: Option<u64>,
+}
+impl SendObservation {
+    fn new(request: &Value) -> Self {
+        let context = memory::transport_start();
+        let method = match request.get("method").and_then(Value::as_str) {
+            Some("eth_getLogs") => "eth_getLogs",
+            Some("eth_getBlockByNumber") => "eth_getBlockByNumber",
+            Some("eth_getBlockByHash") => "eth_getBlockByHash",
+            Some("eth_getBlockReceipts") => "eth_getBlockReceipts",
+            Some("eth_getTransactionReceipt") => "eth_getTransactionReceipt",
+            _ if request.is_array() => "batch",
+            _ => "other",
+        };
+        let number = |key| {
+            request
+                .pointer(key)
+                .and_then(Value::as_str)
+                .and_then(|s| s.strip_prefix("0x"))
+                .and_then(|s| u64::from_str_radix(s, 16).ok())
+        };
+        Self {
+            context,
+            method,
+            range: (number("/params/0/fromBlock"), number("/params/0/toBlock")),
+            outcome: "send_failed_or_cancelled",
+            bytes: None,
+        }
+    }
+}
+impl Drop for SendObservation {
+    fn drop(&mut self) {
+        if let Some((context, ordinal)) = &self.context {
+            memory::transport_outcome(
+                context,
+                *ordinal,
+                self.method,
+                self.range,
+                self.outcome,
+                self.bytes,
+            );
+        }
     }
 }
 
@@ -166,6 +241,9 @@ fn response_result(response: &Value, method: &str) -> Result<Option<Value>> {
         bail!("provider returned JSON-RPC error for {method}: {code}: {message}");
     }
     let result = response.get("result").cloned().unwrap_or(Value::Null);
+    memory::observe("rpc_json_and_result_clone", || {
+        response.footprint().combine(result.footprint())
+    });
     Ok((!result.is_null()).then_some(result))
 }
 

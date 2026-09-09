@@ -27,6 +27,7 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .json()
         .init();
+    bigname_ingest::measurement::observe("process_start", Default::default);
     let command = Cli::parse().resolve()?;
     let cancellation = CancellationToken::new();
     let signal_cancellation = cancellation.clone();
@@ -194,10 +195,12 @@ async fn main() -> Result<()> {
             .with_watch_set_coverage_attestations(watch_set_coverage_attestations)
             .with_loop_heartbeat(loop_heartbeat)
             .with_phase_progress(phase_progress);
+            bigname_ingest::measurement::observe("redo_initialized", Default::default);
             let report = runner
                 .redo_chains(&chains, phase, range, cancellation)
                 .await?;
             require_clean_supervisor_exit(report)?;
+            bigname_ingest::measurement::observe("redo_cli_complete", Default::default);
         }
         ResolvedCommand::Rewind {
             database_url,

@@ -7,7 +7,7 @@ use std::{
 
 use bigname_ingest::{
     BASE_COINBASE_SEAM_BLOCK, VerificationBatch, VerificationProvider, VerificationProviderKind,
-    WatchFilter,
+    WatchFilter, measurement as memory,
 };
 use tracing::info;
 
@@ -125,88 +125,91 @@ impl Phase for VerifyPhase {
             let verification = verification_plan(&context.chain_id, &context.sources)?;
             let plan =
                 BatchPlan::new(&context, verification.cross_check_through(), &self.store).await?;
-            let reported_level = if let Some(range) = context.mode.range() {
-                self.store
-                    .level_for_redo(&context.chain_id, range, verification.verification_level())
-                    .await?
-            } else {
-                normal_extent_level(&context, verification.verification_level())?
-            };
-            let completes_target = plan.to == plan.target.number;
-            let end = match &verification {
-                VerificationPlan::ProviderTrusted { source, .. } => {
-                    let end = self
-                        .store
-                        .finalized_marker(&context.chain_id, plan.to)
-                        .await?;
-                    if completes_target {
-                        self.store
-                            .require_provider_trusted_extent(
-                                &context.chain_id,
-                                source,
-                                &end,
-                                context.mode.is_redo(),
-                            )
+            memory::attempt(&context.chain_id, plan.from, plan.to, async {
+                let reported_level = if let Some(range) = context.mode.range() {
+                    self.store
+                        .level_for_redo(&context.chain_id, range, verification.verification_level())
+                        .await?
+                } else {
+                    normal_extent_level(&context, verification.verification_level())?
+                };
+                let completes_target = plan.to == plan.target.number;
+                let end = match &verification {
+                    VerificationPlan::ProviderTrusted { source, .. } => {
+                        let end = self
+                            .store
+                            .finalized_marker(&context.chain_id, plan.to)
                             .await?;
+                        if completes_target {
+                            self.store
+                                .require_provider_trusted_extent(
+                                    &context.chain_id,
+                                    source,
+                                    &end,
+                                    context.mode.is_redo(),
+                                )
+                                .await?;
+                        }
+                        end
                     }
-                    end
-                }
-                VerificationPlan::Compared(source) => {
-                    let stored = self
-                        .store
-                        .load_batch(&context.chain_id, plan.from, plan.to)
-                        .await?;
-                    let reference = self
-                        .reference
-                        .fetch(source, stored.filter.clone(), plan.from, plan.to)
-                        .await?;
-                    if let Some(mismatch) = verify_compare::compare(&stored, &reference) {
-                        return Err(RunnerError::verification_mismatch(format!(
-                            "chain {} source {} range {}..={}: {mismatch}",
-                            context.chain_id,
-                            source.source_key(),
-                            plan.from,
-                            plan.to
-                        )));
+                    VerificationPlan::Compared(source) => {
+                        let stored = self
+                            .store
+                            .load_batch(&context.chain_id, plan.from, plan.to)
+                            .await?;
+                        let reference = self
+                            .reference
+                            .fetch(source, stored.filter.clone(), plan.from, plan.to)
+                            .await?;
+                        if let Some(mismatch) = verify_compare::compare(&stored, &reference) {
+                            return Err(RunnerError::verification_mismatch(format!(
+                                "chain {} source {} range {}..={}: {mismatch}",
+                                context.chain_id,
+                                source.source_key(),
+                                plan.from,
+                                plan.to
+                            )));
+                        }
+                        info!(
+                            chain_id = context.chain_id,
+                            source_key = source.source_key(),
+                            reference_kind = ?source.provider_kind(),
+                            reference_verification_level = source.verification_level().as_str(),
+                            reported_verification_level = reported_level.as_str(),
+                            from_block = plan.from,
+                            to_block = plan.to,
+                            reference_rpc_request_count = reference.rpc_request_count,
+                            "stored history verification batch matched its reference"
+                        );
+                        memory::marker(stored.end.number, &stored.end.hash, source.verification_level().as_str());
+                        stored.end
                     }
+                };
+                if let VerificationPlan::ProviderTrusted { source, .. } = &verification {
                     info!(
                         chain_id = context.chain_id,
-                        source_key = source.source_key(),
-                        reference_kind = ?source.provider_kind(),
-                        reference_verification_level = source.verification_level().as_str(),
+                        source_key = source.source_key,
                         reported_verification_level = reported_level.as_str(),
                         from_block = plan.from,
                         to_block = plan.to,
-                        reference_rpc_request_count = reference.rpc_request_count,
-                        "stored history verification batch matched its reference"
+                        "provider-trusted stored history extent accepted without an independent reference"
                     );
-                    stored.end
                 }
-            };
-            if let VerificationPlan::ProviderTrusted { source, .. } = &verification {
-                info!(
-                    chain_id = context.chain_id,
-                    source_key = source.source_key,
-                    reported_verification_level = reported_level.as_str(),
-                    from_block = plan.from,
-                    to_block = plan.to,
-                    "provider-trusted stored history extent accepted without an independent reference"
-                );
-            }
-            if completes_target {
-                completed::require_frozen_target(&context.chain_id, &end, &plan.target)?;
-            }
-            let progress = PhaseProgress {
-                current: Some(end),
-                target: Some(plan.target),
-                verification_level: Some(reported_level),
-                ..PhaseProgress::default()
-            };
-            if completes_target {
-                Ok(PhaseBatchOutcome::Complete(progress))
-            } else {
-                Ok(PhaseBatchOutcome::Continue(progress))
-            }
+                if completes_target {
+                    completed::require_frozen_target(&context.chain_id, &end, &plan.target)?;
+                }
+                let progress = PhaseProgress {
+                    current: Some(end),
+                    target: Some(plan.target),
+                    verification_level: Some(reported_level),
+                    ..PhaseProgress::default()
+                };
+                if completes_target {
+                    Ok(PhaseBatchOutcome::Complete(progress))
+                } else {
+                    Ok(PhaseBatchOutcome::Continue(progress))
+                }
+            }).await
         })
     }
     fn revalidates_completed(

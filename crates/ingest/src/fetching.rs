@@ -1,3 +1,4 @@
+use crate::measurement::{self as memory, Measured};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
@@ -18,6 +19,7 @@ pub async fn fetch_selected_facts(
     resolved: &[ResolvedBlock],
     selected_logs: Vec<Log>,
 ) -> Result<FetchedBatch> {
+    memory::observe("selected_facts_input", || selected_logs.footprint());
     let blocks = provider.headers(resolved).await.map_err(|error| {
         super::provider::provider_error("failed to fetch resolved block headers", error)
     })?;
@@ -47,9 +49,11 @@ pub async fn fetch_selected_facts(
         .filter(|block| selected_block_hashes.contains(block.hash.as_str()))
         .cloned()
         .collect::<Vec<_>>();
+    memory::observe("selected_blocks", || selected_blocks.footprint());
     let bundles = provider.bundles(&selected_blocks).await.map_err(|error| {
         super::provider::provider_error("failed to fetch selected block payloads", error)
     })?;
+    memory::observe("selected_bundles", || bundles.footprint());
     let bundles = bundles
         .into_iter()
         .map(|bundle| (bundle.block.hash.clone(), bundle))
@@ -58,7 +62,28 @@ pub async fn fetch_selected_facts(
     let mut receipts = BTreeMap::<(String, String), Receipt>::new();
     let mut logs = BTreeMap::<(String, i64), Log>::new();
 
+    let mut accounting = FactOverlap::default();
+    memory::observe("selected_facts_overlap_start", || {
+        accounting.remaining = selected_logs.footprint();
+        accounting.stable = blocks.footprint().combine(selected_blocks.footprint());
+        for (key, bundle) in &bundles {
+            accounting.stable = accounting
+                .stable
+                .combine(key.footprint())
+                .combine(bundle.footprint());
+        }
+        accounting.stable = accounting
+            .stable
+            .combine(memory::Footprint::entries::<&str>(
+                selected_block_hashes.len(),
+            ));
+        accounting.stable.combine(accounting.remaining)
+    });
     for selected in selected_logs {
+        if memory::capture().is_some() {
+            accounting.current = selected.footprint();
+        }
+
         let bundle = bundles.get(&selected.block_hash).ok_or_else(|| {
             IngestError::data_integrity(format!(
                 "provider omitted selected block {}",
@@ -98,11 +123,17 @@ pub async fn fetch_selected_facts(
                     actual.transaction_hash
                 ))
             })?;
-        transactions.insert(
+        if memory::capture().is_some() {
+            accounting.pending = receipt.footprint();
+        }
+        accounting.insert(
+            &mut transactions,
             (transaction.block_hash.clone(), transaction.hash.clone()),
             transaction,
         );
-        receipts.insert(
+        accounting.pending = memory::Footprint::default();
+        accounting.insert(
+            &mut receipts,
             (receipt.block_hash.clone(), receipt.transaction_hash.clone()),
             receipt,
         );
@@ -112,7 +143,10 @@ pub async fn fetch_selected_facts(
             .filter(|log| log.transaction_hash == actual.transaction_hash)
         {
             let key = (log.block_hash.clone(), log.log_index);
-            if let Some(previous) = logs.insert(key.clone(), log.clone())
+            if memory::capture().is_some() {
+                accounting.pending = key.footprint();
+            }
+            if let Some(previous) = accounting.insert(&mut logs, key.clone(), log.clone())
                 && previous != *log
             {
                 return Err(IngestError::data_integrity(format!(
@@ -121,7 +155,39 @@ pub async fn fetch_selected_facts(
                 )));
             }
         }
+        if memory::capture().is_some() {
+            accounting.remaining.bytes =
+                memory::subtract(accounting.remaining.bytes, accounting.current.bytes);
+            accounting.remaining.owned =
+                memory::subtract(accounting.remaining.owned, accounting.current.owned);
+        }
     }
+    memory::observe("selected_fact_maps", || {
+        let mut f =
+            memory::Footprint::entries::<((String, String), Transaction)>(transactions.len())
+                .combine(memory::Footprint::entries::<((String, String), Receipt)>(
+                    receipts.len(),
+                ))
+                .combine(memory::Footprint::entries::<((String, i64), Log)>(
+                    logs.len(),
+                ));
+        for (key, value) in &transactions {
+            f = f
+                .combine(key.0.footprint())
+                .combine(key.1.footprint())
+                .combine(value.footprint());
+        }
+        for (key, value) in &receipts {
+            f = f
+                .combine(key.0.footprint())
+                .combine(key.1.footprint())
+                .combine(value.footprint());
+        }
+        for (key, value) in &logs {
+            f = f.combine(key.0.footprint()).combine(value.footprint());
+        }
+        f
+    });
     let mut logs = logs.into_values().collect::<Vec<_>>();
     logs.sort_by_key(|log| (log.block_number, log.transaction_index, log.log_index));
     Ok(FetchedBatch {
@@ -130,6 +196,54 @@ pub async fn fetch_selected_facts(
         receipts: receipts.into_values().collect(),
         logs,
     })
+}
+
+#[derive(Default)]
+struct FactOverlap {
+    stable: memory::Footprint,
+    remaining: memory::Footprint,
+    current: memory::Footprint,
+    retained: memory::Footprint,
+    pending: memory::Footprint,
+    peak: memory::Footprint,
+}
+impl FactOverlap {
+    fn insert<K: Ord + Measured, T: Measured>(
+        &mut self,
+        map: &mut BTreeMap<K, T>,
+        key: K,
+        value: T,
+    ) -> Option<T> {
+        if memory::capture().is_none() {
+            return map.insert(key, value);
+        }
+        let key_size = key.footprint();
+        let next = value.footprint();
+        let overlap = self
+            .stable
+            .combine(self.remaining)
+            .combine(self.retained)
+            .combine(self.pending)
+            .combine(key_size)
+            .combine(next);
+        self.peak.bytes = self.peak.bytes.max(overlap.bytes);
+        self.peak.owned = self.peak.owned.max(overlap.owned);
+        let old = map.insert(key, value);
+        if let Some(old) = &old {
+            let f = old.footprint();
+            self.retained.bytes = memory::subtract(self.retained.bytes, f.bytes);
+            self.retained.owned = memory::subtract(self.retained.owned, f.owned);
+        } else {
+            self.retained = self.retained.combine(key_size);
+        }
+        self.retained = self.retained.combine(next);
+        old
+    }
+}
+impl Drop for FactOverlap {
+    fn drop(&mut self) {
+        memory::observe("selected_facts_overlap_peak", || self.peak);
+    }
 }
 
 fn validate_log_identity(selected: &Log, actual: &Log) -> Result<()> {

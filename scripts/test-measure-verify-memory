@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Pure admission/stream validator tests. Does not launch an experiment."""
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import unittest
+from unittest.mock import patch, Mock
+import io
+
+loader = importlib.machinery.SourceFileLoader("measurement", str(Path(__file__).with_name("measure-verify-memory")))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+
+
+def fixture():
+    state = {"phase_status": "completed", "current_block_number": 10, "verification_level": "quick_synced", "redo_in_progress": False}
+    result = dict(chain="ethereum-mainnet", chain_id=1, **{"from": 2, "to": 5}, run_id="validator",
+                  runner_bytes=2**32, postgres_bytes=2**31, seconds=30,
+                  base_tree="26ba8684d6d255a5f5e157174a8e9d1a9e0f7619", independent_source_history_reviewed=True,
+                  legal_redo_reviewed=True, manifest_sync_unchanged=True, build_test_chains_including_this=1,
+                  initial_state=state, expected_final_state=state, ingest_start=0,
+                  source_objects=[{}] * 8, source_descriptors=["a", "b"], disk_paths=["/unused"], pg_temp_dirs=["/unused"], finalized_end_hash="a" * 66, complete_receipt_bytes_max=1000)
+    for key in ("binary_sha256", "fixture_sha256", "instrumentation_commit", "manifest_sha256", "density_inventory_sha256", "allocation_receipt_sha256"):
+        result[key] = "a" * 64
+    for side in ("stored", "provider"):
+        result[side] = dict(unique_rows=1, logical_bytes=100, cumulative_rows=1, cumulative_bytes=100, largest_log=100)
+    return result
+
+
+def event(stage, sequence=1, **overrides):
+    f = dict(schema=1, run="validator", valid=True, sequence=sequence, stage=stage,
+             stored_rows=1, stored_bytes=100, provider_rows=1, provider_bytes=100,
+             marker_number=5, marker_hash="a" * 66, source_level="node_checked", max_item_bytes=100, rows=1, logical_bytes=100, chain="ethereum-mainnet", **{"from": 2, "to": 5})
+    f.update(attempt=0 if stage in module.ROOT_STAGES else 1, query_kind="stored" if stage == "stored_query_return" else "ordinary", query_ordinal=0)
+    f.update(native_block=5, receipt_bytes=20, hash_bytes=30, output_bytes=50, receipt_capacity=0, hash_capacity=0, output_capacity=0, exposed_capacity_bytes=0)
+    f.update(overrides)
+    return dict(target="bigname_memory", fields=f)
+
+
+def complete_stream():
+    stages = sorted(module.REQUIRED - {"provider_query_return", "reth_complete_receipt_peak"})
+    stages += ["reth_native_query_start", "reth_complete_receipt_peak", "reth_native_query_loaded", "reth_native_logical_peak", "reth_native_capacity_peak", "provider_query_return"]
+    return [event(stage, sequence) for sequence, stage in enumerate(stages, 1)]
+
+
+class ValidatorTests(unittest.TestCase):
+    def test_admission_requires_real_prerequisites(self):
+        module.admission(fixture())
+        for key, value in (("chain_id", 11155111), ("independent_source_history_reviewed", False),
+                           ("legal_redo_reviewed", False), ("manifest_sync_unchanged", False),
+                           ("seconds", 1801), ("runner_bytes", 2**32 + 1),
+                           ("build_test_chains_including_this", 5), ("complete_receipt_bytes_max", 0)):
+            a = fixture(); a[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError): module.admission(a)
+        a = fixture(); a["initial_state"]["redo_in_progress"] = True
+        with self.assertRaises(ValueError): module.admission(a)
+
+    def test_out_of_envelope_cannot_be_truncated(self):
+        for side in ("stored", "provider"):
+            for key, value in (("unique_rows", 250001), ("logical_bytes", 128 * 2**20 + 1),
+                               ("cumulative_rows", 500001), ("cumulative_bytes", 256 * 2**20 + 1),
+                               ("largest_log", 2**20 + 1)):
+                a = fixture(); a[side][key] = value
+                with self.subTest(side=side, key=key), self.assertRaises(ValueError): module.admission(a)
+
+    def test_baseline_without_observations_is_red(self):
+        reader = module.Observations(fixture())
+        reader.accept({"fields": {"message": "verification batch matched"}})
+        with self.assertRaises(ValueError): reader.finish()
+
+    def test_complete_stream_and_selected_counts(self):
+        reader = module.Observations(fixture())
+        for value in complete_stream(): reader.accept(value)
+        reader.finish()
+        reader.final["stored_final"]["rows"] = 0
+        with self.assertRaises(ValueError): reader.finish()
+
+    def test_failed_incomplete_or_misattributed_output(self):
+        for stage, overrides in (("compare_matched", {"from": 3}), ("provider_trusted", {}),
+                                 ("compared_rpc", {}), ("stored_query_return", {"max_item_bytes": 101}),
+                                 ("provider_query_return", {"provider_rows": 500001}),
+                                 ("process_start", {"valid": False}), ("process_start", {"run": "other"}),
+                                 ("reth_complete_receipt_peak", {"logical_bytes": 1001})):
+            with self.subTest(stage=stage), self.assertRaises(ValueError): module.Observations(fixture()).accept(event(stage, **overrides))
+
+    def test_lost_events_invalidate_completion(self):
+        reader = module.Observations(fixture())
+        with self.assertRaises(ValueError): reader.accept(event("process_start", 2))
+
+    def test_duplicate_gap_unknown_and_attempt_mix(self):
+        reader = module.Observations(fixture())
+        reader.accept(event("process_start"))
+        with self.assertRaises(ValueError): reader.accept(event("process_start"))
+        with self.assertRaises(ValueError): module.Observations(fixture()).accept(event("unknown"))
+        reader = module.Observations(fixture())
+        for value in complete_stream(): reader.accept(value)
+        reader.accept(event("stored_final", len(complete_stream()) + 1, attempt=2))
+        with self.assertRaises(ValueError): reader.finish()
+
+    def test_exact_cumulative_and_largest_inventory(self):
+        for key in ("cumulative_rows", "cumulative_bytes", "largest_log"):
+            a = fixture(); a["stored"][key] += 1
+            reader = module.Observations(a)
+            for value in complete_stream(): reader.accept(value)
+            with self.subTest(key=key), self.assertRaises(ValueError): reader.finish()
+
+    def test_native_witness_completeness_and_query_bounds(self):
+        for missing in module.NATIVE_WITNESSES:
+            reader = module.Observations(fixture())
+            values = [v for v in complete_stream() if v["fields"]["stage"] != missing]
+            with self.subTest(missing=missing), self.assertRaises(ValueError):
+                for sequence, value in enumerate(values, 1):
+                    value["fields"]["sequence"] = sequence; reader.accept(value)
+        for overrides in ({"query_ordinal": 1}, {"attempt": 2}, {"native_block": 2}):
+            reader = module.Observations(fixture())
+            reader.accept(event("reth_native_query_start", **{"from": 3}))
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                reader.accept(event("reth_native_logical_peak", 2, **dict({"from": 3}, **overrides)))
+        reader = module.Observations(fixture())
+        for sequence, stage in enumerate(("reth_native_query_start", "reth_native_query_empty", "reth_complete_receipt_peak", "provider_query_return"), 1):
+            reader.accept(event(stage, sequence, rows=0, logical_bytes=0, max_item_bytes=0))
+        self.assertIsNone(reader.native)
+
+    def test_drain_is_bounded_and_checks_each_read(self):
+        class Growing:
+            def readline(self, limit): return "{}\n"
+        observer, check = Mock(), Mock()
+        self.assertEqual(module.drain(Growing(), "", observer, check), "")
+        self.assertEqual(check.call_count, 64)
+        check.side_effect = [None, ValueError("deadline")]
+        with self.assertRaisesRegex(ValueError, "deadline"):
+            module.drain(Growing(), "", observer, check)
+        with self.assertRaises(ValueError):
+            module.drain(io.StringIO("x" * 65537), "", observer, Mock())
+
+    def test_cleanup_kills_child_after_leader_exit(self):
+        process = Mock(); process.poll.return_value = 0
+        members = Mock(); members.read_text.side_effect = ["123", "123", "123", "", ""]
+        kill_file = Mock()
+        def path(group, name): return members if name == "cgroup.procs" else kill_file
+        with patch.object(module, "Path", side_effect=path), patch.object(module.os, "kill") as term, patch.object(module.time, "monotonic", side_effect=[0, 4, 5]):
+            module.terminate_owned("owned", process)
+        term.assert_called_once_with(123, module.signal.SIGTERM)
+        kill_file.write_text.assert_called_once_with("1")
+        process.wait.assert_called_once_with(timeout=3)
+
+
+if __name__ == "__main__":
+    unittest.main()

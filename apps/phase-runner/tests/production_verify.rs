@@ -1,3 +1,6 @@
+#[path = "production_verify/measurement.rs"]
+mod measurement;
+
 #[allow(dead_code)]
 mod support;
 
