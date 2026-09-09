@@ -60,64 +60,7 @@ pub(super) async fn restore_events(
     before_block: i64,
     restore: &mut AdapterSessionRestore,
 ) -> Result<usize> {
-    // The content-hashed adapter owns the opaque state key. Rows without one stay keyed by event
-    // identity, and its clear marker alone retains one additional row.
-    let statement = format!(
-        "
-        WITH ranked AS (
-            SELECT event.*,
-                   live_lineage.block_timestamp AS retained_block_timestamp,
-                   row_number() OVER (
-                       PARTITION BY
-                           event.raw_fact_ref ? '{INTERPRETER_STATE_KEY}',
-                           public.digest(
-                               COALESCE(
-                                   event.raw_fact_ref ->> '{INTERPRETER_STATE_KEY}',
-                                   event.event_identity
-                               ),
-                               'sha256'
-                           ),
-                           COALESCE(
-                               event.raw_fact_ref ->> '{INTERPRETER_STATE_KEY}',
-                               event.event_identity
-                           ),
-                           event.after_state ? '{SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY}'
-                       ORDER BY event.block_number DESC,
-                                event.transaction_index DESC NULLS LAST,
-                                event.log_index DESC NULLS LAST,
-                                event.normalized_event_id DESC
-                   ) AS state_rank
-            FROM normalized_events event
-            JOIN chain_lineage live_lineage
-              ON live_lineage.chain_id = event.chain_id
-             AND live_lineage.block_hash = event.block_hash
-             AND live_lineage.block_number = event.block_number
-             AND live_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-            WHERE event.chain_id = $1
-              AND event.block_number < $2
-              AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-        )
-        SELECT ranked.chain_id,
-               ranked.namespace,
-               ranked.logical_name_id,
-               ranked.resource_id,
-               ranked.event_kind,
-               ranked.source_family,
-               ranked.manifest_version,
-               ranked.source_manifest_id,
-               ranked.raw_fact_ref ->> 'emitting_address',
-               ranked.raw_fact_ref ->> '{INTERPRETER_STATE_KEY}',
-               ranked.event_identity,
-               ranked.raw_fact_ref ->> '{STATE_SCOPE_KEY}',
-               ranked.block_number,
-               ranked.block_hash,
-               ranked.retained_block_timestamp,
-               ranked.after_state
-        FROM ranked
-        WHERE ranked.state_rank = 1
-        ORDER BY ranked.block_number, ranked.normalized_event_id
-        "
-    );
+    let statement = restore_statement();
     let mut rows = sqlx::query_as::<_, Row>(&statement)
         .bind(chain_id)
         .bind(before_block)
@@ -148,6 +91,84 @@ pub(super) async fn restore_events(
         })?;
     }
     Ok(count)
+}
+
+fn restore_statement() -> String {
+    // Keep winner ordering ahead of the per-ID payload lookup. The bounded plan fixture
+    // inspects named SELECT plans through EXPLAIN EXECUTE; OFFSET alone is not proof.
+    // The content-hashed adapter owns the opaque state key. Rows without one stay keyed by event
+    // identity, and its clear marker alone retains one additional row.
+    format!(
+        "
+        WITH ranked AS (
+            SELECT event.normalized_event_id,
+                   event.block_number,
+                   row_number() OVER (
+                       PARTITION BY
+                           event.raw_fact_ref ? '{INTERPRETER_STATE_KEY}',
+                           public.digest(
+                               COALESCE(
+                                   event.raw_fact_ref ->> '{INTERPRETER_STATE_KEY}',
+                                   event.event_identity
+                               ),
+                               'sha256'
+                           ),
+                           COALESCE(
+                               event.raw_fact_ref ->> '{INTERPRETER_STATE_KEY}',
+                               event.event_identity
+                           ),
+                           event.after_state ? '{SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY}'
+                       ORDER BY event.block_number DESC,
+                                event.transaction_index DESC NULLS LAST,
+                                event.log_index DESC NULLS LAST,
+                                event.normalized_event_id DESC
+                   ) AS state_rank
+            FROM normalized_events event
+            JOIN chain_lineage live_lineage
+              ON live_lineage.chain_id = event.chain_id
+             AND live_lineage.block_hash = event.block_hash
+             AND live_lineage.block_number = event.block_number
+             AND live_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+            WHERE event.chain_id = $1
+              AND event.block_number < $2
+              AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        )
+        SELECT payload.chain_id,
+               payload.namespace,
+               payload.logical_name_id,
+               payload.resource_id,
+               payload.event_kind,
+               payload.source_family,
+               payload.manifest_version,
+               payload.source_manifest_id,
+               payload.raw_fact_ref ->> 'emitting_address',
+               payload.raw_fact_ref ->> '{INTERPRETER_STATE_KEY}',
+               payload.event_identity,
+               payload.raw_fact_ref ->> '{STATE_SCOPE_KEY}',
+               payload.block_number,
+               payload.block_hash,
+               payload.retained_block_timestamp,
+               payload.after_state
+        FROM (
+            SELECT normalized_event_id, block_number
+            FROM ranked
+            WHERE state_rank = 1
+            ORDER BY block_number, normalized_event_id
+            OFFSET 0
+        ) winner
+        CROSS JOIN LATERAL (
+            SELECT event.*, live_lineage.block_timestamp AS retained_block_timestamp
+            FROM normalized_events event
+            JOIN chain_lineage live_lineage
+              ON live_lineage.chain_id = event.chain_id
+             AND live_lineage.block_hash = event.block_hash
+             AND live_lineage.block_number = event.block_number
+            WHERE event.normalized_event_id = winner.normalized_event_id
+            OFFSET 0
+        ) payload
+        ORDER BY winner.block_number, winner.normalized_event_id
+        "
+    )
 }
 
 fn row_to_event(
@@ -294,3 +315,7 @@ mod tests;
 #[cfg(test)]
 #[path = "ops_owner_replay_tests.rs"]
 mod ops_owner_replay_tests;
+
+#[cfg(test)]
+#[path = "prior_restore_tests.rs"]
+mod restore_tests;

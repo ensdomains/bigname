@@ -1270,6 +1270,11 @@ pub struct SequentialFixtureReplay {
 }
 
 impl SequentialFixtureReplay {
+    /// Borrow the compiled binary while this replay owner retains its lease.
+    pub fn binary_path(&self) -> &Path {
+        &self._binary.path
+    }
+
     pub async fn start_with_chain_rpc_urls(
         repo_root: &Path,
         database_url: &str,
