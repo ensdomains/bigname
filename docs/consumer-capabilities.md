@@ -131,6 +131,22 @@ summaries. A superseded ENSv1 registration is therefore never selected, while a
 current registration queried by resource can still contribute in a separate
 name-scoped view.
 
+For the post-audit Sepolia profile, an exact-name read may qualify through
+an activated migration instead of a V2 registrar event. The existing ordinary
+registry-plus-registrar qualification remains unchanged. The migration alternative
+requires the selected current ENSv2 binding and resource to match the exact
+successor of the selected `MigrationApplied` proof, with no authority-selection
+refusal. The boundary and successor-resource registry evidence must identify the
+same ENS name and chain and join their admitted active manifests. The registry
+must be explicitly declared for the post-audit Sepolia profile at that evidence
+position. This does not admit the historical registry model, custom undeclared
+registries, candidate or orphaned boundaries, mismatched successors, or a stale
+migration proof whose successor is no longer current. It does not fabricate a
+registrar registration or grant resolver read features; resolver-specific feature
+admission is unchanged. Later ordinary registrations continue to use the existing
+registrar qualification. Runtime acceptance of this alternative is tracked with
+the connected #822 proof and is not implied by this contract statement.
+
 The final activation re-derives a [complete
 group](glossary.md#complete-group) through
 the production interpreter and records `MigrationApplied` as an activated

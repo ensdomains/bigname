@@ -2283,6 +2283,22 @@ pub async fn prove_normal_sepolia_http(
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     runner.stop().await?;
+    let before = proof_tables(&db.pool).await?;
+    let snapshot = std::env::temp_dir().join(format!(
+        "bigname-e2e-completed-normal-{}.json",
+        std::process::id()
+    ));
+    let captured: Result<()> = (|| {
+        let bytes = serde_json::to_vec_pretty(&before)?;
+        anyhow::ensure!(bytes.len() <= 32 * 1024 * 1024, "snapshot exceeds 32 MiB");
+        std::fs::write(&snapshot, bytes)?;
+        Ok(())
+    })();
+    match captured {
+        Ok(()) => eprintln!("completed normal database snapshot: {snapshot:?}"),
+        Err(error) => eprintln!("completed normal snapshot capture failed: {error:#}"),
+    }
+
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let startup_guard = await_with_readiness_deadline(
         deadline,
@@ -2328,7 +2344,6 @@ pub async fn prove_normal_sepolia_http(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     drop(startup_guard);
-    let before = proof_tables(&db.pool).await?;
     for (name, owner) in owners {
         let response = client
             .get(format!("http://{address}/v2/names/{name}"))

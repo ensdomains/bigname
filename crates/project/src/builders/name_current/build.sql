@@ -661,6 +661,75 @@
                              -> 'capability_flags'
                              -> 'exact_name_profile'
                              ->> 'status' = 'supported'
+                   ) OR EXISTS (
+                       -- A validated migration replaces the registrar qualification only
+                       -- for its exact current successor in the admitted registry profile.
+                       SELECT 1
+                       FROM project_events boundary
+                       JOIN project_manifests migration_manifest
+                         ON migration_manifest.manifest_id = boundary.source_manifest_id
+                        AND migration_manifest.manifest_version = boundary.manifest_version
+                        AND migration_manifest.source_family = boundary.source_family
+                       JOIN project_events successor
+                         ON successor.chain_id = boundary.chain_id
+                        AND successor.namespace = boundary.namespace
+                        AND successor.logical_name_id = boundary.logical_name_id
+                        AND successor.resource_id = selected_authority.selected_resource_id
+                        AND successor.event_kind = 'SurfaceBound'
+                        AND successor.source_family = 'ens_v2_registry_l1'
+                        AND successor.after_state ->> 'surface_binding_id' =
+                            selected_authority.selected_binding_id::text
+                        AND successor.block_number = boundary.block_number
+                        AND successor.transaction_index = boundary.transaction_index
+                       JOIN project_manifests registry_manifest
+                         ON registry_manifest.manifest_id = successor.source_manifest_id
+                        AND registry_manifest.manifest_version = successor.manifest_version
+                        AND registry_manifest.source_family = successor.source_family
+                       JOIN contract_instance_addresses registry_address
+                         ON registry_address.chain_id = successor.chain_id
+                        AND registry_address.contract_instance_id::text =
+                            boundary.after_state ->> 'successor_registry_contract_instance_id'
+                        AND lower(registry_address.address) =
+                            lower(successor.raw_fact_ref ->> 'emitting_address')
+                        AND COALESCE(registry_address.active_from_block_number, 0)
+                            <= successor.block_number
+                        AND (registry_address.active_to_block_number IS NULL
+                             OR registry_address.active_to_block_number >= successor.block_number)
+                       WHERE surface.namespace = 'ens'
+                         AND boundary.namespace = surface.namespace
+                         AND boundary.logical_name_id = surface.logical_name_id
+                         AND boundary.chain_id = 'ethereum-sepolia'
+                         AND selected_authority.selected_authority_arm = 'ens_v2'
+                         AND selected_authority.unsupported_reason IS NULL
+                         AND selected_authority.authority_proof_kind =
+                             'migration_authority_transition'
+                         AND boundary.normalized_event_id =
+                             selected_authority.authority_proof_event_id
+                         AND boundary.event_identity =
+                             selected_authority.authority_proof_event_identity
+                         AND boundary.event_kind = 'MigrationApplied'
+                         AND boundary.source_family = 'ens_v2_migration_l1'
+                         AND boundary.consumer_visibility = 'activated'
+                         AND boundary.canonicality_state IN ('canonical', 'safe', 'finalized')
+                         AND boundary.after_state #>> '{successor_binding,binding_id}' =
+                             selected_authority.selected_binding_id::text
+                         AND boundary.after_state #>> '{successor_binding,resource_id}' =
+                             selected_authority.selected_resource_id::text
+                         AND migration_manifest.namespace = boundary.namespace
+                         AND migration_manifest.chain_id = boundary.chain_id
+                         AND migration_manifest.deployment_label = 'ens_v2_sepolia_post_audit'
+                         AND registry_manifest.namespace = successor.namespace
+                         AND registry_manifest.chain_id = successor.chain_id
+                         AND registry_manifest.deployment_label = 'ens_v2_sepolia_post_audit'
+                         AND EXISTS (
+                             SELECT 1 FROM jsonb_array_elements(COALESCE(
+                                 registry_manifest.manifest_payload -> 'contracts', '[]'::jsonb
+                             )) declaration
+                             WHERE declaration ->> 'role' = 'registry'
+                               AND lower(declaration ->> 'address') = lower(registry_address.address)
+                               AND (declaration ->> 'start_block' IS NULL
+                                    OR (declaration ->> 'start_block')::bigint <= successor.block_number)
+                         )
                    ) AS supported
         ) ens_v2_profile ON TRUE
         CROSS JOIN LATERAL (

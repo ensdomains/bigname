@@ -182,6 +182,21 @@ For ENSv2, admitted registry, registrar, and resolver name-bearing events produc
 
 ### ENSv1→ENSv2 current authority
 
+Exact-name profile admission is separate from selecting the authority epoch.
+For an active post-audit Sepolia ENS registry, the selected activated migration
+can supply the qualification otherwise supplied by a V2 registrar name event.
+Project matches the selected proof's event ID and identity, logical name, chain,
+and namespace, then requires its successor binding and resource to equal the
+current selected ENSv2 binding and resource. The boundary's source manifest and
+the successor-resource registry event's source manifest must be admitted and
+active. The registry event must match the post-audit manifest's declared registry
+address and applicable start block, including its contract-instance address
+identity. Candidate and noncanonical events remain excluded by Project staging.
+Historical boundary evidence cannot qualify an unrelated later current resource.
+The existing ordinary registry-plus-registrar path and every authority refusal
+remain intact. This changes no resolver feature admission or read routing.
+
+
 Canonical ENS history may contain both ENSv1 and ENSv2 facts for one logical
 name. That history is not itself a conflict. On a deployment profile that
 admits the
