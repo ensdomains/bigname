@@ -412,12 +412,17 @@ fn complete_successor(
             .ok()?;
         let mut mints = Vec::new();
         let mut grants = Vec::new();
-        for raw in raws.iter().filter(|raw| {
-            raw.chain_id == boundary.chain_id
-                && same_transaction(boundary, raw)
-                && raw.emitting_address.eq_ignore_ascii_case(emitter)
-                && Some(raw.log_index) > registration.log_index
-        }) {
+        let mut successor_raws = raws
+            .iter()
+            .filter(|raw| {
+                raw.chain_id == boundary.chain_id
+                    && same_transaction(boundary, raw)
+                    && raw.emitting_address.eq_ignore_ascii_case(emitter)
+                    && Some(raw.log_index) > registration.log_index
+            })
+            .collect::<Vec<_>>();
+        successor_raws.sort_by_key(|raw| raw.log_index);
+        for raw in successor_raws {
             if let Some(mint) = decode::<TransferSingle>(raw).ok()? {
                 if mint.id == token {
                     if mint.operator != controller
@@ -446,6 +451,7 @@ fn complete_successor(
                         return None;
                     }
                     grants.push(raw.log_index);
+                    break;
                 }
             }
         }
@@ -461,12 +467,20 @@ fn complete_successor(
                     && event.resource_id == Some(resource)
                     && event.block_hash == boundary.block_hash
                     && event.transaction_hash == boundary.transaction_hash
+                    && event
+                        .log_index
+                        .is_some_and(|log| *mint < log && log < *grant)
             })
             .collect::<Vec<_>>();
         let [link] = links.as_slice() else {
             return None;
         };
-        (mint < &link.log_index? && &link.log_index? < grant).then_some(())
+        (link.after_state["token_id"]
+            .as_str()?
+            .parse::<U256>()
+            .ok()?
+            == token)
+            .then_some(())
     };
     proof().is_some()
 }

@@ -619,8 +619,8 @@ pub async fn ingest_ens_v1_v2_migration_sepolia_and_serve(
     .await
 }
 
-/// Add only the locally deployed plain registration controller before profile validation/hash
-/// computation. This fixture declaration does not admit a public Sepolia controller.
+/// Declare the local plain registration controller before validating/hashing the
+/// [deployment profile](../../../../docs/glossary.md#deployment-profile). This fixture declaration does not admit a public Sepolia controller.
 pub async fn ingest_plain_migration_and_serve(
     harness: &ConnectedMigrationHarness,
 ) -> Result<PipelineRun> {

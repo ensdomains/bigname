@@ -4896,7 +4896,7 @@ fn plain_unwrapped_input() -> anyhow::Result<BatchInput> {
                     resource: token,
                     account: owner,
                     oldRoleBitmap: U256::ZERO,
-                    newRoleBitmap: U256::from(1),
+                    newRoleBitmap: U256::from(0x1100000_u64) | (U256::from(0x11100000_u64) << 128),
                 }
                 .encode_log_data(),
                 block,
@@ -5069,6 +5069,68 @@ fn plain_unwrapped_cleanup_keeps_one_predecessor_without_v1_reopenings() -> anyh
 }
 
 #[test]
+fn plain_unwrapped_cleanup_preserves_later_same_transaction_token_operations() -> anyhow::Result<()>
+{
+    let mut input = plain_unwrapped_input()?;
+    let block = input.raw_logs.last().unwrap().block_number;
+    let raw = |index| {
+        input
+            .raw_logs
+            .iter()
+            .find(|r| r.block_number == block && r.log_index == index)
+            .unwrap()
+            .clone()
+    };
+    let mut transfer = raw(7);
+    transfer.log_index = 11;
+    transfer.topics[1] = transfer.topics[3].clone();
+    transfer.topics[2] = transfer.topics[3].clone();
+    transfer.topics[3] = format!("0x{:064x}", 0x52);
+    let mut revoke = raw(9);
+    revoke.log_index = 12;
+    revoke.data.rotate_left(32);
+    let mut grant = raw(9);
+    grant.log_index = 13;
+    grant.topics[2] = transfer.topics[3].clone();
+    input.raw_logs.extend([transfer, revoke, grant]);
+    let mut ordinary = input.clone();
+    ordinary
+        .manifests
+        .retain(|m| m.source_family != "ens_v2_migration_l1");
+    ordinary
+        .admissions
+        .retain(|a| a.source_manifest_id != Some(MIGRATION_MANIFEST_ID));
+    let output = interpret_test_batch(input)?;
+    assert!(
+        output
+            .surface_bindings
+            .iter()
+            .all(|b| b.block_number < block || b.authority_arm != "ens_v1")
+    );
+    let later = |out: BatchOutput| {
+        out.normalized_events
+            .into_iter()
+            .filter(|e| e.block_number == Some(block) && e.log_index >= Some(11))
+            .collect::<Vec<_>>()
+    };
+    let later_output = later(output);
+    assert!(
+        later_output
+            .iter()
+            .any(|e| e.event_kind == "TokenControlTransferred")
+    );
+    assert_eq!(
+        later_output
+            .iter()
+            .filter(|e| e.event_kind == "PermissionChanged")
+            .count(),
+        2
+    );
+    assert_eq!(later_output, later(interpret_test_batch(ordinary)?));
+    Ok(())
+}
+
+#[test]
 fn plain_unwrapped_cleanup_is_identical_after_cold_predecessor_restore() -> anyhow::Result<()> {
     let mut whole = plain_unwrapped_input()?;
     let block = whole.raw_logs.last().unwrap().block_number;
@@ -5114,13 +5176,51 @@ fn plain_unwrapped_cleanup_is_identical_after_cold_predecessor_restore() -> anyh
 
 #[test]
 fn incomplete_unwrapped_cleanup_keeps_ordinary_authority_effects() -> anyhow::Result<()> {
-    for missing_log in [0, 1, 2, 3, 5, 6, 7, 8, 9, 11, 12, 13] {
+    for missing_log in [0, 1, 2, 3, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17] {
         let mut input = plain_unwrapped_input()?;
         let block = input.raw_logs.last().unwrap().block_number;
         input
             .raw_logs
             .retain(|raw| raw.block_number != block || raw.log_index != missing_log);
-        if missing_log == 11 {
+        if missing_log >= 14 {
+            if missing_log == 17 {
+                input
+                    .raw_logs
+                    .iter_mut()
+                    .find(|r| r.block_number == block && r.log_index == 8)
+                    .unwrap()
+                    .topics[1] = format!("{:#x}", B256::ZERO);
+            } else if missing_log == 16 {
+                for raw in input
+                    .raw_logs
+                    .iter_mut()
+                    .filter(|r| r.block_number == block)
+                {
+                    raw.log_index = match raw.log_index {
+                        8 => 9,
+                        9 => 8,
+                        index => index,
+                    };
+                }
+            } else {
+                let index = missing_log - 7;
+                let mut duplicate = input
+                    .raw_logs
+                    .iter()
+                    .find(|r| r.block_number == block && r.log_index == index)
+                    .unwrap()
+                    .clone();
+                for raw in input
+                    .raw_logs
+                    .iter_mut()
+                    .filter(|r| r.block_number == block && r.log_index > index)
+                {
+                    raw.log_index += 1;
+                }
+                duplicate.log_index += 1;
+                input.raw_logs.push(duplicate);
+            }
+        } else if missing_log == 11 {
             let foreign = "0x0000000000000000000000000000000000000097";
             input.admissions.push(admission_at(
                 V1_REGISTRAR_MANIFEST_ID,
@@ -5151,6 +5251,9 @@ fn incomplete_unwrapped_cleanup_keeps_ordinary_authority_effects() -> anyhow::Re
                 .last_mut()
                 .unwrap() = 1;
         }
+        input
+            .raw_logs
+            .sort_by_key(|r| (r.block_number, r.transaction_index, r.log_index));
         let mut ordinary = input.clone();
         ordinary
             .manifests

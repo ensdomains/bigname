@@ -51,7 +51,7 @@ logs. `plain_unwrapped_cleanup_keeps_one_predecessor_without_v1_reopenings` and
 constructed plain registration and eleven-log transaction. The connected
 `plain_unwrapped_eleven_log_migration_publishes_only_v2_authority` exercises
 local contracts, normal Interpret/Project, and public name/permission reads with
-its controller declared in the fixture profile before intake. It requires zero
+its controller declared in the fixture [deployment profile](glossary.md#deployment-profile) before intake. It requires zero
 current ENSv1 bindings and permissions for the current name, one ENSv2 binding,
 and the expected ENSv2 owner. These tests require execution evidence before a
 passing claim; none of them substitutes for the complete catalog replay matrix.

@@ -227,8 +227,11 @@ never schedules a cross-arm transition. A row shared by several correlation
 IDs activates only when every referenced group is complete.
 
 Registrar-token `unwrapped` groups that carry the unlocked controller's ENSv1
-registry cleanup currently derive activation but fail the exact-predecessor check while committing it, so no activation rows reach Project. This is the bounded production-path defect
-tracked by [issue #822](https://github.com/ensdomains/bigname/issues/822); the
+registry cleanup failed the exact-predecessor commit check in the recorded
+[issue #822](https://github.com/ensdomains/bigname/issues/822) baseline. The adapter
+correction reconciles complete existing-token transactions before the block's
+ENSv1 state fold, preserving the original registrar predecessor through cleanup
+as specified in [storage](storage.md). Runtime acceptance remains unproven; the
 affected catalog rows are enumerated in
 [`migration-activation-coverage.md`](migration-activation-coverage.md). The
 other authority paths retain the activation behavior described here. A fatal #822 predecessor error rolls
@@ -244,8 +247,8 @@ without rewriting their independently admitted events, changes the name's
 and retains or opens the concrete ENSv2 binding. Child and `unlocked_wrapped`
 second-level predecessors close at the exact ENSv1 cleanup recorded by the
 boundary; `locked_wrapped` second-level predecessors close at the boundary
-position. Registrar-token `unwrapped` predecessors will use that exact-cleanup
-rule after issue #822 restores their production path. The unlocked wrapped controller
+position. Reconciled registrar-token `unwrapped` predecessors use that same
+exact-cleanup rule; recorded #822 coverage remains pending runtime acceptance. The unlocked wrapped controller
 unwraps before injecting the ENSv2 registration.
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@a971bd64)
 If the deployment profile had not materialized the registrar identity before

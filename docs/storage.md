@@ -460,6 +460,9 @@ proof requires the admitted BaseRegistrar holder-to-controller transfer,
 registry reclaim to that controller, registry transfer to Graveyard, any
 emitted resolver/TTL clears, the matching registrar transfer to Graveyard,
 and exactly one complete ENSv2 successor for the same name and transaction.
+The successor proof ends at its initial mint/resource-link/role-grant sequence;
+subsequent same-transaction token transfers and role changes remain ordinary.
+(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRegistry.json:L2347 @ ens_v2@a971bd64)
 Reconciliation retains raw facts and normalized ownership/cleanup observations,
 but removes intervening ENSv1 authority bindings and their derived permission
 changes. Registry metadata remains attached to the existing registrar resource
