@@ -930,7 +930,12 @@ preserves one logical before/after stream and the clear needed to invalidate
 older token-version pointers. Restore rebuilds the adapter's protocol state
 while admitting at most
 the configured number of `after_state` values to the cache; it does not first
-materialize every retained JSON value in one process allocation. If the chain
+materialize every retained JSON value in one process allocation. The restore query
+ranks and orders event identifiers before retrieving their payloads in the same
+read snapshot. Plan validation must keep full payloads out of history-wide sorts
+and materialization. This reduces the data carried by those operations; it does
+not bound temporary storage, individual row size, or the protocol state retained
+by the adapter. If the chain
 [lineage orphaning epoch](glossary.md#lineage-orphaning-epoch) changes, the
 process discards the whole interpreter session and rebuilds it from readable
 rows. It retains only the block anchors added since the last validation while

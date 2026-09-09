@@ -767,7 +767,11 @@ redo or full rebuild.
 
 `phase-runner rewind` selects an exact stored readable ancestor, marks the
 displaced suffix orphaned through normal head publication, and stamps downstream
-redo. Historical API reads serve only when eligible projection materialization
+redo. Before changing heads or lineage, it refuses to orphan the retained end
+of an unfinished operator Ingest redo. Complete the reported covering Ingest
+repair with configured sources before retrying; required Ingest work retains
+its [Live recovery path](chain-intake.md#redo-and-rewind).
+Historical API reads serve only when eligible projection materialization
 exists for the selected positions; they never overwrite newer current rows or
 fall forward to current state.
 

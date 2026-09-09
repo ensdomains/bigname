@@ -17,11 +17,12 @@ struct CandidateNameForms {
     labelhash_count: Option<i32>,
 }
 
-pub(super) async fn load_reverse_identity_page_rows(
+async fn query_reverse_identity_page_rows(
     pool: &PgPool,
     inputs: &[ReverseIdentityStorageInput],
     public_namespaces: &[String],
-) -> Result<Vec<ReverseIdentityPageRow>> {
+    explain: bool,
+) -> Result<Vec<sqlx::postgres::PgRow>> {
     if inputs.is_empty() {
         return Ok(Vec::new());
     }
@@ -73,18 +74,52 @@ pub(super) async fn load_reverse_identity_page_rows(
         .map(|input| input.cursor.as_ref().map(|cursor| cursor.namehash.clone()))
         .collect::<Vec<_>>();
 
+    // Keep the requested values visible to the planner while preserving SQL lower().
+    let address_candidates = (1..=inputs.len())
+        .map(|index| format!("lower(($2::TEXT[])[{index}])"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let query = format!(
         r#"
-        WITH {READABLE_REVERSE_IDENTITY_CTES}, requested AS (
+        WITH {READABLE_REVERSE_IDENTITY_CTES}, requested AS MATERIALIZED (
             SELECT * FROM UNNEST(
                 $1::INT[], $2::TEXT[], $3::TEXT[], $4::TEXT[], $5::JSONB[],
                 $6::BIGINT[], $7::BOOLEAN[], $8::BOOLEAN[], $9::SMALLINT[],
                 $10::TEXT[], $11::TEXT[], $12::TEXT[]
-            ) AS requested(
+            ) AS request_input(
                 input_index, address, coin_type, roles, primary_names, page_size,
                 cursor_present, cursor_is_primary, cursor_role_rank,
                 cursor_normalized_name, cursor_namespace, cursor_namehash
             )
+        ), readable_candidates AS MATERIALIZED (
+            SELECT seed.address, anc.*
+            FROM bigname_phase.address_names_current seed
+            JOIN LATERAL (
+                SELECT readable_relation.logical_name_id, readable_relation.namespace,
+                       readable_relation.namehash, readable_relation.relation, identity_nc.raw_name
+                FROM readable_relations readable_relation
+                JOIN readable_names identity_nc
+                  ON identity_nc.logical_name_id = readable_relation.logical_name_id
+                WHERE readable_relation.address = seed.address
+                  AND readable_relation.logical_name_id = seed.logical_name_id
+                  AND readable_relation.relation = seed.relation
+                -- Recheck this stored relation once before per-input pagination.
+                OFFSET 0
+            ) anc ON TRUE
+            WHERE lower(seed.address) = ANY(ARRAY[{address_candidates}])
+              AND seed.namespace = ANY($13::TEXT[])
+              AND EXISTS (
+                  SELECT 1 FROM requested request_match
+                  WHERE lower(request_match.address) = lower(seed.address)
+                    AND (
+                        request_match.roles = 'both'
+                        OR (request_match.roles = 'owned'
+                            AND seed.relation IN ('registrant', 'token_holder'))
+                        OR (request_match.roles = 'managed'
+                            AND seed.relation = 'effective_controller')
+                    )
+                  OFFSET 0
+              )
         )
         SELECT requested.input_index, candidate.logical_name_id, candidate.raw_name,
                requested.primary_names -> candidate.namespace AS primary_name
@@ -95,21 +130,18 @@ pub(super) async fn load_reverse_identity_page_rows(
                 SELECT anc.logical_name_id,
                        bool_or(COALESCE(
                            requested.primary_names -> anc.namespace
-                               ->> 'normalized_claim_name' = identity_nc.raw_name,
+                               ->> 'normalized_claim_name' = anc.raw_name,
                            false
                        )) AS is_primary,
                        min(CASE
                            WHEN anc.relation IN ('registrant', 'token_holder') THEN 0
                            ELSE 1
                        END)::SMALLINT AS role_rank,
-                       identity_nc.raw_name AS raw_name,
+                       anc.raw_name AS raw_name,
                        anc.namespace,
                        anc.namehash
-                FROM readable_relations anc
-                JOIN readable_names identity_nc
-                  ON identity_nc.logical_name_id = anc.logical_name_id
+                FROM readable_candidates anc
                 WHERE lower(anc.address) = lower(requested.address)
-                  AND anc.namespace = ANY($13::TEXT[])
                   AND (
                       requested.roles = 'both'
                       OR (requested.roles = 'owned'
@@ -117,7 +149,7 @@ pub(super) async fn load_reverse_identity_page_rows(
                       OR (requested.roles = 'managed'
                           AND anc.relation = 'effective_controller')
                   )
-                GROUP BY anc.logical_name_id, identity_nc.raw_name,
+                GROUP BY anc.logical_name_id, anc.raw_name,
                          anc.namespace, anc.namehash
             ) grouped
             WHERE NOT requested.cursor_present
@@ -143,6 +175,14 @@ pub(super) async fn load_reverse_identity_page_rows(
                  candidate.namespace, candidate.namehash
         "#
     );
+    #[cfg(not(test))]
+    let _ = explain;
+    #[cfg(test)]
+    let query = if explain {
+        format!("EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON) {query}")
+    } else {
+        query
+    };
     let rows = sqlx::query(&query)
         .bind(&input_indexes)
         .bind(&addresses)
@@ -165,6 +205,33 @@ pub(super) async fn load_reverse_identity_page_rows(
                 inputs.len()
             )
         })?;
+
+    Ok(rows)
+}
+
+#[cfg(test)]
+pub(crate) async fn explain_reverse_identity_page(
+    pool: &PgPool,
+    inputs: &[ReverseIdentityStorageInput],
+    public_namespaces: &[String],
+) -> Result<Option<Value>> {
+    if inputs.is_empty() {
+        return Ok(None);
+    }
+    let rows = query_reverse_identity_page_rows(pool, inputs, public_namespaces, true).await?;
+    anyhow::ensure!(rows.len() == 1, "expected exactly one reverse page plan");
+    Ok(Some(rows[0].try_get("QUERY PLAN")?))
+}
+
+pub(super) async fn load_reverse_identity_page_rows(
+    pool: &PgPool,
+    inputs: &[ReverseIdentityStorageInput],
+    public_namespaces: &[String],
+) -> Result<Vec<ReverseIdentityPageRow>> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = query_reverse_identity_page_rows(pool, inputs, public_namespaces, false).await?;
 
     #[cfg(test)]
     super::primary_coherence_test_hooks::candidate_read_complete(pool).await?;
