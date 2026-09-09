@@ -1820,9 +1820,15 @@ so there is no persisted artifact to explain. See
   anchored to the chain lineage where it was derived, while the lookup attaches
   every association with the same `event_identity`. The top-level
   `canonicality_state` applies only to the returned normalized-event row; it does
-  not filter its associations. Retained associations from replaced forks can
-  therefore appear beside a canonical event. Consumers that require canonical-only
-  correlation must not treat association presence as a current relationship.
+  not filter its associations. Because every `event_identity` embeds
+  fork-distinct evidence, a returned event's associations always sit on the
+  event's own block; what the identity attach does not check is whether that
+  block is still canonical, so an event whose block was orphaned by head
+  publication and not yet cleared by an Interpret redo is returned with
+  associations still stamped `canonical`, and a retained losing-fork
+  association whose event a redo deleted attaches to no event. Consumers that
+  require canonical-only correlation must not treat association presence or
+  its stamped `canonicality_state` as a current relationship.
   When interpretation links one V1 registry resolver log to both the registry
   resource retained for reads and a distinct control resource, diagnostics
   returns both normalized rows and permits cursors anchored to either row;
