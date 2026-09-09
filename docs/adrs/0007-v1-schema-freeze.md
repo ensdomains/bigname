@@ -162,8 +162,9 @@ schema-migration newer than the legacy-schema drop that names no
 `bigname_phase` object unless each of its statements is one the check
 recognizes and every relation it names — the object it creates, alters,
 drops, or writes, any it inherits, partitions, references, copies, or reads,
-and any it names as a string in an expression (`nextval`, a `::regclass`
-cast) — carries a schema qualifier, quoted or bare; a statement or lexical
+any it names as a string in an expression (`nextval`, a `::regclass` cast),
+and any routine it calls by a bare name other than the functions PostgreSQL
+itself provides — carries a schema qualifier, quoted or bare; a statement or lexical
 form it cannot read (a `WITH`-prefixed write, a `DO` block, a block comment,
 a dollar-quoted, escape, or unicode string) is rejected rather than assumed
 safe, as is any spelling of the phase schema other than `bigname_phase`,
@@ -218,9 +219,11 @@ it: it incorporates the [derivation kind](../glossary.md#derivation-kind),
 identity suffix, and emission ordinal
 (`crates/adapters/src/schema_v2/normalized.rs`, `raw_log_event_identity`), so
 a covered adapter change can alter it for a raw log that did not change — and
-it embeds the numeric `source_manifest_id`,
-which is sequence-assigned, so installing the same baseline into a fresh
-database changes every identity even with nothing else changed
+it embeds the numeric `source_manifest_id`, an identity-column value
+(`schema-v2/baseline/04_manifests.sql`) that is not a cross-database
+contract: installing the same manifests into a fresh database may assign
+the same numbers — the paths are collected in filename order and upserted in
+that order — or different ones, and nothing promises either
 (`consumer-capabilities.md` says as much of an empty-schema replacement). An
 artifact that must survive a rebuild carries the retained manifest-ID mapping
 with it or does not key on `event_identity` at all. Across
