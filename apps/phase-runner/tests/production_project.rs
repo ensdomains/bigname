@@ -1550,6 +1550,130 @@ async fn authority_epoch_rebind_updates_the_current_registration_authority() -> 
     scratch.cleanup().await
 }
 
+// A wrapped ENSv1 subname has no registrar lease; the NameWrapper entry's expiry is the only
+// expiry the chain holds for it, so the registration serves that expiry instead of none.
+#[tokio::test]
+async fn wrapped_subname_serves_its_name_wrapper_expiry() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_wrapped_subname_expiry").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    let resource = Uuid::parse_str("00000000-0000-0000-0000-0000000000a7")?;
+    let binding = Uuid::parse_str("00000000-0000-0000-0000-0000000000b7")?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash,
+             labelhashes, normalizer_version, visibility_state, chain_id, block_hash,
+             block_number, canonicality_state
+         ) VALUES (
+             'ens:0xsub', 'ens', 'sub.alice.eth', ARRAY['sub','alice','eth'],
+             decode('00', 'hex'), '0xsub', ARRAY['0xsub-label','0xalice-label','0xeth'], $1,
+             'active', $2, $3, 2, 'canonical'
+         )",
+    )
+    .bind(NORMALIZER)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 2))
+    .execute(scratch.pool())
+    .await?;
+    insert_classifier_resource_and_binding(
+        scratch.pool(),
+        CHAIN,
+        "ens:0xsub",
+        "ens_v1",
+        resource,
+        binding,
+        2,
+        None,
+    )
+    .await?;
+    let resource_text = resource.to_string();
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        Some("ens:0xsub"),
+        Some(&resource_text),
+        "SubregistryChanged",
+        "ens_v1_registry_l1",
+        json!({
+            "node":"0xalice",
+            "child_node":"0xsub",
+            "labelhash":"0xsub-label",
+            "owner":OWNER
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        Some("ens:0xsub"),
+        Some(&resource_text),
+        "RegistrationGranted",
+        "ens_v1_registry_l1",
+        json!({"authority_kind":"registry_only","registrant":OWNER,"status":"registered"}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        Some("ens:0xsub"),
+        Some(&resource_text),
+        "AuthorityTransferred",
+        "ens_v1_registry_l1",
+        json!({"owner":OWNER}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        Some("ens:0xsub"),
+        Some(&resource_text),
+        "PermissionScopeChanged",
+        "ens_v1_wrapper_l1",
+        json!({"fuses":65536,"wrapper_state":"emancipated"}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        Some("ens:0xsub"),
+        Some(&resource_text),
+        "ExpiryChanged",
+        "ens_v1_wrapper_l1",
+        json!({"authority_kind":"wrapper","expiry":2_000_000_000_i64}),
+        json!({}),
+    )
+    .await?;
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let summary: Value = sqlx::query_scalar(
+        "SELECT declared_summary FROM name_current WHERE logical_name_id = 'ens:0xsub'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(summary["wrapper_state"], "emancipated");
+    assert_eq!(
+        summary["registration"]["expiry"], 2_000_000_000_i64,
+        "a wrapped subname's registration expiry is its NameWrapper expiry"
+    );
+    assert_eq!(summary["control"]["expiry"], "2033-05-18T03:33:20Z");
+    // The registrar-backed parent is untouched by the fallback.
+    let parent: Value = sqlx::query_scalar(
+        "SELECT declared_summary FROM name_current WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(parent["registration"]["expiry"].is_null());
+    scratch.cleanup().await
+}
+
 #[tokio::test]
 async fn expiry_fold_ignores_malformed_updates_and_clears_unrepresentable_numbers() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_expiry_fold").await?;

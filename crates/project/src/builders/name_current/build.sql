@@ -47,7 +47,13 @@
                                THEN selected_registration.after_state -> 'expiry'
                            ELSE COALESCE(to_jsonb(expiry.expiry_seconds), CASE
                                WHEN selected_registration.is_v2_lifecycle
-                                   THEN selected_registration.after_state -> 'expiry' END)
+                                   THEN selected_registration.after_state -> 'expiry' END,
+                               -- A wrapped ENSv1 name with no registrar lease (a wrapped
+                               -- subname) expires when its NameWrapper entry does; that is
+                               -- the only expiry the chain holds for it.
+                               CASE WHEN wrapper.wrapper_state IS NOT NULL
+                                     AND NOT COALESCE(selected_registration.is_v2_lifecycle, false)
+                                   THEN to_jsonb(wrapper_expiry.servable_expiry_seconds) END)
                        END,
                        'registered_at', registration_grant.block_timestamp,
                        'created_at', created.block_timestamp,
@@ -94,8 +100,13 @@
                                    selected_registration.after_state ->> 'status')
                            END,
                            'expiry', CASE
-                               WHEN expiry.expiry_seconds IS NULL THEN NULL
-                               ELSE to_jsonb(to_char(to_timestamp(expiry.expiry_seconds)
+                               WHEN COALESCE(expiry.expiry_seconds, CASE
+                                        WHEN wrapper.wrapper_state IS NOT NULL
+                                         AND NOT COALESCE(selected_registration.is_v2_lifecycle, false)
+                                            THEN wrapper_expiry.servable_expiry_seconds END)
+                                    IS NULL THEN NULL
+                               ELSE to_jsonb(to_char(to_timestamp(COALESCE(expiry.expiry_seconds,
+                                        wrapper_expiry.servable_expiry_seconds))
                                    AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
                            END,
                            'registrant', registrant.registrant,
@@ -415,7 +426,18 @@
                         AND (event.after_state ->> 'expiry')::numeric <=
                             18446744073709551615
                            THEN (event.after_state ->> 'expiry')::numeric
-                   END AS expiry_seconds
+                   END AS expiry_seconds,
+                   -- The same word as a servable timestamp: a wrapped name without a registrar
+                   -- lease (a wrapped subname) expires when its NameWrapper entry does. Zero
+                   -- means the parent set no expiry; words past the timestamp range are dropped
+                   -- like malformed registrar expiries.
+                   CASE
+                       WHEN jsonb_typeof(event.after_state -> 'expiry') = 'number'
+                        AND (event.after_state ->> 'expiry')::numeric =
+                            trunc((event.after_state ->> 'expiry')::numeric)
+                        AND (event.after_state ->> 'expiry')::numeric BETWEEN 1 AND 253402300799
+                           THEN (event.after_state ->> 'expiry')::bigint
+                   END AS servable_expiry_seconds
             FROM project_authority_events event
             WHERE event.resource_id = resource.resource_id
               AND event.event_kind = 'ExpiryChanged'
