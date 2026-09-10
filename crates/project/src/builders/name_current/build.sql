@@ -64,10 +64,12 @@
                                'authority_kind', NULL, 'authority_key', NULL,
                                'registrant', NULL, 'expiry', NULL
                            )
+                       -- A released ENSv2 registration keeps its lapsed expiry as a readable
+                       -- detail, like a released ENSv1 lease; nothing current remains.
                        WHEN selected_registration.event_kind = 'RegistrationReleased'
                         AND selected_authority.selected_authority_arm = 'ens_v2'
                        THEN jsonb_build_object('authority_kind', NULL, 'authority_key', NULL,
-                           'registrant', NULL, 'expiry', NULL) ELSE '{}'::jsonb END,
+                           'registrant', NULL) ELSE '{}'::jsonb END,
                    'control', CASE
                        WHEN selected_authority.known_ownerless_registry
                            THEN jsonb_build_object('status', 'unregistered')
@@ -480,6 +482,11 @@
                            THEN NULL
                        WHEN selected_registration.is_v2_lifecycle AND event.event_kind = 'TokenControlTransferred'
                            THEN event.after_state ->> 'to'
+                       -- A numeric lease disclosed by a later readable observation has no
+                       -- name-attached registry transfer: its registry owner was proven equal to
+                       -- the registrar owner at disclosure and travels in the snapshot's getter.
+                       WHEN event.event_kind = 'RegistrationGranted'
+                           THEN event.after_state ->> 'owner_getter'
                        ELSE COALESCE(
                            event.after_state ->> 'registry_owner',
                            event.after_state ->> 'owner'
@@ -492,6 +499,8 @@
                  OR (selected_registration.is_v2_lifecycle AND event.event_kind = 'TokenControlTransferred')
                  OR (event.event_kind = 'SurfaceBound' AND event.after_state @>
                      '{"state_derived":true,"authority_kind":"registry_only"}')
+                 OR (event.event_kind = 'RegistrationGranted' AND event.after_state @>
+                     '{"state_derived":true,"registrar_surface_snapshot":true}')
               )
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
@@ -758,8 +767,4 @@
         ) support
         WHERE surface.visibility_state = 'active'
           AND surface.raw_name <> ''
-          AND NOT COALESCE(
-              registration_current.event_kind = 'RegistrationReleased' AND registration_current.after_state ->> 'source_event' = 'RegistryPathExpired' AND registration_current.after_state ->> 'derived_from' = 'interpreter_state' AND registration_current.after_state ->> 'terminal_reason' = 'registry_name_binding_expired' AND
-              (selected_authority.selected_authority_arm = 'ens_v2' OR (selected_authority.selected_authority_arm IS NULL AND selected_authority.unsupported_reason = 'current_authority_not_projected')) AND (binding.resource_id IS NULL OR registration_current.resource_id = binding.resource_id), FALSE
-          )
         ORDER BY surface.logical_name_id

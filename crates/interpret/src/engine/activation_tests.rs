@@ -280,9 +280,11 @@ async fn faithful_unwrapped_migration_retires_all_v1_bindings() -> TestResult {
         assert_eq!((v1, v2), (0, 1), "cleanup must retire every V1 binding");
         let (boundaries, transfers): (i64, i64) = sqlx::query_as(
             "SELECT count(*) FILTER (WHERE event_kind = 'MigrationApplied' AND consumer_visibility = 'activated'),
-                    count(*) FILTER (WHERE event_kind = 'TokenControlTransferred' AND source_family = 'ens_v1_registrar_l1')
+                    count(*) FILTER (WHERE event_kind = $4 AND source_family = 'ens_v1_registrar_l1')
              FROM normalized_events WHERE chain_id = $1 AND logical_name_id = $2 AND block_number = $3",
-        ).bind(CHAIN).bind(&logical_name_id).bind(MIGRATION_BLOCK).fetch_one(pool).await?;
+        ).bind(CHAIN).bind(&logical_name_id).bind(MIGRATION_BLOCK)
+        .bind(bigname_adapters::schema_v2::seam::TOKEN_CONTROL_TRANSFERRED_EVENT_KIND)
+        .fetch_one(pool).await?;
         assert_eq!(
             (boundaries, transfers),
             (1, 2),

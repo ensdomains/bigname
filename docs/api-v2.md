@@ -134,7 +134,8 @@ step-3-gate vocabulary needed by the route schemas:
 An admitted controller-free ENSv1 numeric registration can retain its resource and token lifecycle
 before its plaintext name is known. Such normalized events have no logical-name attachment.
 Once admitted name evidence and the current ENSv1 authority establish a name binding, normal
-name reads can use that registrar owner and expiry. Earlier resource-only events remain unchanged;
+name reads can use that registrar owner and expiry, and `owner` reports the registry owner proven
+equal to it at disclosure until a later name-attached registry transfer replaces it. Earlier resource-only events remain unchanged;
 name evidence alone does not reactivate a dormant registrar authority. See [storage semantics](storage.md)
 for the numeric registration and restoration rules. This does not widen route or history coverage.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f)
@@ -941,6 +942,13 @@ projection may change too. The
 resource-less late event does not restore `name_current.resource_id`, so name
 and record reads for the released or expired name continue to expose no current
 record inventory.
+
+An ENSv2 registration that lapses by path expiry is served like one released by
+`unregister`: `GET /v2/names/{name}` keeps answering with `registration_status`
+`released`, the registration identity, timestamps and the lapsed `expires_at`,
+without a current owner, resolver or records, and `GET /v2/names/{name}/history`
+keeps serving the name's history. Only a name that never had a readable surface
+answers `404 not_found`.
 
 Every collection uses `cursor`, `next_cursor`, `page_size`, nullable
 `total_count`, and `has_more`. Default `page_size` is 50; maximum is 200.

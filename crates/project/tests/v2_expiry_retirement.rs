@@ -427,6 +427,16 @@ async fn make_registered_lifecycle_bindingless(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+async fn current_name_status(pool: &PgPool) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT declared_summary #>> '{registration,status}' FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(MAIN)
+    .fetch_optional(pool)
+    .await?
+    .flatten())
+}
+
 async fn current_name_and_permission_counts(pool: &PgPool) -> Result<(i64, i64)> {
     Ok(sqlx::query_as(
         "SELECT (SELECT count(*) FROM name_current WHERE logical_name_id = $1),
@@ -442,17 +452,20 @@ async fn current_name_and_permission_counts(pool: &PgPool) -> Result<(i64, i64)>
 #[rustfmt::skip]
 async fn formerly_named_revival_restores_permissions_without_resurrecting_name() -> Result<()> {
     let (incremental_db, incremental) = database("v2_expiry_flag_only_incremental").await?; seed_formerly_named_flag_only_renewal(&incremental).await?;
+    // The path-expired name keeps a `released` row (details and history stay readable); only
+    // its effective permissions retire, and the flag-only revival readmits permissions without
+    // reactivating the name.
     let live = run(&incremental, 100, None).await?; assert_eq!(current_name_and_permission_counts(&incremental).await?, (1, 1));
-    let retired = run(&incremental, 101, Some(live)).await?; assert_eq!(current_name_and_permission_counts(&incremental).await?, (0, 0));
-    run(&incremental, 102, Some(retired)).await?; assert_eq!(current_name_and_permission_counts(&incremental).await?, (0, 1));
+    let retired = run(&incremental, 101, Some(live)).await?; assert_eq!(current_name_and_permission_counts(&incremental).await?, (1, 0)); assert_eq!(current_name_status(&incremental).await?, Some("released".into()));
+    run(&incremental, 102, Some(retired)).await?; assert_eq!(current_name_and_permission_counts(&incremental).await?, (1, 1)); assert_eq!(current_name_status(&incremental).await?, Some("released".into()));
     let (fresh_db, fresh) = database("v2_expiry_flag_only_fresh").await?; seed_formerly_named_flag_only_renewal(&fresh).await?; run(&fresh, 102, None).await?;
-    assert_eq!(current_name_and_permission_counts(&fresh).await?, (0, 1)); assert_eq!(snapshot(&incremental).await?, snapshot(&fresh).await?);
+    assert_eq!(current_name_and_permission_counts(&fresh).await?, (1, 1)); assert_eq!(snapshot(&incremental).await?, snapshot(&fresh).await?);
     let (emitted_db, emitted) = database("v2_expiry_flag_only_emitted_incremental").await?; seed_formerly_named_flag_only_renewal(&emitted).await?; omit_silent_renewal_status(&emitted).await?;
     let emitted_live = run(&emitted, 100, None).await?; assert_eq!(current_name_and_permission_counts(&emitted).await?, (1, 1));
-    let emitted_retired = run(&emitted, 101, Some(emitted_live)).await?; assert_eq!(current_name_and_permission_counts(&emitted).await?, (0, 0));
-    run(&emitted, 102, Some(emitted_retired)).await?; assert_eq!(current_name_and_permission_counts(&emitted).await?, (0, 1));
+    let emitted_retired = run(&emitted, 101, Some(emitted_live)).await?; assert_eq!(current_name_and_permission_counts(&emitted).await?, (1, 0));
+    run(&emitted, 102, Some(emitted_retired)).await?; assert_eq!(current_name_and_permission_counts(&emitted).await?, (1, 1)); assert_eq!(current_name_status(&emitted).await?, Some("released".into()));
     let (emitted_fresh_db, emitted_fresh) = database("v2_expiry_flag_only_emitted_fresh").await?; seed_formerly_named_flag_only_renewal(&emitted_fresh).await?; omit_silent_renewal_status(&emitted_fresh).await?; run(&emitted_fresh, 102, None).await?;
-    assert_eq!(current_name_and_permission_counts(&emitted_fresh).await?, (0, 1)); assert_eq!(snapshot(&emitted).await?, snapshot(&emitted_fresh).await?);
+    assert_eq!(current_name_and_permission_counts(&emitted_fresh).await?, (1, 1)); assert_eq!(snapshot(&emitted).await?, snapshot(&emitted_fresh).await?);
     emitted_fresh_db.cleanup().await?; emitted_db.cleanup().await?; fresh_db.cleanup().await?; incremental_db.cleanup().await?; Ok(())
 }
 
@@ -506,7 +519,8 @@ async fn contested_name_renewal_revives_losing_resource_permissions() -> Result<
 
     let live = run(&pool, 100, None).await?;
     let retired = run(&pool, 101, Some(live)).await?;
-    assert_eq!(current_name_and_permission_counts(&pool).await?, (0, 0));
+    assert_eq!(current_name_and_permission_counts(&pool).await?, (1, 0));
+    assert_eq!(current_name_status(&pool).await?.as_deref(), Some("released"));
     run(&pool, 102, Some(retired)).await?;
 
     let current_name_resource: String =
@@ -918,7 +932,9 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     .bind(RESOURCE).bind(MAIN)
     .fetch_one(&incremental)
     .await?;
-    assert_eq!(live_state, (5, 1, 1, Some("operator_approval_surfaces_not_ingested".into()), Some("active".into()), Some("registered".into()), Some(OWNER.into()), Some("RegistrationGranted".into()), Some(OWNER.into()), Some("1800000000".into()), Some("ens_v2_registry".into())));
+    // Six names publish at block 100: the stale reservation already lapsed by path expiry
+    // keeps a released row instead of disappearing.
+    assert_eq!(live_state, (6, 1, 1, Some("operator_approval_surfaces_not_ingested".into()), Some("active".into()), Some("registered".into()), Some(OWNER.into()), Some("RegistrationGranted".into()), Some(OWNER.into()), Some("1800000000".into()), Some("ens_v2_registry".into())));
     let stale_state: (i64, i64, i64, Option<String>, Option<String>) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM name_current WHERE logical_name_id = $1),
                 (SELECT count(*) FROM permissions_current WHERE resource_id = $2::uuid),
@@ -931,7 +947,11 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     .bind(STALE).bind(STALE_RESOURCE)
     .fetch_one(&incremental)
     .await?;
-    assert_eq!(stale_state, (0, 0, 1, Some("resource_permission_authority_not_projected".into()), None));
+    // The lapsed reservation's released row carries the same coverage reason as the other
+    // binding-less reservation rows (reserved.eth, detached.eth).
+    assert_eq!(stale_state, (1, 0, 1, Some("resource_permission_authority_not_projected".into()), Some("current_authority_not_projected".into())));
+    let stale_status: Option<String> = sqlx::query_scalar("SELECT declared_summary #>> '{registration,status}' FROM name_current WHERE logical_name_id = $1").bind(STALE).fetch_one(&incremental).await?;
+    assert_eq!(stale_status.as_deref(), Some("released"));
     let retired = run(&incremental, 101, Some(live)).await?;
     let (retired_db, retired_fresh) = fresh("v2_expiry_retired_fresh", 101).await?;
     assert_eq!(snapshot(&incremental).await?, snapshot(&retired_fresh).await?);
@@ -949,7 +969,8 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     .bind(MAIN).bind(GENERIC).bind(RESERVATION).bind(MIXED).bind(RESOURCE).bind(DETACHED_RESOURCE)
     .fetch_one(&incremental)
     .await?;
-    assert_eq!(retired_state, (0, 1, 1, 1, 0, 0, Some("operator_approval_surfaces_not_ingested".into())));
+    assert_eq!(retired_state, (1, 1, 1, 1, 0, 0, Some("operator_approval_surfaces_not_ingested".into())));
+    assert_eq!(current_name_status(&incremental).await?.as_deref(), Some("released"));
     let reservation: (Option<String>, Option<String>, Option<String>, Option<String>) = sqlx::query_as("SELECT declared_summary -> 'registration' ->> 'status', declared_summary -> 'control' ->> 'status', declared_summary -> 'registration' ->> 'latest_event_kind', declared_summary -> 'registration' ->> 'expiry' FROM name_current WHERE logical_name_id = $1").bind(RESERVATION).fetch_one(&incremental).await?;
     assert_eq!(reservation, (Some("reserved".into()), Some("reserved".into()), Some("RegistrationReserved".into()), Some("1900000000".into())));
     let generic: (Option<String>, Option<String>, Option<String>) = sqlx::query_as("SELECT declared_summary -> 'registration' ->> 'status', declared_summary -> 'control' ->> 'status', declared_summary -> 'resolver' ->> 'address' FROM name_current WHERE logical_name_id = $1").bind(GENERIC).fetch_one(&incremental).await?;
@@ -1021,5 +1042,5 @@ async fn regenerated_token_expiry_retires_the_predecessor_grant() -> Result<()> 
     sqlx::query("UPDATE normalized_events SET after_state = jsonb_set(after_state, '{token_id}', to_jsonb($1::text)) WHERE logical_name_id = $2 AND block_number = 101 AND event_kind = 'RegistrationReleased' AND after_state ->> 'source_event' = 'RegistryPathExpired'").bind(regenerated).bind(MAIN).execute(&pool).await?;
     run(&pool, 101, None).await?;
     let current: i64 = sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1").bind(MAIN).fetch_one(&pool).await?;
-    assert_eq!(current, 0); database.cleanup().await?; Ok(())
+    assert_eq!(current, 1); assert_eq!(current_name_status(&pool).await?.as_deref(), Some("released")); database.cleanup().await?; Ok(())
 }

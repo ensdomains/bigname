@@ -89,10 +89,11 @@ pub(crate) enum HistoryEventType {
     Record,
     PrimaryName,
     Permission,
+    Subregistry,
 }
 
 impl HistoryEventType {
-    pub(crate) const ALL: [Self; 10] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::Registration,
         Self::Renewal,
         Self::Release,
@@ -103,6 +104,7 @@ impl HistoryEventType {
         Self::Record,
         Self::PrimaryName,
         Self::Permission,
+        Self::Subregistry,
     ];
 
     pub(crate) const fn as_str(self) -> &'static str {
@@ -117,6 +119,7 @@ impl HistoryEventType {
             Self::Record => "record",
             Self::PrimaryName => "primary_name",
             Self::Permission => "permission",
+            Self::Subregistry => "subregistry",
         }
     }
 
@@ -137,6 +140,7 @@ impl HistoryEventType {
                 "RolesChanged",
                 "EACRolesChanged",
             ],
+            Self::Subregistry => &["SubregistryChanged"],
         }
     }
 }
@@ -513,6 +517,7 @@ mod tests {
         assert_wire(HistoryEventType::Record, "record");
         assert_wire(HistoryEventType::PrimaryName, "primary_name");
         assert_wire(HistoryEventType::Permission, "permission");
+        assert_wire(HistoryEventType::Subregistry, "subregistry");
     }
 
     #[test]
@@ -528,6 +533,7 @@ mod tests {
             HistoryEventType::Record,
             HistoryEventType::PrimaryName,
             HistoryEventType::Permission,
+            HistoryEventType::Subregistry,
         ] {
             for storage_kind in event_type.storage_event_kinds() {
                 assert_eq!(

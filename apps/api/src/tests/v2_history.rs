@@ -927,6 +927,62 @@ async fn v2_get_history_rejects_cross_name_and_cross_scope_cursor_reuse() -> Res
 }
 
 #[tokio::test]
+async fn v2_get_history_serves_subregistry_changes_as_registration_rows() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    seed_v2_history_blocks(&database, 112..=112).await?;
+    let mut event = v2_history_event(
+        "history-subregistry",
+        None,
+        Some(Uuid::from_u128(0x7100)),
+        "SubregistryChanged",
+        112,
+    );
+    event.after_state = json!({
+        "subregistry": "0x0000000000000000000000000000000000000abd",
+    });
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event])
+        .await
+        .context("failed to upsert subregistry history event")?;
+
+    let unfiltered = v2_history_payload_for_database(
+        &database,
+        "/v2/names/history.eth/history?page_size=20",
+    )
+    .await?;
+    let rows = unfiltered["data"].as_array().expect("data");
+    assert_eq!(rows.len(), 11);
+    assert_eq!(rows[0]["type"], json!("subregistry"));
+    assert_eq!(rows[0]["block_number"], json!(112));
+    assert_eq!(
+        rows[0]["registration_id"],
+        json!(Uuid::from_u128(0x7100).to_string())
+    );
+
+    let filtered = v2_history_payload_for_database(
+        &database,
+        "/v2/events?name=history.eth&type=subregistry&page_size=20",
+    )
+    .await?;
+    assert_eq!(
+        history_types(filtered["data"].as_array().expect("data")),
+        vec!["subregistry"]
+    );
+    let registration_scope = v2_history_payload_for_database(
+        &database,
+        "/v2/names/history.eth/history?scope=registration&page_size=20",
+    )
+    .await?;
+    assert_eq!(
+        history_types(registration_scope["data"].as_array().expect("data"))[0],
+        "subregistry"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_history_scope_filters_name_registration_and_both() -> Result<()> {
     let (database, name_scope) =
         v2_history_payload("/v2/names/history.eth/history?scope=name&page_size=20").await?;

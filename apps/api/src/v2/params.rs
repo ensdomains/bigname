@@ -187,6 +187,7 @@ fn parse_event_type(value: Option<&str>) -> V2Result<Option<HistoryEventType>> {
         Some("record") => Ok(Some(HistoryEventType::Record)),
         Some("primary_name") => Ok(Some(HistoryEventType::PrimaryName)),
         Some("permission") => Ok(Some(HistoryEventType::Permission)),
+        Some("subregistry") => Ok(Some(HistoryEventType::Subregistry)),
         Some(_) => Err(invalid_parameter("type")),
     }
 }

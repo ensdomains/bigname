@@ -901,7 +901,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   [`GET /v2/events`](#get-v2events). Rows never include before/after
   state, raw normalized-event payloads, or a `data` change object. Friendly
   `type` vocabulary: `registration`, `renewal`, `release`, `expiry`,
-  `transfer`, `authority`, `resolver`, `record`, `primary_name`, `permission`.
+  `transfer`, `authority`, `resolver`, `record`, `primary_name`, `permission`,
+  `subregistry` (an ENSv2 registration's subregistry link set or cleared).
   Raw upstream or pipeline event kinds are diagnostics-only and are not emitted
   by this product route. Slice 1 excludes every correlation-dependent normalized
   row with `consumer_visibility=candidate`, including a familiar event kind whose

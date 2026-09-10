@@ -17597,12 +17597,14 @@ async fn expiry_release_redo_restores_deleted_name_like_fresh_rebuild() -> Resul
         seed_expiry_release_redo_fixture(pool).await?;
     }
     publish_and_retract_expiry_fixture(incremental.pool()).await?;
-    assert_eq!(expiry_fixture_counts(incremental.pool()).await?.0, 0);
+    // The path-expired name keeps a released row; the redo below must restore the reopened
+    // (active) row identically to a fresh rebuild.
+    assert_eq!(expiry_fixture_counts(incremental.pool()).await?.0, 1);
     for pool in [incremental.pool(), fresh.pool()] {
         seed_later_expiry_fixture_event(pool).await?;
     }
     advance_expiry_fixture_beyond_redo(incremental.pool()).await?;
-    assert_eq!(expiry_fixture_counts(incremental.pool()).await?.0, 0);
+    assert_eq!(expiry_fixture_counts(incremental.pool()).await?.0, 1);
     for pool in [incremental.pool(), fresh.pool()] {
         orphan_expiry_release_and_reopen_binding(pool).await?;
     }
@@ -17744,12 +17746,15 @@ async fn expiry_release_redo_uses_displaced_branch_timestamps_for_name_scope() -
         3,
     )
     .await?;
-    let expired_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
-            .bind(NAME)
-            .fetch_one(incremental.pool())
-            .await?;
-    assert_eq!(expired_count, 0);
+    let expired: Option<String> = sqlx::query_scalar(
+        "SELECT declared_summary #>> '{registration,status}' FROM name_current
+         WHERE logical_name_id = $1",
+    )
+    .bind(NAME)
+    .fetch_optional(incremental.pool())
+    .await?
+    .flatten();
+    assert_eq!(expired.as_deref(), Some("released"));
 
     for pool in [incremental.pool(), fresh.pool()] {
         sqlx::query(
@@ -18687,18 +18692,18 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
         3,
     )
     .await?;
-    let expired_child_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
-            .bind(CHILD)
-            .fetch_one(incremental.pool())
-            .await?;
-    assert_eq!(expired_child_count, 0);
-    let expired_grandchild_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
-            .bind(GRANDCHILD)
-            .fetch_one(incremental.pool())
-            .await?;
-    assert_eq!(expired_grandchild_count, 0);
+    // Descendants released by the ancestor's path expiry keep released rows.
+    for descendant in [CHILD, GRANDCHILD] {
+        let expired_status: Option<String> = sqlx::query_scalar(
+            "SELECT declared_summary #>> '{registration,status}' FROM name_current
+             WHERE logical_name_id = $1",
+        )
+        .bind(descendant)
+        .fetch_optional(incremental.pool())
+        .await?
+        .flatten();
+        assert_eq!(expired_status.as_deref(), Some("released"));
+    }
 
     for pool in [incremental.pool(), fresh.pool()] {
         sqlx::query(
@@ -19172,12 +19177,19 @@ async fn expiry_release_redo_restores_ownerless_reservation_like_fresh_rebuild()
         2,
     )
     .await?;
-    let expired_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
-            .bind(NAME)
-            .fetch_one(incremental.pool())
-            .await?;
-    assert_eq!(expired_count, 0);
+    let expired: Option<String> = sqlx::query_scalar(
+        "SELECT declared_summary #>> '{registration,status}' FROM name_current
+         WHERE logical_name_id = $1",
+    )
+    .bind(NAME)
+    .fetch_optional(incremental.pool())
+    .await?
+    .flatten();
+    assert_eq!(
+        expired.as_deref(),
+        Some("released"),
+        "a path-expired name keeps a released row instead of disappearing"
+    );
     run_project(
         incremental.pool(),
         CHAIN,

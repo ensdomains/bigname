@@ -1552,9 +1552,15 @@ mod numeric_short_lease_connected {
             summary["registration"]["registrant"],
             expected["expected_owner"]
         );
+        // The public name record's `owner` is read from `control.registry_owner`; a disclosed
+        // numeric lease must publish the proven registry owner, not only the registrant.
+        assert_eq!(
+            summary["control"]["registry_owner"],
+            expected["expected_owner"]
+        );
         assert_eq!(summary["registration"]["expiry"], expected["v1_expiry"]);
         assert_eq!(
-            summary["resolver"]["address"],
+            summary.pointer("/resolver/address").cloned().unwrap_or(serde_json::Value::Null),
             expected["expected_resolver"]
         );
         let registered_at: i64 = sqlx::query_scalar("SELECT extract(epoch FROM (declared_summary #>> '{registration,registered_at}')::timestamptz)::bigint FROM name_current WHERE logical_name_id=$1")
@@ -1647,7 +1653,7 @@ mod numeric_short_lease_connected {
         payload["abi"]["events"].as_array_mut().unwrap().push(json!({
             "name":"NameRegistered",
             "fragment":"event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
-            "emitter_roles":["controller"],"normalized_events":["PreimageObserved"],
+            "emitter_roles":["controller"],"normalized_events":[adapter::seam::PREIMAGE_OBSERVATION_EVENT_KIND],
         }));
         manifest.payload_json = serde_json::to_string(&payload)?;
         let mut admission = input
@@ -1754,7 +1760,8 @@ mod numeric_short_lease_connected {
                         output
                             .normalized_events
                             .iter()
-                            .any(|event| event.event_kind == "TokenControlTransferred"
+                            .any(|event| event.event_kind
+                                == adapter::seam::TOKEN_CONTROL_TRANSFERRED_EVENT_KIND
                                 && event.log_index == Some(4)
                                 && event.resource_id == registrar_resource)
                     );
