@@ -126,7 +126,18 @@ impl State {
                 continue;
             };
             let next_authority = if release_is_active {
-                let next = self.v1_registry_authority_if_authentic(&key);
+                // A NameWrapper holds the registry node only on behalf of the lease it wrapped
+                // (wrapETH2LD reclaims the node for the wrapper). Once that lease lapses past
+                // grace there is no ENSv1 authority left to fall back to: reviving the
+                // remembered registry-only custody would keep serving the name as registered.
+                let lapsed_wrapper_custody = previous_authority
+                    .as_ref()
+                    .is_some_and(|active| active.authority_source_family == "ens_v1_wrapper_l1");
+                let next = if lapsed_wrapper_custody {
+                    None
+                } else {
+                    self.v1_registry_authority_if_authentic(&key)
+                };
                 self.activate_v1_authority(namespace, namehash, next);
                 self.v1_name(namespace, namehash)
             } else {
