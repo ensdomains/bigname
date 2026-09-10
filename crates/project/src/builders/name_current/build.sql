@@ -742,15 +742,65 @@
                          AND registry_manifest.namespace = successor.namespace
                          AND registry_manifest.chain_id = successor.chain_id
                          AND registry_manifest.deployment_label = 'ens_v2_sepolia_post_audit'
-                         AND EXISTS (
-                             SELECT 1 FROM jsonb_array_elements(COALESCE(
-                                 registry_manifest.manifest_payload -> 'contracts', '[]'::jsonb
-                             )) declaration
-                             WHERE declaration ->> 'role' = 'registry'
-                               AND lower(declaration ->> 'address') = lower(registry_address.address)
-                               AND (declaration ->> 'start_block' IS NULL
-                                    OR (declaration ->> 'start_block')::bigint <= successor.block_number)
+                         AND (
+                             -- The successor registry is either declared in the admitted
+                             -- registry profile or was created on chain by an admitted
+                             -- migration (LockedMigrationController / WrapperRegistry deploy a
+                             -- WrapperRegistry per migrated name and announce it), which is the
+                             -- same registry-creation proof the authority builder accepts for
+                             -- positive child registrations.
+                             EXISTS (
+                                 SELECT 1 FROM jsonb_array_elements(COALESCE(
+                                     registry_manifest.manifest_payload -> 'contracts', '[]'::jsonb
+                                 )) declaration
+                                 WHERE declaration ->> 'role' = 'registry'
+                                   AND lower(declaration ->> 'address') = lower(registry_address.address)
+                                   AND (declaration ->> 'start_block' IS NULL
+                                        OR (declaration ->> 'start_block')::bigint <= successor.block_number)
+                             )
+                             OR EXISTS (
+                                 SELECT 1
+                                 FROM migration_discovery_associations created
+                                 JOIN discovery_edges created_edge
+                                   ON created_edge.chain_id = created.chain_id
+                                  AND created_edge.edge_kind = 'registry_announcement'
+                                  AND created_edge.to_contract_instance_id =
+                                      created.registry_contract_instance_id
+                                  AND created_edge.source_manifest_id = created.source_manifest_id
+                                  AND created_edge.active_from_block_number = created.block_number
+                                  AND created_edge.active_from_block_hash = created.block_hash
+                                  AND (created_edge.provenance ->> 'transaction_index')::bigint =
+                                      created.transaction_index
+                                  AND (created_edge.provenance ->> 'log_index')::bigint =
+                                      created.log_index
+                                 JOIN chain_lineage created_lineage
+                                   ON created_lineage.chain_id = created.chain_id
+                                  AND created_lineage.block_hash = created.block_hash
+                                  AND created_lineage.block_number = created.block_number
+                                 WHERE created.chain_id = successor.chain_id
+                                   AND created.correlation_kind = 'migration_registry_creation'
+                                   AND created.registry_contract_instance_id =
+                                       registry_address.contract_instance_id
+                                   AND lower(created.registry_address) =
+                                       lower(registry_address.address)
+                                   AND created.block_number <= successor.block_number
+                                   AND created.canonicality_state IN ('canonical', 'safe', 'finalized')
+                                   AND created_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                                   AND created_edge.canonicality_state IN ('canonical', 'safe', 'finalized')
+                                   AND (created_edge.active_to_block_number IS NULL
+                                        OR created_edge.active_to_block_number >= successor.block_number)
+                             )
                          )
+                   ) OR (
+                       -- A positive ENSv2 child registration is already proven by the authority
+                       -- builder against a migration-created, announced registry under a
+                       -- migrated parent; the exact profile follows that chain of custody.
+                       -- Every operand is coalesced: a NULL here would make `supported`
+                       -- NULL and the support CASE below would fall through to 'supported'.
+                       COALESCE(selected_authority.selected_authority_arm, '') = 'ens_v2'
+                       AND selected_authority.unsupported_reason IS NULL
+                       AND COALESCE(selected_authority.authority_proof_kind, '') =
+                           'positive_v2_child_registration'
                    ) AS supported
         ) ens_v2_profile ON TRUE
         CROSS JOIN LATERAL (

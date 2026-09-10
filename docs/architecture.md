@@ -235,9 +235,18 @@ Project matches the selected proof's event ID and identity, logical name, chain,
 and namespace, then requires its successor binding and resource to equal the
 current selected ENSv2 binding and resource. The boundary's source manifest and
 the successor-resource registry event's source manifest must be admitted and
-active. The registry event must match the post-audit manifest's declared registry
-address and applicable start block, including its contract-instance address
-identity. Candidate and noncanonical events remain excluded by Project staging.
+active. The registry event must match either the post-audit manifest's declared
+registry address and applicable start block, including its contract-instance
+address identity, or a registry the migration itself created on chain: the
+locked migration deploys and announces a `WrapperRegistry` per migrated name
+(`LockedMigrationController` for `.eth` 2LDs, the parent's `WrapperRegistry` for
+emancipated children), and that registry qualifies through the same
+`migration_registry_creation` association and admitted `registry_announcement`
+edge the positive child proof requires. A positive ENSv2 child registration
+proven under such a registry qualifies the same way, so names migrated through
+the wrapper receiver serve the exact profile instead of
+`ensv2_exact_name_profile_shadow`. Candidate and noncanonical events remain
+excluded by Project staging.
 Historical boundary evidence cannot qualify an unrelated later current resource.
 The existing ordinary registry-plus-registrar path and every authority refusal
 remain intact. This changes no resolver feature admission or read routing.

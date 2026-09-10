@@ -3613,6 +3613,223 @@ async fn parent_reachability_filters_before_positive_v2_child_integrity() -> Res
     Ok(())
 }
 
+// A child migrated through the wrapper receiver lands in the WrapperRegistry its parent's
+// migration created (LockedMigrationController / WrapperRegistry deploy one per migrated name
+// and announce it). That registry is the child's successor registry, so the migration branch
+// of the exact-name profile accepts it on the same registry-creation proof the authority
+// builder uses; without that proof the undeclared registry stays shadowed.
+#[tokio::test]
+async fn migrated_child_in_a_migration_created_registry_serves_the_exact_profile() -> Result<()> {
+    let scratch =
+        ScratchDatabase::create("project_exact_profile_migration_created_registry").await?;
+    let chain = "ethereum-sepolia";
+    seed_lineage(scratch.pool(), chain, 5).await?;
+    declare_sepolia_post_audit_profile(scratch.pool(), chain).await?;
+    let registry_manifest = insert_namespaced_manifest(
+        scratch.pool(),
+        "ens",
+        chain,
+        "ens_v2_registry_l1",
+        1,
+        "ens_v2_sepolia_post_audit",
+        "tests/project-exact-profile-created-registry.toml",
+        json!({"contracts":[]}),
+    )
+    .await?;
+    insert_namespaced_manifest(
+        scratch.pool(),
+        "ens",
+        chain,
+        "ens_v2_registrar_l1",
+        1,
+        "ens_v2_sepolia_post_audit",
+        "tests/project-exact-profile-created-registrar.toml",
+        json!({"capability_flags":{"exact_name_profile":{"status":"shadow"}}}),
+    )
+    .await?;
+    let migration_manifest = insert_namespaced_manifest(
+        scratch.pool(),
+        "ens",
+        chain,
+        "ens_v2_migration_l1",
+        1,
+        "ens_v2_sepolia_post_audit",
+        "tests/project-exact-profile-created-migration.toml",
+        json!({}),
+    )
+    .await?;
+    let logical_name_id = format!(
+        "ens:{:#x}",
+        raw_namehash(&[b"child", b"created-registry", b"eth"])
+    );
+    seed_authority_classifier_case(
+        scratch.pool(),
+        chain,
+        &logical_name_id,
+        EnsArmSet::Both,
+        EnsArmSet::Both,
+        1,
+        Some(5),
+    )
+    .await?;
+    let (binding, resource, proof_identity) = insert_activated_authority_proof(
+        scratch.pool(),
+        chain,
+        &logical_name_id,
+        "locked_child",
+        None,
+    )
+    .await?;
+
+    // The successor registry: created at block 1 by the parent's migration, announced there,
+    // and never declared in the registry manifest.
+    let registry_instance = Uuid::new_v4();
+    let registry_address = "0x00000000000000000000000000000000000000c7";
+    sqlx::query(
+        "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+         VALUES ($1, $2, 'contract')",
+    )
+    .bind(registry_instance)
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (
+             contract_instance_id, chain_id, address, active_from_block_number,
+             active_from_block_hash, source_manifest_id
+         ) VALUES ($1, $2, $3, 1, $4, $5)",
+    )
+    .bind(registry_instance)
+    .bind(chain)
+    .bind(registry_address)
+    .bind(block_hash(chain, 1))
+    .bind(registry_manifest)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO discovery_edges (
+             chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id,
+             discovery_source, admission_basis, source_manifest_id,
+             active_from_block_number, active_from_block_hash, canonicality_state,
+             provenance
+         ) VALUES (
+             $1, 'registry_announcement', $2, $2, 'RegistryCreated',
+             'reachable_from_root', $3, 1, $4, 'canonical',
+             '{\"transaction_index\":0,\"log_index\":0}'::jsonb
+         )",
+    )
+    .bind(chain)
+    .bind(registry_instance)
+    .bind(registry_manifest)
+    .bind(block_hash(chain, 1))
+    .execute(scratch.pool())
+    .await?;
+    let insert_creation = |pool: PgPool| async move {
+        sqlx::query(
+            "INSERT INTO migration_discovery_associations (
+                 logical_edge_identity, migration_correlation_id, correlation_kind,
+                 registry_contract_instance_id, registry_address, source_manifest_id,
+                 evidence_refs, chain_id, block_number, block_hash, transaction_hash,
+                 transaction_index, log_index, canonicality_state, consumer_visibility,
+                 interpreter_content_hash
+             ) VALUES (
+                 $1, $2, 'migration_registry_creation', $3, lower($4), $5,
+                 '[{\"event_identity\":\"created-registry-proof\"}]'::jsonb,
+                 $6, 1, $7, $8, 0, 0, 'canonical', 'candidate', $9
+             )",
+        )
+        .bind(format!("{chain}:created-registry-edge"))
+        .bind(format!("{chain}:created-registry-correlation"))
+        .bind(registry_instance)
+        .bind(registry_address)
+        .bind(registry_manifest)
+        .bind(chain)
+        .bind(block_hash(chain, 1))
+        .bind(format!("{chain}:created-registry-tx"))
+        .bind(INTERPRETER_CONTENT_HASH)
+        .execute(&pool)
+        .await
+        .map(|_| ())
+    };
+    insert_creation(scratch.pool().clone()).await?;
+    // The child's boundary names that registry as its successor registry, and the successor
+    // binding is bound by that registry in the same transaction.
+    sqlx::query(
+        "UPDATE normalized_events
+         SET source_manifest_id = $2,
+             after_state = after_state
+                 || jsonb_build_object('successor_registry_contract_instance_id', $3::text)
+         WHERE event_identity = $1",
+    )
+    .bind(&proof_identity)
+    .bind(migration_manifest)
+    .bind(registry_instance)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, resource_id, event_kind,
+             source_family, manifest_version, source_manifest_id, chain_id, block_number,
+             block_hash, transaction_hash, transaction_index, log_index, raw_fact_ref,
+             derivation_kind, canonicality_state, before_state, after_state
+         ) VALUES (
+             $1, 'ens', $2, $3, 'SurfaceBound', 'ens_v2_registry_l1', 1, $4, $5, 1, $6,
+             $7, 0, 1, jsonb_build_object('emitting_address', $8::text),
+             'ens_v1_unwrapped_authority', 'canonical', '{}'::jsonb,
+             jsonb_build_object('surface_binding_id', $9::text)
+         )",
+    )
+    .bind(format!("{chain}:SurfaceBound:created-registry-successor"))
+    .bind(&logical_name_id)
+    .bind(resource)
+    .bind(registry_manifest)
+    .bind(chain)
+    .bind(block_hash(chain, 1))
+    .bind(format!("{chain}:created-registry-successor-tx"))
+    .bind(registry_address)
+    .bind(binding)
+    .execute(scratch.pool())
+    .await?;
+
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
+    type ProfileRow = (Option<String>, String, Option<String>, Option<Uuid>);
+    let profile_row = |pool: PgPool, name: String| async move {
+        sqlx::query_as::<_, ProfileRow>(
+            "SELECT provenance #>> '{authority_selection,proof_kind}', support_status,
+                    unsupported_reason, surface_binding_id
+             FROM name_current WHERE logical_name_id = $1",
+        )
+        .bind(name)
+        .fetch_one(&pool)
+        .await
+    };
+    let served = profile_row(scratch.pool().clone(), logical_name_id.clone()).await?;
+    assert_eq!(
+        served.0.as_deref(),
+        Some("migration_authority_transition")
+    );
+    assert_eq!(served.3, Some(binding));
+    assert_eq!(
+        (served.1.as_str(), served.2),
+        ("supported", None),
+        "the migration-created successor registry qualifies the exact profile"
+    );
+
+    // Without the registry-creation proof the same undeclared registry is still shadowed.
+    sqlx::query("DELETE FROM migration_discovery_associations WHERE chain_id = $1")
+        .bind(chain)
+        .execute(scratch.pool())
+        .await?;
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
+    let shadowed = profile_row(scratch.pool().clone(), logical_name_id.clone()).await?;
+    assert_eq!(
+        (shadowed.1.as_str(), shadowed.2.as_deref()),
+        ("unsupported", Some("ensv2_exact_name_profile_shadow")),
+        "an undeclared registry without a creation proof stays shadowed"
+    );
+    scratch.cleanup().await
+}
+
 // Basenames subnames are their own authority arm. The child's authority selects `basenames`,
 // so a Basenames-derived relation publishes only because it is staged under that arm.
 #[tokio::test]
@@ -11088,6 +11305,20 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
     assert_eq!(
         admitted_registry_proof.as_deref(),
         Some("positive_v2_child_registration")
+    );
+    // The child's registry was created and announced by its parent's migration and is not
+    // in the manifest's declared registry list; the exact profile follows that proof.
+    let admitted_registry_support: (String, Option<String>) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        admitted_registry_support,
+        ("supported".into(), None),
+        "a positive child registration under a migration-created registry serves the exact profile"
     );
     sqlx::query(
         "UPDATE normalized_events

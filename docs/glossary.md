@@ -1328,6 +1328,11 @@ flag that, when `supported`, makes declared exact-name reads authoritative for
 that deployment profile. Today the only family whose active manifest carries
 `supported` is the ENSv2 Sepolia registrar; the flag also exists in `shadow`
 elsewhere (for example the mainnet ENSv1 registrar). It promotes nothing else.
+A name whose current ENSv2 authority comes from a validated migration, or from
+a positive child registration under a migrated parent, qualifies without a
+registrar event when its registry is either declared in the post-audit registry
+manifest or was created and announced by the migration itself (the per-name
+`WrapperRegistry` of the locked path); see [architecture](architecture.md).
 
 ## Generation (raw-log retention generation)
 
