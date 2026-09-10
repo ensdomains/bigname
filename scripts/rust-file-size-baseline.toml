@@ -36,11 +36,6 @@ loc = 638
 justification = "Registry event decoding and its atomic control/read transition remain together while shared owner classification and authority emission live in the bounded authority-transition sibling; the file remains below the review threshold."
 
 [[files]]
-path = "crates/project/src/builders/name_authority.rs"
-loc = 683
-justification = "The exact-name authority selector keeps proof, released-state, source deployment period, and proven-zero-owner registry rules in one auditable query so known-absent authority cannot be confused with selector failure; the file remains below the review threshold."
-
-[[files]]
 path = "crates/project/src/builders/permissions.rs"
 loc = 626
 justification = "Effective permission folding keeps wrapper fuse masking, partial-coverage summaries, and the narrowly provenance-gated ENSv2 expiry tombstone in one resource-keyed projection boundary."

@@ -1842,6 +1842,24 @@ not retroactively validate a non-qualifying release. A release that does not
 qualify leaves no tombstone: the name resolves to explicit
 `current_authority_not_projected`.
 
+<a id="released-v1-authority"></a>
+## Released v1 authority
+
+the authority tombstone left when the latest ENSv1 registrar lifecycle fact for a
+name is a release and no custody was revived behind it: no binding of any arm
+is open and the registry owner is not a proven zero. The lease that lapsed
+while wrapped is the ordinary case: the NameWrapper's registry custody expired
+with the lease, so nothing current owns the node. The tombstone selects the
+released lease binding, serves the registration as `released` with its
+identity and timestamps, and serves no current registrant, authority, expiry,
+owner, control, resolver or records. It is positive proof that the
+registration is absent, so the row is supported rather than
+`current_authority_not_projected`. A release whose registry owner was revived
+is not a tombstone; it selects the revived registry-only binding. A registry
+owner proven zero stays the supported ownerless-registry profile.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L143-L154 @ ens_v1@91c966f)
+
 ## Retained-history proof
 
 a schema-migration-era ENSv2 tuple (retention generation,
