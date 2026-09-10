@@ -1105,7 +1105,13 @@ instead keeps a row for a [released v2
 authority](glossary.md#released-v2-authority) whose `resource_id` still
 references the released resource, but its `serving_resource_id` is null; the
 tombstone's summary nulls resolver state, so inventory attributed to that
-resource stays out of current serving. A state-derived ENSv2 expiry release
+resource stays out of current serving. A [released v1
+authority](glossary.md#released-v1-authority) keeps the same shape on its
+lapsed lease binding. The name-current read filter admits a closed binding
+only for those two tombstones (`authority_selection.lifecycle_state =
+unregistered` with `authority_arm = ens_v2`, or
+`resource_authority_context.released_tombstone = ens_v1`); every other closed
+binding reads as absent. A state-derived ENSv2 expiry release
 removes the `name_current` row when ENSv2 is the selected authority, or when no
 authority is selected and the row reports `current_authority_not_projected`;
 for a resource-backed binding, the release's `resource_id` must also match the
