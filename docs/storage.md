@@ -135,6 +135,21 @@ event](glossary.md#independently-admitted-event) for the exact same logical name
 to remain simultaneously open until an explicit activated
 [migration boundary](glossary.md#migration-boundary) selects the successor.
 
+Interpret restores the timestamp of each activated `MigrationApplied` transition
+from its canonical normalized evidence. A later ENSv1 registrar-expiry boundary
+retains the old lease release without opening a replacement ENSv1 registry
+binding or granting its retained registry owner current control. No new
+persisted marker or identity is introduced. If a physical batch contains both
+the migration and that later expiry, complete-group correlation first proves
+the migration and the adapter reinterprets that batch with the proof's timestamp;
+earlier blocks cannot use a future boundary. The resulting activated
+transitions must remain identical. A resumed session and a cold restore apply
+the same retained proof. Redo and reorg rebuild it from surviving canonical
+events; replay without the activated boundary restores ordinary ENSv1 expiry
+behavior. Real later ENSv1 ownership observations are not suppressed, and the
+dual-current publication assertion is unchanged. This interpreter-content change
+requires the normal Interpret and Project redos for previously derived rows.
+
 When an ENSv2 registration release, a move away from a registry path, or a
 block-boundary expiry closes this arm-wide conflict domain but the surface still
 has a registered holder with a linked resource, Interpret reasserts the elected

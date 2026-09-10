@@ -2,6 +2,9 @@ use super::state_residency::{StateCacheCapacity, StateResidency};
 use imbl::{ordmap::OrdMap, ordset::OrdSet};
 use serde_json::Value;
 use uuid::Uuid;
+#[path = "state_expiry.rs"]
+mod expiry;
+pub(super) use expiry::{ENS_GRACE_PERIOD_SECS, v1_registration_is_live};
 #[path = "state_incremental.rs"]
 mod incremental;
 #[path = "state_topology.rs"]
@@ -105,6 +108,7 @@ pub(super) struct State {
     v1_registrars: OrdMap<String, V1NameState>,
     v1_registrar_evidence: OrdMap<String, Value>,
     v1_expiries: OrdSet<(i64, String)>,
+    v2_migration_times: OrdMap<String, i64>,
     v1_registry_authorities: OrdMap<String, V1NameState>,
     v1_registry_owners: OrdMap<String, String>,
     v1_registry_owner_words: OrdMap<String, String>,
@@ -491,116 +495,4 @@ impl State {
         }
         Some(registrar)
     }
-
-    pub(super) fn release_v1_name(
-        &mut self,
-        namespace: &str,
-        namehash: &str,
-    ) -> Option<V1NameState> {
-        let released = self.v1_names.remove(&v1_key(namespace, namehash));
-        if let Some(released) = released.as_ref()
-            && self.active_resources.get(&released.logical_name_id) == Some(&released.resource_id)
-        {
-            self.active_resources.remove(&released.logical_name_id);
-        }
-        released
-    }
-
-    pub(super) fn restore_v1_registration_release(&mut self, namespace: &str, namehash: &str) {
-        let key = v1_key(namespace, namehash);
-        let registrar = self.v1_registrars.remove(&key);
-        self.update_v1_expiry_index(
-            &key,
-            registrar.as_ref().and_then(|state| state.expiry),
-            None,
-        );
-        let should_release_active = self.v1_names.get(&key).is_some_and(|active| {
-            registrar
-                .as_ref()
-                .is_some_and(|registrar| active.logical_name_id == registrar.logical_name_id)
-                || matches!(
-                    active.authority_source_family.as_str(),
-                    "ens_v1_registrar_l1" | "basenames_base_registrar" | "ens_v1_wrapper_l1"
-                )
-        });
-        if should_release_active {
-            let next_authority = self.v1_registry_authority_if_authentic(&key);
-            self.activate_v1_authority(namespace, namehash, next_authority);
-        }
-    }
-
-    pub(super) fn settle_v1_releases(&mut self, at_unix_timestamp: i64) -> Vec<V1Release> {
-        let mut due = Vec::new();
-        while let Some((expiry, _)) = self.v1_expiries.get_max() {
-            if expiry.checked_add(ENS_GRACE_PERIOD_SECS).is_some() {
-                break;
-            }
-            self.v1_expiries.remove_max();
-        }
-        while let Some((expiry, _)) = self.v1_expiries.get_min() {
-            if v1_registration_is_live(Some(*expiry), at_unix_timestamp) {
-                break;
-            }
-            due.push(self.v1_expiries.remove_min().unwrap().1);
-        }
-        // Preserve the prior OrdMap registrar-key order for deterministic, output-identical releases.
-        due.sort();
-        let mut releases = Vec::new();
-        for key in due {
-            let Some(registrar) = self.v1_registrars.remove(&key) else {
-                continue;
-            };
-            let previous_authority = self.v1_names.get(&key).cloned();
-            let release_is_active = previous_authority.as_ref().is_some_and(|active| {
-                active.resource_id == registrar.resource_id
-                    || active.authority_source_family == "ens_v1_wrapper_l1"
-            });
-            let Some((namespace, namehash)) = key.split_once(':') else {
-                continue;
-            };
-            let next_authority = if release_is_active {
-                let next = self.v1_registry_authority_if_authentic(&key);
-                self.activate_v1_authority(namespace, namehash, next);
-                self.v1_name(namespace, namehash)
-            } else {
-                previous_authority.clone()
-            };
-            releases.push(V1Release {
-                namehash: namehash.to_owned(),
-                resolver: self.v1_resolvers.get(&key).cloned(),
-                registrar,
-                release_was_active: release_is_active,
-                previous_authority,
-                next_authority,
-            });
-        }
-        releases
-    }
-    fn update_v1_expiry_index(
-        &mut self,
-        registrar_key: &str,
-        previous: Option<i64>,
-        current: Option<i64>,
-    ) {
-        if previous == current {
-            return;
-        }
-        if let Some(previous) = previous {
-            self.v1_expiries
-                .remove(&(previous, registrar_key.to_owned()));
-        }
-        if let Some(current) = current {
-            self.v1_expiries.insert((current, registrar_key.to_owned()));
-        }
-    }
-}
-
-const ENS_GRACE_PERIOD_SECS: i64 = 90 * 24 * 60 * 60;
-
-fn v1_registration_is_live(expiry: Option<i64>, at_unix_timestamp: i64) -> bool {
-    expiry.is_none_or(|expiry| {
-        expiry
-            .checked_add(ENS_GRACE_PERIOD_SECS)
-            .is_none_or(|release| at_unix_timestamp <= release)
-    })
 }

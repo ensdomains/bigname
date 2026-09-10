@@ -42,6 +42,7 @@ impl State {
             v1_registrars: OrdMap::new(),
             v1_registrar_evidence: OrdMap::new(),
             v1_expiries: OrdSet::new(),
+            v2_migration_times: OrdMap::new(),
             v1_registry_authorities: OrdMap::new(),
             v1_registry_owners: OrdMap::new(),
             v1_registry_owner_words: OrdMap::new(),

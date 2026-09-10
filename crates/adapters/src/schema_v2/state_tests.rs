@@ -282,7 +282,7 @@ fn v1_release_order_matches_naive_scan_after_expiry_updates_and_removals() {
     observe_registrar(&mut state, "updated", Some(50));
     observe_registrar(&mut state, "updated", Some(500));
     observe_registrar(&mut state, "removed", Some(50));
-    state.restore_v1_registration_release(NAMESPACE, "removed");
+    state.restore_v1_registration_release(NAMESPACE, "removed", 0);
 
     assert_expiry_index_is_derived(&state);
     let timestamp = 100 + super::ENS_GRACE_PERIOD_SECS + 1;
@@ -310,7 +310,7 @@ fn v1_expiry_index_matches_naive_scan_over_generated_mutations() {
                 };
                 observe_registrar(&mut state, &namehash, expiry);
             }
-            3 => state.restore_v1_registration_release(NAMESPACE, &namehash),
+            3 => state.restore_v1_registration_release(NAMESPACE, &namehash, 0),
             _ => {
                 let timestamp =
                     super::ENS_GRACE_PERIOD_SECS + (sequence.next() % 6_000) as i64 - 3_000;

@@ -199,6 +199,7 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
 }
 #[rustfmt::skip]
 fn v1_inner(state: &mut State, event: &PriorEventInput) {
+    state.restore_v2_migration_boundary(event);
     if state.restore_registrar_snapshot(event) { return; }
     let source_event = event.after_state.get("source_event").and_then(Value::as_str);
     if event.source_family == "ens_v2_migration_l1"
@@ -417,7 +418,8 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
         && source_event == Some("RegistrationReleased")
         && let Some(namehash) = event.after_state.get("namehash").and_then(Value::as_str)
     {
-        state.restore_v1_registration_release(&event.namespace, namehash);
+        state.restore_v1_registration_release(&event.namespace, namehash,
+            event.block_timestamp.map(time::OffsetDateTime::unix_timestamp).unwrap_or(i64::MIN));
         return;
     }
     let Some(resource_id) = event.resource_id else {
