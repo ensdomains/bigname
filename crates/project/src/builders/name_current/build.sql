@@ -64,12 +64,18 @@
                                'authority_kind', NULL, 'authority_key', NULL,
                                'registrant', NULL, 'expiry', NULL
                            )
-                       -- A released ENSv2 registration keeps its lapsed expiry as a readable
-                       -- detail, like a released ENSv1 lease; nothing current remains.
+                       -- An ENSv2 registration lapsed by path expiry keeps its lapsed expiry as
+                       -- a readable detail (the registry entry still holds it); an explicit
+                       -- release clears the entry, so nothing current remains.
+                       WHEN selected_registration.event_kind = 'RegistrationReleased'
+                        AND selected_authority.selected_authority_arm = 'ens_v2'
+                        AND selected_registration.after_state ->> 'source_event' = 'RegistryPathExpired'
+                       THEN jsonb_build_object('authority_kind', NULL, 'authority_key', NULL,
+                           'registrant', NULL)
                        WHEN selected_registration.event_kind = 'RegistrationReleased'
                         AND selected_authority.selected_authority_arm = 'ens_v2'
                        THEN jsonb_build_object('authority_kind', NULL, 'authority_key', NULL,
-                           'registrant', NULL) ELSE '{}'::jsonb END,
+                           'registrant', NULL, 'expiry', NULL) ELSE '{}'::jsonb END,
                    'control', CASE
                        WHEN selected_authority.known_ownerless_registry
                            THEN jsonb_build_object('status', 'unregistered')

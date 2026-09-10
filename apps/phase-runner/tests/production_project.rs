@@ -8822,14 +8822,18 @@ async fn incremental_sibling_update_retains_unbound_migrated_name_v2_subnames() 
     normalize_projection_clocks(incremental.pool()).await?;
     normalize_projection_clocks(full.pool()).await?;
     let incremental_children: Value = sqlx::query_scalar(
-        "SELECT COALESCE(jsonb_agg(to_jsonb(child) ORDER BY child_logical_name_id), '[]'::jsonb)
+        // An untouched sibling row keeps its earlier target position; compare served content.
+        "SELECT COALESCE(jsonb_agg(to_jsonb(child) - 'chain_positions' - 'canonicality_summary'
+                                  ORDER BY child_logical_name_id), '[]'::jsonb)
          FROM children_current child
          WHERE parent_logical_name_id = 'ens:0xequivalence-parent'",
     )
     .fetch_one(incremental.pool())
     .await?;
     let rebuilt_children: Value = sqlx::query_scalar(
-        "SELECT COALESCE(jsonb_agg(to_jsonb(child) ORDER BY child_logical_name_id), '[]'::jsonb)
+        // An untouched sibling row keeps its earlier target position; compare served content.
+        "SELECT COALESCE(jsonb_agg(to_jsonb(child) - 'chain_positions' - 'canonicality_summary'
+                                  ORDER BY child_logical_name_id), '[]'::jsonb)
          FROM children_current child
          WHERE parent_logical_name_id = 'ens:0xequivalence-parent'",
     )

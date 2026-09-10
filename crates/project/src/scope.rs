@@ -93,6 +93,9 @@ async fn create_scope_tables(transaction: &mut Transaction<'_, Postgres>) -> Res
         "CREATE TEMP TABLE project_scope_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_expiry_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_children (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
+        // Ancestors reached only through a changed child's edge: their own events and surfaces
+        // stage as parent evidence, but their child families are not rebuilt.
+        "CREATE TEMP TABLE project_scope_ancestors (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_account_permissions (chain_id text, authority_kind text, authority_contract text, owner text, subject text, relation_kind text, PRIMARY KEY (chain_id, authority_kind, authority_contract, owner, subject, relation_kind)) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_permission_effect_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
@@ -179,37 +182,50 @@ async fn seed_direct_scope(
             })?;
     }
 
-    sqlx::query(
-        "INSERT INTO project_scope_children
-         SELECT event.namespace || ':' || lower(candidate.node)
-         FROM project_changed_events event
-         CROSS JOIN LATERAL (
-             VALUES (event.after_state ->> 'node'),
-                    (event.after_state ->> 'child_node'),
-                    (event.before_state ->> 'node'),
-                    (event.before_state ->> 'child_node')
-         ) candidate(node)
-         WHERE event.event_kind IN ('SubregistryChanged', 'AuthorityTransferred')
-           AND event.source_family IN (
-               'ens_v1_registry_l1', 'basenames_base_registry'
-           )
-           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND EXISTS (
-               SELECT 1
-               FROM chain_lineage lineage
-               WHERE lineage.chain_id = event.chain_id
-                 AND lineage.block_number = event.block_number
-                 AND lineage.block_hash = event.block_hash
-                 AND lineage.canonicality_state IN (
-                     'canonical', 'safe', 'finalized'
-                 )
-           )
-           AND candidate.node IS NOT NULL AND btrim(candidate.node) <> ''
-         ON CONFLICT DO NOTHING",
-    )
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to derive direct child scope", error))?;
+    // A changed registry edge rebuilds the child's edge; the parent node is an ancestor whose
+    // evidence stages without restaging its other children.
+    for (table, columns) in [
+        (
+            "project_scope_children",
+            "(event.after_state ->> 'child_node'), (event.before_state ->> 'child_node')",
+        ),
+        (
+            "project_scope_ancestors",
+            "(event.after_state ->> 'node'), (event.before_state ->> 'node')",
+        ),
+    ] {
+        let statement = format!(
+            "INSERT INTO {table}
+             SELECT event.namespace || ':' || lower(candidate.node)
+             FROM project_changed_events event
+             CROSS JOIN LATERAL (
+                 VALUES {columns}
+             ) candidate(node)
+             WHERE event.event_kind IN ('SubregistryChanged', 'AuthorityTransferred')
+               AND event.source_family IN (
+                   'ens_v1_registry_l1', 'basenames_base_registry'
+               )
+               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND EXISTS (
+                   SELECT 1
+                   FROM chain_lineage lineage
+                   WHERE lineage.chain_id = event.chain_id
+                     AND lineage.block_number = event.block_number
+                     AND lineage.block_hash = event.block_hash
+                     AND lineage.canonicality_state IN (
+                         'canonical', 'safe', 'finalized'
+                     )
+               )
+               AND candidate.node IS NOT NULL AND btrim(candidate.node) <> ''
+             ON CONFLICT DO NOTHING"
+        );
+        sqlx::query(&statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to derive direct child scope", error)
+            })?;
+    }
 
     sqlx::query(
         "INSERT INTO project_scope_resources

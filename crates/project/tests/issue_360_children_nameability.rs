@@ -1,5 +1,5 @@
 use anyhow::Result;
-use bigname_project::{BatchRequest, Engine, RunMode};
+use bigname_project::{BatchRequest, Engine, Marker, RunMode};
 use bigname_storage::load_children_current;
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
@@ -372,4 +372,113 @@ async fn ens_v1_topology_only_child_keeps_non_name_form() -> Result<()> {
         block_hash(10)
     );
     database.cleanup().await
+}
+
+async fn seed_v1_edge(pool: &PgPool, identity: &str, block: i64, child: &str) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, resource_id, event_kind,
+             source_family, manifest_version, chain_id, block_number, block_hash,
+             transaction_hash, transaction_index, log_index, derivation_kind,
+             canonicality_state, after_state, raw_fact_ref
+         ) VALUES (
+             $1, 'ens', NULL, NULL, 'SubregistryChanged', 'ens_v1_registry_l1', 1, $2, $3, $4,
+             $5, 0, 1, 'ens_v1_unwrapped_authority', 'canonical', $6,
+             jsonb_build_object('event_identity', $1::text)
+         )",
+    )
+    .bind(identity)
+    .bind(CHAIN)
+    .bind(block)
+    .bind(block_hash(block))
+    .bind(format!("0x{:064x}", block + 200))
+    .bind(json!({
+        "node": PARENT.trim_start_matches("ens:"),
+        "child_node": child.trim_start_matches("ens:"),
+        "labelhash": format!("0x{}", &child.trim_start_matches("ens:0x")[..64]),
+        "owner": OWNER
+    }))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn run_project_at(pool: &PgPool, target: i64, resume: Option<i64>) -> Result<()> {
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.into(),
+            target_block: target,
+            affected_from_block: resume.map_or(10, |number| number + 1),
+            affected_to_block: target,
+            resume_current: resume.map(|number| Marker {
+                number,
+                hash: block_hash(number),
+            }),
+            mode: RunMode::Normal,
+        })
+        .await?;
+    Ok(())
+}
+
+async fn children_rows(pool: &PgPool) -> Result<Value> {
+    Ok(sqlx::query_scalar(
+        // Untouched rows keep their earlier target position; compare the served content.
+        "SELECT COALESCE(jsonb_agg(to_jsonb(row) - 'last_recomputed_at' - 'inserted_at'
+                                  - 'chain_positions' - 'canonicality_summary'
+                                  ORDER BY child_logical_name_id), '[]'::jsonb)
+         FROM children_current row WHERE parent_logical_name_id = $1",
+    )
+    .bind(PARENT)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn row_version(pool: &PgPool, child: &str) -> Result<String> {
+    Ok(sqlx::query_scalar(
+        "SELECT xmin::text FROM children_current
+         WHERE parent_logical_name_id = $1 AND child_logical_name_id = $2",
+    )
+    .bind(PARENT)
+    .bind(child)
+    .fetch_one(pool)
+    .await?)
+}
+
+// A sibling registration touches the parent only as an edge endpoint: the parent's other child
+// rows must not be restaged, and the incremental result must match a fresh rebuild.
+#[tokio::test]
+async fn sibling_registration_does_not_restage_the_parents_other_children() -> Result<()> {
+    const SIBLING: &str = "ens:0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    let (incremental_db, incremental) = database("issue360_sibling_incremental").await?;
+    seed_parent_surface(&incremental).await?;
+    seed_v1_edge(&incremental, "sibling-edge-a", 10, V1_CHILD).await?;
+    seed_v1_edge(&incremental, "sibling-edge-b", 10, V2_CHILD).await?;
+    run_project_at(&incremental, 10, None).await?;
+    let before_a = row_version(&incremental, V1_CHILD).await?;
+    let before_b = row_version(&incremental, V2_CHILD).await?;
+
+    seed_v1_edge(&incremental, "sibling-edge-c", 11, SIBLING).await?;
+    run_project_at(&incremental, 11, Some(10)).await?;
+
+    assert!(
+        projected_child(&incremental, SIBLING).await?.is_some(),
+        "the new sibling must publish"
+    );
+    assert_eq!(
+        row_version(&incremental, V1_CHILD).await?,
+        before_a,
+        "an untouched sibling row must not be rewritten"
+    );
+    assert_eq!(row_version(&incremental, V2_CHILD).await?, before_b);
+
+    let (fresh_db, fresh) = database("issue360_sibling_fresh").await?;
+    seed_parent_surface(&fresh).await?;
+    seed_v1_edge(&fresh, "sibling-edge-a", 10, V1_CHILD).await?;
+    seed_v1_edge(&fresh, "sibling-edge-b", 10, V2_CHILD).await?;
+    seed_v1_edge(&fresh, "sibling-edge-c", 11, SIBLING).await?;
+    run_project_at(&fresh, 11, None).await?;
+    assert_eq!(children_rows(&incremental).await?, children_rows(&fresh).await?);
+
+    fresh_db.cleanup().await?;
+    incremental_db.cleanup().await
 }

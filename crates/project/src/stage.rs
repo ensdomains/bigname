@@ -261,6 +261,15 @@ async fn create_scoped_event_ids(
         WHERE event.chain_id = $1 AND event.block_number <= $2
           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
         UNION
+        -- An ancestor reached only through a changed child's edge stages its own events (migration
+        -- boundary, subregistry pointer, ownership) as parent evidence; its other children stay out
+        -- of scope.
+        SELECT event.normalized_event_id
+        FROM project_scope_ancestors scope
+        JOIN normalized_events event USING (logical_name_id)
+        WHERE event.chain_id = $1 AND event.block_number <= $2
+          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        UNION
         -- ENSv2 registration stores the entry's subregistry and emits the label registration
         -- separately. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L462 @ ens_v2@a971bd64)
         -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L467 @ ens_v2@a971bd64)
@@ -471,6 +480,8 @@ async fn create_identity_views(
              SELECT logical_name_id FROM project_scope_names
              UNION
              SELECT logical_name_id FROM project_scope_children
+             UNION
+             SELECT logical_name_id FROM project_scope_ancestors
          ) scope USING (logical_name_id)"
     };
     let surface_statement = format!(
