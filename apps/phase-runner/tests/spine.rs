@@ -139,6 +139,101 @@ async fn phase_transitions_are_legal_and_persisted() -> Result<()> {
 }
 
 #[tokio::test]
+async fn completed_ingest_resumes_when_probed_head_advances() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_ingest_head_resume").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let chain = "ingest-head-resume";
+    store.initialize_chain(chain).await?;
+    // A cleanly completed ingest row: current/target/live_handoff all agree.
+    sqlx::query(
+        "
+        UPDATE chain_phase_state
+        SET phase_status = 'completed',
+            current_block_number = 100,
+            current_block_hash = 'resume-block-100',
+            target_block_number = 100,
+            target_block_hash = 'resume-block-100',
+            live_handoff_block_number = 100,
+            live_handoff_block_hash = 'resume-block-100',
+            started_at = now(),
+            finished_at = now(),
+            updated_at = now()
+        WHERE chain_id = $1
+          AND phase_name = 'ingest'
+        ",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    // Pinned cursors from the completed sweep: one chain provider, one
+    // Coinbase seam source whose pin must survive the resume.
+    sqlx::query(
+        "
+        INSERT INTO ingest_cursors
+            (chain_id, source_key, source_kind, seed_basis, start_block_number,
+             next_block_number, target_block_number)
+        VALUES
+            ($1, 'primary-rpc', 'rpc', 'ethereum_head', 0, 101, 100),
+            ($1, 'raised-rpc', 'rpc', 'ethereum_head', 0, 101, 200),
+            ($1, 'seam', 'coinbase_sql', 'base_seam', 0, 51, 50)
+        ",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+
+    // No probe, or a probe equal to the stored position: completion stands.
+    assert_eq!(
+        store
+            .start_phase(chain, PhaseName::Ingest, &RunMode::Normal)
+            .await?,
+        StartDisposition::AlreadyCompleted
+    );
+    assert_eq!(
+        store
+            .start_phase_with_ingest_probe(chain, PhaseName::Ingest, &RunMode::Normal, Some(100))
+            .await?,
+        StartDisposition::AlreadyCompleted
+    );
+
+    // A probed head beyond the stored position resumes the phase and unpins
+    // the *stale* non-Coinbase cursor target (a pin at or below the
+    // completed position) so the batch can chase the new head instead of
+    // instantly re-completing at the old pin. A pin deliberately raised
+    // beyond the completed position bounds the resumed sweep and survives.
+    assert_eq!(
+        store
+            .start_phase_with_ingest_probe(chain, PhaseName::Ingest, &RunMode::Normal, Some(107))
+            .await?,
+        StartDisposition::Started
+    );
+    assert_eq!(
+        store.status(chain, PhaseName::Ingest).await?,
+        PhaseStatus::Running
+    );
+    let targets: Vec<(String, Option<i64>, i64)> = sqlx::query_as(
+        "
+        SELECT source_key, target_block_number, next_block_number
+        FROM ingest_cursors
+        WHERE chain_id = $1
+        ORDER BY source_key
+        ",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        targets,
+        vec![
+            ("primary-rpc".to_owned(), None, 101),
+            ("raised-rpc".to_owned(), Some(200), 101),
+            ("seam".to_owned(), Some(50), 51),
+        ]
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn completed_project_cannot_enter_ingest_verify_retained_recovery() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_recovery_marker_collision").await?;
     let store = PhaseStore::new(scratch.runner().pool().clone());
