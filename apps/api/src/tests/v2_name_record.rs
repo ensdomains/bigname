@@ -1325,6 +1325,99 @@ async fn v2_get_name_classifies_released_as_released() -> Result<()> {
 }
 
 #[tokio::test]
+async fn storage_name_current_reads_serve_the_released_v1_tombstone_on_its_closed_binding()
+-> Result<()> {
+    // A released v1 authority tombstone selects the lapsed lease binding, which is closed.
+    // The read filter admits a closed binding for a released v2 authority already; the v1
+    // tombstone is the same shape and must not read as `not_found`.
+    const SURFACE_BINDING_ID: Uuid = Uuid::from_u128(0x9140);
+    let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        "ens:lapsed-wrapped.eth",
+        "lapsed-wrapped.eth",
+        "lapsed-wrapped.eth",
+        "node:lapsed-wrapped.eth",
+        Uuid::from_u128(0x7140),
+        Uuid::from_u128(0x8140),
+        SURFACE_BINDING_ID,
+        "0x0000000000000000000000000000000000007140",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        90,
+    )
+    .await?;
+    // The migrated seed rekeys the row onto its namehash identity; read the stored id back.
+    let (logical_name_id,): (String,) = sqlx::query_as(
+        "SELECT logical_name_id FROM bigname_phase.name_current WHERE surface_binding_id = $1",
+    )
+    .bind(SURFACE_BINDING_ID)
+    .fetch_one(&database.pool)
+    .await?;
+    let closed = sqlx::query(
+        "UPDATE bigname_phase.surface_bindings SET active_to = active_from + interval '1 day'
+         WHERE surface_binding_id = $1",
+    )
+    .bind(SURFACE_BINDING_ID)
+    .execute(&database.pool)
+    .await?;
+    assert_eq!(closed.rows_affected(), 1, "the lease binding must close");
+    assert_eq!(
+        closed_binding_reads(
+            &database,
+            &logical_name_id,
+            json!({"authority_arm": "ens_v1", "lifecycle_state": "unregistered"}),
+        )
+        .await?,
+        (false, false),
+        "a closed ens_v1 binding without a tombstone stays unreadable"
+    );
+    assert_eq!(
+        closed_binding_reads(
+            &database,
+            &logical_name_id,
+            json!({
+                "authority_arm": "ens_v1",
+                "lifecycle_state": "unregistered",
+                "resource_authority_context": {
+                    "authority_arm": "ens_v1",
+                    "released_tombstone": "ens_v1"
+                }
+            }),
+        )
+        .await?,
+        (true, true),
+        "the released v1 tombstone reads on its closed lease binding"
+    );
+    database.cleanup().await
+}
+
+/// Stamps `authority_selection` on the seeded row and reports whether the detail and list
+/// loaders still return it.
+async fn closed_binding_reads(
+    database: &TestDatabase,
+    logical_name_id: &str,
+    authority_selection: serde_json::Value,
+) -> Result<(bool, bool)> {
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET provenance = provenance || jsonb_build_object('authority_selection', $2::jsonb)
+         WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .bind(authority_selection)
+    .execute(&database.pool)
+    .await?;
+    let detail = bigname_storage::load_name_current(&database.pool, logical_name_id).await?;
+    let listed = bigname_storage::load_name_current_list_row_by_name(
+        &database.pool,
+        "ens",
+        "lapsed-wrapped.eth",
+    )
+    .await?;
+    Ok((detail.is_some(), listed.is_some()))
+}
+
+#[tokio::test]
 async fn v2_get_name_withholds_retained_inventory_for_released_tombstone() -> Result<()> {
     // The fixture's inventory row and declared resolver stay attached: a
     // released tombstone must not serve them even if projection state loss

@@ -71,6 +71,9 @@ pub const DEFAULT_NAME_CURRENT_READ_FILTER: &str = r#"
                   AND nc.provenance #>> '{authority_selection,lifecycle_state}' =
                       'unregistered'
               )
+              OR nc.provenance
+                  #>> '{authority_selection,resource_authority_context,released_tombstone}'
+                  = 'ens_v1'
           )
           AND (
               nc.token_lineage_id IS NULL
