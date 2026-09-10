@@ -910,6 +910,17 @@ continuation guarantee and may be rejected. Consumers must discard
 pre-#348/#529 cursors and restart from the first page; fresh post-publication cursors
 continue normally.
 
+A `record` row may also come from a node-keyed resolver observation that carries
+no logical name or resource of its own, such as an exact direct
+`public_resolver_v2` write. Project attributes that observation to a registration
+through its selected resolver pointer and publishes the attributed event ids in
+the record inventory provenance; `registration` and `both` scope name history
+read them back so history lists the writes the name's records serve, while
+`name` scope does not because the observation has no surface link. The row's
+`registration_id` stays null. The attribution follows the current pointer
+exactly as the inventory does: switching the pointer away hides those rows and
+switching back restores them.
+
 The [#613](https://github.com/ensdomains/bigname/issues/613) interpreter change
 keeps the original [pre-surface](glossary.md#pre-surface) ENSv1 registry `ResolverChanged` row unchanged,
 then adds a name- and resource-linked, [state-derived](glossary.md#state-derived-normalized-event) `ResolverChanged` when the

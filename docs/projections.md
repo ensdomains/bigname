@@ -583,7 +583,12 @@ to its emitting resolver. A selected `ens_v2_registry_l1` or `ens_v2_root_l1`
 pointer may also join when its target resolver's final classification is
 supported `ens_v1_resolver_l1` from an applicable exact declaration and the
 classifying manifest's namespace matches the pointer's namespace. Incremental
-staging applies the same guarded exception. A `basenames_base_resolver` event
+staging applies the same guarded exception. Every `RecordChanged` or
+`RecordVersionChanged` event that joins without a logical name of its own is
+listed in the row's `provenance.attributed_event_ids`, whether or not it is
+the current value for its record key, so `registration`- and `both`-scope name
+history can read those node-keyed writes back; retracting one of those events
+restages the row like any other cited event. A `basenames_base_resolver` event
 with no logical-name attribution may join only when the selected pointer is
 `basenames_base_registry`, with the same chain, node-to-namehash, and resolver
 emitter match. Basenames keeps the current resolver by node, permits its
