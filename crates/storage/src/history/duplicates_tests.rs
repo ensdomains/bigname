@@ -156,6 +156,9 @@ async fn expanded_history_selectors_fit_postgres_bind_limit() -> Result<()> {
             include_str!("../../../../schema-v2/baseline/03_identity.sql"),
             include_str!("../../../../schema-v2/baseline/04_manifests.sql"),
             include_str!("../../../../schema-v2/baseline/05_normalized_events.sql"),
+            // Resource-scoped selectors read pointer-attributed record ids from the record
+            // inventory projection.
+            include_str!("../../../../schema-v2/baseline/06_projections.sql"),
         ] {
             sqlx::raw_sql(baseline).execute(&mut *connection).await?;
         }

@@ -163,6 +163,10 @@ direct declaration. The current resolver/node version selects inventory values;
 a reset excludes older-version values, and later writes contribute only to the
 new version. Incremental staging and replay apply the same declaration and
 pointer guards without creating a new surface or binding from record events.
+The inventory row publishes the attributed event ids in
+`provenance.attributed_event_ids`, and registration-scoped name history reads
+them back so the history lists the same writes; `name` scope does not, because
+the observation has no surface link of its own.
 See [direct declaration admission](manifests.md#direct-publicresolverv2-declarations-on-an-owned-local-chain)
 and [inventory attribution](storage.md#interpret-process-memory).
 The inherited reset increments the node version and emits `VersionChanged`;

@@ -8437,6 +8437,23 @@ async fn orphaned_later_pointer_does_not_hide_node_attributed_records_incrementa
                 })
             })
     );
+    // The node-keyed write has no logical name of its own; the pointer attribution that serves
+    // it as a record is published so registration-scoped history can list the same write.
+    let attributed_event_id: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM normalized_events
+         WHERE chain_id = $1 AND block_number = 1 AND event_kind = 'RecordChanged'
+           AND logical_name_id IS NULL AND after_state ->> 'record_key' = 'text:before-surface'",
+    )
+    .bind(CHAIN)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert!(
+        incremental_inventory["provenance"]["attributed_event_ids"]
+            .as_array()
+            .is_some_and(|ids| ids.contains(&json!(attributed_event_id))),
+        "provenance must cite the pointer-attributed node write: {}",
+        incremental_inventory["provenance"]
+    );
 
     incremental.cleanup().await?;
     full.cleanup().await

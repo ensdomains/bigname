@@ -70,6 +70,132 @@ async fn v2_get_history_returns_lean_product_rows_newest_first() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_history_lists_pointer_attributed_record_writes_for_the_registration() -> Result<()> {
+    const ADDRESS: &str = "0x0000000000000000000000000000000000007130";
+    const RESOLVER: &str = "0x00000000000000000000000000000000000000c2";
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:attributed-record.eth";
+    let resource_id = Uuid::from_u128(0x7130);
+    seed_identity_name(
+        &database,
+        logical_name_id,
+        "attributed-record.eth",
+        "attributed-record.eth",
+        "node:attributed-record.eth",
+        resource_id,
+        Uuid::from_u128(0x8130),
+        Uuid::from_u128(0x9130),
+        ADDRESS,
+        bigname_storage::AddressNameRelation::EffectiveController,
+        80,
+    )
+    .await?;
+    seed_v2_history_blocks(&database, 131..=132).await?;
+
+    // PublicResolverV2 writes stay node-keyed at interpretation: no logical name, no resource.
+    // Project attributes the first one to this registration through its resolver pointer and
+    // publishes that attribution in the record inventory provenance; the second write targets
+    // another node and stays unattributed.
+    let node_write = |event_identity: &str, block_number: i64, node: &str| {
+        let mut event =
+            v2_history_event(event_identity, None, None, "RecordChanged", block_number);
+        event.source_family = "ens_v2_resolver_l1".to_owned();
+        event.derivation_kind = "ens_v2_resolver".to_owned();
+        event.after_state = json!({
+            "source_event": "TextChanged",
+            "resolver": RESOLVER,
+            "node": node,
+            "record_key": "text:post-migration",
+            "record_family": "text",
+            "selector_key": "post-migration",
+            "value_retained": true,
+            "value": "current",
+        });
+        event
+    };
+    let attributed_identity = "ens_v2_resolver:2:ethereum-mainnet:0xhistory131:0xtx131:0:RecordChanged:0";
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            node_write(attributed_identity, 131, "node:attributed-record.eth"),
+            node_write(
+                "ens_v2_resolver:2:ethereum-mainnet:0xhistory132:0xtx132:0:RecordChanged:0",
+                132,
+                "node:other.eth",
+            ),
+        ],
+    )
+    .await?;
+    let attributed_event_id: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM bigname_phase.normalized_events WHERE event_identity = $1",
+    )
+    .bind(attributed_identity)
+    .fetch_one(&database.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.record_inventory_current
+         SET provenance = provenance
+             || jsonb_build_object('attributed_event_ids', jsonb_build_array($2::bigint))
+         WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .bind(attributed_event_id)
+    .execute(&database.pool)
+    .await?;
+
+    for (scope, listed) in [("both", true), ("registration", true), ("name", false)] {
+        let payload = v2_history_payload_for_database(
+            &database,
+            &format!("/v2/names/attributed-record.eth/history?scope={scope}&page_size=20"),
+        )
+        .await?;
+        let rows = payload["data"].as_array().expect("history data");
+        let attributed = rows.iter().find(|row| row["transaction_hash"] == json!("0xtx131"));
+        assert_eq!(attributed.is_some(), listed, "scope={scope}: {rows:?}");
+        if let Some(row) = attributed {
+            assert_eq!(row["type"], json!("record"), "scope={scope}");
+            assert_eq!(row["block_number"], json!(131), "scope={scope}");
+            assert_eq!(row["registration_id"], Value::Null, "scope={scope}");
+        }
+        assert!(
+            !rows.iter().any(|row| row["transaction_hash"] == json!("0xtx132")),
+            "scope={scope}: an unattributed node write must not appear: {rows:?}"
+        );
+    }
+
+    // A keyset cursor issued on the attributed row must validate and continue.
+    let first = v2_history_payload_for_database(
+        &database,
+        "/v2/names/attributed-record.eth/history?scope=registration&page_size=1",
+    )
+    .await?;
+    assert_eq!(first["data"][0]["transaction_hash"], json!("0xtx131"));
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .map(str::to_owned);
+    if let Some(cursor) = cursor {
+        let next = v2_history_payload_for_database(
+            &database,
+            &format!(
+                "/v2/names/attributed-record.eth/history?scope=registration&page_size=1&cursor={cursor}"
+            ),
+        )
+        .await?;
+        assert!(
+            !next["data"]
+                .as_array()
+                .expect("history data")
+                .iter()
+                .any(|row| row["transaction_hash"] == json!("0xtx131")),
+            "the attributed row must not repeat after its cursor: {next}"
+        );
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> Result<()> {
     const ADDRESS: &str = "0x0000000000000000000000000000000000007120";
     let database = TestDatabase::new_migrated().await?;

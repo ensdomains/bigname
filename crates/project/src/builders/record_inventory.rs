@@ -141,6 +141,22 @@ pub(super) async fn build(
             JOIN pointers pointer USING (resource_id)
             JOIN project_events event USING (normalized_event_id)
         ),
+        -- Node-keyed record observations that only the pointer attributes to this resource.
+        -- Name history reads them back through the published provenance because the events
+        -- themselves carry no logical name or resource.
+        attributed_node_events AS (
+            SELECT attributed.resource_id,
+                   jsonb_agg(to_jsonb(attributed.normalized_event_id)
+                             ORDER BY attributed.normalized_event_id) AS event_ids
+            FROM (
+                SELECT DISTINCT event.attributed_resource_id AS resource_id,
+                       event.normalized_event_id
+                FROM attributed_events event
+                WHERE event.logical_name_id IS NULL
+                  AND event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
+            ) attributed
+            GROUP BY attributed.resource_id
+        ),
         ranked_versions AS (
             SELECT event.*,
                    row_number() OVER (
@@ -482,6 +498,7 @@ pub(super) async fn build(
                    'record_event_ids', COALESCE(records.event_ids, '[]'::jsonb)
                        || COALESCE(link_change.event_ids, '[]'::jsonb),
                    'record_link_event_ids', COALESCE(link_change.event_ids, '[]'::jsonb),
+                   'attributed_event_ids', COALESCE(node_attribution.event_ids, '[]'::jsonb),
                    'read_rules', CASE WHEN COALESCE(
                        resolver.declared_summary -> 'classification' -> 'read_features',
                        '[]'::jsonb
@@ -534,6 +551,8 @@ pub(super) async fn build(
           ON records.resource_id = pointer.resource_id
         LEFT JOIN project_linked_record_changes link_change
           ON link_change.resource_id = pointer.resource_id
+        LEFT JOIN attributed_node_events node_attribution
+          ON node_attribution.resource_id = pointer.resource_id
         LEFT JOIN latest_positions latest_position
           ON latest_position.resource_id = pointer.resource_id
         ORDER BY pointer.resource_id
