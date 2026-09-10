@@ -68,7 +68,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `registrant` | registrant | `registrant` (unchanged) |
 | `relation` | address-to-name relation filter: one or more of `owner`, `manager`, `registrant` (comma-separated set); `any` = all three | four divergent relation/role enums incl. `owned`/`managed`/`both` (partner `BOTH` = `owner,manager`) |
 | `relations` | address-to-name relations that matched a row, using `owner`, `manager`, and `registrant` values | `relation_facets`, role-specific match arrays |
-| `expires_at` | expiry, RFC 3339 | `expiry_date`, `expiration` (unix), `expiry` |
+| `expires_at` | expiry, RFC 3339: the registrar lease for registrar-backed names; for a wrapped ENSv1 name with no registrar lease (a wrapped subname) the NameWrapper entry's expiry, which is the only expiry the chain holds for it (zero means the parent set none and the field is omitted) | `expiry_date`, `expiration` (unix), `expiry` |
 | `registered_at` | current registration start, RFC 3339 | `registration_date` |
 | `created_at` | first observation of the name, RFC 3339 | `created_at` (now defined and distinguished from `registered_at`) |
 | `registration_status` | registration/control lifecycle label: `active`, `wrapped`, `registered`, `released`, or `unregistered` | `ControlVector.status`, role-summary `status` |
