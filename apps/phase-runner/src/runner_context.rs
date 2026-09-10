@@ -151,28 +151,9 @@ impl PhaseRunner {
         phase: Arc<dyn Phase>,
         phase_lock: &mut PhaseLock,
     ) -> RunnerResult<bool> {
-        // A cleanly completed ingest row records nothing about blocks mined
-        // after its completion, so ask the phase to probe its provider head
-        // before deciding the completion still stands. Probed only when the
-        // phase is already completed, so steady-state starts pay nothing.
-        let ingest_resume_head = if phase.name() == PhaseName::Ingest
-            && self.store.status(&chain.chain_id, PhaseName::Ingest).await?
-                == PhaseStatus::Completed
-        {
-            phase
-                .probe_completed_resume_head(&chain.chain_id, &chain.sources)
-                .await?
-        } else {
-            None
-        };
         match self
             .store
-            .start_phase_with_ingest_probe(
-                &chain.chain_id,
-                phase.name(),
-                &RunMode::Normal,
-                ingest_resume_head,
-            )
+            .start_phase(&chain.chain_id, phase.name(), &RunMode::Normal)
             .await?
         {
             StartDisposition::Started => Ok(true),

@@ -126,24 +126,6 @@ impl Engine {
         }
     }
 
-    /// Fetch the primary intake provider's latest head without running a
-    /// batch. The stored cursors and published heads only ever describe
-    /// blocks that were already ingested, so this probe is the only way to
-    /// notice that a cleanly completed ingest phase has new blocks to cover.
-    pub async fn probe_primary_head(
-        &self,
-        chain_id: &str,
-        sources: &[SourceDescriptor],
-    ) -> Result<i64> {
-        let primary = primary_source(sources)?;
-        let provider = self.provider(chain_id, primary).await?;
-        let snapshot = provider
-            .heads()
-            .await
-            .map_err(|error| provider_error("failed to probe ingest resume head", error))?;
-        Ok(snapshot.latest.number)
-    }
-
     async fn run_normal_batch(&self, mut request: BatchRequest) -> Result<BatchOutcome> {
         sort_sources(&mut request.sources);
         self.enforce_source_floors(&request).await?;

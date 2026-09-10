@@ -10,8 +10,6 @@ pub type PhaseFuture<'a> =
     Pin<Box<dyn Future<Output = RunnerResult<PhaseBatchOutcome>> + Send + 'a>>;
 pub type CompletedPhaseFuture<'a> =
     Pin<Box<dyn Future<Output = RunnerResult<Option<PhaseProgress>>> + Send + 'a>>;
-pub type ResumeHeadFuture<'a> =
-    Pin<Box<dyn Future<Output = RunnerResult<Option<i64>>> + Send + 'a>>;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum PhaseName {
@@ -248,19 +246,6 @@ pub trait Phase: Send + Sync {
     }
 
     fn revalidate_completed(&self, _context: PhaseContext) -> CompletedPhaseFuture<'_> {
-        Box::pin(async { Ok(None) })
-    }
-
-    /// Probe the upstream source of truth for work beyond a cleanly
-    /// completed phase's stored position. `None` (the default) means the
-    /// phase has no notion of upstream work appearing after completion; a
-    /// head number lets the store legalize a Completed → Running resume
-    /// when it exceeds the stored current position.
-    fn probe_completed_resume_head(
-        &self,
-        _chain_id: &str,
-        _sources: &[SourceConfig],
-    ) -> ResumeHeadFuture<'_> {
         Box::pin(async { Ok(None) })
     }
 }

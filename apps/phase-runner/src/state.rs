@@ -122,22 +122,6 @@ impl PhaseStore {
         phase: PhaseName,
         mode: &RunMode,
     ) -> RunnerResult<StartDisposition> {
-        self.start_phase_with_ingest_probe(chain_id, phase, mode, None)
-            .await
-    }
-
-    /// `ingest_resume_head` is the primary provider's latest head, probed by
-    /// the caller when the ingest phase is already completed. A head beyond
-    /// the stored current position legalizes a Completed → Running resume:
-    /// completion only ever meant "caught up to the head sampled back then",
-    /// and no table records that the chain has since moved.
-    pub async fn start_phase_with_ingest_probe(
-        &self,
-        chain_id: &str,
-        phase: PhaseName,
-        mode: &RunMode,
-        ingest_resume_head: Option<i64>,
-    ) -> RunnerResult<StartDisposition> {
         if mode.is_redo() {
             return Err(RunnerError::new(
                 ErrorKind::Configuration,
@@ -154,17 +138,9 @@ impl PhaseStore {
         let status = row.status()?;
         let recovering_completed = status == PhaseStatus::Failed
             && crate::completed_phase_recovery::locked_completion_recovery(row, phase);
-        let ingest_head_advanced = phase == PhaseName::Ingest
-            && status == PhaseStatus::Completed
-            && ingest_resume_head.is_some_and(|head| {
-                row.current_block_number
-                    .is_none_or(|current| head > current)
-            });
         let restarts_completed = match (status, phase) {
             (_, PhaseName::Live) => true,
-            (PhaseStatus::Completed, PhaseName::Ingest) => {
-                row.ingest_completion_is_incomplete() || ingest_head_advanced
-            }
+            (PhaseStatus::Completed, PhaseName::Ingest) => row.ingest_completion_is_incomplete(),
             (PhaseStatus::Completed, PhaseName::Interpret | PhaseName::Project) => {
                 completed_phase_is_behind(&mut transaction, chain_id, phase, row).await?
             }
@@ -205,39 +181,6 @@ impl PhaseStore {
             ));
         }
         let resume_position = status != PhaseStatus::Idle;
-        if ingest_head_advanced && !row.ingest_completion_is_incomplete() {
-            // The batch engine prefers a pinned cursor target over a fresh
-            // head probe, so a resumed run would instantly re-complete at
-            // the old target. Unpin only *stale* targets — pins at or below
-            // the completed position, i.e. the pins this very completion
-            // wrote. A pin deliberately raised beyond the completed position
-            // (an operator or harness bounding the resumed sweep) stays, as
-            // do Coinbase-seam pins (the seam block never moves with the
-            // chain head). Crash resumes of an interrupted backfill never
-            // take this branch, so their deterministic targets are
-            // untouched.
-            sqlx::query(
-                "
-                UPDATE ingest_cursors
-                SET target_block_number = NULL,
-                    updated_at = now()
-                WHERE chain_id = $1
-                  AND target_block_number IS NOT NULL
-                  AND target_block_number <= $2
-                  AND lower(replace(btrim(source_kind), '-', '_'))
-                      NOT IN ('coinbase', 'coinbase_sql', 'cdp_sql')
-                ",
-            )
-            .bind(chain_id)
-            .bind(row.current_block_number)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|error| {
-                RunnerError::transient(format!(
-                    "failed to unpin ingest cursor targets for resumed chain {chain_id}: {error}"
-                ))
-            })?;
-        }
         sqlx::query(
             "
             UPDATE chain_phase_state

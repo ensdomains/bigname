@@ -6,12 +6,11 @@ use bigname_ingest::{
 use sqlx::PgPool;
 
 use crate::{
-    config::SourceConfig,
     error::{ErrorKind, RunnerError, RunnerResult},
     heads::{BlockMarker, HeadMarkers},
     phase::{
-        Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName, PhaseProgress,
-        ResumeHeadFuture, RunMode, SourceProgress,
+        Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName, PhaseProgress, RunMode,
+        SourceProgress,
     },
 };
 
@@ -113,34 +112,6 @@ impl Phase for IngestPhase {
             } else {
                 Ok(PhaseBatchOutcome::Continue(progress))
             }
-        })
-    }
-
-    fn probe_completed_resume_head(
-        &self,
-        chain_id: &str,
-        sources: &[SourceConfig],
-    ) -> ResumeHeadFuture<'_> {
-        let chain_id = chain_id.to_owned();
-        let descriptors = sources
-            .iter()
-            .filter(|source| source.role.serves_intake())
-            .map(|source| SourceDescriptor {
-                key: source.source_key.clone(),
-                kind: source.source_kind.clone(),
-                start_block: source.start_block_number,
-                endpoint: source.endpoint().to_owned(),
-            })
-            .collect::<Vec<_>>();
-        Box::pin(async move {
-            if descriptors.is_empty() {
-                return Ok(None);
-            }
-            self.engine
-                .probe_primary_head(&chain_id, &descriptors)
-                .await
-                .map(Some)
-                .map_err(runner_error)
         })
     }
 }
