@@ -958,7 +958,12 @@ An ENSv2 registration that lapses by path expiry is served like one released by
 `unregister`: `GET /v2/names/{name}` keeps answering with `registration_status`
 `released`, the registration identity, timestamps and the lapsed `expires_at`,
 without a current owner, resolver or records, and `GET /v2/names/{name}/history`
-keeps serving the name's history. Only a name that never had a readable surface
+keeps serving the name's history. An ENSv1 lease that lapses past grace with no
+revived custody, which is how a wrapped `.eth` name lapses, is served the same
+way as a [released v1 authority](glossary.md#released-v1-authority):
+`registration_status` `released` with the registration identity and
+timestamps, no owner, registrant, `expires_at`, resolver or records, and its
+history intact. Only a name that never had a readable surface
 answers `404 not_found`.
 
 Every collection uses `cursor`, `next_cursor`, `page_size`, nullable

@@ -323,8 +323,8 @@ mod v1_registrar {
     }
 
     #[test]
-    fn lapsed_wrapped_lease_does_not_revive_the_name_wrapper_registry_custody()
-    -> anyhow::Result<()> {
+    fn lapsed_wrapped_lease_does_not_revive_the_name_wrapper_registry_custody() -> anyhow::Result<()>
+    {
         const HOLDER: &str = "0x0000000000000000000000000000000000000055";
         const WRAPPER: &str = "0x0000000000000000000000000000000000000077";
         let label = "lapsed-wrapped";
@@ -365,73 +365,194 @@ mod v1_registrar {
         // registry node, then NameWrapped names HOLDER as the wrapped owner.
         // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol wrapETH2LD/_wrapETH2LD)
         let logs = vec![
-            raw_at(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash,
-                owner: CONTROLLER.parse()? }.encode_log_data(), 1, 0, REGISTRY),
-            raw_at(with_topic0(BaseNameRegistered { id: U256::from_be_slice(labelhash.as_slice()),
-                owner: CONTROLLER.parse()?, expires: U256::from(42) }.encode_log_data(),
-                keccak256(b"NameRegistered(uint256,address,uint256)")), 1, 1, CONTRACT),
-            raw_at(super::v1_registry::Transfer { node: node.parse()?, owner: HOLDER.parse()? }
-                .encode_log_data(), 1, 2, REGISTRY),
-            raw_at(Transfer { from: CONTROLLER.parse()?, to: HOLDER.parse()?,
-                tokenId: U256::from_be_slice(labelhash.as_slice()) }.encode_log_data(), 1, 3, CONTRACT),
-            raw_at(super::NameRegistered { name: label.to_owned(), label: labelhash,
-                owner: HOLDER.parse()?, expires: U256::from(42) }.encode_log_data(), 1, 4, CONTROLLER),
-            raw_at(Transfer { from: HOLDER.parse()?, to: WRAPPER.parse()?,
-                tokenId: U256::from_be_slice(labelhash.as_slice()) }.encode_log_data(), 2, 0, CONTRACT),
-            raw_at(super::v1_registry::Transfer { node: node.parse()?, owner: WRAPPER.parse()? }
-                .encode_log_data(), 2, 1, REGISTRY),
-            raw_at(super::NameWrapped { node: node.parse()?,
-                name: b"\x0elapsed-wrapped\x03eth\0".to_vec().into(), owner: HOLDER.parse()?,
-                fuses: 196_608, expiry: 42 + 90 * 86400 }.encode_log_data(), 2, 2, WRAPPER),
+            raw_at(
+                super::v1_registry::NewOwner {
+                    node: parent.parse()?,
+                    label: labelhash,
+                    owner: CONTROLLER.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                REGISTRY,
+            ),
+            raw_at(
+                with_topic0(
+                    BaseNameRegistered {
+                        id: U256::from_be_slice(labelhash.as_slice()),
+                        owner: CONTROLLER.parse()?,
+                        expires: U256::from(42),
+                    }
+                    .encode_log_data(),
+                    keccak256(b"NameRegistered(uint256,address,uint256)"),
+                ),
+                1,
+                1,
+                CONTRACT,
+            ),
+            raw_at(
+                super::v1_registry::Transfer {
+                    node: node.parse()?,
+                    owner: HOLDER.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                2,
+                REGISTRY,
+            ),
+            raw_at(
+                Transfer {
+                    from: CONTROLLER.parse()?,
+                    to: HOLDER.parse()?,
+                    tokenId: U256::from_be_slice(labelhash.as_slice()),
+                }
+                .encode_log_data(),
+                1,
+                3,
+                CONTRACT,
+            ),
+            raw_at(
+                super::NameRegistered {
+                    name: label.to_owned(),
+                    label: labelhash,
+                    owner: HOLDER.parse()?,
+                    expires: U256::from(42),
+                }
+                .encode_log_data(),
+                1,
+                4,
+                CONTROLLER,
+            ),
+            raw_at(
+                Transfer {
+                    from: HOLDER.parse()?,
+                    to: WRAPPER.parse()?,
+                    tokenId: U256::from_be_slice(labelhash.as_slice()),
+                }
+                .encode_log_data(),
+                2,
+                0,
+                CONTRACT,
+            ),
+            raw_at(
+                super::v1_registry::Transfer {
+                    node: node.parse()?,
+                    owner: WRAPPER.parse()?,
+                }
+                .encode_log_data(),
+                2,
+                1,
+                REGISTRY,
+            ),
+            raw_at(
+                super::NameWrapped {
+                    node: node.parse()?,
+                    name: b"\x0elapsed-wrapped\x03eth\0".to_vec().into(),
+                    owner: HOLDER.parse()?,
+                    fuses: 196_608,
+                    expiry: 42 + 90 * 86400,
+                }
+                .encode_log_data(),
+                2,
+                2,
+                WRAPPER,
+            ),
         ];
         let first_input = BatchInput {
             chain_id: CHAIN.to_owned(),
             manifests: vec![lifecycle_manifest(), registry_manifest(), wrapper_manifest],
             discovery_rules: vec![],
-            admissions: admissions().into_iter()
-                .chain([registry_admission(), wrapper_admission]).collect(),
+            admissions: admissions()
+                .into_iter()
+                .chain([registry_admission(), wrapper_admission])
+                .collect(),
             prior_events: vec![],
             blocks: vec![block(1, 1), block(2, 2)],
             raw_logs: logs,
         };
         let (first, session) = interpret_test_batch_incremental(first_input.clone(), None)?;
-        let wrapped = first.normalized_events.iter().find(|e|
-            e.event_kind == "SurfaceBound" && e.source_family == "ens_v1_wrapper_l1").expect("wrapped surface");
+        let wrapped = first
+            .normalized_events
+            .iter()
+            .find(|e| e.event_kind == "SurfaceBound" && e.source_family == "ens_v1_wrapper_l1")
+            .expect("wrapped surface");
         assert_eq!(wrapped.after_state["authority_kind"], "wrapper");
-        let grant = first.normalized_events.iter().find(|e|
-            e.event_kind == "RegistrationGranted" && e.log_index == Some(1)).unwrap();
+        let grant = first
+            .normalized_events
+            .iter()
+            .find(|e| e.event_kind == "RegistrationGranted" && e.log_index == Some(1))
+            .unwrap();
         let mut tail = first_input.clone();
         tail.raw_logs.clear();
-        tail.blocks = vec![block(3, 42 + 90 * 86400), block(4, 42 + 90 * 86400 + 1), block(5, 42 + 90 * 86400 + 2)];
+        tail.blocks = vec![
+            block(3, 42 + 90 * 86400),
+            block(4, 42 + 90 * 86400 + 1),
+            block(5, 42 + 90 * 86400 + 2),
+        ];
         let (live, _) = interpret_test_batch_incremental(tail.clone(), Some(session))?;
         let mut full_input = first_input.clone();
         full_input.blocks.extend(tail.blocks.clone());
         let full = interpret_test_batch(full_input)?;
-        let full_events = full.normalized_events.into_iter().filter(|e| e.block_number >= Some(3)).collect::<Vec<_>>();
+        let full_events = full
+            .normalized_events
+            .into_iter()
+            .filter(|e| e.block_number >= Some(3))
+            .collect::<Vec<_>>();
         assert_eq!(live.normalized_events, full_events, "full replay");
-        for prior in [first.normalized_events.iter().map(prior_event).collect(),
-            seam::fold_prior_events(vec![], &first.normalized_events, &first_input.blocks)?] {
+        for prior in [
+            first.normalized_events.iter().map(prior_event).collect(),
+            seam::fold_prior_events(vec![], &first.normalized_events, &first_input.blocks)?,
+        ] {
             tail.prior_events = prior;
             let restored = interpret_test_batch(tail.clone())?;
-            assert_eq!(restored.normalized_events, live.normalized_events, "restore");
-            assert_eq!(restored.surface_bindings, live.surface_bindings, "restore bindings");
+            assert_eq!(
+                restored.normalized_events, live.normalized_events,
+                "restore"
+            );
+            assert_eq!(
+                restored.surface_bindings, live.surface_bindings,
+                "restore bindings"
+            );
         }
-        let releases = live.normalized_events.iter().filter(|e| e.event_kind == "RegistrationReleased").collect::<Vec<_>>();
-        assert_eq!(releases.len(), 1, "lapsed wrapped lease releases exactly once");
+        let releases = live
+            .normalized_events
+            .iter()
+            .filter(|e| e.event_kind == "RegistrationReleased")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            releases.len(),
+            1,
+            "lapsed wrapped lease releases exactly once"
+        );
         assert_eq!(releases[0].block_number, Some(4));
         assert_eq!(releases[0].resource_id, grant.resource_id);
         // The NameWrapper only holds the registry node on behalf of the lease. Once the lease
         // lapses past grace, no ENSv1 authority remains: the wrapper custody must not be revived
         // as a registry-only owner that keeps serving the name as registered.
-        let revived = live.normalized_events.iter().filter(|e|
-            e.event_kind == "SurfaceBound"
-            || (e.event_kind == "AuthorityEpochChanged" && !e.after_state["authority_kind"].is_null()))
+        let revived = live
+            .normalized_events
+            .iter()
+            .filter(|e| {
+                e.event_kind == "SurfaceBound"
+                    || (e.event_kind == "AuthorityEpochChanged"
+                        && !e.after_state["authority_kind"].is_null())
+            })
             .collect::<Vec<_>>();
-        assert!(revived.is_empty(), "lapsed wrapped lease revived custody: {revived:#?}");
-        let epoch = live.normalized_events.iter().find(|e| e.event_kind == "AuthorityEpochChanged")
+        assert!(
+            revived.is_empty(),
+            "lapsed wrapped lease revived custody: {revived:#?}"
+        );
+        let epoch = live
+            .normalized_events
+            .iter()
+            .find(|e| e.event_kind == "AuthorityEpochChanged")
             .expect("wrapper authority epoch closes at release");
         assert_eq!(epoch.before_state["authority_kind"], "wrapper");
-        assert!(live.surface_bindings.is_empty(), "{:#?}", live.surface_bindings);
+        assert!(
+            live.surface_bindings.is_empty(),
+            "{:#?}",
+            live.surface_bindings
+        );
         Ok(())
     }
 

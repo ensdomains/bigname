@@ -3928,10 +3928,7 @@ async fn migrated_child_in_a_migration_created_registry_serves_the_exact_profile
         .await
     };
     let served = profile_row(scratch.pool().clone(), logical_name_id.clone()).await?;
-    assert_eq!(
-        served.0.as_deref(),
-        Some("migration_authority_transition")
-    );
+    assert_eq!(served.0.as_deref(), Some("migration_authority_transition"));
     assert_eq!(served.3, Some(binding));
     assert_eq!(
         (served.1.as_str(), served.2),
@@ -12569,6 +12566,218 @@ async fn identity_only_name_has_no_projected_current_authority() -> Result<()> {
         )
     );
     scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn lapsed_wrapped_v1_lease_without_revived_custody_serves_a_released_tombstone() -> Result<()>
+{
+    let incremental =
+        ScratchDatabase::create("project_authority_lapsed_wrapped_v1_tombstone").await?;
+    let fresh =
+        ScratchDatabase::create("project_authority_lapsed_wrapped_v1_tombstone_fresh").await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        seed_project_fixture(pool).await?;
+        seed_wrapped_v1_lease(pool).await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+    let live: (String, Option<String>, Value) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason, declared_summary
+         FROM name_current WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(live.0, "supported");
+    assert_eq!(live.1, None);
+    assert_eq!(live.2["registration"]["status"], "active");
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        release_wrapped_v1_lease_without_revival(pool).await?;
+    }
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(CHAIN, 4),
+        }),
+        RunMode::Normal,
+        5,
+        5,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 5).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        normalize_projection_clocks(pool).await?;
+    }
+
+    let row: (
+        String,
+        Option<String>,
+        Option<Uuid>,
+        Option<Uuid>,
+        Value,
+        Value,
+    ) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason, surface_binding_id, resource_id,
+                declared_summary, provenance -> 'authority_selection'
+         FROM name_current WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(
+        (row.0.as_str(), row.1.as_deref()),
+        ("supported", None),
+        "a lapsed lease whose release is proven is not an unresolved authority selection"
+    );
+    assert_eq!(row.2, Some(Uuid::parse_str(SURFACE_BINDING)?));
+    assert_eq!(row.3, Some(Uuid::parse_str(RESOURCE)?));
+    let registration = &row.4["registration"];
+    assert_eq!(registration["status"], "released");
+    assert_eq!(registration["released_at"], 5);
+    assert!(registration["registrant"].is_null());
+    assert!(registration["authority_kind"].is_null());
+    assert!(registration["expiry"].is_null());
+    assert_eq!(row.4["control"], json!({"status": "unregistered"}));
+    assert!(row.4["resolver"]["address"].is_null());
+    assert!(row.4["resolver"]["chain_id"].is_null());
+    assert_eq!(row.5["authority_arm"], "ens_v1");
+    assert_eq!(row.5["lifecycle_state"], "unregistered");
+    assert_eq!(
+        row.5["resource_authority_context"]["released_tombstone"],
+        "ens_v1"
+    );
+
+    let incremental_row: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current
+         WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_one(incremental.pool())
+    .await?;
+    let fresh_row: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current
+         WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_one(fresh.pool())
+    .await?;
+    assert_eq!(incremental_row, fresh_row);
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+/// Wraps the fixture's registrar lease in place: the NameWrapper holds the registry node
+/// and the lease resource carries the wrapper authority kind.
+async fn seed_wrapped_v1_lease(pool: &PgPool) -> Result<()> {
+    for block in 4..=5 {
+        insert_lineage_block(pool, CHAIN, block).await?;
+    }
+    sqlx::query(
+        "UPDATE resources
+         SET provenance = jsonb_build_object(
+             'authority_kind', 'wrapper', 'source_family', 'ens_v1_wrapper_l1',
+             'manifest_version', 1
+         )
+         WHERE resource_id = $1",
+    )
+    .bind(Uuid::parse_str(RESOURCE)?)
+    .execute(pool)
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "AuthorityEpochChanged",
+        "ens_v1_wrapper_l1",
+        json!({
+            "source_event":"NameWrapped",
+            "authority_kind":"wrapper",
+            "authority_key":"wrapper:0xalice",
+            "owner":OWNER
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "PermissionScopeChanged",
+        "ens_v1_wrapper_l1",
+        json!({"fuses":0,"wrapper_state":"wrapped"}),
+        json!({}),
+    )
+    .await?;
+    Ok(())
+}
+
+/// The lease lapses past grace while wrapped: the interpreter releases the registration,
+/// unbinds the wrapper surface and closes the authority epoch without a successor, because
+/// the NameWrapper's registry custody is not a live authority once its own entry expired.
+async fn release_wrapped_v1_lease_without_revival(pool: &PgPool) -> Result<()> {
+    insert_event(
+        pool,
+        CHAIN,
+        5,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "RegistrationReleased",
+        "ens_v1_registrar_l1",
+        json!({
+            "source_event":"RegistrationReleased",
+            "released_at":5,
+            "labelhash":"0xalice-label",
+            "namehash":"0xalice",
+            "expiry":4
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        5,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "SurfaceUnbound",
+        "ens_v1_registrar_l1",
+        json!({
+            "source_event":"RegistrationReleased",
+            "authority_kind":"wrapper",
+            "authority_key":"wrapper:0xalice",
+            "active_to":5
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        5,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "AuthorityEpochChanged",
+        "ens_v1_registrar_l1",
+        json!({
+            "source_event":"RegistrationReleased",
+            "authority_kind":null,
+            "authority_key":null,
+            "owner":null
+        }),
+        json!({}),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(5)
+         WHERE surface_binding_id = $1",
+    )
+    .bind(Uuid::parse_str(SURFACE_BINDING)?)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 #[tokio::test]

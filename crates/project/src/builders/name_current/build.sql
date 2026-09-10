@@ -70,6 +70,12 @@
                                'authority_kind', NULL, 'authority_key', NULL,
                                'registrant', NULL, 'expiry', NULL
                            )
+                       -- A released ENSv1 lease whose custody was not revived is a tombstone:
+                       -- the registrar lease is gone and nothing current owns the node, so the
+                       -- lapsed registrant, authority and expiry are history only.
+                       WHEN COALESCE(selected_authority.released_v1_tombstone, false)
+                           THEN jsonb_build_object('authority_kind', NULL, 'authority_key', NULL,
+                               'registrant', NULL, 'expiry', NULL)
                        -- An ENSv2 registration lapsed by path expiry keeps its lapsed expiry as
                        -- a readable detail (the registry entry still holds it); an explicit
                        -- release clears the entry, so nothing current remains.
@@ -84,6 +90,8 @@
                            'registrant', NULL, 'expiry', NULL) ELSE '{}'::jsonb END,
                    'control', CASE
                        WHEN selected_authority.known_ownerless_registry
+                           THEN jsonb_build_object('status', 'unregistered')
+                       WHEN COALESCE(selected_authority.released_v1_tombstone, false)
                            THEN jsonb_build_object('status', 'unregistered')
                        WHEN selected_registration.event_kind = 'RegistrationReleased'
                         AND selected_authority.selected_authority_arm = 'ens_v2'
@@ -118,12 +126,14 @@
                        'chain_id', CASE
                            WHEN resolver.resolver_address IS NOT NULL AND resolver.resolver_address <> '0x0000000000000000000000000000000000000000'
                             AND NOT (COALESCE(selected_registration.event_kind, '') IN ('RegistrationReleased', 'RegistrationReserved') AND selected_authority.selected_authority_arm = 'ens_v2')
+                            AND NOT COALESCE(selected_authority.released_v1_tombstone, false)
                                THEN resolver.chain_id
                            ELSE NULL
                        END,
                        'address', CASE
                            WHEN resolver.resolver_address IS NOT NULL AND resolver.resolver_address <> '0x0000000000000000000000000000000000000000'
                             AND NOT (COALESCE(selected_registration.event_kind, '') IN ('RegistrationReleased', 'RegistrationReserved') AND selected_authority.selected_authority_arm = 'ens_v2')
+                            AND NOT COALESCE(selected_authority.released_v1_tombstone, false)
                                THEN resolver.resolver_address
                            ELSE NULL
                        END,
