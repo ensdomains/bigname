@@ -991,6 +991,12 @@ jobs:
     name: test (API container shutdown)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    # Ordered after the dependency-cache producer, the same way the e2e shards are.
+    # `!cancelled()` rather than a success guard: a failure over there must not skip
+    # this proof, it only means this job compiles against a cold cache.
+    needs:
+      - e2e_build
+    if: ${{ !cancelled() }}
     services:
       postgres:
         image: postgres:16-alpine
@@ -1006,11 +1012,15 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
+      # sccache is off here for the same reason as `build (e2e phase-runner)`: the
+      # dependency cache below covers this build instead. The image build takes its
+      # single-job constraint from the pinned one-CPU builder that
+      # `scripts/test-container-shutdown` creates and verifies, not from this job's
+      # environment, so the host build is free to use the runner's cores.
       RUSTC_WRAPPER: ""
       BIGNAME_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
       BIGNAME_E2E_SHUTDOWN_SOURCE_SHA: ${{ github.sha }}
       BIGNAME_E2E_SHUTDOWN_EVIDENCE: ${{ github.workspace }}/target/api-container-shutdown
-      CARGO_BUILD_JOBS: "1"
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
@@ -1028,13 +1038,88 @@ jobs:
         run: |
           scripts/sync-refs
           scripts/sync-refs --check
+      - name: Compute phase-runner dependency-cache key
+        id: phase_runner_cache_key
+        run: |
+          root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+          e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
+          prefix="v1-rust-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
+          runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
+          primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
+          echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
+          echo "primary=$primary" >>"$GITHUB_OUTPUT"
+          echo "phase-runner dependency-cache primary key: $primary"
+
+      # Same workspace, lockfiles, and debug profile as `build (e2e phase-runner)`,
+      # so this restores that job's dependency cache instead of compiling cold.
+      - name: Cache e2e phase-runner Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ steps.phase_runner_cache_key.outputs.prefix }}
+          shared-key: phase-runner
+          add-job-id-key: false
+          add-rust-environment-hash-key: false
+          workspaces: ". -> target"
+          cache-workspace-crates: false
+          save-if: false
+
       - name: Build canonical phase-runner prerequisite
         env:
           BIGNAME_BUILD_SHA: ${{ github.sha }}
         run: |
           cargo build --locked --package phase-runner --bin phase-runner
           sha256sum target/debug/phase-runner
+      # The Dockerfile names its base images by tag, and both tags are republished
+      # upstream without any file here changing. A republish invalidates every layer
+      # built on it, so the digests belong in the cache key below: an entry is
+      # immutable once saved, and a key that stayed the same across a republish
+      # would restore the stale layers and rebuild cold on every run, never saving.
+      - name: Resolve the image build's base digests
+        id: base_images
+        run: |
+          # `.Manifest.Digest` is the descriptor digest buildx attaches to the resolved
+          # index, the same value its default inspector prints as `Digest:` and the
+          # one BuildKit pins `FROM` to. The guard keeps a format change from turning
+          # into a key that silently stops rotating.
+          resolve() {
+            local digest
+            digest="$(docker buildx imagetools inspect "$1" --format '{{ .Manifest.Digest }}')"
+            case "$digest" in
+              sha256:[0-9a-f]*) printf '%s\n' "${digest#sha256:}" ;;
+              *) echo "could not resolve a digest for $1: got '$digest'" >&2; return 1 ;;
+            esac
+          }
+          builder="$(resolve "rust:${RUST_VERSION}-bookworm")"
+          runtime="$(resolve "ubuntu:24.04")"
+          echo "builder=${builder}" >>"$GITHUB_OUTPUT"
+          echo "runtime=${runtime}" >>"$GITHUB_OUTPUT"
+          echo "rust:${RUST_VERSION}-bookworm is sha256:${builder}; ubuntu:24.04 is sha256:${runtime}"
+
+      # The image build compiles the whole workspace in release mode on the pinned
+      # single-CPU builder. Its builder is per-run, so without this the compile starts
+      # cold every time. The Dockerfile builds third-party dependencies in their own
+      # layer, ahead of any first-party source, so an ordinary commit reuses that layer
+      # and recompiles only this workspace's crates.
+      - name: Cache exact-image build layers
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/shutdown-image-cache
+          # Keyed on every input of the dependency layer and nothing else: the base
+          # image digests, the manifests the Dockerfile copies ahead of it, the
+          # lockfile, the toolchain and cargo config, and the Dockerfile itself. Not
+          # the commit, because the first-party layers change every commit anyway,
+          # and a per-commit key would write a multi-gigabyte entry every run and
+          # evict the Cargo caches the other jobs depend on. Every input is in the
+          # key for the same reason the digests are: a change that left the key
+          # alone could never save its rebuilt layers.
+          key: v1-shutdown-image-${{ env.RUST_VERSION }}-${{ steps.base_images.outputs.builder }}-${{ steps.base_images.outputs.runtime }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/*/Cargo.toml', 'crates/*/Cargo.toml', 'tools/*/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml', 'Dockerfile') }}
+          restore-keys: |
+            v1-shutdown-image-${{ env.RUST_VERSION }}-${{ steps.base_images.outputs.builder }}-
+            v1-shutdown-image-${{ env.RUST_VERSION }}-
+
       - name: Prove exact-image API shutdown
+        env:
+          BIGNAME_E2E_SHUTDOWN_BUILD_CACHE: ${{ runner.temp }}/shutdown-image-cache
         run: scripts/test-container-shutdown
       - name: Retain shutdown evidence
         if: always()
