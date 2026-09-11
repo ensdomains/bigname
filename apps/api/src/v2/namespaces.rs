@@ -309,7 +309,7 @@ mod tests {
     #[tokio::test]
     async fn no_query_params_rejects_namespace_controls() {
         let request = Request::builder()
-            .uri("/v2/namespaces/ens?at=2026-06-10T00:00:00Z")
+            .uri("/v1/namespaces/ens?at=2026-06-10T00:00:00Z")
             .body(())
             .expect("request must build");
         let (mut parts, ()) = request.into_parts();

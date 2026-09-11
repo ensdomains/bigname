@@ -318,7 +318,7 @@ async fn drain(
         let hashes: Vec<String> = sqlx::query_scalar("SELECT input_content_hash FROM chain_phase_state WHERE phase_name IN ('interpret','project') AND phase_status='completed'")
             .fetch_all(pool).await?;
         ensure!(hashes.len() == 2 && hashes.iter().all(|h| boot["fields"]["interpreter_content_hash"] == *h), "producer/API generation mismatch");
-        let url = format!("http://{address}/v2/names/alice.eth?source=indexed");
+        let url = format!("http://{address}/v1/names/alice.eth?source=indexed");
         let baseline = response(url.clone()).await?;
         ensure!(baseline["data"]["name"] == "alice.eth" && baseline["meta"]["source"] == "indexed", "wrong indexed identity");
         save(evidence, &format!("{name}-baseline"), &baseline)?;

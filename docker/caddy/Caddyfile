@@ -14,22 +14,14 @@
 		Strict-Transport-Security "max-age=31536000"
 	}
 
-	@docs path /docs /docs/ /openapi.json
-	header @docs Cache-Control "public, max-age=300"
-
-	@helpers {
-		method GET HEAD
-		path / /docs /docs/ /openapi.json
-	}
-
 	@v1_reads {
 		method GET HEAD
 		path /v1/*
 	}
 
-	@v1_identity_lookup {
+	@v1_lookup {
 		method POST
-		path /v1/identity:lookup
+		path /v1/lookup
 	}
 
 	@graphql {
@@ -39,13 +31,12 @@
 
 	@preflight {
 		method OPTIONS
-		path /v1/identity:lookup /graphql
+		path /v1/lookup /graphql
 	}
 
 	route {
-		reverse_proxy @helpers {$BIGNAME_PUBLIC_UPSTREAM}
 		reverse_proxy @v1_reads {$BIGNAME_PUBLIC_UPSTREAM}
-		reverse_proxy @v1_identity_lookup {$BIGNAME_PUBLIC_UPSTREAM}
+		reverse_proxy @v1_lookup {$BIGNAME_PUBLIC_UPSTREAM}
 		reverse_proxy @graphql {$BIGNAME_PUBLIC_UPSTREAM}
 		reverse_proxy @preflight {$BIGNAME_PUBLIC_UPSTREAM}
 		respond 404

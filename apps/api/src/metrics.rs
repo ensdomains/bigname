@@ -271,17 +271,17 @@ mod tests {
     async fn request_counter_uses_route_template_without_raw_path_values() -> Result<()> {
         let before = api_metrics()
             .http_requests
-            .with_label_values(&["/v2/names/{name}", "GET", "2xx"])
+            .with_label_values(&["/v1/names/{name}", "GET", "2xx"])
             .get();
         let app = Router::new()
-            .route("/v2/names/{name}", get(|| async { "metric test" }))
+            .route("/v1/names/{name}", get(|| async { "metric test" }))
             .layer(middleware::from_fn(track_http_request));
 
         for name in ["alice.eth", "bob.eth"] {
             app.clone()
                 .oneshot(
                     Request::builder()
-                        .uri(format!("/v2/names/{name}"))
+                        .uri(format!("/v1/names/{name}"))
                         .body(Body::empty())?,
                 )
                 .await?;
@@ -289,7 +289,7 @@ mod tests {
 
         let after = api_metrics()
             .http_requests
-            .with_label_values(&["/v2/names/{name}", "GET", "2xx"])
+            .with_label_values(&["/v1/names/{name}", "GET", "2xx"])
             .get();
         ensure!(after >= before + 2);
         let scrape = api_metrics().registry.encode()?;

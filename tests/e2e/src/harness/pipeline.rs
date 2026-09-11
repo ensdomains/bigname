@@ -2346,7 +2346,7 @@ pub async fn prove_normal_sepolia_http(
     drop(startup_guard);
     for (name, owner) in owners {
         let response = client
-            .get(format!("http://{address}/v2/names/{name}"))
+            .get(format!("http://{address}/v1/names/{name}"))
             .query(&[
                 ("namespace", "ens"),
                 ("finality", "latest"),
@@ -2398,7 +2398,7 @@ pub async fn prove_normal_sepolia_http(
             let mut grants = Vec::new();
             loop {
                 let mut request = client
-                    .get(format!("http://{address}/v2/permissions"))
+                    .get(format!("http://{address}/v1/permissions"))
                     .query(&[
                         ("name", *name),
                         ("namespace", "ens"),

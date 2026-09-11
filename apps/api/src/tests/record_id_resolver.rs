@@ -1,7 +1,7 @@
 #[tokio::test]
 async fn record_id_resolver_inventory_serves_explicit_empty_values() -> Result<()> {
     let payload = v2_name_records_payload_with_row_and_setup(
-        "/v2/names/alice.eth/records?keys=text:url,addr:60,contenthash&include=inventory",
+        "/v1/names/alice.eth/records?keys=text:url,addr:60,contenthash&include=inventory",
         |row| {
             row.declared_summary["topology"] = json!({"version_boundaries":{"record_version_boundary":record_inventory_boundary_with_pointer(&bigname_storage::logical_name_id_for_name("ens", "alice.eth"), row.resource_id.unwrap(), Some(808), Some("ResolverRecordLinked"))}});
         },
@@ -39,7 +39,7 @@ async fn record_id_resolver_permissions_preserve_generation_specific_powers() ->
     let payload = v2_permissions_payload_for_database(
         &database,
         &format!(
-            "/v2/permissions?registration_id={}",
+            "/v1/permissions?registration_id={}",
             v2_permissions_current_resource_id()
         ),
     )
@@ -70,7 +70,7 @@ async fn record_id_resolver_default_rule_derives_eth_address_in_indexed_and_auto
     // this route fixture checks both consumer modes using that projected rule.
     for source in ["indexed", "auto"] {
         let payload = v2_name_records_payload_with_setup(
-            &format!("/v2/names/alice.eth/records?source={source}&keys=addr:60"),
+            &format!("/v1/names/alice.eth/records?source={source}&keys=addr:60"),
             |_, _, inventory| {
                 inventory.selectors = json!([{
                     "record_key":"addr:2147483648","record_family":"addr","selector_key":"2147483648","cacheable":true
