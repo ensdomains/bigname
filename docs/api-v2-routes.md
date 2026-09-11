@@ -200,6 +200,13 @@ Field ownership:
   serializes as `owner,manager,registrant` and reordered sets use canonical
   dictionary order. `profile=feed` returns a documented core-field subset of
   the same record object; it does not introduce another DTO.
+  `profile=detail` records carry `authority` (`ens_v1` or `ens_v2`) when the
+  projection selected an ENSv1/ENSv2 arm for the name, and `migrated_at` when
+  that `ens_v2` authority was proven by an ENSv1→ENSv2 migration transition;
+  both apply to name results and reverse rows alike and are omitted on feed
+  records and on `status=unsupported` records. Reverse inputs accept no
+  `authority` filter yet; filter client-side or use
+  `GET /v1/addresses/{address}/names?authority=`.
   A name result classified as `registration_status=unregistered` always omits
   `registration_id`. It also omits `resolver` and resolver-record fields unless
   it is
@@ -424,7 +431,15 @@ Field ownership:
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L820 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L825 @ ens_v1@91c966f)
   `manager` is omitted when no forward-read source can derive it; it is not
-  emitted as a permanent null placeholder. The
+  emitted as a permanent null placeholder. `authority` names the protocol arm
+  the current registration fields come from (`ens_v1` or `ens_v2`, read from
+  the projection's selected [authority epoch](glossary.md#authority-epoch)); it
+  is omitted for Basenames names and on the `status=unsupported` identity-only
+  object. `migrated_at` is present only when `authority=ens_v2` was proven by
+  an activated `MigrationApplied` [migration
+  boundary](glossary.md#migration-boundary): it is the RFC 3339 block time of
+  that proof event, read through the event's block in the chain lineage. A name
+  first registered in ENSv2 has `authority=ens_v2` and no `migrated_at`. The
   name-profile portion uses `name`, `display_name`, `namespace`, `namehash`, `resolver`,
   `addresses`, `text_records`, `content_hash`,
   `primary_name`, `primary_address`, `chain_id`, `network`, `status`, and
@@ -435,7 +450,8 @@ Field ownership:
   verified path as `/v1/names/{name}/records`; indexed resolver-record values
   are not substituted into those fields. The registration and identity summary
   fields (`registration_id`, `token_id`, `owner`, `manager`, `registrant`, dates,
-  `registration_status`, `wrapper_state`, `wrapper_fuses`, `name`, `display_name`, `namespace`, `namehash`,
+  `registration_status`, `wrapper_state`, `wrapper_fuses`, `authority`,
+  `migrated_at`, `name`, `display_name`, `namespace`, `namehash`,
   `resolver`, `primary_name`, `chain_id`, and `network`) remain indexed
   projection values because they are not resolver records. Verified responses
   include `meta.as_of`/`meta.as_of_token` for the positions used by the fresh
@@ -1095,11 +1111,16 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Method/path: `GET /v1/addresses/{address}/names`
 - Tier: product read.
 - Purpose: names related to an address.
-- Request parameters: path `address`; query `namespace`, `relation`, `q`,
+- Request parameters: path `address`; query `namespace`, `relation`,
+  `authority=ens_v1|ens_v2`, `q`,
   `sort=name|expires_at|registered_at`, `order=asc|desc`,
   `dedupe=name|registration`, `include=role_summary`, `cursor`, `page_size`,
   and optional `finality=latest`. `at` and historical `finality` values are
   rejected by the shared latest-state collection rule.
+  `authority` keeps only rows whose current name row selected that protocol
+  arm; it is a primary-key probe of the name row per candidate relation row.
+  Any other value returns `400 invalid_input`. Rows with no selected arm
+  (Basenames) match neither value.
   `q` applies prefix matching to the dictionary `name` field. The API treats
   the complete `q` value as an ENSIP-15 name prefix and normalizes it with the
   same normalizer used for indexed names before comparing it directly with the
@@ -1121,7 +1142,10 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `display_name`, `namespace`, `namehash`, `owner`, `registrant`,
   `registration_status`, `registered_at`, `created_at`, and `expires_at`.
   Address-name rows add `is_primary` and `relations`, where `relations` is the
-  subset of `owner`, `manager`, and `registrant` that matched. `is_primary` is
+  subset of `owner`, `manager`, and `registrant` that matched. They also carry
+  `authority` and `migrated_at` with the same meaning as on
+  `GET /v1/names/{name}`: the selected `ens_v1`/`ens_v2` arm, and the block time
+  of the migration boundary that proved an `ens_v2` arm. `is_primary` is
   evaluated against that row namespace's coin-type-60 primary-name claim, not a
   route-wide namespace shortcut. The claim is compared in the same normalized
   form the indexed answer from `GET /v1/addresses/{address}/primary-name`
@@ -1141,8 +1165,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   explicit gaps. `grant_scope` uses the same shape documented for
   `GET /v1/permissions`.
 - Pagination behavior: standard collection pagination. Cursors are bound to
-  address, optional namespace filter, normalized relation set, `q`, dedupe
-  mode, sort, and order.
+  address, optional namespace filter, normalized relation set, `authority`,
+  `q`, dedupe mode, sort, and order.
 - Snapshot behavior: address-name rows come from current state. The response
   omits `meta.as_of` and `meta.as_of_token`; completeness metadata for
   `include=role_summary` remains available. Its cursor carries no snapshot

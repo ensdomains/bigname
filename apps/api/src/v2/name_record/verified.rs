@@ -72,6 +72,8 @@ fn unsupported_name_record(row: &NameCurrentRow) -> V2Result<Option<NameRecord>>
         registration_status: None,
         wrapper_state: None,
         wrapper_fuses: None,
+        authority: None,
+        migrated_at: None,
         name: row.normalized_name.clone(),
         display_name: row.canonical_display_name.clone(),
         namespace: row.namespace.clone(),

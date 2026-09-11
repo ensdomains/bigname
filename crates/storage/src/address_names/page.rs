@@ -41,6 +41,7 @@ pub async fn load_address_names_current_page(
         relations,
         dedupe_by,
         None,
+        None,
         AddressNamesCurrentSort::Name,
         AddressNamesCurrentOrder::Asc,
         sorted_cursor.as_ref(),
@@ -69,6 +70,7 @@ pub async fn load_address_names_current_page_sorted_for_relations(
     relations: Option<&[AddressNameRelation]>,
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<&str>,
+    authority_arm: Option<&str>,
     sort: AddressNamesCurrentSort,
     order: AddressNamesCurrentOrder,
     cursor: Option<&AddressNamesCurrentSortedCursor>,
@@ -85,14 +87,29 @@ pub async fn load_address_names_current_page_sorted_for_relations(
         "address_names_current page_size exceeds SQL limit",
     )?;
 
-    let summary =
-        load_address_names_current_summary(pool, address, namespace, relations, dedupe_by, q)
-            .await?;
+    let summary = load_address_names_current_summary(
+        pool,
+        address,
+        namespace,
+        relations,
+        dedupe_by,
+        q,
+        authority_arm,
+    )
+    .await?;
 
     if let Some(cursor) = cursor {
         ensure_address_names_current_cursor_matches_sort(sort, cursor)?;
         ensure_address_names_current_cursor_exists(
-            pool, address, namespace, relations, dedupe_by, q, sort, cursor,
+            pool,
+            address,
+            namespace,
+            relations,
+            dedupe_by,
+            q,
+            authority_arm,
+            sort,
+            cursor,
         )
         .await?;
     }
@@ -105,6 +122,7 @@ pub async fn load_address_names_current_page_sorted_for_relations(
         relations,
         dedupe_by,
         q,
+        authority_arm,
     );
     push_address_names_current_sortable_entries_cte(&mut builder, sort);
     builder.push(
@@ -149,7 +167,8 @@ pub async fn load_address_names_current_page_sorted_for_relations(
     builder.push_bind(page_limit);
 
     let rows = builder.build().fetch_all(pool).await.with_context(|| {
-        let mut parts = load_context_parts(address, namespace, relations, dedupe_by, q);
+        let mut parts =
+            load_context_parts(address, namespace, relations, dedupe_by, q, authority_arm);
         parts.push(format!("sort {}", sort.as_str()));
         parts.push(format!("order {}", order.as_str()));
         format!(
@@ -180,6 +199,7 @@ fn load_context_parts(
     relations: Option<&[AddressNameRelation]>,
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<&str>,
+    authority_arm: Option<&str>,
 ) -> Vec<String> {
     let mut parts = vec![format!("address {address}")];
     if let Some(namespace) = namespace {
@@ -198,6 +218,9 @@ fn load_context_parts(
     if let Some(q) = q {
         parts.push(format!("q {q}"));
     }
+    if let Some(authority_arm) = authority_arm {
+        parts.push(format!("authority {authority_arm}"));
+    }
     parts.push(format!("dedupe_by {}", dedupe_by.as_str()));
     parts
 }
@@ -209,6 +232,7 @@ async fn load_address_names_current_summary(
     relations: Option<&[AddressNameRelation]>,
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<&str>,
+    authority_arm: Option<&str>,
 ) -> Result<AddressNamesCurrentSummary> {
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_address_names_current_grouped_entries_cte(
@@ -218,6 +242,7 @@ async fn load_address_names_current_summary(
         relations,
         dedupe_by,
         q,
+        authority_arm,
     );
     builder.push(
         r#",
@@ -354,7 +379,7 @@ async fn load_address_names_current_summary(
     );
 
     let row = builder.build().fetch_one(pool).await.with_context(|| {
-        let parts = load_context_parts(address, namespace, relations, dedupe_by, q);
+        let parts = load_context_parts(address, namespace, relations, dedupe_by, q, authority_arm);
         format!(
             "failed to load address_names_current grouped summary for {}",
             parts.join(" ")
@@ -372,6 +397,7 @@ async fn ensure_address_names_current_cursor_exists(
     relations: Option<&[AddressNameRelation]>,
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<&str>,
+    authority_arm: Option<&str>,
     sort: AddressNamesCurrentSort,
     cursor: &AddressNamesCurrentSortedCursor,
 ) -> Result<()> {
@@ -383,6 +409,7 @@ async fn ensure_address_names_current_cursor_exists(
         relations,
         dedupe_by,
         q,
+        authority_arm,
     );
     push_address_names_current_sortable_entries_cte(&mut builder, sort);
     builder.push(
@@ -407,7 +434,8 @@ async fn ensure_address_names_current_cursor_exists(
     );
 
     let row = builder.build().fetch_one(pool).await.with_context(|| {
-        let mut parts = load_context_parts(address, namespace, relations, dedupe_by, q);
+        let mut parts =
+            load_context_parts(address, namespace, relations, dedupe_by, q, authority_arm);
         parts.push(format!("sort {}", sort.as_str()));
         format!(
             "failed to validate address_names_current grouped page cursor for {}",

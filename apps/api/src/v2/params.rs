@@ -5,8 +5,8 @@ use super::support::parse_evm_address;
 use super::{
     error::{V2Error, V2Result},
     vocab::{
-        AddressNamesDedupe, AddressNamesSort, Finality, HistoryEventType, HistoryScope, Relation,
-        RelationSet,
+        AddressNamesDedupe, AddressNamesSort, Authority, Finality, HistoryEventType, HistoryScope,
+        Relation, RelationSet,
     },
 };
 
@@ -29,6 +29,7 @@ pub(crate) struct RawQueryParams {
     pub(crate) registration_id: Option<String>,
     pub(crate) address: Option<String>,
     pub(crate) relation: Option<String>,
+    pub(crate) authority: Option<String>,
     pub(crate) from_block: Option<String>,
     pub(crate) to_block: Option<String>,
     pub(crate) q: Option<String>,
@@ -54,6 +55,7 @@ pub(crate) struct QueryParams {
     pub(crate) registration_id: Option<String>,
     pub(crate) address: Option<String>,
     pub(crate) relation: Option<RelationSet>,
+    pub(crate) authority: Option<Authority>,
     pub(crate) from_block: Option<i64>,
     pub(crate) to_block: Option<i64>,
     pub(crate) q: Option<String>,
@@ -101,6 +103,7 @@ impl TryFrom<RawQueryParams> for QueryParams {
             registration_id: parse_registration_id(raw.registration_id)?,
             address: parse_address(raw.address)?,
             relation: parse_relation_set_param(raw.relation.as_deref())?,
+            authority: parse_authority(raw.authority.as_deref())?,
             from_block: parse_block_bound(raw.from_block, "from_block")?,
             to_block: parse_block_bound(raw.to_block, "to_block")?,
             q: trim_to_option(raw.q),
@@ -221,6 +224,15 @@ pub(crate) fn parse_relation_set_param(value: Option<&str>) -> V2Result<Option<R
     RelationSet::from_relations(relations)
         .map(Some)
         .ok_or_else(|| invalid_parameter("relation"))
+}
+
+fn parse_authority(value: Option<&str>) -> V2Result<Option<Authority>> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some(value) => Authority::from_wire(value)
+            .map(Some)
+            .ok_or_else(|| invalid_parameter("authority")),
+    }
 }
 
 fn parse_registration_id(value: Option<String>) -> V2Result<Option<String>> {

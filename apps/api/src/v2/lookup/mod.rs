@@ -11,7 +11,8 @@ use super::support::{load_reverse_identity_records_live, load_reverse_identity_r
 use crate::AppState;
 
 use super::{
-    Envelope, NoQueryParams, Page, Relation, RelationSet, Status, V2Error, V2Result, encode,
+    Authority, Envelope, NoQueryParams, Page, Relation, RelationSet, Status, V2Error, V2Result,
+    encode,
 };
 
 mod admission;
@@ -134,6 +135,7 @@ pub(crate) async fn get_lookup(
         &mut results,
     )
     .await?;
+    apply_migrated_at(&state, &mut results).await?;
     #[cfg(test)]
     head::served_head_revalidation_test_hooks::run(&state.pool).await?;
     revalidate_lookup_public_namespaces(&state, public_namespaces.as_ref()).await?;
@@ -150,6 +152,42 @@ pub(crate) async fn get_lookup(
         page: None,
         meta,
     }))
+}
+
+/// Fills `migrated_at` on every rendered record whose current authority is the ENSv2 arm, in one
+/// batch across name results and reverse rows.
+async fn apply_migrated_at(state: &AppState, results: &mut [Option<LookupResult>]) -> V2Result<()> {
+    let mut records = results
+        .iter_mut()
+        .flatten()
+        .flat_map(|result| {
+            result
+                .record
+                .iter_mut()
+                .chain(result.records.iter_mut().flatten())
+        })
+        .filter(|record| record.authority == Some(Authority::EnsV2))
+        .map(|record| {
+            let logical_name_id =
+                bigname_storage::logical_name_id_for_name(&record.namespace, &record.name);
+            (logical_name_id, record)
+        })
+        .collect::<Vec<_>>();
+    if records.is_empty() {
+        return Ok(());
+    }
+    let logical_name_ids = records
+        .iter()
+        .map(|(logical_name_id, _)| logical_name_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let migrated_at =
+        crate::v2::name_record::load_migrated_at(&state.pool, &logical_name_ids).await?;
+    for (logical_name_id, record) in &mut records {
+        record.migrated_at = migrated_at.get(logical_name_id).cloned();
+    }
+    Ok(())
 }
 
 async fn render_name_lookup_results(

@@ -20,9 +20,10 @@ use super::permission_support::{
 };
 use super::support::{ensure_public_namespace, parse_evm_address};
 use super::{
-    AddressNamesDedupe, AddressNamesSort, Envelope, Meta, Page, QueryParamAllowlist,
+    AddressNamesDedupe, AddressNamesSort, Authority, Envelope, Meta, Page, QueryParamAllowlist,
     RegistrationStatus, Relation, RelationSet, SortOrder, StrictQueryParams, V2Error, V2Result,
-    api_error_to_v2, decode, encode, name_record::name_registration_fields,
+    api_error_to_v2, decode, encode,
+    name_record::{load_migrated_at, name_registration_fields},
     permission_powers_value, permission_scope_value, validate_latest_collection_selectors,
 };
 
@@ -46,6 +47,7 @@ impl QueryParamAllowlist for AddressNamesQueryParams {
         "at",
         "finality",
         "relation",
+        "authority",
         "q",
         "sort",
         "order",
@@ -75,6 +77,10 @@ pub(crate) struct AddressName {
     pub(crate) created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) authority: Option<Authority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) migrated_at: Option<String>,
     pub(crate) relations: Vec<Relation>,
     pub(crate) is_primary: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,6 +131,7 @@ pub(crate) async fn get_address_names(
         relation: params.relation.as_ref(),
         dedupe: params.dedupe,
         q: normalized_q.as_deref(),
+        authority: params.authority,
         sort: params.sort,
         order: params.order,
     };
@@ -144,6 +151,7 @@ pub(crate) async fn get_address_names(
         storage_relations,
         storage_dedupe,
         normalized_q.as_deref(),
+        params.authority.map(Authority::as_str),
         storage_sort,
         storage_order,
         storage_cursor.as_ref(),
@@ -178,6 +186,12 @@ pub(crate) async fn get_address_names(
                     "failed to load address-name registration summaries for {normalized_address}"
                 ))
             })?;
+    let migrated_logical_name_ids = name_rows
+        .values()
+        .filter(|row| Authority::from_provenance(&row.provenance) == Some(Authority::EnsV2))
+        .map(|row| row.logical_name_id.clone())
+        .collect::<Vec<_>>();
+    let migrated_at_by_name = load_migrated_at(&state.pool, &migrated_logical_name_ids).await?;
     let primary_names_by_namespace = load_primary_names_by_namespace(
         &state.pool,
         &normalized_address,
@@ -255,6 +269,7 @@ pub(crate) async fn get_address_names(
                 primary_names_by_namespace
                     .get(&entry.namespace)
                     .and_then(Option::as_deref),
+                migrated_at_by_name.get(&entry.logical_name_id).cloned(),
                 record_counts_by_name.get(&entry.logical_name_id).copied(),
                 role_summary,
             ))
@@ -341,6 +356,7 @@ pub(crate) fn build_address_name(
     entry: &AddressNameCurrentEntry,
     name_row: Option<&NameCurrentRow>,
     primary_name: Option<&str>,
+    migrated_at: Option<String>,
     record_count: Option<u64>,
     role_summary: Option<Vec<AddressNameRoleSummary>>,
 ) -> AddressName {
@@ -357,6 +373,8 @@ pub(crate) fn build_address_name(
         registered_at: registration.registered_at,
         created_at: registration.created_at,
         expires_at: registration.expires_at,
+        authority: name_row.and_then(|row| Authority::from_provenance(&row.provenance)),
+        migrated_at,
         relations: entry
             .relations
             .iter()

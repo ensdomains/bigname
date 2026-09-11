@@ -6284,3 +6284,110 @@ fn assert_no_banned_v1_spellings(value: &Value) {
         _ => {}
     }
 }
+
+/// Stamps the seeded ENSv2 migration proof on the Alice row: a `MigrationApplied`
+/// normalized event at `block_number` plus the matching `authority_selection`.
+async fn stamp_v2_alice_migration_transition(
+    database: &TestDatabase,
+    block_number: i64,
+    block_timestamp: i64,
+) -> Result<()> {
+    let block_hash = format!("0xmigration{block_number}");
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[raw_block(
+            "ethereum-mainnet",
+            &block_hash,
+            None,
+            block_number,
+            block_timestamp,
+        )],
+    )
+    .await?;
+    let event_identity = format!(
+        "ens_v2_migration_l1:1:ethereum-mainnet:{block_hash}:0xtxmigration:0:MigrationApplied:0"
+    );
+    let mut event = history_event(
+        &event_identity,
+        None,
+        None,
+        Some("ethereum-mainnet"),
+        Some(block_number),
+        Some(&block_hash),
+        Some("0xtxmigration"),
+        Some(0),
+        CanonicalityState::Canonical,
+    );
+    event.event_kind = "MigrationApplied".to_owned();
+    event.source_family = "ens_v2_migration_l1".to_owned();
+    event.derivation_kind = "ens_v2_migration".to_owned();
+    event.before_state = json!({});
+    event.after_state = json!({});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    let proof_event_id: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM bigname_phase.normalized_events WHERE event_identity = $1",
+    )
+    .bind(&event_identity)
+    .fetch_one(&database.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET provenance = provenance || jsonb_build_object('authority_selection', $1::jsonb)
+         WHERE namespace = 'ens' AND lower(raw_name) = 'alice.eth'",
+    )
+    .bind(json!({
+        "authority_arm": "ens_v2",
+        "proof_kind": "migration_authority_transition",
+        "proof_event_id": proof_event_id,
+        "lifecycle_state": "registered",
+    }))
+    .execute(&database.pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_reports_authority_arm_without_migration_transition() -> Result<()> {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
+        row.provenance["authority_selection"] = json!({
+            "authority_arm": "ens_v1",
+            "lifecycle_state": "registered",
+        });
+    })
+    .await?;
+
+    let data = payload["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("authority"), Some(&json!("ens_v1")));
+    assert!(data.get("migrated_at").is_none());
+
+    let unstamped = v2_name_record_payload("/v1/names/Alice.eth").await?;
+    assert!(unstamped["data"].get("authority").is_none());
+    assert!(unstamped["data"].get("migrated_at").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_and_lookup_report_migrated_at_from_the_migration_proof() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_record_fixture(&database, |_| {}, |_, _, _| {}).await?;
+    stamp_v2_alice_migration_transition(&database, 21_000_002, 1_717_171_699).await?;
+
+    let payload = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
+    let data = payload["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("authority"), Some(&json!("ens_v2")));
+    assert_eq!(data.get("migrated_at"), Some(&json!("2024-05-31T16:08:19Z")));
+
+    let response = v2_lookup_response_for_database(
+        &database,
+        "/v1/lookup",
+        json!({"inputs": [{"id": "alice", "name": "alice.eth"}]}),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let lookup: Value = read_json(response).await?;
+    let record = &lookup["data"][0]["record"];
+    assert_eq!(record["authority"], json!("ens_v2"));
+    assert_eq!(record["migrated_at"], json!("2024-05-31T16:08:19Z"));
+
+    database.cleanup().await
+}

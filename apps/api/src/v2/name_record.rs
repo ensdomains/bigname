@@ -20,7 +20,7 @@ use super::{
     V2Result, api_error_to_v2_for_resource, resolve_v2_snapshot_for, snapshot_meta,
     v2_exact_name_snapshot_scope_with_resolution_auxiliary,
     vocab::{
-        PARTIAL_SERVE_UNSUPPORTED_REASON, RegistrationStatus, Resolver, Source, Status,
+        Authority, PARTIAL_SERVE_UNSUPPORTED_REASON, RegistrationStatus, Resolver, Source, Status,
         WrapperFuses, WrapperState,
     },
 };
@@ -76,6 +76,10 @@ pub(crate) struct NameRecord {
     pub(crate) wrapper_state: Option<WrapperState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) wrapper_fuses: Option<WrapperFuses>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) authority: Option<Authority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) migrated_at: Option<String>,
     pub(crate) name: String,
     pub(crate) display_name: String,
     pub(crate) namespace: String,
@@ -175,7 +179,7 @@ pub(crate) async fn get_name_record(
         None
     };
     let chain_id = response_chain_id(&selected_snapshot);
-    let record = verified::build_name_record_for_source(
+    let mut record = verified::build_name_record_for_source(
         &state,
         &row,
         record_inventory.as_ref(),
@@ -184,6 +188,12 @@ pub(crate) async fn get_name_record(
         route_source,
     )
     .await?;
+    if record.record.authority == Some(Authority::EnsV2) {
+        record.record.migrated_at =
+            load_migrated_at(&state.pool, std::slice::from_ref(&row.logical_name_id))
+                .await?
+                .remove(&row.logical_name_id);
+    }
     let mut meta = snapshot_meta(&selected_snapshot)?;
     meta.source = Some(route_source);
 
@@ -192,6 +202,22 @@ pub(crate) async fn get_name_record(
         page: None,
         meta,
     }))
+}
+
+/// RFC 3339 `migrated_at` per logical name for names whose current ENSv2 authority was proven by
+/// an ENSv1→ENSv2 migration transition; other names are absent.
+pub(crate) async fn load_migrated_at(
+    pool: &sqlx::PgPool,
+    logical_name_ids: &[String],
+) -> V2Result<BTreeMap<String, String>> {
+    let transitions =
+        bigname_storage::load_name_migration_transition_timestamps(pool, logical_name_ids)
+            .await
+            .map_err(|_| V2Error::internal_error("failed to load name migration transitions"))?;
+    Ok(transitions
+        .into_iter()
+        .map(|(logical_name_id, timestamp)| (logical_name_id, super::format_timestamp(timestamp)))
+        .collect())
 }
 
 pub(crate) fn build_name_record(
@@ -272,6 +298,8 @@ pub(crate) fn build_name_record(
         registration_status: Some(registration.registration_status),
         wrapper_state,
         wrapper_fuses,
+        authority: Authority::from_provenance(&row.provenance),
+        migrated_at: None,
         name: row.normalized_name.clone(),
         display_name: row.canonical_display_name.clone(),
         namespace: row.namespace.clone(),

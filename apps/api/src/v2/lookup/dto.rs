@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::v2::{Page, RegistrationStatus, Relation, Resolver, Status};
+use crate::v2::{Authority, Page, RegistrationStatus, Relation, Resolver, Status};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -132,6 +132,10 @@ pub(crate) struct LookupRecord {
     pub(crate) is_primary: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) relations: Vec<Relation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) authority: Option<Authority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) migrated_at: Option<String>,
     pub(crate) status: Status,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unsupported_reason: Option<String>,

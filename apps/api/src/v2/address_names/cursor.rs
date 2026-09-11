@@ -4,7 +4,8 @@ use bigname_storage::{AddressNamesCurrentSortedCursor, AddressNamesCurrentSorted
 use sqlx::types::Uuid;
 
 use crate::v2::{
-    AddressNamesDedupe, AddressNamesSort, CursorPayload, RelationSet, SortOrder, V2Result,
+    AddressNamesDedupe, AddressNamesSort, Authority, CursorPayload, RelationSet, SortOrder,
+    V2Result,
     cursor::{cursor_value, invalid_cursor_error},
     format_timestamp,
 };
@@ -14,6 +15,7 @@ const NAMESPACE_FILTER_KEY: &str = "namespace";
 const RELATION_FILTER_KEY: &str = "relation";
 const DEDUPE_FILTER_KEY: &str = "dedupe";
 const Q_FILTER_KEY: &str = "q";
+const AUTHORITY_FILTER_KEY: &str = "authority";
 pub(crate) const ORDER_FILTER_KEY: &str = "order";
 pub(crate) const SORT_KIND_CURSOR_KEY: &str = "sort_kind";
 pub(crate) const SORT_VALUE_CURSOR_KEY: &str = "sort_value";
@@ -31,6 +33,7 @@ pub(crate) struct AddressNamesCursorBinding<'a> {
     pub(crate) relation: Option<&'a RelationSet>,
     pub(crate) dedupe: AddressNamesDedupe,
     pub(crate) q: Option<&'a str>,
+    pub(crate) authority: Option<Authority>,
     pub(crate) sort: AddressNamesSort,
     pub(crate) order: SortOrder,
 }
@@ -57,6 +60,10 @@ pub(crate) fn address_names_cursor_payload(
             ),
             (Q_FILTER_KEY.to_owned(), option_filter(binding.q)),
             (
+                AUTHORITY_FILTER_KEY.to_owned(),
+                option_filter(binding.authority.map(Authority::as_str)),
+            ),
+            (
                 ORDER_FILTER_KEY.to_owned(),
                 binding.order.as_str().to_owned(),
             ),
@@ -73,7 +80,7 @@ pub(crate) fn address_names_storage_cursor(
     if payload.sort != binding.sort.as_str() {
         return Err(invalid_cursor_error());
     }
-    if payload.filters.len() != 6
+    if payload.filters.len() != 7
         || payload.filters.get(ADDRESS_FILTER_KEY).map(String::as_str) != Some(binding.address)
         || payload
             .filters
@@ -86,6 +93,11 @@ pub(crate) fn address_names_storage_cursor(
             != Some(binding.dedupe.as_str())
         || payload.filters.get(Q_FILTER_KEY).map(String::as_str)
             != Some(option_filter(binding.q).as_str())
+        || payload
+            .filters
+            .get(AUTHORITY_FILTER_KEY)
+            .map(String::as_str)
+            != Some(option_filter(binding.authority.map(Authority::as_str)).as_str())
         || payload.filters.get(ORDER_FILTER_KEY).map(String::as_str) != Some(binding.order.as_str())
     {
         return Err(invalid_cursor_error());
