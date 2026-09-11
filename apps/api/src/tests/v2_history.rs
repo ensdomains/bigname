@@ -2095,3 +2095,97 @@ async fn v2_history_include_data_adds_friendly_payloads_and_keeps_lean_rows_othe
 
     database.cleanup().await
 }
+
+#[tokio::test]
+async fn v2_events_resolver_filter_lists_rows_for_one_resolver_contract() -> Result<()> {
+    const RESOLVER: &str = "0x0000000000000000000000000000000000000abc";
+    let (database, _) = v2_history_payload("/v1/names/history.eth/history?page_size=1").await?;
+    sqlx::query(
+        "UPDATE bigname_phase.normalized_events \
+         SET raw_fact_ref = raw_fact_ref || '{\"emitting_address\":\"0x0000000000000000000000000000000000000ABC\"}'::jsonb \
+         WHERE event_identity = 'history-record'",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    // The record write was emitted by the resolver and the pointer change names it.
+    let payload = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?resolver=1:{RESOLVER}"),
+    )
+    .await?;
+    assert_eq!(history_blocks(&payload), vec![106, 104]);
+    assert_eq!(
+        history_types(payload["data"].as_array().expect("events data")),
+        vec!["record", "resolver"]
+    );
+    assert_eq!(payload["page"]["total_count"], json!(2));
+    assert_eq!(payload["data"][0]["name"], json!("history.eth"));
+
+    let mixed_case = v2_history_payload_for_database(
+        &database,
+        "/v1/events?resolver=1:0x0000000000000000000000000000000000000ABC&order=asc",
+    )
+    .await?;
+    assert_eq!(history_blocks(&mixed_case), vec![104, 106]);
+
+    let detailed = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?resolver=1:{RESOLVER}&type=record&include=data"),
+    )
+    .await?;
+    assert_eq!(history_blocks(&detailed), vec![106]);
+    assert_eq!(detailed["data"][0]["contract_address"], json!(RESOLVER));
+
+    // Cursors bind the resolver filter.
+    let first = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?resolver=1:{RESOLVER}&page_size=1"),
+    )
+    .await?;
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .expect("resolver page must provide a cursor")
+        .to_owned();
+    let continued = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?resolver=1:{RESOLVER}&page_size=1&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(history_blocks(&continued), vec![104]);
+    let response = v2_history_response_for_database(
+        &database,
+        &format!(
+            "/v1/events?resolver=1:0x0000000000000000000000000000000000000bbb&page_size=1&cursor={cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Another chain or another resolver matches nothing; the chain scopes the read.
+    let empty = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?resolver=8453:{RESOLVER}"),
+    )
+    .await?;
+    assert_eq!(empty["data"], json!([]));
+    assert_eq!(empty["page"]["total_count"], json!(0));
+
+    for route in [
+        format!("/v1/events?resolver={RESOLVER}"),
+        format!("/v1/events?resolver=99:{RESOLVER}"),
+        "/v1/events?resolver=1:0x12".to_owned(),
+        format!("/v1/events?resolver=one:{RESOLVER}"),
+        format!("/v1/diagnostics/events?resolver=1:{RESOLVER}"),
+    ] {
+        let response = v2_history_response_for_database(&database, &route).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{route}");
+        assert_eq!(
+            read_json::<Value>(response).await?["error"]["code"],
+            json!("invalid_input"),
+            "{route}"
+        );
+    }
+
+    database.cleanup().await
+}

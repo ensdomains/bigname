@@ -1567,3 +1567,122 @@ fn unsupported_resolver_current_row(chain_id: &str, resolver_address: &str) -> R
     });
     row
 }
+
+#[tokio::test]
+async fn v2_resolver_roles_carry_grant_event_provenance() -> Result<()> {
+    const HOLDER: &str = "0x0000000000000000000000000000000000000abc";
+    const OTHER_HOLDER: &str = "0x0000000000000000000000000000000000000abd";
+    let database = TestDatabase::new_migrated().await?;
+    let mut resolver = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    resolver.declared_summary["role_holders"]["count"] = json!(2);
+    resolver.declared_summary["role_holders"]["items"]
+        .as_array_mut()
+        .expect("role holder items")
+        .push(json!({
+            "subject": OTHER_HOLDER,
+            "resource_count": 1,
+            "permission_row_count": 1,
+            "effective_powers": ["set_records"],
+            "resource_ids": ["00000000-0000-0000-0000-00000000b1ff"],
+        }));
+    database
+        .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
+        .await?;
+    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
+
+    let resource_id = Uuid::from_u128(0xb100);
+    upsert_test_resources(&database.pool, &[resource(resource_id)]).await?;
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[
+            raw_block("ethereum-mainnet", "0xgrant150", None, 150, 1_700_000_150),
+            raw_block("ethereum-mainnet", "0xgrant160", None, 160, 1_700_000_160),
+        ],
+    )
+    .await?;
+    let grant_event = |identity: &str, block_number: i64, powers: Value| {
+        let mut event = history_event(
+            identity,
+            None,
+            Some(resource_id),
+            Some("ethereum-mainnet"),
+            Some(block_number),
+            Some(&format!("0xgrant{block_number}")),
+            Some(&format!("0xgrant{block_number}tx")),
+            Some(3),
+            CanonicalityState::Canonical,
+        );
+        event.event_kind = "PermissionChanged".to_owned();
+        event.source_family = "ens_v2_resolver_l1".to_owned();
+        event.after_state = json!({
+            "subject": HOLDER,
+            "effective_powers": powers,
+            "scope": {
+                "kind": "resolver",
+                "chain_id": "ethereum-mainnet",
+                "resolver_address": V2_RESOLVER_ADDRESS,
+            },
+        });
+        event
+    };
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            grant_event("resolver-grant-150", 150, json!(["set_resolver"])),
+            grant_event("resolver-grant-160", 160, json!(["set_resolver", "set_records"])),
+        ],
+    )
+    .await?;
+    let event_ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM bigname_phase.normalized_events \
+         WHERE event_identity IN ('resolver-grant-150', 'resolver-grant-160') \
+         ORDER BY block_number",
+    )
+    .fetch_all(&database.pool)
+    .await?;
+    assert_eq!(event_ids.len(), 2);
+    let mut permission = permission_current_row(
+        resource_id,
+        HOLDER,
+        PermissionScope::Resolver {
+            chain_id: "ethereum-mainnet".to_owned(),
+            resolver_address: V2_RESOLVER_ADDRESS.to_owned(),
+        },
+        7,
+        160,
+    );
+    permission.effective_powers = json!(["set_resolver", "set_records"]);
+    permission.provenance["normalized_event_ids"] = json!(event_ids);
+    upsert_phase_permissions_current_rows(&database.pool, &[permission]).await?;
+
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=roles"),
+    )
+    .await?;
+    let roles = payload["data"]["roles"].as_array().expect("roles");
+    assert_eq!(roles.len(), 2);
+    let holder = roles
+        .iter()
+        .find(|item| item["address"] == json!(HOLDER))
+        .expect("holder role item");
+    assert_eq!(
+        holder["grant_event"],
+        json!({
+            "block_number": 150,
+            "timestamp": "2023-11-14T22:15:50Z",
+            "transaction_hash": "0xgrant150tx",
+            "log_index": 3,
+        })
+    );
+    assert_eq!(holder["powers"], json!(["set_records", "set_resolver"]));
+    let other = roles
+        .iter()
+        .find(|item| item["address"] == json!(OTHER_HOLDER))
+        .expect("other role item");
+    assert!(other.get("grant_event").is_none(), "{other}");
+    assert_no_banned_v1_spellings(&payload);
+
+    database.cleanup().await?;
+    Ok(())
+}

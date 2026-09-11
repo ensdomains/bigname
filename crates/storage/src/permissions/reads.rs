@@ -171,6 +171,69 @@ pub async fn load_permissions_current_for_resolver_scope(
         .collect()
 }
 
+/// Load persisted resolver-scoped permission rows for a bounded set of subjects,
+/// so role-holder samples can be enriched without reading every row the
+/// resolver scope holds.
+pub async fn load_permissions_current_for_resolver_scope_subjects(
+    pool: &PgPool,
+    chain_id: &str,
+    resolver_address: &str,
+    subjects: &[String],
+) -> Result<Vec<PermissionsCurrentRow>> {
+    if subjects.is_empty() {
+        return Ok(Vec::new());
+    }
+    let scope = PermissionScope::Resolver {
+        chain_id: chain_id.to_owned(),
+        resolver_address: resolver_address.to_ascii_lowercase(),
+    }
+    .storage_key();
+    let subjects = subjects
+        .iter()
+        .map(|subject| subject.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT
+            pc.resource_id,
+            pc.subject,
+            pc.scope,
+            pc.scope_kind,
+            pc.scope_detail,
+            pc.effective_powers,
+            pc.grant_source,
+            pc.revocation_source,
+            pc.inheritance_path,
+            pc.transfer_behavior,
+            pc.provenance,
+            jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted') AS coverage,
+            pc.chain_positions,
+            pc.canonicality_summary,
+            pc.manifest_version,
+            pc.last_recomputed_at
+        FROM bigname_phase.permissions_current pc
+        WHERE pc.scope = $1
+          AND pc.scope_kind = 'resolver'
+          AND lower(pc.subject) = ANY($2::text[])
+          {DEFAULT_PERMISSIONS_CURRENT_READ_FILTER}
+        ORDER BY pc.subject ASC, pc.resource_id ASC, pc.manifest_version ASC
+        "#,
+    ))
+    .bind(scope)
+    .bind(&subjects)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load resolver-scoped permissions_current rows for chain {chain_id} resolver {resolver_address} subjects"
+        )
+    })?;
+
+    rows.into_iter()
+        .map(decode_permissions_current_row)
+        .collect()
+}
+
 /// Discover resolver targets represented by persisted resolver-scoped permission rows.
 pub async fn load_permissions_current_resolver_targets(
     pool: &PgPool,

@@ -346,7 +346,44 @@ pub(super) fn push_history_filters<'a>(
         push_history_block_window(builder, window);
     }
 
+    if let Some(resolver) = filter.resolver.as_ref() {
+        builder.push(" AND ne.chain_id = ");
+        builder.push_bind(&resolver.chain_id);
+        builder.push(" AND (lower(ne.raw_fact_ref ->> 'emitting_address') = ");
+        builder.push_bind(&resolver.address);
+        builder.push(
+            " OR (ne.event_kind = 'ResolverChanged' AND (lower(ne.after_state ->> 'resolver') = ",
+        );
+        builder.push_bind(&resolver.address);
+        builder.push(" OR lower(ne.before_state ->> 'resolver') = ");
+        builder.push_bind(&resolver.address);
+        builder.push(")))");
+    }
+
     push_history_canonicality_filter(builder, canonical_only);
+}
+
+pub(super) async fn load_history_events_by_ids(
+    pool: &PgPool,
+    ids: &[i64],
+) -> Result<Vec<HistoryEvent>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    push_history_select(&mut builder, false, false);
+    builder.push(" AND ne.normalized_event_id = ANY(");
+    builder.push_bind(ids);
+    builder.push("::bigint[])");
+    push_history_canonicality_filter(&mut builder, true);
+    push_history_order(&mut builder, HistoryOrder::Desc);
+
+    let rows = builder
+        .build()
+        .fetch_all(pool)
+        .await
+        .context("failed to fetch normalized events by id")?;
+    rows.into_iter().map(decode_history_event).collect()
 }
 
 /// One inclusive block range per chain; a window without ranges matches nothing.

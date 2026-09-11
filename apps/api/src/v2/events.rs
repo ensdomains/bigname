@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use axum::{Json, extract::State};
 use bigname_storage::{
-    EventHistoryAddressFilter, EventHistoryFilter, HistoryCursor,
+    EventHistoryAddressFilter, EventHistoryFilter, EventHistoryResolverFilter, HistoryCursor,
     HistoryEvent as StorageHistoryEvent, HistoryOrder, HistorySummaryMode,
 };
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,7 @@ use super::{
 const NAMESPACE_FILTER_KEY: &str = "namespace";
 const NAME_FILTER_KEY: &str = "name";
 const ADDRESS_FILTER_KEY: &str = "address";
+const RESOLVER_FILTER_KEY: &str = "resolver";
 const REGISTRATION_ID_FILTER_KEY: &str = "registration_id";
 const FROM_BLOCK_FILTER_KEY: &str = "from_block";
 const TO_BLOCK_FILTER_KEY: &str = "to_block";
@@ -37,6 +38,7 @@ impl QueryParamAllowlist for EventsQueryParams {
         "namespace",
         "name",
         "address",
+        "resolver",
         "registration_id",
         "type",
         "from_block",
@@ -75,13 +77,14 @@ pub(crate) struct Event {
 pub(crate) struct ParsedEventsFilter {
     pub(crate) storage_filter: EventHistoryFilter,
     pub(crate) cursor_filters: BTreeMap<String, String>,
-    /// Whether an identity anchor (name, registration, or address) bounds the
+    /// Whether an anchor (name, registration, address, or resolver) bounds the
     /// read, which is what makes a capped `total_count` affordable.
     pub(crate) anchored: bool,
 }
 
 /// `namespace` defaults to the name's inferred namespace when `name` is provided
-/// and `namespace` is omitted; otherwise defaults to `ens`.
+/// and `namespace` is omitted; otherwise defaults to `ens`, except that a
+/// `resolver` filter alone reads every namespace the resolver contract serves.
 pub(crate) async fn get_events(
     params: EventsQuery,
     State(state): State<AppState>,
@@ -90,7 +93,7 @@ pub(crate) async fn get_events(
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let include_data = history_include_data(&params.include)?;
     let namespace = resolve_events_namespace(&params)?;
-    let mut parsed = parse_events_filter(&params, &namespace)?;
+    let mut parsed = parse_events_filter(&params, namespace.as_deref())?;
     if params.event_types.is_none() {
         parsed.storage_filter.event_kinds = product_history_event_kinds();
     }
@@ -261,19 +264,20 @@ pub(crate) fn events_storage_cursor(
     })
 }
 
-pub(crate) fn resolve_events_namespace(params: &QueryParams) -> V2Result<String> {
+pub(crate) fn resolve_events_namespace(params: &QueryParams) -> V2Result<Option<String>> {
     match (params.namespace.as_deref(), params.name.as_deref()) {
-        (Some(namespace), _) => Ok(namespace.to_owned()),
+        (Some(namespace), _) => Ok(Some(namespace.to_owned())),
         (None, Some(name)) => normalize_inferred_route_name(name)
-            .map(|normalized| normalized.namespace.to_owned())
+            .map(|normalized| Some(normalized.namespace.to_owned()))
             .map_err(|error| V2Error::invalid_input(error.message)),
-        (None, None) => Ok("ens".to_owned()),
+        (None, None) if params.resolver.is_some() => Ok(None),
+        (None, None) => Ok(Some("ens".to_owned())),
     }
 }
 
 pub(crate) fn parse_events_filter(
     params: &QueryParams,
-    namespace: &str,
+    namespace: Option<&str>,
 ) -> V2Result<ParsedEventsFilter> {
     if matches!(
         (params.from_block, params.to_block),
@@ -288,14 +292,13 @@ pub(crate) fn parse_events_filter(
         .name
         .as_deref()
         .map(|name| {
-            normalize_inferred_route_name(name)
-                .map(|normalized| {
-                    bigname_storage::logical_name_id_for_name(
-                        namespace,
-                        &normalized.normalized_name,
-                    )
-                })
-                .map_err(|error| V2Error::invalid_input(error.message))
+            let normalized = normalize_inferred_route_name(name)
+                .map_err(|error| V2Error::invalid_input(error.message))?;
+            let namespace = namespace.unwrap_or(normalized.namespace);
+            Ok::<_, V2Error>(bigname_storage::logical_name_id_for_name(
+                namespace,
+                &normalized.normalized_name,
+            ))
         })
         .transpose()?;
     let resource_id = params
@@ -312,9 +315,17 @@ pub(crate) fn parse_events_filter(
         .map(|event_types| event_types.storage_event_kinds())
         .unwrap_or_default();
 
-    let anchored = logical_name_id.is_some() || resource_id.is_some() || params.address.is_some();
-    let mut cursor_filters =
-        BTreeMap::from([(NAMESPACE_FILTER_KEY.to_owned(), namespace.to_owned())]);
+    let anchored = logical_name_id.is_some()
+        || resource_id.is_some()
+        || params.address.is_some()
+        || params.resolver.is_some();
+    let mut cursor_filters = BTreeMap::new();
+    if let Some(namespace) = namespace {
+        cursor_filters.insert(NAMESPACE_FILTER_KEY.to_owned(), namespace.to_owned());
+    }
+    if let Some(resolver) = params.resolver.as_ref() {
+        cursor_filters.insert(RESOLVER_FILTER_KEY.to_owned(), resolver.canonical());
+    }
     if let Some(logical_name_id) = logical_name_id.as_ref() {
         cursor_filters.insert(NAME_FILTER_KEY.to_owned(), logical_name_id.clone());
     }
@@ -337,7 +348,7 @@ pub(crate) fn parse_events_filter(
 
     Ok(ParsedEventsFilter {
         storage_filter: EventHistoryFilter {
-            namespace: Some(namespace.to_owned()),
+            namespace: namespace.map(str::to_owned),
             logical_name_id,
             resource_id,
             address: params
@@ -346,6 +357,13 @@ pub(crate) fn parse_events_filter(
                 .map(|address| EventHistoryAddressFilter {
                     address: address.clone(),
                     relation: None,
+                }),
+            resolver: params
+                .resolver
+                .as_ref()
+                .map(|resolver| EventHistoryResolverFilter {
+                    chain_id: resolver.chain_slug.to_owned(),
+                    address: resolver.address.clone(),
                 }),
             event_kinds,
             bind_cursor_anchor_to_event_kinds: params.event_types.is_some(),
@@ -428,7 +446,10 @@ mod tests {
             ..RawQueryParams::default()
         })
         .expect("params must parse");
-        assert_eq!(resolve_events_namespace(&params).expect("namespace"), "ens");
+        assert_eq!(
+            resolve_events_namespace(&params).expect("namespace"),
+            Some("ens".to_owned())
+        );
 
         let params = QueryParams::try_from(RawQueryParams {
             name: Some("alice.base.eth".to_owned()),
@@ -437,7 +458,7 @@ mod tests {
         .expect("params must parse");
         assert_eq!(
             resolve_events_namespace(&params).expect("namespace"),
-            "basenames"
+            Some("basenames".to_owned())
         );
 
         let params = QueryParams::try_from(RawQueryParams {
@@ -445,10 +466,16 @@ mod tests {
             ..RawQueryParams::default()
         })
         .expect("params must parse");
-        assert_eq!(resolve_events_namespace(&params).expect("namespace"), "ens");
+        assert_eq!(
+            resolve_events_namespace(&params).expect("namespace"),
+            Some("ens".to_owned())
+        );
 
         let params = QueryParams::try_from(RawQueryParams::default()).expect("params must parse");
-        assert_eq!(resolve_events_namespace(&params).expect("namespace"), "ens");
+        assert_eq!(
+            resolve_events_namespace(&params).expect("namespace"),
+            Some("ens".to_owned())
+        );
 
         let params = QueryParams::try_from(RawQueryParams {
             name: Some("bad name.eth".to_owned()),
@@ -588,7 +615,8 @@ mod tests {
             ..RawQueryParams::default()
         })
         .expect("block bounds parse globally");
-        let error = parse_events_filter(&params, "ens").expect_err("bad block range must fail");
+        let error =
+            parse_events_filter(&params, Some("ens")).expect_err("bad block range must fail");
         assert_eq!(error.code(), ErrorCode::InvalidInput);
     }
 
@@ -609,7 +637,7 @@ mod tests {
         })
         .expect("filters must parse globally");
 
-        let parsed = parse_events_filter(&params, "basenames").expect("filter must build");
+        let parsed = parse_events_filter(&params, Some("basenames")).expect("filter must build");
 
         assert!(parsed.anchored);
         assert_eq!(parsed.storage_filter.order, HistoryOrder::Asc);
@@ -651,7 +679,7 @@ mod tests {
                 ..RawQueryParams::default()
             })
             .expect("filters must parse globally"),
-            "ens",
+            Some("ens"),
         )
         .expect("filter must build");
         assert!(!unanchored.anchored);

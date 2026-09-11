@@ -29,6 +29,7 @@ pub(crate) struct RawQueryParams {
     pub(crate) name: Option<String>,
     pub(crate) registration_id: Option<String>,
     pub(crate) address: Option<String>,
+    pub(crate) resolver: Option<String>,
     pub(crate) relation: Option<String>,
     pub(crate) from_block: Option<String>,
     pub(crate) to_block: Option<String>,
@@ -56,6 +57,7 @@ pub(crate) struct QueryParams {
     pub(crate) name: Option<String>,
     pub(crate) registration_id: Option<String>,
     pub(crate) address: Option<String>,
+    pub(crate) resolver: Option<ResolverSelector>,
     pub(crate) relation: Option<RelationSet>,
     pub(crate) from_block: Option<i64>,
     pub(crate) to_block: Option<i64>,
@@ -76,6 +78,22 @@ pub(crate) struct QueryParams {
 pub(crate) struct TimestampBound {
     pub(crate) value: OffsetDateTime,
     pub(crate) canonical: String,
+}
+
+/// A resolver contract named as `<numeric chain_id>:<address>`; the chain is
+/// carried as the storage slug and the address in lowercase canonical form.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolverSelector {
+    pub(crate) chain_id: u64,
+    pub(crate) chain_slug: &'static str,
+    pub(crate) address: String,
+}
+
+impl ResolverSelector {
+    /// Wire form cursors bind: `<numeric chain_id>:<lowercase address>`.
+    pub(crate) fn canonical(&self) -> String {
+        format!("{}:{}", self.chain_id, self.address)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -114,6 +132,7 @@ impl TryFrom<RawQueryParams> for QueryParams {
             name: trim_to_option(raw.name),
             registration_id: parse_registration_id(raw.registration_id)?,
             address: parse_address(raw.address)?,
+            resolver: parse_resolver_selector(raw.resolver)?,
             relation: parse_relation_set_param(raw.relation.as_deref())?,
             from_block: parse_block_bound(raw.from_block, "from_block")?,
             to_block: parse_block_bound(raw.to_block, "to_block")?,
@@ -311,6 +330,31 @@ fn parse_address(value: Option<String>) -> V2Result<Option<String>> {
     parse_evm_address(&value, "address")
         .map(Some)
         .map_err(|error| V2Error::invalid_input(error.message))
+}
+
+fn parse_resolver_selector(value: Option<String>) -> V2Result<Option<ResolverSelector>> {
+    let Some(value) = trim_to_option(value) else {
+        return Ok(None);
+    };
+    let invalid = || {
+        V2Error::invalid_input(
+            "resolver must be <chain_id>:<address> with a supported numeric chain id",
+        )
+    };
+    let (chain_id, address) = value.split_once(':').ok_or_else(invalid)?;
+    let chain_id = chain_id.trim();
+    if chain_id.is_empty() || !chain_id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    let chain_id = chain_id.parse::<u64>().map_err(|_| invalid())?;
+    let chain_slug = super::chains::numeric_to_slug(chain_id).ok_or_else(invalid)?;
+    let address = parse_evm_address(address, "resolver")
+        .map_err(|error| V2Error::invalid_input(error.message))?;
+    Ok(Some(ResolverSelector {
+        chain_id,
+        chain_slug,
+        address,
+    }))
 }
 
 fn parse_block_bound(value: Option<String>, field_name: &'static str) -> V2Result<Option<i64>> {

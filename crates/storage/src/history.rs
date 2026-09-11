@@ -184,6 +184,14 @@ pub struct EventHistoryAddressFilter {
     pub relation: Option<AddressNameRelation>,
 }
 
+/// Resolver-contract filter: rows emitted by the resolver on `chain_id`, plus
+/// `ResolverChanged` rows whose pointer was set to or cleared from it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventHistoryResolverFilter {
+    pub chain_id: String,
+    pub address: String,
+}
+
 /// Projection-backed filters for canonical normalized-event history reads.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct EventHistoryFilter {
@@ -191,6 +199,7 @@ pub struct EventHistoryFilter {
     pub logical_name_id: Option<String>,
     pub resource_id: Option<Uuid>,
     pub address: Option<EventHistoryAddressFilter>,
+    pub resolver: Option<EventHistoryResolverFilter>,
     pub event_kinds: Vec<String>,
     pub bind_cursor_anchor_to_event_kinds: bool,
     pub from_block: Option<i64>,
@@ -210,6 +219,7 @@ pub(in crate::history) struct EventHistoryReadFilter {
     pub(in crate::history) to_block: Option<i64>,
     pub(in crate::history) order: HistoryOrder,
     pub(in crate::history) block_window: Option<HistoryBlockWindow>,
+    pub(in crate::history) resolver: Option<EventHistoryResolverFilter>,
 }
 
 impl EventHistoryReadFilter {
@@ -617,7 +627,19 @@ async fn event_history_read_filter(
         to_block: filter.to_block,
         order: filter.order,
         block_window: filter.block_window,
+        resolver: filter.resolver.map(|resolver| EventHistoryResolverFilter {
+            chain_id: resolver.chain_id,
+            address: resolver.address.to_ascii_lowercase(),
+        }),
     })
+}
+
+/// Load canonical normalized events by row id in the shared chain-position
+/// order, for callers that already hold event ids from projection provenance.
+pub async fn load_history_events_by_ids(pool: &PgPool, ids: &[i64]) -> Result<Vec<HistoryEvent>> {
+    paging::load_history_events_by_ids(pool, ids)
+        .await
+        .context("failed to load normalized events by id")
 }
 
 async fn load_resource_ids_for_logical_name_id(
