@@ -1004,9 +1004,12 @@ Rules:
   no execution outcome is cached for any v2 lookup. ENS/60 primary-name
   verification uses the same transport
   split with its CCIP-Read gateway leg: configured provider or gateway response
-  timeouts remain in-band failures for that response, while provider or gateway
+  timeouts, and the shared CCIP-Read gateway budget running out in whatever
+  phase the in-flight gateway request was in, remain in-band failures for that
+  response, while provider or gateway
   connect-phase timeouts, DNS failures, TLS failures, connection resets, and
-  other transport failures return whole-request `500 internal_error`. Neither
+  other transport failures within a request's own timeouts return
+  whole-request `500 internal_error`. Neither
   result is persisted by the v2 serving path.
 - Every route has a whole-request deadline. `/healthz` and `/v2/status` retain
   that deadline as their final backstop. `/healthz` bypasses
