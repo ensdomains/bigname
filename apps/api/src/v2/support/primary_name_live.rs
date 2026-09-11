@@ -270,27 +270,14 @@ async fn current_primary_name_publication(
                         "primary-name snapshot scope did not select exactly one position",
                     )
                 })?;
-            let project_generation: Option<String> = sqlx::query_scalar(
-                r#"
-                SELECT project.xmin::text
-                FROM chain_heads head
-                JOIN chain_phase_state project
-                  ON project.chain_id = head.chain_id
-                 AND project.phase_name = 'project'
-                 AND project.phase_status = 'completed'
-                 AND project.current_block_number = head.latest_block_number
-                 AND project.current_block_hash = head.latest_block_hash
-                 AND project.input_content_hash = $4
-                WHERE head.chain_id = $1
-                  AND head.latest_block_number = $2
-                  AND head.latest_block_hash = $3
-                "#,
+            let project_generation = bigname_storage::load_served_project_generation(
+                phase_pool,
+                &position.chain_id,
+                position.block_number,
+                &position.block_hash,
+                true,
+                false,
             )
-            .bind(&position.chain_id)
-            .bind(position.block_number)
-            .bind(&position.block_hash)
-            .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
-            .fetch_optional(phase_pool)
             .await
             .map_err(|error| {
                 error!(
@@ -349,30 +336,16 @@ async fn require_primary_name_projection_position(
     pool: &PgPool,
     position: &bigname_lookup::LookupPosition,
 ) -> ApiResult<()> {
-    let matches_lookup: bool = sqlx::query_scalar(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM chain_heads head
-            JOIN chain_phase_state project
-              ON project.chain_id = head.chain_id
-             AND project.phase_name = 'project'
-             AND project.phase_status = 'completed'
-             AND project.current_block_number = head.latest_block_number
-             AND project.current_block_hash = head.latest_block_hash
-             AND project.input_content_hash = $4
-            WHERE head.chain_id = $1
-              AND head.latest_block_number = $2
-              AND head.latest_block_hash = $3
-        )
-        "#,
+    let matches_lookup = bigname_storage::load_served_project_generation(
+        pool,
+        bigname_lookup::ETHEREUM_MAINNET_CHAIN_ID,
+        position.block_number,
+        &position.block_hash,
+        true,
+        false,
     )
-    .bind(bigname_lookup::ETHEREUM_MAINNET_CHAIN_ID)
-    .bind(position.block_number)
-    .bind(&position.block_hash)
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
-    .fetch_one(pool)
     .await
+    .map(|generation| generation.is_some())
     .map_err(|error| {
         error!(
             service = "api",

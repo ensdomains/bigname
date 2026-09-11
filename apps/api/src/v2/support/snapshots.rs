@@ -380,38 +380,16 @@ pub(crate) async fn load_selected_project_generations_for_read(
     for position in selected.chain_positions.as_map().values() {
         // Do not compare interpret.xmin: normal forward batches update it. History-rewriting redos
         // hold this flag until Project is stamped; canonical-head orphaning stamps both phases.
-        let generation = sqlx::query_scalar::<_, String>(
-            r#"
-            SELECT project.xmin::TEXT
-            FROM chain_heads head
-            JOIN chain_phase_state project
-              ON project.chain_id = head.chain_id
-             AND project.phase_name = 'project'
-             AND project.phase_status = 'completed'
-             AND project.current_block_number = head.latest_block_number
-             AND project.current_block_hash = head.latest_block_hash
-             AND project.input_content_hash = $4
-            WHERE head.chain_id = $1
-              AND head.latest_block_number = $2
-              AND head.latest_block_hash = $3
-              AND (
-                  NOT $5
-                  OR EXISTS (
-                      SELECT 1
-                      FROM chain_phase_state interpret
-                      WHERE interpret.chain_id = head.chain_id
-                        AND interpret.phase_name = 'interpret'
-                        AND interpret.redo_in_progress = false
-                  )
-              )
-            "#,
+        // The selected position is the served publication (the head, or a publication trailing
+        // it within tolerance), so the publication must sit exactly there.
+        let generation = bigname_storage::load_served_project_generation(
+            pool,
+            &position.chain_id,
+            position.block_number,
+            &position.block_hash,
+            true,
+            require_interpret_not_redo,
         )
-        .bind(&position.chain_id)
-        .bind(position.block_number)
-        .bind(&position.block_hash)
-        .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
-        .bind(require_interpret_not_redo)
-        .fetch_optional(pool)
         .await?;
         let Some(generation) = generation else {
             return Ok(None);

@@ -162,10 +162,11 @@ pub use resolution_support::{
 };
 pub use resolver::ResolverCurrentRow;
 pub use snapshot_selection::{
-    CURRENT_PROJECT_PUBLICATION_JOIN, ChainPosition, ChainPositions, SelectedSnapshot, SnapshotAt,
-    SnapshotConsistency, SnapshotPositionRequirement, SnapshotProjectionRead,
-    SnapshotSelectionError, SnapshotSelectionErrorKind, SnapshotSelectionResult,
-    SnapshotSelectionScope, SnapshotSelectorInput, ensure_projection_chain_positions_match,
+    CURRENT_PROJECT_PUBLICATION_JOIN, ChainPosition, ChainPositions,
+    PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS, SelectedSnapshot, SnapshotAt, SnapshotConsistency,
+    SnapshotPositionRequirement, SnapshotProjectionRead, SnapshotSelectionError,
+    SnapshotSelectionErrorKind, SnapshotSelectionResult, SnapshotSelectionScope,
+    SnapshotSelectorInput, ensure_projection_chain_positions_match, load_served_project_generation,
     parse_rfc3339_utc_timestamp, resolve_exact_name_snapshot_selection, snapshot_chain_has_head,
 };
 

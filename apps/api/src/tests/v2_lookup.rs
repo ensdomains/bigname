@@ -1158,13 +1158,23 @@ async fn v2_lookup_rejects_head_reorg_before_project_republication() -> Result<(
     });
 
     control.wait_until_reached().await;
+    // A reorg replaces the served block 39 and extends the new fork to 40. The head moves on
+    // before Project republishes, so the served publication is no longer on the readable path.
+    sqlx::query(
+        "UPDATE bigname_phase.chain_lineage
+         SET canonicality_state = 'orphaned'
+         WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xlookup-before-reorg'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
     sqlx::query(
         "INSERT INTO bigname_phase.chain_lineage (
              chain_id, block_hash, block_number, block_timestamp, canonicality_state
-         ) VALUES (
-             'ethereum-mainnet', '0xlookup-after-reorg', 40,
-             '2026-04-17T00:00:40Z'::timestamptz, 'canonical'
-         )",
+         ) VALUES
+             ('ethereum-mainnet', '0xlookup-reorged-39', 39,
+              '2026-04-17T00:00:39Z'::timestamptz, 'canonical'),
+             ('ethereum-mainnet', '0xlookup-after-reorg', 40,
+              '2026-04-17T00:00:40Z'::timestamptz, 'canonical')",
     )
     .execute(&database.lookup_pool)
     .await?;
@@ -2632,37 +2642,74 @@ async fn v2_lookup_rejects_single_scope_with_incompatible_project_generation() -
 }
 
 #[tokio::test]
-async fn v2_lookup_reports_stale_when_project_phase_is_behind_head() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    database
-        .seed_snapshot_selector_chain_positions(&json!({
-            "ethereum": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": 79,
-                "block_hash": "0xlookup-project-behind",
-                "timestamp": "2026-04-17T00:01:19Z"
-            }
-        }))
+async fn v2_lookup_serves_a_project_publication_a_few_blocks_behind_head() -> Result<()> {
+    // Live-follow stores the head before Project publishes for it. A publication within the
+    // lag tolerance is served as the snapshot and reported in `as_of`; one further behind is
+    // still stale so a wedged Project cannot serve arbitrarily old data.
+    for (publication_block, expect_served) in [(78_i64, true), (40_i64, false)] {
+        let database = TestDatabase::new_migrated().await?;
+        database
+            .seed_snapshot_selector_chain_positions(&json!({
+                "ethereum": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 79,
+                    "block_hash": "0xlookup-project-behind",
+                    "timestamp": "2026-04-17T00:01:19Z"
+                }
+            }))
+            .await?;
+        sqlx::query(
+            "INSERT INTO bigname_phase.chain_lineage
+                 (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+             VALUES ('ethereum-mainnet', '0xlookup-previous', $1,
+                     '2026-04-17T00:01:18Z'::timestamptz,
+                     'finalized'::bigname_phase.canonicality_state)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(publication_block)
+        .execute(&database.pool)
         .await?;
-    sqlx::query(
-        "UPDATE chain_phase_state
-         SET current_block_number = 78, current_block_hash = '0xlookup-previous'
-         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
-    )
-    .execute(&database.lookup_pool)
-    .await?;
+        sqlx::query(
+            "UPDATE chain_phase_state
+             SET current_block_number = $1, current_block_hash = '0xlookup-previous'
+             WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+        )
+        .bind(publication_block)
+        .execute(&database.lookup_pool)
+        .await?;
 
-    let response = v2_lookup_response_for_database(
-        &database,
-        "/v2/lookup",
-        json!({"inputs": [{"id": "miss", "name": "missing.eth"}]}),
-    )
-    .await?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(payload["error"]["code"], json!("stale"));
+        let response = v2_lookup_response_for_database(
+            &database,
+            "/v2/lookup",
+            json!({"inputs": [{"id": "miss", "name": "missing.eth"}]}),
+        )
+        .await?;
+        if expect_served {
+            let status = response.status();
+            let payload: Value = read_json(response).await?;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "publication one block behind must be served: {payload}"
+            );
+            assert_eq!(payload["meta"]["as_of"]["1"]["block_number"], json!(78));
+            assert_eq!(
+                payload["meta"]["as_of"]["1"]["block_hash"],
+                json!("0xlookup-previous")
+            );
+        } else {
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "publication beyond the lag tolerance"
+            );
+            let payload: Value = read_json(response).await?;
+            assert_eq!(payload["error"]["code"], json!("stale"));
+        }
 
-    database.cleanup().await
+        database.cleanup().await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]
