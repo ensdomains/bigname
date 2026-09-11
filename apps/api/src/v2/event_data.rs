@@ -1,10 +1,13 @@
-//! Product-tier event payloads for `include=data` on the history collections.
+//! Row expansions for the history collections: `include=data` payloads and the
+//! `include=raw` storage kind.
 //!
-//! Each friendly `type` exposes only the fields its stored normalized event
-//! actually carries, translated into dictionary vocabulary (`expires_at`,
-//! `resolver: {chain_id, address}`, `powers`, ...). Absent or null source
-//! fields are omitted rather than serialized as `null`. The raw storage event
-//! kind is the one documented pipeline term exposed here, as `kind`.
+//! With `include=data`, each friendly `type` exposes only the fields its stored
+//! normalized event actually carries, translated into dictionary vocabulary
+//! (`expires_at`, `resolver: {chain_id, address}`, `powers`, ...). Absent or
+//! null source fields are omitted rather than serialized as `null`. The raw
+//! storage event kind is deliberately not part of that payload; it is the one
+//! documented pipeline term the product tier exposes, and only behind the
+//! separate `include=raw` opt-in, as `kind`.
 
 use bigname_storage::HistoryEvent as StorageHistoryEvent;
 use serde::{Deserialize, Serialize};
@@ -20,22 +23,51 @@ const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 /// contract when the row came from an on-chain log and `null` otherwise.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct EventDetail {
-    pub(crate) kind: String,
     pub(crate) contract_address: Option<String>,
     pub(crate) data: Map<String, Value>,
 }
 
-/// `include` on the history collections accepts only `data`.
-pub(crate) fn history_include_data(include: &[String]) -> V2Result<bool> {
-    let mut include_data = false;
+/// Row expansions the history collections accept on `include`. `data` adds the
+/// friendly payload (`contract_address`, `data`); `raw` adds the raw storage
+/// event `kind` for explorer and diagnostic use. The flags are independent and
+/// compose in any order.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct HistoryInclude {
+    pub(crate) data: bool,
+    pub(crate) raw: bool,
+}
+
+impl HistoryInclude {
+    pub(crate) const DATA: Self = Self {
+        data: true,
+        raw: false,
+    };
+    pub(crate) const RAW: Self = Self {
+        data: false,
+        raw: true,
+    };
+}
+
+/// `include` on the history collections accepts only `data` and `raw`.
+pub(crate) fn history_include(include: &[String]) -> V2Result<HistoryInclude> {
+    let mut parsed = HistoryInclude::default();
     for value in include {
-        if value == "data" {
-            include_data = true;
-        } else {
-            return Err(V2Error::invalid_input("include must contain only data"));
+        match value.as_str() {
+            "data" => parsed.data = true,
+            "raw" => parsed.raw = true,
+            _ => {
+                return Err(V2Error::invalid_input(
+                    "include must contain only data or raw",
+                ));
+            }
         }
     }
-    Ok(include_data)
+    Ok(parsed)
+}
+
+/// The raw storage event kind, present only with `include=raw`.
+pub(crate) fn raw_event_kind(row: &StorageHistoryEvent, include: HistoryInclude) -> Option<String> {
+    include.raw.then(|| row.event_kind.clone())
 }
 
 pub(crate) fn build_event_detail(
@@ -43,7 +75,6 @@ pub(crate) fn build_event_detail(
     event_type: HistoryEventType,
 ) -> EventDetail {
     EventDetail {
-        kind: row.event_kind.clone(),
         contract_address: string_field(&row.raw_fact_ref, "emitting_address")
             .map(|address| address.to_ascii_lowercase()),
         data: build_event_data(row, event_type),
@@ -232,15 +263,49 @@ mod tests {
     }
 
     #[test]
-    fn include_data_accepts_only_data() {
-        assert!(!history_include_data(&[]).expect("empty include is valid"));
-        assert!(history_include_data(&["data".to_owned()]).expect("data is valid"));
-        assert!(history_include_data(&["bogus".to_owned()]).is_err());
-        assert!(history_include_data(&["data".to_owned(), "events".to_owned()]).is_err());
+    fn include_accepts_only_data_and_raw_in_any_order() {
+        assert_eq!(
+            history_include(&[]).expect("empty include is valid"),
+            HistoryInclude::default()
+        );
+        assert_eq!(
+            history_include(&["data".to_owned()]).expect("data is valid"),
+            HistoryInclude::DATA
+        );
+        assert_eq!(
+            history_include(&["raw".to_owned()]).expect("raw is valid"),
+            HistoryInclude::RAW
+        );
+        let both = HistoryInclude {
+            data: true,
+            raw: true,
+        };
+        assert_eq!(
+            history_include(&["data".to_owned(), "raw".to_owned()]).expect("both are valid"),
+            both
+        );
+        assert_eq!(
+            history_include(&["raw".to_owned(), "data".to_owned()]).expect("both are valid"),
+            both
+        );
+        assert!(history_include(&["bogus".to_owned()]).is_err());
+        assert!(history_include(&["kind".to_owned()]).is_err());
+        assert!(history_include(&["data".to_owned(), "events".to_owned()]).is_err());
     }
 
     #[test]
-    fn detail_exposes_kind_and_lower_cased_emitter() {
+    fn raw_kind_is_exposed_only_behind_include_raw() {
+        let row = row("RegistrationRenewed", json!({}), json!({}));
+        assert_eq!(raw_event_kind(&row, HistoryInclude::default()), None);
+        assert_eq!(raw_event_kind(&row, HistoryInclude::DATA), None);
+        assert_eq!(
+            raw_event_kind(&row, HistoryInclude::RAW),
+            Some("RegistrationRenewed".to_owned())
+        );
+    }
+
+    #[test]
+    fn detail_exposes_lower_cased_emitter_without_the_raw_kind() {
         let detail = build_event_detail(
             &row(
                 "RegistrationRenewed",
@@ -249,10 +314,15 @@ mod tests {
             ),
             HistoryEventType::Renewal,
         );
-        assert_eq!(detail.kind, "RegistrationRenewed");
         assert_eq!(
             detail.contract_address,
             Some("0x00000000000000000000000000000000000000aa".to_owned())
+        );
+        assert!(
+            serde_json::to_value(&detail)
+                .expect("detail must serialize")
+                .get("kind")
+                .is_none()
         );
         assert_eq!(
             Value::Object(detail.data),

@@ -932,18 +932,16 @@ their route-specific anchors:
   `total_count=null`. Unanchored `/v1/events` reads (namespace, type, and block
   or timestamp windows only) never count and always report `total_count=null`.
 
-### History event payloads (`include=data`)
+### History event payloads (`include=data`, `include=raw`)
 
-The same three collections accept `include=data`. `include` on these routes
-accepts only `data`; any other value returns `400 invalid_input`. Without it,
-rows keep their lean shape and carry none of the fields below. With it, every
-returned row gains three fields:
+The same three collections accept two independent `include` flags, alone or
+together in any order (`include=data`, `include=raw`, `include=data,raw`).
+`include` on these routes accepts only those two values; any other value
+returns `400 invalid_input`. Without either flag, rows keep their lean shape
+and carry none of the fields below.
 
-- `kind`: the raw storage event kind behind the friendly `type`, such as
-  `RegistrationGranted`, `LabelRegistered`, `RecordChanged`, or
-  `EACRolesChanged`. This is the one pipeline term the product tier exposes,
-  so clients that need the upstream event name for a badge or a raw-type
-  facet do not have to fall back to diagnostics.
+`include=data` adds two fields to every returned row:
+
 - `contract_address`: the lower-cased address of the contract that emitted the
   underlying log. It is `null` for rows derived from interpreter state rather
   than from one on-chain log.
@@ -956,6 +954,17 @@ returned row gains three fields:
   a `resolver` row whose `data` has no `resolver` records a clearing. Unix
   expiry values become RFC 3339 `expires_at`.
 
+`include=raw` is a separate, explicit opt-in for explorer and diagnostic use.
+It adds one field:
+
+- `kind`: the raw storage event kind behind the friendly `type`, such as
+  `RegistrationGranted`, `LabelRegistered`, `RecordChanged`, or
+  `EACRolesChanged`. This is the one pipeline term the product tier exposes,
+  so an explorer that wants the upstream event name for a badge or a raw-type
+  facet does not have to fall back to diagnostics. It is never part of
+  `include=data`: product clients that render the friendly payload do not see
+  storage vocabulary unless they ask for it.
+
 Per friendly `type`, `data` may contain:
 
 | `type` | `data` fields |
@@ -966,7 +975,7 @@ Per friendly `type`, `data` may contain:
 | `transfer` | `from`, `to`, `fuses` |
 | `authority` | `owner` (the new registry owner), `from` (the previous owner when the row retains it) |
 | `resolver` | `resolver: {chain_id, address}` (absent when the pointer was cleared) |
-| `record` | `key`, `value`, `coin_type` (number, for `addr:<coin_type>` keys). `key` is the stored record key; history retains writes outside the public record grammar (for example `name` or `abi:<content_type>`), so `key` may name a family the records route does not serve. `value` is present only when the write's value was retained: text values are strings, other families are hex strings. A record-version reset (`kind=RecordVersionChanged`) carries no fields. |
+| `record` | `key`, `value`, `coin_type` (number, for `addr:<coin_type>` keys). `key` is the stored record key; history retains writes outside the public record grammar (for example `name` or `abi:<content_type>`), so `key` may name a family the records route does not serve. `value` is present only when the write's value was retained: text values are strings, other families are hex strings. A record-version reset (raw kind `RecordVersionChanged`, visible with `include=raw`) carries no fields. |
 | `primary_name` | `address`, `coin_type` (number) |
 | `permission` | `address` (the subject), `powers` (product power vocabulary, as on permission rows), `fuses` (uint32 word for NameWrapper fuse changes) |
 | `subregistry` | `subregistry: {chain_id, address}` (absent when the link was cleared) |
@@ -983,11 +992,14 @@ Example row from `GET /v1/names/alice.eth/history?include=data&type=record`:
   "timestamp": "2026-06-10T00:00:06Z",
   "transaction_hash": "0x...",
   "log_index": 12,
-  "kind": "RecordChanged",
   "contract_address": "0x231b0ee14048e9dccd1d247744d114a4eb5e8e63",
   "data": { "key": "addr:60", "coin_type": 60, "value": "0x..." }
 }
 ```
+
+The same row from `GET /v1/names/alice.eth/history?include=raw&type=record`
+carries the lean fields plus `"kind": "RecordChanged"` and no
+`contract_address` or `data`; `include=data,raw` carries all three.
 
 `data` never exposes before/after state, raw fact references, or other
 pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
@@ -999,12 +1011,12 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 - Purpose: name history.
 - Request parameters: path `name`; query `namespace`,
   `scope=name|registration|both`, `type`, `order=asc|desc`, `from_timestamp`,
-  `to_timestamp`, `include=data`, `cursor`, `page_size`, and optional
+  `to_timestamp`, `include=data|raw`, `cursor`, `page_size`, and optional
   `finality=latest`. `at` and historical `finality` values are rejected by the
   shared latest-state collection rule. `type`, `order`, and the timestamp
   window follow the [history collection filters](#history-collection-filters);
-  `include=data` adds the [history event
-  payloads](#history-event-payloads-includedata).
+  `include=data` and `include=raw` add the [history event
+  payloads](#history-event-payloads-includedata-includeraw).
 - Response shape: `data` is an array of dedicated lean event rows:
   `{type, name, namespace, registration_id, block_number, timestamp,
   transaction_hash, log_index}`. `registration_id` carries actual registration
@@ -1014,13 +1026,14 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   for the underlying resource identity, is documented under
   [`GET /v1/events`](#get-v2events). Rows never include before/after
   state or raw normalized-event payloads; without `include=data` they carry no
-  `data`, `kind`, or `contract_address` either, and with it they carry exactly
-  the documented friendly payload. Friendly
+  `data` or `contract_address`, without `include=raw` they carry no `kind`,
+  and with those flags they carry exactly the documented fields. Friendly
   `type` vocabulary: `registration`, `renewal`, `release`, `expiry`,
   `transfer`, `authority`, `resolver`, `record`, `primary_name`, `permission`,
   `subregistry` (an ENSv2 registration's subregistry link set or cleared).
-  Raw upstream or pipeline event kinds are diagnostics-only and are not emitted
-  by this product route. Slice 1 excludes every correlation-dependent normalized
+  Raw upstream or pipeline event kinds are not emitted by this product route
+  except as the `kind` field behind the explicit `include=raw` opt-in; the
+  diagnostics events route remains the raw surface. Slice 1 excludes every correlation-dependent normalized
   row with `consumer_visibility=candidate`, including a familiar event kind whose
   existence depends on correlation under an existing source family; diagnostics
   may expose those rows. An [independently admitted
@@ -1482,12 +1495,13 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 - Purpose: address activity history.
 - Request parameters: path `address`; query `namespace`, `relation`,
   `scope=name|registration|both`, `type`, `order=asc|desc`, `from_timestamp`,
-  `to_timestamp`, `include=data`, `cursor`, `page_size`, and optional
+  `to_timestamp`, `include=data|raw`, `cursor`, `page_size`, and optional
   `finality=latest`. `at`
   and historical `finality` values are rejected by the shared latest-state
   collection rule. `type`, `order`, and the timestamp window follow the
   [history collection filters](#history-collection-filters); `include=data`
-  adds the [history event payloads](#history-event-payloads-includedata).
+  and `include=raw` add the [history event
+  payloads](#history-event-payloads-includedata-includeraw).
   `namespace` defaults to `ens` when omitted. `relation` accepts a
   comma-separated set of `owner`, `manager`, and `registrant`; `any`
   normalizes to all three values. Rows match when any listed relation matches.
@@ -1617,8 +1631,8 @@ For a registrar lease first identified by a later readable observation, registra
   type, and block filters.
 - Request parameters: query `namespace`, `name`, `address`, `resolver`,
   `registration_id`, `type`, `from_block`, `to_block`, `from_timestamp`,
-  `to_timestamp`, `order=asc|desc`, `include=data`, `cursor`, `page_size`, and
-  optional `finality=latest`. `at` and historical `finality` values are rejected by the
+  `to_timestamp`, `order=asc|desc`, `include=data|raw`, `cursor`, `page_size`,
+  and optional `finality=latest`. `at` and historical `finality` values are rejected by the
   shared latest-state collection rule. When `name` is present and `namespace`
   is omitted, namespace is inferred from the name; `namespace` defaults to
   `ens` only when there is neither a name filter nor a `resolver` filter (a
@@ -1627,7 +1641,8 @@ For a registrar lease first identified by a later readable observation, registra
   comma-separated set), `order`, and the timestamp window follow the [history
   collection filters](#history-collection-filters); the resolved timestamp
   window intersects an explicit `from_block`/`to_block` range. `include=data`
-  adds the [history event payloads](#history-event-payloads-includedata).
+  and `include=raw` add the [history event
+  payloads](#history-event-payloads-includedata-includeraw).
   `resolver=<chain_id>:<address>` names one resolver contract by numeric chain
   id (`1`, `8453`, `11155111`, `84532`) and EVM address; the address is
   case-insensitive and cursors bind its lower-cased form. Any other shape —
@@ -1645,7 +1660,8 @@ For a registrar lease first identified by a later readable observation, registra
   paginated collection beside `bound_names` would give the overview two
   independent cursors.
 - Response shape: `data` is an array of compact event rows with friendly
-  `type` vocabulary. Raw upstream event kinds are diagnostics-only. Event-row
+  `type` vocabulary. Raw upstream event kinds appear only as `kind` behind the
+  explicit `include=raw` opt-in. Event-row
   identity uses two fields with distinct meanings. `registration_id` is actual
   registration lifecycle identity: it is set only when the event is associated
   with a registration lifecycle and is `null` otherwise. `resource_id` carries

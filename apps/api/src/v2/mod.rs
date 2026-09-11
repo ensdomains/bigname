@@ -51,7 +51,9 @@ pub(crate) use envelope::{AsOfCompleteness, Envelope, Meta, Page};
 #[cfg(test)]
 pub(crate) use error::ErrorCode;
 pub(crate) use error::{V2Error, V2Result};
-pub(crate) use event_data::{EventDetail, build_event_detail, history_include_data};
+pub(crate) use event_data::{
+    EventDetail, HistoryInclude, build_event_detail, history_include, raw_event_kind,
+};
 pub(crate) use events::{
     Event, build_event, events_cursor_payload, events_storage_cursor, get_events,
 };

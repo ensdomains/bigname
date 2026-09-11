@@ -18,10 +18,10 @@ use super::support::{
     ExactNameSnapshotSelector, exact_name_snapshot_scope, normalize_inferred_route_name,
 };
 use super::{
-    AtSelector, CursorPayload, Envelope, EventDetail, HistoryEventType, HistoryScope, Meta, Page,
-    QueryParamAllowlist, QueryParams, SortOrder, StrictQueryParams, V2Error, V2Result,
-    all_chain_slugs, api_error_to_v2, build_event_detail, decode, decode_at_token, encode,
-    history_include_data, validate_latest_collection_selectors,
+    AtSelector, CursorPayload, Envelope, EventDetail, HistoryEventType, HistoryInclude,
+    HistoryScope, Meta, Page, QueryParamAllowlist, QueryParams, SortOrder, StrictQueryParams,
+    V2Error, V2Result, all_chain_slugs, api_error_to_v2, build_event_detail, decode,
+    decode_at_token, encode, history_include, raw_event_kind, validate_latest_collection_selectors,
 };
 
 const HISTORY_SORT_DESC: &str = "chain_position_desc";
@@ -70,9 +70,12 @@ pub(crate) struct HistoryEvent {
     pub(crate) timestamp: Option<String>,
     pub(crate) transaction_hash: Option<String>,
     pub(crate) log_index: Option<i64>,
-    /// Present only with `include=data`: `kind`, `contract_address`, `data`.
+    /// Present only with `include=data`: `contract_address`, `data`.
     #[serde(flatten)]
     pub(crate) detail: Option<EventDetail>,
+    /// Present only with `include=raw`: the raw storage event kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) kind: Option<String>,
 }
 
 pub(crate) async fn get_history(
@@ -82,7 +85,7 @@ pub(crate) async fn get_history(
 ) -> V2Result<Json<Envelope<Vec<HistoryEvent>>>> {
     let params = params.into_inner();
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
-    let include_data = history_include_data(&params.include)?;
+    let include = history_include(&params.include)?;
     let normalized = normalize_inferred_route_name(&input_name)
         .map_err(|error| V2Error::invalid_input(error.message))?;
     let namespace = params
@@ -188,7 +191,7 @@ pub(crate) async fn get_history(
     let data = storage_page
         .rows
         .iter()
-        .filter_map(|row| build_history_event(row, &normalized.normalized_name, include_data))
+        .filter_map(|row| build_history_event(row, &normalized.normalized_name, include))
         .collect();
     Ok(Json(Envelope {
         data,
@@ -289,7 +292,7 @@ pub(crate) fn history_total_count(summary: Option<&HistorySummary>) -> Option<u6
 pub(crate) fn build_history_event(
     row: &StorageHistoryEvent,
     anchor_name: &str,
-    include_data: bool,
+    include: HistoryInclude,
 ) -> Option<HistoryEvent> {
     let event_type = history_event_type(&row.event_kind)?;
 
@@ -304,7 +307,8 @@ pub(crate) fn build_history_event(
         timestamp: row.block_timestamp.map(format_timestamp),
         transaction_hash: row.transaction_hash.clone(),
         log_index: row.log_index,
-        detail: include_data.then(|| build_event_detail(row, event_type)),
+        detail: include.data.then(|| build_event_detail(row, event_type)),
+        kind: raw_event_kind(row, include),
     })
 }
 

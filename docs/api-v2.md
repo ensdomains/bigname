@@ -135,8 +135,8 @@ step-3-gate vocabulary needed by the route schemas:
 | `to_block` | inclusive upper block-number filter | `to_block` (unchanged) |
 | `from_timestamp` | inclusive lower RFC 3339 bound on history collections, resolved per chain to the first readable lineage block at or after it | new in v2 |
 | `to_timestamp` | inclusive upper RFC 3339 bound on history collections, resolved per chain to the last readable lineage block at or before it | new in v2 |
-| `data` | envelope root payload, and the `include=data` event-row payload when nested inside an event row (see [history event payloads](api-v2-routes.md#history-event-payloads-includedata)) | compact event payload objects |
-| `kind` | raw storage event kind on an event row, exposed only with `include=data`; the one pipeline term the product tier carries | `event_kind` |
+| `data` | envelope root payload, and the `include=data` event-row payload when nested inside an event row (see [history event payloads](api-v2-routes.md#history-event-payloads-includedata-includeraw)) | compact event payload objects |
+| `kind` | raw storage event kind on an event row, exposed only behind the explicit `include=raw` opt-in (never part of `include=data`); the one pipeline term the product tier carries, for explorer and diagnostic use | `event_kind` |
 | `contract_address` | lower-cased emitting contract of an event row, exposed only with `include=data`; `null` for state-derived rows | `emitting_address` |
 | `resolver` (query) | `/v1/events` filter naming one resolver contract as `<chain_id>:<address>` (numeric chain id, case-insensitive address); matches rows the contract emitted plus `resolver` pointer rows naming it | new in v2 |
 | `grant_event` | on resolver-overview `include=roles` items: `{block_number, timestamp, transaction_hash, log_index}` of the earliest permission event that granted the role; omitted when unresolvable | permission-row `provenance.normalized_event_ids` |
@@ -261,7 +261,8 @@ Rules:
 - Pipeline vocabulary (`projection`, `sidecar`, `manifest`, `normalized event`,
   `raw fact`, table names) must not appear in product-route field names, enum
   values, or error messages. The documented exception is the `kind` string on
-  `include=data` event rows, which carries the raw storage event kind.
+  `include=raw` event rows, which carries the raw storage event kind behind an
+  explicit opt-in.
 
 ## Envelope
 
