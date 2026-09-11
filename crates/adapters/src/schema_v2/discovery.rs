@@ -127,11 +127,36 @@ pub(super) fn materialize(
                 let target = catalog
                     .contract_instance_for_address(&address, raw.block_number)?
                     .unwrap_or_else(|| contract_id(&raw.chain_id, &address));
+                // A registry may point one of its own labels back at itself (observed on the
+                // Sepolia hackathon deployment: `SubregistryUpdated` with `subregistry` equal
+                // to the emitter). Under the #569 ruling an undeclared, discovery-admitted
+                // emitter's anomalous log is skipped and recorded rather than halting the
+                // chain: the previous edge is closed above and no new discovery edge is opened,
+                // so no walk can loop. A manifest-declared emitter doing this stays fatal.
                 if target == selected.contract_instance_id {
-                    bail!(
-                        "{} produced a non-announcement self-edge of kind {edge_kind}",
-                        selected.event.name
-                    );
+                    if selected.manifest_declared_emitter {
+                        bail!(
+                            "{} produced a non-announcement self-edge of kind {edge_kind}",
+                            selected.event.name
+                        );
+                    }
+                    output.decode_skips.push(super::DecodeSkip {
+                        chain_id: raw.chain_id.clone(),
+                        block_hash: raw.block_hash.clone(),
+                        block_number: raw.block_number,
+                        transaction_hash: raw.transaction_hash.clone(),
+                        log_index: raw.log_index,
+                        emitting_address: raw.emitting_address.clone(),
+                        source_family: selected.source.source_family.clone(),
+                        selection_topic0: selected.event.topic0.clone(),
+                        match_all: selected.match_all,
+                        decode_context: format!(
+                            "{} produced a non-announcement self-edge of kind {edge_kind}; \
+                             the previous edge is closed and no discovery edge is opened",
+                            selected.event.name
+                        ),
+                    });
+                    continue;
                 }
                 push_contract(
                     output,

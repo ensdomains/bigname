@@ -4297,6 +4297,97 @@ fn registry_created_emits_the_ruled_self_edge() -> anyhow::Result<()> {
 }
 
 #[test]
+fn a_registry_pointing_a_label_back_at_itself_does_not_halt_interpretation() -> anyhow::Result<()> {
+    // Seen on the Sepolia hackathon deployment (block 11673141): a discovery-admitted user
+    // registry set one of its own labels' subregistry to its own address. Under the #569
+    // ruling an undeclared emitter's anomalous log is skipped and recorded, not terminal; a
+    // manifest-declared registry doing the same stays fatal.
+    let sender: Address = Address::repeat_byte(0x51);
+    let manifest = || {
+        manifest_with_events(
+            68,
+            "ens",
+            "ens_v2_registry_l1",
+            &[(
+                "SubregistryUpdated",
+                "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)",
+                &["registry"],
+                &["SubregistryChanged"],
+            )],
+        )
+    };
+    let rules = || {
+        vec![DiscoveryRuleInput {
+            manifest_id: 68,
+            edge_kind: "subregistry".to_owned(),
+            from_role: Some("registry".to_owned()),
+            admission: "linked_subregistry_event".to_owned(),
+        }]
+    };
+    let self_loop = || {
+        vec![raw_at(
+            v2_registry::SubregistryUpdated {
+                tokenId: U256::from(7),
+                subregistry: CONTRACT.parse().unwrap(),
+                sender,
+            }
+            .encode_log_data(),
+            1,
+            0,
+            CONTRACT,
+        )]
+    };
+    let mut announced = admission(68, "registry");
+    announced.discovery_edge_kind = Some("registry_announcement".to_owned());
+    announced.discovery_from_contract_instance_id = Some(announced.contract_instance_id);
+    announced.discovery_observation_key = Some("registry-announcement:self".to_owned());
+
+    let declared = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest()],
+        discovery_rules: rules(),
+        admissions: vec![admission(68, "registry")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: self_loop(),
+    });
+    assert!(
+        declared.is_err(),
+        "a manifest-declared registry pointing at itself stays fatal"
+    );
+
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest()],
+        discovery_rules: rules(),
+        admissions: vec![announced],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: self_loop(),
+    })?;
+
+    assert!(
+        output
+            .discovery_edges
+            .iter()
+            .all(|edge| edge.edge_kind != "subregistry"),
+        "a self-loop opens no subregistry discovery edge"
+    );
+    assert_eq!(
+        output.decode_skips.len(),
+        1,
+        "the skip is recorded explicitly"
+    );
+    assert!(
+        output.decode_skips[0]
+            .decode_context
+            .contains("self-edge of kind subregistry")
+    );
+    assert_eq!(output.decode_skips[0].block_number, 1);
+    Ok(())
+}
+
+#[test]
 fn registry_created_selects_the_rule_role_independent_of_admission_order() -> anyhow::Result<()> {
     let root = admission(2, "ETHRegistry");
     let registry = admission(2, "registry");
