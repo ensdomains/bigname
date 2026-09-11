@@ -1,5 +1,6 @@
 mod address_history;
 mod address_names;
+mod cache_headers;
 mod chains;
 mod cursor;
 mod diag_events;
@@ -17,6 +18,7 @@ mod name_records;
 #[cfg(test)]
 pub(crate) use name_records::auto_fallback_test_hooks as name_records_auto_fallback_test_hooks;
 mod name_records_inventory;
+mod names;
 mod namespaces;
 mod params;
 mod permission_support;
@@ -78,6 +80,7 @@ pub(crate) use name_records::{
     load_ephemeral_verified_record_lookup, parse_record_keys,
 };
 pub(crate) use name_records_inventory::{default_requested_records, validate_product_record};
+pub(crate) use names::get_names;
 pub(crate) use namespaces::get_namespace;
 pub(crate) use params::{
     AtSelector, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, QueryParams, RawQueryParams, RequestSource,
@@ -114,9 +117,9 @@ pub(crate) use subnames::get_subnames;
 #[allow(unused_imports)]
 pub(crate) use vocab::matched_boundary_vocabulary_terms;
 pub(crate) use vocab::{
-    AddressNamesDedupe, AddressNamesSort, Completeness, Finality, HistoryEventType, HistoryScope,
-    OpsStatus, PRODUCT_PIPELINE_TERMS, RegistrationStatus, Relation, RelationSet, Resolver, Source,
-    Status, contains_boundary_vocabulary, shared_product_reason,
+    AddressNamesDedupe, AddressNamesSort, Authority, Completeness, Finality, HistoryEventType,
+    HistoryScope, OpsStatus, PRODUCT_PIPELINE_TERMS, RegistrationStatus, Relation, RelationSet,
+    Resolver, Source, Status, contains_boundary_vocabulary, shared_product_reason,
 };
 
 use axum::Router;

@@ -1,33 +1,43 @@
 use axum::{
-    Router,
+    Router, middleware,
     routing::{get, post},
 };
 
 use crate::AppState;
 
+use super::cache_headers::indexed_read_cache_headers;
+
 use super::{
     get_address_history, get_address_names, get_diagnostic_events,
     get_diagnostic_namespace_manifests, get_events, get_history, get_lookup,
     get_name_authority_diagnostic, get_name_binding_diagnostic, get_name_coverage_diagnostic,
-    get_name_record, get_name_records, get_name_records_diagnostic, get_namespace, get_permissions,
-    get_primary_name, get_registry, get_registry_labels, get_resolver, get_search, get_status,
-    get_subnames,
+    get_name_record, get_name_records, get_name_records_diagnostic, get_names, get_namespace,
+    get_permissions, get_primary_name, get_registry, get_registry_labels, get_resolver, get_search,
+    get_status, get_subnames,
 };
 
 pub(super) fn router() -> Router<AppState> {
-    Router::new()
-        .route("/v1/lookup", post(get_lookup))
-        .route("/v1/status", get(get_status))
+    // Indexed single-resource reads carry the snapshot they were read at as `meta.as_of_token`;
+    // only these routes get the weak-ETag / Cache-Control layer (see `cache_headers`).
+    let indexed_single_resource_reads = Router::new()
         .route("/v1/names/{name}", get(get_name_record))
         .route("/v1/names/{name}/records", get(get_name_records))
-        .route("/v1/names/{name}/subnames", get(get_subnames))
-        .route("/v1/names/{name}/history", get(get_history))
-        .route("/v1/permissions", get(get_permissions))
-        .route("/v1/addresses/{address}/names", get(get_address_names))
         .route(
             "/v1/addresses/{address}/primary-name",
             get(get_primary_name),
         )
+        .route("/v1/resolvers/{chain_id}/{address}", get(get_resolver))
+        .route_layer(middleware::from_fn(indexed_read_cache_headers));
+
+    Router::new()
+        .merge(indexed_single_resource_reads)
+        .route("/v1/lookup", post(get_lookup))
+        .route("/v1/status", get(get_status))
+        .route("/v1/names", get(get_names))
+        .route("/v1/names/{name}/subnames", get(get_subnames))
+        .route("/v1/names/{name}/history", get(get_history))
+        .route("/v1/permissions", get(get_permissions))
+        .route("/v1/addresses/{address}/names", get(get_address_names))
         .route("/v1/addresses/{address}/history", get(get_address_history))
         .route("/v1/search", get(get_search))
         .route("/v1/events", get(get_events))

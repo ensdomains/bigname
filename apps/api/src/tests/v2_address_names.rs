@@ -953,7 +953,7 @@ async fn v2_get_address_names_rejects_bad_address_and_unknown_include() -> Resul
 
     let bad_include = v2_address_names_response_for_database(
         &database,
-        &format!("/v1/addresses/{V2_ADDRESS}/names?include=counts"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?include=events"),
     )
     .await?;
     assert_eq!(bad_include.status(), StatusCode::BAD_REQUEST);
@@ -1739,4 +1739,163 @@ fn address_name_record_inventory_chain_position(spec: &V2AddressNameSpec) -> Val
         "block_hash": format!("0xname{:02x}", spec.block_number),
         "timestamp": format!("2026-04-17T00:00:{:02}Z", spec.block_number % 60)
     })
+}
+
+#[tokio::test]
+async fn v2_get_address_names_filters_by_authority_and_reports_migration() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[raw_block("ethereum-mainnet", "0xmigration7", None, 7, 1_717_180_007)],
+    )
+    .await?;
+    let event_identity =
+        "ens_v2_migration_l1:1:ethereum-mainnet:0xmigration7:0xtxmigration7:0:MigrationApplied:0";
+    let mut event = history_event(
+        event_identity,
+        None,
+        None,
+        Some("ethereum-mainnet"),
+        Some(7),
+        Some("0xmigration7"),
+        Some("0xtxmigration7"),
+        Some(0),
+        CanonicalityState::Canonical,
+    );
+    event.event_kind = "MigrationApplied".to_owned();
+    event.source_family = "ens_v2_migration_l1".to_owned();
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    let proof_event_id: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM bigname_phase.normalized_events WHERE event_identity = $1",
+    )
+    .bind(event_identity)
+    .fetch_one(&database.pool)
+    .await?;
+    for (name, authority_selection) in [
+        (
+            "alpha.eth",
+            json!({
+                "authority_arm": "ens_v2",
+                "proof_kind": "migration_authority_transition",
+                "proof_event_id": proof_event_id,
+            }),
+        ),
+        ("beta.eth", json!({"authority_arm": "ens_v1"})),
+    ] {
+        sqlx::query(
+            "UPDATE bigname_phase.name_current
+             SET provenance = provenance || jsonb_build_object('authority_selection', $2::jsonb)
+             WHERE namespace = 'ens' AND raw_name = $1",
+        )
+        .bind(name)
+        .bind(authority_selection)
+        .execute(&database.pool)
+        .await?;
+    }
+
+    let all = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
+    )
+    .await?;
+    let rows = all["data"].as_array().expect("data must be an array");
+    assert_eq!(rows[0]["name"], json!("alpha.eth"));
+    assert_eq!(rows[0]["authority"], json!("ens_v2"));
+    assert_eq!(rows[0]["migrated_at"], json!("2024-05-31T18:26:47Z"));
+    assert_eq!(rows[1]["name"], json!("beta.eth"));
+    assert_eq!(rows[1]["authority"], json!("ens_v1"));
+    assert!(rows[1].get("migrated_at").is_none());
+    assert!(rows[2].get("authority").is_none());
+
+    let v2_only = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?authority=ens_v2"),
+    )
+    .await?;
+    assert_eq!(
+        names(v2_only["data"].as_array().expect("v2 data")),
+        vec!["alpha.eth"]
+    );
+    let v1_only = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?authority=ens_v1&page_size=1"),
+    )
+    .await?;
+    assert_eq!(
+        names(v1_only["data"].as_array().expect("v1 data")),
+        vec!["beta.eth"]
+    );
+
+    let invalid = v2_address_names_response_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?authority=basenames"),
+    )
+    .await?;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    let first_page = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?page_size=1"),
+    )
+    .await?;
+    let cursor = first_page["page"]["next_cursor"]
+        .as_str()
+        .expect("first page must include a cursor");
+    let rebound = v2_address_names_response_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?page_size=1&authority=ens_v1&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(rebound.status(), StatusCode::BAD_REQUEST);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_address_names_include_counts_adds_subname_and_record_counts() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let alpha = v2_address_name_specs()
+        .into_iter()
+        .find(|spec| spec.name == "alpha.eth")
+        .expect("alpha address-name fixture must exist");
+    database
+        .insert_record_inventory_current_row(address_name_record_inventory_current_row(&alpha))
+        .await?;
+
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?include=counts"),
+    )
+    .await?;
+    let rows = payload["data"].as_array().expect("data must be an array");
+    assert_eq!(rows[0]["name"], json!("alpha.eth"));
+    assert_eq!(rows[0]["subname_count"], json!(0));
+    assert_eq!(rows[0]["record_count"], json!(3));
+    assert!(rows[0].get("role_summary").is_none());
+    assert!(rows[0].get("event_count").is_none());
+    assert_eq!(rows[1]["name"], json!("beta.eth"));
+    assert_eq!(rows[1]["subname_count"], json!(0));
+    assert!(rows[1].get("record_count").is_none());
+
+    let plain = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
+    )
+    .await?;
+    assert!(plain["data"][0].get("subname_count").is_none());
+    assert!(plain["data"][0].get("record_count").is_none());
+
+    let both = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?include=counts,role_summary"),
+    )
+    .await?;
+    assert_eq!(both["data"][0]["record_count"], json!(3));
+    assert!(both["data"][0].get("role_summary").is_some());
+
+    database.cleanup().await?;
+    Ok(())
 }

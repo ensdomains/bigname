@@ -40,7 +40,8 @@ with no claim, unsupported verification, or mismatched verification return
 All collection routes use the standard `page` object: `cursor`,
 `next_cursor`, `page_size`, nullable `total_count`, and `has_more`.
 
-The top-level latest-state collections are `GET /v1/names/{name}/subnames`,
+The top-level latest-state collections are `GET /v1/names`,
+`GET /v1/names/{name}/subnames`,
 `GET /v1/names/{name}/history`, `GET /v1/permissions`,
 `GET /v1/addresses/{address}/names`,
 `GET /v1/addresses/{address}/history`, `GET /v1/search`, `GET /v1/events`, and
@@ -173,6 +174,31 @@ Field ownership:
   already dictionary fields. Diagnostics may use pipeline vocabulary because
   their tier is explicitly separate from product reads.
 
+### Caching headers on indexed single-resource reads
+
+`GET /v1/names/{name}`, `GET /v1/names/{name}/records`,
+`GET /v1/resolvers/{chain_id}/{address}`, and
+`GET /v1/addresses/{address}/primary-name` answer an indexed read with two
+HTTP caching headers derived from the response itself:
+
+- `ETag: W/"<meta.as_of_token>"` — a weak validator equal to the snapshot
+  token the body already carries, so the validator changes exactly when the
+  served snapshot does and is the same for a latest-state read and an `at`
+  read pinned to that snapshot.
+- `Cache-Control: public, max-age=12, stale-while-revalidate=48` — one
+  Ethereum slot of freshness, after which a browser or edge revalidates with
+  `If-None-Match`; an edge may keep serving the held body for four more slots
+  while it revalidates.
+
+A request whose `If-None-Match` lists that validator (weak or strong form, or
+`*`) receives `304 Not Modified` with the same two headers and no body. The
+headers appear only on `200` responses whose body carries `meta.as_of_token`,
+and only for indexed reads: `source=verified` and `source=auto` execute against
+a provider per request and are never cached, and the primary-name route
+qualifies only when `source=indexed` is explicit, because its default answer
+set includes the verified source. Errors, `POST /v1/lookup`, and every
+collection route carry neither header.
+
 ## Tier 1: Lookup Primitives
 
 ### `POST /v1/lookup`
@@ -209,6 +235,13 @@ Field ownership:
   serializes as `owner,manager,registrant` and reordered sets use canonical
   dictionary order. `profile=feed` returns a documented core-field subset of
   the same record object; it does not introduce another DTO.
+  `profile=detail` records carry `authority` (`ens_v1` or `ens_v2`) when the
+  projection selected an ENSv1/ENSv2 arm for the name, and `migrated_at` when
+  that `ens_v2` authority was proven by an ENSv1→ENSv2 migration transition;
+  both apply to name results and reverse rows alike and are omitted on feed
+  records and on `status=unsupported` records. Reverse inputs accept no
+  `authority` filter yet; filter client-side or use
+  `GET /v1/addresses/{address}/names?authority=`.
   A name result classified as `registration_status=unregistered` always omits
   `registration_id`. It also omits `resolver` and resolver-record fields unless
   it is
@@ -397,14 +430,75 @@ Field ownership:
 
 ## Tier 2: Product Reads
 
+### `GET /v1/names`
+
+- Method/path: `GET /v1/names`
+- Tier: product read.
+- Purpose: the namespace-wide listing of current names by registration expiry
+  — the "which names expire between t1 and t2" sweep. It lives under
+  `/v1/names` rather than a `/v1/registrations` route because its rows are
+  names in the dictionary shape `GET /v1/search` serves, each carrying its
+  selected current registration, and because no route addresses a registration
+  as a resource of its own: registrations appear only as `registration_id` on
+  history and permission rows.
+- Request parameters: query `namespace` (required), `expires_after`,
+  `expires_before`, `sort=expires_at`, `order=asc|desc`, `cursor`,
+  `page_size`, and optional `finality=latest`. `at` and historical `finality`
+  values are rejected by the shared latest-state collection rule.
+  `namespace` is required: the listing is one namespace's index scan, and a
+  missing namespace returns `400 invalid_input`; an unsupported one returns
+  `404 not_found`. At least one of `expires_after` and `expires_before` is
+  required so the request can never be an unbounded scan; both are RFC 3339 UTC
+  timestamps. `expires_after` is inclusive and `expires_before` exclusive, so
+  consecutive windows tile without overlap or gap; `expires_after` must be
+  earlier than `expires_before`. `sort` defaults to `expires_at` and accepts
+  nothing else; `order` defaults to `asc`. Any other value, a non-RFC 3339
+  bound, or an equal or inverted pair returns `400 invalid_input`.
+- Response shape: `data` is an array of the same record-shaped rows
+  `GET /v1/search` serves: `name`, `display_name`, `namespace`, `namehash`,
+  `owner`, `registrant`, `registration_status`, `registered_at`, `created_at`,
+  and `expires_at`. Every row has an `expires_at` inside the window. A name
+  whose exact-name authority is unsupported is omitted, as on search, because
+  a listing row carries no `unsupported_reason`.
+- Coverage: the listing reads `name_current` rows whose
+  `declared_summary.registration.expiry` is the projection's numeric lease
+  expiry (unix seconds) — the form the exact-name builder writes for registrar
+  leases, ENSv2 registrations, and wrapped subnames — and relies on the partial
+  expression index `name_current_registration_expiry_idx` on
+  `(namespace, (registration.expiry)::double precision, logical_name_id)`
+  guarded by `jsonb_typeof(registration.expiry) = 'number'`
+  (`schema-v2/baseline/06_projections.sql`; migration
+  `20260911120000_name_current_registration_expiry_idx.sql` for a phase schema
+  installed before the baseline carried it). A row whose only expiry is stored
+  in another form (an RFC 3339 string at `control.expiry`, or no expiry at all)
+  is outside this listing by design; `GET /v1/names/{name}` still serves its
+  `expires_at`.
+- Pagination behavior: standard collection pagination by `expires_at` in the
+  requested order, ties broken by namespace, name, and namehash. Cursors are
+  bound to namespace, both bounds, and order. `page.total_count` is `null`.
+- Snapshot behavior: rows come from current state. The response omits
+  `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
+  validity claim.
+- Status semantics: an empty window returns `200` with empty `data`.
+
 ### `GET /v1/names/{name}`
 
 - Method/path: `GET /v1/names/{name}`
 - Tier: product read.
 - Purpose: name-profile read, using the flat record shape plus registration summary.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`,
-  `source`. `source` accepts `indexed` or `verified`; omitting it is identical
+  `source`, `include=counts`. `source` accepts `indexed` or `verified`; omitting it is identical
   to `source=indexed`. This name-profile route does not accept `source=auto`.
+  `include=counts` adds `subname_count`, the name's direct readable subname
+  count (the same per-parent aggregate `GET /v1/names/{name}/subnames` reports
+  as `page.total_count`), and `record_count`, the known record-selector count
+  of the current registration's record inventory with the same meaning as on
+  address-name rows; `record_count` is omitted when the row has no current
+  record inventory. Neither count is added to the `status=unsupported`
+  identity-only object. There is no `event_count`: bigname keeps no
+  precomputed per-name event total, and counting history rows on the request
+  path would be an unbounded scan, so the expansion does not offer one. Any
+  other `include` value returns `400 invalid_input`.
 - Response shape: `data` is one flat record object using dictionary fields.
   The registration summary is not nested; it is represented by
   `registration_id`, `token_id`, `owner`, `manager`, `registrant`,
@@ -439,7 +533,15 @@ Field ownership:
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L820 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L825 @ ens_v1@91c966f)
   `manager` is omitted when no forward-read source can derive it; it is not
-  emitted as a permanent null placeholder. The
+  emitted as a permanent null placeholder. `authority` names the protocol arm
+  the current registration fields come from (`ens_v1` or `ens_v2`, read from
+  the projection's selected [authority epoch](glossary.md#authority-epoch)); it
+  is omitted for Basenames names and on the `status=unsupported` identity-only
+  object. `migrated_at` is present only when `authority=ens_v2` was proven by
+  an activated `MigrationApplied` [migration
+  boundary](glossary.md#migration-boundary): it is the RFC 3339 block time of
+  that proof event, read through the event's block in the chain lineage. A name
+  first registered in ENSv2 has `authority=ens_v2` and no `migrated_at`. The
   name-profile portion uses `name`, `display_name`, `namespace`, `namehash`, `resolver`,
   `subregistry`, `addresses`, `text_records`, `content_hash`,
   `primary_name`, `primary_address`, `chain_id`, `network`, `status`, and
@@ -455,7 +557,8 @@ Field ownership:
   verified path as `/v1/names/{name}/records`; indexed resolver-record values
   are not substituted into those fields. The registration and identity summary
   fields (`registration_id`, `token_id`, `owner`, `manager`, `registrant`, dates,
-  `registration_status`, `wrapper_state`, `wrapper_fuses`, `name`, `display_name`, `namespace`, `namehash`,
+  `registration_status`, `wrapper_state`, `wrapper_fuses`, `authority`,
+  `migrated_at`, `name`, `display_name`, `namespace`, `namehash`,
   `resolver`, `primary_name`, `chain_id`, and `network`) remain indexed
   projection values because they are not resolver records. Verified responses
   include `meta.as_of`/`meta.as_of_token` for the positions used by the fresh
@@ -618,10 +721,15 @@ Field ownership:
   requested key, and only the remaining supported keys fall back to verified
   lookup. [Universal Resolver ancestor
   discovery](glossary.md#universal-resolver-ancestor-discovery) applies when a
-  readable ENS name on Ethereum Mainnet has a null projected exact resolver, a
-  projected name identity and DNS wire name, no alias, linked-subregistry,
-  projected wildcard, or cross-chain transport path, and an admitted Universal
-  Resolver manifest entrypoint. This makes the indexed null-resolver miss
+  readable ENS name on the deployment profile's Ethereum L1 (Mainnet under
+  `manifests/mainnet`, Sepolia under `manifests/sepolia`) has a null projected
+  exact resolver, a projected name identity and DNS wire name, no alias,
+  linked-subregistry, projected wildcard, or cross-chain transport path, and an
+  admitted Universal Resolver manifest entrypoint on that chain
+  (`ens_execution`, checked in for both profiles). Verified ENS reads follow
+  the same rules on both chains; only the chain, and therefore the
+  `BIGNAME_API_CHAIN_RPC_URLS` entry they need (`ethereum-mainnet=` or
+  `ethereum-sepolia=`), differs. This makes the indexed null-resolver miss
   unsatisfying. `source=auto` therefore executes the requested
   keys through verified lookup, and `source=verified` uses the same route. The
   Universal Resolver walks to the nearest nonzero ancestor resolver and accepts
@@ -831,9 +939,35 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Method/path: `GET /v1/names/{name}/subnames`
 - Tier: product read.
 - Purpose: direct subnames.
-- Request parameters: path `name`; query `namespace`, `include=counts`,
-  `cursor`, `page_size`, and optional `finality=latest`. `at` and historical
-  `finality` values are rejected by the shared latest-state collection rule.
+- Request parameters: path `name`; query `namespace`, `q`,
+  `sort=name|expires_at|registered_at`, `order=asc|desc`,
+  `include_expired=true|false`, `include=counts`, `cursor`, `page_size`, and
+  optional `finality=latest`. `at` and historical `finality` values are
+  rejected by the shared latest-state collection rule.
+  `q` applies prefix matching to the served `name` under exactly the rules
+  documented for `q` on `GET /v1/addresses/{address}/names`: the whole value is
+  normalized as an ENSIP-15 name prefix (`q=AL` matches `alpha.parent.eth`),
+  one trailing dot marks a label boundary (`q=alpha.` matches
+  `alpha.parent.eth` but not `alphax.parent.eth`), an empty `q` is absent, and
+  input the normalizer rejects returns `400 invalid_input`. The comparison is
+  byte-wise against the served name, so a [non-name form](glossary.md#non-name-form)
+  row matches only a prefix of its placeholder or escaped text.
+  `sort` defaults to `name` and `order` to `asc`. `expires_at` and
+  `registered_at` order by the child's own registration timestamps, read the
+  same way `GET /v1/addresses/{address}/names` reads them; a child with no
+  current name row or no such timestamp sorts after every dated row ascending
+  and before every dated row descending. Ties, and the whole `name` sort, break
+  by served name and then by child identity. Any other `sort` or `order` value
+  returns `400 invalid_input`.
+  `include_expired` defaults to `true`, which is the route's prior behaviour:
+  released children and children whose `expires_at` has passed are listed with
+  their `registration_status` and `expires_at` as served. `include_expired=false`
+  omits a child whose current registration status is `released` or whose
+  `expires_at` is earlier than the database's transaction time when the page is
+  read. A child with no registration or no expiry — an unregistered subname, or
+  one under a parent that carries no expiry — is not expired and stays. bigname
+  applies no grace period here: the comparison is against the served
+  `expires_at`. Any other value returns `400 invalid_input`.
 - Response shape: `data` is an array of dedicated subname rows in dictionary
   vocabulary: `name`, `display_name`, `namespace`, `namehash`, `labelhash`,
   `owner`, `registrant`, `registration_status`, `registered_at`,
@@ -865,8 +999,16 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `include=counts` adds `subname_count`, the row's direct subname count.
   `subregistry` is `{chain_id, address}` of the ENSv2 registry the child's
   current subregistry pointer targets, omitted when there is none.
-- Pagination behavior: standard collection pagination by
-  `display_name` ascending.
+- Pagination behavior: standard collection pagination in the requested sort
+  and order. Cursors are bound to namespace, parent, `q`, `include_expired`,
+  sort, and order; a cursor replayed under different controls returns
+  `400 invalid_input`. Cursors issued before these controls existed name the
+  default page and stay valid for a request that asks for exactly that page.
+  `page.total_count` is populated with the parent's direct readable subname
+  count — the same bounded per-parent aggregate that already annotates the page,
+  so it costs no extra scan — only when the page admits every child, that is
+  when `q` is absent and `include_expired` is not `false`. A narrowed page
+  reports `total_count: null` rather than a count it did not compute.
 - Snapshot behavior: the parent and subname rows are selected from current
   state. The response omits `meta.as_of` and `meta.as_of_token`, and its cursor
   carries no snapshot validity claim. True as-of child enumeration is deferred
@@ -1142,7 +1284,9 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   registration. Their presence does not widen wrapper-holder enumeration;
   request-relative completeness metadata below remains authoritative.
   `authority_context` is required on every row and records how that row was
-  admitted under the per-name ownership rule.
+  admitted under the per-name ownership rule. `powers` values come from the
+  [permission powers vocabulary](api-v2.md#permission-powers-vocabulary), which
+  names every value and the on-chain role bit or NameWrapper fuse behind it.
   `include=lineage`
   adds route-local `lineage` per row:
   `{grant, revocation?, inheritance_path?, transfer_behavior?}`. Product lineage
@@ -1244,11 +1388,15 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 - Tier: product read.
 - Purpose: names related to an address.
 - Request parameters: path `address`; query `namespace`, `relation`,
-  `coin_type`, `q`,
+  `authority=ens_v1|ens_v2`, `coin_type`, `q`,
   `sort=name|expires_at|registered_at`, `order=asc|desc`,
   `dedupe=name|registration`, `include=role_summary`, `cursor`, `page_size`,
   and optional `finality=latest`. `at` and historical `finality` values are
   rejected by the shared latest-state collection rule.
+  `authority` keeps only rows whose current name row selected that protocol
+  arm; it is a primary-key probe of the name row per candidate relation row.
+  Any other value returns `400 invalid_input`. Rows with no selected arm
+  (Basenames) match neither value.
   `q` applies prefix matching to the dictionary `name` field. The API treats
   the complete `q` value as an ENSIP-15 name prefix and normalizes it with the
   same normalizer used for indexed names before comparing it directly with the
@@ -1291,8 +1439,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   `["resolves_to"]` on a `relation=resolves_to` read. A `resolves_to` row also
   carries `resolution: {coin_type, record_key}`: the coin type asked about and
   the resolver record key that answered (`addr:<coin_type>`, or
-  `addr:2147483648` when the ENSIP-19 default EVM address answered).
-  `is_primary` is
+  `addr:2147483648` when the ENSIP-19 default EVM address answered). Rows also
+  carry `authority` and `migrated_at` with the same meaning as on
+  `GET /v1/names/{name}`: the selected `ens_v1`/`ens_v2` arm, and the block time
+  of the migration boundary that proved an `ens_v2` arm. `is_primary` is
   evaluated against that row namespace's coin-type-60 primary-name claim, not a
   route-wide namespace shortcut; a `resolves_to` row evaluates it against the
   requested `coin_type`'s claim instead, so a name resolving to the address on
@@ -1312,11 +1462,16 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   for the row. `record_count` counts the known record selectors for the name's
   current registration, including unsupported-family selectors and excluding
   explicit gaps. `grant_scope` uses the same shape documented for
-  `GET /v1/permissions`.
+  `GET /v1/permissions`. `include=counts` adds `subname_count`, the row's
+  direct readable subname count (one bounded per-parent aggregate over the
+  page's names), and the same `record_count`; the two expansions combine as
+  `include=counts,role_summary`. No `event_count` is offered, for the reason
+  given on `GET /v1/names/{name}`. Any other `include` value returns
+  `400 invalid_input`.
 - Pagination behavior: standard collection pagination. Cursors are bound to
-  address, optional namespace filter, normalized relation set, `q`, dedupe
-  mode, sort, and order; a `resolves_to` cursor additionally binds the coin
-  type, and a cursor minted for one relation set never resumes another.
+  address, optional namespace filter, normalized relation set, `authority`,
+  `q`, dedupe mode, sort, and order; a `resolves_to` cursor additionally binds
+  the coin type, and a cursor minted for one relation set never resumes another.
 - Snapshot behavior: address-name rows come from current state. The response
   omits `meta.as_of` and `meta.as_of_token`; completeness metadata for
   `include=role_summary` remains available. Its cursor carries no snapshot
@@ -1402,7 +1557,9 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 - Snapshot behavior: current-state read over chain-derived primary-name state.
   The route does not accept `at` or `finality`. Successful responses carry
   `meta.as_of` and `meta.as_of_token` for indexed state or the current readable
-  Ethereum position used by fresh ENS/60 verification. No metadata field
+  Ethereum L1 position used by fresh ENS/60 verification: chain `1` under the
+  Mainnet deployment profile, chain `11155111` (token slot `ethereum-sepolia`)
+  under the Sepolia profile. No metadata field
   implies cache reuse or a persisted execution identity. Provider transport
   failures abort the request with `500 internal_error`; they are not verified
   answer entries with `status=stale`. The projected-claim reads that decide
@@ -1432,12 +1589,18 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   separately observed wildcard names can have projected surfaces.
 
   A missing readable row cannot generally hide a later authority arm from the
-  execution this route performs. Live ENS/60 primary-name verification currently
-  executes only against Mainnet, whose [deployment
-  profile](glossary.md#deployment-profile) admits no ENSv2 registry, so
-  there is no later arm to hide. Sepolia currently has no route execution
-  entrypoint; the Sepolia evidence below explains its projected authority and
-  the expected ENSv1-path behavior, not an active Sepolia verified route. An
+  execution this route performs. Live ENS/60 primary-name verification executes
+  against the Ethereum L1 of the selected [deployment
+  profile](glossary.md#deployment-profile): Mainnet, whose profile admits no
+  ENSv2 registry, so there is no later arm to hide; or Sepolia, through the
+  Sepolia profile's `ens_execution` Universal Resolver and `ens_v1_registry_l1`
+  registry declarations, with the same reverse leg, the same pre-forward
+  authority gate, the same hash pinning to the readable Sepolia head, and the
+  same provider limits. On Sepolia the gate does real work: the profile admits
+  ENSv2 registries, so a claimed name whose selected authority is an `ens_v2`
+  arm is refused before the forward call exactly as described above. The
+  Sepolia evidence below explains the projected authority and the ENSv1-path
+  behavior that route relies on. An
   unwrapped ENSv1→ENSv2 migration clears the migrated node's ENSv1 resolver
   `(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L118 @ ens_v2@a971bd64)`,
   an unlocked wrapped ENSv1→ENSv2 migration does the same
@@ -1487,12 +1650,12 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   Moving the wrapped token to the graveyard therefore freezes ordinary writes
   by the former name owner, but it does not revoke those separately trusted
   callers.
-  This locked-name `CANNOT_SET_RESOLVER` case is not reachable through the
-  current Mainnet-only execution path. If a deployment with the Sepolia redirect
-  gains a verified route entrypoint, a name outside indexed coverage would be
-  admitted and could verify those retained records. Inside coverage, the name's
-  `ens_v2`-selected row would cause the refusal above, so the exposure would close
-  as indexing coverage completes.
+  This locked-name `CANNOT_SET_RESOLVER` case is not reachable under the
+  Mainnet profile, which has no ENSv2 arm. Under the Sepolia profile, whose
+  verified route executes through the Sepolia Universal Resolver, a name outside
+  indexed coverage is admitted and can verify those retained records. Inside
+  coverage, the name's `ens_v2`-selected row causes the refusal above, so the
+  exposure closes as indexing coverage completes.
 - Status semantics: answer entries use in-band `status`. Valid tuples with no
   indexed claim return an `indexed` entry with `status=not_found`. A stored
   successful claim whose spelling does not normalize returns an `indexed` entry
@@ -1996,13 +2159,51 @@ For a registrar lease first identified by a later readable observation, registra
 - Request parameters: path `namespace`.
 - Response shape: `data` is `{namespace, capabilities, networks}`.
   `capabilities` is a product-facing object keyed by capability name; each
-  value is `{completeness, unsupported_reason?}` using the common
+  value is `{completeness, unsupported_reason?, chains?}` using the common
   completeness vocabulary. `networks` is an array of `{network, chain_id?}`
   entries when the namespace has public chain mappings. Control-plane metadata
   omits `meta.as_of` and `meta.as_of_token`. Under the Sepolia deployment
   profile, ENS `name_profile` completeness is `partial`: the ENSv2 registrar
   declaration is supported while the admitted ENSv1 registrar declaration is
   shadow because registrar-controller label coverage is absent.
+- Capabilities from manifest flags: `subnames`, `name_profile`, and
+  `name_history` aggregate the active manifests' capability flags (`full` when
+  every declaring manifest is supported, `partial` when some are, otherwise
+  `unsupported` with `unsupported_reason=not_supported_for_namespace`). They
+  carry no `chains` object.
+- Verified capabilities per chain: `verified_records` and
+  `verified_primary_name` describe what this deployment's verified routes will
+  execute, decided per declared network and reported under `chains`, keyed by
+  the numeric chain id (`"1"`, `"11155111"`, `"8453"`). A chain entry is
+  `{completeness: full}` when the lookup route table has an execution
+  entrypoint for the namespace on that chain (ENS: Ethereum Mainnet or Sepolia;
+  Basenames: Base, executing through the Mainnet L1 Resolver), an active or,
+  where the route admits it, shadow manifest declares that entrypoint with a
+  `verified_resolution` flag the route accepts (ENS accepts `shadow`; Basenames
+  requires `supported` on manifest version 2), for `verified_primary_name` the
+  same chain also has an active `ens_v1_registry_l1` manifest, and
+  `BIGNAME_API_CHAIN_RPC_URLS` names a provider for the execution chain.
+  Otherwise the entry is `unsupported` with one of
+  `not_supported_for_namespace` (the capability never applies, such as
+  `verified_primary_name` on Basenames), `not_supported_for_chain` (no route
+  entrypoint for that chain), `execution_entrypoint_not_declared` (no usable
+  execution manifest, or no registry manifest for primary names), or
+  `execution_provider_not_configured` (the operator has not configured the
+  provider). The top-level `completeness` is `full` when every chain is `full`,
+  `partial` when some are, and `unsupported` when none is; an `unsupported`
+  top level repeats the chains' shared reason, `not_supported_for_chain` when
+  the per-chain reasons differ, and `not_supported_for_namespace` when the
+  namespace declares no network. Per-name support classes on the routes
+  themselves (topology class, authority arm) still apply; this is
+  deployment-level support. Example under the Sepolia profile with a Sepolia
+  provider configured:
+
+  ```json
+  "verified_primary_name": {
+    "completeness": "full",
+    "chains": { "11155111": { "completeness": "full" } }
+  }
+  ```
 - Pagination behavior: none.
 - Status semantics: unsupported public namespaces return `404 not_found`.
 - Replaces (v1): `GET /v1/namespaces/{namespace}`. Operational namespace

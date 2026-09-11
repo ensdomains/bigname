@@ -5,8 +5,7 @@ use serde_json::{Value, json};
 use bigname_domain::normalization::normalize_name;
 
 use crate::{
-    ChainRpcUrls, ETHEREUM_MAINNET_CHAIN_ID, LookupError, LookupPosition, LookupRecordStatus,
-    RecordSelector, Result,
+    ChainRpcUrls, LookupError, LookupPosition, LookupRecordStatus, RecordSelector, Result,
     abi::{
         ResolutionResultAbi, decode_registry_resolver, decode_resolver_name, dns_encode_name,
         hex_to_bytes, namehash, registry_resolver_call, resolver_name_call,
@@ -67,7 +66,7 @@ where
         ));
     }
     let reverse_node = reverse_node(request.normalized_address)?;
-    let rpc = primary_name_rpc(request.chain_rpc_urls)?;
+    let rpc = primary_name_rpc(request.chain_rpc_urls, &request.position.chain_id)?;
     let block_selector = hash_pinned_block_selector(&request.position.block_hash);
     let resolver_address = match registry_resolver(
         &rpc,
@@ -129,7 +128,7 @@ where
         ))
     })?;
     let block = ExecutionBlock {
-        chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+        chain_id: request.position.chain_id.clone(),
         block_number: request.position.block_number,
         block_hash: request.position.block_hash.clone(),
     };
@@ -306,9 +305,11 @@ fn reverse_node(normalized_address: &str) -> Result<[u8; 32]> {
     })
 }
 
-fn primary_name_rpc(rpc_urls: &ChainRpcUrls) -> Result<JsonRpcHttpClient> {
-    let endpoint = rpc_urls.url_for(ETHEREUM_MAINNET_CHAIN_ID).ok_or_else(|| {
-        LookupError::configuration("ENS primary-name RPC provider is not configured")
+fn primary_name_rpc(rpc_urls: &ChainRpcUrls, chain_id: &str) -> Result<JsonRpcHttpClient> {
+    let endpoint = rpc_urls.url_for(chain_id).ok_or_else(|| {
+        LookupError::configuration(format!(
+            "ENS primary-name RPC provider for {chain_id} is not configured"
+        ))
     })?;
     JsonRpcHttpClient::new_for_rpc_urls(endpoint, rpc_urls).map_err(|error| {
         LookupError::configuration(format!(

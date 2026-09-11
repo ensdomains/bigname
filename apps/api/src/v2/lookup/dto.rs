@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::v2::{
-    AddressNameResolution, Page, RegistrationStatus, RegistryRef, Relation, Resolver, Status,
+    AddressNameResolution, Authority, Page, RegistrationStatus, RegistryRef, Relation, Resolver,
+    Status,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -139,6 +140,10 @@ pub(crate) struct LookupRecord {
     /// Present only on `relation=resolves_to` reverse rows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resolution: Option<AddressNameResolution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) authority: Option<Authority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) migrated_at: Option<String>,
     pub(crate) status: Status,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unsupported_reason: Option<String>,

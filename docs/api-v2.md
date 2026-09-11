@@ -80,6 +80,8 @@ step-3-gate vocabulary needed by the route schemas:
 | `wrapper_state` | bigname's current ENSv1 NameWrapper lifecycle value: [`wrapped`](glossary.md#wrapped-namewrapper-state), [`emancipated`](glossary.md#emancipated-namewrapper-state), or [`locked`](glossary.md#locked-namewrapper-state); omitted when the current name is not in one of those states | raw NameWrapper fuse bitmap |
 | `wrapper_fuses` | typed summary of the current [expiry-effective NameWrapper fuse word](glossary.md#expiry-effective-namewrapper-fuse-word); present exactly when `wrapper_state` is present | raw NameWrapper fuse bitmap |
 | `fuses` | uint32 fuse word nested in `wrapper_fuses`; it is zero after wrapper expiry even though normalized events retain their expiry-unadjusted interpreted word | raw NameWrapper fuse bitmap |
+| `authority` | the protocol arm that supplies the row's current registration and control fields: `ens_v1` or `ens_v2` (the selected [authority epoch](glossary.md#authority-epoch) arm). Omitted when the projection selected no ENSv1/ENSv2 arm — Basenames names have no era split, and an `unsupported` name detail object carries no registration fields | new in v2; the zigens `Domain.protocol` / `isMigrated` concept |
+| `migrated_at` | RFC 3339 block time of the activated `MigrationApplied` [migration boundary](glossary.md#migration-boundary) that proved the row's current `ens_v2` authority through an ENSv1→ENSv2 [migration authority transition](glossary.md#migration-authority-transition). Present only with `authority=ens_v2`; a name registered directly in ENSv2, or one still on `ens_v1`, omits it | new in v2 |
 | `primary_name` | primary name selected or claimed for an address/coin tuple | `claimed_primary_name`, `verified_primary_name` when surfaced as the selected name |
 | `primary_address` | primary/default address value for a name | `primary_address` (unchanged) |
 | `is_primary` | whether an address-name row is the selected primary answer for that address/coin tuple | `is_primary` (unchanged) |
@@ -113,7 +115,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `unsupported_reason` | reason code or short reason string required with `status=unsupported` | `coverage.unsupported_reason`, route-specific unsupported details |
 | `failure_reason` | reason code or short reason string for `failed`, `stale`, `not_found`, or `mismatch` details | route-specific failure detail fields |
 | `completeness` | `full`, `partial`, `unsupported` | `coverage.status` on product routes (full taxonomy moves to diagnostics) |
-| `powers` | effective permission powers; storage `resource_control` is exposed as `registration_control`; ENSv2 registry `was_reserved` is a non-authorizing history marker retained here so marker-only transitions remain visible (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@a971bd64) | `effective_powers` |
+| `powers` | effective permission powers, drawn from the [permission powers vocabulary](#permission-powers-vocabulary); storage `resource_control` is exposed as `registration_control`; ENSv2 registry `was_reserved` is a non-authorizing history marker retained here so marker-only transitions remain visible (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@a971bd64) | `effective_powers` |
 | `unsupported_fields` | fields or expansions that could not be served or proved for a response item | `unsupported_filters`, coverage-derived unsupported field lists |
 | `keys` | comma-separated resolver record-key allowlist | `records` query parameter, selector token lists in record diagnostics |
 | `page` | pagination object on top-level collections, per-input lookup results, and the resolver overview `bound_names` nested collection | pagination sections with divergent field subsets |
@@ -127,7 +129,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `record_count` | count of known record keys when requested | `record_count` (unchanged) |
 | `role_summary` | grouped permission powers for dashboard-style name rows | `role_summary` (unchanged; rewritten to dictionary field names inside) |
 | `authority_context` | required permission-row marker from the [per-name ownership rule](consumer-capabilities.md#ensv1ensv2-mixed-history-ownership); [`current_for_name`](glossary.md#current-for-name-authority-context) means a `name` filter selected the current registration, while [`resource_audit`](glossary.md#resource-audit-context) makes no current-name claim | new in v2 |
-| `capabilities` | product-facing summary of supported namespace capabilities | capability flag summaries when exposed to product routes |
+| `capabilities` | product-facing summary of supported namespace capabilities; `verified_records` and `verified_primary_name` carry a `chains` object keyed by numeric chain id with per-chain `{completeness, unsupported_reason?}` | capability flag summaries when exposed to product routes |
 | `type` | product event category label; as a history filter, one label or a comma-separated set | `event_kind`, compact event `type` aliases |
 | `by_type` | map of product event `type` values to counts | event summary `by_kind` maps keyed by raw event kind |
 | `block_number` | EVM block number | block-number fields inside chain-position objects |
@@ -139,6 +141,8 @@ step-3-gate vocabulary needed by the route schemas:
 | `to_block` | inclusive upper block-number filter | `to_block` (unchanged) |
 | `from_timestamp` | inclusive lower RFC 3339 bound on history collections, resolved per chain to the first readable lineage block at or after it | new in v2 |
 | `to_timestamp` | inclusive upper RFC 3339 bound on history collections, resolved per chain to the last readable lineage block at or before it | new in v2 |
+| `expires_after` | inclusive lower `expires_at` bound on `GET /v1/names` (RFC 3339 UTC) | `expires_after` (new) |
+| `expires_before` | exclusive upper `expires_at` bound on `GET /v1/names` (RFC 3339 UTC) | `expires_before` (new) |
 | `data` | envelope root payload, and the `include=data` event-row payload when nested inside an event row (see [history event payloads](api-v2-routes.md#history-event-payloads-includedata-includeraw)) | compact event payload objects |
 | `kind` | raw storage event kind on an event row, exposed only behind the explicit `include=raw` opt-in (never part of `include=data`); the one pipeline term the product tier carries, for explorer and diagnostic use | `event_kind` |
 | `contract_address` | lower-cased emitting contract of an event row, exposed only with `include=data`; `null` for state-derived rows | `emitting_address` |
@@ -256,6 +260,107 @@ approve exception is bigname policy, not an upstream lifecycle state.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L127 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L135 @ ens_v1@91c966f)
 
+### Permission powers vocabulary
+
+`powers` (on `GET /v1/permissions` rows, `include=role_summary` grants, and
+lineage objects) is a list of snake_case names drawn from three producers. The
+table is the complete vocabulary the code can serve; a test
+(`documented_powers_vocabulary_matches_code` in
+`apps/api/src/v2/permission_values.rs`) fails when this table and the producing
+source files disagree. Names are listed once even where two producers share
+them.
+
+- **ENSv1 and Basenames projected control** (adapters
+  `crates/adapters/src/schema_v2/protocol/v1/*`, projection
+  `crates/project/src/builders/permissions.rs`). These are the only two powers
+  today's interpreters emit for ENSv1 and Basenames names. Storage spells the
+  first `resource_control`; the API renames it `registration_control`.
+- **ENSv1 NameWrapper fuse vocabulary** (projection mask in
+  `crates/project/src/builders/permissions.rs`). The projection recognises
+  these names and removes each one from a wrapped name's effective powers when
+  the corresponding NameWrapper fuse is burnt, evaluated with the
+  [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) fuse
+  word. No current interpreter emits them, so they appear in served rows only
+  if a future interpreter grants them; they are documented so the mask's
+  meaning is fixed now.
+  (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10-L16 @ ens_v1@91c966f)
+- **ENSv2 role bitmaps** (adapters
+  `crates/adapters/src/schema_v2/protocol/permissions.rs` and
+  `v2_record_resolver/permissions.rs`). `EACRolesChanged` bitmaps are decoded
+  bit by bit; each name is the pinned upstream `ROLE_<NAME>` constant in
+  lower snake case, and `admin_<name>` is `ROLE_<NAME>_ADMIN`, the same bit
+  shifted by 128. Unknown bits are omitted rather than surfaced under invented
+  names.
+  (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L7-L63 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L7-L64 @ ens_v2_sepolia_20260629@ccaeb58)
+  (upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L10 @ ens_v2_sepolia_20260903@5da83f6a)
+
+<!-- powers-vocabulary:start -->
+| Power | Producer | On-chain role or condition |
+| --- | --- | --- |
+| `registration_control` | ENSv1/Basenames control | Storage `resource_control`. Held by the account that controls the registration's authority object: the registrar token owner (`RegistrationGranted`, registrar `Transfer`), the registry owner of a registry-only resource (`NewOwner`/`Transfer`), or the NameWrapper token holder (`TokenControlTransferred`). Masked away while the wrapper is `locked`. |
+| `resolver_control` | ENSv1/Basenames control | Held by the same account, scoped to the registration's current nonzero resolver (`grant_scope.kind = resolver`); revoked and re-granted on `ResolverChanged` and `RegistrationGranted`. Masked by `CANNOT_SET_RESOLVER` (8). |
+| `set_resolver` | ENSv2 registry; wrapper mask | Registry `ROLE_SET_RESOLVER` (bit 24). On a wrapped ENSv1 name the mask removes it under `CANNOT_SET_RESOLVER` (8). |
+| `set_ttl` | wrapper mask | Removed under `CANNOT_SET_TTL` (16). |
+| `create_subnames` | wrapper mask | Removed under `CANNOT_CREATE_SUBDOMAIN` (32). |
+| `create_subdomain` | wrapper mask | Alias of `create_subnames`; removed under `CANNOT_CREATE_SUBDOMAIN` (32). |
+| `transfer` | wrapper mask | Removed under `CANNOT_TRANSFER` (4). |
+| `transfer_name` | wrapper mask | Alias of `transfer`; removed under `CANNOT_TRANSFER` (4). |
+| `unwrap` | wrapper mask | Removed under `CANNOT_UNWRAP` (1). |
+| `burn_fuses` | wrapper mask | Removed under `CANNOT_BURN_FUSES` (2). |
+| `approve` | wrapper mask | Removed under `CANNOT_APPROVE` (64); retained during `.eth` registrar grace (policy, see above). |
+| `approve_wrapper` | wrapper mask | Removed under `CANNOT_APPROVE` (64); retained during `.eth` registrar grace (policy, see above). |
+| `registrar` | ENSv2 registry | `ROLE_REGISTRAR` (bit 0): may register names. |
+| `register_reserved` | ENSv2 registry | `ROLE_REGISTER_RESERVED` (bit 4). |
+| `set_parent` | ENSv2 registry | `ROLE_SET_PARENT` (bit 8). |
+| `unregister` | ENSv2 registry | `ROLE_UNREGISTER` (bit 12). |
+| `renew` | ENSv2 registry | `ROLE_RENEW` (bit 16). |
+| `set_subregistry` | ENSv2 registry | `ROLE_SET_SUBREGISTRY` (bit 20). |
+| `was_reserved` | ENSv2 registry | `ROLE_WAS_RESERVED` (bit 32): a token-only, non-revocable history marker that the name was registered through `ROLE_REGISTER_RESERVED`. It authorizes nothing; it is retained so a marker-only `EACRolesChanged` stays visible. |
+| `set_uri` | ENSv2 registry | `ROLE_SET_URI` (bit 36). |
+| `can_name` | ENSv2 registry; ENSv2 resolvers | `ROLE_CAN_NAME` (bit 120). |
+| `upgrade` | ENSv2 registry; ENSv2 resolvers | `ROLE_UPGRADE` (bit 124). |
+| `can_transfer_admin` | ENSv2 registry | `ROLE_CAN_TRANSFER_ADMIN` (bit 156, `(1 << 28) << 128`). |
+| `admin_registrar` | ENSv2 registry | `ROLE_REGISTRAR_ADMIN` (bit 128). |
+| `admin_register_reserved` | ENSv2 registry | `ROLE_REGISTER_RESERVED_ADMIN` (bit 132). |
+| `admin_set_parent` | ENSv2 registry | `ROLE_SET_PARENT_ADMIN` (bit 136). |
+| `admin_unregister` | ENSv2 registry | `ROLE_UNREGISTER_ADMIN` (bit 140). |
+| `admin_renew` | ENSv2 registry | `ROLE_RENEW_ADMIN` (bit 144). |
+| `admin_set_subregistry` | ENSv2 registry | `ROLE_SET_SUBREGISTRY_ADMIN` (bit 148). |
+| `admin_set_resolver` | ENSv2 registry | `ROLE_SET_RESOLVER_ADMIN` (bit 152). |
+| `admin_set_uri` | ENSv2 registry | `ROLE_SET_URI_ADMIN` (bit 164). |
+| `admin_can_name` | ENSv2 registry; ENSv2 resolvers | `ROLE_CAN_NAME_ADMIN` (bit 248). |
+| `admin_upgrade` | ENSv2 registry; ENSv2 resolvers | `ROLE_UPGRADE_ADMIN` (bit 252). |
+| `set_addr` | ENSv2 resolvers | `ROLE_SET_ADDR` (bit 0 of the resolver bitmap). |
+| `set_text` | ENSv2 resolvers | `ROLE_SET_TEXT` (bit 4). |
+| `set_contenthash` | ENSv2 resolvers | `ROLE_SET_CONTENTHASH` (bit 8). |
+| `set_pubkey` | ENSv2 resolver (20260629) | `ROLE_SET_PUBKEY` (bit 12). |
+| `set_abi` | ENSv2 resolvers | `ROLE_SET_ABI` (bit 16; bit 12 on the record resolver). |
+| `set_interface` | ENSv2 resolvers | `ROLE_SET_INTERFACE` (bit 20; bit 16 on the record resolver). |
+| `set_name` | ENSv2 resolvers | `ROLE_SET_NAME` (bit 24; bit 20 on the record resolver). |
+| `set_alias` | ENSv2 resolver (20260629) | `ROLE_SET_ALIAS` (bit 28). |
+| `clear_records` | ENSv2 resolver (20260629) | `ROLE_CLEAR` (bit 32): may clear a name's records. |
+| `set_data` | ENSv2 resolvers | `ROLE_SET_DATA` (bit 36; bit 24 on the record resolver). |
+| `link` | ENSv2 record resolver | `ROLE_LINK` (bit 28). |
+| `admin_set_addr` | ENSv2 resolvers | `ROLE_SET_ADDR_ADMIN` (bit 128). |
+| `admin_set_text` | ENSv2 resolvers | `ROLE_SET_TEXT_ADMIN` (bit 132). |
+| `admin_set_contenthash` | ENSv2 resolvers | `ROLE_SET_CONTENTHASH_ADMIN` (bit 136). |
+| `admin_set_pubkey` | ENSv2 resolver (20260629) | `ROLE_SET_PUBKEY_ADMIN` (bit 140). |
+| `admin_set_abi` | ENSv2 resolvers | `ROLE_SET_ABI_ADMIN` (bit 144; bit 140 on the record resolver). |
+| `admin_set_interface` | ENSv2 resolvers | `ROLE_SET_INTERFACE_ADMIN` (bit 148; bit 144 on the record resolver). |
+| `admin_set_name` | ENSv2 resolvers | `ROLE_SET_NAME_ADMIN` (bit 152; bit 148 on the record resolver). |
+| `admin_set_alias` | ENSv2 resolver (20260629) | `ROLE_SET_ALIAS_ADMIN` (bit 156). |
+| `admin_clear_records` | ENSv2 resolver (20260629) | `ROLE_CLEAR_ADMIN` (bit 160). |
+| `admin_set_data` | ENSv2 resolvers | `ROLE_SET_DATA_ADMIN` (bit 164; bit 152 on the record resolver). |
+| `admin_link` | ENSv2 record resolver | `ROLE_LINK_ADMIN` (bit 156). |
+<!-- powers-vocabulary:end -->
+
+`set_records` is not in this vocabulary: it appears only in bigname's own API
+test fixtures for `record_manager` grants, and no interpreter emits it. A
+consumer that saw it came from a fixture, not from chain data. Names ending in
+`_resource` or containing `resource_` other than `resource_control` are storage
+vocabulary that the API refuses to serve.
+
 Rules:
 
 - Timestamps are RFC 3339 UTC everywhere, including the lookup route.
@@ -320,7 +425,9 @@ Rules:
   anchor) populate
   it with a capped count over the page's exact filters: exact up to 10,000
   product-visible rows, `null` beyond, and always `null` for unanchored event
-  reads. Other routes populate it only where a precomputed count makes it
+  reads. `GET /v1/names/{name}/subnames` populates it with the parent's direct
+  readable subname count, an aggregate bounded by that one parent's children.
+  Other routes populate it only where a precomputed count makes it
   cheap or where they explicitly document `include=total_count`; they must not
   otherwise run unconditional full counts on the request path.
 - `meta` is always present. Single-resource routes that read chain-derived state
@@ -599,6 +706,8 @@ Common parameter rules:
 | `sort`, `order` | paginated routes that declare a sort set; history collections accept `order` alone over their fixed chain-position sort | route-documented field set plus `asc`/`desc` |
 | `resolver` | `/v1/events` | `<chain_id>:<address>` resolver contract; anchors the read, suppresses the `ens` namespace default, and is bound by cursors |
 | `type`, `from_timestamp`, `to_timestamp` | name history, address history, `/v1/events` | friendly event type or comma-separated set; inclusive RFC 3339 bounds resolved to lineage block ranges (see [history collection filters](api-v2-routes.md#history-collection-filters)) |
+| `expires_after`, `expires_before` | `GET /v1/names` | RFC 3339 UTC window over `expires_at`; at least one is required, `expires_after` inclusive, `expires_before` exclusive |
+| `include_expired` | `GET /v1/names/{name}/subnames` | `true` (default) lists released and past-expiry children; `false` omits them |
 | `cursor`, `page_size` | every paginated route | opaque cursor; default 50, max 200 |
 
 For a cross-namespace read with no explicit `namespace`, the API accounts for

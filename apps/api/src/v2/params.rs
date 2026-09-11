@@ -1,15 +1,14 @@
 use serde::Deserialize;
-use sqlx::types::Uuid;
+use sqlx::types::{Uuid, time::OffsetDateTime};
 
 use super::support::parse_evm_address;
 use super::{
     error::{V2Error, V2Result},
     vocab::{
-        AddressNamesDedupe, AddressNamesSort, Finality, HistoryEventType, HistoryEventTypeSet,
-        HistoryScope, Relation, RelationSet,
+        AddressNamesDedupe, AddressNamesSort, Authority, Finality, HistoryEventType,
+        HistoryEventTypeSet, HistoryScope, Relation, RelationSet,
     },
 };
-use sqlx::types::time::OffsetDateTime;
 
 pub(crate) const DEFAULT_PAGE_SIZE: u64 = 50;
 pub(crate) const MAX_PAGE_SIZE: u64 = 200;
@@ -32,14 +31,18 @@ pub(crate) struct RawQueryParams {
     pub(crate) resolver: Option<String>,
     pub(crate) contract_address: Option<String>,
     pub(crate) relation: Option<String>,
+    pub(crate) authority: Option<String>,
     pub(crate) from_block: Option<String>,
     pub(crate) to_block: Option<String>,
     pub(crate) from_timestamp: Option<String>,
     pub(crate) to_timestamp: Option<String>,
+    pub(crate) expires_after: Option<String>,
+    pub(crate) expires_before: Option<String>,
     pub(crate) q: Option<String>,
     pub(crate) dedupe: Option<String>,
     pub(crate) sort: Option<String>,
     pub(crate) order: Option<String>,
+    pub(crate) include_expired: Option<String>,
     pub(crate) cursor: Option<String>,
     pub(crate) page_size: Option<u64>,
 }
@@ -61,15 +64,22 @@ pub(crate) struct QueryParams {
     pub(crate) resolver: Option<ResolverSelector>,
     pub(crate) contract_address: Option<String>,
     pub(crate) relation: Option<RelationSet>,
+    pub(crate) authority: Option<Authority>,
     pub(crate) from_block: Option<i64>,
     pub(crate) to_block: Option<i64>,
     pub(crate) from_timestamp: Option<TimestampBound>,
     pub(crate) to_timestamp: Option<TimestampBound>,
+    pub(crate) expires_after: Option<OffsetDateTime>,
+    pub(crate) expires_before: Option<OffsetDateTime>,
     pub(crate) q: Option<String>,
     pub(crate) dedupe: AddressNamesDedupe,
     pub(crate) sort: AddressNamesSort,
+    /// The trimmed `sort` value as sent, for routes whose default sort is not `name` and that
+    /// must still reject an explicit `sort=name`.
+    pub(crate) sort_wire: Option<String>,
     /// `None` when the request omitted `order`; each route applies its own default.
     pub(crate) order: Option<SortOrder>,
+    pub(crate) include_expired: Option<bool>,
     pub(crate) cursor: Option<String>,
     pub(crate) page_size: u64,
 }
@@ -137,14 +147,19 @@ impl TryFrom<RawQueryParams> for QueryParams {
             contract_address: parse_address(raw.contract_address, "contract_address")?,
             resolver: parse_resolver_selector(raw.resolver)?,
             relation: parse_relation_set_param(raw.relation.as_deref())?,
+            authority: parse_authority(raw.authority.as_deref())?,
             from_block: parse_block_bound(raw.from_block, "from_block")?,
             to_block: parse_block_bound(raw.to_block, "to_block")?,
             from_timestamp: parse_timestamp_bound(raw.from_timestamp, "from_timestamp")?,
             to_timestamp: parse_timestamp_bound(raw.to_timestamp, "to_timestamp")?,
+            expires_after: parse_expiry_bound(raw.expires_after, "expires_after")?,
+            expires_before: parse_expiry_bound(raw.expires_before, "expires_before")?,
             q: trim_to_option(raw.q),
             dedupe: parse_dedupe(raw.dedupe.as_deref())?,
             sort: parse_sort(raw.sort.as_deref())?,
+            sort_wire: trim_to_option(raw.sort),
             order: parse_order(raw.order.as_deref())?,
+            include_expired: parse_bool_flag(raw.include_expired.as_deref(), "include_expired")?,
             cursor: trim_to_option(raw.cursor),
             page_size: parse_page_size(raw.page_size)?,
         };
@@ -325,6 +340,15 @@ pub(crate) fn parse_relation_set_param(value: Option<&str>) -> V2Result<Option<R
         .ok_or_else(|| invalid_parameter("relation"))
 }
 
+fn parse_authority(value: Option<&str>) -> V2Result<Option<Authority>> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some(value) => Authority::from_wire(value)
+            .map(Some)
+            .ok_or_else(|| invalid_parameter("authority")),
+    }
+}
+
 fn parse_registration_id(value: Option<String>) -> V2Result<Option<String>> {
     let Some(value) = trim_to_option(value) else {
         return Ok(None);
@@ -385,6 +409,23 @@ fn parse_block_bound(value: Option<String>, field_name: &'static str) -> V2Resul
         })
 }
 
+fn parse_expiry_bound(
+    value: Option<String>,
+    field_name: &'static str,
+) -> V2Result<Option<OffsetDateTime>> {
+    let Some(value) = trim_to_option(value) else {
+        return Ok(None);
+    };
+
+    bigname_storage::parse_rfc3339_utc_timestamp(&value)
+        .map(Some)
+        .map_err(|_| {
+            V2Error::invalid_input(format!(
+                "{field_name} must be an RFC 3339 UTC timestamp such as 2026-01-02T03:04:05Z"
+            ))
+        })
+}
+
 fn parse_dedupe(value: Option<&str>) -> V2Result<AddressNamesDedupe> {
     match value.map(str::trim).filter(|value| !value.is_empty()) {
         None | Some("name") => Ok(AddressNamesDedupe::Name),
@@ -399,6 +440,15 @@ fn parse_sort(value: Option<&str>) -> V2Result<AddressNamesSort> {
         Some("expires_at") => Ok(AddressNamesSort::ExpiresAt),
         Some("registered_at") => Ok(AddressNamesSort::RegisteredAt),
         Some(_) => Err(invalid_parameter("sort")),
+    }
+}
+
+fn parse_bool_flag(value: Option<&str>, parameter: &'static str) -> V2Result<Option<bool>> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some("true") => Ok(Some(true)),
+        Some("false") => Ok(Some(false)),
+        Some(_) => Err(invalid_parameter(parameter)),
     }
 }
 
@@ -544,6 +594,66 @@ mod tests {
         assert_eq!(params.dedupe, AddressNamesDedupe::Registration);
         assert_eq!(params.sort, AddressNamesSort::ExpiresAt);
         assert_eq!(params.order, Some(SortOrder::Desc));
+    }
+
+    #[test]
+    fn expiry_bounds_parse_rfc3339_and_reject_other_values() {
+        let params = parse(RawQueryParams {
+            expires_after: Some(" 2026-01-02T03:04:05Z ".to_owned()),
+            expires_before: Some("2026-02-02T03:04:05Z".to_owned()),
+            sort: Some(" expires_at ".to_owned()),
+            ..RawQueryParams::default()
+        })
+        .expect("expiry bounds must parse");
+        assert_eq!(
+            params.expires_after,
+            Some(
+                bigname_storage::parse_rfc3339_utc_timestamp("2026-01-02T03:04:05Z")
+                    .expect("timestamp must parse")
+            )
+        );
+        assert_eq!(
+            params.expires_before,
+            Some(
+                bigname_storage::parse_rfc3339_utc_timestamp("2026-02-02T03:04:05Z")
+                    .expect("timestamp must parse")
+            )
+        );
+        assert_eq!(params.sort_wire.as_deref(), Some("expires_at"));
+
+        for raw in [
+            RawQueryParams {
+                expires_after: Some("2026-01-02".to_owned()),
+                ..RawQueryParams::default()
+            },
+            RawQueryParams {
+                expires_before: Some("1767322445".to_owned()),
+                ..RawQueryParams::default()
+            },
+        ] {
+            let error = parse(raw).expect_err("non-RFC 3339 expiry bound must fail");
+            assert_eq!(error.code(), ErrorCode::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn include_expired_parses_booleans_and_rejects_other_values() {
+        let defaulted = parse(RawQueryParams::default()).expect("default query must parse");
+        assert_eq!(defaulted.include_expired, None);
+        for (wire, expected) in [("true", Some(true)), ("false", Some(false))] {
+            let params = parse(RawQueryParams {
+                include_expired: Some(wire.to_owned()),
+                ..RawQueryParams::default()
+            })
+            .expect("include_expired must parse");
+            assert_eq!(params.include_expired, expected);
+        }
+        let error = parse(RawQueryParams {
+            include_expired: Some("maybe".to_owned()),
+            ..RawQueryParams::default()
+        })
+        .expect_err("non-boolean include_expired must fail");
+        assert_eq!(error.code(), ErrorCode::InvalidInput);
     }
 
     #[test]

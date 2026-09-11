@@ -4,7 +4,7 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use bigname_storage::ChildrenCurrentKeysetCursor;
+use bigname_storage::{ChildrenCurrentKeysetCursor, ChildrenCurrentSortValue};
 
 use super::super::cursor::{cursor_value, invalid_cursor_error};
 use super::super::subnames::{Subname, build_subname};
@@ -203,6 +203,7 @@ pub(crate) fn labels_storage_cursor(
         return Err(invalid_cursor_error());
     }
     Ok(ChildrenCurrentKeysetCursor {
+        sort_value: ChildrenCurrentSortValue::Name,
         canonical_display_name: cursor_value(
             payload,
             DISPLAY_NAME_CURSOR_KEY,
@@ -221,6 +222,7 @@ mod tests {
     #[test]
     fn labels_cursor_round_trips_and_binds_registry() {
         let cursor = ChildrenCurrentKeysetCursor {
+            sort_value: ChildrenCurrentSortValue::Name,
             canonical_display_name: "one.alpha.eth".to_owned(),
             child_logical_name_id: "ens:0xone".to_owned(),
         };

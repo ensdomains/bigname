@@ -9,8 +9,8 @@ use super::{
     DECLARED_SURFACE_CLASS, DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS,
     DEFAULT_CHILDREN_CURRENT_READ_FILTER,
     types::{
-        ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentRow,
-        ChildrenCurrentSummary, RegistryChildrenPage,
+        ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentPageFilter,
+        ChildrenCurrentRow, ChildrenCurrentSortValue, ChildrenCurrentSummary, RegistryChildrenPage,
     },
 };
 
@@ -34,7 +34,7 @@ use super::{
 /// `visibility_state = 'shadow'` and both children projection arms admit active parents only. No
 /// route can address the empty name, so the trailing-dot string that root would produce never
 /// reaches a served page.
-const CHILD_DISPLAY_NAME_EXPR: &str = r#"COALESCE(
+pub(super) const CHILD_DISPLAY_NAME_EXPR: &str = r#"COALESCE(
     cc.decoded_name,
     encode(cc.raw_name, 'escape'),
     '[' || substring(lower(cc.labelhash) FROM 3) || '].' || display_parent.raw_name
@@ -44,7 +44,7 @@ const CHILD_DISPLAY_NAME_EXPR: &str = r#"COALESCE(
 /// of once per evaluation, and so the audit path — which omits the canonicality identity joins —
 /// still resolves the parent portion. `logical_name_id` is the primary key, so this cannot
 /// multiply rows.
-const CHILD_DISPLAY_PARENT_JOIN: &str = r#"
+pub(super) const CHILD_DISPLAY_PARENT_JOIN: &str = r#"
   LEFT JOIN bigname_phase.name_surfaces display_parent
     ON display_parent.logical_name_id = cc.parent_logical_name_id
 "#;
@@ -90,53 +90,14 @@ pub async fn load_children_current_page(
     cursor: Option<&ChildrenCurrentKeysetCursor>,
     page_size: u64,
 ) -> Result<ChildrenCurrentPage> {
-    let limit = checked_page_limit_i64(
+    super::page::load_children_current_page_filtered(
+        pool,
+        parent_logical_name_id,
+        &ChildrenCurrentPageFilter::default(),
+        cursor,
         page_size,
-        "children_current page_size must be positive",
-        "children_current page_size is too large",
-    )?;
-    let page_size = checked_page_size_usize(
-        page_size,
-        "children_current page_size must be positive",
-        "children_current page_size does not fit in usize",
-    )?;
-    let mut builder = QueryBuilder::<Postgres>::new(child_select());
-    builder.push(DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS);
-    builder.push(" WHERE cc.parent_logical_name_id = ");
-    builder.push_bind(parent_logical_name_id);
-    builder.push(" AND cc.surface_class = ");
-    builder.push_bind(DECLARED_SURFACE_CLASS);
-    builder.push(DEFAULT_CHILDREN_CURRENT_READ_FILTER);
-    if let Some(cursor) = cursor {
-        builder.push(format!(
-            " AND ({CHILD_DISPLAY_NAME_EXPR}, cc.child_logical_name_id) > ("
-        ));
-        builder.push_bind(&cursor.canonical_display_name);
-        builder.push(", ");
-        builder.push_bind(&cursor.child_logical_name_id);
-        builder.push(")");
-    }
-    builder.push(format!(
-        " ORDER BY {CHILD_DISPLAY_NAME_EXPR}, cc.child_logical_name_id LIMIT "
-    ));
-    builder.push_bind(limit);
-    let rows = builder
-        .build()
-        .fetch_all(pool)
-        .await
-        .context("failed to load phase children_current page")?
-        .into_iter()
-        .map(decode_children_current_row)
-        .collect::<Result<Vec<_>>>()?;
-    let (rows, next_cursor) = split_keyset_page(rows, page_size, |row| {
-        ChildrenCurrentKeysetCursor::from(row)
-    });
-    let summary = load_children_current_summary(pool, parent_logical_name_id).await?;
-    Ok(ChildrenCurrentPage {
-        rows,
-        next_cursor,
-        summary,
-    })
+    )
+    .await
 }
 
 /// A page of the declared children of `parent_logical_name_id` whose ENSv2 registration was
@@ -190,9 +151,12 @@ pub async fn load_registry_children_current_page(
         .into_iter()
         .map(decode_children_current_row)
         .collect::<Result<Vec<_>>>()?;
-    let (rows, next_cursor) = split_keyset_page(rows, page_size, |row| {
-        ChildrenCurrentKeysetCursor::from(row)
-    });
+    let (rows, next_cursor) =
+        split_keyset_page(rows, page_size, |row| ChildrenCurrentKeysetCursor {
+            sort_value: ChildrenCurrentSortValue::Name,
+            canonical_display_name: row.canonical_display_name.clone(),
+            child_logical_name_id: row.child_logical_name_id.clone(),
+        });
     let label_count =
         count_registry_children_current(pool, parent_logical_name_id, &registry_address).await?;
     Ok(RegistryChildrenPage {
@@ -282,7 +246,7 @@ pub async fn load_children_current_summaries(
         .collect()
 }
 
-async fn load_children_current_summary(
+pub(super) async fn load_children_current_summary(
     pool: &PgPool,
     parent_logical_name_id: &str,
 ) -> Result<ChildrenCurrentSummary> {
@@ -318,7 +282,7 @@ async fn load_children_current_internal(
     rows.into_iter().map(decode_children_current_row).collect()
 }
 
-fn decode_children_current_row(row: PgRow) -> Result<ChildrenCurrentRow> {
+pub(super) fn decode_children_current_row(row: PgRow) -> Result<ChildrenCurrentRow> {
     let surface_class: String = crate::sql_row::get(&row, "surface_class")?;
     if surface_class != DECLARED_SURFACE_CLASS {
         bail!("children_current row has unsupported surface_class {surface_class}");

@@ -29,10 +29,11 @@ use super::cursor::{
     ADDRESS_FILTER_KEY, ORDER_FILTER_KEY, cursor_last_item, cursor_sort_value, option_filter,
 };
 use super::{
-    AddressName, address_names_include_role_summary, build_address_name,
-    build_address_name_role_summary, dedupe_to_storage, load_address_name_record_counts,
-    order_to_storage, sort_to_storage,
+    AddressName, address_names_include, build_address_name, build_address_name_role_summary,
+    dedupe_to_storage, load_address_name_record_counts, order_to_storage, sort_to_storage,
 };
+use crate::v2::name_record::load_migrated_at;
+use crate::v2::vocab::Authority;
 
 const NAMESPACE_FILTER_KEY: &str = "namespace";
 const RELATION_FILTER_KEY: &str = "relation";
@@ -103,7 +104,8 @@ pub(super) async fn get_address_resolves_to(
     params: &QueryParams,
 ) -> V2Result<Json<Envelope<Vec<AddressName>>>> {
     let (coin_type, numeric_coin_type) = parse_resolves_to_coin_type(params.coin_type.as_deref())?;
-    let include_role_summary = address_names_include_role_summary(&params.include)?;
+    let include = address_names_include(&params.include)?;
+    let include_role_summary = include.role_summary;
     let normalized_q = params
         .q
         .as_deref()
@@ -180,6 +182,12 @@ pub(super) async fn get_address_resolves_to(
             "failed to load registration summaries for names resolving to {normalized_address}"
         ))
     })?;
+    let migrated_logical_name_ids = name_rows
+        .values()
+        .filter(|row| Authority::from_provenance(&row.provenance) == Some(Authority::EnsV2))
+        .map(|row| row.logical_name_id.clone())
+        .collect::<Vec<_>>();
+    let migrated_at_by_name = load_migrated_at(&state.pool, &migrated_logical_name_ids).await?;
     let primary_names_by_namespace = load_primary_names_by_namespace(
         &state.pool,
         normalized_address,
@@ -217,7 +225,26 @@ pub(super) async fn get_address_resolves_to(
     } else {
         BTreeMap::new()
     };
-    let record_counts_by_name = if include_role_summary {
+    let subname_counts_by_name = if include.counts {
+        bigname_storage::load_children_current_summaries(&state.pool, &logical_name_ids)
+            .await
+            .map_err(|_| {
+                V2Error::internal_error(format!(
+                    "failed to load subname counts for names resolving to {normalized_address}"
+                ))
+            })?
+            .into_iter()
+            .map(|summary| {
+                (
+                    summary.parent_logical_name_id,
+                    u64::try_from(summary.child_count).unwrap_or_default(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        BTreeMap::new()
+    };
+    let record_counts_by_name = if include_role_summary || include.counts {
         load_address_name_record_counts(&state.pool, &entries, &name_rows)
             .await
             .map_err(|_| {
@@ -255,6 +282,13 @@ pub(super) async fn get_address_resolves_to(
                 primary_names_by_namespace
                     .get(&entry.namespace)
                     .and_then(Option::as_deref),
+                migrated_at_by_name.get(&entry.logical_name_id).cloned(),
+                include.counts.then(|| {
+                    subname_counts_by_name
+                        .get(&entry.logical_name_id)
+                        .copied()
+                        .unwrap_or_default()
+                }),
                 record_counts_by_name.get(&entry.logical_name_id).copied(),
                 role_summary,
             );
@@ -432,6 +466,7 @@ mod tests {
                 relation: None,
                 dedupe: AddressNamesDedupe::Name,
                 q: None,
+                authority: None,
                 sort: AddressNamesSort::Name,
                 order: SortOrder::Asc,
             },

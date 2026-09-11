@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use sqlx::{PgPool, Row};
 
-use crate::{ActiveManifestVersion, NamespaceManifestSnapshot};
+use crate::{ActiveManifestVersion, ExecutionManifestVersion, NamespaceManifestSnapshot};
 
 async fn load_active_manifests_for_namespace(
     pool: &PgPool,
@@ -79,4 +79,55 @@ pub async fn load_namespace_manifest_snapshot(
         manifests,
         last_updated,
     })
+}
+
+/// Active and shadow manifest versions of `namespace` that can serve as verified-execution
+/// entrypoints, in the order the lookup engine prefers them within one source family and chain
+/// (active before shadow, then highest version).
+pub async fn load_execution_manifests_for_namespace(
+    pool: &PgPool,
+    namespace: &str,
+) -> Result<Vec<ExecutionManifestVersion>> {
+    let manifest_rows = sqlx::query(
+        r#"
+        SELECT manifest_version, source_family, chain_id, rollout_status, manifest_payload
+        FROM bigname_phase.manifest_versions
+        WHERE rollout_status IN ('active', 'shadow')
+          AND namespace = $1
+        ORDER BY source_family, chain_id, (rollout_status = 'active') DESC, manifest_version DESC
+        "#,
+    )
+    .bind(namespace)
+    .fetch_all(pool)
+    .await
+    .context("failed to load execution manifests")?;
+
+    manifest_rows
+        .into_iter()
+        .map(|row| {
+            let manifest_version = row
+                .try_get::<i64, _>("manifest_version")
+                .context("failed to read manifest_version from execution manifest row")?;
+            Ok(ExecutionManifestVersion {
+                manifest_version: u64::try_from(manifest_version)
+                    .context("manifest_version must be non-negative")?,
+                source_family: row
+                    .try_get("source_family")
+                    .context("failed to read source_family from execution manifest row")?,
+                chain: row
+                    .try_get("chain_id")
+                    .context("failed to read chain from execution manifest row")?,
+                rollout_status: row
+                    .try_get("rollout_status")
+                    .context("failed to read rollout_status from execution manifest row")?,
+                capability_flags: serde_json::from_value(
+                    row.try_get::<serde_json::Value, _>("manifest_payload")?
+                        .get("capability_flags")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({})),
+                )
+                .context("failed to decode phase manifest capability flags")?,
+            })
+        })
+        .collect()
 }

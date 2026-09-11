@@ -16,6 +16,7 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
     relations: Option<&'a [AddressNameRelation]>,
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<&'a str>,
+    authority_arm: Option<&'a str>,
 ) {
     builder.push(
         r#"
@@ -74,6 +75,19 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
         builder.push(" AND anc.raw_name LIKE ");
         builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
         builder.push(" ESCAPE '\\'");
+    }
+    if let Some(authority_arm) = authority_arm {
+        // The selected arm lives on the exact-name row; this is a primary-key probe per relation
+        // row, so the filter costs one index lookup per candidate.
+        builder.push(
+            r#" AND EXISTS (
+                SELECT 1
+                FROM bigname_phase.name_current authority_nc
+                WHERE authority_nc.logical_name_id = anc.logical_name_id
+                  AND authority_nc.provenance #>> '{authority_selection,authority_arm}' = "#,
+        );
+        builder.push_bind(authority_arm);
+        builder.push(")");
     }
     builder.push(DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER);
     match dedupe_by {
@@ -440,29 +454,37 @@ fn push_address_names_current_sort_timestamp_expr(
         AddressNamesCurrentSort::Name => {
             builder.push("NULL::TIMESTAMPTZ");
         }
-        AddressNamesCurrentSort::ExpiresAt => {
-            push_json_timestamp_coalesce_expr(
-                builder,
-                &[
-                    &["registration", "expires_at"],
-                    &["registration", "expiry_date"],
-                    &["registration", "expiry"],
-                    &["control", "expires_at"],
-                    &["control", "expiry_date"],
-                    &["control", "expiry"],
-                ],
-            );
-        }
-        AddressNamesCurrentSort::RegisteredAt => {
-            push_json_timestamp_coalesce_expr(
-                builder,
-                &[
-                    &["registration", "registered_at"],
-                    &["registration", "registration_date"],
-                ],
-            );
-        }
+        AddressNamesCurrentSort::ExpiresAt => push_expires_at_timestamp_expr(builder),
+        AddressNamesCurrentSort::RegisteredAt => push_registered_at_timestamp_expr(builder),
     };
+}
+
+/// Push the expiry timestamp read of a `name_current` row aliased `nc`: the same COALESCE over
+/// `declared_summary` paths that `sort=expires_at` orders by, shared with the children page so
+/// both collections agree on which expiry a name has.
+pub(crate) fn push_expires_at_timestamp_expr(builder: &mut QueryBuilder<'_, Postgres>) {
+    push_json_timestamp_coalesce_expr(
+        builder,
+        &[
+            &["registration", "expires_at"],
+            &["registration", "expiry_date"],
+            &["registration", "expiry"],
+            &["control", "expires_at"],
+            &["control", "expiry_date"],
+            &["control", "expiry"],
+        ],
+    );
+}
+
+/// Push the registration timestamp read of a `name_current` row aliased `nc`.
+pub(crate) fn push_registered_at_timestamp_expr(builder: &mut QueryBuilder<'_, Postgres>) {
+    push_json_timestamp_coalesce_expr(
+        builder,
+        &[
+            &["registration", "registered_at"],
+            &["registration", "registration_date"],
+        ],
+    );
 }
 
 fn push_json_timestamp_coalesce_expr(builder: &mut QueryBuilder<'_, Postgres>, paths: &[&[&str]]) {
@@ -517,7 +539,7 @@ fn timestamp_null_rank(value: Option<OffsetDateTime>, order: AddressNamesCurrent
     }
 }
 
-fn escape_like_pattern(value: &str) -> String {
+pub(crate) fn escape_like_pattern(value: &str) -> String {
     value
         .replace('\\', r"\\")
         .replace('%', r"\%")

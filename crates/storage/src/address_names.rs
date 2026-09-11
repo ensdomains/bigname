@@ -9,6 +9,9 @@ pub use count::{AddressNamesCurrentCountFilter, count_address_names_current_for_
 pub use page::{
     load_address_names_current_page, load_address_names_current_page_sorted_for_relations,
 };
+pub(crate) use query::{
+    escape_like_pattern, push_expires_at_timestamp_expr, push_registered_at_timestamp_expr,
+};
 pub use read::{
     load_address_names_current, load_address_names_current_for_relations,
     load_address_names_current_including_noncanonical,

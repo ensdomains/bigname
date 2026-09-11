@@ -147,6 +147,7 @@ pub(crate) async fn load_v2_primary_name_route_read(
     } else {
         None
     };
+    let lookup_chain_id = ens_primary_name_lookup_chain(&state.pool, namespace).await?;
     let timer = crate::metrics::verified_execution_timer();
     // The live reverse leg reaches the same question the projected-claim gate answers, so it is
     // gated the same way -- before the forward call, which follows CCIP-read off-chain.
@@ -156,10 +157,16 @@ pub(crate) async fn load_v2_primary_name_route_read(
     let gate_outcome = Arc::clone(&live_outcome);
     let lookup =
         bigname_lookup::LookupEngine::new(state.pool.clone(), state.lookup_chain_rpc_urls.clone())
-            .lookup_ens_primary_name_gated(address, move |claimed_name| async move {
-                let outcome =
-                    match unverifiable_name_authority(&gate_pool, &gate_namespace, &claimed_name)
-                        .await
+            .lookup_ens_primary_name_gated(
+                &lookup_chain_id,
+                address,
+                move |claimed_name| async move {
+                    let outcome = match unverifiable_name_authority(
+                        &gate_pool,
+                        &gate_namespace,
+                        &claimed_name,
+                    )
+                    .await
                     {
                         Ok(ForwardGateDecision::Admit) => return true,
                         Ok(ForwardGateDecision::Refuse(reason)) => {
@@ -173,9 +180,10 @@ pub(crate) async fn load_v2_primary_name_route_read(
                         }
                         Err(error) => LiveGateOutcome::Failed(error),
                     };
-                *gate_outcome.lock().await = Some(outcome);
-                false
-            })
+                    *gate_outcome.lock().await = Some(outcome);
+                    false
+                },
+            )
             .await
             .map_err(|error| primary_name_lookup_error(address, error))?;
     let selected_snapshot = primary_name_lookup_snapshot(&lookup.position)?;
@@ -217,6 +225,27 @@ pub(crate) async fn load_v2_primary_name_route_read(
         lookup_state,
         selected_snapshot: Some(selected_snapshot),
     })
+}
+
+/// The Ethereum L1 this deployment's ENS projection publishes on -- Mainnet under the `mainnet`
+/// profile, Sepolia under the `sepolia` profile -- which is the chain live ENS primary-name
+/// verification executes against. The same rules apply on both; only the chain differs.
+async fn ens_primary_name_lookup_chain(phase_pool: &PgPool, namespace: &str) -> ApiResult<String> {
+    let scope = exact_name_snapshot_scope(
+        phase_pool,
+        namespace,
+        ExactNameSnapshotSelector::default(),
+        false,
+    )
+    .await?;
+    match scope.required_positions() {
+        [position] if bigname_lookup::ens_l1_chain(&position.chain_id).is_some() => {
+            Ok(position.chain_id.clone())
+        }
+        _ => Err(ApiError::internal_error(
+            "primary-name snapshot scope did not select one ENS L1 chain",
+        )),
+    }
 }
 
 #[derive(Eq, PartialEq)]
@@ -338,7 +367,7 @@ async fn require_primary_name_projection_position(
 ) -> ApiResult<()> {
     let matches_lookup = bigname_storage::load_served_project_generation(
         pool,
-        bigname_lookup::ETHEREUM_MAINNET_CHAIN_ID,
+        &position.chain_id,
         position.block_number,
         &position.block_hash,
         true,
@@ -349,7 +378,7 @@ async fn require_primary_name_projection_position(
     .map_err(|error| {
         error!(
             service = "api",
-            chain_id = bigname_lookup::ETHEREUM_MAINNET_CHAIN_ID,
+            chain_id = %position.chain_id,
             error = ?error,
             "failed to fence indexed primary-name claim to lookup position"
         );
@@ -370,11 +399,11 @@ async fn require_primary_name_projection_position(
 fn primary_name_lookup_snapshot(
     position: &bigname_lookup::LookupPosition,
 ) -> ApiResult<SelectedSnapshot> {
-    if position.chain_id != bigname_lookup::ETHEREUM_MAINNET_CHAIN_ID {
-        return Err(ApiError::internal_error(
-            "ENS primary-name lookup returned a non-Ethereum position",
-        ));
-    }
+    let slot = bigname_lookup::ens_l1_chain(&position.chain_id)
+        .and_then(|_| crate::v2::snapshot_slot_for_slug(&position.chain_id))
+        .ok_or_else(|| {
+            ApiError::internal_error("ENS primary-name lookup returned a non-Ethereum position")
+        })?;
     let timestamp = parse_rfc3339_utc_timestamp(&position.timestamp).map_err(|error| {
         error!(
             service = "api",
@@ -386,9 +415,9 @@ fn primary_name_lookup_snapshot(
     })?;
     Ok(SelectedSnapshot {
         chain_positions: ChainPositions::new(BTreeMap::from([(
-            "ethereum".to_owned(),
+            slot.to_owned(),
             ChainPosition {
-                slot: "ethereum".to_owned(),
+                slot: slot.to_owned(),
                 chain_id: position.chain_id.clone(),
                 block_number: position.block_number,
                 block_hash: position.block_hash.clone(),

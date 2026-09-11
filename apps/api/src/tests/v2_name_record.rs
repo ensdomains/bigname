@@ -3699,7 +3699,7 @@ async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> R
     );
 
     assert_eq!(payload["page"]["page_size"], json!(3));
-    assert_eq!(payload["page"]["total_count"], Value::Null);
+    assert_eq!(payload["page"]["total_count"], json!(3));
     assert_eq!(payload["page"]["has_more"], json!(false));
     assert_eq!(payload["meta"], json!({}));
 
@@ -5663,6 +5663,295 @@ async fn seed_v2_alice_name_records_fixture_with_row(
     Ok(())
 }
 
+fn v2_subname_names(payload: &Value) -> Vec<String> {
+    payload["data"]
+        .as_array()
+        .expect("subnames data must be an array")
+        .iter()
+        .map(|row| {
+            row["name"]
+                .as_str()
+                .expect("subname name must be a string")
+                .to_owned()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn v2_get_subnames_q_filters_by_normalized_label_prefix() -> Result<()> {
+    let (database, payload) = v2_subnames_payload("/v1/names/Parent.eth/subnames?q=AL").await?;
+    assert_eq!(v2_subname_names(&payload), vec!["alpha.parent.eth"]);
+    assert_eq!(
+        payload["page"]["total_count"],
+        Value::Null,
+        "a filtered page must not report the unfiltered parent total"
+    );
+    assert_eq!(payload["page"]["has_more"], json!(false));
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v1/names/Parent.eth/subnames?q=alpha.")
+            .await?;
+    assert_eq!(v2_subname_names(&payload), vec!["alpha.parent.eth"]);
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v1/names/Parent.eth/subnames?q=alph.")
+            .await?;
+    assert!(v2_subname_names(&payload).is_empty());
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v1/names/Parent.eth/subnames?q=x").await?;
+    assert!(v2_subname_names(&payload).is_empty());
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v1/names/Parent.eth/subnames?q=").await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["alpha.parent.eth", "beta.parent.eth", "gamma.parent.eth"]
+    );
+    assert_eq!(payload["page"]["total_count"], json!(3));
+
+    let response =
+        v2_subnames_response_for_database(&database, "/v1/names/Parent.eth/subnames?q=a..b")
+            .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = read_json(response).await?;
+    assert_eq!(body["error"]["code"], json!("invalid_input"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_subnames_sorts_by_timestamps_and_binds_cursors_to_sort_and_order() -> Result<()> {
+    let (database, payload) = v2_subnames_payload(
+        "/v1/names/Parent.eth/subnames?sort=expires_at&order=asc&page_size=1",
+    )
+    .await?;
+    assert_eq!(v2_subname_names(&payload), vec!["alpha.parent.eth"]);
+    assert_eq!(payload["page"]["total_count"], json!(3));
+    assert_eq!(payload["page"]["has_more"], json!(true));
+    let first_cursor = payload["page"]["next_cursor"]
+        .as_str()
+        .expect("first page must carry a cursor")
+        .to_owned();
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        &format!(
+            "/v1/names/Parent.eth/subnames?sort=expires_at&order=asc&page_size=1&cursor={first_cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["beta.parent.eth"],
+        "rows without an expiry sort after every dated row, ties broken by name"
+    );
+    let second_cursor = payload["page"]["next_cursor"]
+        .as_str()
+        .expect("second page must carry a cursor")
+        .to_owned();
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        &format!(
+            "/v1/names/Parent.eth/subnames?sort=expires_at&order=asc&page_size=1&cursor={second_cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(v2_subname_names(&payload), vec!["gamma.parent.eth"]);
+    assert_eq!(payload["page"]["has_more"], json!(false));
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?sort=expires_at&order=desc",
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["beta.parent.eth", "gamma.parent.eth", "alpha.parent.eth"],
+        "descending timestamp order lists rows without an expiry first"
+    );
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?sort=registered_at",
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["alpha.parent.eth", "beta.parent.eth", "gamma.parent.eth"]
+    );
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?sort=registered_at&order=desc",
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["beta.parent.eth", "gamma.parent.eth", "alpha.parent.eth"]
+    );
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?sort=name&order=desc",
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["gamma.parent.eth", "beta.parent.eth", "alpha.parent.eth"]
+    );
+
+    for uri in [
+        format!("/v1/names/Parent.eth/subnames?sort=name&page_size=1&cursor={first_cursor}"),
+        format!(
+            "/v1/names/Parent.eth/subnames?sort=expires_at&order=desc&page_size=1&cursor={first_cursor}"
+        ),
+        format!(
+            "/v1/names/Parent.eth/subnames?sort=registered_at&page_size=1&cursor={first_cursor}"
+        ),
+        format!("/v1/names/Parent.eth/subnames?sort=expires_at&q=al&cursor={first_cursor}"),
+        "/v1/names/Parent.eth/subnames?sort=expiry".to_owned(),
+        "/v1/names/Parent.eth/subnames?order=sideways".to_owned(),
+    ] {
+        let response = v2_subnames_response_for_database(&database, &uri).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{uri} must be rejected"
+        );
+        let body: Value = read_json(response).await?;
+        assert_eq!(body["error"]["code"], json!("invalid_input"));
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_subnames_include_expired_false_omits_released_and_past_expiry_rows() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+    seed_v2_subnames_bound_child(
+        &database,
+        "ens:epsilon.parent.eth",
+        "epsilon.parent.eth",
+        "node:epsilon.parent.eth",
+        85,
+        Uuid::from_u128(0x4030),
+        Uuid::from_u128(0x5030),
+        Uuid::from_u128(0x6030),
+        json!({
+            "registration": {
+                "status": "active",
+                "authority_kind": "registrar",
+                "registrant": "0x00000000000000000000000000000000000000eB",
+                "registered_at": "2019-01-02T03:04:05Z",
+                "expiry": "2020-01-02T03:04:05Z"
+            },
+            "control": {
+                "registry_owner": "0x00000000000000000000000000000000000000eA"
+            }
+        }),
+    )
+    .await?;
+    upsert_phase_children_current_rows(
+        &database.pool,
+        &[v2_subnames_declared_child_row(
+            "ens:parent.eth",
+            "ens:epsilon.parent.eth",
+            "epsilon.parent.eth",
+            "node:epsilon.parent.eth",
+            905,
+            85,
+        )],
+    )
+    .await?;
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v1/names/Parent.eth/subnames").await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec![
+            "alpha.parent.eth",
+            "beta.parent.eth",
+            "epsilon.parent.eth",
+            "gamma.parent.eth"
+        ],
+        "the default keeps released and past-expiry rows"
+    );
+    assert_eq!(payload["page"]["total_count"], json!(4));
+    assert_eq!(payload["data"][2]["registration_status"], json!("active"));
+    assert_eq!(
+        payload["data"][2]["expires_at"],
+        json!("2020-01-02T03:04:05Z")
+    );
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?include_expired=true",
+    )
+    .await?;
+    assert_eq!(v2_subname_names(&payload).len(), 4);
+    assert_eq!(payload["page"]["total_count"], json!(4));
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?include_expired=false",
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["alpha.parent.eth", "gamma.parent.eth"],
+        "released rows and rows whose expires_at has passed are omitted; unregistered rows stay"
+    );
+    assert_eq!(payload["page"]["total_count"], Value::Null);
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?include_expired=false&sort=expires_at&order=desc",
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["gamma.parent.eth", "alpha.parent.eth"]
+    );
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?include_expired=false&page_size=1",
+    )
+    .await?;
+    assert_eq!(v2_subname_names(&payload), vec!["alpha.parent.eth"]);
+    assert_eq!(payload["page"]["has_more"], json!(true));
+    let cursor = payload["page"]["next_cursor"]
+        .as_str()
+        .expect("filtered page must carry a cursor")
+        .to_owned();
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        &format!("/v1/names/Parent.eth/subnames?include_expired=false&page_size=1&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(v2_subname_names(&payload), vec!["gamma.parent.eth"]);
+    assert_eq!(payload["page"]["has_more"], json!(false));
+
+    for uri in [
+        format!("/v1/names/Parent.eth/subnames?page_size=1&cursor={cursor}"),
+        format!("/v1/names/Parent.eth/subnames?include_expired=true&page_size=1&cursor={cursor}"),
+        "/v1/names/Parent.eth/subnames?include_expired=maybe".to_owned(),
+    ] {
+        let response = v2_subnames_response_for_database(&database, &uri).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{uri} must be rejected"
+        );
+        let body: Value = read_json(response).await?;
+        assert_eq!(body["error"]["code"], json!("invalid_input"));
+    }
+
+    Ok(())
+}
+
 async fn v2_subnames_payload(uri: &str) -> Result<(TestDatabase, Value)> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_subnames_fixture(&database).await?;
@@ -6283,4 +6572,159 @@ fn assert_no_banned_v1_spellings(value: &Value) {
         }
         _ => {}
     }
+}
+
+/// Stamps the seeded ENSv2 migration proof on the Alice row: a `MigrationApplied`
+/// normalized event at `block_number` plus the matching `authority_selection`.
+async fn stamp_v2_alice_migration_transition(
+    database: &TestDatabase,
+    block_number: i64,
+    block_timestamp: i64,
+) -> Result<()> {
+    let block_hash = format!("0xmigration{block_number}");
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[raw_block(
+            "ethereum-mainnet",
+            &block_hash,
+            None,
+            block_number,
+            block_timestamp,
+        )],
+    )
+    .await?;
+    let event_identity = format!(
+        "ens_v2_migration_l1:1:ethereum-mainnet:{block_hash}:0xtxmigration:0:MigrationApplied:0"
+    );
+    let mut event = history_event(
+        &event_identity,
+        None,
+        None,
+        Some("ethereum-mainnet"),
+        Some(block_number),
+        Some(&block_hash),
+        Some("0xtxmigration"),
+        Some(0),
+        CanonicalityState::Canonical,
+    );
+    event.event_kind = "MigrationApplied".to_owned();
+    event.source_family = "ens_v2_migration_l1".to_owned();
+    event.derivation_kind = "ens_v2_migration".to_owned();
+    event.before_state = json!({});
+    event.after_state = json!({});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    let proof_event_id: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM bigname_phase.normalized_events WHERE event_identity = $1",
+    )
+    .bind(&event_identity)
+    .fetch_one(&database.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET provenance = provenance || jsonb_build_object('authority_selection', $1::jsonb)
+         WHERE namespace = 'ens' AND lower(raw_name) = 'alice.eth'",
+    )
+    .bind(json!({
+        "authority_arm": "ens_v2",
+        "proof_kind": "migration_authority_transition",
+        "proof_event_id": proof_event_id,
+        "lifecycle_state": "registered",
+    }))
+    .execute(&database.pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_reports_authority_arm_without_migration_transition() -> Result<()> {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
+        row.provenance["authority_selection"] = json!({
+            "authority_arm": "ens_v1",
+            "lifecycle_state": "registered",
+        });
+    })
+    .await?;
+
+    let data = payload["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("authority"), Some(&json!("ens_v1")));
+    assert!(data.get("migrated_at").is_none());
+
+    let unstamped = v2_name_record_payload("/v1/names/Alice.eth").await?;
+    assert!(unstamped["data"].get("authority").is_none());
+    assert!(unstamped["data"].get("migrated_at").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_and_lookup_report_migrated_at_from_the_migration_proof() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_record_fixture(&database, |_| {}, |_, _, _| {}).await?;
+    stamp_v2_alice_migration_transition(&database, 21_000_002, 1_717_171_699).await?;
+
+    let payload = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
+    let data = payload["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("authority"), Some(&json!("ens_v2")));
+    assert_eq!(data.get("migrated_at"), Some(&json!("2024-05-31T16:08:19Z")));
+
+    let response = v2_lookup_response_for_database(
+        &database,
+        "/v1/lookup",
+        json!({"inputs": [{"id": "alice", "name": "alice.eth"}]}),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let lookup: Value = read_json(response).await?;
+    let record = &lookup["data"][0]["record"];
+    assert_eq!(record["authority"], json!("ens_v2"));
+    assert_eq!(record["migrated_at"], json!("2024-05-31T16:08:19Z"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_name_include_counts_reports_subname_and_record_counts() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_record_fixture(&database, |_| {}, |_, _, _| {}).await?;
+
+    let plain = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
+    assert!(plain["data"].get("subname_count").is_none());
+    assert!(plain["data"].get("record_count").is_none());
+
+    let counted =
+        v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth?include=counts")
+            .await?;
+    assert_eq!(counted["data"]["subname_count"], json!(0));
+    assert_eq!(counted["data"]["record_count"], json!(4));
+    assert!(counted["data"].get("event_count").is_none());
+
+    let rejected = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/Alice.eth?include=records")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await?;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_name_include_counts_counts_direct_subnames_of_the_parent() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+
+    let parent =
+        v2_name_record_payload_for_database(&database, "/v1/names/parent.eth?include=counts")
+            .await?;
+    assert_eq!(parent["data"]["subname_count"], json!(3));
+
+    let subnames =
+        v2_subnames_payload_for_database(&database, "/v1/names/parent.eth/subnames?page_size=2")
+            .await?;
+    assert_eq!(subnames["page"]["total_count"], json!(3));
+    assert_eq!(subnames["page"]["has_more"], json!(true));
+    assert_eq!(subnames["data"].as_array().map(Vec::len), Some(2));
+
+    database.cleanup().await
 }

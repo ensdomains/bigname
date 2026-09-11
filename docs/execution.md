@@ -42,18 +42,25 @@ reported through the route's explicit unsupported or failed result shapes.
 ## Resolver-record lookup
 
 ENS verified resolution uses the manifest-admitted Universal Resolver
-entrypoint.[^ens-docs-univ][^v1-ur-deploy] The supported topology classes are:
+entrypoint on the deployment profile's Ethereum L1: Mainnet under
+`manifests/mainnet`,[^ens-docs-univ][^v1-ur-deploy] Sepolia under
+`manifests/sepolia`, where the same proxy address is admitted by the archived
+2026-06-29 Sepolia deployment.[^v2-sepolia-ur-proxy][^v1-sepolia-ur-deploy]
+Both profiles apply the same route classes, gates, hash pinning, and provider
+limits; the profile only selects the chain and therefore the
+`BIGNAME_API_CHAIN_RPC_URLS` entry the API needs (`ethereum-mainnet=` or
+`ethereum-sepolia=`). The supported topology classes are:
 
 - exact-surface direct resolution;
 - exact-surface alias resolution with a declared non-empty alias path; and
 - exact-surface wildcard-derived resolution with a declared wildcard source
   and matched labels; and
 - [Universal Resolver ancestor
-  discovery](glossary.md#universal-resolver-ancestor-discovery): Ethereum
-  Mainnet exact-surface resolution with a null exact resolver and no
-  alias, linked-subregistry, projected wildcard, or transport path, executed
-  through the manifest-admitted Universal Resolver at the readable Ethereum
-  head. This last route has no indexed comparison and retains the exact resolver
+  discovery](glossary.md#universal-resolver-ancestor-discovery): exact-surface
+  resolution on the profile's Ethereum L1 (Mainnet or Sepolia) with a null
+  exact resolver and no alias, linked-subregistry, projected wildcard, or
+  transport path, executed through that chain's manifest-admitted Universal
+  Resolver at its readable head. This last route has no indexed comparison and retains the exact resolver
   as null in the API response. The entrypoint walks to the nearest nonzero
   ancestor and accepts it only when it implements ENSIP-10
   `(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)`
@@ -136,6 +143,8 @@ hidden behind a stale cached result.
 
 [^ens-docs-univ]: <https://docs.ens.domains/resolvers/universal/> (official Universal Resolver proxy)
 [^v1-ur-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/UniversalResolver.json:L2 @ ens_v1@91c966f)
+[^v2-sepolia-ur-proxy]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/UpgradableUniversalResolverProxy.json:L2 @ ens_v2@a971bd64)
+[^v1-sepolia-ur-deploy]: (upstream: .refs/ens_v1/deployments/sepolia/UniversalResolver.json:L2 @ ens_v1@91c966f)
 [^v1-iaddressres-l14]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L14 @ ens_v1@91c966f)
 [^v1-aur-l217]: (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L217 @ ens_v1@91c966f)
 [^v1-aur-l263]: (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L263 @ ens_v1@91c966f)

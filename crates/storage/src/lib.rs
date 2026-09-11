@@ -51,10 +51,12 @@ pub use api_preflight::{
     ApiLookupDdlKind, ApiLookupDdlObject, load_missing_api_lookup_ddl, phase_schema_exists,
 };
 pub use children::{
-    ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentRow, ChildrenCurrentSummary,
-    DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS, DEFAULT_CHILDREN_CURRENT_READ_FILTER,
-    RegistryChildrenPage, count_registry_children_current, load_children_current,
-    load_children_current_including_noncanonical, load_children_current_page,
+    ChildrenCurrentKeysetCursor, ChildrenCurrentOrder, ChildrenCurrentPage,
+    ChildrenCurrentPageFilter, ChildrenCurrentRow, ChildrenCurrentSort, ChildrenCurrentSortValue,
+    ChildrenCurrentSummary, DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS,
+    DEFAULT_CHILDREN_CURRENT_READ_FILTER, RegistryChildrenPage, count_registry_children_current,
+    load_children_current, load_children_current_including_noncanonical,
+    load_children_current_page, load_children_current_page_filtered,
     load_children_current_summaries, load_registry_children_current_page,
 };
 pub use evm_primitives::{
@@ -104,14 +106,16 @@ pub use lineage::{
 };
 pub use name_current::{
     DEFAULT_ADDRESS_NAMES_MEMBERSHIP_JOINS, DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER,
-    DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER, NameCurrentAddressFilter,
-    NameCurrentAddressRelationFilter, NameCurrentListCursor, NameCurrentListCursorValue,
-    NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage, NameCurrentListRow,
-    NameCurrentListSort, NameCurrentRow, count_name_current_list,
+    DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER,
+    MIGRATION_AUTHORITY_TRANSITION_PROOF_KIND, NameCurrentAddressFilter,
+    NameCurrentAddressRelationFilter, NameCurrentExpiringFilter, NameCurrentListCursor,
+    NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage,
+    NameCurrentListRow, NameCurrentListSort, NameCurrentRow, count_name_current_list,
     load_current_names_by_resource_ids, load_name_current, load_name_current_by_logical_name_ids,
-    load_name_current_for_snapshot, load_name_current_list_page,
+    load_name_current_expiring_page, load_name_current_for_snapshot, load_name_current_list_page,
     load_name_current_list_page_offset, load_name_current_list_row_by_name,
-    load_name_current_list_row_by_namehash, name_current_list_cursor_from_row,
+    load_name_current_list_row_by_namehash, load_name_migration_transition_timestamps,
+    name_current_authority_arm, name_current_list_cursor_from_row,
 };
 pub use normalized_events::*;
 pub use permissions::{

@@ -1977,8 +1977,8 @@ discovery edge kind.
 
 ## Universal Resolver ancestor discovery
 
-the request-scoped ENS Mainnet
-records path for a projected name whose exact registry resolver is null. When
+the request-scoped ENS records path, on the deployment profile's Ethereum L1
+(Mainnet or Sepolia), for a projected name whose exact registry resolver is null. When
 the name has no projected alias, linked-subregistry, wildcard, or cross-chain
 transport path, bigname calls the manifest-admitted Universal Resolver at the
 selected block and lets that contract find the nearest ENSIP-10 ancestor

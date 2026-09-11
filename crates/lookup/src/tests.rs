@@ -2935,7 +2935,7 @@ async fn primary_name_lookup_uses_manifest_entrypoints_and_readable_head() -> An
     .execute(fixture.pool())
     .await?;
     let result = lookup_engine(fixture.pool(), &rpc_url)?
-        .lookup_ens_primary_name(target)
+        .lookup_ens_primary_name(ETHEREUM, target)
         .await?;
 
     assert_eq!(result.status, EnsPrimaryNameStatus::Success);
@@ -2982,7 +2982,7 @@ async fn primary_name_revalidates_its_position_after_live_calls() -> AnyResult<(
     let pool = fixture.pool().clone();
     let update_pool = pool.clone();
     let result = lookup_engine(&pool, &rpc_url)?
-        .lookup_ens_primary_name_with_before_revalidate(target, move || async move {
+        .lookup_ens_primary_name_with_before_revalidate(ETHEREUM, target, move || async move {
             advance_head(&update_pool)
                 .await
                 .expect("second session must advance the readable head");
@@ -3021,7 +3021,7 @@ async fn primary_name_rejects_a_project_generation_change_after_live_calls() -> 
     let pool = fixture.pool().clone();
     let update_pool = pool.clone();
     let result = lookup_engine(&pool, &rpc_url)?
-        .lookup_ens_primary_name_with_before_revalidate(target, move || async move {
+        .lookup_ens_primary_name_with_before_revalidate(ETHEREUM, target, move || async move {
             sqlx::query(
                 "UPDATE chain_phase_state
                  SET input_content_hash = 'manifest-authority:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:test-invalidation'
@@ -3067,7 +3067,7 @@ async fn primary_name_missing_forward_address_is_not_found() -> AnyResult<()> {
     .await?;
 
     let result = lookup_engine(fixture.pool(), &rpc_url)?
-        .lookup_ens_primary_name(target)
+        .lookup_ens_primary_name(ETHEREUM, target)
         .await?;
     assert_eq!(result.status, EnsPrimaryNameStatus::NotFound);
     assert_eq!(result.forward_address, None);
@@ -3105,7 +3105,7 @@ async fn primary_name_does_not_reclassify_resolver_not_found() -> AnyResult<()> 
     .await?;
 
     let result = lookup_engine(fixture.pool(), &rpc_url)?
-        .lookup_ens_primary_name(target)
+        .lookup_ens_primary_name(ETHEREUM, target)
         .await?;
     assert_eq!(result.status, EnsPrimaryNameStatus::ExecutionFailed);
 
@@ -3134,7 +3134,7 @@ async fn primary_name_selected_block_error_is_stale() -> AnyResult<()> {
     .await?;
 
     let error = lookup_engine(fixture.pool(), &rpc_url)?
-        .lookup_ens_primary_name("0x8e8db5ccef88cca9d624701db544989c996e3216")
+        .lookup_ens_primary_name(ETHEREUM, "0x8e8db5ccef88cca9d624701db544989c996e3216")
         .await
         .expect_err("unavailable selected block must be stale");
     assert_eq!(error.kind(), ErrorKind::Stale);
@@ -3164,7 +3164,7 @@ async fn primary_name_missing_selected_state_is_stale() -> AnyResult<()> {
     .await?;
 
     let error = lookup_engine(fixture.pool(), &rpc_url)?
-        .lookup_ens_primary_name("0x8e8db5ccef88cca9d624701db544989c996e3216")
+        .lookup_ens_primary_name(ETHEREUM, "0x8e8db5ccef88cca9d624701db544989c996e3216")
         .await
         .expect_err("missing selected state must be stale");
     assert_eq!(error.kind(), ErrorKind::Stale);
@@ -3191,7 +3191,7 @@ async fn primary_name_configured_response_timeout_is_in_band() -> AnyResult<()> 
         .with_http_timeouts(Duration::from_millis(50), Duration::from_millis(150))?;
 
     let result = LookupEngine::new(fixture.pool().clone(), rpc_urls)
-        .lookup_ens_primary_name("0x8e8db5ccef88cca9d624701db544989c996e3216")
+        .lookup_ens_primary_name(ETHEREUM, "0x8e8db5ccef88cca9d624701db544989c996e3216")
         .await?;
     assert_eq!(result.status, EnsPrimaryNameStatus::ExecutionFailed);
     assert_eq!(

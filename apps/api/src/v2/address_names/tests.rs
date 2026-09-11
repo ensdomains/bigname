@@ -11,6 +11,7 @@ fn binding(sort: AddressNamesSort) -> AddressNamesCursorBinding<'static> {
         relation: Some(relation),
         dedupe: AddressNamesDedupe::Name,
         q: Some("al"),
+        authority: Some(Authority::EnsV1),
         sort,
         order: SortOrder::Asc,
     }

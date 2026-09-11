@@ -7,9 +7,8 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction};
 
 use crate::{
     ENS_EXECUTION_SOURCE_FAMILY, ENS_NAMESPACE, ENS_UNIVERSAL_RESOLVER_ROLE,
-    ENS_V1_REGISTRY_SOURCE_FAMILY, ETHEREUM_MAINNET_CHAIN_ID, LookupError, LookupPosition,
-    LookupRequest, RecordSelector, Result, abi::ResolutionResultAbi, call::ExecutionBlock,
-    error::database,
+    ENS_V1_REGISTRY_SOURCE_FAMILY, LookupError, LookupPosition, LookupRequest, RecordSelector,
+    Result, abi::ResolutionResultAbi, call::ExecutionBlock, ens_l1_chain, error::database,
 };
 
 mod indexed;
@@ -30,6 +29,7 @@ pub(crate) fn indexed_answer(entries: &Value, selector: &RecordSelector) -> Valu
 pub(crate) use persistence::divergence_write_error;
 pub(crate) use persistence::{persist_comparisons, revalidate_primary_name_position};
 pub(crate) use routes::LookupRoute;
+pub use routes::{VerifiedExecutionEntrypoint, verified_execution_entrypoint};
 
 #[derive(Clone, Debug)]
 pub(crate) struct LookupSnapshot {
@@ -186,7 +186,8 @@ pub(crate) async fn load_snapshot(
             ));
         }
     };
-    let (resolver_chain_id, resolver_address) = routes::selected_resolver(route, &topology)?;
+    let (resolver_chain_id, resolver_address) =
+        routes::selected_resolver(route, &topology, &name.resource_chain_id)?;
     if resolver_chain_id.as_str() != name.resource_chain_id {
         return Err(LookupError::unsupported(
             "projected resolver and indexed authority object are on different chains",
@@ -268,6 +269,7 @@ pub(crate) async fn load_snapshot(
             &topology,
             path_class,
             &name.logical_name_id,
+            resolver_chain_id,
         )
     {
         return Err(LookupError::unsupported(
@@ -346,9 +348,17 @@ pub(crate) async fn load_snapshot(
     })
 }
 
+/// Manifest entrypoints and the readable head for ENS primary-name lookup on `chain_id`, which
+/// must be the Ethereum L1 the deployment profile projects (Mainnet or Sepolia).
 pub(crate) async fn load_ens_primary_name_authority(
     pool: &PgPool,
+    chain_id: &str,
 ) -> Result<EnsPrimaryNameAuthority> {
+    if ens_l1_chain(chain_id).is_none() {
+        return Err(LookupError::unsupported(format!(
+            "ENS primary-name lookup has no execution entrypoint on {chain_id}"
+        )));
+    }
     let mut transaction = pool
         .begin()
         .await
@@ -357,14 +367,14 @@ pub(crate) async fn load_ens_primary_name_authority(
         .execute(&mut *transaction)
         .await
         .map_err(database("set primary-name authority read isolation"))?;
-    let head = load_head(&mut transaction, ETHEREUM_MAINNET_CHAIN_ID).await?;
+    let head = load_head(&mut transaction, chain_id).await?;
     let project_row_xmin = positions::ensure_project_at_head(&mut transaction, &head).await?;
     let registry_manifest = manifests::load_entrypoint(
         &mut transaction,
         manifests::EntrypointQuery {
             namespace: ENS_NAMESPACE,
             source_family: ENS_V1_REGISTRY_SOURCE_FAMILY,
-            chain_id: ETHEREUM_MAINNET_CHAIN_ID,
+            chain_id,
             role: crate::ENS_REGISTRY_ROLE,
             allow_shadow: false,
             execution_block_number: head.block_number,
@@ -378,7 +388,7 @@ pub(crate) async fn load_ens_primary_name_authority(
         manifests::EntrypointQuery {
             namespace: ENS_NAMESPACE,
             source_family: ENS_EXECUTION_SOURCE_FAMILY,
-            chain_id: ETHEREUM_MAINNET_CHAIN_ID,
+            chain_id,
             role: ENS_UNIVERSAL_RESOLVER_ROLE,
             allow_shadow: true,
             execution_block_number: head.block_number,
