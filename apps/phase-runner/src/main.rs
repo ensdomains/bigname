@@ -51,11 +51,16 @@ async fn main() -> Result<()> {
             metrics_bind_addr,
             heartbeat_stale_after_secs,
             manifests_root,
-            runtime,
+            mut runtime,
             hydration_rpc_urls,
         } => {
             let (manifest_repository, manifest_profile) =
                 load_hashed_manifest_repository(&manifests_root)?;
+            phase_runner::config::bind_profile_start(
+                Arc::make_mut(&mut runtime.chains),
+                &manifest_repository,
+                manifest_profile,
+            )?;
             validate_deployment_table_set(
                 &runtime.chains,
                 COMPILED_CHAIN_NAMESPACES.iter().copied(),
