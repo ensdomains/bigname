@@ -135,11 +135,12 @@ pub use primary_name::{
 };
 pub use record_inventory::{
     RECORD_INVENTORY_CANONICALITY_SUMMARY_FILTER, RECORD_INVENTORY_PROJECTION_LINEAGE_FILTER,
-    RECORD_INVENTORY_RESOURCE_CANONICALITY_FILTER, RECORD_INVENTORY_RESOURCE_LINEAGE_FILTER,
-    RESOURCE_CANONICALITY_JOINS, RecordInventoryCurrentRow,
-    count_record_inventory_selectors_by_lookup_keys, load_record_inventory_current,
-    load_record_inventory_current_batch, load_record_inventory_current_for_snapshot,
-    load_record_inventory_current_with_anchor_fallback, record_version_boundary_storage_key,
+    RECORD_INVENTORY_RECORD_SERVING_FILTER, RECORD_INVENTORY_RESOURCE_CANONICALITY_FILTER,
+    RECORD_INVENTORY_RESOURCE_LINEAGE_FILTER, RESOURCE_CANONICALITY_JOINS,
+    RecordInventoryCurrentRow, count_record_inventory_selectors_by_lookup_keys,
+    load_record_inventory_current, load_record_inventory_current_batch,
+    load_record_inventory_current_for_snapshot, load_record_inventory_current_with_anchor_fallback,
+    record_version_boundary_storage_key,
 };
 pub use resolution_support::{
     BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE, ENS_NAMESPACE,

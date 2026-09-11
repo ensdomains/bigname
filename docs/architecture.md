@@ -166,7 +166,14 @@ pointer guards without creating a new surface or binding from record events.
 The inventory row publishes the attributed event ids in
 `provenance.attributed_event_ids`, and registration-scoped name history reads
 them back so the history lists the same writes; `name` scope does not, because
-the observation has no surface link of its own.
+the observation has no surface link of its own. Those ids are retained across
+the registration's whole pointer chain, not just its current pointer: each
+pointer attributes the writes on its resolver before the pointer that superseded
+it, so a later switch or clear changes which records the name serves without
+erasing the fact that the earlier write happened. Value selection keeps reading
+only the latest non-zero pointer. A registration whose selected pointer is a
+clear still publishes a history-only row for those ids, marked
+`provenance.record_serving = false` so no record-serving read can reach it.
 See [direct declaration admission](manifests.md#direct-publicresolverv2-declarations-on-an-owned-local-chain)
 and [inventory attribution](storage.md#interpret-process-memory).
 The inherited reset increments the node version and emits `VersionChanged`;

@@ -527,6 +527,10 @@ async fn load_inventory(
          AND resource_lineage.block_hash = resource.block_hash
         WHERE inventory.resource_id = $1::uuid
           AND inventory.record_version_boundary = $2
+          -- A cleared registration's history-only row serves no records. Its boundary anchors on
+          -- the clearing ResolverChanged, so no caller boundary can equal it; the guard keeps the
+          -- rule uniform with the record-serving read filter rather than resting on that.
+          AND inventory.provenance ->> 'record_serving' IS DISTINCT FROM 'false'
           AND resource.canonicality_state IN ('canonical', 'safe', 'finalized')
           AND resource_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
         "#,

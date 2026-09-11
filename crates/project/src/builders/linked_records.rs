@@ -4,10 +4,14 @@ use crate::{ProjectError, Result};
 
 pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     for statement in [
-        r#"CREATE TEMP TABLE project_record_pointers ON COMMIT DROP AS
-        WITH latest_pointers AS (
-            SELECT DISTINCT ON (event.resource_id)
-                   event.resource_id,
+        // Every readable resolver pointer the resource has ever selected, each carrying the chain
+        // position of the pointer that superseded it (null on the latest). Record values are
+        // selected only through the latest non-zero pointer (`project_record_pointers`), but a
+        // node-keyed write stays attributed to the registration that selected the resolver it was
+        // written to, so history keeps listing it after a later switch or clear.
+        r#"CREATE TEMP TABLE project_record_pointer_history ON COMMIT DROP AS
+        WITH ordered_pointers AS (
+            SELECT event.resource_id,
                    event.logical_name_id,
                    event.namespace AS pointer_namespace,
                    event.source_family AS pointer_source_family,
@@ -16,26 +20,65 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                    event.manifest_version AS pointer_manifest_version,
                    event.normalized_event_id AS pointer_event_id,
                    event.block_number AS pointer_block_number,
-                   event.block_hash AS pointer_block_hash
+                   event.block_hash AS pointer_block_hash,
+                   lead(COALESCE(event.block_number, -1)) OVER pointer_chain
+                       AS next_block_number,
+                   lead(COALESCE(event.transaction_index, -1)) OVER pointer_chain
+                       AS next_transaction_index,
+                   lead(COALESCE(event.log_index, -1)) OVER pointer_chain
+                       AS next_log_index,
+                   lead(event.normalized_event_id) OVER pointer_chain
+                       AS next_event_id
             FROM project_events event
             JOIN project_surfaces surface USING (logical_name_id)
             WHERE event.event_kind = 'ResolverChanged'
               AND event.resource_id IS NOT NULL
               AND event.logical_name_id IS NOT NULL
-            ORDER BY event.resource_id,
-                     event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST,
-                     event.normalized_event_id DESC
-        ),
-        pointers AS (
-            SELECT * FROM latest_pointers
-            WHERE resolver_address IS NOT NULL
-              AND resolver_address NOT IN (
-                  '0x0000000000000000000000000000000000000000', ''
-              )
+            WINDOW pointer_chain AS (
+                PARTITION BY event.resource_id
+                ORDER BY event.block_number ASC NULLS FIRST,
+                         event.transaction_index ASC NULLS FIRST,
+                         event.log_index ASC NULLS FIRST,
+                         event.normalized_event_id ASC
+            )
         )
-        SELECT * FROM pointers"#,
+        SELECT * FROM ordered_pointers
+        WHERE resolver_address IS NOT NULL
+          AND resolver_address NOT IN (
+              '0x0000000000000000000000000000000000000000', ''
+          )"#,
+        r#"CREATE INDEX ON project_record_pointer_history (resource_id)"#,
+        // The resource's current pointer, clears included. `project_record_pointers` drops a
+        // selected clear so no value is served through it; the cleared row is still the anchor the
+        // history-only inventory row is published on.
+        r#"CREATE TEMP TABLE project_record_pointer_latest ON COMMIT DROP AS
+        SELECT DISTINCT ON (event.resource_id)
+               event.resource_id,
+               event.logical_name_id,
+               event.namespace AS pointer_namespace,
+               event.source_family AS pointer_source_family,
+               lower(surface.namehash) AS namehash,
+               lower(event.after_state ->> 'resolver') AS resolver_address,
+               event.manifest_version AS pointer_manifest_version,
+               event.normalized_event_id AS pointer_event_id,
+               event.block_number AS pointer_block_number,
+               event.block_hash AS pointer_block_hash
+        FROM project_events event
+        JOIN project_surfaces surface USING (logical_name_id)
+        WHERE event.event_kind = 'ResolverChanged'
+          AND event.resource_id IS NOT NULL
+          AND event.logical_name_id IS NOT NULL
+        ORDER BY event.resource_id,
+                 event.block_number DESC NULLS LAST,
+                 event.transaction_index DESC NULLS LAST,
+                 event.log_index DESC NULLS LAST,
+                 event.normalized_event_id DESC"#,
+        r#"CREATE TEMP TABLE project_record_pointers ON COMMIT DROP AS
+        SELECT * FROM project_record_pointer_latest
+        WHERE resolver_address IS NOT NULL
+          AND resolver_address NOT IN (
+              '0x0000000000000000000000000000000000000000', ''
+          )"#,
         r#"CREATE TEMP TABLE project_resolver_links ON COMMIT DROP AS
         SELECT DISTINCT ON (chain_id, lower(after_state ->> 'resolver'),
                             lower(after_state ->> 'node')) event.*
