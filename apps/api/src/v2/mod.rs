@@ -23,6 +23,7 @@ mod permission_support;
 mod permission_values;
 mod permissions;
 mod primary_name;
+mod registries;
 mod resolvers;
 mod router;
 mod search;
@@ -85,13 +86,17 @@ pub(crate) use params::{
 pub(crate) use permission_values::{permission_powers_value, permission_scope_value};
 pub(crate) use permissions::get_permissions;
 pub(crate) use primary_name::get_primary_name;
-pub(crate) use resolvers::get_resolver;
+pub(crate) use registries::{
+    RegistryRef, get_registry, get_registry_labels, load_subregistry_refs, name_chain_id,
+    snapshot_block_for_chain,
+};
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use resolvers::{
     BoundNames, BoundNamesCursorBinding, bound_names_cursor_payload, bound_names_storage_cursor,
     build_resolver_overview, resolver_overview_include,
 };
+pub(crate) use resolvers::{get_resolver, parse_numeric_chain_id, resolver_snapshot_scope};
 pub(crate) use search::get_search;
 #[cfg(test)]
 pub(crate) use search::public_namespace_read_test_hooks as search_public_namespace_read_test_hooks;

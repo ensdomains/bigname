@@ -10,7 +10,7 @@ use super::{
     DEFAULT_CHILDREN_CURRENT_READ_FILTER,
     types::{
         ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentRow,
-        ChildrenCurrentSummary,
+        ChildrenCurrentSummary, RegistryChildrenPage,
     },
 };
 
@@ -48,6 +48,11 @@ const CHILD_DISPLAY_PARENT_JOIN: &str = r#"
   LEFT JOIN bigname_phase.name_surfaces display_parent
     ON display_parent.logical_name_id = cc.parent_logical_name_id
 "#;
+
+/// ENSv2 child rows keep the registration event's raw-log reference first in their provenance;
+/// its emitter is the registry contract that holds the label.
+const REGISTRY_CHILD_FILTER: &str =
+    " AND lower(cc.provenance #>> '{raw_fact_refs,0,registration,emitting_address}') = ";
 
 fn child_select() -> String {
     format!(
@@ -132,6 +137,95 @@ pub async fn load_children_current_page(
         next_cursor,
         summary,
     })
+}
+
+/// A page of the declared children of `parent_logical_name_id` whose ENSv2 registration was
+/// emitted by `registry_address`: the labels one registry contract currently holds under the
+/// name it serves. `label_count` counts every such child, not just the page.
+pub async fn load_registry_children_current_page(
+    pool: &PgPool,
+    parent_logical_name_id: &str,
+    registry_address: &str,
+    cursor: Option<&ChildrenCurrentKeysetCursor>,
+    page_size: u64,
+) -> Result<RegistryChildrenPage> {
+    let registry_address = registry_address.to_ascii_lowercase();
+    let limit = checked_page_limit_i64(
+        page_size,
+        "children_current page_size must be positive",
+        "children_current page_size is too large",
+    )?;
+    let page_size = checked_page_size_usize(
+        page_size,
+        "children_current page_size must be positive",
+        "children_current page_size does not fit in usize",
+    )?;
+    let mut builder = QueryBuilder::<Postgres>::new(child_select());
+    builder.push(DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS);
+    builder.push(" WHERE cc.parent_logical_name_id = ");
+    builder.push_bind(parent_logical_name_id);
+    builder.push(" AND cc.surface_class = ");
+    builder.push_bind(DECLARED_SURFACE_CLASS);
+    builder.push(DEFAULT_CHILDREN_CURRENT_READ_FILTER);
+    builder.push(REGISTRY_CHILD_FILTER);
+    builder.push_bind(&registry_address);
+    if let Some(cursor) = cursor {
+        builder.push(format!(
+            " AND ({CHILD_DISPLAY_NAME_EXPR}, cc.child_logical_name_id) > ("
+        ));
+        builder.push_bind(&cursor.canonical_display_name);
+        builder.push(", ");
+        builder.push_bind(&cursor.child_logical_name_id);
+        builder.push(")");
+    }
+    builder.push(format!(
+        " ORDER BY {CHILD_DISPLAY_NAME_EXPR}, cc.child_logical_name_id LIMIT "
+    ));
+    builder.push_bind(limit);
+    let rows = builder
+        .build()
+        .fetch_all(pool)
+        .await
+        .context("failed to load phase registry children_current page")?
+        .into_iter()
+        .map(decode_children_current_row)
+        .collect::<Result<Vec<_>>>()?;
+    let (rows, next_cursor) = split_keyset_page(rows, page_size, |row| {
+        ChildrenCurrentKeysetCursor::from(row)
+    });
+    let label_count =
+        count_registry_children_current(pool, parent_logical_name_id, &registry_address).await?;
+    Ok(RegistryChildrenPage {
+        rows,
+        next_cursor,
+        label_count,
+    })
+}
+
+/// Exact count of the declared children of `parent_logical_name_id` whose ENSv2 registration
+/// was emitted by `registry_address`.
+pub async fn count_registry_children_current(
+    pool: &PgPool,
+    parent_logical_name_id: &str,
+    registry_address: &str,
+) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(&format!(
+        r#"
+        SELECT count(*)::bigint
+        FROM bigname_phase.children_current cc
+        {DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS}
+        WHERE cc.parent_logical_name_id = $1
+          AND cc.surface_class = $2
+        {DEFAULT_CHILDREN_CURRENT_READ_FILTER}
+        {REGISTRY_CHILD_FILTER} $3
+        "#
+    ))
+    .bind(parent_logical_name_id)
+    .bind(DECLARED_SURFACE_CLASS)
+    .bind(registry_address.to_ascii_lowercase())
+    .fetch_one(pool)
+    .await
+    .context("failed to count phase registry children_current rows")
 }
 
 pub async fn load_children_current_summaries(

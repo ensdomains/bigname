@@ -14,9 +14,9 @@ use crate::AppState;
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::support::normalize_inferred_route_name;
 use super::{
-    CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, RegistrationStatus,
-    StrictQueryParams, V2Error, V2Result, decode, encode, name_record::name_registration_fields,
-    validate_latest_collection_selectors,
+    CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, RegistrationStatus, RegistryRef,
+    StrictQueryParams, V2Error, V2Result, decode, encode, load_subregistry_refs,
+    name_record::name_registration_fields, validate_latest_collection_selectors,
 };
 
 const SUBNAMES_SORT: &str = "display_name_asc";
@@ -59,6 +59,8 @@ pub(crate) struct Subname {
     pub(crate) created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subregistry: Option<RegistryRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subname_count: Option<u64>,
 }
@@ -149,6 +151,8 @@ pub(crate) async fn get_subnames(
     } else {
         std::collections::BTreeMap::new()
     };
+    let mut subregistries =
+        load_subregistry_refs(&state.pool, &child_logical_name_ids, None).await?;
 
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
         encode(&subname_cursor_payload(
@@ -162,12 +166,14 @@ pub(crate) async fn get_subnames(
         .rows
         .iter()
         .map(|row| {
-            build_subname(
+            let mut subname = build_subname(
                 row,
                 child_name_rows.get(&row.child_logical_name_id),
                 child_summaries.get(&row.child_logical_name_id),
                 include_counts,
-            )
+            );
+            subname.subregistry = subregistries.remove(&row.child_logical_name_id);
+            subname
         })
         .collect();
     Ok(Json(Envelope {
@@ -223,6 +229,7 @@ pub(crate) fn build_subname(
         registered_at: registration.registered_at,
         created_at: registration.created_at,
         expires_at: registration.expires_at,
+        subregistry: None,
         subname_count: include_counts.then(|| {
             summary
                 .and_then(|summary| u64::try_from(summary.child_count).ok())

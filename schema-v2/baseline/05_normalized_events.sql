@@ -488,6 +488,16 @@ CREATE INDEX IF NOT EXISTS normalized_events_block_idx
 CREATE INDEX IF NOT EXISTS normalized_events_chain_block_number_idx
     ON normalized_events (chain_id, block_number);
 
+CREATE INDEX IF NOT EXISTS normalized_events_emitter_history_idx
+    ON normalized_events (
+        lower(raw_fact_ref ->> 'emitting_address'),
+        block_number DESC NULLS LAST,
+        log_index DESC NULLS LAST,
+        normalized_event_id DESC
+    )
+    WHERE raw_fact_ref ->> 'emitting_address' IS NOT NULL
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
 CREATE INDEX IF NOT EXISTS normalized_events_v2_expiry_scope_idx
     ON normalized_events (
         chain_id,

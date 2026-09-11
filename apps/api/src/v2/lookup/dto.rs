@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::v2::{Page, RegistrationStatus, Relation, Resolver, Status};
+use crate::v2::{Page, RegistrationStatus, RegistryRef, Relation, Resolver, Status};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -114,6 +114,8 @@ pub(crate) struct LookupRecord {
     pub(crate) registration_status: Option<RegistrationStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resolver: Option<Resolver>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subregistry: Option<RegistryRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) addresses: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]

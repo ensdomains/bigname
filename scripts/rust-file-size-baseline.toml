@@ -101,7 +101,7 @@ justification = "The selected numeric registrar import retains current authority
 [[files]]
 path = "apps/api/src/v2/events.rs"
 loc = 765
-justification = "History ergonomics (order, type sets, timestamp windows, include=data|raw, resolver filter) keep the /v1/events handler, its cursor binding, and its filter parser adjacent; split the filter parser out on the next substantive touch."
+justification = "History ergonomics (order, type sets, timestamp windows, include=data|raw, resolver filter) and the registry-route `contract_address` emitter filter keep the /v1/events handler, its cursor binding, and its filter parser adjacent; split the filter parser out on the next substantive touch."
 
 [[files]]
 path = "apps/api/src/v2/history.rs"
@@ -126,9 +126,14 @@ justification = "Product vocabulary gained HistoryEventTypeSet canonicalization 
 [[files]]
 path = "crates/storage/src/history.rs"
 loc = 685
-justification = "History read facade gained HistoryOrder, HistoryBlockWindow, HistoryPageOptions, and the resolver filter while keeping every loader signature in one place; move the option types into a sibling module on the next substantive touch."
+justification = "History read facade gained HistoryOrder, HistoryBlockWindow, HistoryPageOptions, the resolver filter, and the registry-route `contract_address` emitter filter while keeping every loader signature in one place; move the option types into a sibling module on the next substantive touch."
 
 [[files]]
 path = "crates/storage/src/history/paging.rs"
 loc = 689
 justification = "Keyset paging gained the reversible order predicate, per-chain block windows, and the resolver filter, which share one SQL builder; split the filter pushers from the cursor predicate on the next substantive touch."
+
+[[files]]
+path = "apps/api/src/v2/lookup/mod.rs"
+loc = 602
+justification = "Batch lookup keeps request parsing, name and address rendering, and served-head validation together; attaching the current `subregistry` pointer to name results (F1) adds two lines at the 600-line boundary. Split on the next substantive touch."

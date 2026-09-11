@@ -427,10 +427,15 @@ Field ownership:
   `manager` is omitted when no forward-read source can derive it; it is not
   emitted as a permanent null placeholder. The
   name-profile portion uses `name`, `display_name`, `namespace`, `namehash`, `resolver`,
-  `addresses`, `text_records`, `content_hash`,
+  `subregistry`, `addresses`, `text_records`, `content_hash`,
   `primary_name`, `primary_address`, `chain_id`, `network`, `status`, and
   `unsupported_reason`/`failure_reason`/`unsupported_fields` when those fields
-  are served. With `source=verified`, the resolver-record-backed fields
+  are served. `subregistry` is `{chain_id, address}` of the ENSv2 registry the
+  name's current subregistry pointer targets, bounded to the selected
+  position; it is omitted when the name has no current pointer, including
+  every ENSv1-only and Basenames name, and when the latest pointer was cleared.
+  The same field appears on batch-lookup name results and on subname rows,
+  where it reads the latest pointer. With `source=verified`, the resolver-record-backed fields
   `addresses`, `text_records`, `content_hash`, and `primary_address` are built
   by a fresh schema-v2 lookup at the current readable position, using the same
   verified path as `/v1/names/{name}/records`; indexed resolver-record values
@@ -844,6 +849,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   use `GET /v1/names/{name}/records` for `resolver`, `addresses`,
   `text_records`, and `content_hash`.
   `include=counts` adds `subname_count`, the row's direct subname count.
+  `subregistry` is `{chain_id, address}` of the ENSv2 registry the child's
+  current subregistry pointer targets, omitted when there is none.
 - Pagination behavior: standard collection pagination by
   `display_name` ascending.
 - Snapshot behavior: the parent and subname rows are selected from current
@@ -1628,10 +1635,10 @@ For a registrar lease first identified by a later readable observation, registra
 
 - Method/path: `GET /v1/events`
 - Tier: product read.
-- Purpose: compact event search across name, address, registration, resolver,
-  type, and block filters.
+- Purpose: compact event search across name, address, contract, registration,
+  resolver, type, and block filters.
 - Request parameters: query `namespace`, `name`, `address`, `resolver`,
-  `registration_id`, `type`, `from_block`, `to_block`, `from_timestamp`,
+  `contract_address`, `registration_id`, `type`, `from_block`, `to_block`, `from_timestamp`,
   `to_timestamp`, `order=asc|desc`, `include=data|raw`, `cursor`, `page_size`,
   and optional `finality=latest`. `at` and historical `finality` values are rejected by the
   shared latest-state collection rule. When `name` is present and `namespace`
@@ -1660,6 +1667,10 @@ For a registrar lease first identified by a later readable observation, registra
   `include=events` is a bounded `{count, by_type}` summary; nesting a second
   paginated collection beside `bound_names` would give the overview two
   independent cursors.
+  `contract_address` keeps only events whose source log was emitted by
+  that contract (a registry, registrar, or resolver address, compared
+  case-insensitively); it combines with every other filter (including
+  `resolver`, applied as AND), and the cursor binds it like the others.
 - Response shape: `data` is an array of compact event rows with friendly
   `type` vocabulary. Raw upstream event kinds appear only as `kind` behind the
   explicit `include=raw` opt-in. Event-row
@@ -1852,6 +1863,89 @@ For a registrar lease first identified by a later readable observation, registra
   invalid_input`.
 - Replaces (v1): `GET /v1/resolvers/{chain_id}/{resolver_address}/overview`
   and the `GET /v1/names?resolver=...` filter.
+
+### `GET /v1/registries/{chain_id}/{address}`
+
+- Method/path: `GET /v1/registries/{chain_id}/{address}`
+- Tier: product read.
+- Purpose: one ENSv2 registry contract by numeric `chain_id` and contract
+  `address`: the name it serves, its parent registry, when it was created, how
+  many labels it holds, and the names that point at it.
+- Request parameters: path `chain_id`, `address`; query `include=counts`,
+  `at`, `finality`, and `cursor`/`page_size` for the nested `referenced_by`
+  collection.
+- Response shape: `data` is `{chain_id, address, name, parent_registry,
+  created_block_number, created_at, created_transaction_hash, created_basis,
+  counts, referenced_by}`. `address` is the lowercase hex form. A registry is
+  known when it announced itself with the ENSv2 `RegistryCreated` event, when
+  any ENSv2 `SubregistryUpdated` has ever pointed a name at it, or when an
+  ENSv2 manifest declares it as a `root_registry` or `registry` contract; the
+  ENSv1 and Basenames registries are not registries in this sense.
+  `name` is `{name, display_name, namespace, namehash}` for the earliest name
+  whose current subregistry pointer targets this contract, and `null` when no
+  current pointer does (the root registry, or a registry that was announced or
+  declared but never linked). `parent_registry` is `{chain_id, address}` of
+  the registry that emitted that pointer, and `null` whenever `name` is
+  `null`. The creation fields describe the contract's first observation and
+  `created_basis` says which event defines it: `registry_created` is the
+  contract's own `RegistryCreated` announcement; `subregistry_pointer` is the
+  earliest `SubregistryUpdated` that pointed a name at it, used when the
+  contract never announced itself; `declared` is a manifest-declared registry
+  with no observed creation, whose `created_block_number` is its configured
+  start block, `created_at` is that block's timestamp when the block is known,
+  and `created_transaction_hash` is `null`. `counts.labels` is the exact
+  number of labels the registry holds (the rows of the labels route below);
+  it is `0` when `name` is `null`. `counts.events` is present only with
+  `include=counts` and counts the product-visible events emitted by the
+  contract — the same rows `GET /v1/events?contract_address=` serves — because
+  it reads every event of the contract rather than a projected total. There is
+  no `counts.roles`: bigname projects permissions per registration, not per
+  registry contract, so a per-registry role-holder count is not served.
+  `referenced_by` is a nested `{data, page}` collection of every name whose
+  current subregistry pointer targets this contract, each `{name,
+  display_name, namespace, namehash}`, sorted by display name. It usually
+  holds exactly the served `name`; it is empty when `name` is `null`.
+- Pagination behavior: standard collection pagination applies to the nested
+  `referenced_by.page` object; its cursor binds the chain and registry. The
+  top-level response has no `page`.
+- Snapshot behavior: the route selects the chain's served position like the
+  resolver overview and reports `meta.as_of` and `meta.as_of_token`. The
+  creation, pointer, and event-count evidence is bounded to that position, so
+  an `at` or `finality` selector shows the registry as it stood then.
+  `counts.labels` reads the current child collection.
+- Status semantics: an unknown registry returns `404 not_found` at every
+  selector, because the bounded read proves absence at the selected position.
+  Malformed `chain_id` or `address` and an `include` value other than `counts`
+  return `400 invalid_input`.
+- Replaces (v1): none; new in F1.
+
+### `GET /v1/registries/{chain_id}/{address}/labels`
+
+- Method/path: `GET /v1/registries/{chain_id}/{address}/labels`
+- Tier: product read.
+- Purpose: the labels one ENSv2 registry currently holds.
+- Request parameters: path `chain_id`, `address`; query `include=counts`,
+  `cursor`, `page_size`, and optional `finality=latest`. `at` and historical
+  `finality` values are rejected by the shared latest-state collection rule.
+- Response shape: `data` is an array of rows in exactly the `GET
+  /v1/names/{name}/subnames` shape, including `subregistry` and the
+  `include=counts` `subname_count`. A label is a direct subname of the name
+  the registry serves whose ENSv2 registration the registry itself emitted;
+  a child of that name registered by another contract is not a label of this
+  registry. A registry that serves no name — the root registry, or one never
+  linked from a name — holds no servable labels here and returns an empty
+  page: the child collection is projected under a parent name, and the root
+  name has no child projection.
+- Pagination behavior: standard collection pagination by `display_name`
+  ascending. `page.total_count` is the exact label count, the same number as
+  `counts.labels` on the registry route. The cursor binds the chain and
+  registry.
+- Snapshot behavior: rows come from current state; the response omits
+  `meta.as_of` and `meta.as_of_token`.
+- Status semantics: an unknown registry returns `404 not_found`; a known
+  registry with no labels returns `200` with empty `data`. Malformed
+  `chain_id`, `address`, `include`, or cursor values return `400 invalid_input`.
+- Replaces (v1): none; new in F1.
 
 ### `GET /v1/namespaces/{namespace}`
 

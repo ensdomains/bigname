@@ -200,6 +200,8 @@ pub struct EventHistoryFilter {
     pub resource_id: Option<Uuid>,
     pub address: Option<EventHistoryAddressFilter>,
     pub resolver: Option<EventHistoryResolverFilter>,
+    /// Lowercase EVM address of the emitting contract; matches the raw log emitter.
+    pub contract_address: Option<String>,
     pub event_kinds: Vec<String>,
     pub bind_cursor_anchor_to_event_kinds: bool,
     pub from_block: Option<i64>,
@@ -213,6 +215,7 @@ pub(in crate::history) struct EventHistoryReadFilter {
     pub(in crate::history) selectors: Vec<selectors::HistorySelector>,
     pub(in crate::history) registration_id: Option<Uuid>,
     pub(in crate::history) namespace: Option<String>,
+    pub(in crate::history) contract_address: Option<String>,
     pub(in crate::history) event_kinds: Vec<String>,
     pub(in crate::history) bind_cursor_anchor_to_event_kinds: bool,
     pub(in crate::history) from_block: Option<i64>,
@@ -621,6 +624,9 @@ async fn event_history_read_filter(
             filter.resource_id
         },
         namespace: filter.namespace,
+        contract_address: filter
+            .contract_address
+            .map(|address| address.to_ascii_lowercase()),
         event_kinds: filter.event_kinds,
         bind_cursor_anchor_to_event_kinds: filter.bind_cursor_anchor_to_event_kinds,
         from_block: filter.from_block,

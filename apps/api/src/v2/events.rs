@@ -25,6 +25,7 @@ const NAMESPACE_FILTER_KEY: &str = "namespace";
 const NAME_FILTER_KEY: &str = "name";
 const ADDRESS_FILTER_KEY: &str = "address";
 const RESOLVER_FILTER_KEY: &str = "resolver";
+const CONTRACT_ADDRESS_FILTER_KEY: &str = "contract_address";
 const REGISTRATION_ID_FILTER_KEY: &str = "registration_id";
 const FROM_BLOCK_FILTER_KEY: &str = "from_block";
 const TO_BLOCK_FILTER_KEY: &str = "to_block";
@@ -39,6 +40,7 @@ impl QueryParamAllowlist for EventsQueryParams {
         "name",
         "address",
         "resolver",
+        "contract_address",
         "registration_id",
         "type",
         "from_block",
@@ -336,6 +338,12 @@ pub(crate) fn parse_events_filter(
     if let Some(address) = params.address.as_ref() {
         cursor_filters.insert(ADDRESS_FILTER_KEY.to_owned(), address.clone());
     }
+    if let Some(contract_address) = params.contract_address.as_ref() {
+        cursor_filters.insert(
+            CONTRACT_ADDRESS_FILTER_KEY.to_owned(),
+            contract_address.clone(),
+        );
+    }
     if let Some(registration_id) = params.registration_id.as_ref() {
         cursor_filters.insert(
             REGISTRATION_ID_FILTER_KEY.to_owned(),
@@ -369,6 +377,7 @@ pub(crate) fn parse_events_filter(
                     chain_id: resolver.chain_slug.to_owned(),
                     address: resolver.address.clone(),
                 }),
+            contract_address: params.contract_address.clone(),
             event_kinds,
             bind_cursor_anchor_to_event_kinds: params.event_types.is_some(),
             from_block: params.from_block,

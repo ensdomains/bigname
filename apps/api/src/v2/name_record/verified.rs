@@ -68,6 +68,7 @@ fn unsupported_name_record(row: &NameCurrentRow) -> V2Result<Option<NameRecord>>
         registrant: None,
         registered_at: None,
         created_at: None,
+        subregistry: None,
         expires_at: None,
         registration_status: None,
         wrapper_state: None,

@@ -317,6 +317,11 @@ pub(super) fn push_history_filters<'a>(
         builder.push_bind(namespace);
     }
 
+    if let Some(contract_address) = filter.contract_address.as_ref() {
+        builder.push(" AND lower(ne.raw_fact_ref ->> 'emitting_address') = ");
+        builder.push_bind(contract_address);
+    }
+
     if let Some(registration_id) = filter.registration_id.as_ref() {
         builder.push(" AND ((ne.resource_id IS NULL AND ");
         push_product_event_kind_predicate(builder);

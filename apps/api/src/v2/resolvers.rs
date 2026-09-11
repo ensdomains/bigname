@@ -570,7 +570,7 @@ pub(crate) fn resolver_overview_include(include: &[String]) -> V2Result<Resolver
     })
 }
 
-fn parse_numeric_chain_id(value: &str) -> V2Result<(u64, &'static str)> {
+pub(crate) fn parse_numeric_chain_id(value: &str) -> V2Result<(u64, &'static str)> {
     let value = value.trim();
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(invalid_chain_id());
@@ -586,7 +586,7 @@ fn invalid_chain_id() -> V2Error {
     V2Error::invalid_input("chain_id must be a supported numeric EVM chain id")
 }
 
-fn resolver_snapshot_scope(chain_id_slug: &str) -> V2Result<SnapshotSelectionScope> {
+pub(crate) fn resolver_snapshot_scope(chain_id_slug: &str) -> V2Result<SnapshotSelectionScope> {
     let slot = snapshot_slot_for_slug(chain_id_slug).ok_or_else(|| {
         error!(
             service = "api",

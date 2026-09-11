@@ -171,16 +171,18 @@ async fn render_name_lookup_results(
         .into_iter()
         .collect::<Vec<_>>();
     let records = load_name_records(state, profile, &logical_name_ids, selected_snapshot).await?;
+    let subregistries = super::load_subregistry_refs(&state.pool, &logical_name_ids, None).await?;
 
     for input in inputs {
         let (status, record) = match input.lookup.as_ref() {
             None => (Status::InvalidName, None),
             Some(lookup) => match records.get(&lookup.logical_name_id) {
                 Some(record) => {
-                    let record = match profile {
+                    let mut record = match profile {
                         LookupProfile::Feed => build_forward_feed_record(record),
                         LookupProfile::Detail => build_forward_detail_record(record),
                     }?;
+                    record.subregistry = subregistries.get(&lookup.logical_name_id).cloned();
                     (record.status, Some(record))
                 }
                 None => (Status::NotFound, None),
