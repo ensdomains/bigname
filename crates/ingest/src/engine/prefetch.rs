@@ -70,6 +70,16 @@ impl RangeLogCache {
                 .collect()
         })
     }
+
+    /// Drops ranges that end below the window now loading.
+    ///
+    /// Discovery admits addresses as a backfill runs, and every change gives the persisted
+    /// filter a new query identity. Without this, a long backfill would keep one wide
+    /// range in memory per identity it ever saw; windows only move forward, so a range
+    /// that ends behind the current one can never answer anything again.
+    fn evict_below(&mut self, from: i64) {
+        self.ranges.retain(|_, cached| cached.to >= from);
+    }
 }
 
 /// Consults and fills the cache for one batch's provider.
@@ -128,14 +138,18 @@ impl<'a> Prefetcher<'a> {
         let Some(logs) = logs else {
             return window_logs(provider, resolved, query, from, to).await;
         };
-        self.cache.lock().await.ranges.insert(
-            key,
-            CachedRange {
-                from,
-                to: range_to,
-                logs,
-            },
-        );
+        {
+            let mut cache = self.cache.lock().await;
+            cache.evict_below(from);
+            cache.ranges.insert(
+                key,
+                CachedRange {
+                    from,
+                    to: range_to,
+                    logs,
+                },
+            );
+        }
         let window = self
             .cache
             .lock()
