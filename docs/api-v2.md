@@ -312,7 +312,8 @@ Rules:
   the page query when the requested relation set maps directly to a stored role
   group. Relation sets that require post-filtering retain `total_count=null`.
   Anchored history collections (name history, address history, and
-  `/v1/events` with a `name`, `registration_id`, or `address` anchor) populate
+  `/v1/events` with a `name`, `registration_id`, `address`, or `resolver`
+  anchor) populate
   it with a capped count over the page's exact filters: exact up to 10,000
   product-visible rows, `null` beyond, and always `null` for unanchored event
   reads. Other routes populate it only where a precomputed count makes it
