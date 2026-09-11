@@ -1816,13 +1816,21 @@ so there is no persisted artifact to explain. See
   fields. An independently admitted ordinary row reports top-level
   `consumer_visibility=activated` and an empty ID set; its separate candidate or
   activated correlation relationships appear only in `migration_associations`.
-  `migration_associations` is raw diagnostic evidence: each association remains
-  anchored to the chain lineage where it was derived, while the lookup attaches
-  every association with the same `event_identity`. The top-level
-  `canonicality_state` applies only to the returned normalized-event row; it does
-  not filter its associations. Retained associations from replaced forks can
-  therefore appear beside a canonical event. Consumers that require canonical-only
-  correlation must not treat association presence as a current relationship.
+  `migration_associations` is raw diagnostic evidence. The route is
+  canonical-only: a normalized-event row is returned only while its own
+  `canonicality_state` and the `chain_lineage` row for its block are both
+  readable, so an event on a block that head publication has orphaned is absent
+  from the response even before an Interpret redo deletes it. The lookup then
+  attaches every association with the same `event_identity` and applies no
+  lineage predicate of its own; because every `event_identity` embeds
+  fork-distinct evidence, those associations sit on the returned event's own,
+  still-readable block, and a retained losing-fork association whose event a
+  redo deleted attaches to no event. The top-level `canonicality_state`
+  describes the returned row. Each attached association reports only the
+  `consumer_visibility` Interpret stamped when it last derived the row; the
+  association's own stored `canonicality_state` is not part of the response.
+  Association presence, or a `candidate` visibility, is evidence of a
+  derivation, not an assertion of a current or activated correlation.
   When interpretation links one V1 registry resolver log to both the registry
   resource retained for reads and a distinct control resource, diagnostics
   returns both normalized rows and permits cursors anchored to either row;

@@ -3613,6 +3613,164 @@ async fn parent_reachability_filters_before_positive_v2_child_integrity() -> Res
     Ok(())
 }
 
+// The ENSv1→ENSv2 correlation tables stamp `canonicality_state` at insert and never
+// maintain it. This drives the production reorg path — head publication orphans the
+// lineage and stamps the required redo, Interpret's redo keeps the losing-fork
+// association as evidence while orphaning its announcement edge, Project rebuilds —
+// and pins both halves of the documented rule: the retained row still reads
+// `canonical`, and no reader publishes from it.
+#[tokio::test]
+async fn reorg_retains_a_migration_association_that_still_reads_canonical_and_publishes_nothing_from_it()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_association_reorg").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    seed_positive_child_authority_fixture(scratch.pool(), 5, "locked_wrapped").await?;
+    publish_heads(
+        scratch.pool(),
+        CHAIN,
+        &HeadMarkers {
+            latest: BlockMarker::new(6, block_hash(CHAIN, 6))?,
+            safe: Some(BlockMarker::new(0, block_hash(CHAIN, 0))?),
+            finalized: Some(BlockMarker::new(0, block_hash(CHAIN, 0))?),
+        },
+    )
+    .await?;
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 6).await?;
+    assert_eq!(
+        child_relation(scratch.pool()).await?,
+        Some((None, Some(OWNER.to_owned()))),
+        "positive control: the association-backed ENSv2 relation publishes"
+    );
+
+    // A competing fork replaces heights 1 through 6, starting at the block where the
+    // migration registry association and its announcement edge are anchored. Head
+    // publication orphans the old branch and stamps the required Interpret and
+    // Project redo in the same transaction; supplying every replacement height keeps
+    // the redo range readable, so the runner re-derives instead of waiting on Live
+    // intake for blocks it has not seen.
+    let store = PhaseStore::new(scratch.pool().clone());
+    store.initialize_chain(CHAIN).await?;
+    seed_completed_project_extent(scratch.pool(), CHAIN, 6).await?;
+    let winning_hash = |number: i64| format!("{CHAIN}-winning-block-{number}");
+    for number in 1..=6 {
+        let parent = if number == 1 {
+            block_hash(CHAIN, 0)
+        } else {
+            winning_hash(number - 1)
+        };
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number,
+                 block_timestamp, canonicality_state
+             ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'observed')",
+        )
+        .bind(CHAIN)
+        .bind(winning_hash(number))
+        .bind(parent)
+        .bind(number)
+        .execute(scratch.pool())
+        .await?;
+    }
+    publish_heads(
+        scratch.pool(),
+        CHAIN,
+        &HeadMarkers {
+            latest: BlockMarker::new(6, winning_hash(6))?,
+            safe: Some(BlockMarker::new(0, block_hash(CHAIN, 0))?),
+            finalized: Some(BlockMarker::new(0, block_hash(CHAIN, 0))?),
+        },
+    )
+    .await?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        PhaseSet::with_ingest_interpret_and_project(
+            Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+            Arc::new(InterpretPhase::new(scratch.pool().clone())),
+            Arc::new(ProjectPhase::new(scratch.pool().clone())),
+        )?,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-association-reorg",
+        test_timing(),
+    )?;
+    let terminal = runner
+        .run_chain(&chain_config(CHAIN)?, CancellationToken::new())
+        .await
+        .expect_err("the intentionally unavailable verify/live slot stops after re-derivation");
+    assert_eq!(
+        terminal.kind(),
+        RunnerErrorKind::Configuration,
+        "unexpected terminal error: {terminal:#}"
+    );
+
+    let (association_state, association_anchor): (String, String) = sqlx::query_as(
+        "SELECT canonicality_state::text, block_hash FROM migration_discovery_associations
+         WHERE logical_edge_identity = $1",
+    )
+    .bind(format!("{CHAIN}:positive-child-registry-edge"))
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(association_anchor, block_hash(CHAIN, 1));
+    assert_eq!(
+        association_state, "canonical",
+        "the retained losing-fork row keeps its insert-time stamp"
+    );
+    let anchor_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::text FROM chain_lineage
+         WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 1))
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(anchor_state, "orphaned");
+    let edge_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::text FROM discovery_edges
+         WHERE chain_id = $1 AND edge_kind = 'registry_announcement'
+           AND active_from_block_hash = $2",
+    )
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 1))
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        edge_state, "orphaned",
+        "Interpret's redo orphans the announcement edge before Project runs"
+    );
+    assert_eq!(
+        child_relation(scratch.pool()).await?,
+        None,
+        "nothing is published from a retained association whose anchor was replaced"
+    );
+    let states: Vec<(String, String, bool, Option<String>)> = sqlx::query_as(
+        "SELECT phase_name, phase_status, redo_in_progress, current_block_hash
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')
+         ORDER BY phase_name",
+    )
+    .bind(CHAIN)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        states,
+        vec![
+            (
+                "interpret".into(),
+                "completed".into(),
+                false,
+                Some(winning_hash(6))
+            ),
+            (
+                "project".into(),
+                "completed".into(),
+                false,
+                Some(winning_hash(6))
+            ),
+        ]
+    );
+    scratch.cleanup().await?;
+    Ok(())
+}
+
 // Basenames subnames are their own authority arm. The child's authority selects `basenames`,
 // so a Basenames-derived relation publishes only because it is staged under that arm.
 #[tokio::test]

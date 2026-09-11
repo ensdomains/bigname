@@ -836,6 +836,73 @@ async fn candidate_migration_rows_are_diagnostic_only() -> Result<()> {
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn diagnostics_hide_an_event_on_an_orphaned_lineage_with_its_still_canonical_association()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    sqlx::query(
+        "INSERT INTO migration_event_associations (
+             event_identity, migration_correlation_id, correlation_kind, evidence_refs,
+             chain_id, block_number, block_hash, transaction_hash, transaction_index,
+             log_index, canonicality_state, consumer_visibility, interpreter_content_hash
+         ) VALUES (
+             'history-renewal', 'orphaned-lineage-correlation', 'synchronized_renewal',
+             '[]'::jsonb, 'ethereum-mainnet', 110, '0xhistory110', '0xtx110', 0, 0,
+             'canonical', 'candidate', 'keccak256:test'
+         )",
+    )
+    .execute(&database.pool)
+    .await?;
+    let route = "/v2/diagnostics/events?name=history.eth&page_size=20";
+
+    let before = v2_history_payload_for_database(&database, route).await?;
+    let renewal = before["data"]
+        .as_array()
+        .expect("diagnostic rows")
+        .iter()
+        .find(|row| row["event_identity"] == "history-renewal")
+        .expect("the renewal is served while its lineage is canonical");
+    assert_eq!(renewal["migration_associations"], json!([{
+        "migration_correlation_ids": ["orphaned-lineage-correlation"],
+        "correlation_kind": "synchronized_renewal",
+        "consumer_visibility": "candidate",
+    }]));
+
+    // Head publication orphans chain_lineage only; the event row and its association keep
+    // their `canonical` stamps until Interpret's redo deletes the event.
+    sqlx::query(
+        "UPDATE bigname_phase.chain_lineage
+         SET canonicality_state = 'orphaned'::bigname_phase.canonicality_state
+         WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xhistory110'",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let after = v2_history_payload_for_database(&database, route).await?;
+    let rows = after["data"].as_array().expect("diagnostic rows");
+    assert!(
+        rows.iter().all(|row| row["event_identity"] != "history-renewal"),
+        "an event on an orphaned lineage must leave diagnostics before Interpret clears it"
+    );
+    assert!(
+        rows.iter().any(|row| row["event_identity"] == "history-expiry"),
+        "sibling events on readable blocks stay served"
+    );
+    let stamps: Vec<(String, String)> = sqlx::query_as(
+        "SELECT ne.canonicality_state::text, association.canonicality_state::text
+         FROM normalized_events ne
+         JOIN migration_event_associations association
+           ON association.event_identity = ne.event_identity
+         WHERE ne.event_identity = 'history-renewal'",
+    )
+    .fetch_all(&database.pool)
+    .await?;
+    assert_eq!(stamps, vec![("canonical".to_owned(), "canonical".to_owned())]);
+
+    database.cleanup().await
+}
+
 async fn collect_remaining_cursor_pages(
     database: &TestDatabase,
     route: &str,
