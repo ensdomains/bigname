@@ -953,7 +953,7 @@ async fn v2_get_address_names_rejects_bad_address_and_unknown_include() -> Resul
 
     let bad_include = v2_address_names_response_for_database(
         &database,
-        &format!("/v1/addresses/{V2_ADDRESS}/names?include=counts"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?include=events"),
     )
     .await?;
     assert_eq!(bad_include.status(), StatusCode::BAD_REQUEST);
