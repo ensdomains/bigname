@@ -14,9 +14,10 @@ use super::support::{ensure_public_namespace, parse_evm_address};
 use super::{
     CursorPayload, Envelope, Event, HISTORY_TOTAL_COUNT_CAP, HistoryScope, Meta, Page,
     QueryParamAllowlist, QueryParams, RelationSet, StrictQueryParams, V2Error, V2Result,
-    api_error_to_v2, build_event, decode, encode, history_page_options, history_sort_token,
-    history_storage_order, history_storage_scope, history_total_count, insert_history_filter_keys,
-    map_history_page_error, resolve_history_block_window, validate_latest_collection_selectors,
+    api_error_to_v2, build_event, decode, encode, history_include_data, history_page_options,
+    history_sort_token, history_storage_order, history_storage_scope, history_total_count,
+    insert_history_filter_keys, map_history_page_error, resolve_history_block_window,
+    validate_latest_collection_selectors,
 };
 
 const ADDRESS_FILTER_KEY: &str = "address";
@@ -39,6 +40,7 @@ impl QueryParamAllowlist for AddressHistoryQueryParams {
         "order",
         "from_timestamp",
         "to_timestamp",
+        "include",
         "cursor",
         "page_size",
     ];
@@ -53,6 +55,7 @@ pub(crate) async fn get_address_history(
 ) -> V2Result<Json<Envelope<Vec<Event>>>> {
     let params = params.into_inner();
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
+    let include_data = history_include_data(&params.include)?;
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let namespace = params.namespace.clone().unwrap_or_else(|| "ens".to_owned());
     ensure_public_namespace(&namespace).map_err(api_error_to_v2)?;
@@ -143,7 +146,7 @@ pub(crate) async fn get_address_history(
                 .as_ref()
                 .and_then(|logical_name_id| names.get(logical_name_id))
                 .map(|row| row.normalized_name.as_str());
-            build_event(row, name)
+            build_event(row, name, include_data)
         })
         .collect();
     Ok(Json(Envelope {

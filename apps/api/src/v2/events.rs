@@ -13,10 +13,10 @@ use crate::AppState;
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::support::normalize_inferred_route_name;
 use super::{
-    CursorPayload, Envelope, HISTORY_TOTAL_COUNT_CAP, HistoryEventType, Meta, Page,
-    QueryParamAllowlist, QueryParams, StrictQueryParams, V2Error, V2Result, decode, encode,
-    format_timestamp, history_event_type, history_sort_token, history_storage_order,
-    history_total_count, insert_history_filter_keys, map_history_page_error,
+    CursorPayload, Envelope, EventDetail, HISTORY_TOTAL_COUNT_CAP, HistoryEventType, Meta, Page,
+    QueryParamAllowlist, QueryParams, StrictQueryParams, V2Error, V2Result, build_event_detail,
+    decode, encode, format_timestamp, history_event_type, history_include_data, history_sort_token,
+    history_storage_order, history_total_count, insert_history_filter_keys, map_history_page_error,
     product_history_event_kinds, resolve_history_block_window,
     validate_latest_collection_selectors,
 };
@@ -44,6 +44,7 @@ impl QueryParamAllowlist for EventsQueryParams {
         "from_timestamp",
         "to_timestamp",
         "order",
+        "include",
         "at",
         "finality",
         "cursor",
@@ -65,6 +66,9 @@ pub(crate) struct Event {
     pub(crate) timestamp: Option<String>,
     pub(crate) transaction_hash: Option<String>,
     pub(crate) log_index: Option<i64>,
+    /// Present only with `include=data`: `kind`, `contract_address`, `data`.
+    #[serde(flatten)]
+    pub(crate) detail: Option<EventDetail>,
 }
 
 #[derive(Debug)]
@@ -84,6 +88,7 @@ pub(crate) async fn get_events(
 ) -> V2Result<Json<Envelope<Vec<Event>>>> {
     let params = params.into_inner();
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
+    let include_data = history_include_data(&params.include)?;
     let namespace = resolve_events_namespace(&params)?;
     let mut parsed = parse_events_filter(&params, &namespace)?;
     if params.event_types.is_none() {
@@ -166,7 +171,7 @@ pub(crate) async fn get_events(
                 .as_ref()
                 .and_then(|logical_name_id| names.get(logical_name_id))
                 .map(|row| row.normalized_name.as_str());
-            build_event(row, name)
+            build_event(row, name, include_data)
         })
         .collect();
     Ok(Json(Envelope {
@@ -182,7 +187,11 @@ pub(crate) async fn get_events(
     }))
 }
 
-pub(crate) fn build_event(row: &StorageHistoryEvent, name: Option<&str>) -> Option<Event> {
+pub(crate) fn build_event(
+    row: &StorageHistoryEvent,
+    name: Option<&str>,
+    include_data: bool,
+) -> Option<Event> {
     let event_type = history_event_type(&row.event_kind)?;
 
     Some(Event {
@@ -196,6 +205,7 @@ pub(crate) fn build_event(row: &StorageHistoryEvent, name: Option<&str>) -> Opti
         timestamp: row.block_timestamp.map(format_timestamp),
         transaction_hash: row.transaction_hash.clone(),
         log_index: row.log_index,
+        detail: include_data.then(|| build_event_detail(row, event_type)),
     })
 }
 
@@ -354,7 +364,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use bigname_storage::CanonicalityState;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
     use crate::v2::{ErrorCode, RawQueryParams};
@@ -523,6 +533,7 @@ mod tests {
         let event = build_event(
             &storage_event("RegistrationGranted", Some("ens:alice.eth")),
             Some("alice.eth"),
+            false,
         )
         .expect("product event must build");
 
@@ -534,25 +545,39 @@ mod tests {
         assert_eq!(event.transaction_hash, Some("0xtx".to_owned()));
         assert_eq!(event.log_index, Some(5));
 
-        let event = build_event(&storage_event("RecordChanged", None), None)
+        let event = build_event(&storage_event("RecordChanged", None), None, false)
             .expect("product event without name must build");
         assert_eq!(event.name, None);
+        assert!(event.detail.is_none());
+        let serialized = serde_json::to_value(&event).expect("event must serialize");
+        assert!(serialized.get("kind").is_none());
+        assert!(serialized.get("data").is_none());
+        assert!(serialized.get("contract_address").is_none());
+
+        let detailed = build_event(&storage_event("RecordChanged", None), None, true)
+            .expect("detailed product event must build");
+        let serialized = serde_json::to_value(&detailed).expect("event must serialize");
+        assert_eq!(serialized["kind"], json!("RecordChanged"));
+        assert_eq!(serialized["contract_address"], Value::Null);
+        assert_eq!(serialized["data"], json!({}));
 
         assert!(
             build_event(
                 &storage_event("SurfaceBound", Some("ens:alice.eth")),
-                Some("alice.eth")
+                Some("alice.eth"),
+                false,
             )
             .is_none()
         );
         assert!(
             build_event(
                 &storage_event("MigrationApplied", Some("ens:alice.eth")),
-                Some("alice.eth")
+                Some("alice.eth"),
+                false,
             )
             .is_none()
         );
-        assert!(build_event(&storage_event("ContractDiscovered", None), None).is_none());
+        assert!(build_event(&storage_event("ContractDiscovered", None), None, false).is_none());
     }
 
     #[test]

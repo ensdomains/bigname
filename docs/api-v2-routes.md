@@ -932,6 +932,66 @@ their route-specific anchors:
   `total_count=null`. Unanchored `/v1/events` reads (namespace, type, and block
   or timestamp windows only) never count and always report `total_count=null`.
 
+### History event payloads (`include=data`)
+
+The same three collections accept `include=data`. `include` on these routes
+accepts only `data`; any other value returns `400 invalid_input`. Without it,
+rows keep their lean shape and carry none of the fields below. With it, every
+returned row gains three fields:
+
+- `kind`: the raw storage event kind behind the friendly `type`, such as
+  `RegistrationGranted`, `LabelRegistered`, `RecordChanged`, or
+  `EACRolesChanged`. This is the one pipeline term the product tier exposes,
+  so clients that need the upstream event name for a badge or a raw-type
+  facet do not have to fall back to diagnostics.
+- `contract_address`: the lower-cased address of the contract that emitted the
+  underlying log. It is `null` for rows derived from interpreter state rather
+  than from one on-chain log.
+- `data`: an object derived from the stored normalized event's before/after
+  state, translated into dictionary vocabulary. Only fields the row actually
+  carries are present; absent or null source values are omitted rather than
+  serialized as `null`, so `data` may be `{}`. Addresses are lower-cased.
+  Contract pointers use the `{chain_id, address}` shape with the row's own
+  numeric `chain_id`; a zero-address pointer means "cleared" and is omitted, so
+  a `resolver` row whose `data` has no `resolver` records a clearing. Unix
+  expiry values become RFC 3339 `expires_at`.
+
+Per friendly `type`, `data` may contain:
+
+| `type` | `data` fields |
+| --- | --- |
+| `registration` | `registrant`, `owner`, `expires_at`, `resolver: {chain_id, address}`, `subregistry: {chain_id, address}` |
+| `renewal`, `release` | `expires_at` |
+| `expiry` | `expires_at`, `fuses` (uint32 word when the change came through NameWrapper) |
+| `transfer` | `from`, `to`, `fuses` |
+| `authority` | `owner` (the new registry owner), `from` (the previous owner when the row retains it) |
+| `resolver` | `resolver: {chain_id, address}` (absent when the pointer was cleared) |
+| `record` | `key`, `value`, `coin_type` (number, for `addr:<coin_type>` keys). `key` is the stored record key; history retains writes outside the public record grammar (for example `name` or `abi:<content_type>`), so `key` may name a family the records route does not serve. `value` is present only when the write's value was retained: text values are strings, other families are hex strings. A record-version reset (`kind=RecordVersionChanged`) carries no fields. |
+| `primary_name` | `address`, `coin_type` (number) |
+| `permission` | `address` (the subject), `powers` (product power vocabulary, as on permission rows), `fuses` (uint32 word for NameWrapper fuse changes) |
+| `subregistry` | `subregistry: {chain_id, address}` (absent when the link was cleared) |
+
+Example row from `GET /v1/names/alice.eth/history?include=data&type=record`:
+
+```json
+{
+  "type": "record",
+  "name": "alice.eth",
+  "namespace": "ens",
+  "registration_id": null,
+  "block_number": 19000106,
+  "timestamp": "2026-06-10T00:00:06Z",
+  "transaction_hash": "0x...",
+  "log_index": 12,
+  "kind": "RecordChanged",
+  "contract_address": "0x231b0ee14048e9dccd1d247744d114a4eb5e8e63",
+  "data": { "key": "addr:60", "coin_type": 60, "value": "0x..." }
+}
+```
+
+`data` never exposes before/after state, raw fact references, or other
+pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
+
 ### `GET /v1/names/{name}/history`
 
 - Method/path: `GET /v1/names/{name}/history`
@@ -939,10 +999,12 @@ their route-specific anchors:
 - Purpose: name history.
 - Request parameters: path `name`; query `namespace`,
   `scope=name|registration|both`, `type`, `order=asc|desc`, `from_timestamp`,
-  `to_timestamp`, `cursor`, `page_size`, and optional `finality=latest`. `at`
-  and historical `finality` values are rejected by the shared latest-state
-  collection rule. `type`, `order`, and the timestamp window follow the
-  [history collection filters](#history-collection-filters).
+  `to_timestamp`, `include=data`, `cursor`, `page_size`, and optional
+  `finality=latest`. `at` and historical `finality` values are rejected by the
+  shared latest-state collection rule. `type`, `order`, and the timestamp
+  window follow the [history collection filters](#history-collection-filters);
+  `include=data` adds the [history event
+  payloads](#history-event-payloads-includedata).
 - Response shape: `data` is an array of dedicated lean event rows:
   `{type, name, namespace, registration_id, block_number, timestamp,
   transaction_hash, log_index}`. `registration_id` carries actual registration
@@ -951,7 +1013,9 @@ their route-specific anchors:
   contract, including the committed companion change that adds `resource_id`
   for the underlying resource identity, is documented under
   [`GET /v1/events`](#get-v2events). Rows never include before/after
-  state, raw normalized-event payloads, or a `data` change object. Friendly
+  state or raw normalized-event payloads; without `include=data` they carry no
+  `data`, `kind`, or `contract_address` either, and with it they carry exactly
+  the documented friendly payload. Friendly
   `type` vocabulary: `registration`, `renewal`, `release`, `expiry`,
   `transfer`, `authority`, `resolver`, `record`, `primary_name`, `permission`,
   `subregistry` (an ENSv2 registration's subregistry link set or cleared).
@@ -1418,10 +1482,12 @@ their route-specific anchors:
 - Purpose: address activity history.
 - Request parameters: path `address`; query `namespace`, `relation`,
   `scope=name|registration|both`, `type`, `order=asc|desc`, `from_timestamp`,
-  `to_timestamp`, `cursor`, `page_size`, and optional `finality=latest`. `at`
+  `to_timestamp`, `include=data`, `cursor`, `page_size`, and optional
+  `finality=latest`. `at`
   and historical `finality` values are rejected by the shared latest-state
   collection rule. `type`, `order`, and the timestamp window follow the
-  [history collection filters](#history-collection-filters).
+  [history collection filters](#history-collection-filters); `include=data`
+  adds the [history event payloads](#history-event-payloads-includedata).
   `namespace` defaults to `ens` when omitted. `relation` accepts a
   comma-separated set of `owner`, `manager`, and `registrant`; `any`
   normalizes to all three values. Rows match when any listed relation matches.
@@ -1551,14 +1617,15 @@ For a registrar lease first identified by a later readable observation, registra
   block filters.
 - Request parameters: query `namespace`, `name`, `address`,
   `registration_id`, `type`, `from_block`, `to_block`, `from_timestamp`,
-  `to_timestamp`, `order=asc|desc`, `cursor`, `page_size`, and optional
-  `finality=latest`. `at` and historical `finality` values are rejected by the
+  `to_timestamp`, `order=asc|desc`, `include=data`, `cursor`, `page_size`, and
+  optional `finality=latest`. `at` and historical `finality` values are rejected by the
   shared latest-state collection rule. When `name` is present and `namespace`
   is omitted, namespace is inferred from the name; `namespace` defaults to
   `ens` only when there is no name filter. `type` (one value or a
   comma-separated set), `order`, and the timestamp window follow the [history
   collection filters](#history-collection-filters); the resolved timestamp
-  window intersects an explicit `from_block`/`to_block` range.
+  window intersects an explicit `from_block`/`to_block` range. `include=data`
+  adds the [history event payloads](#history-event-payloads-includedata).
 - Response shape: `data` is an array of compact event rows with friendly
   `type` vocabulary. Raw upstream event kinds are diagnostics-only. Event-row
   identity uses two fields with distinct meanings. `registration_id` is actual

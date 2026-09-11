@@ -1950,3 +1950,148 @@ fn history_blocks(payload: &Value) -> Vec<i64> {
         .map(|row| row["block_number"].as_i64().expect("history row block_number"))
         .collect()
 }
+
+#[tokio::test]
+async fn v2_history_include_data_adds_friendly_payloads_and_keeps_lean_rows_otherwise(
+) -> Result<()> {
+    const RESOLVER: &str = "0x0000000000000000000000000000000000000abc";
+    let (database, lean) = v2_history_payload("/v1/names/history.eth/history?page_size=20").await?;
+    for row in lean["data"].as_array().expect("history data") {
+        assert!(row.get("data").is_none());
+        assert!(row.get("kind").is_none());
+        assert!(row.get("contract_address").is_none());
+    }
+    // The record write was emitted by the resolver contract; the fixture stores
+    // the emitter in mixed case on the raw fact reference.
+    sqlx::query(
+        "UPDATE bigname_phase.normalized_events \
+         SET raw_fact_ref = raw_fact_ref || '{\"emitting_address\":\"0x0000000000000000000000000000000000000ABC\"}'::jsonb \
+         WHERE event_identity = 'history-record'",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let payload = v2_history_payload_for_database(
+        &database,
+        "/v1/names/history.eth/history?include=data&page_size=20",
+    )
+    .await?;
+    let rows = payload["data"].as_array().expect("history data");
+    assert_eq!(rows.len(), 10);
+    let row_at = |block: i64| {
+        rows.iter()
+            .find(|row| row["block_number"] == json!(block))
+            .unwrap_or_else(|| panic!("row at block {block}"))
+    };
+    for row in rows {
+        assert!(row["kind"].is_string(), "{row}");
+        assert!(row.get("contract_address").is_some(), "{row}");
+        assert!(row["data"].is_object(), "{row}");
+        for key in ["type", "name", "namespace", "registration_id", "block_number", "timestamp", "transaction_hash", "log_index"] {
+            assert!(row.get(key).is_some(), "{key} missing from {row}");
+        }
+        assert!(row.get("before_state").is_none());
+        assert!(row.get("after_state").is_none());
+        assert!(row.get("event_kind").is_none());
+    }
+    assert_no_banned_v1_spellings(&payload);
+
+    let registration = row_at(102);
+    assert_eq!(registration["kind"], json!("RegistrationGranted"));
+    assert_eq!(registration["contract_address"], Value::Null);
+    assert_eq!(
+        registration["data"],
+        json!({
+            "registrant": "0x00000000000000000000000000000000000000aa",
+            "expires_at": "2030-03-17T17:46:40Z",
+        })
+    );
+    assert_eq!(row_at(110)["kind"], json!("RegistrationRenewed"));
+    assert_eq!(
+        row_at(110)["data"],
+        json!({ "expires_at": "2031-10-17T10:40:00Z" })
+    );
+    assert_eq!(row_at(109)["kind"], json!("ExpiryChanged"));
+    assert_eq!(
+        row_at(109)["data"],
+        json!({ "expires_at": "2031-10-17T10:40:00Z" })
+    );
+    assert_eq!(row_at(108)["kind"], json!("RegistrationReleased"));
+    assert_eq!(row_at(108)["data"], json!({}));
+    assert_eq!(row_at(103)["kind"], json!("TokenControlTransferred"));
+    assert_eq!(
+        row_at(103)["data"],
+        json!({ "to": "0x00000000000000000000000000000000000000bb" })
+    );
+    assert_eq!(row_at(101)["kind"], json!("AuthorityTransferred"));
+    assert_eq!(
+        row_at(101)["data"],
+        json!({ "owner": "0x00000000000000000000000000000000000000cc" })
+    );
+    assert_eq!(row_at(105)["kind"], json!("AuthorityEpochChanged"));
+    assert_eq!(
+        row_at(105)["data"],
+        json!({ "owner": "0x00000000000000000000000000000000000000cc" })
+    );
+    assert_eq!(row_at(104)["kind"], json!("ResolverChanged"));
+    assert_eq!(
+        row_at(104)["data"],
+        json!({ "resolver": { "chain_id": 1, "address": RESOLVER } })
+    );
+    let record = row_at(106);
+    assert_eq!(record["kind"], json!("RecordChanged"));
+    assert_eq!(record["contract_address"], json!(RESOLVER));
+    assert_eq!(
+        record["data"],
+        json!({
+            "key": "addr:60",
+            "coin_type": 60,
+            "value": "0x0000000000000000000000000000000000000def",
+        })
+    );
+    assert_eq!(row_at(107)["kind"], json!("PermissionChanged"));
+    assert_eq!(
+        row_at(107)["data"],
+        json!({
+            "address": "0x00000000000000000000000000000000000000dd",
+            "powers": ["registration_control"],
+        })
+    );
+
+    let events = v2_history_payload_for_database(
+        &database,
+        "/v1/events?name=history.eth&type=record&include=data",
+    )
+    .await?;
+    let event_rows = events["data"].as_array().expect("events data");
+    assert_eq!(event_rows.len(), 1);
+    assert_eq!(event_rows[0]["kind"], json!("RecordChanged"));
+    assert_eq!(event_rows[0]["contract_address"], json!(RESOLVER));
+    assert_eq!(event_rows[0]["data"]["key"], json!("addr:60"));
+    let lean_events =
+        v2_history_payload_for_database(&database, "/v1/events?name=history.eth&type=record")
+            .await?;
+    assert!(lean_events["data"][0].get("data").is_none());
+    assert!(lean_events["data"][0].get("kind").is_none());
+
+    let address = v2_history_payload_for_database(
+        &database,
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?include=data&page_size=20",
+    )
+    .await?;
+    let address_rows = address["data"].as_array().expect("address history data");
+    assert!(!address_rows.is_empty());
+    assert!(address_rows.iter().all(|row| row["kind"].is_string() && row["data"].is_object()));
+
+    for route in [
+        "/v1/names/history.eth/history?include=bogus",
+        "/v1/names/history.eth/history?include=data,bogus",
+        "/v1/events?name=history.eth&include=events",
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?include=payload",
+    ] {
+        let response = v2_history_response_for_database(&database, route).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{route}");
+    }
+
+    database.cleanup().await
+}
