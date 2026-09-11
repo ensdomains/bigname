@@ -5663,6 +5663,295 @@ async fn seed_v2_alice_name_records_fixture_with_row(
     Ok(())
 }
 
+fn v2_subname_names(payload: &Value) -> Vec<String> {
+    payload["data"]
+        .as_array()
+        .expect("subnames data must be an array")
+        .iter()
+        .map(|row| {
+            row["name"]
+                .as_str()
+                .expect("subname name must be a string")
+                .to_owned()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn v2_get_subnames_q_filters_by_normalized_label_prefix() -> Result<()> {
+    let (database, payload) = v2_subnames_payload("/v1/names/Parent.eth/subnames?q=AL").await?;
+    assert_eq!(v2_subname_names(&payload), vec!["alpha.parent.eth"]);
+    assert_eq!(
+        payload["page"]["total_count"],
+        Value::Null,
+        "a filtered page must not report the unfiltered parent total"
+    );
+    assert_eq!(payload["page"]["has_more"], json!(false));
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v1/names/Parent.eth/subnames?q=alpha.")
+            .await?;
+    assert_eq!(v2_subname_names(&payload), vec!["alpha.parent.eth"]);
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v1/names/Parent.eth/subnames?q=alph.")
+            .await?;
+    assert!(v2_subname_names(&payload).is_empty());
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v1/names/Parent.eth/subnames?q=x").await?;
+    assert!(v2_subname_names(&payload).is_empty());
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v1/names/Parent.eth/subnames?q=").await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["alpha.parent.eth", "beta.parent.eth", "gamma.parent.eth"]
+    );
+    assert_eq!(payload["page"]["total_count"], json!(3));
+
+    let response =
+        v2_subnames_response_for_database(&database, "/v1/names/Parent.eth/subnames?q=a..b")
+            .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = read_json(response).await?;
+    assert_eq!(body["error"]["code"], json!("invalid_input"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_subnames_sorts_by_timestamps_and_binds_cursors_to_sort_and_order() -> Result<()> {
+    let (database, payload) = v2_subnames_payload(
+        "/v1/names/Parent.eth/subnames?sort=expires_at&order=asc&page_size=1",
+    )
+    .await?;
+    assert_eq!(v2_subname_names(&payload), vec!["alpha.parent.eth"]);
+    assert_eq!(payload["page"]["total_count"], json!(3));
+    assert_eq!(payload["page"]["has_more"], json!(true));
+    let first_cursor = payload["page"]["next_cursor"]
+        .as_str()
+        .expect("first page must carry a cursor")
+        .to_owned();
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        &format!(
+            "/v1/names/Parent.eth/subnames?sort=expires_at&order=asc&page_size=1&cursor={first_cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["beta.parent.eth"],
+        "rows without an expiry sort after every dated row, ties broken by name"
+    );
+    let second_cursor = payload["page"]["next_cursor"]
+        .as_str()
+        .expect("second page must carry a cursor")
+        .to_owned();
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        &format!(
+            "/v1/names/Parent.eth/subnames?sort=expires_at&order=asc&page_size=1&cursor={second_cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(v2_subname_names(&payload), vec!["gamma.parent.eth"]);
+    assert_eq!(payload["page"]["has_more"], json!(false));
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?sort=expires_at&order=desc",
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["beta.parent.eth", "gamma.parent.eth", "alpha.parent.eth"],
+        "descending timestamp order lists rows without an expiry first"
+    );
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?sort=registered_at",
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["alpha.parent.eth", "beta.parent.eth", "gamma.parent.eth"]
+    );
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?sort=registered_at&order=desc",
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["beta.parent.eth", "gamma.parent.eth", "alpha.parent.eth"]
+    );
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?sort=name&order=desc",
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["gamma.parent.eth", "beta.parent.eth", "alpha.parent.eth"]
+    );
+
+    for uri in [
+        format!("/v1/names/Parent.eth/subnames?sort=name&page_size=1&cursor={first_cursor}"),
+        format!(
+            "/v1/names/Parent.eth/subnames?sort=expires_at&order=desc&page_size=1&cursor={first_cursor}"
+        ),
+        format!(
+            "/v1/names/Parent.eth/subnames?sort=registered_at&page_size=1&cursor={first_cursor}"
+        ),
+        format!("/v1/names/Parent.eth/subnames?sort=expires_at&q=al&cursor={first_cursor}"),
+        "/v1/names/Parent.eth/subnames?sort=expiry".to_owned(),
+        "/v1/names/Parent.eth/subnames?order=sideways".to_owned(),
+    ] {
+        let response = v2_subnames_response_for_database(&database, &uri).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{uri} must be rejected"
+        );
+        let body: Value = read_json(response).await?;
+        assert_eq!(body["error"]["code"], json!("invalid_input"));
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_subnames_include_expired_false_omits_released_and_past_expiry_rows() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+    seed_v2_subnames_bound_child(
+        &database,
+        "ens:epsilon.parent.eth",
+        "epsilon.parent.eth",
+        "node:epsilon.parent.eth",
+        85,
+        Uuid::from_u128(0x4030),
+        Uuid::from_u128(0x5030),
+        Uuid::from_u128(0x6030),
+        json!({
+            "registration": {
+                "status": "active",
+                "authority_kind": "registrar",
+                "registrant": "0x00000000000000000000000000000000000000eB",
+                "registered_at": "2019-01-02T03:04:05Z",
+                "expiry": "2020-01-02T03:04:05Z"
+            },
+            "control": {
+                "registry_owner": "0x00000000000000000000000000000000000000eA"
+            }
+        }),
+    )
+    .await?;
+    upsert_phase_children_current_rows(
+        &database.pool,
+        &[v2_subnames_declared_child_row(
+            "ens:parent.eth",
+            "ens:epsilon.parent.eth",
+            "epsilon.parent.eth",
+            "node:epsilon.parent.eth",
+            905,
+            85,
+        )],
+    )
+    .await?;
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v1/names/Parent.eth/subnames").await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec![
+            "alpha.parent.eth",
+            "beta.parent.eth",
+            "epsilon.parent.eth",
+            "gamma.parent.eth"
+        ],
+        "the default keeps released and past-expiry rows"
+    );
+    assert_eq!(payload["page"]["total_count"], json!(4));
+    assert_eq!(payload["data"][2]["registration_status"], json!("active"));
+    assert_eq!(
+        payload["data"][2]["expires_at"],
+        json!("2020-01-02T03:04:05Z")
+    );
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?include_expired=true",
+    )
+    .await?;
+    assert_eq!(v2_subname_names(&payload).len(), 4);
+    assert_eq!(payload["page"]["total_count"], json!(4));
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?include_expired=false",
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["alpha.parent.eth", "gamma.parent.eth"],
+        "released rows and rows whose expires_at has passed are omitted; unregistered rows stay"
+    );
+    assert_eq!(payload["page"]["total_count"], Value::Null);
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?include_expired=false&sort=expires_at&order=desc",
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["gamma.parent.eth", "alpha.parent.eth"]
+    );
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?include_expired=false&page_size=1",
+    )
+    .await?;
+    assert_eq!(v2_subname_names(&payload), vec!["alpha.parent.eth"]);
+    assert_eq!(payload["page"]["has_more"], json!(true));
+    let cursor = payload["page"]["next_cursor"]
+        .as_str()
+        .expect("filtered page must carry a cursor")
+        .to_owned();
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        &format!("/v1/names/Parent.eth/subnames?include_expired=false&page_size=1&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(v2_subname_names(&payload), vec!["gamma.parent.eth"]);
+    assert_eq!(payload["page"]["has_more"], json!(false));
+
+    for uri in [
+        format!("/v1/names/Parent.eth/subnames?page_size=1&cursor={cursor}"),
+        format!("/v1/names/Parent.eth/subnames?include_expired=true&page_size=1&cursor={cursor}"),
+        "/v1/names/Parent.eth/subnames?include_expired=maybe".to_owned(),
+    ] {
+        let response = v2_subnames_response_for_database(&database, &uri).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{uri} must be rejected"
+        );
+        let body: Value = read_json(response).await?;
+        assert_eq!(body["error"]["code"], json!("invalid_input"));
+    }
+
+    Ok(())
+}
+
 async fn v2_subnames_payload(uri: &str) -> Result<(TestDatabase, Value)> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_subnames_fixture(&database).await?;

@@ -837,9 +837,35 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Method/path: `GET /v1/names/{name}/subnames`
 - Tier: product read.
 - Purpose: direct subnames.
-- Request parameters: path `name`; query `namespace`, `include=counts`,
-  `cursor`, `page_size`, and optional `finality=latest`. `at` and historical
-  `finality` values are rejected by the shared latest-state collection rule.
+- Request parameters: path `name`; query `namespace`, `q`,
+  `sort=name|expires_at|registered_at`, `order=asc|desc`,
+  `include_expired=true|false`, `include=counts`, `cursor`, `page_size`, and
+  optional `finality=latest`. `at` and historical `finality` values are
+  rejected by the shared latest-state collection rule.
+  `q` applies prefix matching to the served `name` under exactly the rules
+  documented for `q` on `GET /v1/addresses/{address}/names`: the whole value is
+  normalized as an ENSIP-15 name prefix (`q=AL` matches `alpha.parent.eth`),
+  one trailing dot marks a label boundary (`q=alpha.` matches
+  `alpha.parent.eth` but not `alphax.parent.eth`), an empty `q` is absent, and
+  input the normalizer rejects returns `400 invalid_input`. The comparison is
+  byte-wise against the served name, so a [non-name form](glossary.md#non-name-form)
+  row matches only a prefix of its placeholder or escaped text.
+  `sort` defaults to `name` and `order` to `asc`. `expires_at` and
+  `registered_at` order by the child's own registration timestamps, read the
+  same way `GET /v1/addresses/{address}/names` reads them; a child with no
+  current name row or no such timestamp sorts after every dated row ascending
+  and before every dated row descending. Ties, and the whole `name` sort, break
+  by served name and then by child identity. Any other `sort` or `order` value
+  returns `400 invalid_input`.
+  `include_expired` defaults to `true`, which is the route's prior behaviour:
+  released children and children whose `expires_at` has passed are listed with
+  their `registration_status` and `expires_at` as served. `include_expired=false`
+  omits a child whose current registration status is `released` or whose
+  `expires_at` is earlier than the database's transaction time when the page is
+  read. A child with no registration or no expiry — an unregistered subname, or
+  one under a parent that carries no expiry — is not expired and stays. bigname
+  applies no grace period here: the comparison is against the served
+  `expires_at`. Any other value returns `400 invalid_input`.
 - Response shape: `data` is an array of dedicated subname rows in dictionary
   vocabulary: `name`, `display_name`, `namespace`, `namehash`, `labelhash`,
   `owner`, `registrant`, `registration_status`, `registered_at`,
@@ -869,10 +895,16 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   use `GET /v1/names/{name}/records` for `resolver`, `addresses`,
   `text_records`, and `content_hash`.
   `include=counts` adds `subname_count`, the row's direct subname count.
-- Pagination behavior: standard collection pagination by
-  `display_name` ascending. `page.total_count` is populated on every page with
-  the parent's direct readable subname count: the same bounded per-parent
-  aggregate that already annotates the page, so it costs no extra scan.
+- Pagination behavior: standard collection pagination in the requested sort
+  and order. Cursors are bound to namespace, parent, `q`, `include_expired`,
+  sort, and order; a cursor replayed under different controls returns
+  `400 invalid_input`. Cursors issued before these controls existed name the
+  default page and stay valid for a request that asks for exactly that page.
+  `page.total_count` is populated with the parent's direct readable subname
+  count — the same bounded per-parent aggregate that already annotates the page,
+  so it costs no extra scan — only when the page admits every child, that is
+  when `q` is absent and `include_expired` is not `false`. A narrowed page
+  reports `total_count: null` rather than a count it did not compute.
 - Snapshot behavior: the parent and subname rows are selected from current
   state. The response omits `meta.as_of` and `meta.as_of_token`, and its cursor
   carries no snapshot validity claim. True as-of child enumeration is deferred

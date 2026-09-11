@@ -1,11 +1,15 @@
+mod page;
 mod reads;
 mod types;
+pub use page::load_children_current_page_filtered;
 pub use reads::{
     load_children_current, load_children_current_including_noncanonical,
     load_children_current_page, load_children_current_summaries,
 };
 pub use types::{
-    ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentRow, ChildrenCurrentSummary,
+    ChildrenCurrentKeysetCursor, ChildrenCurrentOrder, ChildrenCurrentPage,
+    ChildrenCurrentPageFilter, ChildrenCurrentRow, ChildrenCurrentSort, ChildrenCurrentSortValue,
+    ChildrenCurrentSummary,
 };
 
 const DECLARED_SURFACE_CLASS: &str = "declared";

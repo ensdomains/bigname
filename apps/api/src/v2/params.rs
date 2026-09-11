@@ -36,6 +36,7 @@ pub(crate) struct RawQueryParams {
     pub(crate) dedupe: Option<String>,
     pub(crate) sort: Option<String>,
     pub(crate) order: Option<String>,
+    pub(crate) include_expired: Option<String>,
     pub(crate) cursor: Option<String>,
     pub(crate) page_size: Option<u64>,
 }
@@ -62,6 +63,7 @@ pub(crate) struct QueryParams {
     pub(crate) dedupe: AddressNamesDedupe,
     pub(crate) sort: AddressNamesSort,
     pub(crate) order: SortOrder,
+    pub(crate) include_expired: Option<bool>,
     pub(crate) cursor: Option<String>,
     pub(crate) page_size: u64,
 }
@@ -110,6 +112,7 @@ impl TryFrom<RawQueryParams> for QueryParams {
             dedupe: parse_dedupe(raw.dedupe.as_deref())?,
             sort: parse_sort(raw.sort.as_deref())?,
             order: parse_order(raw.order.as_deref())?,
+            include_expired: parse_bool_flag(raw.include_expired.as_deref(), "include_expired")?,
             cursor: trim_to_option(raw.cursor),
             page_size: parse_page_size(raw.page_size)?,
         })
@@ -287,6 +290,15 @@ fn parse_sort(value: Option<&str>) -> V2Result<AddressNamesSort> {
     }
 }
 
+fn parse_bool_flag(value: Option<&str>, parameter: &'static str) -> V2Result<Option<bool>> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some("true") => Ok(Some(true)),
+        Some("false") => Ok(Some(false)),
+        Some(_) => Err(invalid_parameter(parameter)),
+    }
+}
+
 fn parse_page_size(value: Option<u64>) -> V2Result<u64> {
     match value {
         None => Ok(DEFAULT_PAGE_SIZE),
@@ -428,6 +440,26 @@ mod tests {
         assert_eq!(params.dedupe, AddressNamesDedupe::Registration);
         assert_eq!(params.sort, AddressNamesSort::ExpiresAt);
         assert_eq!(params.order, SortOrder::Desc);
+    }
+
+    #[test]
+    fn include_expired_parses_booleans_and_rejects_other_values() {
+        let defaulted = parse(RawQueryParams::default()).expect("default query must parse");
+        assert_eq!(defaulted.include_expired, None);
+        for (wire, expected) in [("true", Some(true)), ("false", Some(false))] {
+            let params = parse(RawQueryParams {
+                include_expired: Some(wire.to_owned()),
+                ..RawQueryParams::default()
+            })
+            .expect("include_expired must parse");
+            assert_eq!(params.include_expired, expected);
+        }
+        let error = parse(RawQueryParams {
+            include_expired: Some("maybe".to_owned()),
+            ..RawQueryParams::default()
+        })
+        .expect_err("non-boolean include_expired must fail");
+        assert_eq!(error.code(), ErrorCode::InvalidInput);
     }
 
     #[test]

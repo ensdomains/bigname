@@ -454,29 +454,37 @@ fn push_address_names_current_sort_timestamp_expr(
         AddressNamesCurrentSort::Name => {
             builder.push("NULL::TIMESTAMPTZ");
         }
-        AddressNamesCurrentSort::ExpiresAt => {
-            push_json_timestamp_coalesce_expr(
-                builder,
-                &[
-                    &["registration", "expires_at"],
-                    &["registration", "expiry_date"],
-                    &["registration", "expiry"],
-                    &["control", "expires_at"],
-                    &["control", "expiry_date"],
-                    &["control", "expiry"],
-                ],
-            );
-        }
-        AddressNamesCurrentSort::RegisteredAt => {
-            push_json_timestamp_coalesce_expr(
-                builder,
-                &[
-                    &["registration", "registered_at"],
-                    &["registration", "registration_date"],
-                ],
-            );
-        }
+        AddressNamesCurrentSort::ExpiresAt => push_expires_at_timestamp_expr(builder),
+        AddressNamesCurrentSort::RegisteredAt => push_registered_at_timestamp_expr(builder),
     };
+}
+
+/// Push the expiry timestamp read of a `name_current` row aliased `nc`: the same COALESCE over
+/// `declared_summary` paths that `sort=expires_at` orders by, shared with the children page so
+/// both collections agree on which expiry a name has.
+pub(crate) fn push_expires_at_timestamp_expr(builder: &mut QueryBuilder<'_, Postgres>) {
+    push_json_timestamp_coalesce_expr(
+        builder,
+        &[
+            &["registration", "expires_at"],
+            &["registration", "expiry_date"],
+            &["registration", "expiry"],
+            &["control", "expires_at"],
+            &["control", "expiry_date"],
+            &["control", "expiry"],
+        ],
+    );
+}
+
+/// Push the registration timestamp read of a `name_current` row aliased `nc`.
+pub(crate) fn push_registered_at_timestamp_expr(builder: &mut QueryBuilder<'_, Postgres>) {
+    push_json_timestamp_coalesce_expr(
+        builder,
+        &[
+            &["registration", "registered_at"],
+            &["registration", "registration_date"],
+        ],
+    );
 }
 
 fn push_json_timestamp_coalesce_expr(builder: &mut QueryBuilder<'_, Postgres>, paths: &[&[&str]]) {
@@ -531,7 +539,7 @@ fn timestamp_null_rank(value: Option<OffsetDateTime>, order: AddressNamesCurrent
     }
 }
 
-fn escape_like_pattern(value: &str) -> String {
+pub(crate) fn escape_like_pattern(value: &str) -> String {
     value
         .replace('\\', r"\\")
         .replace('%', r"\%")

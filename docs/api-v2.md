@@ -581,6 +581,7 @@ Common parameter rules:
 | `namespace` | name-inferred, address-anchored, and collection routes | explicit override or filter |
 | `include` | route-documented expansions | per-route allowlist |
 | `sort`, `order` | paginated routes that declare a sort set | route-documented field set plus `asc`/`desc` |
+| `include_expired` | `GET /v1/names/{name}/subnames` | `true` (default) lists released and past-expiry children; `false` omits them |
 | `cursor`, `page_size` | every paginated route | opaque cursor; default 50, max 200 |
 
 For a cross-namespace read with no explicit `namespace`, the API accounts for
