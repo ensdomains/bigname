@@ -704,10 +704,10 @@ indexes are additive; rollback may leave them in place.
 10. confirm the phase state directly in the database while the API is still
    stopped — the `project` row in `chain_phase_state` current with no pending
    redo, and Verify success from the `verify` row for each affected chain plus
-   the supervisor's Verify completion output (`/v2/status` cannot be used here
+   the supervisor's Verify completion output (`/v1/status` cannot be used here
    because the API is stopped; after startup, the API accepts every known verification level at or above Sepolia's `quick_synced` floor and rejects unknown
    levels);
-11. start the API built from the same commit and confirm `/v2/status` reports
+11. start the API built from the same commit and confirm `/v1/status` reports
    current phase state and no pending redo; and
 12. run the release smoke and public-edge checks before undraining traffic.
 
@@ -758,7 +758,7 @@ Probe the host-private API listener:
 
 ```sh
 curl -fsS http://127.0.0.1:3000/healthz
-curl -fsS http://127.0.0.1:3000/v2/status
+curl -fsS http://127.0.0.1:3000/v1/status
 ```
 
 `api_status="ready"` proves the API can reach PostgreSQL. Aggregate readiness

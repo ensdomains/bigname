@@ -734,7 +734,7 @@ boundary while the unadmitted resolver profile still publishes no record
 values. Basenames record facts remain gated by the admitted Base resolver
 profile.
 
-`GET /v2/names/{name}/records` reads this inventory for `indexed` behavior.
+`GET /v1/names/{name}/records` reads this inventory for `indexed` behavior.
 `verified` and `auto` may use fresh schema-v2 lookup as described in
 [`execution.md`](execution.md); they never read a legacy execution cache.
 

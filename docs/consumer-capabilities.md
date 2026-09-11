@@ -8,36 +8,36 @@ Wire format and route details live in [`api-v2.md`](api-v2.md) and
 
 | Set | Routes | Intended use |
 | --- | --- | --- |
-| Lookup | `POST /v2/lookup`, `GET /v2/status` | Batched name/address lookup and indexing readiness. |
-| Product reads | `/v2/names/*`, `/v2/addresses/*`, `/v2/permissions`, `/v2/search`, `/v2/events`, `/v2/resolvers/*`, `/v2/namespaces/*` | Name, record, address, permission, event, resolver, and namespace reads. |
-| Diagnostics | `/v2/diagnostics/*` | Coverage, binding, authority, record, manifest, and event inspection. |
+| Lookup | `POST /v1/lookup`, `GET /v1/status` | Batched name/address lookup and indexing readiness. |
+| Product reads | `/v1/names/*`, `/v1/addresses/*`, `/v1/permissions`, `/v1/search`, `/v1/events`, `/v1/resolvers/*`, `/v1/namespaces/*` | Name, record, address, permission, event, resolver, and namespace reads. |
+| Diagnostics | `/v1/diagnostics/*` | Coverage, binding, authority, record, manifest, and event inspection. |
 | GraphQL compatibility | `POST /graphql` | The subgraph-shaped compatibility surface described below. |
 | Operator health | `GET /healthz` | API process, opaque running-database-instance identity, and phase-runner heartbeat readiness. This is not a product route. |
 
 The v1 REST surface has been removed. In particular,
 `POST /v1/identity:lookup` no longer serves the native identity capability.
-`POST /v2/lookup` owns batched forward and reverse lookup with the v2 envelope;
+`POST /v1/lookup` owns batched forward and reverse lookup with the v2 envelope;
 it does not preserve the deleted v1 DTOs.
 
 ## Capability mapping
 
 | Capability | Route owner | Notes |
 | --- | --- | --- |
-| Batched forward and reverse lookup | `POST /v2/lookup` | `profile=feed` is the field-budgeted path; `profile=detail` returns the documented full record shape. |
-| Indexing readiness | `GET /v2/status` | Per-chain projection progress, stored head, indexing-process liveness, network-head readiness, and required Sepolia completed-Ingest state plus [verification-level evidence](glossary.md#verification-level). |
-| Exact name profile | `GET /v2/names/{name}` | Indexed or verified name and record fields, plus [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper lifecycle and fuse data when backed, subject to the route's source rules. |
-| Resolver records | `GET /v2/names/{name}/records` | Key-selected record reads plus inventory metadata. |
-| Direct subnames | `GET /v2/names/{name}/subnames` | Latest-state direct-subname collection. |
-| Name history | `GET /v2/names/{name}/history` | Name, registration, or combined history scope. |
-| Names by address | `GET /v2/addresses/{address}/names` | Owner, manager, and registrant relations with optional expansions. |
-| Primary name | `GET /v2/addresses/{address}/primary-name` | Indexed tuples and verified ENS coin-type 60 lookup as documented. |
-| Address history | `GET /v2/addresses/{address}/history` | Latest-state address-anchored event history. |
-| Permission holders | `GET /v2/permissions` | Known current permission rows that apply to each resource. Standard registry, registrar, and resolver approval/delegation paths are not yet authoritative enumerations, so coverage stays request-relative partial even for zero rows. An empty name-filter result reports `permission_support_unknown` when the name is missing or unrecognized, its current name is marked unsupported, or its current name is not bound to a registration resource. The exception is a resolved current name paired with an explicitly different `registration_id`: that supported filter combination selects no registration and returns an empty page without completeness metadata. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) ENSv1 NameWrapper holder enumeration remains a separate unsupported class. Returned current wrapper registrations still carry [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) lifecycle and fuse data when backed. |
-| Search | `GET /v2/search` | Name search only; no registration, pricing, or availability workflow. |
-| Events | `GET /v2/events` | Product event collection. |
-| Resolver overview | `GET /v2/resolvers/{chain_id}/{address}` | Resolver metadata, total section counts with deterministic samples capped at 100 items, and a separately paginated record-shaped bound-name collection, including [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper metadata when backed. |
-| Namespace metadata | `GET /v2/namespaces/{namespace}` | Product-facing namespace and capability metadata. |
-| Pipeline diagnostics | `/v2/diagnostics/*` | Explicit diagnostic tier, separate from product reads. |
+| Batched forward and reverse lookup | `POST /v1/lookup` | `profile=feed` is the field-budgeted path; `profile=detail` returns the documented full record shape. |
+| Indexing readiness | `GET /v1/status` | Per-chain projection progress, stored head, indexing-process liveness, network-head readiness, and required Sepolia completed-Ingest state plus [verification-level evidence](glossary.md#verification-level). |
+| Exact name profile | `GET /v1/names/{name}` | Indexed or verified name and record fields, plus [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper lifecycle and fuse data when backed, subject to the route's source rules. |
+| Resolver records | `GET /v1/names/{name}/records` | Key-selected record reads plus inventory metadata. |
+| Direct subnames | `GET /v1/names/{name}/subnames` | Latest-state direct-subname collection. |
+| Name history | `GET /v1/names/{name}/history` | Name, registration, or combined history scope. |
+| Names by address | `GET /v1/addresses/{address}/names` | Owner, manager, and registrant relations with optional expansions. |
+| Primary name | `GET /v1/addresses/{address}/primary-name` | Indexed tuples and verified ENS coin-type 60 lookup as documented. |
+| Address history | `GET /v1/addresses/{address}/history` | Latest-state address-anchored event history. |
+| Permission holders | `GET /v1/permissions` | Known current permission rows that apply to each resource. Standard registry, registrar, and resolver approval/delegation paths are not yet authoritative enumerations, so coverage stays request-relative partial even for zero rows. An empty name-filter result reports `permission_support_unknown` when the name is missing or unrecognized, its current name is marked unsupported, or its current name is not bound to a registration resource. The exception is a resolved current name paired with an explicitly different `registration_id`: that supported filter combination selects no registration and returns an empty page without completeness metadata. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) ENSv1 NameWrapper holder enumeration remains a separate unsupported class. Returned current wrapper registrations still carry [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) lifecycle and fuse data when backed. |
+| Search | `GET /v1/search` | Name search only; no registration, pricing, or availability workflow. |
+| Events | `GET /v1/events` | Product event collection. |
+| Resolver overview | `GET /v1/resolvers/{chain_id}/{address}` | Resolver metadata, total section counts with deterministic samples capped at 100 items, and a separately paginated record-shaped bound-name collection, including [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper metadata when backed. |
+| Namespace metadata | `GET /v1/namespaces/{namespace}` | Product-facing namespace and capability metadata. |
+| Pipeline diagnostics | `/v1/diagnostics/*` | Explicit diagnostic tier, separate from product reads. |
 
 The [record-ID resolver generation](architecture.md) supplies declared records
 and resolver permissions through the existing routes and response shapes once
@@ -386,8 +386,8 @@ not a comparison between the actual pre-boundary production publication and the
 activated Project publication deployed after the shared boundary. It proves identical
 product-visible row membership
 and every DTO field for `name_current`, `children_current`,
-`address_names_current`, both permission projections and `/v2/permissions`,
-resolver and record reads, primary-name and search reads, `/v2/events`, and
+`address_names_current`, both permission projections and `/v1/permissions`,
+resolver and record reads, primary-name and search reads, `/v1/events`, and
 name- and address-history reads, plus every GraphQL compatibility operation.
 The comparison covers ordered pages, page membership, every REST and Manager
 DTO field, summary/count fields, `has_more`, and point responses. Before the
@@ -395,13 +395,13 @@ test-only slice-1 re-walk, each normalized-event-backed cursor surface reads a
 page and saves its `next_cursor`. After the full Interpret and Project re-walk
 publishes, that pre-rewalk cursor is submitted to the post-rewalk test
 publication.
-For `/v2/events`, name history, address history, and every other product cursor
+For `/v1/events`, name history, address history, and every other product cursor
 surface backed by normalized-event row identity, it must resume from the same
 normalized-event keyset anchor with identical remaining product rows, pages,
 fields, `has_more`, and summary behavior. The anchor may be an unmapped event
 absent from the product response, so the corpus interleaves an unmapped event at
 a product-page boundary and proves that no visible row is skipped or duplicated.
-`/v2/diagnostics/events` must accept its old cursor and continue from the same
+`/v1/diagnostics/events` must accept its old cursor and continue from the same
 stable normalized-event anchor, but its remaining rows and fields may include
 the expected new candidate diagnostics. A pre-existing diagnostic row's numeric
 `normalized_event_id` may change, while its `event_identity` and pre-existing
@@ -977,9 +977,8 @@ to the routes and selectors documented in [`api-v2-routes.md`](api-v2-routes.md)
 
 ## Replacement boundary
 
-The v2 route set is the current internal API contract. This document records
-local route ownership only; it does not claim that an external application has
-changed its call sites or that the production public edge exposes v2. The
-checked-in Caddy configuration remains on the pre-C3 routing policy, so the v2
-REST surface is not publicly reachable until the maintainer-gated C3 edge
-flip.
+The `/v1` route set is the current API contract. This document records local
+route ownership only; it does not claim that an external application has
+changed its call sites. The checked-in Caddy configuration admits `/v1` reads,
+`POST /v1/lookup`, and GraphQL (#315); see
+[`production.md`](production.md#public-edge).
