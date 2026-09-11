@@ -107,3 +107,8 @@ justification = "The compact event search keeps its filter parsing, cursor bindi
 path = "crates/storage/src/history.rs"
 loc = 606
 justification = "History filter types and the read-filter derivation stay in one module; the `contract_address` emitter filter (F1) adds two fields and one normalization. Split on the next substantive touch."
+
+[[files]]
+path = "apps/api/src/v2/lookup/mod.rs"
+loc = 602
+justification = "Batch lookup keeps request parsing, name and address rendering, and served-head validation together; attaching the current `subregistry` pointer to name results (F1) adds two lines at the 600-line boundary. Split on the next substantive touch."
