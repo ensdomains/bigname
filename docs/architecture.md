@@ -1248,11 +1248,11 @@ restored agreement may clear the matching active row.
 
 ## Permissions
 
-Permissions are first-class projections and explain views. Track grants by scope (root, registry, resource, resolver, record manager/operator). Each grant records source, revocation source, inheritance path, transfer behavior, scope, and effective powers.
+Permissions are first-class projections and explain views. Track grants by scope (root, registry, resource, resolver, record manager/operator, or [account](glossary.md#account-permission-scope)). Each grant records source, revocation source, inheritance path, transfer behavior, scope, and effective powers.
 
 Public reads expose effective powers directly so callers do not reconstruct
 authority from raw role bitmaps. `GET /v2/permissions` is the current
-resource-anchored permission collection; name- and address-centric views
+resource- or account-anchored permission collection; name- and address-centric views
 summarize or filter the same truth.
 
 The current projection interprets admitted ENSv1 and Basenames registry
@@ -1322,9 +1322,9 @@ registration only `reclaim` does (upstream:
 .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L174 @
 ens_v1@91c966f). A transfer with no `reclaim` therefore leaves the registry owner
 behind on the resource that the later registry-only binding superseded. Address
-relations publish that divergent owner as the name's effective controller even
-though its resource is not the selected registration, because otherwise the
-divergence would be invisible in every product collection.
+relations retain that owner's effective-controller membership through this
+exception. Exact-name ownership separately follows observations on the selected
+authority, as described below.
 
 Both admitted registry/registrar arms reach this. ENSv1 is the obvious one.
 Basenames reaches it too: its registrar and its registry are both admitted source
@@ -1374,11 +1374,12 @@ identity is instead stable per node and can span eras, but when the predecessor 
 one it is the same resource as the selection, and those events are already in the
 selected set rather than readmitted through this exception.
 
-The exact-name summary does not follow the exception: for this superseded-resource
-case it keeps reporting no registry owner, so `name_current` and
-`address_names_current` disagree here by design. That disagreement is specific to
-this case — an ordinary registry-only name, which never had a superseded
-predecessor, reports its registry owner in both collections.
+The exact-name summary does not readmit superseded-resource events through this
+exception. A qualifying registrar transfer instead carries the authenticated
+retained registry owner on the selected registry-only authority epoch, which the
+existing owner fold consumes. Exact-name control therefore reports that owner
+while the registrant can differ. Missing, zero or inconsistent retained evidence
+does not supply an owner; see [the transfer observation contract](projections.md).
 
 ### Exact-name lookup
 
@@ -1396,9 +1397,9 @@ Returns surfaces, not backing resources. Each item carries `logical_name_id`, su
 
 ### Address → names with `include=role_summary`
 
-Additive expansion, not a separate route. Adds `role_summary` (one `subjects[*]` entry per distinct current permission subject for the same `resource_id`, with `scope` and `effective_powers`), `subname_count`, `record_count`, `status`, `expiry`. Identity, supported filters, grouping, default sort, cursor, and coverage stay unchanged.
+Additive expansion, not a separate route. Adds `role_summary: [{address, grants: [{grant_relation?, grant_scope, powers}]}]` and `record_count` for the current registration. Address-name membership, supported filters, grouping, default sort, and cursor stay unchanged; role-summary completeness remains partial.
 
-`subname_count` reuses declared-direct-children semantics. `record_count` is the count of distinct stable declared record selectors at the current version boundary.
+`record_count` is the count of distinct stable declared record selectors at the current version boundary.
 
 ### Name → children
 

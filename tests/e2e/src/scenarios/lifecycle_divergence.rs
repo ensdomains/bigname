@@ -138,9 +138,13 @@ async fn transfer_without_reclaim_keeps_registry_owner_divergent() -> Result<()>
     );
     assert_eq!(
         pointer(&body, "/declared_state/control/registry_owner"),
-        Value::Null,
-        "schema-v2 keeps the divergent registry owner in its authority events and address projection, not the registry-only registration summary"
+        format!("{alice:#x}"),
+        "the selected registry-only authority retains its authenticated owner"
     );
+    let epoch_owners: Vec<String> = sqlx::query_scalar(
+        "SELECT after_state->>'registry_owner' FROM normalized_events WHERE resource_id=$1 AND event_kind='AuthorityEpochChanged' AND after_state->>'source_event'='Transfer' AND canonicality_state='canonical'",
+    ).bind(current_resource).fetch_all(&run.db.pool).await?;
+    assert_eq!(epoch_owners, vec![format!("{alice:#x}")]);
     let retained_registry_owner: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
          WHERE logical_name_id = 'ens:0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74' \

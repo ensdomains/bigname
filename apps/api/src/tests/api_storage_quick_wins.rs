@@ -69,7 +69,7 @@ async fn api_serve_refuses_a_schema_missing_normalized_events() -> Result<()> {
 
     assert!(
         diagnostic.starts_with(
-            "API verified-lookup DDL preflight failed: required lookup DDL is missing"
+            "API verified-lookup DDL preflight failed: required lookup objects are missing or serving relations are unreadable"
         ),
         "unexpected startup error: {diagnostic}"
     );
@@ -98,7 +98,7 @@ async fn api_verified_lookup_ddl_preflight_reports_missing_relation() -> Result<
         crate::startup_preflight::ensure_verified_lookup_ddl_available(&database.lookup_pool)
             .await
             .expect_err("startup diagnostics must be repeatable");
-    let expected = "API verified-lookup DDL preflight failed: required lookup DDL is missing\n\
+    let expected = "API verified-lookup DDL preflight failed: required lookup objects are missing or serving relations are unreadable\n\
                     relation: bigname_phase.record_inventory_current";
 
     assert_eq!(format!("{first_error:#}"), expected);
@@ -124,7 +124,7 @@ async fn api_verified_lookup_ddl_preflight_reports_missing_guard_function() -> R
 
     assert_eq!(
         format!("{error:#}"),
-        "API verified-lookup DDL preflight failed: required lookup DDL is missing\n\
+        "API verified-lookup DDL preflight failed: required lookup objects are missing or serving relations are unreadable\n\
          function: bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)"
     );
     database.cleanup().await
@@ -162,6 +162,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     let expected = BTreeSet::from([
         "function: bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)",
         "function: bigname_phase.write_resolution_divergence(uuid,text,text,text,bigint,text,jsonb,text,text,text,text,jsonb,jsonb,boolean)",
+        "relation: bigname_phase.account_permission_state_current",
         "relation: bigname_phase.address_names_current",
         "relation: bigname_phase.chain_header_audit",
         "relation: bigname_phase.chain_heads",
@@ -189,7 +190,65 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     .map(str::to_owned));
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 25);
+    assert_eq!(actual.len(), 26);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn api_preflight_reports_missing_account_permission_state_current() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    sqlx::query("DROP TABLE bigname_phase.account_permission_state_current")
+        .execute(&database.lookup_pool).await?;
+    let missing = bigname_storage::load_missing_api_lookup_ddl(&database.lookup_pool).await?;
+    assert!(missing.iter().any(|object| {
+        object.kind == bigname_storage::ApiLookupDdlKind::Relation
+            && object.identity == "bigname_phase.account_permission_state_current"
+    }));
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn api_preflight_reports_unreadable_account_permission_state_current() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let role = format!("permission_preflight_{}", std::process::id());
+    sqlx::query(&format!("CREATE ROLE {role} NOLOGIN"))
+        .execute(&database.lookup_pool).await?;
+    sqlx::query(&format!("GRANT USAGE ON SCHEMA bigname_phase TO {role}"))
+        .execute(&database.lookup_pool).await?;
+    sqlx::query(&format!("GRANT SELECT ON ALL TABLES IN SCHEMA bigname_phase TO {role}"))
+        .execute(&database.lookup_pool).await?;
+    sqlx::query(&format!("REVOKE SELECT ON bigname_phase.account_permission_state_current FROM {role}"))
+        .execute(&database.lookup_pool).await?;
+    sqlx::query(&format!("REVOKE SELECT ON bigname_phase.resolution_divergences FROM {role}"))
+        .execute(&database.lookup_pool).await?;
+    let config = database.database_config(1)?;
+    let options = PgConnectOptions::from_str(config.database_url.as_deref().context("test URL")?)?;
+    let set_role = format!("SET ROLE {role}");
+    let pool = PgPoolOptions::new().max_connections(1).after_connect(move |connection, _| {
+        let set_role = set_role.clone();
+        Box::pin(async move { sqlx::query(&set_role).execute(connection).await.map(|_| ()) })
+    }).connect_with(options).await?;
+    let missing = bigname_storage::load_missing_api_lookup_ddl(&pool).await?;
+    assert!(missing.iter().any(|object| object.identity
+        == "bigname_phase.account_permission_state_current"));
+    assert!(!missing.iter().any(|object| object.identity
+        == "bigname_phase.resolution_divergences"));
+    sqlx::query(&format!("REVOKE USAGE ON SCHEMA bigname_phase FROM {role}"))
+        .execute(&database.lookup_pool).await?;
+    let missing = bigname_storage::load_missing_api_lookup_ddl(&pool).await?;
+    assert!(missing.iter().any(|object| object.identity
+        == "bigname_phase.account_permission_state_current"));
+    let error = crate::startup_preflight::ensure_verified_lookup_ddl_available(&pool)
+        .await
+        .expect_err("startup must reject an unreadable serving relation");
+    assert!(format!("{error:#}").starts_with(
+        "API verified-lookup DDL preflight failed: required lookup objects are missing or serving relations are unreadable"
+    ));
+    pool.close().await;
+    sqlx::query(&format!("DROP OWNED BY {role}"))
+        .execute(&database.lookup_pool).await?;
+    sqlx::query(&format!("DROP ROLE {role}"))
+        .execute(&database.lookup_pool).await?;
     database.cleanup().await
 }
 

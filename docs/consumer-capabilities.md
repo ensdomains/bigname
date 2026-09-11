@@ -29,10 +29,10 @@ it does not preserve the deleted v1 DTOs.
 | Resolver records | `GET /v2/names/{name}/records` | Key-selected record reads plus inventory metadata. |
 | Direct subnames | `GET /v2/names/{name}/subnames` | Latest-state direct-subname collection. |
 | Name history | `GET /v2/names/{name}/history` | Name, registration, or combined history scope. |
-| Names by address | `GET /v2/addresses/{address}/names` | Owner, manager, and registrant relations with optional expansions. |
+| Names by address | `GET /v2/addresses/{address}/names` | Owner, manager, and registrant relations with optional expansions. Inline role summaries allow 1,000 total grant rows; overflow returns 422. Each row exposes `permission_resource_id` for existing cursor-paginated permissions reads, including when the include is omitted. |
 | Primary name | `GET /v2/addresses/{address}/primary-name` | Indexed tuples and verified ENS coin-type 60 lookup as documented. |
 | Address history | `GET /v2/addresses/{address}/history` | Latest-state address-anchored event history. |
-| Permission holders | `GET /v2/permissions` | Known current permission rows that apply to each resource. Standard registry, registrar, and resolver approval/delegation paths are not yet authoritative enumerations, so coverage stays request-relative partial even for zero rows. An empty name-filter result reports `permission_support_unknown` when the name is missing or unrecognized, its current name is marked unsupported, or its current name is not bound to a registration resource. The exception is a resolved current name paired with an explicitly different `registration_id`: that supported filter combination selects no registration and returns an empty page without completeness metadata. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) ENSv1 NameWrapper holder enumeration remains a separate unsupported class. Returned current wrapper registrations still carry [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) lifecycle and fuse data when backed. |
+| Permission holders | `GET /v2/permissions` | Known current direct permission rows plus effective ENSv1 and Basenames registry operators that apply to each resource. Registry `ApprovalForAll` is served for `address`, `name`, and `registration_id` filters and role-summary expansion. Registrar ERC-721 approvals, resolver approvals/delegates, NameWrapper permissions, and ENSv2 registry operators remain explicitly unsupported, so coverage stays request-relative partial even for zero rows. An empty name-filter result reports `permission_support_unknown` when the name is missing or unrecognized, its current name is marked unsupported, or its current name is not bound to a registration resource. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L155-L158 @ basenames@1809bbc) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) Returned current wrapper registrations still carry [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) lifecycle and fuse data when backed. |
 | Search | `GET /v2/search` | Name search only; no registration, pricing, or availability workflow. |
 | Events | `GET /v2/events` | Product event collection. |
 | Resolver overview | `GET /v2/resolvers/{chain_id}/{address}` | Resolver metadata, total section counts with deterministic samples capped at 100 items, and a separately paginated record-shaped bound-name collection, including [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper metadata when backed. |
@@ -727,11 +727,24 @@ these remaining disagreement classes:
   `resource_control` clears the current controller. The effective controller is
   then absent when the name has no registrar [token lineage](glossary.md#token-lineage),
   or falls back to the token holder or registrant otherwise; served control
-  ownership is unchanged by either `PermissionChanged`. A release can also
-  co-emit an owner-less `AuthorityEpochChanged`, which clears the served registry
-  owner so `Domain.owner` falls back to the registrant or zero address, while the
-  epoch event is excluded from the effective-controller fold and the release's
-  `resource_control` grant keeps the registry owner there.
+  ownership is unchanged by either `PermissionChanged`. A release restoring a
+  retained direct-registry authority carries its owner in `AuthorityEpochChanged`.
+  A genuinely ownerless release epoch instead clears the served registry owner,
+  so `Domain.owner` falls back to the registrant or zero address. The epoch event
+  is excluded from the effective-controller fold; that controller follows the
+  release's `resource_control` changes.
+
+A registrar-token transfer without reclaim differs from that release case.
+When ENSv1 or Basenames still reports the original nonzero registry owner and
+bigname selects the registry-only resource, the transfer observation retains
+that authenticated registry owner. The owner's approved operator remains
+available through name, current-resource and address permission filters, and
+through role summaries for names already on the owner's address page. Operator
+approval alone still adds no address-name membership. This does not change the
+release behaviors above or broaden permission coverage.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L20 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/Registry.sol:L49-L52 @ basenames@1809bbc)
 
 `DomainFilter` remains the separate input for the local `domainConnection`
 operation. Its `name` continues the existing ENS name lookup, and its

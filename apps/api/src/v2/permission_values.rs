@@ -1,4 +1,4 @@
-use bigname_storage::PermissionScope;
+use bigname_storage::{EffectivePermissionScope, PermissionScope};
 use serde_json::{Value, json};
 
 use super::{V2Error, V2Result, slug_to_numeric};
@@ -32,6 +32,25 @@ pub(crate) fn permission_scope_value(scope: &PermissionScope) -> V2Result<Value>
         "kind": kind,
         "detail": detail,
     }))
+}
+
+pub(crate) fn effective_permission_scope_value(
+    scope: &EffectivePermissionScope,
+) -> V2Result<Value> {
+    match scope {
+        EffectivePermissionScope::Direct(scope) => permission_scope_value(scope),
+        EffectivePermissionScope::Account {
+            chain_id,
+            authority_kind,
+            authority_contract,
+            owner,
+        } => Ok(json!({"kind":"account","detail":{
+            "chain_id": permission_scope_chain_id(chain_id)?,
+            "authority_kind": authority_kind,
+            "authority_contract": authority_contract.to_ascii_lowercase(),
+            "owner": owner.to_ascii_lowercase(),
+        }})),
+    }
 }
 
 pub(crate) fn permission_powers_value(powers: &Value) -> V2Result<Value> {
@@ -73,4 +92,32 @@ fn permission_scope_chain_id(storage_chain_id: &str) -> V2Result<u64> {
             "permission scope uses unmapped chain_id {storage_chain_id}"
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn permission_powers_value_preserves_registry_control() {
+        assert_eq!(
+            permission_powers_value(&json!(["registry_control"])).unwrap(),
+            json!(["registry_control"])
+        );
+    }
+
+    #[test]
+    fn effective_permission_scope_value_maps_account_detail() {
+        let scope = EffectivePermissionScope::Account {
+            chain_id: "ethereum-mainnet".to_owned(),
+            authority_kind: "registry".to_owned(),
+            authority_contract: "0x0000000000000000000000000000000000000c33".to_owned(),
+            owner: "0x0000000000000000000000000000000000000a11".to_owned(),
+        };
+        assert_eq!(
+            effective_permission_scope_value(&scope).unwrap(),
+            json!({"kind":"account","detail":{"chain_id":1,"authority_kind":"registry",
+                "authority_contract":"0x0000000000000000000000000000000000000c33",
+                "owner":"0x0000000000000000000000000000000000000a11"}})
+        );
+    }
 }

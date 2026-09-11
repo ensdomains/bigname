@@ -220,14 +220,30 @@ fn transfer(
         &raw_namehash,
         active_after.as_ref(),
     );
+    let registry_binding = state.v1_registry_binding(&selected.source.namespace, &raw_namehash);
+    let mut observation = json!({"source_event":"Transfer"});
+    if let (Some(active), Some((owner, _))) = (active_after.as_ref(), registry_binding.as_ref())
+        && active.token_lineage_id.is_none()
+        && matches!(
+            active.authority_source_family.as_str(),
+            "ens_v1_registry_l1" | "basenames_base_registry"
+        )
+        && !owner.eq_ignore_ascii_case(ZERO_ADDRESS)
+        && active
+            .owner
+            .as_deref()
+            .is_some_and(|selected_owner| selected_owner.eq_ignore_ascii_case(owner))
+    {
+        observation["registry_owner"] = json!(owner);
+    }
     append_authority_transition(
         &mut output,
         super::authority_arm(&selected.source.namespace),
         previous_active.as_ref(),
         active_after.as_ref(),
-        state.v1_registry_binding(&selected.source.namespace, &raw_namehash),
+        registry_binding,
         raw,
-        &json!({"source_event":"Transfer"}),
+        &observation,
         linked_resolver,
         fallback_active_from,
     );

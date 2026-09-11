@@ -588,6 +588,49 @@ async fn v2_product_routes_hide_pipeline_vocabulary_family_wide() -> Result<()> 
     Ok(())
 }
 
+#[test]
+fn v2_permission_additive_vocabulary_census_rejects_unknown_relation_and_malformed_account_scope() {
+    let unknown = json!({"grant_relation":"delegate","grant_scope":{"kind":"account","detail":{
+        "chain_id":1,"authority_kind":"registry","authority_contract":"0xregistry","owner":"0xowner"
+    }},"powers":["registry_control"]});
+    assert!(assert_permission_additive_vocabulary(&unknown).is_err());
+    let malformed = json!({"grant_relation":"operator","grant_scope":{"kind":"account","detail":{
+        "chain_id":1,"authority_kind":"registry","owner":"0xowner"
+    }},"powers":["registry_control"]});
+    assert!(assert_permission_additive_vocabulary(&malformed).is_err());
+}
+
+fn assert_permission_additive_vocabulary(value: &Value) -> std::result::Result<(), String> {
+    match value {
+        Value::Object(object) => {
+            if let Some(relation) = object.get("grant_relation") {
+                if relation != "operator" {
+                    return Err(format!("unknown grant_relation {relation}"));
+                }
+                let scope = object.get("grant_scope").ok_or("missing grant_scope")?;
+                if scope["kind"] != "account" {
+                    return Err("operator must use account scope".to_owned());
+                }
+                let detail = scope["detail"].as_object().ok_or("account detail must be object")?;
+                for key in ["chain_id", "authority_kind", "authority_contract", "owner"] {
+                    if !detail.contains_key(key) {
+                        return Err(format!("account detail missing {key}"));
+                    }
+                }
+                if detail.len() != 4 || object.get("powers") != Some(&json!(["registry_control"])) {
+                    return Err("operator scope or powers are outside the additive vocabulary".to_owned());
+                }
+            }
+            for child in object.values() {
+                assert_permission_additive_vocabulary(child)?;
+            }
+        }
+        Value::Array(items) => for item in items { assert_permission_additive_vocabulary(item)?; },
+        _ => {}
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -961,14 +1004,18 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         V2SuccessFixture::Permissions => {
             let uri =
                 format!("/v2/permissions?address={V2_PERMISSIONS_SUBJECT}&include=lineage&page_size=10");
-            let (database, payload) = v2_permissions_payload(&uri).await?;
+            let database = seed_v2_registry_operator_fixture().await?;
+            let payload = v2_permissions_payload_for_database(&database, &uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, &uri, &payload).await?;
             database.cleanup().await?;
             Ok(payload)
         }
         V2SuccessFixture::AddressNames => {
             let uri = format!("/v2/addresses/{V2_ADDRESS}/names?include=role_summary");
-            let (database, payload) = v2_address_names_payload(&uri).await?;
+            let database = TestDatabase::new_migrated().await?;
+            seed_v2_address_names_fixture(&database).await?;
+            seed_v2_address_registry_operator(&database).await?;
+            let payload = v2_address_names_payload_for_database(&database, &uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, &uri, &payload).await?;
             database.cleanup().await?;
             Ok(payload)
@@ -1673,6 +1720,11 @@ fn assert_v2_exercised_expansions_non_empty(route: &V2ConformanceRoute, payload:
                 "{} include=lineage must populate at least one non-empty lineage section",
                 route.label
             );
+            let operator = rows.iter().find(|row| row.get("grant_relation") == Some(&json!("operator")))
+                .expect("permissions fixture must exercise the operator vocabulary");
+            assert_eq!(operator["grant_scope"]["kind"], json!("account"));
+            assert_eq!(operator["powers"], json!(["registry_control"]));
+            assert_permission_additive_vocabulary(payload).expect("permissions additive vocabulary");
         }
         V2SuccessFixture::AddressNames => {
             let rows = payload["data"]
@@ -1684,6 +1736,7 @@ fn assert_v2_exercised_expansions_non_empty(route: &V2ConformanceRoute, payload:
                 "{} include=role_summary must populate at least one non-empty role_summary section",
                 route.label
             );
+            assert_permission_additive_vocabulary(payload).expect("role-summary additive vocabulary");
         }
         V2SuccessFixture::Resolver => {
             for key in ["nodes", "aliases", "roles", "events"] {
@@ -1839,6 +1892,9 @@ fn collect_pipeline_vocabulary_in_product_response(
     violations: &mut Vec<String>,
 ) {
     walk_product_pipeline_response(value, "$", None, &mut |path, value_key, candidate| {
+        if value_key.is_none() && is_address_name_permission_handle(route, path, candidate) {
+            return;
+        }
         for term in matched_pipeline_terms(candidate) {
             violations.push(format!(
                 "{} at {path}: {candidate:?} contains product-banned pipeline vocabulary {term:?}",
@@ -1986,7 +2042,23 @@ fn matched_pipeline_terms(candidate: &str) -> Vec<&'static str> {
     crate::v2::matched_boundary_vocabulary_terms(candidate, crate::v2::PRODUCT_PIPELINE_TERMS)
 }
 
+// ADR 0006 permits this authority handle only on direct address-name rows.
+fn is_address_name_permission_handle(route: &V2ConformanceRoute, path: &str, key: &str) -> bool {
+    route.success == V2SuccessFixture::AddressNames
+        && key == "permission_resource_id"
+        && path
+            .strip_prefix("$.data[")
+            .and_then(|path| path.strip_suffix("].permission_resource_id"))
+            .is_some_and(|index| {
+                !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+            })
+}
+
 fn is_dictionary_allowlisted(route: &V2ConformanceRoute, path: &str, key: &str) -> bool {
+    if is_address_name_permission_handle(route, path, key) {
+        return true;
+    }
+
     if route.success == V2SuccessFixture::DiagnosticsEvents
         && diagnostics_events_raw_state_subtree(path)
     {
@@ -2067,6 +2139,63 @@ fn v2_pipeline_matching_uses_shared_underscore_boundaries_and_plural_suffixes() 
     let raw_fact_matches = matched_pipeline_terms("raw facts unavailable");
     assert!(raw_fact_matches.contains(&"raw_fact"));
     assert!(raw_fact_matches.contains(&"raw fact"));
+}
+
+#[test]
+fn v2_permission_resource_id_exception_is_only_for_address_name_rows() {
+    let route = V2_CONFORMANCE_ROUTES
+        .iter()
+        .find(|route| route.success == V2SuccessFixture::AddressNames)
+        .unwrap();
+    let allowed = json!({"data": [
+        {"permission_resource_id": "first"}, {"permission_resource_id": "second"}
+    ]});
+    type Collector = fn(&V2ConformanceRoute, &Value, &mut Vec<String>);
+    for collect in [
+        collect_banned_dictionary_fields as Collector,
+        collect_pipeline_vocabulary_in_product_response as Collector,
+    ] {
+        let mut violations = Vec::new();
+        collect(route, &allowed, &mut violations);
+        assert!(violations.is_empty(), "{violations:?}");
+        for payload in [
+            json!({"data": [{"resource_id": "id"}]}),
+            json!({"data": [{"resource": "id"}]}),
+            json!({"data": [{"permission_resource_ids": ["id"]}]}),
+            json!({"data": [{"other_permission_resource_id": "id"}]}),
+            json!({"data": [{"nested": {"permission_resource_id": "id"}}]}),
+            json!({"meta": {"permission_resource_id": "id"}}),
+            json!({"permission_resource_id": "id"}),
+        ] {
+            let mut violations = Vec::new();
+            collect(route, &payload, &mut violations);
+            assert!(!violations.is_empty(), "unexpected exception for {payload}");
+        }
+        for other in V2_CONFORMANCE_ROUTES.iter().filter(|other| {
+            other.tier == V2RouteTier::Product && other.success != V2SuccessFixture::AddressNames
+        }) {
+            let mut violations = Vec::new();
+            collect(other, &allowed, &mut violations);
+            assert!(
+                !violations.is_empty(),
+                "unexpected exception for {}",
+                other.label
+            );
+        }
+    }
+    // Global matchers still reject this spelling outside the precise row-field exception.
+    assert_eq!(
+        matched_banned_dictionary_field_names("permission_resource_id"),
+        vec!["resource_id"]
+    );
+    assert_eq!(
+        matched_field_name_terms("permission_resource_id", PRODUCT_ONLY_BANNED_FIELD_NAMES),
+        vec!["resource"]
+    );
+    assert_eq!(
+        matched_pipeline_terms("permission_resource_id"),
+        vec!["resources"]
+    );
 }
 
 #[test]
