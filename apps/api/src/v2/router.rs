@@ -41,7 +41,6 @@ pub(super) fn router() -> Router<AppState> {
         .route("/v1/addresses/{address}/history", get(get_address_history))
         .route("/v1/search", get(get_search))
         .route("/v1/events", get(get_events))
-        .route("/v1/resolvers/{chain_id}/{address}", get(get_resolver))
         .route("/v1/registries/{chain_id}/{address}", get(get_registry))
         .route(
             "/v1/registries/{chain_id}/{address}/labels",
