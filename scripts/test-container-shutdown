@@ -9,6 +9,10 @@ if [[ "${1:-}" == --serve ]]; then
   export BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL="$database"
   export BIGNAME_PHASE_RUNNER_CHAINS=ethereum-mainnet BIGNAME_PHASE_RUNNER_SOURCES=unused
   # Required for full Compose interpolation; this fixture starts only the API.
+  # The compose file has no defaults for the writer login or the database
+  # password, so the render needs values even though neither service is started.
+  export BIGNAME_DATABASE_URL="$database"
+  export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-container-shutdown-fixture}"
   export BIGNAME_PHASE_RUNNER_MINIMUM_FREE_DISK_BYTES=1
   export BIGNAME_PHASE_RUNNER_WRITABLE_PATH="$evidence/unused-capacity-probe"
   override="$evidence/override.yml"; rendered="$evidence/compose.json"

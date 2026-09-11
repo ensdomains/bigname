@@ -91,6 +91,8 @@ impl Fixture {
             .arg(operation)
             .args(args)
             .env("BIGNAME_DATABASE_URL", &self.writer_url)
+            // This fixture reads the child's log as JSON, and JSON output is opt-in.
+            .env("BIGNAME_LOG_JSON", "1")
             .env("RUST_LOG", "phase_runner=info")
             .env("REDO554_RPC_URL", &self.rpc.endpoint);
         if matches!(operation, "run" | "redo") {

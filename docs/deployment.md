@@ -717,6 +717,107 @@ API docs. The request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; together
 with the reserved readiness connection, one API process can open at most
 `BIGNAME_DATABASE_MAX_CONNECTIONS + 1` PostgreSQL connections.
 
+### Database connection budget
+
+`BIGNAME_DATABASE_MAX_CONNECTIONS` is an API-only setting. The phase runner does
+not read it; it derives its own pools from the number of configured chains, so
+the two services must be budgeted separately.
+
+For `C` configured chains, one phase-runner process opens at most:
+
+| Pool | Size | Where |
+| --- | --- | --- |
+| Phase pool | `max(2C, 4)` | `apps/phase-runner/src/main.rs`, `RunnerDatabase::connect` in the `Run` arm |
+| Verification pool | `max(C, 1)` | `apps/phase-runner/src/main.rs`, `VerificationDatabase::connect` in the `Run` arm |
+| Advisory phase locks, peak | `3C` | see below |
+
+Each lock is a dedicated connection outside both pools, because it holds a
+session-scoped `pg_try_advisory_lock` (`PhaseLock::acquire`, `apps/phase-runner/src/phase_lock.rs`).
+How many are held at once depends on where the chain is in its cycle, and the
+budget has to cover the peak, not the common case:
+
+| Situation | Locks per chain | Where |
+| --- | --- | --- |
+| Serial path: Verify runs before Live (`verify_before_live`) | `1` | `PhaseRunner::run_chain`, `apps/phase-runner/src/runner_chain.rs` |
+| Combined path: Verify and Live polled concurrently, each holding its own lock | `2` | `apps/phase-runner/src/runner_live_follow.rs` |
+| Post-Live discovery repair: a Verify fence, then an Ingest fence inside it, then one phase lock inside that | `3` | `runner_live_follow.rs:70`, `:112`, `:143` |
+| `rewind` (separate operator process): the four writer-phase locks, no Verify lock | `4`, plus its own pool | `rewind::acquire_writer_locks`, `apps/phase-runner/src/rewind.rs`; `RunnerDatabase::connect` in the `Rewind` arm |
+
+A fence is an ordinary phase lock on that phase's name, so it excludes the
+phase itself rather than adding to it — the post-Live Verify fence waits for the
+paired Verify to release before it is granted. Catch-up and the spine phases run
+one after another and never hold two of their own locks at once.
+
+So budget `max(2C, 4) + max(C, 1) + 3C` for the running service: a one-chain
+deployment peaks at `4 + 1 + 3 = 8` connections and settles at `6` or `7`
+depending on the path; three chains peak at `6 + 3 + 9 = 18`. A start that
+finds phases recorded against chains no longer configured takes one lock at a
+time to close them out (`settle_unconfigured_phases`, `apps/phase-runner/src/runner_chain.rs`) and does
+not raise the peak.
+
+`phase-runner rewind` is not part of that figure: it is a separate process
+with its own pool of up to `2` connections (`RunnerDatabase::connect` in the `Rewind` arm)
+that takes the Ingest, Interpret, Project, and Live locks for one chain and
+never the Verify lock (`rewind::acquire_writer_locks`, `apps/phase-runner/src/rewind.rs`). It therefore
+succeeds while the supervised runner is alive whenever that chain is not in a
+writer phase — during its serial Verify phase, for instance — so the two
+processes can hold connections at the same time. Either stop the supervised
+runner before a rewind, or budget `6` more connections for the duration:
+`14` for one chain, `24` for three. A rewind against a chain whose writer
+phase is running fails on the held lock rather than waiting.
+
+`phase-runner redo` is likewise a separate, and potentially long-running,
+process: a writer pool of up to `4` (`RunnerDatabase::connect` in the `Redo` arm), a
+verifier pool of `1` opened at start whenever the requested redo includes
+Verify (`VerificationDatabase::connect` under `phase.requires_verify()`), and up to two locks at once — the Project
+lock is held while the Interpret phase runs beneath it
+(`run_recompute_interpret_with_project_lock`, `apps/phase-runner/src/runner_operator_redo.rs`), and every phase run
+takes its own lock (`PhaseRunner::run_phase`, `apps/phase-runner/src/runner.rs`). The advisory locks
+let it run beside a supervised runner that holds a non-conflicting phase such as
+Live. Either stop the supervised runner before an explicit redo, or budget `7`
+more for its duration.
+
+The advisory locks do **not** serialize explicit processes against each other:
+they only prevent the same phase from running twice on the same chain. A
+Verify-only redo holds the Verify lock alone
+(`redo_phase_only`, `apps/phase-runner/src/runner_operator_redo.rs`), rewind never takes
+Verify, and lock keys are per chain, so a redo and a rewind — or two redos on
+different chains — can run at the same time and each brings its own pools and
+locks: up to `7` for a redo, `6` for a rewind. Run one explicit process at a
+time, which is what the ceiling below assumes, or add each additional
+overlapping process to the budget in full.
+
+**The superuser reservation.** The writer login created from `POSTGRES_USER` is
+a superuser; `bigname_api` and `bigname_verify` are created `NOSUPERUSER`
+(the grant blocks above). PostgreSQL 16 keeps
+`superuser_reserved_connections` (default `3`, set explicitly in the compose
+files as `POSTGRES_SUPERUSER_RESERVED_CONNECTIONS`) usable by superusers only,
+so a non-superuser connection is refused once `max_connections` minus that
+reservation is in use — even though the superuser writer pool, its advisory
+locks, and a redo or rewind can still connect. A ceiling set exactly to the
+service sum therefore starves the API and the verifier first. Count the
+reservation in the ceiling rather than relying on it as headroom.
+
+Set the server's own ceiling explicitly with `POSTGRES_MAX_CONNECTIONS` rather
+than inheriting the PostgreSQL default, and size it as the sum of:
+
+| Term | Value |
+| --- | --- |
+| Supervised runner peak | `max(2C, 4) + max(C, 1) + 3C` |
+| Explicit maintenance, one process at a time | `7` (a redo; a rewind needs `6`) — add `7` per additional process you intend to overlap |
+| Superuser reservation | `superuser_reserved_connections`, `3` by default |
+| Administrative headroom | `2` for `psql` and `sqlx migrate` |
+| Each API process | `BIGNAME_DATABASE_MAX_CONNECTIONS + 1` |
+
+One chain with one API process at the default pool of `10` and one explicit
+process at a time: `8 + 7 + 3 + 2 + 11 = 31`. Three chains: `18 + 7 + 3 + 2 +
+11 = 41`. A redo (`7`) and a rewind (`6`) overlapping would need `37` rather than
+`31`. The shipped default of `100` clears all of these; the arithmetic
+matters when the ceiling is lowered to fit `work_mem`. Then budget it against `work_mem`: a single
+backend can hold several `work_mem` allocations at once, so the worst case a
+server commits to is roughly `max_connections x work_mem x concurrent sort or
+hash nodes`, on top of `shared_buffers`.
+
 ## Owner-ratified Sepolia source-role rollout
 
 Do not begin this destructive rollout until the Issue #411 part-2 release
