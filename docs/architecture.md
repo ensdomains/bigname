@@ -63,6 +63,18 @@ members instead compare the served display-name bytes directly, preserve SQL
 wildcards for pattern operators, and use explicit `COLLATE "C"`.
 `Domain_orderBy.name` orders the served display name with that collation. The
 complete split is defined in [`consumer-capabilities.md`](consumer-capabilities.md#graphql-compatibility).
+`DomainFilter.isMigrated` reuses the upstream field name for a different
+protocol event and is a [documented
+divergence](upstream.md#known-divergences): upstream the subgraph sets it in its
+current-registry `NewOwner` handler, recording the 2019 ENS registry migration
+(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L131-L135 @ ens_subgraph@723f1b6),
+while here `isMigrated: true` restricts to names
+whose declared registration authority is the ENSv2 registry — the ENSv1→ENSv2
+migration. Only `true` filters; `false` and an omitted value apply no
+predicate, because the negation of an ENSv2-authority test does not answer the
+upstream question either. `DomainFilter.id` is accepted and applies no
+predicate; use `domain(id:)` for namehash lookup. Both are declared so
+subgraph-shaped variables validate, not because the surface implements them.
 Resolver record fields select the sole projected inventory for the name's
 current control resource or, for an ownerless V1 registry name, its retained
 [serving resource](glossary.md#serving-resource), without coupling the
@@ -689,6 +701,33 @@ hydration values are execution-derived current-state enrichment layered into
 `record_inventory_current` and `primary_names_current` only after that
 rebuildable event-derived publication; they are never raw facts, identity rows,
 or normalized events.
+
+"Rebuildable" describes where projection data comes from, and the identity rows
+underneath are what cannot be emptied on their own. Six projection tables hold
+foreign keys into the identity layer — `name_current`, `address_names_current`,
+`children_current`, `permissions_current`,
+`permissions_current_resource_summary`, and `record_inventory_current` reference
+`name_surfaces`, `surface_bindings`, `resources`, and `token_lineages`.
+Projections are not the only dependants: `normalized_events` references
+`name_surfaces` and `resources`, and `resolution_divergences` references
+`name_surfaces`, so clearing the six projection tables alone still does not make
+identity removable. The identity layer is ordered internally too, with
+`surface_bindings` referencing `name_surfaces` and `resources`, and `resources`
+referencing `token_lineages`. So the dependency runs projections, normalized
+events, and the divergence ledger → identity, and a rebuild that drops or
+truncates identity first fails on those constraints rather than cascading. Rebuild
+projections against retained identity, or replace identity with an `interpret`
+redo: when Interpret's resulting status is `completed`, the same command runs a
+Project redo over whatever range Interpret left required, so the projections are
+republished before it returns. That follow-on is conditional — if Interpret ends
+`failed`, `running`, or `paused`, the command returns with Project still stamped
+for redo and the projections not republished, so check the phase state and run
+the Project redo yourself before serving.
+Project stays the only writer of those rows; the redo
+sequences it after Interpret rather than letting Interpret write them. A redo
+of `--phase all` sequences Ingest, Interpret, Project, and Verify explicitly.
+A rebuild that truncates projections and then fails partway leaves the system
+unable to serve until it is rerun to completion.
 Provider lookup responses are request-scoped and are not persisted as reusable
 outcomes or durable execution traces. Guarded resolution disagreements may be
 recorded in the [resolution divergence ledger](glossary.md#resolution-divergence-ledger).
@@ -734,6 +773,11 @@ Core objects: `NameSurface`, `SurfaceBinding`, `BackingResource`, `NameClass`, `
 Permissions and control are anchored to `resource_id`, never to surface text. The chain `logical_name_id → SurfaceBinding → resource_id → token_lineage` must remain reconstructible through time.
 
 ## Normalized event taxonomy
+
+The authority for what may be written is the closed `event_kind` vocabulary in
+`schema-v2/baseline/05_normalized_events.sql`; a value absent from that `CHECK`
+cannot be stored. The groupings below name the shape of the model, not the
+constraint.
 
 Identity, preimage, discovery, and contract history: `PreimageObserved`,
 `SurfaceBound`, `SurfaceUnbound`, `ContractDiscovered`, `RegistryCreated`,
@@ -1430,17 +1474,56 @@ None of these introduces a separate truth system or ledger.
 
 Coverage is contractual.
 
+**What `exhaustiveness` actually carries today.** The project phase does not
+assert exhaustiveness: every projection that carries a coverage object emits the
+constant `not_asserted` alongside `status = "projected"`, and support is carried
+separately in `support_status` / `unsupported_reason`.
+`account_permission_state_current` is the exception: it builds no coverage object at all, so it emits neither value
+and a consumer must not probe it for one. That is a deliberate decision recorded
+in [`schema-v2/README.md`](../schema-v2/README.md) § Current projections, not a
+gap. Two read paths still report a richer value, and both derive it at read
+time rather than reading it from a projection. The permissions resource-summary
+read derives `authoritative`, `best_effort`, or `not_applicable` from
+`support_status` (`PermissionCoverageExhaustiveness`). `GET
+/v2/diagnostics/events` reports `not_applicable` on every row today, but as a
+fallback rather than a fixed value: the history read lifts a `coverage` object
+out of an event's `after_state` or `before_state` when one is present
+(`crates/storage/src/history/paging.rs`) and the route passes its
+`exhaustiveness` through, filling in the defaults only for the keys that are
+missing (`apps/api/src/v2/diag_events.rs`). No interpreter writes that object
+today, which is why every row currently falls back.
+
+So the statements below describe which classes *are* enumerable in the protocol,
+not a value the field will hand you. Read `support_status` to decide whether an
+answer is usable; do not branch on a stored projection's `exhaustiveness`
+expecting one of the richer values, and do not key monitoring on a transition
+to one. The two read paths above are the exception: their values come from the
+read that builds the response, so a diagnostics consumer sees a richer value
+there without any projection having asserted it.
+
 - Exact-name lookup is authoritative for supported source classes. Route-level coverage may still be authoritative when individual declared summary subdocuments are unsupported.
 - Address-to-name enumeration is exhaustive only for enumerable source classes.
 - Wildcard and offchain name classes are not globally enumerable.
-- Record inventory is `best_effort` unless a resolver family enumerates explicitly or there's a source-specific index.
+- Record inventory is enumerable only where a resolver family enumerates explicitly or a source-specific index exists; the served value is still `not_asserted`.
 - Child enumeration is authoritative only for declared direct children unless the caller opts into other surface classes.
-- V2 primary-name route-level coverage is `partial`, with
-  `exhaustiveness=non_enumerable` and
-  `enumeration_basis=primary_name_lookup` for ENS/60 fresh verification. Other
-  v2 verified tuples are explicit `unsupported`.
+- V2 primary-name coverage is the ordinary projection shape — `status=projected`,
+  `exhaustiveness=not_asserted`, and no `enumeration_basis` key — because the
+  primary-name projection is not exempt from the decision above. Other v2
+  verified tuples are explicit `unsupported`. (The `partial` /
+  `non_enumerable` / `primary_name_lookup` triple described here previously was
+  the retired `/v1/primary-names/{address}` contract; `non_enumerable` has no
+  writer and is not a `PermissionCoverageExhaustiveness` variant.)
 
-Every response carries `coverage.status`, `coverage.exhaustiveness`, `coverage.source_classes_considered`, `coverage.unsupported_reason`, `coverage.enumeration_basis`.
+The full coverage object — `coverage.status`, `coverage.exhaustiveness`,
+`coverage.source_classes_considered`, `coverage.unsupported_reason`,
+`coverage.enumeration_basis` — is carried on the **diagnostics** name-coverage
+route, not on product responses. `exhaustiveness`, `enumeration_basis`,
+`source_classes_considered`, and `coverage` itself are on the Tier-2
+product-route denylist in [`api-v2.md`](api-v2.md) § Tier 2: Product Reads, and
+that denylist is enforced in code as `PRODUCT_PIPELINE_TERMS`. Product routes
+expose the simplified `completeness` / `unsupported_fields` / per-item `status`
+vocabulary instead. Projection rows store the coverage object either way; what
+differs is which tier may serve it.
 
 ## Verified execution
 
