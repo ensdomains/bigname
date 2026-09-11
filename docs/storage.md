@@ -1283,6 +1283,8 @@ Published projection families include:
 
 - `name_current` and identity companions;
 - `address_names_current`;
+- `address_records_current` (the reverse index over current `addr:<coin_type>`
+  records, derived from `record_inventory_current`);
 - `children_current`;
 - `permissions_current`, `account_permission_state_current`, and the
   per-resource permission summary;
