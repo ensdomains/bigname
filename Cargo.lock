@@ -1759,6 +1759,7 @@ dependencies = [
  "base64 0.22.1",
  "bigname-manifests",
  "bigname-test-support",
+ "futures-util",
  "jsonwebtoken",
  "reqwest 0.13.2",
  "reth-ethereum",

@@ -44,7 +44,10 @@ impl RedoWindowLoader for ProductionRedoWindowLoader {
         from: i64,
         to: i64,
     ) -> RedoLoadFuture<'a> {
-        Box::pin(engine.load_window(chain_id, source, all_sources, from, to))
+        // Redo reloads a range the operator names, out of order and often across the very
+        // reorg it is there to repair. Reading ahead would cache logs from a lineage the
+        // redo is replacing, so redo windows always read their own range.
+        Box::pin(engine.load_window(chain_id, source, all_sources, from, to, None))
     }
 }
 

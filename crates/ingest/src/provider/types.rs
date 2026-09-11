@@ -12,6 +12,19 @@ pub struct BlockBundle {
     pub receipts: Vec<Receipt>,
 }
 
+/// One selected transaction with the receipt that confirms it and the receipt's own logs.
+///
+/// This is what the JSON-RPC provider fetches instead of a whole block: everything ingest
+/// stores for a transaction, and nothing it discards.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransactionPayload {
+    pub transaction: Transaction,
+    pub receipt: Receipt,
+    pub receipt_logs: Vec<Log>,
+    /// Whether the raw receipt carried a non-null `status` field.
+    pub receipt_reported_status: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedBlock {
     pub number: i64,

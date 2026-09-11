@@ -15,14 +15,19 @@ use crate::{
         BASE_COINBASE_SEAM_BLOCK, effective_redo_start, primary_source, publishable_heads,
         redo_source_target, sort_sources, target_number, validate_request,
     },
-    provider::{ChainProvider, ProviderKind, SharedProvider, normalized_kind, provider_error},
+    provider::{
+        ChainProvider, ProviderKind, ResolvedBlock, SharedProvider, normalized_kind, provider_error,
+    },
 };
 
 mod live;
-mod query;
+pub(crate) mod prefetch;
+pub(crate) mod query;
 mod redo;
 mod source_floor;
 
+use prefetch::{Prefetcher, RangeLogCache};
+use query::QueryContext;
 use redo::LoadedWindow;
 
 const BLOCKS_PER_BATCH: i64 = 256;
@@ -106,6 +111,7 @@ pub struct Engine {
     pool: PgPool,
     providers: Mutex<BTreeMap<String, SharedProvider>>,
     coinbase_sources: Mutex<BTreeMap<String, Arc<CoinbaseSqlSource>>>,
+    range_logs: Mutex<RangeLogCache>,
 }
 
 impl Engine {
@@ -114,6 +120,7 @@ impl Engine {
             pool,
             providers: Mutex::new(BTreeMap::new()),
             coinbase_sources: Mutex::new(BTreeMap::new()),
+            range_logs: Mutex::new(RangeLogCache::default()),
         }
     }
 
@@ -194,6 +201,10 @@ impl Engine {
                     } - 1,
                 )
                 .min(state.target.number);
+            // Only blocks at or below the finalized head may be read ahead: a prefetched
+            // range is consumed by windows that resolve long after the query ran, and a
+            // block that can still reorg could gain a log the prefetch never saw.
+            let prefetch_ceiling = head_snapshot.finalized.as_ref().map(|block| block.number);
             let result = self
                 .load_window(
                     &request.chain_id,
@@ -201,6 +212,7 @@ impl Engine {
                     &request.sources,
                     state.next,
                     to,
+                    prefetch_ceiling,
                 )
                 .await?;
             state.current = Some(result.marker);
@@ -428,6 +440,7 @@ impl Engine {
         all_sources: &[SourceDescriptor],
         from: i64,
         to: i64,
+        prefetch_ceiling: Option<i64>,
     ) -> Result<LoadedWindow> {
         let provider = self.resolver(chain_id, source, all_sources).await?;
         let numbers = (from..=to).collect::<Vec<_>>();
@@ -446,14 +459,16 @@ impl Engine {
         } else {
             None
         };
-        query::fetch_into(
-            &provider,
-            &resolved,
-            coinbase_source.as_deref(),
-            &queries,
-            &mut selected_by_identity,
-        )
-        .await?;
+        let prefetcher = prefetch_ceiling.filter(|_| !coinbase).map(|ceiling| {
+            Prefetcher::new(&self.range_logs, provider_key(chain_id, source), ceiling)
+        });
+        let mut context = QueryContext {
+            provider: &provider,
+            resolved: &resolved,
+            coinbase: coinbase_source.as_deref(),
+            prefetch: prefetcher.as_ref(),
+        };
+        query::fetch_into(&context, &queries, &mut selected_by_identity).await?;
         if let Some(announcement_topic0) = filter.registry_announcement_topic0() {
             let announcements = selected_by_identity
                 .values()
@@ -465,15 +480,19 @@ impl Engine {
                 .map(|log| (log.address.clone(), log.block_number))
                 .collect::<BTreeSet<_>>();
             let supplemental = filter.admit_registry_announcements(announcements, from, to);
-            query::fetch_into(
-                &provider,
-                &resolved,
-                coinbase_source.as_deref(),
-                &supplemental,
-                &mut selected_by_identity,
-            )
-            .await?;
+            // Discovery queries admit addresses mid-window, so a range read ahead of the
+            // announcement would be incomplete: they always read the window itself.
+            context.prefetch = None;
+            query::fetch_into(&context, &supplemental, &mut selected_by_identity).await?;
             queries.extend(supplemental);
+        }
+        // One hash re-check per window, after the last range log lookup, over the union of
+        // blocks that returned a log.
+        if !coinbase {
+            let logged = logged_blocks(&resolved, selected_by_identity.values());
+            provider.recheck_resolved(&logged).await.map_err(|error| {
+                provider_error("failed to re-resolve ingest blocks after log lookup", error)
+            })?;
         }
         let mut selected = selected_by_identity.into_values().collect::<Vec<_>>();
         selected.retain(|log| {
@@ -481,7 +500,7 @@ impl Engine {
                 .first()
                 .is_some_and(|topic0| filter.includes(&log.address, topic0, log.block_number))
         });
-        let facts = fetch_selected_facts(&provider, &resolved, selected.clone()).await?;
+        let facts = fetch_selected_facts(&provider, &resolved, selected.clone(), &filter).await?;
         let estimated_write_bytes = estimated_write_bytes(&facts);
         self.enforce_window_floor(chain_id, source, from, to)
             .await?;
@@ -576,6 +595,27 @@ impl Engine {
             .insert(key, client.clone());
         Ok(client)
     }
+}
+
+/// Identifies a configured provider, for caches that must never mix endpoints.
+fn provider_key(chain_id: &str, source: &SourceDescriptor) -> String {
+    format!("{chain_id}\0{}\0{}", source.kind, source.endpoint)
+}
+
+/// The resolved blocks that returned at least one log, in window order.
+pub(crate) fn logged_blocks<'a>(
+    resolved: &[ResolvedBlock],
+    logs: impl IntoIterator<Item = &'a crate::provider::Log>,
+) -> Vec<ResolvedBlock> {
+    let numbers = logs
+        .into_iter()
+        .map(|log| log.block_number)
+        .collect::<BTreeSet<_>>();
+    resolved
+        .iter()
+        .filter(|block| numbers.contains(&block.number))
+        .cloned()
+        .collect()
 }
 
 struct NormalSourceState<'a> {
