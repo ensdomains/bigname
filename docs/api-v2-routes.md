@@ -1106,7 +1106,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   registration. Their presence does not widen wrapper-holder enumeration;
   request-relative completeness metadata below remains authoritative.
   `authority_context` is required on every row and records how that row was
-  admitted under the per-name ownership rule.
+  admitted under the per-name ownership rule. `powers` values come from the
+  [permission powers vocabulary](api-v2.md#permission-powers-vocabulary), which
+  names every value and the on-chain role bit or NameWrapper fuse behind it.
   `include=lineage`
   adds route-local `lineage` per row:
   `{grant, revocation?, inheritance_path?, transfer_behavior?}`. Product lineage

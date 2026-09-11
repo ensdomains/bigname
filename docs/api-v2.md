@@ -111,7 +111,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `unsupported_reason` | reason code or short reason string required with `status=unsupported` | `coverage.unsupported_reason`, route-specific unsupported details |
 | `failure_reason` | reason code or short reason string for `failed`, `stale`, `not_found`, or `mismatch` details | route-specific failure detail fields |
 | `completeness` | `full`, `partial`, `unsupported` | `coverage.status` on product routes (full taxonomy moves to diagnostics) |
-| `powers` | effective permission powers; storage `resource_control` is exposed as `registration_control`; ENSv2 registry `was_reserved` is a non-authorizing history marker retained here so marker-only transitions remain visible (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@a971bd64) | `effective_powers` |
+| `powers` | effective permission powers, drawn from the [permission powers vocabulary](#permission-powers-vocabulary); storage `resource_control` is exposed as `registration_control`; ENSv2 registry `was_reserved` is a non-authorizing history marker retained here so marker-only transitions remain visible (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@a971bd64) | `effective_powers` |
 | `unsupported_fields` | fields or expansions that could not be served or proved for a response item | `unsupported_filters`, coverage-derived unsupported field lists |
 | `keys` | comma-separated resolver record-key allowlist | `records` query parameter, selector token lists in record diagnostics |
 | `page` | pagination object on top-level collections, per-input lookup results, and the resolver overview `bound_names` nested collection | pagination sections with divergent field subsets |
@@ -249,6 +249,107 @@ approve exception is bigname policy, not an upstream lifecycle state.
 (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L47 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L127 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L135 @ ens_v1@91c966f)
+
+### Permission powers vocabulary
+
+`powers` (on `GET /v1/permissions` rows, `include=role_summary` grants, and
+lineage objects) is a list of snake_case names drawn from three producers. The
+table is the complete vocabulary the code can serve; a test
+(`documented_powers_vocabulary_matches_code` in
+`apps/api/src/v2/permission_values.rs`) fails when this table and the producing
+source files disagree. Names are listed once even where two producers share
+them.
+
+- **ENSv1 and Basenames projected control** (adapters
+  `crates/adapters/src/schema_v2/protocol/v1/*`, projection
+  `crates/project/src/builders/permissions.rs`). These are the only two powers
+  today's interpreters emit for ENSv1 and Basenames names. Storage spells the
+  first `resource_control`; the API renames it `registration_control`.
+- **ENSv1 NameWrapper fuse vocabulary** (projection mask in
+  `crates/project/src/builders/permissions.rs`). The projection recognises
+  these names and removes each one from a wrapped name's effective powers when
+  the corresponding NameWrapper fuse is burnt, evaluated with the
+  [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) fuse
+  word. No current interpreter emits them, so they appear in served rows only
+  if a future interpreter grants them; they are documented so the mask's
+  meaning is fixed now.
+  (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10-L16 @ ens_v1@91c966f)
+- **ENSv2 role bitmaps** (adapters
+  `crates/adapters/src/schema_v2/protocol/permissions.rs` and
+  `v2_record_resolver/permissions.rs`). `EACRolesChanged` bitmaps are decoded
+  bit by bit; each name is the pinned upstream `ROLE_<NAME>` constant in
+  lower snake case, and `admin_<name>` is `ROLE_<NAME>_ADMIN`, the same bit
+  shifted by 128. Unknown bits are omitted rather than surfaced under invented
+  names.
+  (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L7-L63 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L7-L64 @ ens_v2_sepolia_20260629@ccaeb58)
+  (upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L10 @ ens_v2_sepolia_20260903@5da83f6a)
+
+<!-- powers-vocabulary:start -->
+| Power | Producer | On-chain role or condition |
+| --- | --- | --- |
+| `registration_control` | ENSv1/Basenames control | Storage `resource_control`. Held by the account that controls the registration's authority object: the registrar token owner (`RegistrationGranted`, registrar `Transfer`), the registry owner of a registry-only resource (`NewOwner`/`Transfer`), or the NameWrapper token holder (`TokenControlTransferred`). Masked away while the wrapper is `locked`. |
+| `resolver_control` | ENSv1/Basenames control | Held by the same account, scoped to the registration's current nonzero resolver (`grant_scope.kind = resolver`); revoked and re-granted on `ResolverChanged` and `RegistrationGranted`. Masked by `CANNOT_SET_RESOLVER` (8). |
+| `set_resolver` | ENSv2 registry; wrapper mask | Registry `ROLE_SET_RESOLVER` (bit 24). On a wrapped ENSv1 name the mask removes it under `CANNOT_SET_RESOLVER` (8). |
+| `set_ttl` | wrapper mask | Removed under `CANNOT_SET_TTL` (16). |
+| `create_subnames` | wrapper mask | Removed under `CANNOT_CREATE_SUBDOMAIN` (32). |
+| `create_subdomain` | wrapper mask | Alias of `create_subnames`; removed under `CANNOT_CREATE_SUBDOMAIN` (32). |
+| `transfer` | wrapper mask | Removed under `CANNOT_TRANSFER` (4). |
+| `transfer_name` | wrapper mask | Alias of `transfer`; removed under `CANNOT_TRANSFER` (4). |
+| `unwrap` | wrapper mask | Removed under `CANNOT_UNWRAP` (1). |
+| `burn_fuses` | wrapper mask | Removed under `CANNOT_BURN_FUSES` (2). |
+| `approve` | wrapper mask | Removed under `CANNOT_APPROVE` (64); retained during `.eth` registrar grace (policy, see above). |
+| `approve_wrapper` | wrapper mask | Removed under `CANNOT_APPROVE` (64); retained during `.eth` registrar grace (policy, see above). |
+| `registrar` | ENSv2 registry | `ROLE_REGISTRAR` (bit 0): may register names. |
+| `register_reserved` | ENSv2 registry | `ROLE_REGISTER_RESERVED` (bit 4). |
+| `set_parent` | ENSv2 registry | `ROLE_SET_PARENT` (bit 8). |
+| `unregister` | ENSv2 registry | `ROLE_UNREGISTER` (bit 12). |
+| `renew` | ENSv2 registry | `ROLE_RENEW` (bit 16). |
+| `set_subregistry` | ENSv2 registry | `ROLE_SET_SUBREGISTRY` (bit 20). |
+| `was_reserved` | ENSv2 registry | `ROLE_WAS_RESERVED` (bit 32): a token-only, non-revocable history marker that the name was registered through `ROLE_REGISTER_RESERVED`. It authorizes nothing; it is retained so a marker-only `EACRolesChanged` stays visible. |
+| `set_uri` | ENSv2 registry | `ROLE_SET_URI` (bit 36). |
+| `can_name` | ENSv2 registry; ENSv2 resolvers | `ROLE_CAN_NAME` (bit 120). |
+| `upgrade` | ENSv2 registry; ENSv2 resolvers | `ROLE_UPGRADE` (bit 124). |
+| `can_transfer_admin` | ENSv2 registry | `ROLE_CAN_TRANSFER_ADMIN` (bit 156, `(1 << 28) << 128`). |
+| `admin_registrar` | ENSv2 registry | `ROLE_REGISTRAR_ADMIN` (bit 128). |
+| `admin_register_reserved` | ENSv2 registry | `ROLE_REGISTER_RESERVED_ADMIN` (bit 132). |
+| `admin_set_parent` | ENSv2 registry | `ROLE_SET_PARENT_ADMIN` (bit 136). |
+| `admin_unregister` | ENSv2 registry | `ROLE_UNREGISTER_ADMIN` (bit 140). |
+| `admin_renew` | ENSv2 registry | `ROLE_RENEW_ADMIN` (bit 144). |
+| `admin_set_subregistry` | ENSv2 registry | `ROLE_SET_SUBREGISTRY_ADMIN` (bit 148). |
+| `admin_set_resolver` | ENSv2 registry | `ROLE_SET_RESOLVER_ADMIN` (bit 152). |
+| `admin_set_uri` | ENSv2 registry | `ROLE_SET_URI_ADMIN` (bit 164). |
+| `admin_can_name` | ENSv2 registry; ENSv2 resolvers | `ROLE_CAN_NAME_ADMIN` (bit 248). |
+| `admin_upgrade` | ENSv2 registry; ENSv2 resolvers | `ROLE_UPGRADE_ADMIN` (bit 252). |
+| `set_addr` | ENSv2 resolvers | `ROLE_SET_ADDR` (bit 0 of the resolver bitmap). |
+| `set_text` | ENSv2 resolvers | `ROLE_SET_TEXT` (bit 4). |
+| `set_contenthash` | ENSv2 resolvers | `ROLE_SET_CONTENTHASH` (bit 8). |
+| `set_pubkey` | ENSv2 resolver (20260629) | `ROLE_SET_PUBKEY` (bit 12). |
+| `set_abi` | ENSv2 resolvers | `ROLE_SET_ABI` (bit 16; bit 12 on the record resolver). |
+| `set_interface` | ENSv2 resolvers | `ROLE_SET_INTERFACE` (bit 20; bit 16 on the record resolver). |
+| `set_name` | ENSv2 resolvers | `ROLE_SET_NAME` (bit 24; bit 20 on the record resolver). |
+| `set_alias` | ENSv2 resolver (20260629) | `ROLE_SET_ALIAS` (bit 28). |
+| `clear_records` | ENSv2 resolver (20260629) | `ROLE_CLEAR` (bit 32): may clear a name's records. |
+| `set_data` | ENSv2 resolvers | `ROLE_SET_DATA` (bit 36; bit 24 on the record resolver). |
+| `link` | ENSv2 record resolver | `ROLE_LINK` (bit 28). |
+| `admin_set_addr` | ENSv2 resolvers | `ROLE_SET_ADDR_ADMIN` (bit 128). |
+| `admin_set_text` | ENSv2 resolvers | `ROLE_SET_TEXT_ADMIN` (bit 132). |
+| `admin_set_contenthash` | ENSv2 resolvers | `ROLE_SET_CONTENTHASH_ADMIN` (bit 136). |
+| `admin_set_pubkey` | ENSv2 resolver (20260629) | `ROLE_SET_PUBKEY_ADMIN` (bit 140). |
+| `admin_set_abi` | ENSv2 resolvers | `ROLE_SET_ABI_ADMIN` (bit 144; bit 140 on the record resolver). |
+| `admin_set_interface` | ENSv2 resolvers | `ROLE_SET_INTERFACE_ADMIN` (bit 148; bit 144 on the record resolver). |
+| `admin_set_name` | ENSv2 resolvers | `ROLE_SET_NAME_ADMIN` (bit 152; bit 148 on the record resolver). |
+| `admin_set_alias` | ENSv2 resolver (20260629) | `ROLE_SET_ALIAS_ADMIN` (bit 156). |
+| `admin_clear_records` | ENSv2 resolver (20260629) | `ROLE_CLEAR_ADMIN` (bit 160). |
+| `admin_set_data` | ENSv2 resolvers | `ROLE_SET_DATA_ADMIN` (bit 164; bit 152 on the record resolver). |
+| `admin_link` | ENSv2 record resolver | `ROLE_LINK_ADMIN` (bit 156). |
+<!-- powers-vocabulary:end -->
+
+`set_records` is not in this vocabulary: it appears only in bigname's own API
+test fixtures for `record_manager` grants, and no interpreter emits it. A
+consumer that saw it came from a fixture, not from chain data. Names ending in
+`_resource` or containing `resource_` other than `resource_control` are storage
+vocabulary that the API refuses to serve.
 
 Rules:
 
