@@ -1663,7 +1663,7 @@ The closed set of Project-owned maintenance fields is `last_recomputed_at` on
 every projection
 table except `primary_names_current`; `inserted_at` on `name_current`,
 `children_current`, `permissions_current`, `record_inventory_current`,
-`resolver_current`, and `address_names_current`; and
+`resolver_current`, `address_names_current`, and `address_records_current`; and
 `reverse_hydration_attempted_block_number`,
 `reverse_hydration_attempted_block_hash`, and
 `reverse_hydration_attempt_ordinal` on `primary_names_current`. The Project

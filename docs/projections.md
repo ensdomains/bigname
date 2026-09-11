@@ -243,6 +243,7 @@ outcomes, or durable traces.
 | --- | --- | --- |
 | `name_current` | `logical_name_id` | exact-name lookup and search |
 | `address_names_current` | `(address, logical_name_id, relation)` | address-to-names and reverse lookup |
+| `address_records_current` | `(address, coin_type, logical_name_id)` | names whose current `addr:<coin_type>` record resolves to an address (`relation=resolves_to`) |
 | `children_current` | parent/child identity plus class | direct and classified child collections |
 | `permissions_current` | resource, subject, and scope | resource permissions and role summaries |
 | `account_permission_state_current` | (`chain_id`, `authority_kind`, `authority_contract`, `owner`, `subject`, `relation_kind`) | no serving reader yet; a follow-up change adds storage and API readers |
@@ -345,6 +346,30 @@ Address-to-name collections use `address_names_current` membership and join
 `name_current` for display, sort, and compact record fields. Relation vocabulary
 is `registrant`, `token_holder`, and `effective_controller`. Surface is the
 default unit; resource deduplication is explicit.
+
+`address_records_current` is the reverse index over current `addr:<coin_type>`
+resolver records: one row per (lower-cased address the record resolves to, coin
+type, current bound name). It is derived from the published record inventory of
+the name's record-serving resource (`name_current.serving_resource_id`, else
+`resource_id`), never from record events directly, so a row exists exactly when
+the forward indexed read of that record answers `success` with a 20-byte
+non-zero EVM address. Zero-address values and cleared (`not_found`) entries
+produce no row; non-EVM-shaped payloads produce no row. `record_key` names the
+entry the row came from. The ENSIP-19 default EVM address (`addr:2147483648`)
+publishes one row under its own coin type; when the serving resolver declares
+the `ensip19_default_address` read feature that row carries
+`provenance.ensip19_default_address=true` and
+`provenance.shadowed_coin_types`, the EVM coin types whose exact entry (any
+retained answer, or the coin-60 zero-address clear the inventory marks as an
+exact absence) stops the default from answering. Readers apply the same
+fallback rule as `bigname_domain::resolver_read::evaluate_indexed_record`: a
+request for an eligible EVM coin type matches its exact row, or the unshadowed
+default row. Rows carry the record's chain position and the Project target like
+`address_names_current`; incremental publication deletes and republishes rows
+whose name is in scope or whose authority or record-serving resource is in
+scope, and a redo that orphans a record event retracts the row it produced.
+The serving relation is `resolves_to`; it is a resolver-record relation, not an
+authority relation, and `relation=any` does not include it.
 
 `children_current` stores direct and classified child relations. For registry
 events from ENSv1, Project first filters the relation by the parent's

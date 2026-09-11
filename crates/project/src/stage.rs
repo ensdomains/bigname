@@ -16,6 +16,7 @@ const PROJECTION_TABLES: &[&str] = &[
     "record_inventory_current",
     "resolver_current",
     "address_names_current",
+    "address_records_current",
     "primary_names_current",
 ];
 

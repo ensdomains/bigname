@@ -3,6 +3,7 @@ mod decode;
 mod page;
 mod query;
 mod read;
+mod resolves_to;
 mod types;
 pub use count::{AddressNamesCurrentCountFilter, count_address_names_current_for_app_filter};
 pub use page::{
@@ -12,6 +13,10 @@ pub use read::{
     load_address_names_current, load_address_names_current_for_relations,
     load_address_names_current_including_noncanonical,
     load_address_names_current_including_noncanonical_for_relations,
+};
+pub use resolves_to::{
+    AddressRecordCurrentEntry, AddressRecordsCurrentPage, ENSIP19_DEFAULT_ADDRESS_RECORD_KEY,
+    load_address_records_current_page,
 };
 pub use types::{
     AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation, AddressNamesCurrentCursor,

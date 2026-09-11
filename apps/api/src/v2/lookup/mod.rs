@@ -10,9 +10,7 @@ use tracing::error;
 use super::support::{load_reverse_identity_records_live, load_reverse_identity_records_page_live};
 use crate::AppState;
 
-use super::{
-    Envelope, NoQueryParams, Page, Relation, RelationSet, Status, V2Error, V2Result, encode,
-};
+use super::{Envelope, NoQueryParams, Page, Status, V2Error, V2Result, encode};
 
 mod admission;
 mod build;
@@ -25,6 +23,8 @@ pub(crate) use head::{
 };
 mod page;
 mod parse;
+mod relation_filter;
+mod resolves_to;
 mod scope;
 
 pub(crate) use admission::{
@@ -46,6 +46,9 @@ use parse::{
     LookupProfile, ParsedAddressLookup, ParsedNameLookup, bind_address_cursor,
     ensure_lookup_batch_limit, parse_address_input, parse_lookup_json_body, parse_lookup_namespace,
     parse_lookup_profile, parse_name_input,
+};
+use relation_filter::{
+    requires_relation_post_filter, reverse_record_matches_relation, trim_reverse_record_relations,
 };
 use scope::{
     lookup_public_namespaces, lookup_request_scope_meta, lookup_snapshot_scope,
@@ -257,6 +260,15 @@ async fn render_reverse_lookup_results(
         results,
     )
     .await?;
+    resolves_to::render_resolves_to_lookup_results(
+        state,
+        profile,
+        inputs,
+        served_head,
+        public_namespaces,
+        results,
+    )
+    .await?;
     for input in inputs
         .iter()
         .filter(|input| requires_relation_post_filter(input.relation.as_ref()))
@@ -279,7 +291,10 @@ async fn render_storage_exact_reverse_lookup_results(
     let selected_snapshot = served_head.map(head::ServedHead::selected);
     let storage_exact_inputs = inputs
         .iter()
-        .filter(|input| !requires_relation_post_filter(input.relation.as_ref()))
+        .filter(|input| {
+            !requires_relation_post_filter(input.relation.as_ref())
+                && !resolves_to::is_resolves_to_input(input)
+        })
         .collect::<Vec<_>>();
     let storage_inputs = deduped_reverse_storage_inputs(storage_exact_inputs.iter().copied());
     let groups =
@@ -527,51 +542,6 @@ fn result_failure_reason<'a>(
                 .next()
         })
         .flatten()
-}
-
-fn requires_relation_post_filter(relation: Option<&RelationSet>) -> bool {
-    relation.is_some_and(|relation| {
-        !relation.is_all()
-            && !relation.is_exact_manager()
-            && !relation.is_exact_owner_and_registrant()
-    })
-}
-
-fn reverse_record_matches_relation(
-    record: &bigname_storage::ReverseIdentityRecordRow,
-    relation: Option<&RelationSet>,
-) -> bool {
-    relation.is_none_or(|relation| {
-        record.relation_facets.iter().any(|facet| {
-            relation
-                .as_slice()
-                .iter()
-                .any(|relation| relation_to_storage(*relation) == *facet)
-        })
-    })
-}
-
-fn trim_reverse_record_relations(
-    mut record: bigname_storage::ReverseIdentityRecordRow,
-    relation: Option<&RelationSet>,
-) -> bigname_storage::ReverseIdentityRecordRow {
-    if let Some(relation) = relation {
-        record.relation_facets.retain(|facet| {
-            relation
-                .as_slice()
-                .iter()
-                .any(|relation| relation_to_storage(*relation) == *facet)
-        });
-    }
-    record
-}
-
-fn relation_to_storage(relation: Relation) -> bigname_storage::AddressNameRelation {
-    match relation {
-        Relation::Owner => bigname_storage::AddressNameRelation::TokenHolder,
-        Relation::Manager => bigname_storage::AddressNameRelation::EffectiveController,
-        Relation::Registrant => bigname_storage::AddressNameRelation::Registrant,
-    }
 }
 
 fn deduped_reverse_storage_inputs<'a>(

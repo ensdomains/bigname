@@ -229,9 +229,14 @@ pub(crate) enum Relation {
     Owner,
     Manager,
     Registrant,
+    /// The address is the value of the name's current `addr:<coin_type>` resolver record. A
+    /// resolver-record relation, not an authority relation: it is coin-type scoped, never part
+    /// of `any`, and never combined with the authority relations in one set.
+    ResolvesTo,
 }
 
 impl Relation {
+    /// The authority relations `any` expands to. `resolves_to` is deliberately outside this set.
     pub(crate) const ALL: [Self; 3] = [Self::Owner, Self::Manager, Self::Registrant];
 
     pub(crate) const fn as_str(self) -> &'static str {
@@ -239,6 +244,7 @@ impl Relation {
             Self::Owner => "owner",
             Self::Manager => "manager",
             Self::Registrant => "registrant",
+            Self::ResolvesTo => "resolves_to",
         }
     }
 
@@ -247,6 +253,7 @@ impl Relation {
             "owner" => Some(Self::Owner),
             "manager" => Some(Self::Manager),
             "registrant" => Some(Self::Registrant),
+            "resolves_to" => Some(Self::ResolvesTo),
             _ => None,
         }
     }
@@ -264,8 +271,18 @@ impl RelationSet {
         }
     }
 
+    /// Canonicalizes a requested set. `resolves_to` is only valid on its own: a set that mixes it
+    /// with an authority relation has no canonical form and returns `None`.
     pub(crate) fn from_relations(relations: impl IntoIterator<Item = Relation>) -> Option<Self> {
         let requested = relations.into_iter().collect::<Vec<_>>();
+        if requested.contains(&Relation::ResolvesTo) {
+            return requested
+                .iter()
+                .all(|relation| *relation == Relation::ResolvesTo)
+                .then(|| Self {
+                    relations: vec![Relation::ResolvesTo],
+                });
+        }
         let mut normalized = Vec::new();
         for candidate in Relation::ALL {
             if requested.contains(&candidate) && !normalized.contains(&candidate) {
@@ -295,6 +312,10 @@ impl RelationSet {
 
     pub(crate) fn is_exact_manager(&self) -> bool {
         self.relations == [Relation::Manager]
+    }
+
+    pub(crate) fn is_resolves_to(&self) -> bool {
+        self.relations == [Relation::ResolvesTo]
     }
 
     pub(crate) fn is_exact_owner_and_registrant(&self) -> bool {
@@ -369,6 +390,7 @@ pub(crate) const PRODUCT_PIPELINE_TERMS: &[&str] = &[
     "enumeration_basis",
     "source_classes_considered",
     "address_names_current",
+    "address_records_current",
     "chain_header_audit",
     "chain_lineage",
     "children_current",
@@ -503,6 +525,8 @@ fn term_match_has_underscore_boundaries(candidate: &str, term: &str, start: usiz
 
 #[cfg(test)]
 mod tests {
+    mod relation_tests;
+
     use serde::Serialize;
 
     use super::*;
@@ -652,6 +676,7 @@ mod tests {
         assert_wire(Relation::Owner, "owner");
         assert_wire(Relation::Manager, "manager");
         assert_wire(Relation::Registrant, "registrant");
+        assert_wire(Relation::ResolvesTo, "resolves_to");
     }
 
     #[test]

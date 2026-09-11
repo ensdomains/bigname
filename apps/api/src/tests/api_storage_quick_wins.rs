@@ -163,6 +163,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
         "function: bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)",
         "function: bigname_phase.write_resolution_divergence(uuid,text,text,text,bigint,text,jsonb,text,text,text,text,jsonb,jsonb,boolean)",
         "relation: bigname_phase.address_names_current",
+        "relation: bigname_phase.address_records_current",
         "relation: bigname_phase.chain_header_audit",
         "relation: bigname_phase.chain_heads",
         "relation: bigname_phase.chain_lineage",
@@ -189,7 +190,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     .map(str::to_owned));
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 25);
+    assert_eq!(actual.len(), 26);
     database.cleanup().await
 }
 

@@ -318,6 +318,7 @@ include!("tests/v2_history_redo.rs");
 include!("tests/v2_history_paging.rs");
 include!("tests/v2_diag_events.rs");
 include!("tests/v2_address_names.rs");
+include!("tests/v2_address_resolves_to.rs");
 include!("tests/v2_permissions.rs");
 include!("tests/v2_resolvers.rs");
 include!("tests/v2_registries.rs");

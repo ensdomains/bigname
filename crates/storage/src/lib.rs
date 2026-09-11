@@ -38,12 +38,14 @@ pub use address_names::{
     AddressNamesCurrentCountFilter, AddressNamesCurrentCursor, AddressNamesCurrentDedupe,
     AddressNamesCurrentOrder, AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary,
     AddressNamesCurrentSort, AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
-    AddressNamesCurrentSortedPage, AddressNamesCurrentSummary,
-    DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
+    AddressNamesCurrentSortedPage, AddressNamesCurrentSummary, AddressRecordCurrentEntry,
+    AddressRecordsCurrentPage, DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS,
+    DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER, ENSIP19_DEFAULT_ADDRESS_RECORD_KEY,
     count_address_names_current_for_app_filter, load_address_names_current,
     load_address_names_current_for_relations, load_address_names_current_including_noncanonical,
     load_address_names_current_including_noncanonical_for_relations,
     load_address_names_current_page, load_address_names_current_page_sorted_for_relations,
+    load_address_records_current_page,
 };
 pub use api_preflight::{
     ApiLookupDdlKind, ApiLookupDdlObject, load_missing_api_lookup_ddl, phase_schema_exists,

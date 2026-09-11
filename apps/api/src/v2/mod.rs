@@ -37,7 +37,7 @@ mod vocab;
 pub(crate) use address_history::get_address_history;
 #[cfg(test)]
 pub(crate) use address_history::{AddressHistoryCursorBinding, address_history_cursor_payload};
-pub(crate) use address_names::{AddressNameGrant, get_address_names};
+pub(crate) use address_names::{AddressNameGrant, AddressNameResolution, get_address_names};
 pub(crate) use chains::{
     all_chain_slugs, numeric_to_slug, slug_to_numeric, snapshot_slot_for_slug,
 };

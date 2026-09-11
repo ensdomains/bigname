@@ -70,8 +70,9 @@ step-3-gate vocabulary needed by the route schemas:
 | `owner` | token/registry owner | `token_holder`, `owner`, `owner_address`, `registry_owner` |
 | `manager` | controller/manager | `effective_controller`, `manager_address` |
 | `registrant` | registrant | `registrant` (unchanged) |
-| `relation` | address-to-name relation filter: one or more of `owner`, `manager`, `registrant` (comma-separated set); `any` = all three | four divergent relation/role enums incl. `owned`/`managed`/`both` (partner `BOTH` = `owner,manager`) |
-| `relations` | address-to-name relations that matched a row, using `owner`, `manager`, and `registrant` values | `relation_facets`, role-specific match arrays |
+| `relation` | address-to-name relation filter: one or more of the authority relations `owner`, `manager`, `registrant` (comma-separated set); `any` = all three; or, on its own, the resolver-record relation `resolves_to` (names whose current `addr:<coin_type>` record resolves to the address, coin type from `coin_type`, default `60`). `resolves_to` is not part of `any` and cannot be combined with an authority relation | four divergent relation/role enums incl. `owned`/`managed`/`both` (partner `BOTH` = `owner,manager`); ensjs `resolvedAddress` |
+| `relations` | address-to-name relations that matched a row, using `owner`, `manager`, `registrant`, and `resolves_to` values | `relation_facets`, role-specific match arrays |
+| `resolution` | on a `resolves_to` row only: `{coin_type, record_key}`, the coin type asked about and the resolver record key that answered it (`addr:<coin_type>`, or `addr:2147483648` when the ENSIP-19 default EVM address answered) | subgraph `resolver.coinTypes` |
 | `expires_at` | expiry, RFC 3339: the registrar lease for registrar-backed names; for a wrapped ENSv1 name with no registrar lease (a wrapped subname) the NameWrapper entry's expiry, which is the only expiry the chain holds for it (zero means the parent set none and the field is omitted) | `expiry_date`, `expiration` (unix), `expiry` |
 | `registered_at` | current registration start, RFC 3339 | `registration_date` |
 | `created_at` | first observation of the name, RFC 3339 | `created_at` (now defined and distinguished from `registered_at`) |

@@ -9,6 +9,7 @@ pub const PHASE_SCHEMA_NAME: &str = "bigname_phase";
 const EXPECTED_TABLES: &[&str] = &[
     "account_permission_state_current",
     "address_names_current",
+    "address_records_current",
     "chain_heads",
     "chain_header_audit",
     "chain_lineage",
