@@ -549,8 +549,9 @@
                        WHEN $1 = 'ethereum-sepolia' OR EXISTS (
                            SELECT 1 FROM project_manifests manifest
                            WHERE manifest.namespace = 'ens'
-                             AND manifest.deployment_label =
-                                 'ens_v2_sepolia_post_audit'
+                             AND manifest.deployment_label IN (
+                                 'ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon'
+                             )
                        ) THEN 'sepolia'
                        ELSE 'mainnet'
                    END AS deployment_profile

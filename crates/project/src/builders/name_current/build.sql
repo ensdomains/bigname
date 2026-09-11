@@ -694,8 +694,9 @@
                          AND event.source_family = 'ens_v2_registry_l1'
                          AND manifest.namespace = 'ens'
                          AND manifest.chain_id = 'ethereum-sepolia'
-                         AND manifest.deployment_label =
-                             'ens_v2_sepolia_post_audit'
+                         AND manifest.deployment_label IN (
+                             'ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon'
+                         )
                    )
                    AND EXISTS (
                        SELECT 1
@@ -708,8 +709,9 @@
                          AND event.source_family = 'ens_v2_registrar_l1'
                          AND manifest.namespace = 'ens'
                          AND manifest.chain_id = 'ethereum-sepolia'
-                         AND manifest.deployment_label =
-                             'ens_v2_sepolia_post_audit'
+                         AND manifest.deployment_label IN (
+                             'ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon'
+                         )
                          AND manifest.manifest_payload
                              -> 'capability_flags'
                              -> 'exact_name_profile'
@@ -770,10 +772,10 @@
                              selected_authority.selected_resource_id::text
                          AND migration_manifest.namespace = boundary.namespace
                          AND migration_manifest.chain_id = boundary.chain_id
-                         AND migration_manifest.deployment_label = 'ens_v2_sepolia_post_audit'
+                         AND migration_manifest.deployment_label IN ('ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon')
                          AND registry_manifest.namespace = successor.namespace
                          AND registry_manifest.chain_id = successor.chain_id
-                         AND registry_manifest.deployment_label = 'ens_v2_sepolia_post_audit'
+                         AND registry_manifest.deployment_label IN ('ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon')
                          AND (
                              -- The successor registry is either declared in the admitted
                              -- registry profile or was created on chain by an admitted
