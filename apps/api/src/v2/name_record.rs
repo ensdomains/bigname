@@ -16,8 +16,9 @@ use super::support::{
     snapshot_selection_api_error,
 };
 use super::{
-    Envelope, QueryParamAllowlist, RequestSource, SnapshotReadResource, StrictQueryParams, V2Error,
-    V2Result, api_error_to_v2_for_resource, resolve_v2_snapshot_for, snapshot_meta,
+    Envelope, QueryParamAllowlist, RegistryRef, RequestSource, SnapshotReadResource,
+    StrictQueryParams, V2Error, V2Result, api_error_to_v2_for_resource, load_subregistry_refs,
+    name_chain_id, resolve_v2_snapshot_for, snapshot_block_for_chain, snapshot_meta,
     v2_exact_name_snapshot_scope_with_resolution_auxiliary,
     vocab::{
         PARTIAL_SERVE_UNSUPPORTED_REASON, RegistrationStatus, Resolver, Source, Status,
@@ -82,6 +83,8 @@ pub(crate) struct NameRecord {
     pub(crate) namehash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resolver: Option<Resolver>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subregistry: Option<RegistryRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) addresses: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -175,7 +178,7 @@ pub(crate) async fn get_name_record(
         None
     };
     let chain_id = response_chain_id(&selected_snapshot);
-    let record = verified::build_name_record_for_source(
+    let mut record = verified::build_name_record_for_source(
         &state,
         &row,
         record_inventory.as_ref(),
@@ -184,6 +187,15 @@ pub(crate) async fn get_name_record(
         route_source,
     )
     .await?;
+    let as_of_block = name_chain_id(&row)
+        .and_then(|chain_id| snapshot_block_for_chain(&selected_snapshot, &chain_id));
+    record.record.subregistry = load_subregistry_refs(
+        &state.pool,
+        std::slice::from_ref(&row.logical_name_id),
+        as_of_block,
+    )
+    .await?
+    .remove(&row.logical_name_id);
     let mut meta = snapshot_meta(&selected_snapshot)?;
     meta.source = Some(route_source);
 
@@ -277,6 +289,7 @@ pub(crate) fn build_name_record(
         namespace: row.namespace.clone(),
         namehash: row.namehash.clone(),
         resolver,
+        subregistry: None,
         addresses,
         text_records,
         content_hash,

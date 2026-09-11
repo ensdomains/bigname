@@ -88,6 +88,8 @@ step-3-gate vocabulary needed by the route schemas:
 | `text_records` | text-key-to-value map | `text_records` (unchanged) |
 | `content_hash` | contenthash value | `content_hash` (unchanged) |
 | `resolver` | `{chain_id, address}` | `resolver_address`, `current_resolver`, declared resolver summaries |
+| `subregistry` | `{chain_id, address}` of the ENSv2 registry a name's current subregistry pointer targets; omitted when there is none | `SubregistryChanged` after-state `subregistry` |
+| `parent_registry` | `{chain_id, address}` of the registry that emitted the pointer to a registry; `null` for the root registry | `SubregistryChanged` emitter |
 | `contract_address` | event filter for the contract that emitted an event's source log | `emitting_address` |
 | `chain_id` | numeric EVM chain id (`1`, `8453`); string-keyed in maps | string chain ids (`"ethereum-mainnet"`), position slot keys |
 | `network` | display slug (`ethereum`, `base`) | `network` (unchanged, display-only) |
