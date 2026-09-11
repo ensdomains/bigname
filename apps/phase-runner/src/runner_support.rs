@@ -3,12 +3,13 @@ use std::time::{Duration, Instant};
 use sqlx::PgConnection;
 
 use crate::{
-    config::TimingConfig,
+    config::{ChainConfig, TimingConfig},
     database::RunnerDatabase,
     error::{ErrorKind, RunnerError, RunnerResult},
-    phase::{BlockRange, PhaseName, PhaseProgress},
+    phase::{BlockRange, PhaseName, PhaseProgress, RunMode},
     phase_lock::PhaseLock,
     redo_state::{RedoOutcome, RedoSession},
+    runner::SupervisorReport,
     state::PhaseStore,
     state_persistence::{load_redo_marker, record_live_verification_mismatch},
     transitions::redo_rerun_instruction,
@@ -48,6 +49,73 @@ pub(crate) async fn cancelled_redo_error(
              from normal restart; {instruction}"
         ),
     ))
+}
+
+/// A stop accepted between chains leaves the rest of an explicit redo unstarted.
+/// Each one is reported, so the command cannot exit clean with a prefix redone.
+pub(crate) fn report_undispatched_redo(report: &mut SupervisorReport, chains: &[ChainConfig]) {
+    for chain in chains {
+        report.stopped_chains.push((
+            chain.chain_id.clone(),
+            RunnerError::new(
+                ErrorKind::InvalidTransition,
+                format!(
+                    "redo for chain {} was not started: the stop was accepted before its \
+                     dispatch and no redo stamp was recorded; rerun the command for this chain",
+                    chain.chain_id
+                ),
+            ),
+        ));
+    }
+}
+
+/// True when the Interpret marker is this recompute's own interrupted run, which
+/// resumes; an ordinary redo or a different range is an error.
+pub(crate) async fn resumable_recompute_marker(
+    store: &PhaseStore,
+    chain_id: &str,
+    range: BlockRange,
+) -> RunnerResult<bool> {
+    let Some((redo_mode, from, to)) =
+        load_redo_marker(store.pool(), chain_id, PhaseName::Interpret).await?
+    else {
+        return Ok(false);
+    };
+    if redo_mode != "recompute_flags" {
+        return Err(RunnerError::data_integrity(format!(
+            "interpret phase for chain {chain_id} already has an ordinary redo; complete it \
+             before starting recompute-flags"
+        )));
+    }
+    let persisted = BlockRange::new(from, to)?;
+    if persisted != range {
+        return Err(RunnerError::data_integrity(format!(
+            "recompute-flags for chain {chain_id} is interrupted; rerun the exact persisted \
+             range {}..={}",
+            persisted.from, persisted.to
+        )));
+    }
+    Ok(true)
+}
+
+pub(crate) async fn require_all_phase_range_within_verify(
+    store: &PhaseStore,
+    chain_id: &str,
+    range: BlockRange,
+) -> RunnerResult<()> {
+    let verify_to = store
+        .phase_resume(chain_id, PhaseName::Verify, &RunMode::Normal)
+        .await?
+        .current
+        .ok_or_else(|| RunnerError::data_integrity("Verify has no recorded extent"))?
+        .number;
+    if range.to > verify_to {
+        return Err(RunnerError::data_integrity(format!(
+            "all-phase redo range ends at {}, beyond Verify's recorded extent {verify_to}",
+            range.to
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn redo_outcome(result: &RunnerResult<PhaseLoopResult>) -> RedoOutcome<'_> {

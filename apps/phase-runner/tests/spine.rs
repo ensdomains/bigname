@@ -331,6 +331,63 @@ async fn derived_write_refuses_a_recorded_content_hash_mismatch() -> Result<()> 
 }
 
 #[tokio::test]
+async fn a_stop_while_phase_start_waits_on_a_held_row_returns_without_it() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_start_waits_on_row").await?;
+    let chain_id = "start-waits-on-row-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 3).await?;
+    PhaseStore::new(scratch.runner().pool().clone())
+        .initialize_chain(chain_id)
+        .await?;
+    // Another session holds the Ingest row, so `start_phase` blocks on its
+    // `FOR UPDATE` with no lock timeout. The hold outlives the whole test.
+    let mut holder = scratch.pool().begin().await?;
+    sqlx::query(
+        "SELECT 1 FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'ingest' FOR UPDATE",
+    )
+    .bind(chain_id)
+    .execute(&mut *holder)
+    .await?;
+
+    let runner = runner(
+        scratch.runner(),
+        complete_phase_set(None),
+        available_capacity(),
+        "start-waits-on-row-runner",
+    )?;
+    let chain = chain(chain_id)?;
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let task = tokio::spawn(async move { runner.run_chain(&chain, run_cancellation).await });
+
+    // Wait until the runner is really parked on the row before stopping it.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'
+                   AND query LIKE '%chain_phase_state%'",
+            )
+            .fetch_one(scratch.pool())
+            .await?;
+            if waiting >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+
+    cancellation.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .map_err(|_| anyhow::anyhow!("the stop was held by the phase start's row wait"))??;
+    outcome?;
+    holder.rollback().await?;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn runner_writes_transitions_cursors_heads_and_heartbeats() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_writes").await?;
     let chain_id = "write-chain";
@@ -2919,6 +2976,163 @@ async fn redo_restores_the_full_phase_lifecycle_state() -> Result<()> {
 }
 
 #[tokio::test]
+async fn all_phase_redo_stopped_between_phases_keeps_the_all_phase_instruction() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_stop_between_phases").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let chain_id = "redo-stop-between-phases-chain";
+    store.initialize_chain(chain_id).await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 1).await?;
+    for (phase, hash) in [
+        (PhaseName::Ingest, None),
+        (
+            PhaseName::Interpret,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        ),
+        (
+            PhaseName::Project,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        ),
+        (PhaseName::Verify, None),
+    ] {
+        mark_completed(scratch.pool(), chain_id, phase, hash).await?;
+        set_phase_extent(scratch.pool(), chain_id, phase, 1).await?;
+    }
+
+    // The stop lands inside Interpret's last batch, so it is observed before
+    // Project starts. Interpret's redo has already stamped Project and Verify as
+    // required, which is what lets the error carry the all-phase recovery.
+    let cancellation = CancellationToken::new();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let phases = PhaseName::ALL.map(|name| {
+        Arc::new(StoppingRedoPhase {
+            name,
+            calls: Arc::clone(&calls),
+            stop_at: (
+                chain_id.to_owned(),
+                PhaseName::Interpret,
+                cancellation.clone(),
+            ),
+        }) as Arc<dyn Phase>
+    });
+    let phase_runner = runner(
+        scratch.runner(),
+        PhaseSet::new(phases)?,
+        available_capacity(),
+        "redo-stop-between-phases-runner",
+    )?;
+    let report = phase_runner
+        .redo_chains(
+            &[chain(chain_id)?],
+            RedoPhase::All,
+            BlockRange::new(0, 0)?,
+            cancellation,
+        )
+        .await?;
+
+    assert_eq!(
+        report.stopped_chains.len(),
+        1,
+        "{:?}",
+        report.stopped_chains
+    );
+    let (stopped, error) = &report.stopped_chains[0];
+    assert_eq!(stopped, chain_id);
+    assert_eq!(error.kind(), ErrorKind::InvalidTransition);
+    let message = error.to_string();
+    assert!(message.contains("phase project is incomplete"), "{message}");
+    assert!(
+        message.contains(
+            "then rerun `phase-runner redo --chain redo-stop-between-phases-chain --phase all \
+             --from-block 0 --to-block 0`"
+        ),
+        "{message}"
+    );
+    assert_eq!(
+        *calls.lock().expect("recorded calls lock"),
+        [
+            (chain_id.into(), PhaseName::Ingest),
+            (chain_id.into(), PhaseName::Interpret),
+        ]
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn all_phase_redo_stopped_between_chains_reports_the_chains_it_never_started() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_stop_between_chains").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let first = "redo-stop-first-chain";
+    let second = "redo-stop-second-chain";
+    for chain_id in [first, second] {
+        store.initialize_chain(chain_id).await?;
+        seed_interpret_redo_presence(scratch.pool(), chain_id, 1).await?;
+        for (phase, hash) in [
+            (PhaseName::Ingest, None),
+            (
+                PhaseName::Interpret,
+                Some(phase_runner::INTERPRETER_CONTENT_HASH),
+            ),
+            (
+                PhaseName::Project,
+                Some(phase_runner::INTERPRETER_CONTENT_HASH),
+            ),
+            (PhaseName::Verify, None),
+        ] {
+            mark_completed(scratch.pool(), chain_id, phase, hash).await?;
+            set_phase_extent(scratch.pool(), chain_id, phase, 1).await?;
+        }
+    }
+
+    // The stop lands inside the first chain's last batch, so it is observed
+    // between the two chains: too late to abandon the first, before the second.
+    let cancellation = CancellationToken::new();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let phases = PhaseName::ALL.map(|name| {
+        Arc::new(StoppingRedoPhase {
+            name,
+            calls: Arc::clone(&calls),
+            stop_at: (first.to_owned(), PhaseName::Verify, cancellation.clone()),
+        }) as Arc<dyn Phase>
+    });
+    let phase_runner = runner(
+        scratch.runner(),
+        PhaseSet::new(phases)?,
+        available_capacity(),
+        "redo-stop-between-chains-runner",
+    )?;
+    let report = phase_runner
+        .redo_chains(
+            &[chain(first)?, chain(second)?],
+            RedoPhase::All,
+            BlockRange::new(0, 0)?,
+            cancellation,
+        )
+        .await?;
+
+    let stopped = report
+        .stopped_chains
+        .iter()
+        .map(|(chain_id, error)| (chain_id.as_str(), error.kind(), error.to_string()))
+        .collect::<Vec<_>>();
+    let (chain_id, kind, message) = stopped
+        .iter()
+        .find(|(chain_id, _, _)| *chain_id == second)
+        .unwrap_or_else(|| panic!("the undispatched chain must be reported, got {stopped:?}"));
+    assert_eq!(*chain_id, second);
+    assert_eq!(*kind, ErrorKind::InvalidTransition);
+    assert!(message.contains("was not started"), "{message}");
+    assert!(
+        calls
+            .lock()
+            .expect("recorded calls lock")
+            .iter()
+            .all(|(chain_id, _)| chain_id == first),
+        "no batch may run for the second chain"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_redo_all_phases").await?;
     let store = PhaseStore::new(scratch.runner().pool().clone());
@@ -5434,6 +5648,32 @@ impl Phase for RecordingRedoPhase {
                 return Err(RunnerError::data_integrity(
                     "fixture failed during all-phase interpret redo",
                 ));
+            }
+            LoopbackPhase::new(self.name).run_batch(context).await
+        })
+    }
+}
+
+struct StoppingRedoPhase {
+    name: PhaseName,
+    calls: Arc<Mutex<Vec<(String, PhaseName)>>>,
+    stop_at: (String, PhaseName, CancellationToken),
+}
+
+impl Phase for StoppingRedoPhase {
+    fn name(&self) -> PhaseName {
+        self.name
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            self.calls
+                .lock()
+                .expect("recorded calls lock")
+                .push((context.chain_id.clone(), self.name));
+            let (chain_id, phase, cancellation) = &self.stop_at;
+            if *chain_id == context.chain_id && *phase == self.name {
+                cancellation.cancel();
             }
             LoopbackPhase::new(self.name).run_batch(context).await
         })

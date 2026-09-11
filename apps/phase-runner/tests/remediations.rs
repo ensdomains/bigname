@@ -598,6 +598,9 @@ async fn cancelled_redo_is_incomplete_and_returns_the_required_rerun_command() -
     assert!(error_message.contains("is incomplete"));
     assert!(error_message.contains("the phase remains blocked from normal restart"));
     assert!(error_message.contains(instruction));
+    // The stamp carries no sources and the CLI rejects an Interpret redo without
+    // one, so the instruction has to say what the operator must add back.
+    assert!(error_message.contains("` with the chain's --source options"));
 
     let state: (String, bool, Option<String>) = sqlx::query_as(
         "
