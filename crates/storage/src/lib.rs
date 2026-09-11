@@ -59,14 +59,15 @@ pub use evm_primitives::{
 #[cfg(any(test, feature = "test-support"))]
 pub use history::history_anchor_read_test_hooks;
 pub use history::{
-    EventHistoryAddressFilter, EventHistoryFilter, HistoryChainPositionSample, HistoryCursor,
-    HistoryEvent, HistoryPage, HistoryScope, HistorySummary, HistorySummaryMode,
-    InterpretRedoFence, InterpretRedoInProgress, InvalidHistoryCursor,
-    capture_interpret_redo_fence, load_address_history, load_address_history_for_relations,
-    load_address_history_page, load_address_history_page_for_relations, load_event_history,
-    load_event_history_page, load_event_history_page_with_redo_policy, load_name_history,
-    load_name_history_head, load_name_history_page, load_resource_history,
-    load_resource_history_page, revalidate_interpret_redo_fence,
+    ChainBlockRange, EventHistoryAddressFilter, EventHistoryFilter, HistoryBlockWindow,
+    HistoryChainPositionSample, HistoryCursor, HistoryEvent, HistoryOrder, HistoryPage,
+    HistoryPageOptions, HistoryScope, HistorySummary, HistorySummaryMode, InterpretRedoFence,
+    InterpretRedoInProgress, InvalidHistoryCursor, capture_interpret_redo_fence,
+    load_address_history, load_address_history_for_relations, load_address_history_page,
+    load_address_history_page_for_relations, load_event_history, load_event_history_page,
+    load_event_history_page_with_redo_policy, load_name_history, load_name_history_head,
+    load_name_history_page, load_resource_history, load_resource_history_page,
+    resolve_chain_block_ranges, revalidate_interpret_redo_fence,
 };
 pub use history::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
 pub use identity::{

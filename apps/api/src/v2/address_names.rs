@@ -116,7 +116,8 @@ pub(crate) async fn get_address_names(
     let storage_relations = (!storage_relations.is_empty()).then_some(storage_relations.as_slice());
     let storage_dedupe = dedupe_to_storage(params.dedupe);
     let storage_sort = sort_to_storage(params.sort);
-    let storage_order = order_to_storage(params.order);
+    let order = params.order.unwrap_or(SortOrder::Asc);
+    let storage_order = order_to_storage(order);
     let normalized_q = params.q.as_deref().map(normalize_name_prefix).transpose()?;
 
     let cursor_binding = AddressNamesCursorBinding {
@@ -126,7 +127,7 @@ pub(crate) async fn get_address_names(
         dedupe: params.dedupe,
         q: normalized_q.as_deref(),
         sort: params.sort,
-        order: params.order,
+        order,
     };
     let storage_cursor = params
         .cursor

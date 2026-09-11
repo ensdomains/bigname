@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use axum::{Json, extract::State};
 use bigname_storage::{
     EventHistoryAddressFilter, EventHistoryFilter, HistoryCursor,
-    HistoryEvent as StorageHistoryEvent, HistorySummaryMode,
+    HistoryEvent as StorageHistoryEvent, HistoryOrder, HistorySummaryMode,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::types::Uuid;
@@ -13,17 +13,18 @@ use crate::AppState;
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::support::normalize_inferred_route_name;
 use super::{
-    CursorPayload, Envelope, HistoryEventType, Meta, Page, QueryParamAllowlist, QueryParams,
-    StrictQueryParams, V2Error, V2Result, decode, encode, format_timestamp, history_event_type,
-    map_history_page_error, product_history_event_kinds, validate_latest_collection_selectors,
+    CursorPayload, Envelope, HISTORY_TOTAL_COUNT_CAP, HistoryEventType, Meta, Page,
+    QueryParamAllowlist, QueryParams, StrictQueryParams, V2Error, V2Result, decode, encode,
+    format_timestamp, history_event_type, history_sort_token, history_storage_order,
+    history_total_count, insert_history_filter_keys, map_history_page_error,
+    product_history_event_kinds, resolve_history_block_window,
+    validate_latest_collection_selectors,
 };
 
-const EVENTS_SORT: &str = "chain_position_desc";
 const NAMESPACE_FILTER_KEY: &str = "namespace";
 const NAME_FILTER_KEY: &str = "name";
 const ADDRESS_FILTER_KEY: &str = "address";
 const REGISTRATION_ID_FILTER_KEY: &str = "registration_id";
-const TYPE_FILTER_KEY: &str = "type";
 const FROM_BLOCK_FILTER_KEY: &str = "from_block";
 const TO_BLOCK_FILTER_KEY: &str = "to_block";
 const NORMALIZED_EVENT_ID_CURSOR_KEY: &str = "normalized_event_id";
@@ -40,6 +41,9 @@ impl QueryParamAllowlist for EventsQueryParams {
         "type",
         "from_block",
         "to_block",
+        "from_timestamp",
+        "to_timestamp",
+        "order",
         "at",
         "finality",
         "cursor",
@@ -67,6 +71,9 @@ pub(crate) struct Event {
 pub(crate) struct ParsedEventsFilter {
     pub(crate) storage_filter: EventHistoryFilter,
     pub(crate) cursor_filters: BTreeMap<String, String>,
+    /// Whether an identity anchor (name, registration, or address) bounds the
+    /// read, which is what makes a capped `total_count` affordable.
+    pub(crate) anchored: bool,
 }
 
 /// `namespace` defaults to the name's inferred namespace when `name` is provided
@@ -79,18 +86,25 @@ pub(crate) async fn get_events(
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let namespace = resolve_events_namespace(&params)?;
     let mut parsed = parse_events_filter(&params, &namespace)?;
-    if params.event_type.is_none() {
+    if params.event_types.is_none() {
         parsed.storage_filter.event_kinds = product_history_event_kinds();
     }
+    let order = parsed.storage_filter.order;
 
     let storage_cursor = params
         .cursor
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
-            events_storage_cursor(&payload, &parsed.cursor_filters)
+            events_storage_cursor(&payload, &parsed.cursor_filters, order)
         })
         .transpose()?;
+    parsed.storage_filter.block_window = resolve_history_block_window(&state.pool, &params).await?;
+    let summary_mode = if parsed.anchored {
+        HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP)
+    } else {
+        HistorySummaryMode::None
+    };
 
     let storage_page = bigname_storage::load_event_history_page_with_redo_policy(
         &state.pool,
@@ -98,7 +112,7 @@ pub(crate) async fn get_events(
         true,
         storage_cursor.as_ref(),
         params.page_size,
-        HistorySummaryMode::None,
+        summary_mode,
         false,
         true,
     )
@@ -113,11 +127,15 @@ pub(crate) async fn get_events(
     .await
     .map_err(|_| V2Error::internal_error("failed to run history read test hook"))?;
 
-    let next_cursor = storage_page
-        .next_cursor
-        .as_ref()
-        .map(|cursor| encode(&events_cursor_payload(cursor, &parsed.cursor_filters)));
+    let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
+        encode(&events_cursor_payload(
+            cursor,
+            &parsed.cursor_filters,
+            order,
+        ))
+    });
     let has_more = next_cursor.is_some();
+    let total_count = history_total_count(storage_page.summary.as_ref());
     let logical_name_ids = storage_page
         .rows
         .iter()
@@ -157,7 +175,7 @@ pub(crate) async fn get_events(
             cursor: params.cursor.clone(),
             next_cursor,
             page_size: params.page_size,
-            total_count: None,
+            total_count,
             has_more,
         }),
         meta: Meta::default(),
@@ -184,9 +202,10 @@ pub(crate) fn build_event(row: &StorageHistoryEvent, name: Option<&str>) -> Opti
 pub(crate) fn events_cursor_payload(
     cursor: &HistoryCursor,
     filters: &BTreeMap<String, String>,
+    order: HistoryOrder,
 ) -> CursorPayload {
     CursorPayload::new(
-        EVENTS_SORT,
+        history_sort_token(order),
         filters.clone(),
         BTreeMap::from([
             (
@@ -205,8 +224,9 @@ pub(crate) fn events_cursor_payload(
 pub(crate) fn events_storage_cursor(
     payload: &CursorPayload,
     expected_filters: &BTreeMap<String, String>,
+    order: HistoryOrder,
 ) -> V2Result<HistoryCursor> {
-    if payload.sort != EVENTS_SORT {
+    if payload.sort != history_sort_token(order) {
         return Err(invalid_cursor_error());
     }
     if &payload.filters != expected_filters {
@@ -277,16 +297,12 @@ pub(crate) fn parse_events_filter(
         })
         .transpose()?;
     let event_kinds = params
-        .event_type
-        .map(|event_type| {
-            event_type
-                .storage_event_kinds()
-                .iter()
-                .map(|kind| (*kind).to_owned())
-                .collect()
-        })
+        .event_types
+        .as_ref()
+        .map(|event_types| event_types.storage_event_kinds())
         .unwrap_or_default();
 
+    let anchored = logical_name_id.is_some() || resource_id.is_some() || params.address.is_some();
     let mut cursor_filters =
         BTreeMap::from([(NAMESPACE_FILTER_KEY.to_owned(), namespace.to_owned())]);
     if let Some(logical_name_id) = logical_name_id.as_ref() {
@@ -301,9 +317,7 @@ pub(crate) fn parse_events_filter(
             registration_id.clone(),
         );
     }
-    if let Some(event_type) = params.event_type {
-        cursor_filters.insert(TYPE_FILTER_KEY.to_owned(), event_type.as_str().to_owned());
-    }
+    insert_history_filter_keys(&mut cursor_filters, params);
     if let Some(from_block) = params.from_block {
         cursor_filters.insert(FROM_BLOCK_FILTER_KEY.to_owned(), from_block.to_string());
     }
@@ -324,11 +338,14 @@ pub(crate) fn parse_events_filter(
                     relation: None,
                 }),
             event_kinds,
-            bind_cursor_anchor_to_event_kinds: params.event_type.is_some(),
+            bind_cursor_anchor_to_event_kinds: params.event_types.is_some(),
             from_block: params.from_block,
             to_block: params.to_block,
+            order: history_storage_order(params.order),
+            block_window: None,
         },
         cursor_filters,
+        anchored,
     })
 }
 
@@ -436,14 +453,25 @@ mod tests {
     fn events_cursor_payload_round_trips_storage_cursor() {
         let cursor = sample_cursor();
         let filters = sample_filters();
-        let payload = events_cursor_payload(&cursor, &filters);
+        let payload = events_cursor_payload(&cursor, &filters, HistoryOrder::Desc);
 
+        assert_eq!(payload.sort, "chain_position_desc");
         assert_eq!(payload.filters, filters);
         assert_eq!(
-            events_storage_cursor(&payload, &sample_filters()).expect("cursor must decode"),
+            events_storage_cursor(&payload, &sample_filters(), HistoryOrder::Desc)
+                .expect("cursor must decode"),
             cursor
         );
         assert!(payload.snapshot.is_none());
+
+        let payload = events_cursor_payload(&cursor, &filters, HistoryOrder::Asc);
+        assert_eq!(payload.sort, "chain_position_asc");
+        assert_eq!(
+            events_storage_cursor(&payload, &filters, HistoryOrder::Asc)
+                .expect("asc cursor must decode"),
+            cursor
+        );
+        assert!(events_storage_cursor(&payload, &filters, HistoryOrder::Desc).is_err());
     }
 
     #[test]
@@ -451,25 +479,26 @@ mod tests {
         let cursor = sample_cursor();
         let filters = sample_filters();
 
-        let mut payload = events_cursor_payload(&cursor, &filters);
+        let mut payload = events_cursor_payload(&cursor, &filters, HistoryOrder::Desc);
         payload.sort = "name".to_owned();
-        assert!(events_storage_cursor(&payload, &filters).is_err());
+        assert!(events_storage_cursor(&payload, &filters, HistoryOrder::Desc).is_err());
 
-        let mut payload = events_cursor_payload(&cursor, &filters);
+        let mut payload = events_cursor_payload(&cursor, &filters, HistoryOrder::Desc);
         payload
             .filters
             .insert("to_block".to_owned(), "20".to_owned());
-        assert!(events_storage_cursor(&payload, &filters).is_err());
+        assert!(events_storage_cursor(&payload, &filters, HistoryOrder::Desc).is_err());
 
-        let mut payload = events_cursor_payload(&cursor, &filters);
+        let mut payload = events_cursor_payload(&cursor, &filters, HistoryOrder::Desc);
         payload.filters.remove("namespace");
-        assert!(events_storage_cursor(&payload, &filters).is_err());
+        assert!(events_storage_cursor(&payload, &filters, HistoryOrder::Desc).is_err());
 
-        let payload = events_cursor_payload(&cursor, &filters);
+        let payload = events_cursor_payload(&cursor, &filters, HistoryOrder::Desc);
         assert!(
             events_storage_cursor(
                 &payload,
                 &BTreeMap::from([("namespace".to_owned(), "ens".to_owned())]),
+                HistoryOrder::Desc,
             )
             .is_err()
         );
@@ -479,11 +508,11 @@ mod tests {
     fn events_cursor_ignores_legacy_snapshot_component() {
         let cursor = sample_cursor();
         let filters = sample_filters();
-        let mut payload = events_cursor_payload(&cursor, &filters);
+        let mut payload = events_cursor_payload(&cursor, &filters, HistoryOrder::Desc);
         payload.snapshot = Some("legacy-snapshot".to_owned());
 
         assert_eq!(
-            events_storage_cursor(&payload, &filters)
+            events_storage_cursor(&payload, &filters, HistoryOrder::Desc)
                 .expect("legacy snapshot component must not bind a latest-state cursor"),
             cursor
         );
@@ -548,17 +577,27 @@ mod tests {
             address: Some(ADDRESS.to_owned()),
             from_block: Some("10".to_owned()),
             to_block: Some("20".to_owned()),
+            from_timestamp: Some("2023-11-14T22:15:04Z".to_owned()),
+            to_timestamp: Some("2023-11-14T23:15:07+01:00".to_owned()),
+            order: Some("asc".to_owned()),
             ..RawQueryParams::default()
         })
         .expect("filters must parse globally");
 
         let parsed = parse_events_filter(&params, "basenames").expect("filter must build");
 
+        assert!(parsed.anchored);
+        assert_eq!(parsed.storage_filter.order, HistoryOrder::Asc);
+        assert!(parsed.storage_filter.block_window.is_none());
         assert_eq!(
             parsed.cursor_filters,
             BTreeMap::from([
                 ("address".to_owned(), ADDRESS.to_owned()),
                 ("from_block".to_owned(), "10".to_owned()),
+                (
+                    "from_timestamp".to_owned(),
+                    "2023-11-14T22:15:04Z".to_owned()
+                ),
                 (
                     "name".to_owned(),
                     bigname_storage::logical_name_id_for_name("basenames", "alice.base.eth"),
@@ -566,6 +605,7 @@ mod tests {
                 ("namespace".to_owned(), "basenames".to_owned()),
                 ("registration_id".to_owned(), REGISTRATION_ID.to_owned()),
                 ("to_block".to_owned(), "20".to_owned()),
+                ("to_timestamp".to_owned(), "2023-11-14T22:15:07Z".to_owned()),
                 ("type".to_owned(), "permission".to_owned()),
             ])
         );
@@ -576,6 +616,34 @@ mod tests {
                 "PermissionScopeChanged".to_owned(),
                 "RolesChanged".to_owned(),
                 "EACRolesChanged".to_owned(),
+            ]
+        );
+
+        let unanchored = parse_events_filter(
+            &QueryParams::try_from(RawQueryParams {
+                namespace: Some("ens".to_owned()),
+                event_type: Some("renewal,registration".to_owned()),
+                ..RawQueryParams::default()
+            })
+            .expect("filters must parse globally"),
+            "ens",
+        )
+        .expect("filter must build");
+        assert!(!unanchored.anchored);
+        assert_eq!(unanchored.storage_filter.order, HistoryOrder::Desc);
+        assert_eq!(
+            unanchored.cursor_filters,
+            BTreeMap::from([
+                ("namespace".to_owned(), "ens".to_owned()),
+                ("type".to_owned(), "registration,renewal".to_owned()),
+            ])
+        );
+        assert_eq!(
+            unanchored.storage_filter.event_kinds,
+            vec![
+                "RegistrationGranted".to_owned(),
+                "LabelRegistered".to_owned(),
+                "RegistrationRenewed".to_owned(),
             ]
         );
         assert_eq!(

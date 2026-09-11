@@ -888,15 +888,61 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   the resolver removes it.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/children`.
 
+### History collection filters
+
+`GET /v1/names/{name}/history`, `GET /v1/addresses/{address}/history`, and
+`GET /v1/events` share one filter and pagination vocabulary in addition to
+their route-specific anchors:
+
+- `order=asc|desc` selects the keyset direction over the shared chain-position
+  sort. `desc` (newest first) is the default; `asc` is the exact reverse of the
+  same total order, so the two directions enumerate identical row sets and an
+  `asc` first page is the oldest-first anchor of the collection.
+- `type` accepts one friendly event type or a comma-separated set, for example
+  `type=registration,renewal`. Parts are trimmed, empty parts are ignored,
+  duplicates collapse, and the set is canonicalized into the friendly
+  vocabulary order. A part outside the vocabulary or an entirely empty set
+  returns `400 invalid_input`. Rows match when their `type` is in the set.
+- `from_timestamp` and `to_timestamp` are inclusive RFC 3339 bounds (`Z` or a
+  numeric offset; fractional seconds allowed). They are resolved to block
+  ranges from readable chain lineage, never through RPC: for every chain the
+  deployment can serve, `from_timestamp` maps to the first readable block whose
+  timestamp is at or after the bound and `to_timestamp` to the last readable
+  block whose timestamp is at or before it, and rows are kept when their
+  `block_number` falls inside that chain's inclusive range. A chain with no
+  block satisfying a bound contributes no rows, so a window entirely after the
+  last indexed block matches nothing and returns `200` with empty `data`. Rows
+  without a chain position never match a timestamp window. `from_timestamp`
+  greater than `to_timestamp`, or a value that is not RFC 3339, returns `400
+  invalid_input`. On `/v1/events` the resolved window intersects an explicit
+  `from_block`/`to_block` range.
+- Cursors bind the order and every filter above. The cursor `sort` token
+  encodes the direction, and its filters carry the canonical `type` set and
+  the canonical UTC spelling of each timestamp bound, so a cursor issued by one
+  query cannot continue a query with a different direction, type set, or
+  window; the mismatch returns `400 invalid_input`. Equivalent spellings of the
+  same bound (`+01:00` versus `Z`) continue the same query.
+- `page.total_count` is populated for anchored history reads: name history and
+  address history always, and `/v1/events` when `name`, `registration_id`, or
+  `address` bounds the read. The count runs inside the same repeatable-read
+  transaction as the page over exactly the page's filters (scope, type set,
+  block and timestamp windows, product visibility, and duplicate suppression),
+  so it agrees with what paging would enumerate. It is capped: counting stops
+  after 10,000 product-visible rows and a larger result reports
+  `total_count=null`. Unanchored `/v1/events` reads (namespace, type, and block
+  or timestamp windows only) never count and always report `total_count=null`.
+
 ### `GET /v1/names/{name}/history`
 
 - Method/path: `GET /v1/names/{name}/history`
 - Tier: product read.
 - Purpose: name history.
 - Request parameters: path `name`; query `namespace`,
-  `scope=name|registration|both`, `cursor`, `page_size`, and optional
-  `finality=latest`. `at` and historical `finality` values are rejected by the
-  shared latest-state collection rule.
+  `scope=name|registration|both`, `type`, `order=asc|desc`, `from_timestamp`,
+  `to_timestamp`, `cursor`, `page_size`, and optional `finality=latest`. `at`
+  and historical `finality` values are rejected by the shared latest-state
+  collection rule. `type`, `order`, and the timestamp window follow the
+  [history collection filters](#history-collection-filters).
 - Response shape: `data` is an array of dedicated lean event rows:
   `{type, name, namespace, registration_id, block_number, timestamp,
   transaction_hash, log_index}`. `registration_id` carries actual registration
@@ -932,12 +978,15 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   validation, summary calculation, and pagination. Without a distinct control
   resource, the sole registry-resource row remains product-visible.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
-- Pagination behavior: standard newest-first keyset pagination by chain
-  position. The cursor is bound to the resolved namespace, parent name, scope,
-  and sort. Product event-type filtering is applied before page construction,
-  so `page_size`, `next_cursor`, and `has_more` describe product-visible
-  events. A nonterminal page contains `page_size` rows; only the terminal page
-  may be shorter.
+- Pagination behavior: keyset pagination by chain position, newest first
+  unless `order=asc`. The cursor is bound to the resolved namespace, parent
+  name, scope, direction, `type` set, and timestamp window. Product event-type
+  filtering, including an explicit `type` set, is applied before page
+  construction, so `page_size`, `next_cursor`, and `has_more` describe
+  product-visible events. A nonterminal page contains `page_size` rows; only
+  the terminal page may be shorter. `page.total_count` is the capped anchored
+  count described under the shared history filters: exact up to 10,000 rows,
+  `null` beyond.
 - Scope behavior: `scope=name` reads name-surface events only,
   `scope=registration` reads registration-resource events associated with the
   requested name, and `scope=both` reads both sets. `scope` defaults to `both`.
@@ -1368,9 +1417,11 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Tier: product read.
 - Purpose: address activity history.
 - Request parameters: path `address`; query `namespace`, `relation`,
-  `scope=name|registration|both`, `cursor`, `page_size`, and optional
-  `finality=latest`. `at` and historical `finality` values are rejected by the
-  shared latest-state collection rule.
+  `scope=name|registration|both`, `type`, `order=asc|desc`, `from_timestamp`,
+  `to_timestamp`, `cursor`, `page_size`, and optional `finality=latest`. `at`
+  and historical `finality` values are rejected by the shared latest-state
+  collection rule. `type`, `order`, and the timestamp window follow the
+  [history collection filters](#history-collection-filters).
   `namespace` defaults to `ens` when omitted. `relation` accepts a
   comma-separated set of `owner`, `manager`, and `registrant`; `any`
   normalizes to all three values. Rows match when any listed relation matches.
@@ -1396,10 +1447,14 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   omits `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
   validity claim. True as-of/finality row-bounding is deferred to the
   revision-bound storage follow-up.
-- Pagination behavior: product event-type filtering runs before newest-first
-  keyset page construction, so `page_size`, `next_cursor`, and `has_more`
-  describe product-visible events. A nonterminal page contains `page_size`
-  rows; only the terminal page may be shorter.
+- Pagination behavior: product event-type filtering, including an explicit
+  `type` set, runs before keyset page construction (newest first unless
+  `order=asc`), so `page_size`, `next_cursor`, and `has_more` describe
+  product-visible events. The cursor is bound to the address, namespace,
+  relation set, scope, direction, `type` set, and timestamp window. A
+  nonterminal page contains `page_size` rows; only the terminal page may be
+  shorter. `page.total_count` is the capped anchored count described under
+  the shared history filters.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Address, namespace, and
   cursor-binding validation precede the first `redo_in_progress` check, so
@@ -1495,11 +1550,15 @@ For a registrar lease first identified by a later readable observation, registra
 - Purpose: compact event search across name, address, registration, type, and
   block filters.
 - Request parameters: query `namespace`, `name`, `address`,
-  `registration_id`, `type`, `from_block`, `to_block`, `cursor`, `page_size`,
-  and optional `finality=latest`. `at` and historical `finality` values are
-  rejected by the shared latest-state collection rule. When `name` is present
-  and `namespace` is omitted, namespace is inferred from the name; `namespace`
-  defaults to `ens` only when there is no name filter.
+  `registration_id`, `type`, `from_block`, `to_block`, `from_timestamp`,
+  `to_timestamp`, `order=asc|desc`, `cursor`, `page_size`, and optional
+  `finality=latest`. `at` and historical `finality` values are rejected by the
+  shared latest-state collection rule. When `name` is present and `namespace`
+  is omitted, namespace is inferred from the name; `namespace` defaults to
+  `ens` only when there is no name filter. `type` (one value or a
+  comma-separated set), `order`, and the timestamp window follow the [history
+  collection filters](#history-collection-filters); the resolved timestamp
+  window intersects an explicit `from_block`/`to_block` range.
 - Response shape: `data` is an array of compact event rows with friendly
   `type` vocabulary. Raw upstream event kinds are diagnostics-only. Event-row
   identity uses two fields with distinct meanings. `registration_id` is actual
@@ -1546,10 +1605,15 @@ For a registrar lease first identified by a later readable observation, registra
   the sole registry-resource row remains product-visible.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
   (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L91 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L92 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L93 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L226 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L227 @ ens_v2@a971bd64) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L132 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L157 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L160 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L162 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L169 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json:L110-L158 @ ens_v2@a971bd64)
-- Pagination behavior: standard newest-first keyset pagination. Product
-  event-type filtering runs before page construction, so `page_size`,
-  `next_cursor`, and `has_more` describe product-visible events. A nonterminal
-  page contains `page_size` rows; only the terminal page may be shorter.
+- Pagination behavior: keyset pagination, newest first unless `order=asc`.
+  Product event-type filtering, including an explicit `type` set, runs before
+  page construction, so `page_size`, `next_cursor`, and `has_more` describe
+  product-visible events. The cursor is bound to the namespace, every anchor
+  and block filter, the direction, the `type` set, and the timestamp window. A
+  nonterminal page contains `page_size` rows; only the terminal page may be
+  shorter. `page.total_count` follows the shared history rule: populated (exact
+  up to 10,000 rows, `null` beyond) when `name`, `registration_id`, or
+  `address` anchors the read, and always `null` for unanchored reads.
 - Snapshot behavior: event rows come from current state. The response omits
   `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
   validity claim. True as-of/finality row-bounding is deferred to the
