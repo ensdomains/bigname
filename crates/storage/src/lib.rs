@@ -26,6 +26,7 @@ mod phase_projection_reads;
 mod primary_name;
 mod projection_helpers;
 mod record_inventory;
+mod registries;
 mod resolution_support;
 mod resolver;
 mod snapshot_selection;
@@ -50,8 +51,9 @@ pub use api_preflight::{
 pub use children::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentRow, ChildrenCurrentSummary,
     DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS, DEFAULT_CHILDREN_CURRENT_READ_FILTER,
-    load_children_current, load_children_current_including_noncanonical,
-    load_children_current_page, load_children_current_summaries,
+    RegistryChildrenPage, count_registry_children_current, load_children_current,
+    load_children_current_including_noncanonical, load_children_current_page,
+    load_children_current_summaries, load_registry_children_current_page,
 };
 pub use evm_primitives::{
     ens_namehash_label_bytes, logical_name_id_for_name, normalize_evm_address, normalize_evm_b256,
@@ -141,6 +143,12 @@ pub use record_inventory::{
     load_record_inventory_current, load_record_inventory_current_batch,
     load_record_inventory_current_for_snapshot, load_record_inventory_current_with_anchor_fallback,
     record_version_boundary_storage_key,
+};
+pub use registries::{
+    RegistryContractRow, RegistryCreation, RegistryCreationBasis, RegistryReferenceKeysetCursor,
+    RegistryReferencePage, SubregistryPointer, count_contract_events, load_registry_contract,
+    load_registry_references_page, load_registry_serving_pointer,
+    load_subregistry_pointers_for_names,
 };
 pub use resolution_support::{
     BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE, ENS_NAMESPACE,

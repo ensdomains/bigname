@@ -97,3 +97,8 @@ justification = "The selected numeric registrar import keeps transfer authority 
 path = "crates/adapters/src/schema_v2/state_surfaces.rs"
 loc = 641
 justification = "The selected numeric registrar import retains current authority selection and registry resolver-read state together; the new readable-name registrar evidence and snapshot eligibility are isolated in a bounded sibling module."
+
+[[files]]
+path = "crates/storage/src/history.rs"
+loc = 606
+justification = "History filter types and the read-filter derivation stay in one module; the `contract_address` emitter filter (F1) adds two fields and one normalization. Split on the next substantive touch."

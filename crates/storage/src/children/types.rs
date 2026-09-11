@@ -55,3 +55,12 @@ pub struct ChildrenCurrentPage {
     pub next_cursor: Option<ChildrenCurrentKeysetCursor>,
     pub summary: ChildrenCurrentSummary,
 }
+
+/// Bounded page of the declared children one registry contract holds, with the exact count of
+/// every such child.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegistryChildrenPage {
+    pub rows: Vec<ChildrenCurrentRow>,
+    pub next_cursor: Option<ChildrenCurrentKeysetCursor>,
+    pub label_count: i64,
+}
