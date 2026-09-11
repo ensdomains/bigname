@@ -1,5 +1,10 @@
 # Storage
 
+The schema this document describes is frozen for the V1 milestone by
+[ADR 0007](adrs/0007-v1-schema-freeze.md), which names the frozen artifact, the
+conformance test that makes the freeze observable, and every authorized
+carve-out.
+
 PostgreSQL is the durable indexing and serving store. Current runtime objects
 live in `bigname_phase`; the append-only SQLx history in `migrations/` records
 the retired `public` schema, its schema-qualified deletion, and reviewed
