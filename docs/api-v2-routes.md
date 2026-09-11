@@ -468,7 +468,7 @@ collection route carry neither header.
   `(namespace, (registration.expiry)::double precision, logical_name_id)`
   guarded by `jsonb_typeof(registration.expiry) = 'number'`
   (`schema-v2/baseline/06_projections.sql`; migration
-  `20260911120000_name_current_registration_expiry_idx.sql` for a phase schema
+  `20260911120200_name_current_registration_expiry_idx.sql` for a phase schema
   installed before the baseline carried it). A row whose only expiry is stored
   in another form (an RFC 3339 string at `control.expiry`, or no expiry at all)
   is outside this listing by design; `GET /v1/names/{name}` still serves its
