@@ -45,22 +45,31 @@ pub(super) async fn ensure_project_at_head(
     transaction: &mut Transaction<'_, Postgres>,
     head: &HeadRow,
 ) -> Result<String> {
+    // The publication may trail the stored head within the shared lag tolerance (see
+    // bigname_storage::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS); it must be on the readable
+    // lineage and belong to this build's interpreter generation.
     let project_row_xmin: Option<String> = sqlx::query_scalar(
         r#"
-        SELECT xmin::text
-        FROM chain_phase_state
-        WHERE chain_id = $1
-          AND phase_name = 'project'
-          AND phase_status = 'completed'
-          AND current_block_number = $2
-          AND current_block_hash = $3
-          AND input_content_hash = $4
+        SELECT project.xmin::text
+        FROM chain_phase_state project
+        JOIN chain_lineage lineage
+          ON lineage.chain_id = project.chain_id
+         AND lineage.block_number = project.current_block_number
+         AND lineage.block_hash = project.current_block_hash
+         AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+        WHERE project.chain_id = $1
+          AND project.phase_name = 'project'
+          AND project.phase_status IN ('completed', 'running')
+          AND $2 - project.current_block_number BETWEEN 0 AND $5
+          AND (project.current_block_number <> $2 OR project.current_block_hash = $3)
+          AND project.input_content_hash = $4
         "#,
     )
     .bind(&head.chain_id)
     .bind(head.block_number)
     .bind(&head.block_hash)
     .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .bind(bigname_storage::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(database("validate project publication head"))?;

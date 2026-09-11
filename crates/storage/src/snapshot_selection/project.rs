@@ -9,7 +9,7 @@ pub const CURRENT_PROJECT_PUBLICATION_JOIN: &str = r#"
 JOIN bigname_phase.chain_phase_state project
   ON project.chain_id = head.chain_id
  AND project.phase_name = 'project'
- AND project.phase_status = 'completed'
+ AND project.phase_status IN ('completed', 'running')
  AND project.current_block_number = head.latest_block_number
  AND project.current_block_hash = head.latest_block_hash
 "#;
@@ -45,7 +45,7 @@ pub(super) async fn load_current_project_publication(
          AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
         WHERE project.chain_id = $1
           AND project.phase_name = 'project'
-          AND project.phase_status = 'completed'
+          AND project.phase_status IN ('completed', 'running')
           AND project.input_content_hash = $2
         "#,
     )
@@ -90,7 +90,7 @@ pub async fn load_served_project_generation(
         JOIN bigname_phase.chain_phase_state project
           ON project.chain_id = head.chain_id
          AND project.phase_name = 'project'
-         AND project.phase_status = 'completed'
+         AND project.phase_status IN ('completed', 'running')
          AND project.input_content_hash = $4
          AND head.latest_block_number - project.current_block_number BETWEEN 0 AND $5
         JOIN bigname_phase.chain_lineage lineage

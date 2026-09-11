@@ -528,7 +528,10 @@ project-publication change between their reads. A fast-moving chain can still
 advance during a provider or CCIP round trip, so the post-call generation
 checks remain necessary.
 
-Indexed snapshot selection serves the project phase's completed publication.
+Indexed snapshot selection serves the project phase's latest publication: the
+project row's current position while the phase is `completed` or `running` (a
+running pass has not yet published beyond that position; a failed, paused, or
+idle phase, or a fresh run that cleared the position, has no publication).
 Live-follow stores a new head as soon as a block arrives and Project publishes
 for it a few seconds later, so the publication may trail the stored head. When
 it trails by at most 32 blocks, the selected position is the publication (and

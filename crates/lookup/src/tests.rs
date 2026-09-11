@@ -34,6 +34,8 @@ const ETHEREUM_LATER_HASH: &str =
     "0x3333333333333333333333333333333333333333333333333333333333333333";
 const ETHEREUM_PRIOR_HASH: &str =
     "0x4444444444444444444444444444444444444444444444444444444444444444";
+const ETHEREUM_FAR_HASH: &str =
+    "0x5555555555555555555555555555555555555555555555555555555555555555";
 const BASE_HASH: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
 const UNIVERSAL_RESOLVER: &str = "0xeeeeeeee14d718c2b47d9923deab1335e144eeee";
 const ENS_REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
@@ -1001,15 +1003,37 @@ async fn stable_projection_divergence_tracks_live_reorg_dependency() -> AnyResul
 }
 
 #[tokio::test]
-async fn lookup_is_stale_while_project_cursor_lags_the_head() -> AnyResult<()> {
+async fn lookup_is_stale_while_project_cursor_lags_the_head_beyond_tolerance() -> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    advance_head_to(
+        fixture.pool(),
+        10 + bigname_storage::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS + 1,
+        ETHEREUM_FAR_HASH,
+    )
+    .await?;
+
+    let error = lookup_engine(fixture.pool(), "http://127.0.0.1:1")?
+        .lookup(lookup_request(&fixture.logical_name_id)?)
+        .await
+        .expect_err("lookup must wait for project to publish near the newest processed head");
+    assert_eq!(error.kind(), ErrorKind::Stale);
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn lookup_proceeds_while_project_cursor_lags_the_head_within_tolerance() -> AnyResult<()> {
+    // Live-follow stores the head before Project publishes for it; a publication one block
+    // behind is served rather than reported stale. The provider here is unreachable, so the
+    // lookup fails later, but not on the project fence.
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
     advance_head(fixture.pool()).await?;
 
     let error = lookup_engine(fixture.pool(), "http://127.0.0.1:1")?
         .lookup(lookup_request(&fixture.logical_name_id)?)
         .await
-        .expect_err("lookup must wait for project to publish the newest processed head");
-    assert_eq!(error.kind(), ErrorKind::Stale);
+        .expect_err("the provider is unreachable");
+    assert_ne!(error.kind(), ErrorKind::Stale, "{error}");
     fixture.cleanup().await?;
     Ok(())
 }
@@ -3497,22 +3521,28 @@ async fn seed_project_state(pool: &PgPool, chain_id: &str, block_hash: &str) -> 
 }
 
 async fn advance_head(pool: &PgPool) -> AnyResult<()> {
+    advance_head_to(pool, 11, ETHEREUM_LATER_HASH).await
+}
+
+async fn advance_head_to(pool: &PgPool, block_number: i64, block_hash: &str) -> AnyResult<()> {
     sqlx::query(
         "INSERT INTO chain_lineage
             (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
-         VALUES ($1, $2, 11, '2026-08-03T00:00:01Z', 'canonical')",
+         VALUES ($1, $2, $3, '2026-08-03T00:00:01Z', 'canonical')",
     )
     .bind(ETHEREUM)
-    .bind(ETHEREUM_LATER_HASH)
+    .bind(block_hash)
+    .bind(block_number)
     .execute(pool)
     .await?;
     sqlx::query(
         "UPDATE chain_heads
-         SET latest_block_hash = $2, latest_block_number = 11
+         SET latest_block_hash = $2, latest_block_number = $3
          WHERE chain_id = $1",
     )
     .bind(ETHEREUM)
-    .bind(ETHEREUM_LATER_HASH)
+    .bind(block_hash)
+    .bind(block_number)
     .execute(pool)
     .await?;
     Ok(())

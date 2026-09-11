@@ -2681,7 +2681,11 @@ async fn v2_lookup_serves_a_project_publication_a_few_blocks_behind_head() -> Re
     // Live-follow stores the head before Project publishes for it. A publication within the
     // lag tolerance is served as the snapshot and reported in `as_of`; one further behind is
     // still stale so a wedged Project cannot serve arbitrarily old data.
-    for (publication_block, expect_served) in [(78_i64, true), (40_i64, false)] {
+    for (publication_block, phase_status, expect_served) in [
+        (78_i64, "completed", true),
+        (78_i64, "running", true),
+        (40_i64, "completed", false),
+    ] {
         let database = TestDatabase::new_migrated().await?;
         database
             .seed_snapshot_selector_chain_positions(&json!({
@@ -2706,10 +2710,13 @@ async fn v2_lookup_serves_a_project_publication_a_few_blocks_behind_head() -> Re
         .await?;
         sqlx::query(
             "UPDATE chain_phase_state
-             SET current_block_number = $1, current_block_hash = '0xlookup-previous'
+             SET current_block_number = $1, current_block_hash = '0xlookup-previous',
+                 phase_status = $2,
+                 finished_at = CASE WHEN $2 = 'running' THEN NULL ELSE finished_at END
              WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
         )
         .bind(publication_block)
+        .bind(phase_status)
         .execute(&database.lookup_pool)
         .await?;
 
@@ -2725,7 +2732,7 @@ async fn v2_lookup_serves_a_project_publication_a_few_blocks_behind_head() -> Re
             assert_eq!(
                 status,
                 StatusCode::OK,
-                "publication one block behind must be served: {payload}"
+                "publication one block behind ({phase_status}) must be served: {payload}"
             );
             assert_eq!(payload["meta"]["as_of"]["1"]["block_number"], json!(78));
             assert_eq!(

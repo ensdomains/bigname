@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 alloy-json-rpc.workspace = true
+bigname-storage.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 alloy-transport-http.workspace = true
@@ -22,6 +23,5 @@ sqlx = { workspace = true, features = ["time"] }
 tower = { version = "0.5.2", default-features = false }
 
 [dev-dependencies]
-bigname-storage.workspace = true
 bigname-test-support.workspace = true
 tokio.workspace = true
