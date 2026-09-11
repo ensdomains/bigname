@@ -477,7 +477,10 @@ async fn sibling_registration_does_not_restage_the_parents_other_children() -> R
     seed_v1_edge(&fresh, "sibling-edge-b", 10, V2_CHILD).await?;
     seed_v1_edge(&fresh, "sibling-edge-c", 11, SIBLING).await?;
     run_project_at(&fresh, 11, None).await?;
-    assert_eq!(children_rows(&incremental).await?, children_rows(&fresh).await?);
+    assert_eq!(
+        children_rows(&incremental).await?,
+        children_rows(&fresh).await?
+    );
 
     fresh_db.cleanup().await?;
     incremental_db.cleanup().await

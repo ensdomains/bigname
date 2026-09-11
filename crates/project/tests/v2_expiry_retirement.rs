@@ -520,7 +520,10 @@ async fn contested_name_renewal_revives_losing_resource_permissions() -> Result<
     let live = run(&pool, 100, None).await?;
     let retired = run(&pool, 101, Some(live)).await?;
     assert_eq!(current_name_and_permission_counts(&pool).await?, (1, 0));
-    assert_eq!(current_name_status(&pool).await?.as_deref(), Some("released"));
+    assert_eq!(
+        current_name_status(&pool).await?.as_deref(),
+        Some("released")
+    );
     run(&pool, 102, Some(retired)).await?;
 
     let current_name_resource: String =
