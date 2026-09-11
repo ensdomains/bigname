@@ -1770,6 +1770,113 @@ async fn an_unindexed_name_is_admitted_to_live_verification() -> Result<()> {
     Ok(())
 }
 
+/// Under the Sepolia deployment profile the ENS projection publishes on `ethereum-sepolia`, and
+/// live ENS/60 verification executes against that chain's manifest-admitted registry and
+/// Universal Resolver at its readable head: same reverse leg, same gate, same forward call, same
+/// hash pinning as Mainnet. The provider is selected by that chain, so a Mainnet-only provider
+/// map is a configuration failure rather than a Mainnet call.
+#[tokio::test]
+async fn v2_get_primary_name_verifies_against_sepolia_under_the_sepolia_profile() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    database
+        .seed_default_sepolia_ens_primary_name_fallback_context()
+        .await?;
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority_on_chain(
+        &lookup_pool,
+        "ethereum-sepolia",
+        21_000_003,
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+    )
+    .await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+        primary_name_universal_resolver_addr60_response(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
+    ])
+    .await?;
+
+    let mainnet_only = database
+        .app_state_with_lookup_chain_rpc_urls(bigname_lookup::ChainRpcUrls::from_entries(&[
+            format!("ethereum-mainnet={rpc_url}"),
+        ])?)
+        .await?;
+    let response = app_router(mainnet_only)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 sepolia primary-name request without a sepolia provider failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{payload}");
+    assert_eq!(payload["error"]["code"], json!("stale"), "{payload}");
+
+    let sepolia = database
+        .app_state_with_lookup_chain_rpc_urls(bigname_lookup::ChainRpcUrls::from_entries(&[
+            format!("ethereum-sepolia={rpc_url}"),
+        ])?)
+        .await?;
+    let response = app_router(sepolia)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 sepolia primary-name request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload}");
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([{
+            "source": "verified",
+            "status": "ok",
+            "name": "taytems.eth"
+        }]),
+        "{payload}"
+    );
+    assert_primary_name_snapshot_meta_chain_ids(&payload, &["11155111"]);
+    assert_primary_name_snapshot_token_slots(&payload, &["ethereum-sepolia"]);
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(
+        rpc_requests.len(),
+        3,
+        "the Mainnet-only provider map must not dispatch; the Sepolia map dispatches the reverse leg and forward verification"
+    );
+    assert_eq!(
+        rpc_requests[0]["params"][0]["to"],
+        json!("0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e")
+    );
+    assert_eq!(
+        rpc_requests[2]["params"][0]["to"],
+        json!("0xeeeeeeee14d718c2b47d9923deab1335e144eeee")
+    );
+    for request in &rpc_requests {
+        assert_eq!(
+            request["params"][1]["blockHash"],
+            json!("0xbinding"),
+            "sepolia calls stay pinned to the readable sepolia head: {request}"
+        );
+    }
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
 /// The indexed path answers in band when the exact-name projection is not deployed. The verified
 /// path reads the same projection to decide whether a claim may be verified, so it degrades the
 /// same way instead of failing the request -- and without resolving a name whose authority it has

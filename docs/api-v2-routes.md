@@ -701,10 +701,15 @@ collection route carry neither header.
   requested key, and only the remaining supported keys fall back to verified
   lookup. [Universal Resolver ancestor
   discovery](glossary.md#universal-resolver-ancestor-discovery) applies when a
-  readable ENS name on Ethereum Mainnet has a null projected exact resolver, a
-  projected name identity and DNS wire name, no alias, linked-subregistry,
-  projected wildcard, or cross-chain transport path, and an admitted Universal
-  Resolver manifest entrypoint. This makes the indexed null-resolver miss
+  readable ENS name on the deployment profile's Ethereum L1 (Mainnet under
+  `manifests/mainnet`, Sepolia under `manifests/sepolia`) has a null projected
+  exact resolver, a projected name identity and DNS wire name, no alias,
+  linked-subregistry, projected wildcard, or cross-chain transport path, and an
+  admitted Universal Resolver manifest entrypoint on that chain
+  (`ens_execution`, checked in for both profiles). Verified ENS reads follow
+  the same rules on both chains; only the chain, and therefore the
+  `BIGNAME_API_CHAIN_RPC_URLS` entry they need (`ethereum-mainnet=` or
+  `ethereum-sepolia=`), differs. This makes the indexed null-resolver miss
   unsatisfying. `source=auto` therefore executes the requested
   keys through verified lookup, and `source=verified` uses the same route. The
   Universal Resolver walks to the nearest nonzero ancestor resolver and accepts
@@ -1380,7 +1385,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Snapshot behavior: current-state read over chain-derived primary-name state.
   The route does not accept `at` or `finality`. Successful responses carry
   `meta.as_of` and `meta.as_of_token` for indexed state or the current readable
-  Ethereum position used by fresh ENS/60 verification. No metadata field
+  Ethereum L1 position used by fresh ENS/60 verification: chain `1` under the
+  Mainnet deployment profile, chain `11155111` (token slot `ethereum-sepolia`)
+  under the Sepolia profile. No metadata field
   implies cache reuse or a persisted execution identity. Provider transport
   failures abort the request with `500 internal_error`; they are not verified
   answer entries with `status=stale`. The projected-claim reads that decide
@@ -1410,12 +1417,18 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   separately observed wildcard names can have projected surfaces.
 
   A missing readable row cannot generally hide a later authority arm from the
-  execution this route performs. Live ENS/60 primary-name verification currently
-  executes only against Mainnet, whose [deployment
-  profile](glossary.md#deployment-profile) admits no ENSv2 registry, so
-  there is no later arm to hide. Sepolia currently has no route execution
-  entrypoint; the Sepolia evidence below explains its projected authority and
-  the expected ENSv1-path behavior, not an active Sepolia verified route. An
+  execution this route performs. Live ENS/60 primary-name verification executes
+  against the Ethereum L1 of the selected [deployment
+  profile](glossary.md#deployment-profile): Mainnet, whose profile admits no
+  ENSv2 registry, so there is no later arm to hide; or Sepolia, through the
+  Sepolia profile's `ens_execution` Universal Resolver and `ens_v1_registry_l1`
+  registry declarations, with the same reverse leg, the same pre-forward
+  authority gate, the same hash pinning to the readable Sepolia head, and the
+  same provider limits. On Sepolia the gate does real work: the profile admits
+  ENSv2 registries, so a claimed name whose selected authority is an `ens_v2`
+  arm is refused before the forward call exactly as described above. The
+  Sepolia evidence below explains the projected authority and the ENSv1-path
+  behavior that route relies on. An
   unwrapped ENSv1→ENSv2 migration clears the migrated node's ENSv1 resolver
   `(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L118 @ ens_v2@a971bd64)`,
   an unlocked wrapped ENSv1→ENSv2 migration does the same
@@ -1465,12 +1478,12 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   Moving the wrapped token to the graveyard therefore freezes ordinary writes
   by the former name owner, but it does not revoke those separately trusted
   callers.
-  This locked-name `CANNOT_SET_RESOLVER` case is not reachable through the
-  current Mainnet-only execution path. If a deployment with the Sepolia redirect
-  gains a verified route entrypoint, a name outside indexed coverage would be
-  admitted and could verify those retained records. Inside coverage, the name's
-  `ens_v2`-selected row would cause the refusal above, so the exposure would close
-  as indexing coverage completes.
+  This locked-name `CANNOT_SET_RESOLVER` case is not reachable under the
+  Mainnet profile, which has no ENSv2 arm. Under the Sepolia profile, whose
+  verified route executes through the Sepolia Universal Resolver, a name outside
+  indexed coverage is admitted and can verify those retained records. Inside
+  coverage, the name's `ens_v2`-selected row causes the refusal above, so the
+  exposure closes as indexing coverage completes.
 - Status semantics: answer entries use in-band `status`. Valid tuples with no
   indexed claim return an `indexed` entry with `status=not_found`. A stored
   successful claim whose spelling does not normalize returns an `indexed` entry
@@ -1821,13 +1834,51 @@ For a registrar lease first identified by a later readable observation, registra
 - Request parameters: path `namespace`.
 - Response shape: `data` is `{namespace, capabilities, networks}`.
   `capabilities` is a product-facing object keyed by capability name; each
-  value is `{completeness, unsupported_reason?}` using the common
+  value is `{completeness, unsupported_reason?, chains?}` using the common
   completeness vocabulary. `networks` is an array of `{network, chain_id?}`
   entries when the namespace has public chain mappings. Control-plane metadata
   omits `meta.as_of` and `meta.as_of_token`. Under the Sepolia deployment
   profile, ENS `name_profile` completeness is `partial`: the ENSv2 registrar
   declaration is supported while the admitted ENSv1 registrar declaration is
   shadow because registrar-controller label coverage is absent.
+- Capabilities from manifest flags: `subnames`, `name_profile`, and
+  `name_history` aggregate the active manifests' capability flags (`full` when
+  every declaring manifest is supported, `partial` when some are, otherwise
+  `unsupported` with `unsupported_reason=not_supported_for_namespace`). They
+  carry no `chains` object.
+- Verified capabilities per chain: `verified_records` and
+  `verified_primary_name` describe what this deployment's verified routes will
+  execute, decided per declared network and reported under `chains`, keyed by
+  the numeric chain id (`"1"`, `"11155111"`, `"8453"`). A chain entry is
+  `{completeness: full}` when the lookup route table has an execution
+  entrypoint for the namespace on that chain (ENS: Ethereum Mainnet or Sepolia;
+  Basenames: Base, executing through the Mainnet L1 Resolver), an active or,
+  where the route admits it, shadow manifest declares that entrypoint with a
+  `verified_resolution` flag the route accepts (ENS accepts `shadow`; Basenames
+  requires `supported` on manifest version 2), for `verified_primary_name` the
+  same chain also has an active `ens_v1_registry_l1` manifest, and
+  `BIGNAME_API_CHAIN_RPC_URLS` names a provider for the execution chain.
+  Otherwise the entry is `unsupported` with one of
+  `not_supported_for_namespace` (the capability never applies, such as
+  `verified_primary_name` on Basenames), `not_supported_for_chain` (no route
+  entrypoint for that chain), `execution_entrypoint_not_declared` (no usable
+  execution manifest, or no registry manifest for primary names), or
+  `execution_provider_not_configured` (the operator has not configured the
+  provider). The top-level `completeness` is `full` when every chain is `full`,
+  `partial` when some are, and `unsupported` when none is; an `unsupported`
+  top level repeats the chains' shared reason, `not_supported_for_chain` when
+  the per-chain reasons differ, and `not_supported_for_namespace` when the
+  namespace declares no network. Per-name support classes on the routes
+  themselves (topology class, authority arm) still apply; this is
+  deployment-level support. Example under the Sepolia profile with a Sepolia
+  provider configured:
+
+  ```json
+  "verified_primary_name": {
+    "completeness": "full",
+    "chains": { "11155111": { "completeness": "full" } }
+  }
+  ```
 - Pagination behavior: none.
 - Status semantics: unsupported public namespaces return `404 not_found`.
 - Replaces (v1): `GET /v1/namespaces/{namespace}`. Operational namespace

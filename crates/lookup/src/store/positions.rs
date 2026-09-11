@@ -218,9 +218,12 @@ impl From<ProjectedPosition> for LookupPosition {
     }
 }
 
-fn chain_slot(chain_id: &str) -> Result<&'static str> {
+/// The `chain_positions` slot a projection publishes for `chain_id`. Mainnet chains use the
+/// short network slot; Sepolia is keyed by its full chain id, as the project phase writes it.
+pub(super) fn chain_slot(chain_id: &str) -> Result<&'static str> {
     match chain_id {
         crate::ETHEREUM_MAINNET_CHAIN_ID => Ok("ethereum"),
+        crate::ETHEREUM_SEPOLIA_CHAIN_ID => Ok(crate::ETHEREUM_SEPOLIA_CHAIN_ID),
         crate::BASE_MAINNET_CHAIN_ID => Ok("base"),
         _ => Err(LookupError::unsupported(format!(
             "lookup chain {chain_id} has no declared position slot"

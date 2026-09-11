@@ -221,6 +221,10 @@ route that needs provider execution:
 BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=http://127.0.0.1:8545
 ```
 
+Against a `manifests/sepolia` projection, verified ENS reads execute on Sepolia
+and need `ethereum-sepolia=<url>` instead; `GET /v1/namespaces/ens` shows which
+chains' verified capabilities the running configuration enables.
+
 Missing provider configuration fails closed according to each route contract;
 it does not fall back silently to an unrelated answer. Phase-runner projection
 hydration separately uses `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS` for its

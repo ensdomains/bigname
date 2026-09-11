@@ -298,6 +298,51 @@ async fn v2_namespace_ens_uses_the_checked_in_sepolia_capability_aggregate() -> 
         payload["data"]["networks"],
         json!([{ "network": "ethereum-sepolia", "chain_id": 11155111 }])
     );
+    // The checked-in Sepolia profile declares the ENS execution entrypoint and the ENSv1
+    // registry, so both verified capabilities turn on the moment a Sepolia provider is
+    // configured -- and say exactly what is missing until then.
+    for capability in ["verified_records", "verified_primary_name"] {
+        assert_eq!(
+            payload["data"]["capabilities"][capability],
+            json!({
+                "completeness": "unsupported",
+                "unsupported_reason": "execution_provider_not_configured",
+                "chains": {
+                    "11155111": {
+                        "completeness": "unsupported",
+                        "unsupported_reason": "execution_provider_not_configured"
+                    }
+                }
+            }),
+            "{capability}: {payload}"
+        );
+    }
+
+    let configured = database
+        .app_state_with_lookup_chain_rpc_urls(bigname_lookup::ChainRpcUrls::from_entries(&[
+            "ethereum-sepolia=http://rpc.test".to_owned(),
+        ])?)
+        .await?;
+    let response = app_router(configured)
+        .oneshot(
+            Request::builder()
+                .uri("/v1/namespaces/ens")
+                .body(Body::empty())
+                .expect("namespace request must build"),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    for capability in ["verified_records", "verified_primary_name"] {
+        assert_eq!(
+            payload["data"]["capabilities"][capability],
+            json!({
+                "completeness": "full",
+                "chains": { "11155111": { "completeness": "full" } }
+            }),
+            "{capability}: {payload}"
+        );
+    }
 
     database.cleanup().await
 }

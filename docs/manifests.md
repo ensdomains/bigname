@@ -340,6 +340,10 @@ Its admission and schema prerequisite are specified below.
 
 The preceding `ens_v2_sepolia_dev` manifest versions remain checked in as `deprecated` historical records and citation evidence. Their addresses and ranges do not participate in the active post-audit watch or replay plan.
 
+### ENS execution (`sepolia` deployment profile)
+
+`ens_execution` owns verified resolution on Sepolia at the same ENS Universal Resolver proxy address as Mainnet, `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`, with `verified_resolution = "shadow"` and `rollout_status = "shadow"`, under `manifests/sepolia/ethereum/ens/ens_execution/v1.toml`. The admitted 2026-06-29 Sepolia deployment artifact deploys the proxy at that address (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/UpgradableUniversalResolverProxy.json:L2 @ ens_v2@a971bd64); the non-admitted 2026-07-30 redeploy keeps it (upstream: .refs/ens_v2/contracts/deployments/sepolia/UpgradableUniversalResolverProxy.json:L2 @ ens_v2@a971bd64). As on Mainnet, the pinned ENSv1 deployment artifact is the implementation/ABI anchor and the lookup entry is the proxy address (upstream: .refs/ens_v1/deployments/sepolia/UniversalResolver.json:L2 @ ens_v1@91c966f). The shadow flag has the same meaning as on Mainnet: it records manifest ownership for the execution substrate, and the lookup engine admits a shadow `ens_execution` manifest as the ENS entrypoint on either chain. Verified records and the request-scoped, hash-pinned ENS/60 primary-name lookup execute through this entrypoint on Sepolia under the same rules as Mainnet; the primary-name reverse leg additionally reads the active `ens_v1_registry_l1` registry declared below. The API's `GET /v1/namespaces/ens` reports both verified capabilities per chain from these declarations plus the configured provider.
+
 ### ENSv1 (`sepolia` deployment profile)
 
 The `sepolia` deployment profile also admits the ENSv1 deployment the ENSv1→ENSv2 migration family

@@ -82,6 +82,18 @@ pub struct ActiveManifestVersion {
     pub capability_flags: BTreeMap<String, CapabilityFlag>,
 }
 
+/// One manifest version the lookup engine may select as a verified-execution entrypoint. Unlike
+/// `ActiveManifestVersion` this view keeps `shadow` manifests, because ENS execution runs through
+/// a shadow-scoped `ens_execution` manifest on both deployment profiles.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionManifestVersion {
+    pub manifest_version: u64,
+    pub source_family: String,
+    pub chain: String,
+    pub rollout_status: String,
+    pub capability_flags: BTreeMap<String, CapabilityFlag>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NamespaceManifestSnapshot {
     pub manifests: Vec<ActiveManifestVersion>,

@@ -713,7 +713,18 @@ replay evidence.
 
 Configure
 `BIGNAME_API_CHAIN_RPC_URLS` for status and verified lookup as described in the
-API docs. The request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; together
+API docs. Verified ENS reads (`source=verified` and `source=auto` on
+`/v1/names/{name}/records`, `/v1/lookup`, and ENS/60 verification on
+`/v1/addresses/{address}/primary-name`) execute against the Ethereum L1 of the
+deployment profile the API serves, so an API in front of a `manifests/sepolia`
+projection needs an `ethereum-sepolia=<https url>` entry (an API in front of
+`manifests/mainnet` needs `ethereum-mainnet=`). Without that entry the verified
+routes fail closed with `409 stale` and `GET /v1/namespaces/ens` reports
+`verified_records` and `verified_primary_name` as `unsupported` with
+`unsupported_reason=execution_provider_not_configured` for chain `11155111`;
+with it, both report `full`. The Sepolia entrypoint is the checked-in shadow
+`manifests/sepolia/ethereum/ens/ens_execution/v1.toml`, which the normal
+manifest sync installs. The request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; together
 with the reserved readiness connection, one API process can open at most
 `BIGNAME_DATABASE_MAX_CONNECTIONS + 1` PostgreSQL connections.
 
