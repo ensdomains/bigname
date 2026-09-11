@@ -39,7 +39,8 @@ with no claim, unsupported verification, or mismatched verification return
 All collection routes use the standard `page` object: `cursor`,
 `next_cursor`, `page_size`, nullable `total_count`, and `has_more`.
 
-The top-level latest-state collections are `GET /v1/names/{name}/subnames`,
+The top-level latest-state collections are `GET /v1/names`,
+`GET /v1/names/{name}/subnames`,
 `GET /v1/names/{name}/history`, `GET /v1/permissions`,
 `GET /v1/addresses/{address}/names`,
 `GET /v1/addresses/{address}/history`, `GET /v1/search`, `GET /v1/events`, and
@@ -388,6 +389,57 @@ Field ownership:
 - Replaces (v1): `GET /v1/status`.
 
 ## Tier 2: Product Reads
+
+### `GET /v1/names`
+
+- Method/path: `GET /v1/names`
+- Tier: product read.
+- Purpose: the namespace-wide listing of current names by registration expiry
+  — the "which names expire between t1 and t2" sweep. It lives under
+  `/v1/names` rather than a `/v1/registrations` route because its rows are
+  names in the dictionary shape `GET /v1/search` serves, each carrying its
+  selected current registration, and because no route addresses a registration
+  as a resource of its own: registrations appear only as `registration_id` on
+  history and permission rows.
+- Request parameters: query `namespace` (required), `expires_after`,
+  `expires_before`, `sort=expires_at`, `order=asc|desc`, `cursor`,
+  `page_size`, and optional `finality=latest`. `at` and historical `finality`
+  values are rejected by the shared latest-state collection rule.
+  `namespace` is required: the listing is one namespace's index scan, and a
+  missing namespace returns `400 invalid_input`; an unsupported one returns
+  `404 not_found`. At least one of `expires_after` and `expires_before` is
+  required so the request can never be an unbounded scan; both are RFC 3339 UTC
+  timestamps. `expires_after` is inclusive and `expires_before` exclusive, so
+  consecutive windows tile without overlap or gap; `expires_after` must be
+  earlier than `expires_before`. `sort` defaults to `expires_at` and accepts
+  nothing else; `order` defaults to `asc`. Any other value, a non-RFC 3339
+  bound, or an equal or inverted pair returns `400 invalid_input`.
+- Response shape: `data` is an array of the same record-shaped rows
+  `GET /v1/search` serves: `name`, `display_name`, `namespace`, `namehash`,
+  `owner`, `registrant`, `registration_status`, `registered_at`, `created_at`,
+  and `expires_at`. Every row has an `expires_at` inside the window. A name
+  whose exact-name authority is unsupported is omitted, as on search, because
+  a listing row carries no `unsupported_reason`.
+- Coverage: the listing reads `name_current` rows whose
+  `declared_summary.registration.expiry` is the projection's numeric lease
+  expiry (unix seconds) — the form the exact-name builder writes for registrar
+  leases, ENSv2 registrations, and wrapped subnames — and relies on the partial
+  expression index `name_current_registration_expiry_idx` on
+  `(namespace, (registration.expiry)::double precision, logical_name_id)`
+  guarded by `jsonb_typeof(registration.expiry) = 'number'`
+  (`schema-v2/baseline/06_projections.sql`; migration
+  `20260911120000_name_current_registration_expiry_idx.sql` for a phase schema
+  installed before the baseline carried it). A row whose only expiry is stored
+  in another form (an RFC 3339 string at `control.expiry`, or no expiry at all)
+  is outside this listing by design; `GET /v1/names/{name}` still serves its
+  `expires_at`.
+- Pagination behavior: standard collection pagination by `expires_at` in the
+  requested order, ties broken by namespace, name, and namehash. Cursors are
+  bound to namespace, both bounds, and order. `page.total_count` is `null`.
+- Snapshot behavior: rows come from current state. The response omits
+  `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
+  validity claim.
+- Status semantics: an empty window returns `200` with empty `data`.
 
 ### `GET /v1/names/{name}`
 

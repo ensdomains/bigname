@@ -1,3 +1,4 @@
+mod expiring;
 mod list;
 mod migration;
 mod row;
@@ -8,6 +9,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result};
 use sqlx::{PgPool, types::Uuid};
 
+pub use expiring::{NameCurrentExpiringFilter, load_name_current_expiring_page};
 pub use list::{
     NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentListCursor,
     NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage,

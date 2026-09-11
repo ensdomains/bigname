@@ -16,6 +16,7 @@ mod name_records;
 #[cfg(test)]
 pub(crate) use name_records::auto_fallback_test_hooks as name_records_auto_fallback_test_hooks;
 mod name_records_inventory;
+mod names;
 mod namespaces;
 mod params;
 mod permission_support;
@@ -69,6 +70,7 @@ pub(crate) use name_records::{
     load_ephemeral_verified_record_lookup, parse_record_keys,
 };
 pub(crate) use name_records_inventory::{default_requested_records, validate_product_record};
+pub(crate) use names::get_names;
 pub(crate) use namespaces::get_namespace;
 pub(crate) use params::{
     AtSelector, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, QueryParams, RawQueryParams, RequestSource,

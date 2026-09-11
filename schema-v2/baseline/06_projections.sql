@@ -99,6 +99,19 @@ CREATE INDEX IF NOT EXISTS name_current_resolver_idx
     )
     WHERE declared_summary #>> '{resolver,address}' IS NOT NULL;
 
+-- Namespace-wide expiry window (`GET /v1/names?namespace=&expires_after=&expires_before=`).
+-- The projection writes `registration.expiry` as a JSON number of unix seconds; the partial
+-- predicate keeps the text-to-float cast off every other shape, so the expression is immutable
+-- and the index build cannot fail on a non-numeric string. The reader repeats the same
+-- JSONB_TYPEOF guard and cast in its WHERE clause so the planner can match this index.
+CREATE INDEX IF NOT EXISTS name_current_registration_expiry_idx
+    ON name_current (
+        namespace,
+        ((declared_summary #>> '{registration,expiry}')::double precision),
+        logical_name_id
+    )
+    WHERE jsonb_typeof(declared_summary #> '{registration,expiry}') = 'number';
+
 CREATE TABLE IF NOT EXISTS children_current (
     parent_logical_name_id text NOT NULL
         REFERENCES name_surfaces (logical_name_id),

@@ -324,6 +324,7 @@ include!("tests/v2_interpret_redo_loaders.rs");
 include!("tests/v2_primary_name.rs");
 include!("tests/v2_lookup.rs");
 include!("tests/v2_search.rs");
+include!("tests/v2_names.rs");
 include!("tests/v2_query_params.rs");
 include!("tests/v2_status.rs");
 include!("tests/v2_envelope_conformance.rs");

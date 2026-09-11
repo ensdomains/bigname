@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use sqlx::types::Uuid;
+use sqlx::types::{Uuid, time::OffsetDateTime};
 
 use super::support::parse_evm_address;
 use super::{
@@ -32,6 +32,8 @@ pub(crate) struct RawQueryParams {
     pub(crate) authority: Option<String>,
     pub(crate) from_block: Option<String>,
     pub(crate) to_block: Option<String>,
+    pub(crate) expires_after: Option<String>,
+    pub(crate) expires_before: Option<String>,
     pub(crate) q: Option<String>,
     pub(crate) dedupe: Option<String>,
     pub(crate) sort: Option<String>,
@@ -59,9 +61,14 @@ pub(crate) struct QueryParams {
     pub(crate) authority: Option<Authority>,
     pub(crate) from_block: Option<i64>,
     pub(crate) to_block: Option<i64>,
+    pub(crate) expires_after: Option<OffsetDateTime>,
+    pub(crate) expires_before: Option<OffsetDateTime>,
     pub(crate) q: Option<String>,
     pub(crate) dedupe: AddressNamesDedupe,
     pub(crate) sort: AddressNamesSort,
+    /// The trimmed `sort` value as sent, for routes whose default sort is not `name` and that
+    /// must still reject an explicit `sort=name`.
+    pub(crate) sort_wire: Option<String>,
     pub(crate) order: SortOrder,
     pub(crate) include_expired: Option<bool>,
     pub(crate) cursor: Option<String>,
@@ -108,9 +115,12 @@ impl TryFrom<RawQueryParams> for QueryParams {
             authority: parse_authority(raw.authority.as_deref())?,
             from_block: parse_block_bound(raw.from_block, "from_block")?,
             to_block: parse_block_bound(raw.to_block, "to_block")?,
+            expires_after: parse_timestamp_bound(raw.expires_after, "expires_after")?,
+            expires_before: parse_timestamp_bound(raw.expires_before, "expires_before")?,
             q: trim_to_option(raw.q),
             dedupe: parse_dedupe(raw.dedupe.as_deref())?,
             sort: parse_sort(raw.sort.as_deref())?,
+            sort_wire: trim_to_option(raw.sort),
             order: parse_order(raw.order.as_deref())?,
             include_expired: parse_bool_flag(raw.include_expired.as_deref(), "include_expired")?,
             cursor: trim_to_option(raw.cursor),
@@ -270,6 +280,23 @@ fn parse_block_bound(value: Option<String>, field_name: &'static str) -> V2Resul
         .map(Some)
         .ok_or_else(|| {
             V2Error::invalid_input(format!("{field_name} must be a non-negative integer"))
+        })
+}
+
+fn parse_timestamp_bound(
+    value: Option<String>,
+    field_name: &'static str,
+) -> V2Result<Option<OffsetDateTime>> {
+    let Some(value) = trim_to_option(value) else {
+        return Ok(None);
+    };
+
+    bigname_storage::parse_rfc3339_utc_timestamp(&value)
+        .map(Some)
+        .map_err(|_| {
+            V2Error::invalid_input(format!(
+                "{field_name} must be an RFC 3339 UTC timestamp such as 2026-01-02T03:04:05Z"
+            ))
         })
 }
 
@@ -440,6 +467,46 @@ mod tests {
         assert_eq!(params.dedupe, AddressNamesDedupe::Registration);
         assert_eq!(params.sort, AddressNamesSort::ExpiresAt);
         assert_eq!(params.order, SortOrder::Desc);
+    }
+
+    #[test]
+    fn expiry_bounds_parse_rfc3339_and_reject_other_values() {
+        let params = parse(RawQueryParams {
+            expires_after: Some(" 2026-01-02T03:04:05Z ".to_owned()),
+            expires_before: Some("2026-02-02T03:04:05Z".to_owned()),
+            sort: Some(" expires_at ".to_owned()),
+            ..RawQueryParams::default()
+        })
+        .expect("expiry bounds must parse");
+        assert_eq!(
+            params.expires_after,
+            Some(
+                bigname_storage::parse_rfc3339_utc_timestamp("2026-01-02T03:04:05Z")
+                    .expect("timestamp must parse")
+            )
+        );
+        assert_eq!(
+            params.expires_before,
+            Some(
+                bigname_storage::parse_rfc3339_utc_timestamp("2026-02-02T03:04:05Z")
+                    .expect("timestamp must parse")
+            )
+        );
+        assert_eq!(params.sort_wire.as_deref(), Some("expires_at"));
+
+        for raw in [
+            RawQueryParams {
+                expires_after: Some("2026-01-02".to_owned()),
+                ..RawQueryParams::default()
+            },
+            RawQueryParams {
+                expires_before: Some("1767322445".to_owned()),
+                ..RawQueryParams::default()
+            },
+        ] {
+            let error = parse(raw).expect_err("non-RFC 3339 expiry bound must fail");
+            assert_eq!(error.code(), ErrorCode::InvalidInput);
+        }
     }
 
     #[test]

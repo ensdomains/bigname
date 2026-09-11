@@ -135,6 +135,8 @@ step-3-gate vocabulary needed by the route schemas:
 | `log_index` | EVM log index within a transaction | `log_index` (unchanged) |
 | `from_block` | inclusive lower block-number filter | `from_block` (unchanged) |
 | `to_block` | inclusive upper block-number filter | `to_block` (unchanged) |
+| `expires_after` | inclusive lower `expires_at` bound on `GET /v1/names` (RFC 3339 UTC) | `expires_after` (new) |
+| `expires_before` | exclusive upper `expires_at` bound on `GET /v1/names` (RFC 3339 UTC) | `expires_before` (new) |
 | `data` | envelope root payload, and event-row payload when nested inside an event row | compact event payload objects |
 
 An admitted controller-free ENSv1 numeric registration can retain its resource and token lifecycle
@@ -581,6 +583,7 @@ Common parameter rules:
 | `namespace` | name-inferred, address-anchored, and collection routes | explicit override or filter |
 | `include` | route-documented expansions | per-route allowlist |
 | `sort`, `order` | paginated routes that declare a sort set | route-documented field set plus `asc`/`desc` |
+| `expires_after`, `expires_before` | `GET /v1/names` | RFC 3339 UTC window over `expires_at`; at least one is required, `expires_after` inclusive, `expires_before` exclusive |
 | `include_expired` | `GET /v1/names/{name}/subnames` | `true` (default) lists released and past-expiry children; `false` omits them |
 | `cursor`, `page_size` | every paginated route | opaque cursor; default 50, max 200 |
 
