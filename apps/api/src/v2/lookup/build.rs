@@ -187,7 +187,11 @@ fn build_detail_record(
         namespace: record.row.namespace.clone(),
         namehash: record.row.namehash.clone(),
         registration_id: (registration.registration_status != RegistrationStatus::Unregistered)
-            .then(|| record.row.resource_id.map(|value| value.to_string()))
+            .then(|| {
+                name_record::projected_registration_resource_id(&record.row.declared_summary)
+                    .map(str::to_owned)
+                    .or_else(|| record.row.resource_id.map(|value| value.to_string()))
+            })
             .flatten(),
         token_id,
         owner: registration.owner,

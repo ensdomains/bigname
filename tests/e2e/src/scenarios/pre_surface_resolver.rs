@@ -30,6 +30,9 @@ async fn exercise(ownerless: bool) -> Result<()> {
     ens_v1::set_resolver(&rpc, &deployment, owner, &name, resolver).await?;
     ens_v1::set_text_record(&rpc, resolver, owner, &name, TEXT_KEY, TEXT_VALUE).await?;
     ens_v1::set_addr_record(&rpc, resolver, owner, &name, address_value).await?;
+    // Keep registry ownership independent of the admitted numeric registrar lifecycle.
+    // (upstream: .refs/ens_v1/test/ethregistrar/TestBaseRegistrar.test.ts:L189 @ ens_v1@91c966f)
+    ens_v1::transfer_eth_name_without_reclaim(&rpc, &deployment, owner, accounts[4], label).await?;
     if ownerless {
         ens_v1::set_registry_owner(&rpc, &deployment, owner, &name, Address::ZERO).await?;
     }

@@ -303,8 +303,7 @@ mod tests {
         let resolver_bindings: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM normalized_events event
              JOIN surface_bindings binding
-               ON binding.logical_name_id = event.logical_name_id
-              AND binding.resource_id = event.resource_id
+               ON binding.resource_id = event.resource_id
              WHERE event.event_kind = 'ResolverChanged'",
         )
         .fetch_one(&writer)
@@ -339,7 +338,7 @@ mod tests {
         assert_eq!(manifest_events, 3, "all fixture sources must be admitted");
         assert!(
             resolver_bindings >= HEAD,
-            "Interpret must bind every resolver event"
+            "Interpret must relate every resolver event to a resource that later gains a surface binding"
         );
         assert_eq!(
             resolver_rows, 1,

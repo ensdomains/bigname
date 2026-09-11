@@ -8,9 +8,12 @@ use super::{
     InvalidHistoryCursor,
     decoders::decode_history_event,
     duplicates::push_product_history_duplicate_filter,
-    registration_identity::{push_product_event_kind_predicate, push_product_registration_id},
+    registration_identity::{
+        push_product_event_kind_predicate, push_product_registration_id,
+        push_registration_binding_at_event,
+    },
     selectors::HistorySelector,
-    source::{push_history_canonicality_filter, push_history_source_with_visibility},
+    source::{push_history_canonicality_filter, push_history_source_for_filter},
     summary::load_history_summary,
 };
 use crate::projection_helpers::{
@@ -132,7 +135,13 @@ pub(super) async fn load_history_page(
     if let Some(cursor) = cursor {
         push_history_cursor_cte(&mut builder, cursor);
     }
-    push_history_select(&mut builder, cursor.is_some(), include_candidates);
+    push_history_select(
+        &mut builder,
+        &filter,
+        canonical_only,
+        cursor.is_some(),
+        include_candidates,
+    );
     push_history_filters(&mut builder, &filter, canonical_only);
     if !include_candidates {
         push_product_history_duplicate_filter(&mut builder, &filter, canonical_only);
@@ -186,7 +195,7 @@ async fn load_history_internal(
     }
 
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_history_select(&mut builder, false, false);
+    push_history_select(&mut builder, &filter, canonical_only, false, false);
     push_history_filters(&mut builder, &filter, canonical_only);
     push_product_history_duplicate_filter(&mut builder, &filter, canonical_only);
     push_history_order(&mut builder);
@@ -204,8 +213,10 @@ async fn load_history_internal(
     rows.into_iter().map(decode_history_event).collect()
 }
 
-fn push_history_select(
-    builder: &mut QueryBuilder<'_, Postgres>,
+pub(super) fn push_history_select<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    filter: &'a EventHistoryReadFilter,
+    canonical_only: bool,
     include_cursor_row: bool,
     include_candidates: bool,
 ) {
@@ -219,7 +230,7 @@ fn push_history_select(
             ne.resource_id,
         "#,
     );
-    push_product_registration_id(builder);
+    push_product_registration_id(builder, canonical_only);
     builder.push(
         r#" AS registration_id,
             ne.event_kind,
@@ -299,7 +310,13 @@ fn push_history_select(
             ) AS coverage
         "#,
     );
-    push_history_source_with_visibility(builder, include_cursor_row, include_candidates);
+    push_history_source_for_filter(
+        builder,
+        filter,
+        canonical_only,
+        include_cursor_row,
+        include_candidates,
+    );
 }
 
 pub(super) fn push_history_filters<'a>(
@@ -318,10 +335,20 @@ pub(super) fn push_history_filters<'a>(
     }
 
     if let Some(registration_id) = filter.registration_id.as_ref() {
+        builder.push(" AND ");
+        builder.push_bind(filter.registration_id_is_public);
         builder.push(" AND ((ne.resource_id IS NULL AND ");
         push_product_event_kind_predicate(builder);
+        builder.push(" AND ");
+        push_registration_binding_at_event(builder, *registration_id, canonical_only);
         builder.push(") OR (");
-        push_product_registration_id(builder);
+        super::registration_identity::push_public_registration_at_event(
+            builder,
+            *registration_id,
+            canonical_only,
+        );
+        builder.push(" AND ");
+        push_product_registration_id(builder, canonical_only);
         builder.push(" = ");
         builder.push_bind(registration_id);
         builder.push("))");
@@ -345,7 +372,7 @@ pub(super) fn push_history_filters<'a>(
     push_history_canonicality_filter(builder, canonical_only);
 }
 
-fn push_history_order(builder: &mut QueryBuilder<'_, Postgres>) {
+pub(super) fn push_history_order(builder: &mut QueryBuilder<'_, Postgres>) {
     builder.push(" ORDER BY ");
     push_history_order_terms(builder);
 }
@@ -376,11 +403,17 @@ async fn ensure_history_cursor_exists(
             SELECT 1
         "#,
     );
-    push_history_source_with_visibility(&mut builder, false, include_candidates);
     let mut cursor_filter = filter.clone();
     if !cursor_filter.bind_cursor_anchor_to_event_kinds {
         cursor_filter.event_kinds.clear();
     }
+    push_history_source_for_filter(
+        &mut builder,
+        &cursor_filter,
+        canonical_only,
+        false,
+        include_candidates,
+    );
     push_history_filters(&mut builder, &cursor_filter, canonical_only);
     if !include_candidates {
         push_product_history_duplicate_filter(&mut builder, &cursor_filter, canonical_only);
@@ -521,6 +554,12 @@ fn push_selector_filter<'a>(
             builder.push(" OR ");
             push_uuid_filter(builder, "ne.resource_id", resource_ids);
             builder.push(")");
+        }
+        HistorySelector::ProductRegistration {
+            logical_name_ids: _,
+            resource_ids: _,
+        } => {
+            builder.push("TRUE");
         }
         HistorySelector::None => {
             builder.push("FALSE");

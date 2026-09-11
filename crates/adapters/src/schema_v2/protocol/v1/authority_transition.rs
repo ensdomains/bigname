@@ -360,6 +360,24 @@ pub(super) fn append_authority_transition(
     if previous.map(|authority| authority.resource_id)
         == linked.map(|authority| authority.resource_id)
     {
+        if let (Some(previous), Some(linked)) = (previous, linked)
+            && !previous.surface_known
+            && linked.surface_known
+        {
+            super::registry::surface::append_binding(
+                output,
+                linked,
+                authority_arm,
+                raw,
+                binding_active_from,
+            );
+            let mut observation = observation_state.clone();
+            if let Some((owner, contract)) = registry_binding {
+                observation["owner_getter"] = json!(owner);
+                observation["registry_contract"] = json!(contract);
+            }
+            super::registry::surface::append_bound_event(output, linked, raw, &observation);
+        }
         return;
     }
     if let Some(linked) = linked.filter(|authority| authority.surface_known) {
@@ -383,14 +401,17 @@ pub(super) fn append_authority_transition(
         });
     }
     let logical_name_id = linked
+        .filter(|authority| authority.surface_known)
+        .or_else(|| previous.filter(|authority| authority.surface_known))
+        .map(|authority| authority.logical_name_id.clone());
+    let Some(identity_name_id) = linked
         .filter(|authority| authority.surface_known || authority.token_lineage_id.is_some())
-        .map(|authority| authority.logical_name_id.clone())
         .or_else(|| {
             previous
                 .filter(|authority| authority.surface_known || authority.token_lineage_id.is_some())
-                .map(|authority| authority.logical_name_id.clone())
-        });
-    let Some(logical_name_id) = logical_name_id else {
+        })
+        .map(|authority| authority.logical_name_id.clone())
+    else {
         return;
     };
     let source_event = observation_state
@@ -400,7 +421,7 @@ pub(super) fn append_authority_transition(
     if let Some(previous) = previous.filter(|authority| authority.surface_known) {
         output.events.push(EventDraft {
             event_kind: "SurfaceUnbound".to_owned(),
-            logical_name_id: Some(logical_name_id.clone()),
+            logical_name_id: logical_name_id.clone(),
             resource_id: Some(previous.resource_id),
             identity_suffix: format!("SurfaceUnbound:{source_event}:{}", previous.resource_id),
             explicit_before: Some(json!({
@@ -427,7 +448,7 @@ pub(super) fn append_authority_transition(
         }
         output.events.push(EventDraft {
             event_kind: "SurfaceBound".to_owned(),
-            logical_name_id: Some(logical_name_id.clone()),
+            logical_name_id: logical_name_id.clone(),
             resource_id: Some(linked.resource_id),
             identity_suffix: format!("SurfaceBound:{source_event}:{}", linked.resource_id),
             explicit_before: Some(json!({})),
@@ -446,11 +467,11 @@ pub(super) fn append_authority_transition(
     }
     output.events.push(EventDraft {
         event_kind: "AuthorityEpochChanged".to_owned(),
-        logical_name_id: Some(logical_name_id.clone()),
+        logical_name_id: logical_name_id.clone(),
         resource_id: linked
             .map(|authority| authority.resource_id)
             .or_else(|| previous.map(|authority| authority.resource_id)),
-        identity_suffix: format!("AuthorityEpochChanged:{source_event}:{logical_name_id}"),
+        identity_suffix: format!("AuthorityEpochChanged:{source_event}:{identity_name_id}"),
         explicit_before: Some(json!({
             "authority_kind":previous.map(authority_kind),
             "authority_key":previous.and_then(|authority| authority.authority_key.clone()),
@@ -468,7 +489,7 @@ pub(super) fn append_authority_transition(
     if let (Some(linked), Some(resolver)) = (linked, resolver) {
         output.events.push(EventDraft {
             event_kind: "ResolverChanged".to_owned(),
-            logical_name_id: Some(logical_name_id),
+            logical_name_id,
             resource_id: Some(linked.resource_id),
             identity_suffix: format!(
                 "ResolverChanged:authority:{source_event}:{}",
@@ -488,7 +509,7 @@ pub(super) fn append_authority_transition(
     }
 }
 
-fn merge_observation(observation: &Value, fields: Value) -> Value {
+pub(super) fn merge_observation(observation: &Value, fields: Value) -> Value {
     let mut merged = observation.clone();
     merged
         .as_object_mut()

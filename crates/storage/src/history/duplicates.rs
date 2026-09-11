@@ -1,6 +1,8 @@
 use sqlx::{Postgres, QueryBuilder};
 
-use super::{EventHistoryReadFilter, paging::push_history_filters, source::push_history_source};
+use super::{
+    EventHistoryReadFilter, paging::push_history_filters, source::push_history_source_for_filter,
+};
 
 pub(super) fn push_product_history_duplicate_filter<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
@@ -27,7 +29,7 @@ pub(super) fn push_product_history_duplicate_filter<'a>(
     );
     // Handoffs come from RawLogInput, whose chain and block number are required.
     // Equality bounds use the existing chain/block index before matching origin.
-    push_history_source(builder, false);
+    push_history_source_for_filter(builder, filter, canonical_only, false, false);
     builder.push(
         r#"
         AND ne.event_kind = 'ResolverChanged'

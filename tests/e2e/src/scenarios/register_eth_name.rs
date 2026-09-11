@@ -76,14 +76,16 @@ async fn register_eth_name_end_to_end() -> Result<()> {
     // --- layer 2: normalized events ---
     let event_kinds: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT event_kind FROM normalized_events
-         WHERE logical_name_id = $1 AND canonicality_state = 'canonical'",
+         WHERE (logical_name_id = $1 OR namespace || ':' || lower(COALESCE(
+             after_state->>'namehash', after_state->>'child_node', after_state->>'node')) = $1)
+           AND canonicality_state = 'canonical'",
     )
     .bind(&logical_name_id)
     .fetch_all(&run.db.pool)
     .await?;
     for expected in [
         "RegistrationGranted",
-        "SurfaceBound",
+        "PreimageObserved",
         "ExpiryChanged",
         "AuthorityEpochChanged",
     ] {

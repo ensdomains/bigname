@@ -121,6 +121,8 @@ mod base_registrar_events {
 
     sol! {
         event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
+        event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires);
+        event NameRenewed(uint256 indexed id, uint256 expires);
     }
 }
 
@@ -6843,6 +6845,16 @@ async fn seed_old_registry_resolver_handoff(pool: &PgPool) -> Result<()> {
         (
             2,
             0,
+            REGISTRAR,
+            base_registrar_events::NameRenewed {
+                id: U256::from_be_slice(keccak256(b"pointer").as_slice()),
+                expires: U256::from(1_000_000),
+            }
+            .encode_log_data(),
+        ),
+        (
+            2,
+            1,
             CONTROLLER,
             NameRenewed {
                 name: "pointer".into(),
@@ -6948,6 +6960,7 @@ async fn seed_old_registry_resolver_handoff(pool: &PgPool) -> Result<()> {
 async fn seed_pre_surface_registry_fallback(pool: &PgPool) -> Result<()> {
     const CHAIN: &str = "ethereum-mainnet";
     const REGISTRY_ADDRESS: &str = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    const REGISTRAR: &str = "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85";
     const LEGACY_CONTROLLER: &str = "0x283Af0B28c62C092C9727F1Ee09c02CA627EB7F5";
     let profile = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -6956,7 +6969,7 @@ async fn seed_pre_surface_registry_fallback(pool: &PgPool) -> Result<()> {
     sqlx::query(
         "WITH declarations AS (
            UPDATE manifest_contract_instances SET start_block_number = 0
-           WHERE chain_id = $1 AND lower(declared_address) IN (lower($2), lower($3))
+           WHERE chain_id = $1 AND lower(declared_address) IN (lower($2), lower($3), lower($4))
            RETURNING contract_instance_id
          )
          UPDATE contract_instance_addresses SET active_from_block_number = 0
@@ -6965,6 +6978,7 @@ async fn seed_pre_surface_registry_fallback(pool: &PgPool) -> Result<()> {
     .bind(CHAIN)
     .bind(REGISTRY_ADDRESS)
     .bind(LEGACY_CONTROLLER)
+    .bind(REGISTRAR)
     .execute(pool)
     .await?;
     sqlx::query(
@@ -7014,7 +7028,7 @@ async fn seed_pre_surface_registry_fallback(pool: &PgPool) -> Result<()> {
             legacy_registrar_controller_events::NameRegistered {
                 name: "pointer".into(),
                 label: keccak256(b"pointer"),
-                owner: REGISTRANT.parse()?,
+                owner: PRIOR_REGISTRY_OWNER.parse()?,
                 cost: U256::from(1),
                 expires: U256::from(100),
             }
@@ -7036,7 +7050,56 @@ async fn seed_pre_surface_registry_fallback(pool: &PgPool) -> Result<()> {
             CHAIN,
             block,
             &format!("{CHAIN}-fallback-transaction-{block}"),
-            0,
+            if block == 1 { 3 } else { 0 },
+            emitter,
+            fact.topics(),
+            fact.data.as_ref(),
+        )
+        .await?;
+    }
+    // Keep the retained registry owner aligned with the real numeric grant until expiry.
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L145-L153 @ ens_v1@91c966f)
+    let owner = PRIOR_REGISTRY_OWNER.parse()?;
+    let labelhash = keccak256(b"pointer");
+    let token = U256::from_be_slice(labelhash.as_slice());
+    for (index, (emitter, fact)) in [
+        (
+            REGISTRAR,
+            base_registrar_events::Transfer {
+                from: Address::ZERO,
+                to: owner,
+                tokenId: token,
+            }
+            .encode_log_data(),
+        ),
+        (
+            REGISTRY_ADDRESS,
+            NewOwner {
+                node: raw_namehash(&[b"eth"]),
+                label: labelhash,
+                owner,
+            }
+            .encode_log_data(),
+        ),
+        (
+            REGISTRAR,
+            base_registrar_events::NameRegistered {
+                id: token,
+                owner,
+                expires: U256::from(100),
+            }
+            .encode_log_data(),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        insert_log_at(
+            pool,
+            CHAIN,
+            1,
+            &format!("{CHAIN}-fallback-transaction-1"),
+            i64::try_from(index)?,
             emitter,
             fact.topics(),
             fact.data.as_ref(),

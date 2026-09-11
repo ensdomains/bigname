@@ -1368,6 +1368,7 @@ async fn l2_zero_addr60_uses_stubbed_verified_transport() -> Result<()> {
         "basenames",
         name,
         &logical_name_id,
+        None,
     )
     .await?;
     drop(api);

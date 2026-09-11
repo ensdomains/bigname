@@ -1,6 +1,12 @@
 use super::{State, V1NameState, V1WrapperData, v1_key};
 use crate::schema_v2::model::RawLogInput;
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct V1RegistrarTransaction {
+    key: Option<String>,
+    renewal_expiries: imbl::OrdMap<String, alloy_primitives::U256>,
+}
+
 impl State {
     pub(in crate::schema_v2) fn note_v1_unwrap(
         &mut self,
@@ -93,11 +99,38 @@ impl State {
         Some(wrapper_expiry)
     }
 
+    pub(in crate::schema_v2) fn note_v1_registrar_renewal_expiry(
+        &mut self,
+        namespace: &str,
+        namehash: &str,
+        expiry: alloy_primitives::U256,
+        raw: &RawLogInput,
+    ) {
+        self.begin_v1_registrar_controller_transaction(raw);
+        self.v1_registrar_transaction
+            .renewal_expiries
+            .insert(v1_key(namespace, namehash), expiry);
+    }
+
+    pub(in crate::schema_v2) fn v1_registrar_renewal_expiry(
+        &mut self,
+        namespace: &str,
+        namehash: &str,
+        raw: &RawLogInput,
+    ) -> Option<alloy_primitives::U256> {
+        self.begin_v1_registrar_controller_transaction(raw);
+        self.v1_registrar_transaction
+            .renewal_expiries
+            .get(&v1_key(namespace, namehash))
+            .copied()
+    }
+
     fn begin_v1_registrar_controller_transaction(&mut self, raw: &RawLogInput) {
         let transaction = format!("{}:{}", raw.block_hash, raw.transaction_hash);
-        if self.v1_registrar_controller_transaction.as_deref() != Some(transaction.as_str()) {
-            self.v1_registrar_controller_transaction = Some(transaction);
+        if self.v1_registrar_transaction.key.as_deref() != Some(transaction.as_str()) {
+            self.v1_registrar_transaction.key = Some(transaction);
             self.v1_registrar_controllers.clear();
+            self.v1_registrar_transaction.renewal_expiries.clear();
             self.v1_pending_wrapper_sync_expiries.clear();
         }
     }
@@ -211,10 +244,26 @@ impl State {
         namehash: &str,
         expiry: u64,
     ) -> Option<(u64, V1NameState)> {
+        let current = self
+            .v1_wrapper_data
+            .get(&v1_key(namespace, namehash))?
+            .expiry;
+        self.renew_v1_wrapper_expiry(namespace, namehash, current.max(expiry))
+    }
+
+    // Renewal writes the resulting expiry directly; extending an existing subname is separate.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L332-L337 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L204-L215 @ ens_v1@91c966f)
+    pub(in crate::schema_v2) fn renew_v1_wrapper_expiry(
+        &mut self,
+        namespace: &str,
+        namehash: &str,
+        expiry: u64,
+    ) -> Option<(u64, V1NameState)> {
         let key = v1_key(namespace, namehash);
         let data = self.v1_wrapper_data.get_mut(&key)?;
         let previous = data.expiry;
-        data.expiry = data.expiry.max(expiry);
+        data.expiry = expiry;
         let state = self.v1_names.get_mut(&key)?;
         if state.authority_source_family != "ens_v1_wrapper_l1" {
             return None;

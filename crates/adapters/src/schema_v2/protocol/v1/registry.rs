@@ -11,7 +11,7 @@ use super::authority_transition::{
     registry_fallback_handoff_kind,
 };
 pub(super) use super::authority_transition::{
-    append_authority_transition, authority_kind, child_node,
+    append_authority_transition, authority_kind, child_node, merge_observation,
 };
 use super::{
     is_registry_ownership_event,
@@ -28,6 +28,9 @@ use crate::schema_v2::{
     model::RawLogInput,
     state::{State, V1NameState, V1RegistryReadAnchor},
 };
+
+pub(super) mod node;
+pub(super) mod surface;
 
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 sol! {
@@ -450,13 +453,12 @@ pub(super) fn interpret(
             )
             .as_ref()
             .map(|link| link.resolver_address.clone());
-        if let Some(event) = output.events.first_mut() {
-            event.explicit_before = Some(json!({"resolver":previous_resolver}));
-            if let Some((resource_id, logical_name_id)) = event_anchor {
-                event.resource_id = Some(*resource_id);
-                event.logical_name_id = logical_name_id.clone();
-            }
-        }
+        surface::link_resolver_event(
+            output.events.first_mut(),
+            previous_resolver.as_deref(),
+            event_anchor,
+            linked.as_ref(),
+        );
         if let Some((resource_id, _)) = registry_anchor.as_ref() {
             output.resources.push(ResourceDraft {
                 resource_id: *resource_id,
@@ -544,25 +546,19 @@ pub(super) fn push_permission_change(
     let Some(authority_key) = authority.authority_key.as_deref() else {
         return;
     };
-    let (before, after) = if grant {
-        v1_grant_states(
-            subject,
-            scope,
-            power,
-            authority_kind(authority),
-            authority_key,
-            source_event_kind,
-        )
+    let permission_states = if grant {
+        v1_grant_states
     } else {
-        v1_revoke_states(
-            subject,
-            scope,
-            power,
-            authority_kind(authority),
-            authority_key,
-            source_event_kind,
-        )
+        v1_revoke_states
     };
+    let (before, after) = permission_states(
+        subject,
+        scope,
+        power,
+        authority_kind(authority),
+        authority_key,
+        source_event_kind,
+    );
     output.events.push(EventDraft {
         event_kind: "PermissionChanged".to_owned(),
         logical_name_id: authority

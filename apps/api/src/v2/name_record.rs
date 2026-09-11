@@ -45,6 +45,14 @@ use values::{
     json_value_present, network, object_field, response_chain_id,
 };
 pub(crate) use wrapper::wrapper_metadata;
+
+pub(crate) fn projected_registration_resource_id(declared_summary: &Value) -> Option<&str> {
+    declared_summary
+        .get("registration")?
+        .get("resource_id")?
+        .as_str()
+}
+
 pub(crate) struct NameRecordQueryParams;
 impl QueryParamAllowlist for NameRecordQueryParams {
     const ALLOWED: &'static [&'static str] = &["namespace", "at", "finality", "source"];
@@ -255,7 +263,11 @@ pub(crate) fn build_name_record(
 
     Ok(NameRecord {
         registration_id: (registration.registration_status != RegistrationStatus::Unregistered)
-            .then(|| row.resource_id.map(|value| value.to_string()))
+            .then(|| {
+                projected_registration_resource_id(&row.declared_summary)
+                    .map(str::to_owned)
+                    .or_else(|| row.resource_id.map(|value| value.to_string()))
+            })
             .flatten(),
         token_id: if has_name_binding(row) {
             declared_token_id(row)

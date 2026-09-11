@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use super::support;
+use crate::harness::responses::{exact_name, pointer};
 use crate::harness::{anvil::Anvil, ens_v1, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
@@ -9,12 +10,11 @@ const YEAR: u64 = 365 * 24 * 60 * 60;
 /// An owner-added controller registers directly on the registrar
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L79 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L110 @ ens_v1@91c966f).
-/// The registrar-level uint256 events are outside every active manifest ABI,
-/// so the pipeline sees only the registry-side normalized event. With no
-/// routeable `.eth` parent surface, no child projection, lease facts, or
-/// exact-name surface materializes.
+/// The admitted registrar event retains the authoritative lease even though the
+/// unadmitted controller contributes no plaintext name. Exact-name and address-name
+/// routes therefore remain empty.
 #[tokio::test]
-async fn unadmitted_controller_registration_derives_registry_side_only() -> Result<()> {
+async fn unadmitted_controller_registration_retains_resource_keyed_registrar_lease() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
 
@@ -46,7 +46,7 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
     .fetch_one(&run.db.pool)
     .await?;
 
-    // The registrar-plane facts persist raw: the ERC721 mint and the
+    // The BaseRegistrar logs persist raw: the ERC721 mint and the
     // uint256-id NameRegistered both live in the transaction's log set.
     let registrar_raw_logs: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM raw_logs raw \
@@ -63,12 +63,13 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
         "expected registrar mint + NameRegistered raw logs, saw {registrar_raw_logs}"
     );
 
-    // Nothing lease-bearing derives. Schema-v2 expands the registry-side
-    // child edge into its authority and permission facets, but all three
-    // remain registry-family facts.
+    // Schema-v2 retains both the registry observation and the authoritative
+    // BaseRegistrar lifecycle. Those rows have `resource_id` but no
+    // `logical_name_id`.
     let derived_kinds: Vec<(String, String)> = sqlx::query_as(
         "SELECT event_kind, source_family FROM normalized_events \
-         WHERE transaction_hash = $1 AND canonicality_state = 'canonical'",
+         WHERE transaction_hash = $1 AND canonicality_state = 'canonical' \
+         ORDER BY block_number, transaction_index, log_index, normalized_event_id",
     )
     .bind(&register_tx)
     .fetch_all(&run.db.pool)
@@ -88,8 +89,21 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
                 "PermissionChanged".to_owned(),
                 "ens_v1_registry_l1".to_owned(),
             ),
+            (
+                "RegistrationGranted".to_owned(),
+                "ens_v1_registrar_l1".to_owned(),
+            ),
+            ("ExpiryChanged".to_owned(), "ens_v1_registrar_l1".to_owned(),),
+            (
+                "PermissionChanged".to_owned(),
+                "ens_v1_registrar_l1".to_owned(),
+            ),
+            (
+                "AuthorityEpochChanged".to_owned(),
+                "ens_v1_registrar_l1".to_owned(),
+            ),
         ],
-        "unadmitted-controller registration must derive only registry-side facets"
+        "unadmitted-controller registration must retain registrar lifecycle facets"
     );
     let lease_events: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
@@ -104,7 +118,21 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
     .bind(&shadow_node)
     .fetch_one(&run.db.pool)
     .await?;
-    assert_eq!(lease_events, 0, "no lease facts may derive for shadow.eth");
+    assert_eq!(
+        lease_events, 2,
+        "the registrar must retain grant and expiry facts"
+    );
+    let resource_keyed_lease_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events \
+         WHERE transaction_hash = $1 \
+         AND event_kind IN ('RegistrationGranted', 'ExpiryChanged') \
+         AND logical_name_id IS NULL AND resource_id IS NOT NULL \
+         AND canonicality_state = 'canonical'",
+    )
+    .bind(&register_tx)
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(resource_keyed_lease_events, 2);
 
     // `children_current` is keyed by a routeable parent surface. The harness
     // has no `.eth` parent surface, so the registry fact remains normalized
@@ -116,7 +144,7 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
             .await?;
     assert_eq!(
         child_rows, 0,
-        "unadmitted registration must not invent a child without a parent surface"
+        "a resource-keyed registration must not invent a child without a parent surface"
     );
     let surfaces: i64 =
         sqlx::query_scalar("SELECT count(*) FROM name_surfaces WHERE logical_name_id = $1")
@@ -144,9 +172,58 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
         .unwrap_or_default();
     assert!(
         entries.is_empty(),
-        "an unadmitted-controller lease must not appear as a registration: {entries:?}"
+        "a lease without a surface must not appear in a name collection: {entries:?}"
     );
 
+    run.db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn later_wrap_exposes_unadmitted_controller_registrar_owner_and_expiry() -> Result<()> {
+    let anvil = Anvil::spawn().await?;
+    let rpc = anvil.client();
+    let deployment = ens_v1::deploy_ens_v1(&rpc, &repo_root()).await?;
+    let accounts = rpc.accounts().await?;
+    let (controller, registrant, wrapped_owner) = (accounts[3], accounts[4], accounts[5]);
+
+    ens_v1::add_registrar_controller(&rpc, &deployment, controller).await?;
+    ens_v1::register_via_registrar(&rpc, &deployment, controller, "laterwrap", registrant, YEAR)
+        .await?;
+    let registrar_expiry = ens_v1::eth_name_expiry(&rpc, &deployment, "laterwrap").await?;
+    ens_v1::wrap_eth_2ld(
+        &rpc,
+        &deployment,
+        registrant,
+        "laterwrap",
+        wrapped_owner,
+        0,
+        deployment.public_resolver.address,
+    )
+    .await?;
+
+    let logical_name_id = support::schema_v2_logical_name_id("ens:laterwrap.eth");
+    let ready_sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM normalized_events \
+         WHERE logical_name_id = '{logical_name_id}' \
+           AND event_kind = 'SurfaceBound' \
+           AND source_family = 'ens_v1_wrapper_l1' \
+           AND canonicality_state = 'canonical')"
+    );
+    let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
+    let body = exact_name(&run.api, "ens", "laterwrap.eth").await?;
+    assert_eq!(
+        pointer(&body, "/declared_state/registration/registrant"),
+        format!("{registrant:#x}")
+    );
+    assert_eq!(
+        pointer(&body, "/declared_state/registration/expiry"),
+        registrar_expiry
+    );
+    assert_eq!(
+        pointer(&body, "/declared_state/registration/authority_kind"),
+        "wrapper"
+    );
     run.db.cleanup().await?;
     Ok(())
 }

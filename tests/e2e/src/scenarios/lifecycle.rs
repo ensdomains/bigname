@@ -93,7 +93,7 @@ async fn renew_and_transfer_keep_identity() -> Result<()> {
 
     let event_kinds: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT event_kind FROM normalized_events \
-         WHERE logical_name_id = 'ens:0xe3a6b53d6803112ab111b8dd6a02bc89a802451dec3eaec120740e5ed87bd5cb' AND canonicality_state = 'canonical'",
+         WHERE (logical_name_id = 'ens:0xe3a6b53d6803112ab111b8dd6a02bc89a802451dec3eaec120740e5ed87bd5cb' OR after_state->>'namehash' = '0xe3a6b53d6803112ab111b8dd6a02bc89a802451dec3eaec120740e5ed87bd5cb') AND canonicality_state = 'canonical'",
     )
     .fetch_all(&run.db.pool)
     .await?;
@@ -117,14 +117,14 @@ async fn renew_and_transfer_keep_identity() -> Result<()> {
     // back on the original registration anchor.
     let registration_resource: sqlx::types::Uuid = sqlx::query_scalar(
         "SELECT resource_id FROM normalized_events \
-         WHERE logical_name_id = 'ens:0xe3a6b53d6803112ab111b8dd6a02bc89a802451dec3eaec120740e5ed87bd5cb' AND event_kind = 'RegistrationGranted' \
+         WHERE (logical_name_id = 'ens:0xe3a6b53d6803112ab111b8dd6a02bc89a802451dec3eaec120740e5ed87bd5cb' OR after_state->>'namehash' = '0xe3a6b53d6803112ab111b8dd6a02bc89a802451dec3eaec120740e5ed87bd5cb') AND event_kind = 'RegistrationGranted' \
          AND canonicality_state = 'canonical'",
     )
     .fetch_one(&run.db.pool)
     .await?;
     let resource_count: i64 = sqlx::query_scalar(
         "SELECT count(DISTINCT resource_id) FROM normalized_events \
-         WHERE logical_name_id = 'ens:0xe3a6b53d6803112ab111b8dd6a02bc89a802451dec3eaec120740e5ed87bd5cb' AND resource_id IS NOT NULL \
+         WHERE (logical_name_id = 'ens:0xe3a6b53d6803112ab111b8dd6a02bc89a802451dec3eaec120740e5ed87bd5cb' OR after_state->>'namehash' = '0xe3a6b53d6803112ab111b8dd6a02bc89a802451dec3eaec120740e5ed87bd5cb') AND resource_id IS NOT NULL \
          AND canonicality_state = 'canonical'",
     )
     .fetch_one(&run.db.pool)
@@ -235,7 +235,7 @@ async fn expiry_grace_and_reregistration_rotate_identity() -> Result<()> {
         &deployment,
         Some(
             "SELECT count(*) >= 2 FROM normalized_events \
-             WHERE logical_name_id = 'ens:0x2ca4a3098bf61a1886dac6774bfe4dccdd1477d99a6fdbac5b409549f281cbe9' AND event_kind = 'RegistrationGranted' \
+             WHERE (logical_name_id = 'ens:0x2ca4a3098bf61a1886dac6774bfe4dccdd1477d99a6fdbac5b409549f281cbe9' OR after_state->>'namehash' = '0x2ca4a3098bf61a1886dac6774bfe4dccdd1477d99a6fdbac5b409549f281cbe9') AND event_kind = 'RegistrationGranted' \
              AND canonicality_state = 'canonical'",
         ),
     )
@@ -262,7 +262,7 @@ async fn expiry_grace_and_reregistration_rotate_identity() -> Result<()> {
     // The prior lease's history stays queryable, partitioned by resource.
     let resources_with_grants: i64 = sqlx::query_scalar(
         "SELECT count(DISTINCT resource_id) FROM normalized_events \
-         WHERE logical_name_id = 'ens:0x2ca4a3098bf61a1886dac6774bfe4dccdd1477d99a6fdbac5b409549f281cbe9' AND event_kind = 'RegistrationGranted' \
+         WHERE (logical_name_id = 'ens:0x2ca4a3098bf61a1886dac6774bfe4dccdd1477d99a6fdbac5b409549f281cbe9' OR after_state->>'namehash' = '0x2ca4a3098bf61a1886dac6774bfe4dccdd1477d99a6fdbac5b409549f281cbe9') AND event_kind = 'RegistrationGranted' \
          AND canonicality_state = 'canonical'",
     )
     .fetch_one(&after.db.pool)

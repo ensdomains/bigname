@@ -68,7 +68,7 @@ async fn transfer_without_reclaim_keeps_registry_owner_divergent() -> Result<()>
 
     let event_kinds: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT event_kind FROM normalized_events \
-         WHERE logical_name_id = 'ens:0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74' \
+         WHERE (logical_name_id = 'ens:0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74' OR after_state->>'namehash' = '0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74') \
          AND canonicality_state = 'canonical'",
     )
     .fetch_all(&run.db.pool)
@@ -86,12 +86,13 @@ async fn transfer_without_reclaim_keeps_registry_owner_divergent() -> Result<()>
 
     let registrar_resource: Uuid = sqlx::query_scalar(
         "SELECT resource_id FROM normalized_events \
-         WHERE logical_name_id = 'ens:0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74' \
+         WHERE (logical_name_id = 'ens:0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74' OR after_state->>'namehash' = '0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74') \
          AND event_kind = 'RegistrationGranted' \
          AND canonicality_state = 'canonical'",
     )
     .fetch_one(&run.db.pool)
-    .await?;
+    .await
+    .context("registrar resource missing for divergent.eth")?;
     let (current_resource, current_lineage): (Uuid, Option<Uuid>) =
         sqlx::query_as(
             "SELECT binding.resource_id, resource.token_lineage_id \
@@ -104,7 +105,8 @@ async fn transfer_without_reclaim_keeps_registry_owner_divergent() -> Result<()>
              ORDER BY binding.active_from DESC LIMIT 1",
         )
         .fetch_one(&run.db.pool)
-        .await?;
+        .await
+        .context("active registry-only binding missing for divergent.eth")?;
     assert_ne!(
         current_resource, registrar_resource,
         "the divergent state must bind to a distinct registry-only resource"
@@ -143,7 +145,7 @@ async fn transfer_without_reclaim_keeps_registry_owner_divergent() -> Result<()>
     );
     let retained_registry_owner: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
-         WHERE logical_name_id = 'ens:0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74' \
+         WHERE (logical_name_id = 'ens:0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74' OR after_state->>'node' = '0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74') \
            AND event_kind = 'AuthorityTransferred' \
            AND lower(after_state->>'owner') = $1 \
            AND canonicality_state = 'canonical'",
@@ -174,10 +176,10 @@ async fn transfer_without_reclaim_keeps_registry_owner_divergent() -> Result<()>
     }
     for relation in ["registrant", "token_holder"] {
         let bob_names = address_names(&run, &format!("{bob:#x}"), relation).await?;
+        #[rustfmt::skip]
         assert!(
-            bob_names.is_empty(),
-            "current registry-only binding omits the new token holder from relation={relation}: \
-             {bob_names:?}"
+            (relation == "registrant" && bob_names.len() == 1 && bob_names[0].get("normalized_name") == Some(&json!("divergent.eth")) && bob_names[0].get("relation_facets") == Some(&json!(["registrant"]))) || (relation == "token_holder" && bob_names.is_empty()),
+            "current registrar holder membership mismatch for relation={relation}: {bob_names:?}"
         );
     }
     let bob_controller = address_names(&run, &format!("{bob:#x}"), "effective_controller").await?;

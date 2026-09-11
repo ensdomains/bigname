@@ -398,6 +398,13 @@ Field ownership:
   locked wrapper position expires; a plain wrapped position remains `wrapped`
   with `wrapper_fuses.fuses=0` and every named boolean false because expiry
   clears its fuses without clearing its owner.
+  For every name registered through the ENSv1 registrar and wrapped in a later
+  transaction, `registration_id` now identifies the registrar lifecycle resource;
+  it previously identified the wrapper resource. A name born wrapped in the
+  registration transaction keeps its first wrapper resource across exact-name
+  detail, batch lookup, registration-scoped history, and later unwrap and re-wrap
+  operations in that registrar lifecycle; consumers keyed by the previous
+  later-wrapped value must re-read the name.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L849 @ ens_v1@91c966f)
@@ -933,7 +940,29 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   registry resource that was ever bound to the name under `scope=both` or
   `scope=registration`, even when the row was stored before the
   [name surface](glossary.md#surface-name-surface) existed and carries no name
-  attribution. `scope=name` returns only rows carrying the name's
+  attribution. A controller-free registrar resource made name-addressable by a
+  later wrapper binding remains in registration-scoped history after that
+  registration is released or superseded. Wrapper lifecycle rows associated
+  through that binding report the registrar lifecycle's `registration_id`, and
+  name-filtered `GET /v2/events` reads follow the association back to the
+  registrar rows. For an explicit `GET /v2/events?registration_id=...` request,
+  product events without a resource belong to that registration only during a
+  readable binding to its lifecycle, on the event's chain and at its recorded
+  block time plus log-index position. The start is inclusive and the end is
+  exclusive; an older registration does not acquire later registrations' name
+  events. The binding must be backed by a registration grant, directly or through
+  a wrapper's explicit registrar link; a registry-control binding alone does not
+  establish a public registration handle. Resource-bearing events may also use a
+  token-backed registrar resource before a grant or name enrichment is available;
+  retained registrar-source events or registry resolver events explicitly attributed
+  to registrar authority establish that exception. A token lineage alone does not
+  qualify a reservation or registry-only resource. Noncanonical history uses the
+  retained event's branch evidence even after the resource's current block anchor
+  moves to a replacement branch.
+  An invalid handle selects no product
+  rows, whether resource-bearing or resource-less. This selection also governs
+  page counts, summaries, and cursor anchors; raw diagnostics retains resource filtering.
+  `scope=name` returns only rows carrying the name's
   `logical_name_id`. A row on a resource that was never bound to the name is
   reachable through `GET /v2/diagnostics/events` via the registry resource
   recorded internally at
@@ -1041,6 +1070,12 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   enumeration while the partial marker is present. NameWrapper holder
   enumeration remains separately unsupported, and ENSv2 registry operator
   approval remains separately narrowed until indexed.
+  For a name registered first and wrapped in a later transaction, exact-name
+  detail and lifecycle history expose the registrar lifecycle's
+  `registration_id`, while a permissions `name` filter selects the current
+  wrapper authority resource. Combining that name with the registrar lifecycle
+  ID is therefore a proven-empty permission selection; the registrar resource
+  remains independently queryable by `registration_id` as an audit read.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) A `name` filter
   resolves only the selected current registration: a migrated name returns its
   ENSv2 permission rows, while an explicit `registration_id` can still select a
@@ -1506,8 +1541,11 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   lifecycle owner/resource participating in renewal, so one synchronized
   renewal transaction contains two `renewal` rows — the renewal-bridge arm and
   the ENSv1-registrar arm — and two `expiry` rows. Reservation-scoped state
-  changes remain reservation/resource facts and do not produce registration
-  renewal rows; no synthetic collapsed renewal is created. The candidate
+  changes remain reservation/resource facts, carry a null `registration_id`, and
+  do not acquire registration identity through renewal-bridge rows. This
+  classification uses retained lifecycle facts at the event on its own fork; a
+  later registration does not change earlier reservation rows. Block-only expiry
+  releases use their retained pre-release status, without inventing a log position. No synthetic collapsed renewal is created. The candidate
   `MigrationApplied` and
   `ContractDiscovered` kinds have no product event type. During slice 1, every
   correlation-dependent row carrying `consumer_visibility=candidate` is excluded

@@ -13,6 +13,11 @@ sol! {
         event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
     }
 
+    interface V1BaseRegistrar {
+        event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires);
+        event NameRenewed(uint256 indexed id, uint256 expires);
+    }
+
     interface V1LegacyController {
         event NameRegistered(
             string name,
@@ -221,6 +226,8 @@ pub fn declared_events() -> Vec<DeclaredEvent> {
             V1Registry::Transfer,
             V1Registry::NewResolver,
             V1RegistrarToken::Transfer,
+            V1BaseRegistrar::NameRegistered,
+            V1BaseRegistrar::NameRenewed,
             V1LegacyController::NameRegistered,
             V1LegacyController::NameRenewed,
             V1WrappedController::NameRegistered,
@@ -267,6 +274,7 @@ pub fn declared_events() -> Vec<DeclaredEvent> {
             V1Registry::Transfer,
             V1Registry::NewResolver,
             V1RegistrarToken::Transfer,
+            V1BaseRegistrar::NameRegistered,
             V1Wrapper::NameWrapped,
             V1Wrapper::NameUnwrapped,
             V1Wrapper::ExpiryExtended,

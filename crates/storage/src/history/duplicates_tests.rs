@@ -5,7 +5,8 @@ use sqlx::{PgConnection, Postgres, QueryBuilder};
 
 use super::super::{
     EventHistoryReadFilter, duplicates::push_product_history_duplicate_filter,
-    paging::push_history_filters, selectors::HistorySelector, source::push_history_source,
+    paging::push_history_filters, selectors::HistorySelector,
+    source::push_history_source_for_filter,
 };
 
 #[tokio::test]
@@ -63,7 +64,7 @@ async fn exercise_plan(connection: &mut PgConnection) -> Result<()> {
     .await?;
     let filter = EventHistoryReadFilter::default();
     let mut query = QueryBuilder::<Postgres>::new("SELECT count(*)::bigint");
-    push_history_source(&mut query, false);
+    push_history_source_for_filter(&mut query, &filter, true, false, false);
     push_history_filters(&mut query, &filter, true);
     push_product_history_duplicate_filter(&mut query, &filter, true);
     let sql = query.sql().to_owned();
@@ -166,6 +167,10 @@ async fn expanded_history_selectors_fit_postgres_bind_limit() -> Result<()> {
         let names: Vec<String> = (0..34000).map(|n| format!("ens:0x{n:064x}")).collect();
         let resources: Vec<uuid::Uuid> = (0..34000).map(uuid::Uuid::from_u128).collect();
         for selector in [
+            HistorySelector::ProductRegistration {
+                logical_name_ids: names.clone(),
+                resource_ids: resources.clone(),
+            },
             HistorySelector::logical_names(names.clone()),
             HistorySelector::resources(resources.clone()),
             HistorySelector::logical_names_or_resources(
@@ -178,7 +183,7 @@ async fn expanded_history_selectors_fit_postgres_bind_limit() -> Result<()> {
                 ..Default::default()
             };
             let mut query = QueryBuilder::<Postgres>::new("SELECT count(*)::bigint");
-            push_history_source(&mut query, false);
+            push_history_source_for_filter(&mut query, &filter, true, false, false);
             push_history_filters(&mut query, &filter, true);
             push_product_history_duplicate_filter(&mut query, &filter, true);
             assert_eq!(

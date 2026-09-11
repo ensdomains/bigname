@@ -29,14 +29,19 @@ pub(in crate::schema_v2) fn materialize_wrapper_surface(
     state: &mut State,
     interpreted: &mut Interpreted,
 ) -> anyhow::Result<()> {
-    if selected.source.source_family != "ens_v1_wrapper_l1" {
+    if !matches!(
+        selected.source.source_family.as_str(),
+        "ens_v1_wrapper_l1" | "ens_v1_registrar_l1"
+    ) {
         return Ok(());
     }
     let surfaces = interpreted
         .names
         .iter()
-        .filter_map(|name| {
+        .enumerate()
+        .filter_map(|(index, name)| {
             Some((
+                index,
                 name.namehash.clone(),
                 name.labels.first()?.clone(),
                 format!("{}:{}", selected.source.namespace, name.namehash),
@@ -44,19 +49,27 @@ pub(in crate::schema_v2) fn materialize_wrapper_surface(
             ))
         })
         .collect::<Vec<_>>();
-    for (namehash, label, logical_name_id, authority_arm) in surfaces {
+    for (index, namehash, label, logical_name_id, authority_arm) in surfaces {
         let materialization = state.materialize_v1_active_surface(
             &selected.source.namespace,
             &namehash,
             &logical_name_id,
             &hash_hex(label.as_bytes()),
         )?;
+        if matches!(
+            materialization,
+            crate::schema_v2::state::V1SurfaceMaterialization::RegistryAuthority { .. }
+        ) {
+            // Source-backed materialization already emits this registry binding. The controller
+            // still reveals the same name, but must not open a second overlapping interval.
+            interpreted.names[index].bind = false;
+        }
         authority_transition::append_surface_materialization_for_trigger(
             interpreted,
             &authority_arm,
             &materialization,
             raw,
-            "NameWrapped",
+            &selected.event.name,
         );
     }
     Ok(())
@@ -70,11 +83,11 @@ pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
-    registrar_migration_enabled: bool,
+    registrar_context: super::super::migration::RegistrarContext,
 ) -> anyhow::Result<Interpreted> {
     match selected.source.source_family.as_str() {
         "ens_v1_registrar_l1" | "basenames_base_registrar" => {
-            registrar::interpret(selected, raw, state, registrar_migration_enabled)
+            registrar::interpret(selected, raw, state, registrar_context)
         }
         "ens_v1_registry_l1" | "basenames_base_registry" => {
             registry::interpret(selected, raw, state)
@@ -126,6 +139,20 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
             .unwrap_or(output.normalized_events.len());
         output.normalized_events.insert(insert_at, handoff);
     }
+}
+
+pub(in crate::schema_v2) fn registrar_registration_namehash(
+    selected: &Selected,
+    raw: &RawLogInput,
+) -> anyhow::Result<Option<(String, String)>> {
+    registrar::base::registration_namehash(selected, raw)
+}
+
+pub(in crate::schema_v2) fn registry_registration_setup_namehash(
+    selected: &Selected,
+    raw: &RawLogInput,
+) -> anyhow::Result<Option<(String, String)>> {
+    registry::node::registration_setup_node(selected, raw)
 }
 
 fn authority_arm(namespace: &str) -> &'static str {

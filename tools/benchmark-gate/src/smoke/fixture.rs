@@ -10,13 +10,18 @@ pub(super) const HEAD: i64 = 16;
 pub(super) const RESOLVER: &str = "0x0000000000000000000000000000000000000045";
 
 const REGISTRAR: &str = "0x0000000000000000000000000000000000000042";
-const REGISTRAR_ROLE: &str = "legacy_registrar_controller";
+const REGISTRAR_ROLE: &str = "registrar";
 const SENDER: &str = "0x0000000000000000000000000000000000000043";
 const REGISTRY: &str = "0x0000000000000000000000000000000000000044";
 const REGISTRY_ROLE: &str = "registry";
+const CONTROLLER: &str = "0x0000000000000000000000000000000000000046";
+const CONTROLLER_ROLE: &str = "legacy_registrar_controller";
 const NORMALIZER: &str = "ensip15@ens-normalize-0.1.1";
-// (upstream: .refs/ens_v1/deployments/archive/ETHRegistrarController_mainnet_9380471.sol/ETHRegistrarController_mainnet_9380471.json:L33-L67 @ ens_v1@91c966f)
-const REGISTRATION_EVENT_FRAGMENT: &str = "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires)";
+// (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L15-L18 @ ens_v1@91c966f)
+const REGISTRATION_EVENT_FRAGMENT: &str =
+    "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)";
+// (upstream: .refs/ens_v1/deployments/archive/ETHRegistrarController_mainnet_9380471.sol/ETHRegistrarController_mainnet_9380471.json:L33-L68 @ ens_v1@91c966f)
+const CONTROLLER_REGISTRATION_EVENT_FRAGMENT: &str = "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires)";
 // (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L6 @ ens_v1@91c966f)
 const NEW_OWNER_EVENT_FRAGMENT: &str =
     "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)";
@@ -26,7 +31,17 @@ const NEW_RESOLVER_EVENT_FRAGMENT: &str =
 // (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L5 @ ens_v1@91c966f)
 const RESOLVER_EVENT_FRAGMENT: &str =
     "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)";
-const REGISTRATION_NORMALIZED_EVENTS: &[&str] = &["RegistrationGranted"];
+const REGISTRATION_NORMALIZED_EVENTS: &[&str] = &[
+    "RegistrationGranted",
+    "ExpiryChanged",
+    "PermissionChanged",
+    "SurfaceUnbound",
+    "SurfaceBound",
+    "AuthorityEpochChanged",
+    "ResolverChanged",
+    "RegistrationReleased",
+];
+const CONTROLLER_REGISTRATION_NORMALIZED_EVENTS: &[&str] = &["PreimageObserved"];
 const NEW_OWNER_NORMALIZED_EVENTS: &[&str] = &[
     "SubregistryChanged",
     "AuthorityTransferred",
@@ -41,10 +56,8 @@ const RESOLVER_NORMALIZED_EVENTS: &[&str] = &["RecordChanged"];
 
 sol! {
     event NameRegistered(
-        string name,
-        bytes32 indexed label,
+        uint256 indexed id,
         address indexed owner,
-        uint256 cost,
         uint256 expires
     );
     event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
@@ -55,6 +68,20 @@ sol! {
         string key,
         string value
     );
+}
+
+mod controller {
+    use super::*;
+
+    sol! {
+        event NameRegistered(
+            string name,
+            bytes32 indexed label,
+            address indexed owner,
+            uint256 cost,
+            uint256 expires
+        );
+    }
 }
 
 pub(super) async fn seed(pool: &PgPool) -> Result<()> {
@@ -75,12 +102,20 @@ pub(super) async fn seed(pool: &PgPool) -> Result<()> {
         "ens_v1_registrar_l1",
         REGISTRAR_ROLE,
         REGISTRAR,
-        vec![manifest_event(
-            "NameRegistered",
-            REGISTRATION_EVENT_FRAGMENT,
-            &[REGISTRAR_ROLE],
-            REGISTRATION_NORMALIZED_EVENTS,
-        )],
+        vec![
+            manifest_event(
+                "NameRegistered",
+                REGISTRATION_EVENT_FRAGMENT,
+                &[REGISTRAR_ROLE],
+                REGISTRATION_NORMALIZED_EVENTS,
+            ),
+            manifest_event(
+                "NameRegistered",
+                CONTROLLER_REGISTRATION_EVENT_FRAGMENT,
+                &[CONTROLLER_ROLE],
+                CONTROLLER_REGISTRATION_NORMALIZED_EVENTS,
+            ),
+        ],
     )
     .await?;
     insert_manifest(
@@ -133,6 +168,23 @@ async fn insert_manifest(
     events: Vec<serde_json::Value>,
 ) -> Result<()> {
     let capability_flags = fixture_capability_flags(source_family);
+    let contracts = if source_family == "ens_v1_registrar_l1" {
+        vec![(role, address), (CONTROLLER_ROLE, CONTROLLER)]
+    } else {
+        vec![(role, address)]
+    };
+    let payload_contracts = contracts
+        .iter()
+        .map(|(role, address)| {
+            json!({
+                "role": role,
+                "address": address,
+                "proxy_kind": "none",
+                "implementation": null,
+                "start_block": 0
+            })
+        })
+        .collect::<Vec<_>>();
     let payload = json!({
         "manifest_version": 1,
         "namespace": "ens",
@@ -143,13 +195,7 @@ async fn insert_manifest(
         "normalizer_version": NORMALIZER,
         "capability_flags": capability_flags,
         "roots": [],
-        "contracts": [{
-            "role": role,
-            "address": address,
-            "proxy_kind": "none",
-            "implementation": null,
-            "start_block": 0
-        }],
+        "contracts": payload_contracts,
         "discovery_rules": [],
         "abi": {"events": events, "calls": []}
     });
@@ -167,37 +213,41 @@ async fn insert_manifest(
     .bind(&payload)
     .fetch_one(pool)
     .await?;
-    let instance_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO contract_instances VALUES ($1, $2, 'contract', '{}'::jsonb, now())")
+    for (role, address) in contracts {
+        let instance_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO contract_instances VALUES ($1, $2, 'contract', '{}'::jsonb, now())",
+        )
         .bind(instance_id)
         .bind(CHAIN)
         .execute(pool)
         .await?;
-    sqlx::query(
-        "INSERT INTO manifest_contract_instances (
-             manifest_id, chain_id, declaration_kind, declaration_name,
-             contract_instance_id, declared_address, role, proxy_kind, start_block_number
-         ) VALUES ($1, $2, 'contract', $3, $4, $5, $3, 'none', 0)",
-    )
-    .bind(manifest_id)
-    .bind(CHAIN)
-    .bind(role)
-    .bind(instance_id)
-    .bind(address)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO contract_instance_addresses (
-             contract_instance_id, chain_id, address, active_from_block_number,
-             source_manifest_id, provenance
-         ) VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)",
-    )
-    .bind(instance_id)
-    .bind(CHAIN)
-    .bind(address)
-    .bind(manifest_id)
-    .execute(pool)
-    .await?;
+        sqlx::query(
+            "INSERT INTO manifest_contract_instances (
+                 manifest_id, chain_id, declaration_kind, declaration_name,
+                 contract_instance_id, declared_address, role, proxy_kind, start_block_number
+             ) VALUES ($1, $2, 'contract', $3, $4, $5, $3, 'none', 0)",
+        )
+        .bind(manifest_id)
+        .bind(CHAIN)
+        .bind(role)
+        .bind(instance_id)
+        .bind(address)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO contract_instance_addresses (
+                 contract_instance_id, chain_id, address, active_from_block_number,
+                 source_manifest_id, provenance
+             ) VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)",
+        )
+        .bind(instance_id)
+        .bind(CHAIN)
+        .bind(address)
+        .bind(manifest_id)
+        .execute(pool)
+        .await?;
+    }
     sqlx::query(
         "INSERT INTO normalized_events (
              event_identity, namespace, event_kind, source_family, manifest_version,
@@ -270,16 +320,18 @@ async fn insert_block_events(
     .bind(block)
     .bind(&transaction_hash)
     .bind(SENDER)
-    .bind(REGISTRAR)
+    .bind(CONTROLLER)
     .execute(pool)
     .await?;
 
     let mut owner_bytes = [0u8; 20];
     owner_bytes[12..].copy_from_slice(&(block as u64).to_be_bytes());
     insert_registration(pool, block, 0, plain_label, owner_bytes).await?;
-    insert_registration(pool, block, 1, bound_label, owner_bytes).await?;
-    insert_subname(pool, block, 2, plain_label, bound_label, owner_bytes).await?;
-    insert_resolver_records(pool, block, 3, bound_label).await?;
+    insert_registration(pool, block, 2, bound_label, owner_bytes).await?;
+    insert_subname(pool, block, 4, plain_label, bound_label, owner_bytes).await?;
+    insert_resolver_records(pool, block, 5, bound_label).await?;
+    insert_registration_enrichment(pool, block, 7, plain_label, owner_bytes).await?;
+    insert_registration_enrichment(pool, block, 8, bound_label, owner_bytes).await?;
     Ok(())
 }
 
@@ -332,15 +384,41 @@ async fn insert_registration(
     label: &str,
     owner_bytes: [u8; 20],
 ) -> Result<()> {
+    let labelhash = keccak256(label.as_bytes());
+    let setup = NewOwner {
+        node: eth_node(),
+        label: B256::from(labelhash),
+        owner: Address::from(owner_bytes),
+    }
+    .encode_log_data();
+    insert_log(pool, block, log_index, REGISTRY, &setup).await?;
     let registration = NameRegistered {
+        id: U256::from_be_slice(labelhash.as_slice()),
+        owner: Address::from(owner_bytes),
+        expires: U256::from(2_000_000_000u64 + block as u64),
+    }
+    .encode_log_data();
+    insert_log(pool, block, log_index + 1, REGISTRAR, &registration).await?;
+    Ok(())
+}
+
+async fn insert_registration_enrichment(
+    pool: &PgPool,
+    block: i64,
+    log_index: i64,
+    label: &str,
+    owner_bytes: [u8; 20],
+) -> Result<()> {
+    let labelhash = keccak256(label.as_bytes());
+    let enrichment = controller::NameRegistered {
         name: label.to_owned(),
-        label: B256::from(keccak256(label.as_bytes())),
+        label: B256::from(labelhash),
         owner: Address::from(owner_bytes),
         cost: U256::from(1_000_000_000_000_000u64),
         expires: U256::from(2_000_000_000u64 + block as u64),
     }
     .encode_log_data();
-    insert_log(pool, block, log_index, REGISTRAR, &registration).await
+    insert_log(pool, block, log_index, CONTROLLER, &enrichment).await
 }
 
 async fn insert_log(
@@ -376,10 +454,14 @@ async fn insert_log(
 
 fn namehash(label: &str) -> B256 {
     let mut input = [0u8; 64];
-    input[32..].copy_from_slice(keccak256(b"eth").as_slice());
-    let eth_node = keccak256(input);
-    input[..32].copy_from_slice(eth_node.as_slice());
+    input[..32].copy_from_slice(eth_node().as_slice());
     input[32..].copy_from_slice(keccak256(label.as_bytes()).as_slice());
+    keccak256(input)
+}
+
+fn eth_node() -> B256 {
+    let mut input = [0u8; 64];
+    input[32..].copy_from_slice(keccak256(b"eth").as_slice());
     keccak256(input)
 }
 
@@ -456,10 +538,11 @@ pub(super) fn block_hash(number: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        NEW_OWNER_EVENT_FRAGMENT, NEW_OWNER_NORMALIZED_EVENTS, NEW_RESOLVER_EVENT_FRAGMENT,
-        NEW_RESOLVER_NORMALIZED_EVENTS, REGISTRAR_ROLE, REGISTRATION_EVENT_FRAGMENT,
-        REGISTRATION_NORMALIZED_EVENTS, REGISTRY_ROLE, RESOLVER_EVENT_FRAGMENT,
-        RESOLVER_NORMALIZED_EVENTS, fixture_capability_flags,
+        CONTROLLER_REGISTRATION_EVENT_FRAGMENT, CONTROLLER_REGISTRATION_NORMALIZED_EVENTS,
+        CONTROLLER_ROLE, NEW_OWNER_EVENT_FRAGMENT, NEW_OWNER_NORMALIZED_EVENTS,
+        NEW_RESOLVER_EVENT_FRAGMENT, NEW_RESOLVER_NORMALIZED_EVENTS, REGISTRAR_ROLE,
+        REGISTRATION_EVENT_FRAGMENT, REGISTRATION_NORMALIZED_EVENTS, REGISTRY_ROLE,
+        RESOLVER_EVENT_FRAGMENT, RESOLVER_NORMALIZED_EVENTS, fixture_capability_flags,
     };
 
     fn manifest_admits_event(
@@ -483,9 +566,10 @@ mod tests {
                         })
                     })
                     && event["normalized_events"].as_array().is_some_and(|actual| {
-                        normalized_events.iter().all(|expected| {
-                            actual.iter().any(|value| value.as_str() == Some(expected))
-                        })
+                        actual.len() == normalized_events.len()
+                            && normalized_events.iter().all(|expected| {
+                                actual.iter().any(|value| value.as_str() == Some(expected))
+                            })
                     })
             })
     }
@@ -503,6 +587,15 @@ mod tests {
         assert!(
             admitted,
             "smoke registrar fragment and role are not admitted together by the production ENSv1 manifest"
+        );
+        assert!(
+            manifest_admits_event(
+                manifest,
+                CONTROLLER_REGISTRATION_EVENT_FRAGMENT,
+                Some(CONTROLLER_ROLE),
+                CONTROLLER_REGISTRATION_NORMALIZED_EVENTS,
+            ),
+            "smoke controller enrichment fragment and role are not admitted together by the production ENSv1 manifest"
         );
     }
 

@@ -68,7 +68,7 @@ async fn registry_driven_reads() -> Result<()> {
     // --- layer 2: registry- and resolver-family normalized events ---
     let event_kinds: Vec<(String, String)> = sqlx::query_as(
         "SELECT DISTINCT event_kind, source_family FROM normalized_events \
-         WHERE logical_name_id = 'ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec' AND canonicality_state = 'canonical'",
+         WHERE (logical_name_id = 'ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec' OR after_state->>'node' = '0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec') AND canonicality_state = 'canonical'",
     )
     .fetch_all(&run.db.pool)
     .await?;
@@ -102,8 +102,8 @@ async fn registry_driven_reads() -> Result<()> {
     );
     assert_eq!(
         pointer("/declared_state/control/registry_owner"),
-        Value::Null,
-        "first-ownership setup is not projected as a later control transfer"
+        format!("{alice:#x}"),
+        "post-registrar registry setup must remain visible to control projection"
     );
     let selectors = pointer("/declared_state/record_inventory/selectors");
     let record_keys: Vec<&str> = selectors

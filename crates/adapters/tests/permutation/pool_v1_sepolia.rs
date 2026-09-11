@@ -2,7 +2,7 @@ use alloy_primitives::{Address, U256};
 use alloy_sol_types::SolEvent;
 
 use super::{
-    events::{V1RegistrarToken, V1Registry, V1Resolver, V1Wrapper},
+    events::{V1BaseRegistrar, V1RegistrarToken, V1Registry, V1Resolver, V1Wrapper},
     names::{dns_encode, labelhash, namehash},
     scenario::{Action, Dimensions, action, emission, stage},
     world::Wiring,
@@ -16,8 +16,8 @@ const RESOLVER: &str = "ens_v1_resolver_l1";
 const GRACE_PERIOD: i64 = 90 * 24 * 60 * 60;
 
 /// Generates the ordinary ENSv1 authority path declared by the checked-in Sepolia manifests.
-/// Dedicated tests cover correlation-dependent BaseRegistrar events; this generated event world
-/// exercises the registry, resolver, wrapper, and registrar Transfer that restores unwrap authority.
+/// This generated event world exercises numeric BaseRegistrar lifecycle plus the registry,
+/// resolver, wrapper, and registrar Transfer that restores unwrap authority.
 pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) -> Vec<Action> {
     let registry = wiring.address(REGISTRY, "registry");
     let registrar = wiring.address(REGISTRAR, "registrar");
@@ -42,15 +42,26 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         actions.push(action(
             format!("{label}:registry-setup"),
             stage::REGISTER,
-            vec![emission(
-                registry,
-                V1Registry::NewOwner {
-                    node: eth_node,
-                    label: hash,
-                    owner: wrapper_address,
-                }
-                .encode_log_data(),
-            )],
+            vec![
+                emission(
+                    registry,
+                    V1Registry::NewOwner {
+                        node: eth_node,
+                        label: hash,
+                        owner: wrapper_address,
+                    }
+                    .encode_log_data(),
+                ),
+                emission(
+                    registrar,
+                    V1BaseRegistrar::NameRegistered {
+                        id: U256::from_be_bytes(hash.0),
+                        owner: wrapper_address,
+                        expires: U256::from(expiry),
+                    }
+                    .encode_log_data(),
+                ),
+            ],
         ));
         actions.push(action(
             format!("{label}:wrap"),

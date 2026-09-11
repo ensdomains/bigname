@@ -6,8 +6,9 @@ pub(super) async fn build(
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
-    stage::ownerless_registry(transaction).await?;
-    sqlx::query(r#"
+    stage::prepare(transaction).await?;
+    sqlx::query(
+        r#"
         CREATE TEMP TABLE project_name_authority ON COMMIT DROP AS
         WITH target_time AS (
             SELECT block_timestamp + interval '1 second' AS cutoff
@@ -668,8 +669,7 @@ pub(super) async fn build(
                   )
               )
             ORDER BY event.block_number DESC NULLS LAST, event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST,
-                     event.normalized_event_id DESC
+                     event.log_index DESC NULLS LAST, event.normalized_event_id DESC
             LIMIT 1
         ) lifecycle ON TRUE
         "#)

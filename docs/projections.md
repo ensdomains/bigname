@@ -97,6 +97,20 @@ deleted or orphaned release is not served, and unrelated topology components are
 not admitted.
 `project_events` remains the single filter for data that builders may serve.
 
+Incremental scope also follows the identity recorded when a separately registered
+`.eth` name is wrapped later. A scoped wrapper resource or scoped name can reach a
+canonical wrapper `SurfaceBound` event whose `wrapped_registrar_resource_id`
+identifies the registrar token that was wrapped. Project adds that exact registrar
+resource before staging history, including when release has made the wrapper
+historical and a later update scopes only the name and its current registry resource. In the reverse direction, a changed registrar event reaches the exact name
+and wrapper resource only when a canonical wrapper binding names that registrar
+resource. These expansions begin from the already affected name or resource and use
+that identifier relationship; they do not admit every registrar history for the
+name. The same closure runs for normal incremental publication and redo, so a
+wrapper-only transfer, resolver update, fuse change, retraction, or registrar renewal
+stages the same registration inputs as a rebuild from block zero.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L278 @ ens_v1@91c966f)
+
 Code that builds a replacement projection row may read normalized events staged
 for the current Project batch and fields that an earlier build deliberately
 stored for later reuse. A builder may obtain those stored reuse fields from
@@ -296,6 +310,11 @@ control summary exposes that owner, its registration authority context identifie
 the registry-only anchor, and the effective-controller address relation includes
 the owner; `control.status` remains null unless another selected authority event supplies it.
 
+A genuine ENSv1 numeric registration can select a new [resource](glossary.md#resource)
+when no current authority remains, including after a prior lease fully lapses with
+retained zero registry ownership. Output-derived restoration preserves that choice
+and closes its selected [surface binding](glossary.md#surface-binding) after the new lease’s grace period.
+
 ENSv1 wrapper lifecycle and fuse effects are projected from canonical wrapper
 facts. During registrar grace, the holder and lifecycle state remain visible,
 while owner modification, transfer, and effective-controller membership stop at
@@ -303,6 +322,29 @@ grace start.[^v1-wrapper-grace-expiry][^v1-wrapper-grace-authority] Expired
 wrapper fuses are projected as zero, matching NameWrapper `getData`; an expired
 emancipated or locked position also contributes no lifecycle value or effective
 holder powers because that read clears its owner.[^v1-wrapper-expired]
+When an ENSv1 registrar lease expires while wrapped, the registrar release does
+select the released lifecycle state and retained lease expiry even after release
+closes the wrapper binding and selects the retained registry-only authority. The
+exact `wrapped_registrar_resource_id` on the immediately preceding wrapper binding
+admits that registrar's release and original registration grant to the lifecycle
+fold. The linked grant retains `registered_at`, the current registration start,
+including when registration predates wrapping or no registrar surface binding
+was created before the wrapper first made the name readable. A resource-only
+grant is attributed through that same exact preceding wrapper association;
+an unrelated registrar lineage cannot supply the timestamp. The release does not replace the last wrapper
+holder in the served registrant fold: the registrar token
+is held in NameWrapper custody, while the wrapper token records the user-facing
+holder. An active selected registry-only binding still publishes that non-null
+registrant in `address_names_current`. A released cross-resource lifecycle does so
+only when the exact wrapper association proves it; a token-holder relation still requires a token lineage.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L278 @ ens_v1@91c966f)
+
+When plaintext enrichment creates a registrar binding after earlier resource-keyed
+registration or renewal events, a later registry-only fallback admits lifecycle
+events on that immediately preceding registrar resource even when their positions
+predate the enrichment binding. The exact resource match keeps the fold within one
+registrar lifecycle, while the selected registry-only binding remains its upper
+position bound.
 
 Incremental Project redo maps wrapper resources to affected children after it
 has retained resources from projection rows whose cited events disappeared.
@@ -492,6 +534,21 @@ authority emits no additional registry-only balancing rows; ordinary token-holde
 (upstream: .refs/basenames/src/L2/Registry.sol:L46-L52 @ basenames@1809bbc)
 (upstream: .refs/basenames/src/L2/Registry.sol:L132-L134 @ basenames@1809bbc)
 (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L321-L329 @ basenames@1809bbc)
+
+For an ENSv1 registrar registration, the first processed canonical block strictly
+past lease expiry plus the 90-day grace period emits `RegistrationReleased`.
+That event retires the holder's `resource_control` grant on the exact expiring
+[resource](glossary.md#resource) and authority key, even when a distinct registry
+owner keeps the selected [surface binding](glossary.md#surface-binding).
+The registry owner's grants and binding remain unchanged; resolver-control
+revocations and authority transitions still require the released registration
+to have been selected. A later registration has a separate resource identity
+and is not revoked by the preceding registration's release. This describes
+indexed registration lifetime, not proof that every represented action remains
+executable through grace: BaseRegistrar `ownerOf` already refuses at lease expiry.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L75 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L104 @ ens_v1@91c966f)
 
 When a state-derived ENSv2 path-expiry release remains the resource's terminal
 lifecycle event and retires effective permission rows, the resource summary

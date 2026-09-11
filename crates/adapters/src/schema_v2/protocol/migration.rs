@@ -1,6 +1,6 @@
 use alloy_primitives::{B256, U256, keccak256};
 use alloy_sol_types::sol;
-use anyhow::{Context, bail};
+use anyhow::bail;
 use serde_json::{Value, json};
 
 use crate::{
@@ -69,7 +69,7 @@ pub(super) fn interpret_base_registrar(
             (controller(selected, raw, state, &mut output, false)?, None)
         }
         "NameRegistered(uint256,address,uint256)" => {
-            (name_registered(selected, raw, &mut output)?, None)
+            (name_registered(selected, raw, state, &mut output)?, None)
         }
         "NameRenewed(uint256,uint256)" => base_renewed(selected, raw, state, &mut output)?,
         "Transfer(address,address,uint256)" => (transfer(raw)?, None),
@@ -87,6 +87,25 @@ pub(super) fn interpret_base_registrar(
         correlated_wrapper_expiry,
     });
     Ok(output)
+}
+
+pub(in crate::schema_v2) fn is_graveyard_cleanup(
+    selected: &Selected,
+    raw: &RawLogInput,
+    graveyard: &str,
+) -> anyhow::Result<bool> {
+    if selected.event.signature != "NameRegistered(uint256,address,uint256)" {
+        return Ok(false);
+    }
+    let event = decode_event_log::<NameRegistered>(
+        &raw.topics,
+        &raw.data,
+        "BaseRegistrar NameRegistered log is malformed",
+    )?;
+    Ok(crate::schema_v2::migration::is_graveyard_cleanup(
+        &json!({"owner":address_hex(event.owner), "expiry":u64::try_from(event.expires).ok()}),
+        graveyard,
+    ))
 }
 
 fn proxy_deployed(
@@ -225,6 +244,7 @@ fn controller(
 fn name_registered(
     selected: &Selected,
     raw: &RawLogInput,
+    state: &State,
     output: &mut Interpreted,
 ) -> anyhow::Result<Value> {
     let event = decode_event_log::<NameRegistered>(
@@ -241,12 +261,15 @@ fn name_registered(
         "labelhash":format!("{labelhash:#x}"),
         "namehash":namehash,
         "owner":address_hex(event.owner),
-        "expiry":u64::try_from(event.expires).context("BaseRegistrar NameRegistered expiry exceeds u64")?,
+        "expiry":u64::try_from(event.expires).map_or_else(
+            |_| Value::String(event.expires.to_string()), Value::from),
         "source_event":"NameRegistered",
     });
     output.events.push(event_draft(
         "RegistrationReleased",
-        Some(logical_name_id.clone()),
+        state
+            .v1_surface_materialized(&selected.source.namespace, &namehash)
+            .then(|| logical_name_id.clone()),
         format!("RegistrationReleased:{}", u256_word_hex(event.id)),
         decoded.clone(),
         format!("graveyard-cleanup:{logical_name_id}"),
@@ -269,13 +292,14 @@ fn base_renewed(
     let labelhash = B256::from(event.id.to_be_bytes::<32>());
     let namehash = eth_namehash(labelhash);
     let logical_name_id = format!("{}:{namehash}", selected.source.namespace);
-    let registrar_expiry =
-        u64::try_from(event.expires).context("BaseRegistrar NameRenewed expiry exceeds u64")?;
+    let surface_known = state.v1_surface_materialized(&selected.source.namespace, &namehash);
+    let registrar_expiry = u64::try_from(event.expires).ok();
     let decoded = json!({
         "token_id":u256_word_hex(event.id),
         "labelhash":format!("{labelhash:#x}"),
         "namehash":namehash,
-        "expiry":registrar_expiry,
+        "expiry":registrar_expiry.map_or_else(
+            || Value::String(event.expires.to_string()), Value::from),
         "source_event":"NameRenewed",
         "resource_anchor":{
             "candidate_resource_id":stable_uuid(&format!(
@@ -292,12 +316,9 @@ fn base_renewed(
             "consumer_visibility":"candidate",
         },
     });
-    let correlated_wrapper_expiry = state.correlated_v1_wrapper_expiry(
-        &selected.source.namespace,
-        &namehash,
-        registrar_expiry,
-        raw,
-    );
+    let correlated_wrapper_expiry = registrar_expiry.and_then(|expiry| {
+        state.correlated_v1_wrapper_expiry(&selected.source.namespace, &namehash, expiry, raw)
+    });
     let mut persisted = decoded.clone();
     // BaseRegistrar renewals retained as ENSv1→ENSv2 migration evidence share one
     // [interpreter state key](../../../../../docs/glossary.md#interpreter-state-key) per event
@@ -315,7 +336,7 @@ fn base_renewed(
     for event_kind in ["RegistrationRenewed", "ExpiryChanged"] {
         output.events.push(event_draft(
             event_kind,
-            Some(logical_name_id.clone()),
+            surface_known.then(|| logical_name_id.clone()),
             format!("{event_kind}:{token_id}"),
             persisted.clone(),
             scope.clone(),

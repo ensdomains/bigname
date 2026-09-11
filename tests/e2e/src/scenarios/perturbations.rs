@@ -88,7 +88,7 @@ fn rich_ready_sql(resolver: Address, child_owner: Address) -> String {
         "SELECT \
            EXISTS (SELECT 1 FROM normalized_events event \
             JOIN chain_lineage lineage USING (chain_id, block_hash) \
-            WHERE event.logical_name_id = '{logical_name_id}' \
+            WHERE (event.logical_name_id = '{logical_name_id}' OR event.after_state->>'node' = '{parent_node}') \
             AND event.event_kind = 'ResolverChanged' \
             AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized') \
             AND lower(event.after_state->>'resolver') = '{resolver:#x}') \
@@ -96,7 +96,7 @@ fn rich_ready_sql(resolver: Address, child_owner: Address) -> String {
            (SELECT count(DISTINCT event.after_state->>'record_key') >= 2 \
             FROM normalized_events event \
             JOIN chain_lineage lineage USING (chain_id, block_hash) \
-            WHERE event.logical_name_id = '{logical_name_id}' \
+            WHERE (event.logical_name_id = '{logical_name_id}' OR event.after_state->>'node' = '{parent_node}') \
             AND event.event_kind = 'RecordChanged' \
             AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized') \
             AND event.after_state->>'record_key' IN ('addr:60', 'text:{TEXT_KEY}')) \

@@ -36,6 +36,7 @@ sol! {
         uint256 cost,
         uint256 expires
     );
+    event BaseNameRegistered(uint256 indexed id, address indexed owner, uint256 expires);
     event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
     event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
     event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender);
@@ -753,6 +754,7 @@ struct MaterializedDenseCase {
 }
 
 fn dense_case(fixture: DenseFixture) -> Result<MaterializedDenseCase> {
+    const BASE_REGISTRAR: &str = "0x00000000000000000000000000000000000050dd";
     const REGISTRATION_CONTROLLER: &str = "0x00000000000000000000000000000000000050aa";
     const REGISTRY: &str = "0x00000000000000000000000000000000000050bb";
     const RESOLVER: &str = "0x00000000000000000000000000000000000050cc";
@@ -762,8 +764,8 @@ fn dense_case(fixture: DenseFixture) -> Result<MaterializedDenseCase> {
     let controller = REGISTRATION_CONTROLLER.parse::<Address>()?;
     let registrant = REGISTRANT.parse::<Address>()?;
     let record_address = REGISTRANT.parse::<Address>()?;
-    let logs_per_transaction = fixture.register_with_config_per_transaction * 4
-        + fixture.register_per_transaction * 2
+    let logs_per_transaction = fixture.register_with_config_per_transaction * 5
+        + fixture.register_per_transaction * 3
         + fixture.unrelated_logs_per_transaction;
     let mut logs = Vec::with_capacity(fixture.transaction_count * logs_per_transaction);
     for transaction_index in 0..fixture.transaction_count {
@@ -772,6 +774,23 @@ fn dense_case(fixture: DenseFixture) -> Result<MaterializedDenseCase> {
         for registration_index in 0..fixture.register_with_config_per_transaction {
             let label = format!("bulk-config-{transaction_index:02}-{registration_index:03}");
             let (labelhash, node) = dense_namehash(parent_node, &label);
+            logs.push(dense_log(
+                &fixture.block,
+                &transaction_hash,
+                transaction_index,
+                log_index,
+                BASE_REGISTRAR,
+                with_topic0(
+                    BaseNameRegistered {
+                        id: U256::from_be_bytes(*labelhash),
+                        owner: registrant,
+                        expires: U256::from(1_800_000_000_u64),
+                    }
+                    .encode_log_data(),
+                    keccak256(b"NameRegistered(uint256,address,uint256)"),
+                ),
+            ));
+            log_index += 1;
             logs.push(dense_log(
                 &fixture.block,
                 &transaction_hash,
@@ -833,6 +852,23 @@ fn dense_case(fixture: DenseFixture) -> Result<MaterializedDenseCase> {
         for registration_index in 0..fixture.register_per_transaction {
             let label = format!("bulk-direct-{transaction_index:02}-{registration_index:03}");
             let (labelhash, _) = dense_namehash(parent_node, &label);
+            logs.push(dense_log(
+                &fixture.block,
+                &transaction_hash,
+                transaction_index,
+                log_index,
+                BASE_REGISTRAR,
+                with_topic0(
+                    BaseNameRegistered {
+                        id: U256::from_be_bytes(*labelhash),
+                        owner: registrant,
+                        expires: U256::from(1_800_000_000_u64),
+                    }
+                    .encode_log_data(),
+                    keccak256(b"NameRegistered(uint256,address,uint256)"),
+                ),
+            ));
+            log_index += 1;
             logs.push(dense_log(
                 &fixture.block,
                 &transaction_hash,
@@ -939,6 +975,11 @@ fn dense_log(
             .collect(),
         data: format!("0x{}", alloy_primitives::hex::encode(encoded.data)),
     }
+}
+
+fn with_topic0(mut encoded: alloy_primitives::LogData, topic0: B256) -> alloy_primitives::LogData {
+    encoded.topics_mut()[0] = topic0;
+    encoded
 }
 
 fn interpret_with_incremental_equivalence(case_id: &str, input: BatchInput) -> Result<BatchOutput> {
@@ -2065,6 +2106,94 @@ fn checked_in_manifests() -> Result<Vec<LoadedManifest>> {
     Ok(manifests)
 }
 
+#[test]
+fn ens_v1_registrar_manifests_assign_lifecycle_to_base_registrar() -> Result<()> {
+    let manifests = checked_in_manifests()?;
+    let registrar = |chain: &str| {
+        manifests
+            .iter()
+            .find(|loaded| {
+                loaded.manifest.source_family == "ens_v1_registrar_l1"
+                    && loaded.manifest.chain == chain
+            })
+            .map(|loaded| &loaded.manifest)
+            .with_context(|| format!("missing ENSv1 registrar manifest for {chain}"))
+    };
+    let events = |chain: &str, fragment: &str| -> Result<Vec<Vec<String>>> {
+        Ok(registrar(chain)?
+            .abi
+            .events
+            .iter()
+            .filter(|event| event.fragment == fragment)
+            .map(|event| event.normalized_events.clone())
+            .collect())
+    };
+
+    assert_eq!(
+        events(
+            "ethereum-mainnet",
+            "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)"
+        )?,
+        [vec![
+            "RegistrationGranted",
+            "ExpiryChanged",
+            "PermissionChanged",
+            "SurfaceUnbound",
+            "SurfaceBound",
+            "AuthorityEpochChanged",
+            "ResolverChanged",
+            "RegistrationReleased",
+        ]]
+    );
+    assert_eq!(
+        events(
+            "ethereum-sepolia",
+            "event NameRenewed(uint256 indexed id, uint256 expires)"
+        )?,
+        [vec![
+            "RegistrationGranted",
+            "RegistrationRenewed",
+            "ExpiryChanged",
+            "SurfaceUnbound",
+            "SurfaceBound",
+            "AuthorityEpochChanged",
+            "ResolverChanged",
+        ]]
+    );
+    for event in registrar("ethereum-mainnet")?
+        .abi
+        .events
+        .iter()
+        .filter(|event| event.fragment.starts_with("event NameRegistered(string"))
+    {
+        assert_eq!(event.normalized_events, ["PreimageObserved"]);
+    }
+    let controllers = registrar("ethereum-mainnet")?
+        .contracts
+        .iter()
+        .filter(|contract| contract.role.contains("registrar_controller"))
+        .map(|contract| (contract.address.as_str(), contract.start_block))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        controllers,
+        [
+            (
+                "0x283Af0B28c62C092C9727F1Ee09c02CA627EB7F5",
+                Some(9_380_471)
+            ),
+            (
+                "0x253553366Da8546fC250F225fe3d25d0C782303b",
+                Some(16_925_618)
+            ),
+            (
+                "0x59E16fcCd424Cc24e280Be16E11Bcd56fb0CE547",
+                Some(22_764_821)
+            ),
+        ]
+    );
+    Ok(())
+}
+
 fn find_checked_in<'a>(
     fixture: &FixtureManifest,
     checked_in: &'a [LoadedManifest],
@@ -2322,9 +2451,11 @@ fn interpreter_output_is_identical_when_later_resolver_traffic_splits_off() -> R
          no re-thread"
     );
     assert_eq!(
-        late_record.before_state, registration_record.after_state,
-        "the late record must chain its before_state from the reconciled record's surviving row"
+        late_record.before_state,
+        serde_json::json!({}),
+        "the registrar-first anchor avoids the controller-era post-registration re-key"
     );
+    assert_eq!(late_record.after_state, registration_record.after_state);
     Ok(())
 }
 
@@ -2370,13 +2501,9 @@ fn flatten_outputs(outputs: &[BatchOutput]) -> BatchOutput {
 }
 
 #[test]
-fn dense_output_is_purely_additive_over_the_pre_retention_snapshot() -> Result<()> {
-    // Retaining superseded registry-only resource emissions at their first derivation block
-    // must leave every pre-retention row byte-for-byte intact: the only permitted dense-corpus
-    // differences are the non-persisted `before_state_explicit` debug flag and the retained
-    // resource rows themselves (exactly the rows no surviving normalized event or surface
-    // binding references). Remove both and the output must collapse to the pre-retention
-    // snapshot — pinned here by that snapshot's own committed keccak.
+fn dense_registrar_first_output_has_no_unreferenced_registry_resources() -> Result<()> {
+    // A numeric BaseRegistrar event can reconcile the entire transaction, so the registry setup
+    // resources retained by the controller-era prior-only window are now all referenced.
     let fixture: DenseFixture = serde_json::from_str(DENSE_SAME_TRANSACTION)?;
     let case = dense_case(fixture)?;
     let expected_gate = ExpectedCase {
@@ -2410,21 +2537,649 @@ fn dense_output_is_purely_additive_over_the_pre_retention_snapshot() -> Result<(
         .len();
     assert_eq!(
         (retained_ids.len(), distinct_retained),
-        (480, 320),
-        "the retention change adds exactly the unreferenced superseded registry-only rows"
+        (0, 0),
+        "registrar-first reconciliation must not leave unreferenced registry resources"
     );
-    reduced
-        .resources
-        .retain(|resource| referenced.contains(&resource.resource_id));
-    let snapshot = format!("{reduced:#?}")
-        .lines()
-        .filter(|line| !line.trim().starts_with("before_state_explicit:"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    for event in &mut reduced.normalized_events {
+        event.before_state_explicit = false;
+    }
+    let snapshot = format!("{reduced:#?}");
     assert_eq!(
         format!("{:#x}", keccak256(snapshot.as_bytes())),
-        "0xb9f842fdc4a0679e37ac4bdfec4f3ec4a8eada269211a176df7ce0580d31677d",
-        "output minus the debug-only flag and the retained rows must equal the pre-retention snapshot"
+        case.expected_output_keccak,
+        "the resource audit and the dense snapshot must cover the same registrar-first output"
     );
+    Ok(())
+}
+#[test]
+fn numeric_transfer_then_plaintext_renewal_preserves_registry_provenance() -> Result<()> {
+    numeric_late_plaintext_registry_case(false)
+}
+
+#[test]
+fn numeric_transfer_then_ownerless_plaintext_renewal_preserves_read_only_surface() -> Result<()> {
+    numeric_late_plaintext_registry_case(true)
+}
+
+fn numeric_late_plaintext_registry_case(ownerless: bool) -> Result<()> {
+    sol! {
+        event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
+        event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId);
+        event RegistryTransfer(bytes32 indexed node, address owner);
+        event NumericRenewed(uint256 indexed id, uint256 expires);
+        event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires, bytes32 referrer);
+    }
+    let loaded = checked_in_manifests()?;
+    let mut input = BatchInput {
+        chain_id: "ethereum-mainnet".to_owned(),
+        manifests: vec![],
+        discovery_rules: vec![],
+        admissions: vec![],
+        prior_events: vec![],
+        blocks: vec![],
+        raw_logs: vec![],
+    };
+    for (family, version) in [("ens_v1_registrar_l1", 1), ("ens_v1_registry_l1", 3)] {
+        let source = &loaded
+            .iter()
+            .find(|m| {
+                m.manifest.chain == input.chain_id
+                    && m.manifest.source_family == family
+                    && m.manifest.manifest_version == version
+            })
+            .context("declared source version")?
+            .manifest;
+        let manifest_id = i64::try_from(input.manifests.len() + 1)?;
+        input.manifests.push(ManifestInput {
+            manifest_id,
+            manifest_version: i64::try_from(source.manifest_version)?,
+            namespace: source.namespace.clone(),
+            source_family: family.to_owned(),
+            chain_id: input.chain_id.clone(),
+            deployment_label: source.deployment_epoch.clone(),
+            normalizer_version: source.normalizer_version.clone(),
+            payload_json: serde_json::to_string(source)?,
+        });
+        for contract in &source.contracts {
+            input.admissions.push(AddressAdmissionInput {
+                address: contract.address.to_ascii_lowercase(),
+                contract_instance_id: Uuid::from_u128(input.admissions.len() as u128 + 1),
+                source_manifest_id: Some(manifest_id),
+                role: Some(contract.role.clone()),
+                discovery_edge_kind: None,
+                discovery_from_contract_instance_id: None,
+                discovery_observation_key: None,
+                active_from_block: contract.start_block.map(i64::try_from).transpose()?,
+                active_to_block: None,
+            });
+        }
+    }
+    let admission = |role: &str| {
+        input
+            .admissions
+            .iter()
+            .find(|a| a.role.as_deref() == Some(role))
+            .cloned()
+            .context("declared role")
+    };
+    let registrar = admission("registrar")?;
+    let registry = admission("registry")?;
+    let controller = admission("unwrapped_registrar_controller")?;
+    let (label, parent) = (
+        "numeric-late-provenance",
+        "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae".parse()?,
+    );
+    let (labelhash, node) = dense_namehash(parent, label);
+    let token = U256::from_be_bytes(*labelhash);
+    let alice = Address::repeat_byte(0x11);
+    let bob = Address::repeat_byte(0x22);
+    for number in 24_000_000..=24_000_002 {
+        input.blocks.push(RawBlockInput {
+            chain_id: input.chain_id.clone(),
+            block_hash: format!("0x{number:064x}"),
+            block_number: number,
+            block_timestamp: OffsetDateTime::from_unix_timestamp(
+                1_800_000_000 + number - 24_000_000,
+            )?,
+            canonicality_state: "canonical".to_owned(),
+        });
+    }
+    let mut emit = |block: usize, index, address: &str, data: alloy_primitives::LogData| {
+        let b = &input.blocks[block];
+        input.raw_logs.push(RawLogInput {
+            chain_id: input.chain_id.clone(),
+            block_hash: b.block_hash.clone(),
+            block_number: b.block_number,
+            block_timestamp: b.block_timestamp,
+            canonicality_state: "canonical".to_owned(),
+            transaction_hash: format!("0x{:064x}", b.block_number + 100),
+            transaction_index: 0,
+            log_index: index,
+            emitting_address: address.to_owned(),
+            topics: data.topics().iter().map(|t| format!("{t:#x}")).collect(),
+            data: data.data.to_vec(),
+        });
+    };
+    // Contract order: mint, registry write, numeric grant; transfer does not reclaim.
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L145 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/test/ethregistrar/TestBaseRegistrar.test.ts:L189 @ ens_v1@91c966f)
+    emit(
+        0,
+        0,
+        &registrar.address,
+        Transfer {
+            from: Address::ZERO,
+            to: alice,
+            tokenId: token,
+        }
+        .encode_log_data(),
+    );
+    emit(
+        0,
+        1,
+        &registry.address,
+        NewOwner {
+            node: parent,
+            label: labelhash,
+            owner: alice,
+        }
+        .encode_log_data(),
+    );
+    emit(
+        0,
+        2,
+        &registrar.address,
+        with_topic0(
+            BaseNameRegistered {
+                id: token,
+                owner: alice,
+                expires: U256::from(1_900_000_000),
+            }
+            .encode_log_data(),
+            keccak256(b"NameRegistered(uint256,address,uint256)"),
+        ),
+    );
+    emit(
+        1,
+        0,
+        &registrar.address,
+        Approval {
+            owner: alice,
+            approved: Address::ZERO,
+            tokenId: token,
+        }
+        .encode_log_data(),
+    );
+    emit(
+        1,
+        1,
+        &registrar.address,
+        Transfer {
+            from: alice,
+            to: bob,
+            tokenId: token,
+        }
+        .encode_log_data(),
+    );
+    if ownerless {
+        emit(
+            1,
+            2,
+            &registry.address,
+            with_topic0(
+                RegistryTransfer {
+                    node,
+                    owner: Address::ZERO,
+                }
+                .encode_log_data(),
+                keccak256(b"Transfer(bytes32,address)"),
+            ),
+        );
+    }
+    // Numeric renewal precedes the declared label-bearing event, including referrer.
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L352 @ ens_v1@91c966f)
+    emit(
+        2,
+        0,
+        &registrar.address,
+        with_topic0(
+            NumericRenewed {
+                id: token,
+                expires: U256::from(1_900_000_100),
+            }
+            .encode_log_data(),
+            keccak256(b"NameRenewed(uint256,uint256)"),
+        ),
+    );
+    emit(
+        2,
+        1,
+        &controller.address,
+        NameRenewed {
+            name: label.to_owned(),
+            label: labelhash,
+            cost: U256::from(1),
+            expires: U256::from(1_900_000_100),
+            referrer: B256::ZERO,
+        }
+        .encode_log_data(),
+    );
+    let whole = interpret_with_incremental_equivalence("numeric-late-provenance", input.clone())?;
+    let split = interpret_physical_batches(
+        "numeric-late-provenance",
+        input.clone(),
+        &[
+            BlockRange {
+                from_block: 24_000_000,
+                to_block: 24_000_001,
+            },
+            BlockRange {
+                from_block: 24_000_002,
+                to_block: 24_000_002,
+            },
+        ],
+    )?;
+    assert_eq!(flatten_outputs(&split), whole);
+    assert!(split[0].name_surfaces.is_empty() && split[0].surface_bindings.is_empty());
+    let grant = split[0]
+        .normalized_events
+        .iter()
+        .find(|e| e.event_kind == "RegistrationGranted")
+        .context("numeric grant")?;
+    let transfer = split[0]
+        .normalized_events
+        .iter()
+        .find(|e| e.event_kind == "TokenControlTransferred")
+        .context("unreclaimed transfer")?;
+    assert_eq!(grant.logical_name_id, None);
+    assert_eq!(transfer.logical_name_id, None);
+    assert_eq!(transfer.resource_id, grant.resource_id);
+    assert_eq!(transfer.source_manifest_id, registrar.source_manifest_id);
+    let bindings = &split[1].surface_bindings;
+    if ownerless {
+        assert!(
+            bindings.is_empty(),
+            "ownerless plaintext must not bind the dormant registrar"
+        );
+        assert_eq!(split[1].name_surfaces.len(), 1);
+        assert!(
+            split[1]
+                .normalized_events
+                .iter()
+                .all(|e| e.event_kind != "SurfaceBound")
+        );
+    } else {
+        assert_eq!(bindings.len(), 1);
+        assert_ne!(Some(bindings[0].resource_id), grant.resource_id);
+        let bound = split[1]
+            .normalized_events
+            .iter()
+            .find(|e| e.event_kind == "SurfaceBound")
+            .context("retained registry materialization")?;
+        assert_eq!(bound.resource_id, Some(bindings[0].resource_id));
+        assert_eq!(bound.source_manifest_id, registry.source_manifest_id);
+        assert_eq!(bound.source_family, "ens_v1_registry_l1");
+        assert_eq!(bound.manifest_version, 3);
+        assert_eq!(bound.after_state["owner"], format!("{alice:#x}"));
+        assert_eq!(bound.after_state["registry_contract"], registry.address);
+    }
+    assert!(
+        split[1]
+            .normalized_events
+            .iter()
+            .filter(|e| e.event_kind == "AuthorityEpochChanged")
+            .all(|e| e.resource_id != grant.resource_id)
+    );
+    let full_prior = split[0]
+        .normalized_events
+        .iter()
+        .map(|e| seam::fold_prior_events(vec![], std::slice::from_ref(e), &input.blocks))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let compacted = seam::fold_prior_events(vec![], &split[0].normalized_events, &input.blocks)?;
+    for prior_events in [full_prior, compacted] {
+        let suffix = BatchInput {
+            prior_events,
+            blocks: input.blocks[2..].to_vec(),
+            raw_logs: input
+                .raw_logs
+                .iter()
+                .filter(|l| l.block_number == 24_000_002)
+                .cloned()
+                .collect(),
+            ..input.clone()
+        };
+        assert_eq!(interpret_schema_v2_batch(suffix)?, split[1]);
+    }
+    if ownerless {
+        let mut current = input.clone();
+        current.raw_logs.retain(|log| {
+            log.block_number != 24_000_001 || log.emitting_address != registrar.address
+        });
+        let continued =
+            interpret_with_incremental_equivalence("current-registrar-zero-owner", current)?;
+        assert_eq!(continued.surface_bindings.len(), 1);
+        assert_eq!(
+            Some(continued.surface_bindings[0].resource_id),
+            grant.resource_id
+        );
+    }
+    if ownerless {
+        sol! { event NewResolver(bytes32 indexed node, address resolver); }
+        for register_registry in [false, true] {
+            let mut successor = input.clone();
+            let anchor = NewResolver {
+                node,
+                resolver: Address::repeat_byte(0x44),
+            }
+            .encode_log_data();
+            successor.raw_logs.push(RawLogInput {
+                chain_id: input.chain_id.clone(),
+                block_hash: input.blocks[0].block_hash.clone(),
+                block_number: input.blocks[0].block_number,
+                block_timestamp: input.blocks[0].block_timestamp,
+                canonicality_state: "canonical".into(),
+                transaction_hash: format!("0x{:064x}", 24_000_200),
+                transaction_index: 1,
+                log_index: 3,
+                emitting_address: registry.address.clone(),
+                topics: anchor.topics().iter().map(|t| format!("{t:#x}")).collect(),
+                data: anchor.data.to_vec(),
+            });
+            let lapse = 1_900_000_100 + 90 * 86400 + 1;
+            let successor_expiry = lapse + 365 * 86400;
+            for (offset, timestamp) in [lapse, lapse + 1, successor_expiry + 90 * 86400 + 1]
+                .into_iter()
+                .enumerate()
+            {
+                let number = 24_000_003 + offset as i64;
+                successor.blocks.push(RawBlockInput {
+                    chain_id: input.chain_id.clone(),
+                    block_hash: format!("0x{number:064x}"),
+                    block_number: number,
+                    block_timestamp: OffsetDateTime::from_unix_timestamp(timestamp)?,
+                    canonicality_state: "canonical".to_owned(),
+                });
+            }
+            // Re-registration burns and mints before the optional registry write and numeric grant.
+            // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130 @ ens_v1@91c966f)
+            let mut facts = vec![
+                (
+                    0,
+                    &registrar.address,
+                    Approval {
+                        owner: bob,
+                        approved: Address::ZERO,
+                        tokenId: token,
+                    }
+                    .encode_log_data(),
+                ),
+                (
+                    1,
+                    &registrar.address,
+                    Transfer {
+                        from: bob,
+                        to: Address::ZERO,
+                        tokenId: token,
+                    }
+                    .encode_log_data(),
+                ),
+                (
+                    2,
+                    &registrar.address,
+                    Transfer {
+                        from: Address::ZERO,
+                        to: alice,
+                        tokenId: token,
+                    }
+                    .encode_log_data(),
+                ),
+            ];
+            if register_registry {
+                facts.push((
+                    3,
+                    &registry.address,
+                    NewOwner {
+                        node: parent,
+                        label: labelhash,
+                        owner: alice,
+                    }
+                    .encode_log_data(),
+                ));
+            }
+            facts.push((
+                4,
+                &registrar.address,
+                with_topic0(
+                    BaseNameRegistered {
+                        id: token,
+                        owner: alice,
+                        expires: U256::from(successor_expiry),
+                    }
+                    .encode_log_data(),
+                    keccak256(b"NameRegistered(uint256,address,uint256)"),
+                ),
+            ));
+            for (log_index, address, data) in facts {
+                let block = &successor.blocks[4];
+                successor.raw_logs.push(RawLogInput {
+                    chain_id: input.chain_id.clone(),
+                    block_hash: block.block_hash.clone(),
+                    block_number: block.block_number,
+                    block_timestamp: block.block_timestamp,
+                    canonicality_state: "canonical".to_owned(),
+                    transaction_hash: format!("0x{:064x}", block.block_number + 100),
+                    transaction_index: 0,
+                    log_index,
+                    emitting_address: address.clone(),
+                    topics: data.topics().iter().map(|t| format!("{t:#x}")).collect(),
+                    data: data.data.to_vec(),
+                });
+            }
+            successor
+                .raw_logs
+                .sort_by_key(|log| (log.block_number, log.transaction_index, log.log_index));
+            let result =
+                interpret_with_incremental_equivalence("ownerless-fresh-grant", successor.clone())?;
+            let fresh_grant = result
+                .normalized_events
+                .iter()
+                .find(|e| {
+                    e.event_kind == "RegistrationGranted" && e.block_number == Some(24_000_004)
+                })
+                .context("fresh successor grant")?;
+            assert_ne!(fresh_grant.resource_id, grant.resource_id);
+            assert_eq!(
+                result
+                    .surface_bindings
+                    .iter()
+                    .filter(|b| Some(b.resource_id) == fresh_grant.resource_id)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                result
+                    .normalized_events
+                    .iter()
+                    .filter(|e| e.event_kind == "SurfaceUnbound"
+                        && e.resource_id == fresh_grant.resource_id
+                        && e.block_number == Some(24_000_005))
+                    .count(),
+                1,
+                "the selected successor binding must close after its own grace period"
+            );
+            let closure = result
+                .binding_closures
+                .iter()
+                .filter(|c| {
+                    c.block_number == 24_000_005
+                        && Some(c.logical_name_id.as_str())
+                            == fresh_grant.logical_name_id.as_deref()
+                        && c.chain_id == input.chain_id
+                        && c.authority_arm == "ens_v1"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(closure.len(), 1);
+            if !register_registry {
+                assert!(closure[0].except_surface_binding_id.is_none());
+            }
+            assert_eq!(
+                result
+                    .normalized_events
+                    .iter()
+                    .filter(|e| e.event_kind == "RegistrationReleased"
+                        && e.resource_id == fresh_grant.resource_id)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                result
+                    .normalized_events
+                    .iter()
+                    .filter(|e| e.event_kind == "PermissionChanged"
+                        && e.resource_id == fresh_grant.resource_id
+                        && e.before_state["effective_powers"]
+                            .as_array()
+                            .is_some_and(|p| p.iter().any(|v| v == "resource_control"))
+                        && e.after_state["effective_powers"] == serde_json::json!([]))
+                    .count(),
+                1
+            );
+            let batches = interpret_physical_batches(
+                "ownerless-fresh-grant",
+                successor.clone(),
+                &[
+                    BlockRange {
+                        from_block: 24_000_000,
+                        to_block: 24_000_004,
+                    },
+                    BlockRange {
+                        from_block: 24_000_005,
+                        to_block: 24_000_005,
+                    },
+                ],
+            )?;
+            assert_eq!(flatten_outputs(&batches), result);
+            let full = batches[0]
+                .normalized_events
+                .iter()
+                .map(|e| {
+                    seam::fold_prior_events(vec![], std::slice::from_ref(e), &successor.blocks)
+                })
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            let compacted =
+                seam::fold_prior_events(vec![], &batches[0].normalized_events, &successor.blocks)?;
+            for prior_events in [full, compacted] {
+                let suffix = BatchInput {
+                    prior_events,
+                    blocks: successor.blocks[5..].to_vec(),
+                    raw_logs: successor
+                        .raw_logs
+                        .iter()
+                        .filter(|l| l.block_number == 24_000_005)
+                        .cloned()
+                        .collect(),
+                    ..successor.clone()
+                };
+                assert_eq!(interpret_schema_v2_batch(suffix)?, batches[1]);
+            }
+        }
+    }
+    if !ownerless {
+        let mut numeric_only = input.clone();
+        numeric_only
+            .raw_logs
+            .retain(|log| log.emitting_address != registry.address);
+        let numeric_output =
+            interpret_with_incremental_equivalence("numeric-without-registry", numeric_only)?;
+        assert_eq!(numeric_output.surface_bindings.len(), 1);
+        assert_eq!(
+            Some(numeric_output.surface_bindings[0].resource_id),
+            grant.resource_id
+        );
+        let mut returned = input.clone();
+        let mut block = input.blocks[2].clone();
+        block.block_number += 1;
+        block.block_hash = format!("0x{:064x}", block.block_number);
+        block.block_timestamp += time::Duration::seconds(1);
+        let log = Transfer {
+            from: bob,
+            to: alice,
+            tokenId: token,
+        }
+        .encode_log_data();
+        returned.raw_logs.push(RawLogInput {
+            chain_id: input.chain_id.clone(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            block_timestamp: block.block_timestamp,
+            canonicality_state: "canonical".to_owned(),
+            transaction_hash: format!("0x{:064x}", block.block_number + 100),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: registrar.address.clone(),
+            topics: log.topics().iter().map(|t| format!("{t:#x}")).collect(),
+            data: log.data.to_vec(),
+        });
+        returned.blocks.push(block);
+        let fresh =
+            interpret_with_incremental_equivalence("known-surface-return", returned.clone())?;
+        let transfer = fresh
+            .normalized_events
+            .iter()
+            .find(|e| {
+                e.event_kind == "TokenControlTransferred" && e.block_number == Some(24_000_003)
+            })
+            .context("known-name transfer")?;
+        assert_eq!(
+            transfer.logical_name_id.as_deref(),
+            Some(format!("ens:{node:#x}").as_str())
+        );
+        assert_eq!(transfer.resource_id, grant.resource_id);
+        assert_eq!(transfer.source_manifest_id, registrar.source_manifest_id);
+        let batches = interpret_physical_batches(
+            "known-surface-return",
+            returned.clone(),
+            &[
+                BlockRange {
+                    from_block: 24_000_000,
+                    to_block: 24_000_002,
+                },
+                BlockRange {
+                    from_block: 24_000_003,
+                    to_block: 24_000_003,
+                },
+            ],
+        )?;
+        assert_eq!(flatten_outputs(&batches), fresh);
+        let full = whole
+            .normalized_events
+            .iter()
+            .map(|e| seam::fold_prior_events(vec![], std::slice::from_ref(e), &input.blocks))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let compacted = seam::fold_prior_events(vec![], &whole.normalized_events, &input.blocks)?;
+        for prior_events in [full, compacted] {
+            let suffix = BatchInput {
+                prior_events,
+                blocks: returned.blocks[3..].to_vec(),
+                raw_logs: returned
+                    .raw_logs
+                    .iter()
+                    .filter(|l| l.block_number == 24_000_003)
+                    .cloned()
+                    .collect(),
+                ..returned.clone()
+            };
+            assert_eq!(interpret_schema_v2_batch(suffix)?, batches[1]);
+        }
+    }
     Ok(())
 }

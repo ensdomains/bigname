@@ -247,7 +247,7 @@ async fn wrapper_reverse_route_snapshots(
         wrapped
             .pointer("/declared_state/control/registrant")
             .and_then(Value::as_str)
-            == Some(format!("{:#x}", chain.record_target).as_str())
+            == Some(format!("{:#x}", chain.owner).as_str())
             && wrapped
                 .pointer("/declared_state/registration/authority_kind")
                 .and_then(Value::as_str)
@@ -293,11 +293,11 @@ fn derived_output_ready_expression(chain: &CatchupChain) -> String {
     let logical_name_id = support::schema_v2_logical_name_id(&format!("ens:{NAME}"));
     format!(
         "EXISTS (SELECT 1 FROM normalized_events \
-         WHERE logical_name_id = '{logical_name_id}' AND event_kind = 'ResolverChanged' \
+         WHERE (logical_name_id = '{logical_name_id}' OR namespace || ':' || lower(after_state->>'node') = '{logical_name_id}') AND event_kind = 'ResolverChanged' \
          AND canonicality_state = 'canonical' \
          AND lower(after_state->>'resolver') = '{resolver:#x}') \
          AND (SELECT count(DISTINCT after_state->>'record_key') >= 2 FROM normalized_events \
-         WHERE logical_name_id = '{logical_name_id}' AND event_kind = 'RecordChanged' \
+         WHERE (logical_name_id = '{logical_name_id}' OR namespace || ':' || lower(after_state->>'node') = '{logical_name_id}') AND event_kind = 'RecordChanged' \
          AND canonicality_state = 'canonical' \
          AND after_state->>'record_key' IN ('addr:60', 'text:{TEXT_KEY}')) \
          AND EXISTS (SELECT 1 FROM normalized_events \

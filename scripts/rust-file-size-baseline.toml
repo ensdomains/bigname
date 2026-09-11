@@ -32,12 +32,12 @@ justification = "Name-surface materialization distinguishes active from shadow V
 
 [[files]]
 path = "crates/adapters/src/schema_v2/protocol/v1/registry.rs"
-loc = 638
+loc = 634
 justification = "Registry event decoding and its atomic control/read transition remain together while shared owner classification and authority emission live in the bounded authority-transition sibling; the file remains below the review threshold."
 
 [[files]]
 path = "crates/adapters/src/schema_v2/state.rs"
-loc = 606
+loc = 605
 justification = "The V1 interpreter keeps control state, literal registry owner history, and the resource retained for resolver reads together because restore and incremental interpretation must update them atomically; the file remains below the review threshold."
 
 [[files]]
@@ -97,3 +97,23 @@ justification = "Index timing, rebuild, throughput, memory measurement, and red-
 path = "apps/phase-runner/src/redo_state.rs"
 loc = 608
 justification = "Redo marker state owns the atomic redo-begin transition and its authority/progress fencing. Discovery repair adds only the shared downstream-stamp call at that boundary; the stamping implementation was extracted to redo_stamp.rs, ratcheting this file down from 610 lines."
+
+[[files]]
+path = "crates/adapters/src/schema_v2/protocol/v1/registrar.rs"
+loc = 614
+justification = "The integrated V1 registrar dispatcher keeps controller-free numeric registration materialization and terminal registry authority handoff together so receipt ordering yields one binding and one authority transition."
+
+[[files]]
+path = "crates/adapters/src/schema_v2/session.rs"
+loc = 655
+justification = "The interpretation session keeps transaction-local numeric registrar registration, surface enrichment, and source-aware resolver state together so live and restored transaction windows apply the same authority ordering."
+
+[[files]]
+path = "crates/adapters/src/schema_v2/state_surfaces.rs"
+loc = 641
+justification = "Surface materialization keeps numeric registrar resources and registry-only read surfaces adjacent to their active and dormant selection rules so late plaintext enrichment cannot create a second binding."
+
+[[files]]
+path = "crates/project/src/scope.rs"
+loc = 604
+justification = "Projection scope expansion keeps wrapped registrar lifecycle associations with changed name and resource collection so incremental rebuilding includes every affected lifecycle without expanding unrelated resources."
