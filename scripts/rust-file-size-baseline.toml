@@ -11,9 +11,70 @@ wiring_allowlist_required_loc = 500
 wiring_files = ["lib.rs", "main.rs"]
 
 [[files]]
-path = "crates/manifests/src/schema_v2_persistence.rs"
-loc = 607
-justification = "Manifest state, address-epoch persistence, and derived-phase invalidation remain in one transaction boundary; PR #583 grew the file to 598 lines on main and this branch's nine-line no-effect notice crosses the threshold when rebased. Split on the next substantive touch."
+path = "apps/api/src/v2/events.rs"
+loc = 774
+justification = "History ergonomics (order, type sets, timestamp windows, include=data|raw, resolver filter) and the registry-route `contract_address` emitter filter keep the /v1/events handler, its cursor binding, and its filter parser adjacent; split the filter parser out on the next substantive touch."
+
+[[files]]
+path = "apps/api/src/v2/history.rs"
+loc = 714
+justification = "Name-history handler, the shared history read helpers (order, block window, capped total_count, cursor filter keys) and its cursor binding grew together; move the shared helpers into a sibling module on the next substantive touch."
+
+[[files]]
+path = "apps/api/src/v2/lookup/mod.rs"
+loc = 609
+justification = "Batch lookup keeps request parsing, name and address rendering, and served-head validation together; the registry-route subregistry pointer and the name-list authority/migrated_at fields land beside each other. Split on the next substantive touch."
+
+[[files]]
+path = "apps/api/src/v2/name_record.rs"
+loc = 635
+justification = "Name record read gained authority/migrated_at (F3), include=counts (F5), and the registry-route subregistry pointer in one handler; move the auxiliary loaders into a sibling module on the next substantive touch."
+
+[[files]]
+path = "apps/api/src/v2/namespaces.rs"
+loc = 792
+justification = "Namespace overview grew the per-chain verified-read capability report (F12) beside the existing overview assembly; split the capability report into a sibling module on the next substantive touch."
+
+[[files]]
+path = "apps/api/src/v2/params.rs"
+loc = 902
+justification = "Shared query-parameter grammar gained timestamp bounds, type sets, and the resolver selector (history ergonomics), contract_address (registry route), and expires_after/expires_before, sort_wire, and include_expired (name-list ergonomics) in parallel branches; split per-parameter parsers into a submodule now that the branches have landed."
+review_justification = "Staging merge union of four parallel branches pushed the shared parameter grammar just past 900 LOC; accepted for the merge with the per-parameter parser split scheduled as the first follow-up."
+
+[[files]]
+path = "apps/api/src/v2/resolvers.rs"
+loc = 721
+justification = "Resolver overview gained grant_event provenance for include=roles next to the existing overview assembly; move role provenance into overview_items on the next substantive touch."
+
+[[files]]
+path = "apps/api/src/v2/subnames.rs"
+loc = 667
+justification = "Subnames listing gained q/sort/order/include_expired (F7) and the registry-route subregistry pointer together with its cursor binding; split the cursor binding out on the next substantive touch."
+
+[[files]]
+path = "apps/api/src/v2/vocab.rs"
+loc = 746
+justification = "Product vocabulary gained HistoryEventTypeSet canonicalization (history ergonomics), Authority (name-list ergonomics), and the resolves_to relation in parallel branches; split history vocabulary into a submodule now that the branches have landed."
+
+[[files]]
+path = "apps/phase-runner/src/redo_state.rs"
+loc = 608
+justification = "Redo marker state owns the atomic redo-begin transition and its authority/progress fencing. Discovery repair adds only the shared downstream-stamp call at that boundary; the stamping implementation was extracted to redo_stamp.rs, ratcheting this file down from 610 lines."
+
+[[files]]
+path = "crates/adapters/src/schema_v2/identity.rs"
+loc = 604
+justification = "Name-surface materialization distinguishes active from shadow V1 surfaces so a later registry resolver can link only to a serving-visible name; the four-line active-surface notification keeps that identity decision at its operating boundary."
+
+[[files]]
+path = "crates/adapters/src/schema_v2/protocol/v1/registrar.rs"
+loc = 614
+justification = "The selected numeric registrar import keeps transfer authority convergence beside lifecycle dispatch; numeric ABI decoding and label enrichment are split into bounded child modules, while source10 migration correlation remains unchanged."
+
+[[files]]
+path = "crates/adapters/src/schema_v2/protocol/v1/registry.rs"
+loc = 638
+justification = "Registry event decoding and its atomic control/read transition remain together while shared owner classification and authority emission live in the bounded authority-transition sibling; the file remains below the review threshold."
 
 [[files]]
 path = "crates/adapters/src/schema_v2/protocol/v2_registry.rs"
@@ -26,19 +87,29 @@ loc = 685
 justification = "ENSv2 topology removal and rebound groups remain adjacent while the fixed expiry event group and pointer clears live in the bounded sibling module."
 
 [[files]]
-path = "crates/adapters/src/schema_v2/identity.rs"
-loc = 604
-justification = "Name-surface materialization distinguishes active from shadow V1 surfaces so a later registry resolver can link only to a serving-visible name; the four-line active-surface notification keeps that identity decision at its operating boundary."
+path = "crates/adapters/src/schema_v2/state_surfaces.rs"
+loc = 641
+justification = "The selected numeric registrar import retains current authority selection and registry resolver-read state together; the new readable-name registrar evidence and snapshot eligibility are isolated in a bounded sibling module."
 
 [[files]]
-path = "crates/adapters/src/schema_v2/protocol/v1/registry.rs"
-loc = 638
-justification = "Registry event decoding and its atomic control/read transition remain together while shared owner classification and authority emission live in the bounded authority-transition sibling; the file remains below the review threshold."
+path = "crates/manifests/src/schema_v2_persistence.rs"
+loc = 607
+justification = "Manifest state, address-epoch persistence, and derived-phase invalidation remain in one transaction boundary; PR #583 grew the file to 598 lines on main and this branch's nine-line no-effect notice crosses the threshold when rebased. Split on the next substantive touch."
 
 [[files]]
 path = "crates/project/src/builders/permissions.rs"
 loc = 626
 justification = "Effective permission folding keeps wrapper fuse masking, partial-coverage summaries, and the narrowly provenance-gated ENSv2 expiry tombstone in one resource-keyed projection boundary."
+
+[[files]]
+path = "crates/storage/src/history.rs"
+loc = 691
+justification = "History read facade gained HistoryOrder, HistoryBlockWindow, HistoryPageOptions, the resolver filter, and the registry-route `contract_address` emitter filter while keeping every loader signature in one place; move the option types into a sibling module on the next substantive touch."
+
+[[files]]
+path = "crates/storage/src/history/paging.rs"
+loc = 694
+justification = "Keyset paging gained the reversible order predicate, per-chain block windows, and the resolver filter, which share one SQL builder; split the filter pushers from the cursor predicate on the next substantive touch."
 
 [[files]]
 path = "crates/storage/src/record_inventory/snapshot_reads.rs"
@@ -82,58 +153,3 @@ review_justification = "Reviewed as non-serving release tooling: the file is bel
 path = "tools/benchmark-gate/src/indexing.rs"
 loc = 723
 justification = "Index timing, rebuild, throughput, memory measurement, and red-report construction remain one release-gate operation with its budget and false-green regression tests."
-
-[[files]]
-path = "apps/phase-runner/src/redo_state.rs"
-loc = 608
-justification = "Redo marker state owns the atomic redo-begin transition and its authority/progress fencing. Discovery repair adds only the shared downstream-stamp call at that boundary; the stamping implementation was extracted to redo_stamp.rs, ratcheting this file down from 610 lines."
-
-[[files]]
-path = "crates/adapters/src/schema_v2/protocol/v1/registrar.rs"
-loc = 614
-justification = "The selected numeric registrar import keeps transfer authority convergence beside lifecycle dispatch; numeric ABI decoding and label enrichment are split into bounded child modules, while source10 migration correlation remains unchanged."
-
-[[files]]
-path = "crates/adapters/src/schema_v2/state_surfaces.rs"
-loc = 641
-justification = "The selected numeric registrar import retains current authority selection and registry resolver-read state together; the new readable-name registrar evidence and snapshot eligibility are isolated in a bounded sibling module."
-
-[[files]]
-path = "apps/api/src/v2/events.rs"
-loc = 765
-justification = "History ergonomics (order, type sets, timestamp windows, include=data|raw, resolver filter) and the registry-route `contract_address` emitter filter keep the /v1/events handler, its cursor binding, and its filter parser adjacent; split the filter parser out on the next substantive touch."
-
-[[files]]
-path = "apps/api/src/v2/history.rs"
-loc = 714
-justification = "Name-history handler, the shared history read helpers (order, block window, capped total_count, cursor filter keys) and its cursor binding grew together; move the shared helpers into a sibling module on the next substantive touch."
-
-[[files]]
-path = "apps/api/src/v2/params.rs"
-loc = 778
-justification = "Shared query-parameter grammar gained timestamp bounds, type sets, and the resolver selector alongside sibling-branch additions; split per-parameter parsers into a submodule once the parallel branches land."
-
-[[files]]
-path = "apps/api/src/v2/resolvers.rs"
-loc = 721
-justification = "Resolver overview gained grant_event provenance for include=roles next to the existing overview assembly; move role provenance into overview_items on the next substantive touch."
-
-[[files]]
-path = "apps/api/src/v2/vocab.rs"
-loc = 689
-justification = "Product vocabulary gained HistoryEventTypeSet canonicalization alongside sibling-branch additions; split history vocabulary into a submodule once the parallel branches land."
-
-[[files]]
-path = "crates/storage/src/history.rs"
-loc = 685
-justification = "History read facade gained HistoryOrder, HistoryBlockWindow, HistoryPageOptions, the resolver filter, and the registry-route `contract_address` emitter filter while keeping every loader signature in one place; move the option types into a sibling module on the next substantive touch."
-
-[[files]]
-path = "crates/storage/src/history/paging.rs"
-loc = 689
-justification = "Keyset paging gained the reversible order predicate, per-chain block windows, and the resolver filter, which share one SQL builder; split the filter pushers from the cursor predicate on the next substantive touch."
-
-[[files]]
-path = "apps/api/src/v2/lookup/mod.rs"
-loc = 602
-justification = "Batch lookup keeps request parsing, name and address rendering, and served-head validation together; attaching the current `subregistry` pointer to name results (F1) adds two lines at the 600-line boundary. Split on the next substantive touch."
