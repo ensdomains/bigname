@@ -2684,7 +2684,7 @@ async fn v2_lookup_serves_a_project_publication_a_few_blocks_behind_head() -> Re
     for (publication_block, phase_status, expect_served) in [
         (78_i64, "completed", true),
         (78_i64, "running", true),
-        (40_i64, "completed", false),
+        (77_i64, "completed", false),
     ] {
         let database = TestDatabase::new_migrated().await?;
         database

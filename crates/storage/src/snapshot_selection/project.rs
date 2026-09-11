@@ -14,14 +14,14 @@ JOIN bigname_phase.chain_phase_state project
  AND project.current_block_hash = head.latest_block_hash
 "#;
 
-/// How far the project phase's completed publication may trail the stored chain head and
-/// still be served.
+/// How far the project phase's publication may trail the stored chain head and still be
+/// served.
 ///
-/// Live-follow stores a new head as soon as a block arrives; Project publishes for it a few
-/// seconds later. Within this many blocks the publication is served as the snapshot position
-/// (reported as `as_of`). Beyond it the chain is treated as not published and reads are stale,
-/// so a wedged or paused Project still surfaces instead of serving arbitrarily old data.
-pub const PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS: i64 = 32;
+/// Live-follow stores a new head as soon as a block arrives; Project publishes for it well
+/// under a second later. Only the publication for the block just before the head is served
+/// as the snapshot position (reported as `as_of`); anything further behind is stale, so a
+/// wedged or paused Project surfaces within one block instead of serving old data.
+pub const PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS: i64 = 1;
 
 /// The project phase's completed publication for this binary's interpreter generation.
 #[derive(Clone, Debug, Eq, PartialEq)]

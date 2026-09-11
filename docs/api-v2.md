@@ -534,7 +534,7 @@ running pass has not yet published beyond that position; a failed, paused, or
 idle phase, or a fresh run that cleared the position, has no publication).
 Live-follow stores a new head as soon as a block arrives and Project publishes
 for it a few seconds later, so the publication may trail the stored head. When
-it trails by at most 32 blocks, the selected position is the publication (and
+it trails by exactly one block, the selected position is the publication (and
 `as_of` reports it) whenever the publication is behind the requested `head`,
 `safe`, or `finalized` position; otherwise the requested position is served
 unchanged. A publication further behind, one from a different interpreter
@@ -788,7 +788,7 @@ The API selects current `latest`, `safe`, and `finalized` positions from
 `bigname_phase.chain_heads` and obtains their timestamps from readable
 `bigname_phase.chain_lineage`. Every selection is available only when the current
 `project` phase is completed with the API's compiled interpreter content hash on
-the readable lineage at most 32 blocks behind the latest head (see the
+the readable lineage at most one block behind the latest head (see the
 publication-lag rule above). Timestamp `at` selection and opaque-token replay
 still choose historical positions: every supplied or resolved position must
 exist in `bigname_phase.chain_lineage` and satisfy the requested finality
