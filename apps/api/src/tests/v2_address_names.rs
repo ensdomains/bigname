@@ -1852,3 +1852,50 @@ async fn v2_get_address_names_filters_by_authority_and_reports_migration() -> Re
     database.cleanup().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn v2_get_address_names_include_counts_adds_subname_and_record_counts() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let alpha = v2_address_name_specs()
+        .into_iter()
+        .find(|spec| spec.name == "alpha.eth")
+        .expect("alpha address-name fixture must exist");
+    database
+        .insert_record_inventory_current_row(address_name_record_inventory_current_row(&alpha))
+        .await?;
+
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?include=counts"),
+    )
+    .await?;
+    let rows = payload["data"].as_array().expect("data must be an array");
+    assert_eq!(rows[0]["name"], json!("alpha.eth"));
+    assert_eq!(rows[0]["subname_count"], json!(0));
+    assert_eq!(rows[0]["record_count"], json!(3));
+    assert!(rows[0].get("role_summary").is_none());
+    assert!(rows[0].get("event_count").is_none());
+    assert_eq!(rows[1]["name"], json!("beta.eth"));
+    assert_eq!(rows[1]["subname_count"], json!(0));
+    assert!(rows[1].get("record_count").is_none());
+
+    let plain = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
+    )
+    .await?;
+    assert!(plain["data"][0].get("subname_count").is_none());
+    assert!(plain["data"][0].get("record_count").is_none());
+
+    let both = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?include=counts,role_summary"),
+    )
+    .await?;
+    assert_eq!(both["data"][0]["record_count"], json!(3));
+    assert!(both["data"][0].get("role_summary").is_some());
+
+    database.cleanup().await?;
+    Ok(())
+}

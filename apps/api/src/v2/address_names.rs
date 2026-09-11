@@ -84,6 +84,8 @@ pub(crate) struct AddressName {
     pub(crate) relations: Vec<Relation>,
     pub(crate) is_primary: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subname_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) record_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) role_summary: Option<Vec<AddressNameRoleSummary>>,
@@ -113,7 +115,8 @@ pub(crate) async fn get_address_names(
         ensure_public_namespace(namespace).map_err(api_error_to_v2)?;
     }
     let namespace_filter = params.namespace.clone();
-    let include_role_summary = address_names_include_role_summary(&params.include)?;
+    let include = address_names_include(&params.include)?;
+    let include_role_summary = include.role_summary;
     let storage_relations = params
         .relation
         .as_ref()
@@ -232,7 +235,26 @@ pub(crate) async fn get_address_names(
     } else {
         BTreeMap::new()
     };
-    let record_counts_by_name = if include_role_summary {
+    let subname_counts_by_name = if include.counts {
+        bigname_storage::load_children_current_summaries(&state.pool, &logical_name_ids)
+            .await
+            .map_err(|_| {
+                V2Error::internal_error(format!(
+                    "failed to load address-name subname counts for {normalized_address}"
+                ))
+            })?
+            .into_iter()
+            .map(|summary| {
+                (
+                    summary.parent_logical_name_id,
+                    u64::try_from(summary.child_count).unwrap_or_default(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        BTreeMap::new()
+    };
+    let record_counts_by_name = if include_role_summary || include.counts {
         load_address_name_record_counts(&state.pool, &storage_page.entries, &name_rows)
             .await
             .map_err(|_| {
@@ -270,6 +292,12 @@ pub(crate) async fn get_address_names(
                     .get(&entry.namespace)
                     .and_then(Option::as_deref),
                 migrated_at_by_name.get(&entry.logical_name_id).cloned(),
+                include.counts.then(|| {
+                    subname_counts_by_name
+                        .get(&entry.logical_name_id)
+                        .copied()
+                        .unwrap_or_default()
+                }),
                 record_counts_by_name.get(&entry.logical_name_id).copied(),
                 role_summary,
             ))
@@ -357,6 +385,7 @@ pub(crate) fn build_address_name(
     name_row: Option<&NameCurrentRow>,
     primary_name: Option<&str>,
     migrated_at: Option<String>,
+    subname_count: Option<u64>,
     record_count: Option<u64>,
     role_summary: Option<Vec<AddressNameRoleSummary>>,
 ) -> AddressName {
@@ -382,6 +411,7 @@ pub(crate) fn build_address_name(
             .map(relation_from_storage)
             .collect(),
         is_primary: primary_name == Some(entry.normalized_name.as_str()),
+        subname_count,
         record_count,
         role_summary,
     }
@@ -463,19 +493,26 @@ pub(crate) fn build_address_name_role_summary(
         .collect()
 }
 
-fn address_names_include_role_summary(include: &[String]) -> V2Result<bool> {
-    let mut include_role_summary = false;
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct AddressNamesInclude {
+    role_summary: bool,
+    counts: bool,
+}
+
+fn address_names_include(include: &[String]) -> V2Result<AddressNamesInclude> {
+    let mut parsed = AddressNamesInclude::default();
     for value in include {
         match value.as_str() {
-            "role_summary" => include_role_summary = true,
+            "role_summary" => parsed.role_summary = true,
+            "counts" => parsed.counts = true,
             _ => {
                 return Err(V2Error::invalid_input(
-                    "include must contain only role_summary",
+                    "include must contain only role_summary or counts",
                 ));
             }
         }
     }
-    Ok(include_role_summary)
+    Ok(parsed)
 }
 
 #[cfg(test)]

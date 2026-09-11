@@ -47,7 +47,7 @@ use values::{
 pub(crate) use wrapper::wrapper_metadata;
 pub(crate) struct NameRecordQueryParams;
 impl QueryParamAllowlist for NameRecordQueryParams {
-    const ALLOWED: &'static [&'static str] = &["namespace", "at", "finality", "source"];
+    const ALLOWED: &'static [&'static str] = &["namespace", "at", "finality", "source", "include"];
 }
 
 pub(crate) type NameRecordQuery = StrictQueryParams<NameRecordQueryParams>;
@@ -100,6 +100,10 @@ pub(crate) struct NameRecord {
     pub(crate) chain_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) network: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subname_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) record_count: Option<u64>,
     pub(crate) status: Status,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unsupported_reason: Option<String>,
@@ -122,6 +126,7 @@ pub(crate) async fn get_name_record(
         .clone()
         .unwrap_or_else(|| normalized.namespace.to_owned());
     let route_source = route_source(params.source)?;
+    let include_counts = name_record_include_counts(&params.include)?;
 
     let include_resolution_auxiliary =
         namespace == BASENAMES_NAMESPACE && route_source == Source::Verified;
@@ -194,6 +199,11 @@ pub(crate) async fn get_name_record(
                 .await?
                 .remove(&row.logical_name_id);
     }
+    if include_counts && record.record.status != Status::Unsupported {
+        let counts = load_name_counts(&state.pool, &row).await?;
+        record.record.subname_count = Some(counts.subname_count);
+        record.record.record_count = counts.record_count;
+    }
     let mut meta = snapshot_meta(&selected_snapshot)?;
     meta.source = Some(route_source);
 
@@ -202,6 +212,54 @@ pub(crate) async fn get_name_record(
         page: None,
         meta,
     }))
+}
+
+pub(crate) struct NameCounts {
+    pub(crate) subname_count: u64,
+    pub(crate) record_count: Option<u64>,
+}
+
+/// The direct readable subname count and, when the row has current record inventory, its known
+/// record-selector count; both are the same bounded reads the subnames and address-name routes run.
+pub(crate) async fn load_name_counts(
+    pool: &sqlx::PgPool,
+    row: &NameCurrentRow,
+) -> V2Result<NameCounts> {
+    let subname_count = bigname_storage::load_children_current_summaries(
+        pool,
+        std::slice::from_ref(&row.logical_name_id),
+    )
+    .await
+    .map_err(|_| V2Error::internal_error("failed to load subname counts"))?
+    .into_iter()
+    .next()
+    .and_then(|summary| u64::try_from(summary.child_count).ok())
+    .unwrap_or_default();
+    let record_count = match bigname_storage::resolution_record_inventory_lookup_key_any_chain(row)
+    {
+        Some(key) => bigname_storage::count_record_inventory_selectors_by_lookup_keys(pool, &[key])
+            .await
+            .map_err(|_| V2Error::internal_error("failed to load record counts"))?
+            .into_iter()
+            .next()
+            .flatten(),
+        None => None,
+    };
+    Ok(NameCounts {
+        subname_count,
+        record_count,
+    })
+}
+
+fn name_record_include_counts(include: &[String]) -> V2Result<bool> {
+    let mut include_counts = false;
+    for value in include {
+        match value.as_str() {
+            "counts" => include_counts = true,
+            _ => return Err(V2Error::invalid_input("include must contain only counts")),
+        }
+    }
+    Ok(include_counts)
 }
 
 /// RFC 3339 `migrated_at` per logical name for names whose current ENSv2 authority was proven by
@@ -319,6 +377,8 @@ pub(crate) fn build_name_record(
         primary_address,
         chain_id,
         network: Some(network(row)),
+        subname_count: None,
+        record_count: None,
         status,
         unsupported_reason: None,
         failure_reason: None,

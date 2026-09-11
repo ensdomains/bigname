@@ -395,8 +395,18 @@ Field ownership:
 - Tier: product read.
 - Purpose: name-profile read, using the flat record shape plus registration summary.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`,
-  `source`. `source` accepts `indexed` or `verified`; omitting it is identical
+  `source`, `include=counts`. `source` accepts `indexed` or `verified`; omitting it is identical
   to `source=indexed`. This name-profile route does not accept `source=auto`.
+  `include=counts` adds `subname_count`, the name's direct readable subname
+  count (the same per-parent aggregate `GET /v1/names/{name}/subnames` reports
+  as `page.total_count`), and `record_count`, the known record-selector count
+  of the current registration's record inventory with the same meaning as on
+  address-name rows; `record_count` is omitted when the row has no current
+  record inventory. Neither count is added to the `status=unsupported`
+  identity-only object. There is no `event_count`: bigname keeps no
+  precomputed per-name event total, and counting history rows on the request
+  path would be an unbounded scan, so the expansion does not offer one. Any
+  other `include` value returns `400 invalid_input`.
 - Response shape: `data` is one flat record object using dictionary fields.
   The registration summary is not nested; it is represented by
   `registration_id`, `token_id`, `owner`, `manager`, `registrant`,
@@ -860,7 +870,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `text_records`, and `content_hash`.
   `include=counts` adds `subname_count`, the row's direct subname count.
 - Pagination behavior: standard collection pagination by
-  `display_name` ascending.
+  `display_name` ascending. `page.total_count` is populated on every page with
+  the parent's direct readable subname count: the same bounded per-parent
+  aggregate that already annotates the page, so it costs no extra scan.
 - Snapshot behavior: the parent and subname rows are selected from current
   state. The response omits `meta.as_of` and `meta.as_of_token`, and its cursor
   carries no snapshot validity claim. True as-of child enumeration is deferred
@@ -1163,7 +1175,12 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   for the row. `record_count` counts the known record selectors for the name's
   current registration, including unsupported-family selectors and excluding
   explicit gaps. `grant_scope` uses the same shape documented for
-  `GET /v1/permissions`.
+  `GET /v1/permissions`. `include=counts` adds `subname_count`, the row's
+  direct readable subname count (one bounded per-parent aggregate over the
+  page's names), and the same `record_count`; the two expansions combine as
+  `include=counts,role_summary`. No `event_count` is offered, for the reason
+  given on `GET /v1/names/{name}`. Any other `include` value returns
+  `400 invalid_input`.
 - Pagination behavior: standard collection pagination. Cursors are bound to
   address, optional namespace filter, normalized relation set, `authority`,
   `q`, dedupe mode, sort, and order.

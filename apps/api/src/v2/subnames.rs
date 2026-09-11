@@ -176,7 +176,7 @@ pub(crate) async fn get_subnames(
             cursor: params.cursor.clone(),
             next_cursor,
             page_size: params.page_size,
-            total_count: None,
+            total_count: u64::try_from(storage_page.summary.child_count).ok(),
             has_more,
         }),
         meta: Meta::default(),

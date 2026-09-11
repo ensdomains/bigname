@@ -3699,7 +3699,7 @@ async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> R
     );
 
     assert_eq!(payload["page"]["page_size"], json!(3));
-    assert_eq!(payload["page"]["total_count"], Value::Null);
+    assert_eq!(payload["page"]["total_count"], json!(3));
     assert_eq!(payload["page"]["has_more"], json!(false));
     assert_eq!(payload["meta"], json!({}));
 
@@ -6388,6 +6388,54 @@ async fn v2_get_name_and_lookup_report_migrated_at_from_the_migration_proof() ->
     let record = &lookup["data"][0]["record"];
     assert_eq!(record["authority"], json!("ens_v2"));
     assert_eq!(record["migrated_at"], json!("2024-05-31T16:08:19Z"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_name_include_counts_reports_subname_and_record_counts() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_record_fixture(&database, |_| {}, |_, _, _| {}).await?;
+
+    let plain = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
+    assert!(plain["data"].get("subname_count").is_none());
+    assert!(plain["data"].get("record_count").is_none());
+
+    let counted =
+        v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth?include=counts")
+            .await?;
+    assert_eq!(counted["data"]["subname_count"], json!(0));
+    assert_eq!(counted["data"]["record_count"], json!(4));
+    assert!(counted["data"].get("event_count").is_none());
+
+    let rejected = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/Alice.eth?include=records")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await?;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_name_include_counts_counts_direct_subnames_of_the_parent() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+
+    let parent =
+        v2_name_record_payload_for_database(&database, "/v1/names/parent.eth?include=counts")
+            .await?;
+    assert_eq!(parent["data"]["subname_count"], json!(3));
+
+    let subnames =
+        v2_subnames_payload_for_database(&database, "/v1/names/parent.eth/subnames?page_size=2")
+            .await?;
+    assert_eq!(subnames["page"]["total_count"], json!(3));
+    assert_eq!(subnames["page"]["has_more"], json!(true));
+    assert_eq!(subnames["data"].as_array().map(Vec::len), Some(2));
 
     database.cleanup().await
 }

@@ -305,6 +305,8 @@ Rules:
   populate it by counting the same readable current name/address rows used by
   the page query when the requested relation set maps directly to a stored role
   group. Relation sets that require post-filtering retain `total_count=null`.
+  `GET /v1/names/{name}/subnames` populates it with the parent's direct
+  readable subname count, an aggregate bounded by that one parent's children.
   Other routes populate it only where a precomputed count makes it cheap or
   where they explicitly document `include=total_count`; they must not otherwise
   run unconditional full counts on the request path.

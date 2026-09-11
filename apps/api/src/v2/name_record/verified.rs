@@ -86,6 +86,8 @@ fn unsupported_name_record(row: &NameCurrentRow) -> V2Result<Option<NameRecord>>
         primary_address: None,
         chain_id: None,
         network: None,
+        subname_count: None,
+        record_count: None,
         status: Status::Unsupported,
         unsupported_reason: Some(reason),
         failure_reason: None,
