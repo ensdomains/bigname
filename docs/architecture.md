@@ -36,7 +36,7 @@ Conflicts reject canonical [admission](glossary.md); namespace assignment happen
 ## Read contract
 
 The served REST families are lookup, status, name, address, permission, search,
-event, resolver, namespace, and diagnostic routes under `/v2`. Their parameters,
+event, resolver, namespace, and diagnostic routes under `/v1`. Their parameters,
 result vocabulary, snapshot behavior, and pagination rules are defined in
 [`api-v2-routes.md`](api-v2-routes.md). The deleted v1 REST shapes are not a
 compatibility layer for this contract.
@@ -1337,7 +1337,7 @@ restored agreement may clear the matching active row.
 Permissions are first-class projections and explain views. Track grants by scope (root, registry, resource, resolver, record manager/operator). Each grant records source, revocation source, inheritance path, transfer behavior, scope, and effective powers.
 
 Public reads expose effective powers directly so callers do not reconstruct
-authority from raw role bitmaps. `GET /v2/permissions` is the current
+authority from raw role bitmaps. `GET /v1/permissions` is the current
 resource-anchored permission collection; name- and address-centric views
 summarize or filter the same truth.
 

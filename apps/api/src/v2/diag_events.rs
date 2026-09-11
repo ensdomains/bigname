@@ -64,7 +64,7 @@ pub(crate) struct DiagnosticEvent {
     pub(crate) coverage: Value,
 }
 
-/// Raw diagnostics twin of `/v2/events`; filtering and cursor anchoring match
+/// Raw diagnostics twin of `/v1/events`; filtering and cursor anchoring match
 /// the product route, but rows are emitted without product event type mapping.
 pub(crate) async fn get_diagnostic_events(
     params: DiagnosticEventsQuery,

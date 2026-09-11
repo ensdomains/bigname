@@ -1,12 +1,18 @@
 # API v2 Routes
 
-Per-route reference for the development-time `/v2` surface accepted in
+> **Prefix note (#315):** the public route prefix is now `/v1`. This file's
+> name (`api-v2-routes`) is historical, naming the ADR 0006 contract
+> generation; it is not the wire prefix. A rename of the contract docs is
+> tracked separately.
+
+Per-route reference for the `/v1` surface accepted in
 [ADR 0006](adrs/0006-api-v2-product-surface.md). Contract principles,
 dictionary, envelope, status vocabulary, finality rules, cursor rules, and
 error shape live in [`api-v2.md`](api-v2.md).
 
-Routes below use the `/v2` prefix. C2 removes the former `/v1` API without
-renaming these routes; the public edge remains a separate C3 change.
+Routes below use the `/v1` prefix. The former `/v1` API listed under each
+route's "Replaces (v1)" line was removed in C2; this contract took over the
+prefix in #315, and the public edge serves it.
 
 `GET /healthz` remains the unversioned operator health contract outside the
 versioned product routes. `GET /`, `GET /docs`, and `GET /openapi.json` are not
@@ -33,11 +39,11 @@ with no claim, unsupported verification, or mismatched verification return
 All collection routes use the standard `page` object: `cursor`,
 `next_cursor`, `page_size`, nullable `total_count`, and `has_more`.
 
-The top-level latest-state collections are `GET /v2/names/{name}/subnames`,
-`GET /v2/names/{name}/history`, `GET /v2/permissions`,
-`GET /v2/addresses/{address}/names`,
-`GET /v2/addresses/{address}/history`, `GET /v2/search`, `GET /v2/events`, and
-`GET /v2/diagnostics/events`. They omit `meta.as_of` and
+The top-level latest-state collections are `GET /v1/names/{name}/subnames`,
+`GET /v1/names/{name}/history`, `GET /v1/permissions`,
+`GET /v1/addresses/{address}/names`,
+`GET /v1/addresses/{address}/history`, `GET /v1/search`, `GET /v1/events`, and
+`GET /v1/diagnostics/events`. They omit `meta.as_of` and
 `meta.as_of_token`, except that search reports request-scoped `meta.as_of` and
 `meta.as_of_completeness` for staleness and suppression disclosure while still
 omitting `meta.as_of_token`. Their cursors bind the collection anchor, namespace,
@@ -68,7 +74,7 @@ publishes the full Interpret and Project re-walk, and submits that old cursor to
 the post-re-walk test publication. The control and candidate test runs hold
 every other shared-boundary input constant, including PR #391's topology
 serializer. For
-`/v2/events`, name history, address history, and every other product cursor
+`/v1/events`, name history, address history, and every other product cursor
 surface backed by normalized-event row identity, it must
 resume from the same normalized-event keyset anchor with identical remaining
 product rows, pages, fields, `has_more`, and summary behavior. Because that
@@ -76,7 +82,7 @@ anchor may be an unmapped event absent from the response, the corpus places an
 unmapped normalized event at a product-page boundary and proves no visible row
 is skipped or duplicated. This default product-event exception does not remove
 an explicitly requested `type` from cursor anchor validation.
-`/v2/diagnostics/events` must accept its old cursor
+`/v1/diagnostics/events` must accept its old cursor
 and continue from the same stable normalized-event anchor, but its remaining
 rows and fields may include the expected new candidate diagnostics.
 The numeric `normalized_event_id` of a pre-existing diagnostic row may change
@@ -145,7 +151,7 @@ Field ownership:
   vocabulary.
 - Permission lineage containers are route-local: `lineage`, `grant`,
   `revocation`, `inheritance_path`, and `transfer_behavior` exist only on
-  `include=lineage` for `/v2/permissions`.
+  `include=lineage` for `/v1/permissions`.
 - Primary-name containers are route-local: `answers` holds the returned
   source answer entries, and `raw_claim_name` preserves an invalid reverse
   claim exactly as observed for that tuple.
@@ -156,7 +162,7 @@ Field ownership:
   product-facing list of public chain mappings for one namespace.
 - Resolver overview containers are route-local: `bound_names` is the nested
   names collection inside one resolver overview object.
-- Ops status containers are route-local: `/v2/status` owns `chains`,
+- Ops status containers are route-local: `/v1/status` owns `chains`,
   `latest_block`, `indexed_block`, `safe_block`, `finalized_block`,
   `lag_blocks`, `lag_seconds`, `pending_invalidation_count`,
   `pending_invalidation_count_capped`, `dead_letter_count`, `network_block`, `network_head_observed_at`,
@@ -168,9 +174,9 @@ Field ownership:
 
 ## Tier 1: Lookup Primitives
 
-### `POST /v2/lookup`
+### `POST /v1/lookup`
 
-- Method/path: `POST /v2/lookup`
+- Method/path: `POST /v1/lookup`
 - Tier: lookup primitive.
 - Purpose: batched forward name-to-record and reverse address-plus-coin-type
   resolution. `profile=feed` is the latency path; `profile=detail` returns
@@ -292,9 +298,9 @@ Field ownership:
   contain the position actually used by the name input.
 - Replaces (v1): `POST /v1/identity:lookup`.
 
-### `GET /v2/status`
+### `GET /v1/status`
 
-- Method/path: `GET /v2/status`
+- Method/path: `GET /v1/status`
 - Tier: lookup primitive.
 - Purpose: per-chain indexing readiness.
 - Request parameters: none.
@@ -376,9 +382,9 @@ Field ownership:
 
 ## Tier 2: Product Reads
 
-### `GET /v2/names/{name}`
+### `GET /v1/names/{name}`
 
-- Method/path: `GET /v2/names/{name}`
+- Method/path: `GET /v1/names/{name}`
 - Tier: product read.
 - Purpose: name-profile read, using the flat record shape plus registration summary.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`,
@@ -426,7 +432,7 @@ Field ownership:
   are served. With `source=verified`, the resolver-record-backed fields
   `addresses`, `text_records`, `content_hash`, and `primary_address` are built
   by a fresh schema-v2 lookup at the current readable position, using the same
-  verified path as `/v2/names/{name}/records`; indexed resolver-record values
+  verified path as `/v1/names/{name}/records`; indexed resolver-record values
   are not substituted into those fields. The registration and identity summary
   fields (`registration_id`, `token_id`, `owner`, `manager`, `registrant`, dates,
   `registration_status`, `wrapper_state`, `wrapper_fuses`, `name`, `display_name`, `namespace`, `namehash`,
@@ -498,9 +504,9 @@ Field ownership:
 - Replaces (v1): `GET /v1/names/{namespace}/{name}` and
   `GET /v1/profiles/names/{name}`.
 
-### `GET /v2/names/{name}/records`
+### `GET /v1/names/{name}/records`
 
-- Method/path: `GET /v2/names/{name}/records`
+- Method/path: `GET /v1/names/{name}/records`
 - Tier: product read.
 - Purpose: resolver records.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`,
@@ -786,13 +792,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 | Avatar | Served | `avatar`, as the dedicated public selector for the `avatar` text key. (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L4-L19 @ ens_v1@91c966f) |
 | Content hash | Served | `contenthash`. The current Basenames admission has a narrower event family; see the [Basenames contenthash divergence](upstream.md#basenames-contenthash-admission-narrowing). (upstream: .refs/ens_v1/contracts/resolvers/profiles/IContentHashResolver.sol:L4-L10 @ ens_v1@91c966f) |
 | Registry TTL | Validated and discarded | `NewTTL` is decoded to validate admitted logs but produces no normalized event or public record key. The LLL-era low-byte validation exception is documented in the [registry-word divergence](upstream.md#ensv1-lll-era-registry-word-decoding). ENS declares the TTL event and getter as `uint64`. (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L14-L15 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L49-L57 @ ens_v1@91c966f) |
-| Registry owner | Served outside the grammar | No record key. `NewOwner` and `Transfer` are retained as normalized authority events. `GET /v2/names/{name}` carries the selected current owner in its optional `owner` field; its history route exposes a retained authority change as `type=authority`. Ownership is never requestable as a record key. (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L6-L9 @ ens_v1@91c966f) |
-| Registry resolver | Served outside the grammar | No record key. `NewResolver` is retained as the node's resolver-binding event. `GET /v2/names/{name}` carries a serveable current binding in its optional `resolver` object (`chain_id` and `address`); its history route exposes a retained change as `type=resolver`. A resolver address is not itself a requestable record. (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L11-L12 @ ens_v1@91c966f) |
+| Registry owner | Served outside the grammar | No record key. `NewOwner` and `Transfer` are retained as normalized authority events. `GET /v1/names/{name}` carries the selected current owner in its optional `owner` field; its history route exposes a retained authority change as `type=authority`. Ownership is never requestable as a record key. (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L6-L9 @ ens_v1@91c966f) |
+| Registry resolver | Served outside the grammar | No record key. `NewResolver` is retained as the node's resolver-binding event. `GET /v1/names/{name}` carries a serveable current binding in its optional `resolver` object (`chain_id` and `address`); its history route exposes a retained change as `type=resolver`. A resolver address is not itself a requestable record. (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L11-L12 @ ens_v1@91c966f) |
 | ABI records | Outside the grammar | No public key. ENS defines ABI records by node and accepted content-type mask. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IABIResolver.sol:L4-L16 @ ens_v1@91c966f) |
 | Public keys | Outside the grammar | No public key. ENS defines a secp256k1 public-key record. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IPubkeyResolver.sol:L4-L12 @ ens_v1@91c966f) |
 | Interface declarations | Outside the grammar | No public key. ENS defines an interface-ID-to-implementer lookup. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IInterfaceResolver.sol:L4-L22 @ ens_v1@91c966f) |
 | Reverse-claim name records | Served outside the grammar | No record key. For indexed claim intake, only a `RecordChanged` row whose `primary_claim_source` was produced when the reverse-registrar adapter interpreted `NameForAddrChanged` is attributed to a reverse claim. Among indexed `RecordChanged` rows, only those attributed rows contribute claim values to the primary-name projection; a `ReverseChanged` event for the same address, coin type, and namespace must also exist, and the indexed claim attaches to that event's key. ENSv1's standalone reverse registrar emits `NameForAddrChanged` when it stores an address's name. (upstream: .refs/ens_v1/contracts/reverseRegistrar/StandaloneReverseRegistrar.sol:L28-L30 @ ens_v1@91c966f) Mainnet ENS reverse resolution instead uses the separate [event-silent](glossary.md#event-silent) reverse-resolver [hydration](glossary.md#hydration) or request-scoped [verified lookup](glossary.md#verified-lookup) path, not indexed `NameForAddrChanged` claim intake; its reverse registrar emits `ReverseClaimed` and calls the selected resolver to set the name. (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L76-L84 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123-L131 @ ens_v1@91c966f) |
-| General resolver name records | History only; outside the grammar | No public key or current value surface. Every resolver-family `NameChanged` is retained as an unattributed normalized `RecordChanged` in the `name` family, regardless of resolver or node type; a write for an `<addr>.addr.reverse` node therefore remains unattributed. When the row is associated with a materialized name, `GET /v2/names/{name}/history` exposes the change as `type=record` without its stored name value. The record routes reject the `name` family, and the primary-name projection ignores these rows because they have no `primary_claim_source`. ENSv1 defines `NameChanged` generically by node and name. (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L4-L11 @ ens_v1@91c966f) |
+| General resolver name records | History only; outside the grammar | No public key or current value surface. Every resolver-family `NameChanged` is retained as an unattributed normalized `RecordChanged` in the `name` family, regardless of resolver or node type; a write for an `<addr>.addr.reverse` node therefore remains unattributed. When the row is associated with a materialized name, `GET /v1/names/{name}/history` exposes the change as `type=record` without its stored name value. The record routes reject the `name` family, and the primary-name projection ignores these rows because they have no `primary_claim_source`. ENSv1 defines `NameChanged` generically by node and name. (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L4-L11 @ ens_v1@91c966f) |
 | Resolver record versions | Outside the grammar | No public key. ENS keeps a per-node record version on the resolver and bumps it on `clearRecords`, emitting `VersionChanged`; the indexed record inventory retains that event as the boundary that invalidates older record values, but the version number itself is not served. (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L20-L22 @ ens_v1@91c966f) |
 | DNS record sets | Outside the grammar | No public key. ENS defines DNS record-set update/delete events and a wire-format getter. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSRecordResolver.sol:L4-L24 @ ens_v1@91c966f) |
 | DNS zone hashes | Outside the grammar | No public key. ENS defines a DNS zone-hash update event and getter. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSZoneResolver.sol:L4-L15 @ ens_v1@91c966f) |
@@ -800,9 +806,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 | ENSv1 arbitrary data records | Outside the grammar | No public key. ENS defines string-keyed arbitrary byte data. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDataResolver.sol:L5-L21 @ ens_v1@91c966f) The pinned ENSv1 `PublicResolver` source composes `DataResolver`. (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20-L30 @ ens_v1@91c966f) bigname's ENSv1 resolver-family manifest admits and normalizes `DataChanged`, but its Mainnet PublicResolver admission rows include `DataResolver` in none of their declared resolver compositions; see [ENS mainnet admission](manifests.md#ens-mainnet). This is an admitted-generation composition limit and a grammar limit, not an event-admission limit. |
 | ENSv2 generic data resources | Outside the grammar | No public key. The admitted archived Sepolia resolver ABI exposes `DataChanged` and `NamedDataResource`; their normalized-event exclusion is documented in the [ENSv2 admission divergence](upstream.md#ensv2-data-event-admission-narrowing). (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L360-L375 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L505-L519 @ ens_v2@a971bd64) |
 
-### `GET /v2/names/{name}/subnames`
+### `GET /v1/names/{name}/subnames`
 
-- Method/path: `GET /v2/names/{name}/subnames`
+- Method/path: `GET /v1/names/{name}/subnames`
 - Tier: product read.
 - Purpose: direct subnames.
 - Request parameters: path `name`; query `namespace`, `include=counts`,
@@ -834,7 +840,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   bigname cannot name is absent from the page instead. Neither form is
   addressable, and neither may be fed
   back into a name-shaped route. Resolver records are not included here;
-  use `GET /v2/names/{name}/records` for `resolver`, `addresses`,
+  use `GET /v1/names/{name}/records` for `resolver`, `addresses`,
   `text_records`, and `content_hash`.
   `include=counts` adds `subname_count`, the row's direct subname count.
 - Pagination behavior: standard collection pagination by
@@ -882,9 +888,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   the resolver removes it.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/children`.
 
-### `GET /v2/names/{name}/history`
+### `GET /v1/names/{name}/history`
 
-- Method/path: `GET /v2/names/{name}/history`
+- Method/path: `GET /v1/names/{name}/history`
 - Tier: product read.
 - Purpose: name history.
 - Request parameters: path `name`; query `namespace`,
@@ -898,7 +904,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   registration; reservation facts never carry one. The shared event-identity
   contract, including the committed companion change that adds `resource_id`
   for the underlying resource identity, is documented under
-  [`GET /v2/events`](#get-v2events). Rows never include before/after
+  [`GET /v1/events`](#get-v2events). Rows never include before/after
   state, raw normalized-event payloads, or a `data` change object. Friendly
   `type` vocabulary: `registration`, `renewal`, `release`, `expiry`,
   `transfer`, `authority`, `resolver`, `record`, `primary_name`, `permission`,
@@ -912,7 +918,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   activated and product-visible. Its separate
   candidate association is diagnostics-only and cannot suppress, duplicate, or
   reclassify that ordinary row. Only slice 2 consumer activation enables the
-  per-source-log mapping specified for [`GET /v2/events`](#get-v2events) when an
+  per-source-log mapping specified for [`GET /v1/events`](#get-v2events) when an
   activated event is associated with the requested name or registration.
   Manifest or schema-vocabulary activation alone changes no name-history
   response. Candidate visibility is filtered in
@@ -922,7 +928,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   log is linked to both the registry resource retained for reads and a distinct
   control resource, this product route returns the control-resource row once.
   The additional normalized row that retains the registry resource link remains available from
-  `GET /v2/diagnostics/events`; product suppression happens before cursor
+  `GET /v1/diagnostics/events`; product suppression happens before cursor
   validation, summary calculation, and pagination. Without a distinct control
   resource, the sole registry-resource row remains product-visible.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
@@ -944,7 +950,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   [name surface](glossary.md#surface-name-surface) existed and carries no name
   attribution. `scope=name` returns only rows carrying the name's
   `logical_name_id`. A row on a resource that was never bound to the name is
-  reachable through `GET /v2/diagnostics/events` via the registry resource
+  reachable through `GET /v1/diagnostics/events` via the registry resource
   recorded internally at
   `name_current.provenance.read_reachability.serving_resource_id`.
 - Snapshot behavior: the parent anchor and history rows are selected from
@@ -966,13 +972,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   no redo intervened and `stale` when the redo check takes precedence.
 - Replaces (v1): `GET /v1/history/names/{namespace}/{name}`.
   Registration-id anchored history from `GET /v1/history/resources/{resource_id}`
-  moves to `GET /v2/events?registration_id=...`. `scope=registration` on this
+  moves to `GET /v1/events?registration_id=...`. `scope=registration` on this
   route is limited to registration lifecycles associated with the requested
   name.
 
-### `GET /v2/permissions`
+### `GET /v1/permissions`
 
-- Method/path: `GET /v2/permissions`
+- Method/path: `GET /v1/permissions`
 - Tier: product read.
 - Purpose: flat permission rows by name, registration, or address, including
   registrations that are no longer a name's current one.
@@ -1084,9 +1090,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles`, and
   `GET /v1/resources/lookup`.
 
-### `GET /v2/addresses/{address}/names`
+### `GET /v1/addresses/{address}/names`
 
-- Method/path: `GET /v2/addresses/{address}/names`
+- Method/path: `GET /v1/addresses/{address}/names`
 - Tier: product read.
 - Purpose: names related to an address.
 - Request parameters: path `address`; query `namespace`, `relation`, `q`,
@@ -1118,14 +1124,14 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   subset of `owner`, `manager`, and `registrant` that matched. `is_primary` is
   evaluated against that row namespace's coin-type-60 primary-name claim, not a
   route-wide namespace shortcut. The claim is compared in the same normalized
-  form the indexed answer from `GET /v2/addresses/{address}/primary-name`
+  form the indexed answer from `GET /v1/addresses/{address}/primary-name`
   publishes, so a successful claim recorded in a non-normalized spelling still
   marks its name primary. A spelling the projection already recorded as its
   normalized form is instead compared verbatim, so such a claim marks a row
   primary only where the published spelling is exactly that row's name. A
   successful claim whose stored spelling does not normalize likewise marks no
   row primary, and the primary-name route reports it as `invalid_name`.
-  Resolver records are not included; use `GET /v2/names/{name}/records` for
+  Resolver records are not included; use `GET /v1/names/{name}/records` for
   resolver data.
   `include=role_summary` adds
   `role_summary: [{address, grants: [{grant_scope, powers}]}]` grouped by the
@@ -1133,7 +1139,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   for the row. `record_count` counts the known record selectors for the name's
   current registration, including unsupported-family selectors and excluding
   explicit gaps. `grant_scope` uses the same shape documented for
-  `GET /v2/permissions`.
+  `GET /v1/permissions`.
 - Pagination behavior: standard collection pagination. Cursors are bound to
   address, optional namespace filter, normalized relation set, `q`, dedupe
   mode, sort, and order.
@@ -1173,9 +1179,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Replaces (v1): `GET /v1/addresses/{address}/names` and address-relation
   uses of `GET /v1/names`.
 
-### `GET /v2/addresses/{address}/primary-name`
+### `GET /v1/addresses/{address}/primary-name`
 
-- Method/path: `GET /v2/addresses/{address}/primary-name`
+- Method/path: `GET /v1/addresses/{address}/primary-name`
 - Tier: product read.
 - Purpose: primary name for an address.
 - Request parameters: path `address`; query `coin_type` default `60`,
@@ -1356,9 +1362,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   coverage refusal from the shared authority-not-verifiable refusal.
 - Replaces (v1): `GET /v1/primary-names/{address}`.
 
-### `GET /v2/addresses/{address}/history`
+### `GET /v1/addresses/{address}/history`
 
-- Method/path: `GET /v2/addresses/{address}/history`
+- Method/path: `GET /v1/addresses/{address}/history`
 - Tier: product read.
 - Purpose: address activity history.
 - Request parameters: path `address`; query `namespace`, `relation`,
@@ -1370,7 +1376,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   normalizes to all three values. Rows match when any listed relation matches.
 - Response shape: `data` is an array of compact event rows using the shared
   friendly `type` vocabulary and the event-identity contract documented under
-  [`GET /v2/events`](#get-v2events). The correlation-scoped candidate
+  [`GET /v1/events`](#get-v2events). The correlation-scoped candidate
   visibility rule from name history also applies here: slice 1 changes no
   address-history row,
   and slice 2 consumer activation admits correlation-dependent rows. An
@@ -1410,9 +1416,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   and `stale` when the redo check takes precedence.
 - Replaces (v1): `GET /v1/history/addresses/{address}`.
 
-### `GET /v2/search`
+### `GET /v1/search`
 
-- Method/path: `GET /v2/search`
+- Method/path: `GET /v1/search`
 - Tier: product read.
 - Purpose: name search and suggestions. No availability or pricing semantics.
 - Request parameters: query `q`, `match=prefix|contains` default `prefix`,
@@ -1478,13 +1484,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   when no public namespace is ready or when its captured deployment state
   changes during the read.
 - Replaces (v1): search, suggestion, and exact-name-filter uses of
-  `GET /v1/names`; exact name profiles move to `GET /v2/names/{name}`.
+  `GET /v1/names`; exact name profiles move to `GET /v1/names/{name}`.
 
-### `GET /v2/events`
+### `GET /v1/events`
 
 For a registrar lease first identified by a later readable observation, registration time remains the original numeric grant time. Compact product history omits only snapshots with both `state_derived=true` and `registrar_surface_snapshot=true`, before pagination and cursor validation. Diagnostics retains the marked snapshot at its later readable trigger; original resource-only history and all unmarked events remain unchanged. See [storage semantics](storage.md).
 
-- Method/path: `GET /v2/events`
+- Method/path: `GET /v1/events`
 - Tier: product read.
 - Purpose: compact event search across name, address, registration, type, and
   block filters.
@@ -1529,7 +1535,7 @@ For a registrar lease first identified by a later readable observation, registra
   ordinary event's inclusion or multiplicity. Diagnostics may expose candidate
   rows and associations immediately. Schema-vocabulary,
   manifest-family, backfill, and interpretation activation alone change no
-  `/v2/events` or product-history response; only slice 2 changes visibility.
+  `/v1/events` or product-history response; only slice 2 changes visibility.
   The shared visibility predicate runs before keyset pagination, page-size
   limiting, cursor construction, and product-type mapping. A V1 registry
   resolver log linked to both the registry resource retained for reads and a
@@ -1563,9 +1569,9 @@ For a registrar lease first identified by a later readable observation, registra
   no redo intervened and `stale` when the redo check takes precedence.
 - Replaces (v1): `GET /v1/events` compact event search.
 
-### `GET /v2/resolvers/{chain_id}/{address}`
+### `GET /v1/resolvers/{chain_id}/{address}`
 
-- Method/path: `GET /v2/resolvers/{chain_id}/{address}`
+- Method/path: `GET /v1/resolvers/{chain_id}/{address}`
 - Tier: product read.
 - Purpose: resolver overview for numeric `chain_id` and resolver `address`.
 - Request parameters: path `chain_id`, `address`; query `include` for
@@ -1613,7 +1619,7 @@ For a registrar lease first identified by a later readable observation, registra
   the number of those permission rows, not the number of powers expanded from
   them; a row granting multiple powers counts once. The former embedded
   `registration_ids` list is omitted because it was itself unbounded, and
-  permission rows remain queryable through `GET /v2/permissions` using the
+  permission rows remain queryable through `GET /v1/permissions` using the
   returned addresses. The resolver arrays are not independently pageable. This
   bounded-sample contract is
   the consumer-visible resolver-overview shape change delivered with
@@ -1626,7 +1632,7 @@ For a registrar lease first identified by a later readable observation, registra
   to_registration_id?}`. `to_name` is `null` when the latest alias state is
   `removed` or `unknown`. `include=events` exposes `{count, by_type}` where
   `by_type` aggregates raw resolver event kinds that map to the same friendly
-  `type` vocabulary as `GET /v2/events`; raw kinds without a product event type
+  `type` vocabulary as `GET /v1/events`; raw kinds without a product event type
   remain included in `count` but are excluded from `by_type`.
 - Pagination behavior: standard collection pagination applies to the
   nested `bound_names.page` object. The top-level response has no `page`.
@@ -1654,9 +1660,9 @@ For a registrar lease first identified by a later readable observation, registra
 - Replaces (v1): `GET /v1/resolvers/{chain_id}/{resolver_address}/overview`
   and the `GET /v1/names?resolver=...` filter.
 
-### `GET /v2/namespaces/{namespace}`
+### `GET /v1/namespaces/{namespace}`
 
-- Method/path: `GET /v2/namespaces/{namespace}`
+- Method/path: `GET /v1/namespaces/{namespace}`
 - Tier: product read.
 - Purpose: namespace metadata and supported-capability summary in product
   vocabulary.
@@ -1682,27 +1688,27 @@ route vocabulary restrictions do not apply to the diagnostic payloads below.
 
 Diagnostic snapshot rules:
 
-- `/v2/diagnostics/names/{name}/coverage`,
-  `/v2/diagnostics/names/{name}/binding`,
-  `/v2/diagnostics/names/{name}/authority`,
-  and `/v2/diagnostics/names/{name}/records` accept `at` and `finality` and
+- `/v1/diagnostics/names/{name}/coverage`,
+  `/v1/diagnostics/names/{name}/binding`,
+  `/v1/diagnostics/names/{name}/authority`,
+  and `/v1/diagnostics/names/{name}/records` accept `at` and `finality` and
   carry `meta.as_of`/`meta.as_of_token` because they explain one selected
   snapshot.
-- `/v2/diagnostics/events` follows the shared latest-state collection rule: it
+- `/v1/diagnostics/events` follows the shared latest-state collection rule: it
   omits snapshot metadata and rejects `at` and historical `finality`.
-- `/v2/diagnostics/namespaces/{namespace}/manifests` omits `meta.as_of` and
+- `/v1/diagnostics/namespaces/{namespace}/manifests` omits `meta.as_of` and
   `meta.as_of_token`; it is control-plane metadata.
 
-`GET /v2/diagnostics/names/{name}/execution` is removed. The persisted-explain
+`GET /v1/diagnostics/names/{name}/execution` is removed. The persisted-explain
 capability it served is retired with the C2 cutover, not deferred to a later
 slice: the execution traces, steps, and cache outcomes it read no longer exist
 and no replacement route is planned. Verified resolution now runs per request,
 so there is no persisted artifact to explain. See
 [`execution.md`](execution.md#removed-legacy-artifacts).
 
-### `GET /v2/diagnostics/names/{name}/coverage`
+### `GET /v1/diagnostics/names/{name}/coverage`
 
-- Method/path: `GET /v2/diagnostics/names/{name}/coverage`
+- Method/path: `GET /v1/diagnostics/names/{name}/coverage`
 - Tier: diagnostics.
 - Purpose: full coverage taxonomy.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`.
@@ -1713,9 +1719,9 @@ so there is no persisted artifact to explain. See
   classes return diagnostic detail rather than product simplification.
 - Replaces (v1): `GET /v1/coverage/{namespace}/{name}`.
 
-### `GET /v2/diagnostics/names/{name}/binding`
+### `GET /v1/diagnostics/names/{name}/binding`
 
-- Method/path: `GET /v2/diagnostics/names/{name}/binding`
+- Method/path: `GET /v1/diagnostics/names/{name}/binding`
 - Tier: diagnostics.
 - Purpose: surface-binding explain.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`.
@@ -1724,9 +1730,9 @@ so there is no persisted artifact to explain. See
 - Status semantics: missing names return `404 not_found`.
 - Replaces (v1): `GET /v1/explain/names/{namespace}/{name}/surface-binding`.
 
-### `GET /v2/diagnostics/names/{name}/authority`
+### `GET /v1/diagnostics/names/{name}/authority`
 
-- Method/path: `GET /v2/diagnostics/names/{name}/authority`
+- Method/path: `GET /v1/diagnostics/names/{name}/authority`
 - Tier: diagnostics.
 - Purpose: authority/control explain.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`.
@@ -1736,14 +1742,14 @@ so there is no persisted artifact to explain. See
 - Status semantics: missing names return `404 not_found`.
 - Replaces (v1): `GET /v1/explain/names/{namespace}/{name}/authority-control`.
 
-### `GET /v2/diagnostics/names/{name}/records`
+### `GET /v1/diagnostics/names/{name}/records`
 
-- Method/path: `GET /v2/diagnostics/names/{name}/records`
+- Method/path: `GET /v1/diagnostics/names/{name}/records`
 - Tier: diagnostics.
 - Purpose: record inventory and cache internals.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`, and
   optional `keys`. `keys` uses the same record-key grammar as
-  `/v2/names/{name}/records`: `addr:<coin_type>`, `text:<key>`, `avatar`, and
+  `/v1/names/{name}/records`: `addr:<coin_type>`, `text:<key>`, `avatar`, and
   `contenthash`.
 - Response shape: `data` is
   `{record_inventory, record_cache, value_sources, comparison,
@@ -1788,9 +1794,9 @@ so there is no persisted artifact to explain. See
   `GET /v1/names/{namespace}/{name}/records`, including the former
   `mode=both` comparison.
 
-### `GET /v2/diagnostics/namespaces/{namespace}/manifests`
+### `GET /v1/diagnostics/namespaces/{namespace}/manifests`
 
-- Method/path: `GET /v2/diagnostics/namespaces/{namespace}/manifests`
+- Method/path: `GET /v1/diagnostics/namespaces/{namespace}/manifests`
 - Tier: diagnostics.
 - Purpose: active manifest versions, source families, deployment epochs, and
   capability flags.
@@ -1801,9 +1807,9 @@ so there is no persisted artifact to explain. See
 - Status semantics: unsupported public namespaces return `404 not_found`.
 - Replaces (v1): `GET /v1/manifests/{namespace}`.
 
-### `GET /v2/diagnostics/events`
+### `GET /v1/diagnostics/events`
 
-- Method/path: `GET /v2/diagnostics/events`
+- Method/path: `GET /v1/diagnostics/events`
 - Tier: diagnostics.
 - Purpose: raw normalized-event rows: upstream event kinds, event identity, and
   full provenance.
@@ -1843,7 +1849,7 @@ so there is no persisted artifact to explain. See
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
   When `address` is present, diagnostics derives its name/resource anchor set
   from both activated and candidate address-relation evidence. Candidate
-  evidence never contributes anchors to `/v2/events` or product history routes.
+  evidence never contributes anchors to `/v1/events` or product history routes.
   A behavior-preserving full re-walk may assign a different numeric
   `normalized_event_id` to a pre-existing row while its `event_identity` and
   pre-existing semantic fields remain stable; the numeric ID change and the

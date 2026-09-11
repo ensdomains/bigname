@@ -35,7 +35,7 @@ async fn v2_get_address_names_preserves_stored_ensip15_normalized_name_bytes() -
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
     )
     .await?;
     let rows = payload["data"]
@@ -48,7 +48,7 @@ async fn v2_get_address_names_preserves_stored_ensip15_normalized_name_bytes() -
     let prefix_payload = v2_address_names_payload_for_database(
         &database,
         &format!(
-            "/v2/addresses/{V2_ADDRESS}/names?q=%E1%8F%A3%E1%8E%B3"
+            "/v1/addresses/{V2_ADDRESS}/names?q=%E1%8F%A3%E1%8E%B3"
         ),
     )
     .await?;
@@ -59,7 +59,7 @@ async fn v2_get_address_names_preserves_stored_ensip15_normalized_name_bytes() -
     let boundary_payload = v2_address_names_payload_for_database(
         &database,
         &format!(
-            "/v2/addresses/{V2_ADDRESS}/names?q=%E1%8F%A3%E1%8E%B3%E1%8E%A9."
+            "/v1/addresses/{V2_ADDRESS}/names?q=%E1%8F%A3%E1%8E%B3%E1%8E%A9."
         ),
     )
     .await?;
@@ -75,7 +75,7 @@ async fn v2_get_address_names_preserves_stored_ensip15_normalized_name_bytes() -
 #[tokio::test]
 async fn v2_get_address_names_returns_record_rows_with_relations_and_primary_flag() -> Result<()> {
     let (database, payload) =
-        v2_address_names_payload(&format!("/v2/addresses/{V2_ADDRESS}/names")).await?;
+        v2_address_names_payload(&format!("/v1/addresses/{V2_ADDRESS}/names")).await?;
 
     assert_eq!(payload["page"]["page_size"], json!(50));
     assert_eq!(payload["page"]["total_count"], Value::Null);
@@ -130,7 +130,7 @@ async fn v2_get_address_names_returns_record_rows_with_relations_and_primary_fla
 #[tokio::test]
 async fn v2_get_address_names_filters_owner_relation_and_q_prefix() -> Result<()> {
     let (database, owner_payload) =
-        v2_address_names_payload(&format!("/v2/addresses/{V2_ADDRESS}/names?relation=owner"))
+        v2_address_names_payload(&format!("/v1/addresses/{V2_ADDRESS}/names?relation=owner"))
             .await?;
 
     let owner_rows = owner_payload["data"]
@@ -145,7 +145,7 @@ async fn v2_get_address_names_filters_owner_relation_and_q_prefix() -> Result<()
 
     let q_payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=ga"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=ga"),
     )
     .await?;
     let q_rows = q_payload["data"]
@@ -160,12 +160,12 @@ async fn v2_get_address_names_filters_owner_relation_and_q_prefix() -> Result<()
 #[tokio::test]
 async fn v2_get_address_names_normalizes_ascii_mixed_case_q_prefix() -> Result<()> {
     let (database, lowercase_payload) = v2_address_names_payload(&format!(
-        "/v2/addresses/{V2_ADDRESS}/names?q=al"
+        "/v1/addresses/{V2_ADDRESS}/names?q=al"
     ))
     .await?;
     let mixed_case_payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=AL"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=AL"),
     )
     .await?;
 
@@ -185,10 +185,10 @@ async fn v2_get_address_names_normalizes_ascii_mixed_case_q_prefix() -> Result<(
 #[tokio::test]
 async fn v2_get_address_names_treats_empty_q_as_absent() -> Result<()> {
     let (database, unfiltered_payload) =
-        v2_address_names_payload(&format!("/v2/addresses/{V2_ADDRESS}/names")).await?;
+        v2_address_names_payload(&format!("/v1/addresses/{V2_ADDRESS}/names")).await?;
     let empty_q_payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q="),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q="),
     )
     .await?;
 
@@ -208,7 +208,7 @@ async fn v2_get_address_names_trailing_dot_q_matches_label_boundary() -> Result<
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=alice."),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=alice."),
     )
     .await?;
     let rows = payload["data"]
@@ -218,14 +218,14 @@ async fn v2_get_address_names_trailing_dot_q_matches_label_boundary() -> Result<
 
     let mixed_case_payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=ALICE."),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=ALICE."),
     )
     .await?;
     assert_eq!(mixed_case_payload, payload);
 
     let interior_dot_payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=alice.e"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=alice.e"),
     )
     .await?;
     assert_eq!(interior_dot_payload, payload);
@@ -244,7 +244,7 @@ async fn v2_get_address_names_rejects_invalid_q_dot_shapes() -> Result<()> {
     for q in ["alice..", ".", "alice..x"] {
         let response = v2_address_names_response_for_database(
             &database,
-            &format!("/v2/addresses/{V2_ADDRESS}/names?q={q}"),
+            &format!("/v1/addresses/{V2_ADDRESS}/names?q={q}"),
         )
         .await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "q={q}");
@@ -270,12 +270,12 @@ async fn v2_get_address_names_rejects_invalid_q_dot_shapes() -> Result<()> {
 #[tokio::test]
 async fn v2_get_address_names_filters_relation_sets_and_any() -> Result<()> {
     let (database, set_payload) = v2_address_names_payload(&format!(
-        "/v2/addresses/{V2_ADDRESS}/names?relation=registrant,manager"
+        "/v1/addresses/{V2_ADDRESS}/names?relation=registrant,manager"
     ))
     .await?;
     let any_payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?relation=any"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?relation=any"),
     )
     .await?;
 
@@ -333,7 +333,7 @@ async fn v2_get_address_names_marks_primary_for_a_successful_non_normalized_clai
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
     )
     .await?;
     let rows = payload["data"]
@@ -384,7 +384,7 @@ async fn v2_get_address_names_serves_the_page_when_a_primary_claim_no_longer_nor
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
     )
     .await?;
     let rows = payload["data"]
@@ -423,7 +423,7 @@ async fn v2_get_address_names_non_success_primary_claim_does_not_mark_primary() 
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
     )
     .await?;
     let rows = payload["data"]
@@ -457,7 +457,7 @@ async fn v2_get_address_names_scopes_primary_claim_by_row_namespace() -> Result<
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=alpha"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=alpha"),
     )
     .await?;
     let rows = payload["data"]
@@ -482,10 +482,10 @@ async fn v2_get_address_names_scopes_primary_claim_by_row_namespace() -> Result<
 #[tokio::test]
 async fn v2_get_address_names_dedupe_name_vs_registration() -> Result<()> {
     let (database, dedupe_name) =
-        v2_address_names_payload(&format!("/v2/addresses/{V2_ADDRESS}/names?dedupe=name")).await?;
+        v2_address_names_payload(&format!("/v1/addresses/{V2_ADDRESS}/names?dedupe=name")).await?;
     let dedupe_registration = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?dedupe=registration"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?dedupe=registration"),
     )
     .await?;
 
@@ -541,7 +541,7 @@ async fn v2_address_names_registration_dedupe_preserves_role_summary() -> Result
     let payload = v2_address_names_payload_for_database(
         &database,
         &format!(
-            "/v2/addresses/{V2_ADDRESS}/names?dedupe=registration&include=role_summary"
+            "/v1/addresses/{V2_ADDRESS}/names?dedupe=registration&include=role_summary"
         ),
     )
     .await?;
@@ -574,17 +574,17 @@ async fn v2_address_names_registration_dedupe_preserves_role_summary() -> Result
 #[tokio::test]
 async fn v2_get_address_names_sorts_by_expiry_and_registered_at() -> Result<()> {
     let (database, expires_asc) = v2_address_names_payload(&format!(
-        "/v2/addresses/{V2_ADDRESS}/names?sort=expires_at&order=asc"
+        "/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&order=asc"
     ))
     .await?;
     let expires_desc = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?sort=expires_at&order=desc"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&order=desc"),
     )
     .await?;
     let registered = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?sort=registered_at"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?sort=registered_at"),
     )
     .await?;
 
@@ -626,14 +626,14 @@ async fn v2_get_address_names_sorts_by_expiry_and_registered_at() -> Result<()> 
 #[tokio::test]
 async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Result<()> {
     let (database, first_page) =
-        v2_address_names_payload(&format!("/v2/addresses/{V2_ADDRESS}/names?page_size=2")).await?;
+        v2_address_names_payload(&format!("/v1/addresses/{V2_ADDRESS}/names?page_size=2")).await?;
     let next_cursor = first_page["page"]["next_cursor"]
         .as_str()
         .expect("first page must include a cursor")
         .to_owned();
     let second_page = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?page_size=2&cursor={next_cursor}"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?page_size=2&cursor={next_cursor}"),
     )
     .await?;
 
@@ -646,7 +646,7 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
 
     let cross_address = v2_address_names_response_for_database(
         &database,
-        &format!("/v2/addresses/{V2_OTHER_ADDRESS}/names?page_size=2&cursor={next_cursor}"),
+        &format!("/v1/addresses/{V2_OTHER_ADDRESS}/names?page_size=2&cursor={next_cursor}"),
     )
     .await?;
     assert_eq!(cross_address.status(), StatusCode::BAD_REQUEST);
@@ -658,7 +658,7 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
     let cross_sort = v2_address_names_response_for_database(
         &database,
         &format!(
-            "/v2/addresses/{V2_ADDRESS}/names?sort=expires_at&page_size=2&cursor={next_cursor}"
+            "/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&page_size=2&cursor={next_cursor}"
         ),
     )
     .await?;
@@ -666,7 +666,7 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
 
     let expires_page = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?sort=expires_at&page_size=1"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&page_size=1"),
     )
     .await?;
     let expires_cursor = expires_page["page"]["next_cursor"]
@@ -675,7 +675,7 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
     let cross_timestamp_sort = v2_address_names_response_for_database(
         &database,
         &format!(
-            "/v2/addresses/{V2_ADDRESS}/names?sort=registered_at&page_size=1&cursor={expires_cursor}"
+            "/v1/addresses/{V2_ADDRESS}/names?sort=registered_at&page_size=1&cursor={expires_cursor}"
         ),
     )
     .await?;
@@ -683,7 +683,7 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
 
     let relation_set_page = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?relation=manager,owner&page_size=1"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?relation=manager,owner&page_size=1"),
     )
     .await?;
     let relation_set_cursor = relation_set_page["page"]["next_cursor"]
@@ -692,7 +692,7 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
     let reordered_relation_set = v2_address_names_response_for_database(
         &database,
         &format!(
-            "/v2/addresses/{V2_ADDRESS}/names?relation=owner,manager&page_size=1&cursor={relation_set_cursor}"
+            "/v1/addresses/{V2_ADDRESS}/names?relation=owner,manager&page_size=1&cursor={relation_set_cursor}"
         ),
     )
     .await?;
@@ -700,7 +700,7 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
     let changed_relation_set = v2_address_names_response_for_database(
         &database,
         &format!(
-            "/v2/addresses/{V2_ADDRESS}/names?relation=owner&page_size=1&cursor={relation_set_cursor}"
+            "/v1/addresses/{V2_ADDRESS}/names?relation=owner&page_size=1&cursor={relation_set_cursor}"
         ),
     )
     .await?;
@@ -722,7 +722,7 @@ async fn v2_address_role_summary_missing_support_is_partial() -> Result<()> {
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"),
     )
     .await?;
 
@@ -758,7 +758,7 @@ async fn v2_address_role_summary_marks_wrapper_empty_as_non_authoritative() -> R
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=beta&include=role_summary"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=beta&include=role_summary"),
     )
     .await?;
 
@@ -790,7 +790,7 @@ async fn v2_address_role_summary_marks_uningested_approvals_non_authoritative() 
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"),
     )
     .await?;
 
@@ -855,7 +855,7 @@ async fn v2_get_address_names_include_role_summary_groups_permissions_by_address
         .await?;
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?include=role_summary&page_size=1"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?include=role_summary&page_size=1"),
     )
     .await?;
 
@@ -943,7 +943,7 @@ async fn v2_get_address_names_rejects_bad_address_and_unknown_include() -> Resul
         .await?;
 
     let bad_address =
-        v2_address_names_response_for_database(&database, "/v2/addresses/not-an-address/names")
+        v2_address_names_response_for_database(&database, "/v1/addresses/not-an-address/names")
             .await?;
     assert_eq!(bad_address.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
@@ -953,7 +953,7 @@ async fn v2_get_address_names_rejects_bad_address_and_unknown_include() -> Resul
 
     let bad_include = v2_address_names_response_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?include=counts"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?include=counts"),
     )
     .await?;
     assert_eq!(bad_include.status(), StatusCode::BAD_REQUEST);
@@ -975,7 +975,7 @@ async fn v2_get_address_names_empty_returns_200_empty_page() -> Result<()> {
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
     )
     .await?;
 
@@ -1027,7 +1027,7 @@ async fn v2_address_name_collections_exclude_orphaned_phase_lineage_before_proje
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
     )
     .await?;
     let rows = payload["data"]

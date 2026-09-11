@@ -1,5 +1,9 @@
 # API v2
 
+> **Prefix note (#315):** the public route prefix is now `/v1`. This file's
+> name (`api-v2`) is historical, naming the ADR 0006 contract generation; it
+> is not the wire prefix. A rename of the contract docs is tracked separately.
+
 Development-time contract for the API surface accepted in
 [ADR 0006](adrs/0006-api-v2-product-surface.md). Per-route reference lives in
 [`api-v2-routes.md`](api-v2-routes.md). This surface has no generated OpenAPI
@@ -21,10 +25,10 @@ artifact.
 
 ## Versioning
 
-The binary serves this contract under `/v2`; the old v1 REST surface has been
-deleted. The production edge does not expose `/v2` until the maintainer-gated
-C3 edge flip. These docs define the currently served internal REST contract,
-not the public-edge rollout state.
+The binary serves this contract under `/v1`; the old v1 REST surface was
+deleted before this contract took over the prefix (#315), and no `/v2` prefix
+is served. The production edge admits `/v1` reads, `POST /v1/lookup`, and
+GraphQL; see [`production.md`](production.md#public-edge) for the edge policy.
 
 ## GraphQL compatibility
 
@@ -58,7 +62,7 @@ step-3-gate vocabulary needed by the route schemas:
 
 | `v2` name | Meaning | Replaces (`v1`) |
 | --- | --- | --- |
-| `name` | the ENSIP-15 normalized name string, except on routes that document an explicit [non-name form](glossary.md#non-name-form) for a label bigname cannot state as a name — today only `GET /v2/names/{name}/subnames` | `normalized_name`, `logical_name_id` (derivable as `namespace:name`) |
+| `name` | the ENSIP-15 normalized name string, except on routes that document an explicit [non-name form](glossary.md#non-name-form) for a label bigname cannot state as a name — today only `GET /v1/names/{name}/subnames` | `normalized_name`, `logical_name_id` (derivable as `namespace:name`) |
 | `display_name` | display form of the name | `canonical_display_name` |
 | `namespace` | public namespace slug used to resolve a name or filter a route, such as `ens` or `basenames` | `namespace` path segment/query usage (unchanged; now echoed consistently) |
 | `namehash` | ENS namehash hex string | `namehash` (unchanged) |
@@ -142,7 +146,7 @@ for the numeric registration and restoration rules. This does not widen route or
 
 For a registrar lease first identified by a later readable observation, registration time remains the original numeric grant time. Compact product history omits only snapshots with both `state_derived=true` and `registrar_surface_snapshot=true`, before pagination and cursor validation. Diagnostics retains the marked snapshot at its later readable trigger; original resource-only history and all unmarked events remain unchanged. See [storage semantics](storage.md).
 
-`GET /v2/permissions` and `GET /v2/addresses/{address}/names?include=role_summary`
+`GET /v1/permissions` and `GET /v1/addresses/{address}/names?include=role_summary`
 read current permission rows and per-resource permission summaries. Canonical
 identity checks exclude rows from an orphaned chain lineage. These routes do
 not claim a request-wide immutable projection generation, and their cursors carry
@@ -151,7 +155,7 @@ without the expansion.
 
 Permission-backed v2 reads also classify the served resources from the typed
 projection-owned per-resource permission summary. For a resource-bound
-`GET /v2/permissions` read, a non-wrapper summary whose standard operator,
+`GET /v1/permissions` read, a non-wrapper summary whose standard operator,
 token-approval, or resolver-delegation paths are not fully served produces
 `meta.completeness=partial` with
 `approval_and_delegation_permissions_not_supported`. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) An ENSv1 wrapper-only
@@ -184,7 +188,7 @@ reason; missing or unrecognized summary metadata still takes precedence. A
 synthetic or future resource summary that independently proves full coverage
 adds no completeness metadata on a resource-bound request.
 
-These classifications are request-relative. `/v2/permissions` continues to
+These classifications are request-relative. `/v1/permissions` continues to
 serve known permission rows that apply to each resource, but those rows and the
 derived role summaries are not authoritative enumerations while the coverage
 described above remains partial. Zero returned rows therefore
@@ -293,9 +297,9 @@ Rules:
 
 - `data` is an object on single-resource routes and an array on collections.
 - Top-level `page` appears on collection routes only. Per-input pagination on
-  `POST /v2/lookup` and the nested resolver-overview `bound_names` collection
+  `POST /v1/lookup` and the nested resolver-overview `bound_names` collection
   use the same object inside their containing result/object.
-- `total_count` is nullable. Reverse address results from `POST /v2/lookup`
+- `total_count` is nullable. Reverse address results from `POST /v1/lookup`
   populate it by counting the same readable current name/address rows used by
   the page query when the requested relation set maps directly to a stored role
   group. Relation sets that require post-filtering retain `total_count=null`.
@@ -306,9 +310,9 @@ Rules:
   include `meta.as_of` and `meta.as_of_token` when they can attribute at least
   one served snapshot-pinned chain position. Top-level collection routes omit
   both because their mutable latest-state rows are not bound to one snapshot,
-  except that `/v2/search` reports request-scoped `meta.as_of` positions as
+  except that `/v1/search` reports request-scoped `meta.as_of` positions as
   human-readable staleness attribution and still omits `meta.as_of_token`.
-  Control-plane routes (`/v2/status`, `/v2/namespaces/{namespace}`) omit both.
+  Control-plane routes (`/v1/status`, `/v1/namespaces/{namespace}`) omit both.
   Verified name and record responses keep the same metadata shape as their
   indexed peers. The authoritative position identifies the projection snapshot
   admitted for the lookup. For a cross-chain path, the auxiliary position is
@@ -327,7 +331,7 @@ Rules:
   `at` when a route supports snapshot replay. `meta.completeness`,
   `meta.unsupported_fields`, and `meta.unsupported_reason` appear only when the
   read is not clean. `meta.source` appears when the route supports `source`.
-- Public reverse requests to `POST /v2/lookup` and all `GET /v2/search`
+- Public reverse requests to `POST /v1/lookup` and all `GET /v1/search`
   requests disclose the chain scope selected by the request. A public reverse
   request or search without an explicit `namespace` accounts for the chains of
   every active public namespace; an explicit search namespace accounts only
@@ -361,7 +365,7 @@ Rules:
 sections or route-documented expensive metadata. No route supports
 `include=total_count` unless that route's parameter list says so.
 
-`profile=feed` on `POST /v2/lookup` is a field budget over the same record
+`profile=feed` on `POST /v1/lookup` is a field budget over the same record
 shape used by `profile=detail`. Feed returns fewer fields; every feed field has
 the same name and type as its detail counterpart. Feed does not change reverse
 lookup pagination semantics: `cursor`, `page_size`, `next_cursor`, and
@@ -399,11 +403,11 @@ ens_v2@a971bd64)
 
 Lookup primitives serve the partner latency path and current indexing status:
 
-- `POST /v2/lookup`
-- `GET /v2/status`
+- `POST /v1/lookup`
+- `GET /v1/status`
 
 The lookup route uses the common record shape and in-band per-result statuses.
-`GET /v2/status` is the only route with the ops status vocabulary
+`GET /v1/status` is the only route with the ops status vocabulary
 `ready`, `degraded`, `stale`. It reads the chain set from
 `bigname_phase.chain_heads` and `bigname_phase.chain_phase_state`. The stored
 head and finality fields come from `chain_heads`; indexed progress is the
@@ -454,8 +458,8 @@ The product-route denylist includes pipeline terms such as `projection`,
 `execution_checkpoint` pseudo-chain slot. If a product capability needs that
 detail, it belongs on a diagnostics route instead.
 
-`GET /v2/names/{name}?source=verified` and
-`GET /v2/names/{name}/records` with a verified source execute through the
+`GET /v1/names/{name}?source=verified` and
+`GET /v1/names/{name}/records` with a verified source execute through the
 schema-v2 lookup engine on every request. Response fields and per-record status
 meaning stay unchanged, but there is no reusable outcome, durable execution
 trace, or execution-cache readback. A direct live answer that disagrees
@@ -489,7 +493,7 @@ before its synthetic `addr:60` request is added, so a 200-selector inventory
 may issue 201 provider keys when the primary-address selector was absent; more
 than 200 inventory-derived selectors still returns the same error.
 
-`GET /v2/addresses/{address}/primary-name` keeps its documented `answers` and
+`GET /v1/addresses/{address}/primary-name` keeps its documented `answers` and
 typed `verification` shapes. Every indexed answer reads
 `bigname_phase.primary_names_current`; `source` selection only narrows the
 answer list and does not select a different indexed projection. A successful
@@ -658,7 +662,7 @@ The internal reason
 unresolved or unsupported, not for a registry event stream that positively
 proves current authority is absent.
 
-One result-status vocabulary is used everywhere except the `/v2/status` ops
+One result-status vocabulary is used everywhere except the `/v1/status` ops
 route:
 
 - `ok`
@@ -792,7 +796,7 @@ A token or timestamp that selects a block absent from readable phase lineage
 returns `409 conflict`.
 
 API startup discovers the status chain set from the union of
-`bigname_phase.chain_heads` and `bigname_phase.chain_phase_state`. `/v2/status` uses
+`bigname_phase.chain_heads` and `bigname_phase.chain_phase_state`. `/v1/status` uses
 those same relations for its chain set and reads stored head/finality positions
 from `chain_heads`, project progress from the `project` row in
 `chain_phase_state`, and both timestamps from the matching readable
@@ -815,7 +819,7 @@ semantics when that revision is no longer available. Once revision-bound
 cursors and row reads land, the collection `at` and historical `finality`
 restrictions lift and collection snapshot metadata can be restored.
 
-`POST /v2/lookup` is a current-state read. It does not accept `at` or
+`POST /v1/lookup` is a current-state read. It does not accept `at` or
 `finality`; when a served head is available, its `meta.as_of` and
 `meta.as_of_token` record the served positions for staleness attribution and
 shadow-diff correlation. Lookup rejects partial scoped heads instead of
@@ -831,7 +835,7 @@ check and return `409 stale`. Historical resolver reads selected with `at` and
 resolver reads at `finality=safe|finalized` retain their existing generation
 validation without that redo check.
 
-`GET /v2/addresses/{address}/primary-name` is also a current-state read. It
+`GET /v1/addresses/{address}/primary-name` is also a current-state read. It
 does not accept `at` or `finality`; when a served head is available, its
 `meta.as_of` and `meta.as_of_token` record the served positions for staleness
 attribution and shadow-diff correlation. For an ENS/60 verified answer, both
@@ -857,7 +861,7 @@ dataset is frozen. A legacy collection cursor's snapshot component is ignored.
 Snapshot-bound cursor semantics remain on single-resource responses with nested
 pagination where documented.
 
-The `/v2/events`, name-history, and address-history collections use a
+The `/v1/events`, name-history, and address-history collections use a
 collection-wide `redo_in_progress` check. An active Interpret redo on any chain
 returns retryable `409 stale` for all three collections, regardless of the
 requested namespace or name. Events validates the request and cursor binding
@@ -884,7 +888,7 @@ unstable.
 
 A full Interpret and Project re-walk that must not change product behavior at a
 fixed readable chain head does not invalidate an outstanding collection cursor
-merely because an internal normalized-event row ID changes. On `/v2/events`,
+merely because an internal normalized-event row ID changes. On `/v1/events`,
 name history, address history, and every other product cursor surface backed by
 normalized-event row identity, a cursor issued before the re-walk must resume
 after publication from the same underlying normalized-event keyset anchor, with
@@ -966,9 +970,9 @@ and record reads for the released or expired name continue to expose no current
 record inventory.
 
 An ENSv2 registration that lapses by path expiry is served like one released by
-`unregister`: `GET /v2/names/{name}` keeps answering with `registration_status`
+`unregister`: `GET /v1/names/{name}` keeps answering with `registration_status`
 `released`, the registration identity, timestamps and the lapsed `expires_at`,
-without a current owner, resolver or records, and `GET /v2/names/{name}/history`
+without a current owner, resolver or records, and `GET /v1/names/{name}/history`
 keeps serving the name's history. An ENSv1 lease that lapses past grace with no
 revived custody, which is how a wrapped `.eth` name lapses, is served the same
 way as a [released v1 authority](glossary.md#released-v1-authority):
@@ -979,7 +983,7 @@ answers `404 not_found`.
 
 Every collection uses `cursor`, `next_cursor`, `page_size`, nullable
 `total_count`, and `has_more`. Default `page_size` is 50; maximum is 200.
-For reverse address inputs to `POST /v2/lookup` whose relation set maps directly
+For reverse address inputs to `POST /v1/lookup` whose relation set maps directly
 to a stored role group, `total_count` is the exact distinct-name count from the
 same current joins and readability filters as the page, and `has_more` compares
 against that live count on the one-row first-page path. Relation sets that need
@@ -990,7 +994,7 @@ returned `is_primary` is computed from the current name and primary-name claim
 even when a different primary-matching relation row is unreadable. The retired
 v1 page/sidecar pair disagreed on this case; the v2 live page and count joins
 share the same eligibility rule.
-Reverse address results from `POST /v2/lookup` additionally require the
+Reverse address results from `POST /v1/lookup` additionally require the
 projection rows behind a name to be [readable](glossary.md#readable--read-safe)
 *and* supported. Both the name row and the address-relation row that admits it
 must carry a supported support status; a name whose current name row or whose
@@ -1000,7 +1004,7 @@ results therefore answer which supported names an address holds. This
 deliberately narrows earlier behavior, which listed unsupported names and left
 the caller to read the reason; per-name unsupported detail now lives on the
 name-shaped routes and diagnostics, which read the row directly.
-`GET /v2/addresses/{address}/names` is the exception: it lists an unsupported
+`GET /v1/addresses/{address}/names` is the exception: it lists an unsupported
 row when the matching current address relation is provable but other coverage
 for that name is unsupported. Once the [per-name ownership
 rule](consumer-capabilities.md#ensv1ensv2-mixed-history-ownership) is activated,
@@ -1053,7 +1057,7 @@ Rules:
   connect-phase timeouts, DNS failures, TLS failures, connection resets, and
   other transport failures return whole-request `500 internal_error`. Neither
   result is persisted by the v2 serving path.
-- Every route has a whole-request deadline. `/healthz` and `/v2/status` retain
+- Every route has a whole-request deadline. `/healthz` and `/v1/status` retain
   that deadline as their final backstop. `/healthz` bypasses
   the process-wide concurrency limiter and load shedding, uses a reserved
   one-connection database pool with a two-second check limit, and has a small
@@ -1072,8 +1076,8 @@ Rules:
 - The verified-execution rate limit, when enabled, and all in-flight ceilings
   reject work before it waits for execution capacity. The rate-limit key is an
   IPv4 address or IPv6 `/64`; `/healthz` passes only through the health-specific
-  ceiling. `GET /v2/names/{name}/records?source=auto` with omitted or empty
-  `keys` and `GET /v2/addresses/{address}/primary-name?source=indexed` are
+  ceiling. `GET /v1/names/{name}/records?source=auto` with omitted or empty
+  `keys` and `GET /v1/addresses/{address}/primary-name?source=indexed` are
   indexed reads and do not enter verified-execution admission.
 - Single-resource GETs return `404 not_found` when no answer exists.
 - Collections return `200` with empty `data`.

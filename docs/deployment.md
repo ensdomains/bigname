@@ -559,9 +559,9 @@ phase-state reset, rerun the normal pipeline instead.
 ## Surviving services
 
 The API uses one `bigname_phase` request pool plus a reserved readiness
-connection. GraphQL, `/v2/status`, snapshot selection,
+connection. GraphQL, `/v1/status`, snapshot selection,
 [verified lookup](glossary.md#verified-lookup), and all projection reads use
-phase relations. The `/v2/status` phase-runner heartbeat
+phase relations. The `/v1/status` phase-runner heartbeat
 threshold uses `BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS` (60 seconds by
 default). V2 record lookup may perform only the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write;
@@ -576,7 +576,7 @@ or `UPDATE` on
 `resolution_divergences` and no `UPDATE` on the guarded head, lineage, or
 projection relations.
 
-API startup tolerates a wholly absent phase schema so `/v2/status` can return
+API startup tolerates a wholly absent phase schema so `/v1/status` can return
 its empty, `degraded` response. Once the phase schema exists, startup checks
 every phase-schema relation, function, and type its serving paths read:
 relations by name, both guarded functions by exact signature, and the

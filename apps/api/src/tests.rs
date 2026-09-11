@@ -276,7 +276,7 @@ async fn v2_namespace_ens_uses_the_checked_in_sepolia_capability_aggregate() -> 
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/namespaces/ens")
+                .uri("/v1/namespaces/ens")
                 .body(Body::empty())
                 .expect("namespace request must build"),
         )

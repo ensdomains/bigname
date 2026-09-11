@@ -1,6 +1,6 @@
 #[tokio::test]
 async fn v2_get_history_returns_lean_product_rows_newest_first() -> Result<()> {
-    let (database, payload) = v2_history_payload("/v2/names/History.eth/history?page_size=20").await?;
+    let (database, payload) = v2_history_payload("/v1/names/History.eth/history?page_size=20").await?;
 
     assert_eq!(payload["page"]["page_size"], json!(20));
     assert_eq!(payload["page"]["total_count"], Value::Null);
@@ -146,7 +146,7 @@ async fn v2_history_lists_pointer_attributed_record_writes_for_the_registration(
     for (scope, listed) in [("both", true), ("registration", true), ("name", false)] {
         let payload = v2_history_payload_for_database(
             &database,
-            &format!("/v2/names/attributed-record.eth/history?scope={scope}&page_size=20"),
+            &format!("/v1/names/attributed-record.eth/history?scope={scope}&page_size=20"),
         )
         .await?;
         let rows = payload["data"].as_array().expect("history data");
@@ -166,7 +166,7 @@ async fn v2_history_lists_pointer_attributed_record_writes_for_the_registration(
     // A keyset cursor issued on the attributed row must validate and continue.
     let first = v2_history_payload_for_database(
         &database,
-        "/v2/names/attributed-record.eth/history?scope=registration&page_size=1",
+        "/v1/names/attributed-record.eth/history?scope=registration&page_size=1",
     )
     .await?;
     assert_eq!(first["data"][0]["transaction_hash"], json!("0xtx131"));
@@ -177,7 +177,7 @@ async fn v2_history_lists_pointer_attributed_record_writes_for_the_registration(
         let next = v2_history_payload_for_database(
             &database,
             &format!(
-                "/v2/names/attributed-record.eth/history?scope=registration&page_size=1&cursor={cursor}"
+                "/v1/names/attributed-record.eth/history?scope=registration&page_size=1&cursor={cursor}"
             ),
         )
         .await?;
@@ -248,11 +248,11 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
     .await?;
 
     for route in [
-        "/v2/names/resolver-history.eth/history?scope=both&page_size=20",
-        "/v2/names/resolver-history.eth/history?scope=registration&page_size=20",
-        "/v2/events?name=resolver-history.eth&page_size=20",
-        "/v2/events?registration_id=00000000-0000-0000-0000-000000007120&page_size=20",
-        "/v2/addresses/0x0000000000000000000000000000000000007120/history?relation=manager&page_size=20",
+        "/v1/names/resolver-history.eth/history?scope=both&page_size=20",
+        "/v1/names/resolver-history.eth/history?scope=registration&page_size=20",
+        "/v1/events?name=resolver-history.eth&page_size=20",
+        "/v1/events?registration_id=00000000-0000-0000-0000-000000007120&page_size=20",
+        "/v1/addresses/0x0000000000000000000000000000000000007120/history?relation=manager&page_size=20",
     ] {
         let payload = v2_history_payload_for_database(&database, route).await?;
         let rows = payload["data"].as_array().expect("history data");
@@ -267,7 +267,7 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
 
     let diagnostics = v2_history_payload_for_database(
         &database,
-        "/v2/diagnostics/events?name=resolver-history.eth&page_size=20",
+        "/v1/diagnostics/events?name=resolver-history.eth&page_size=20",
     )
     .await?;
     let diagnostic_rows = diagnostics["data"].as_array().expect("diagnostic events");
@@ -280,7 +280,7 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
 
     let diagnostic_first = v2_history_payload_for_database(
         &database,
-        "/v2/diagnostics/events?name=resolver-history.eth&page_size=1",
+        "/v1/diagnostics/events?name=resolver-history.eth&page_size=1",
     )
     .await?;
     let diagnostic_cursor = diagnostic_first["page"]["next_cursor"]
@@ -292,7 +292,7 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
     let diagnostic_second = v2_history_payload_for_database(
         &database,
         &format!(
-            "/v2/diagnostics/events?name=resolver-history.eth&page_size=1&cursor={diagnostic_cursor}"
+            "/v1/diagnostics/events?name=resolver-history.eth&page_size=1&cursor={diagnostic_cursor}"
         ),
     )
     .await?;
@@ -390,7 +390,7 @@ async fn v2_registry_history_registration_identity_uses_event_position() -> Resu
 
     let payload = v2_history_payload_for_database(
         &database,
-        "/v2/events?name=event-position-history.eth&page_size=20",
+        "/v1/events?name=event-position-history.eth&page_size=20",
     )
     .await?;
     let rows = payload["data"].as_array().expect("product history rows");
@@ -503,8 +503,8 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
     .await?;
 
     for route in [
-        "/v2/names/ownerless-history.eth/history?scope=both&page_size=20",
-        "/v2/events?name=ownerless-history.eth&page_size=20",
+        "/v1/names/ownerless-history.eth/history?scope=both&page_size=20",
+        "/v1/events?name=ownerless-history.eth&page_size=20",
     ] {
         let payload = v2_history_payload_for_database(&database, route).await?;
         let rows = payload["data"].as_array().expect("product history rows");
@@ -525,14 +525,14 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
 
     let filtered = v2_history_payload_for_database(
         &database,
-        &format!("/v2/events?registration_id={read_resource_id}&page_size=20"),
+        &format!("/v1/events?registration_id={read_resource_id}&page_size=20"),
     )
     .await?;
     assert_eq!(filtered["data"], json!([]));
 
     let diagnostics = v2_history_payload_for_database(
         &database,
-        "/v2/diagnostics/events?name=ownerless-history.eth&page_size=20",
+        "/v1/diagnostics/events?name=ownerless-history.eth&page_size=20",
     )
     .await?;
     let diagnostic_rows = diagnostics["data"].as_array().expect("diagnostic rows");
@@ -615,7 +615,7 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
 
     let payload = v2_history_payload_for_database(
         &database,
-        &format!("/v2/events?registration_id={resource_id}&page_size=20"),
+        &format!("/v1/events?registration_id={resource_id}&page_size=20"),
     )
     .await?;
     let rows = payload["data"].as_array().expect("product event rows");
@@ -625,7 +625,7 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
 
     let first_page = v2_history_payload_for_database(
         &database,
-        &format!("/v2/events?registration_id={resource_id}&page_size=1"),
+        &format!("/v1/events?registration_id={resource_id}&page_size=1"),
     )
     .await?;
     assert_eq!(history_types(first_page["data"].as_array().unwrap()), vec!["record"]);
@@ -693,8 +693,8 @@ async fn v2_product_event_routes_preserves_stored_ensip15_normalized_name_bytes(
     .await?;
 
     for uri in [
-        "/v2/events?name=%E1%8F%A3%E1%8E%B3%E1%8E%A9.eth&page_size=20".to_owned(),
-        format!("/v2/addresses/{ADDRESS}/history?page_size=20"),
+        "/v1/events?name=%E1%8F%A3%E1%8E%B3%E1%8E%A9.eth&page_size=20".to_owned(),
+        format!("/v1/addresses/{ADDRESS}/history?page_size=20"),
     ] {
         let payload = v2_history_payload_for_database(&database, &uri).await?;
         assert_eq!(payload["data"][0]["name"], json!(stored_raw_name), "{uri}");
@@ -706,7 +706,7 @@ async fn v2_product_event_routes_preserves_stored_ensip15_normalized_name_bytes(
 #[tokio::test]
 async fn v2_get_history_paginates_with_anchor_bound_cursor() -> Result<()> {
     let (database, first_page) =
-        v2_history_payload("/v2/names/history.eth/history?page_size=3").await?;
+        v2_history_payload("/v1/names/history.eth/history?page_size=3").await?;
     let next_cursor = first_page["page"]["next_cursor"]
         .as_str()
         .expect("first page must include a next cursor")
@@ -715,7 +715,7 @@ async fn v2_get_history_paginates_with_anchor_bound_cursor() -> Result<()> {
 
     let second_page = v2_history_payload_for_database(
         &database,
-        &format!("/v2/names/history.eth/history?page_size=3&cursor={next_cursor}"),
+        &format!("/v1/names/history.eth/history?page_size=3&cursor={next_cursor}"),
     )
     .await?;
 
@@ -734,7 +734,7 @@ async fn v2_get_history_paginates_with_anchor_bound_cursor() -> Result<()> {
 
     let replay = v2_history_payload_for_database(
         &database,
-        &format!("/v2/names/history.eth/history?page_size=3&cursor={next_cursor}"),
+        &format!("/v1/names/history.eth/history?page_size=3&cursor={next_cursor}"),
     )
     .await?;
     assert_eq!(replay["data"], second_page["data"]);
@@ -751,16 +751,16 @@ async fn normalized_event_cursors_resume_after_rewalk_ids_rotate() -> Result<()>
     seed_v2_history_fixture(&database).await?;
     let routes = [
         (
-            "/v2/names/history.eth/history?page_size=1".to_owned(),
+            "/v1/names/history.eth/history?page_size=1".to_owned(),
             false,
         ),
-        ("/v2/events?name=history.eth&page_size=1".to_owned(), false),
+        ("/v1/events?name=history.eth&page_size=1".to_owned(), false),
         (
-            format!("/v2/addresses/{ADDRESS}/history?page_size=1"),
+            format!("/v1/addresses/{ADDRESS}/history?page_size=1"),
             false,
         ),
         (
-            "/v2/diagnostics/events?name=history.eth&page_size=1".to_owned(),
+            "/v1/diagnostics/events?name=history.eth&page_size=1".to_owned(),
             true,
         ),
     ];
@@ -848,9 +848,9 @@ async fn candidate_migration_rows_are_diagnostic_only() -> Result<()> {
     .await?;
 
     let product_routes = [
-        "/v2/names/history.eth/history?page_size=20".to_owned(),
-        "/v2/events?name=history.eth&page_size=20".to_owned(),
-        format!("/v2/addresses/{ADDRESS}/history?page_size=20"),
+        "/v1/names/history.eth/history?page_size=20".to_owned(),
+        "/v1/events?name=history.eth&page_size=20".to_owned(),
+        format!("/v1/addresses/{ADDRESS}/history?page_size=20"),
     ];
     let mut product_before = Vec::new();
     for route in &product_routes {
@@ -906,7 +906,7 @@ async fn candidate_migration_rows_are_diagnostic_only() -> Result<()> {
 
     let diagnostics = v2_history_payload_for_database(
         &database,
-        "/v2/diagnostics/events?name=history.eth&page_size=20",
+        "/v1/diagnostics/events?name=history.eth&page_size=20",
     )
     .await?;
     let diagnostic_rows = diagnostics["data"].as_array().expect("diagnostic rows");
@@ -933,7 +933,7 @@ async fn candidate_migration_rows_are_diagnostic_only() -> Result<()> {
     let candidate_only_diagnostics = v2_history_payload_for_database(
         &database,
         &format!(
-            "/v2/diagnostics/events?registration_id={}&page_size=20",
+            "/v1/diagnostics/events?registration_id={}&page_size=20",
             Uuid::from_u128(0x7500)
         ),
     )
@@ -944,7 +944,7 @@ async fn candidate_migration_rows_are_diagnostic_only() -> Result<()> {
 
     let candidate_address_diagnostics = v2_history_payload_for_database(
         &database,
-        &format!("/v2/diagnostics/events?address={ADDRESS}&page_size=20"),
+        &format!("/v1/diagnostics/events?address={ADDRESS}&page_size=20"),
     )
     .await?;
     let candidate_address_rows = candidate_address_diagnostics["data"]
@@ -1024,7 +1024,7 @@ async fn v2_get_history_rejects_cross_name_and_cross_scope_cursor_reuse() -> Res
     .await?;
 
     let first_page =
-        v2_history_payload_for_database(&database, "/v2/names/history.eth/history?page_size=3")
+        v2_history_payload_for_database(&database, "/v1/names/history.eth/history?page_size=3")
             .await?;
     let next_cursor = first_page["page"]["next_cursor"]
         .as_str()
@@ -1032,7 +1032,7 @@ async fn v2_get_history_rejects_cross_name_and_cross_scope_cursor_reuse() -> Res
 
     let cross_name = v2_history_response_for_database(
         &database,
-        &format!("/v2/names/other.eth/history?page_size=3&cursor={next_cursor}"),
+        &format!("/v1/names/other.eth/history?page_size=3&cursor={next_cursor}"),
     )
     .await?;
     assert_eq!(cross_name.status(), StatusCode::BAD_REQUEST);
@@ -1041,7 +1041,7 @@ async fn v2_get_history_rejects_cross_name_and_cross_scope_cursor_reuse() -> Res
 
     let cross_scope = v2_history_response_for_database(
         &database,
-        &format!("/v2/names/history.eth/history?scope=name&page_size=3&cursor={next_cursor}"),
+        &format!("/v1/names/history.eth/history?scope=name&page_size=3&cursor={next_cursor}"),
     )
     .await?;
     assert_eq!(cross_scope.status(), StatusCode::BAD_REQUEST);
@@ -1073,7 +1073,7 @@ async fn v2_get_history_serves_subregistry_changes_as_registration_rows() -> Res
 
     let unfiltered = v2_history_payload_for_database(
         &database,
-        "/v2/names/history.eth/history?page_size=20",
+        "/v1/names/history.eth/history?page_size=20",
     )
     .await?;
     let rows = unfiltered["data"].as_array().expect("data");
@@ -1087,7 +1087,7 @@ async fn v2_get_history_serves_subregistry_changes_as_registration_rows() -> Res
 
     let filtered = v2_history_payload_for_database(
         &database,
-        "/v2/events?name=history.eth&type=subregistry&page_size=20",
+        "/v1/events?name=history.eth&type=subregistry&page_size=20",
     )
     .await?;
     assert_eq!(
@@ -1096,7 +1096,7 @@ async fn v2_get_history_serves_subregistry_changes_as_registration_rows() -> Res
     );
     let registration_scope = v2_history_payload_for_database(
         &database,
-        "/v2/names/history.eth/history?scope=registration&page_size=20",
+        "/v1/names/history.eth/history?scope=registration&page_size=20",
     )
     .await?;
     assert_eq!(
@@ -1111,15 +1111,15 @@ async fn v2_get_history_serves_subregistry_changes_as_registration_rows() -> Res
 #[tokio::test]
 async fn v2_get_history_scope_filters_name_registration_and_both() -> Result<()> {
     let (database, name_scope) =
-        v2_history_payload("/v2/names/history.eth/history?scope=name&page_size=20").await?;
+        v2_history_payload("/v1/names/history.eth/history?scope=name&page_size=20").await?;
     let registration_scope = v2_history_payload_for_database(
         &database,
-        "/v2/names/history.eth/history?scope=registration&page_size=20",
+        "/v1/names/history.eth/history?scope=registration&page_size=20",
     )
     .await?;
     let both_scope = v2_history_payload_for_database(
         &database,
-        "/v2/names/history.eth/history?scope=both&page_size=20",
+        "/v1/names/history.eth/history?scope=both&page_size=20",
     )
     .await?;
 
@@ -1212,7 +1212,7 @@ async fn v2_address_history_ignores_masked_owner_tail_but_keeps_valid_authority_
     let address_payload = v2_history_payload_for_database(
         &database,
         &format!(
-            "/v2/addresses/{MATCHED_ADDRESS}/history?relation=manager&page_size=20"
+            "/v1/addresses/{MATCHED_ADDRESS}/history?relation=manager&page_size=20"
         ),
     )
     .await?;
@@ -1231,7 +1231,7 @@ async fn v2_address_history_ignores_masked_owner_tail_but_keeps_valid_authority_
 
     let name_payload = v2_history_payload_for_database(
         &database,
-        "/v2/names/masked-tail.eth/history?scope=name&page_size=20",
+        "/v1/names/masked-tail.eth/history?scope=name&page_size=20",
     )
     .await?;
     let name_rows = name_payload["data"].as_array().expect("name history data");
@@ -1295,7 +1295,7 @@ async fn v2_get_history_keeps_prior_registration_resources_after_rebinding() -> 
 
     let payload = v2_history_payload_for_database(
         &database,
-        "/v2/names/history.eth/history?scope=registration&page_size=20",
+        "/v1/names/history.eth/history?scope=registration&page_size=20",
     )
     .await?;
     assert!(payload["data"].as_array().expect("history data").iter().any(
@@ -1333,12 +1333,12 @@ async fn v2_get_history_empty_and_missing_name_semantics() -> Result<()> {
     .await?;
 
     let payload =
-        v2_history_payload_for_database(&database, "/v2/names/quiet.eth/history").await?;
+        v2_history_payload_for_database(&database, "/v1/names/quiet.eth/history").await?;
     assert_eq!(payload["data"], json!([]));
     assert_eq!(payload["page"]["has_more"], json!(false));
     assert_eq!(payload["page"]["next_cursor"], Value::Null);
 
-    let response = v2_history_response_for_database(&database, "/v2/names/missing.eth/history")
+    let response = v2_history_response_for_database(&database, "/v1/names/missing.eth/history")
         .await?;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let payload: Value = read_json(response).await?;
@@ -1356,7 +1356,7 @@ async fn v2_get_history_uses_current_sepolia_anchor_on_mixed_phase_heads() -> Re
 
     let payload = v2_history_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_SEPOLIA_SNAPSHOT_NAME}/history"),
+        &format!("/v1/names/{V2_SEPOLIA_SNAPSHOT_NAME}/history"),
     )
     .await?;
     assert_eq!(payload["meta"], json!({}));

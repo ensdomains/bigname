@@ -4,17 +4,17 @@ async fn v2_lookup_rejects_invalid_request_shapes() -> Result<()> {
 
     for (uri, body) in [
         (
-            "/v2/lookup",
+            "/v1/lookup",
             json!({"inputs": [{"id": "both", "name": "alice.eth", "address": "0x0000000000000000000000000000000000000abc"}]}),
         ),
-        ("/v2/lookup", json!({"inputs": [{"id": "neither"}]})),
-        ("/v2/lookup", json!({"inputs": [{"id": "", "name": "alice.eth"}]})),
+        ("/v1/lookup", json!({"inputs": [{"id": "neither"}]})),
+        ("/v1/lookup", json!({"inputs": [{"id": "", "name": "alice.eth"}]})),
         (
-            "/v2/lookup",
+            "/v1/lookup",
             json!({"profile": "detail", "extra": true, "inputs": []}),
         ),
         (
-            "/v2/lookup",
+            "/v1/lookup",
             json!({"namespace": "ens", "inputs": [{"id": "addr", "address": "0x0000000000000000000000000000000000000abc"}]}),
         ),
     ] {
@@ -25,8 +25,8 @@ async fn v2_lookup_rejects_invalid_request_shapes() -> Result<()> {
     }
 
     for uri in [
-        "/v2/lookup?at=2026-04-17T00:00:00Z",
-        "/v2/lookup?finality=safe",
+        "/v1/lookup?at=2026-04-17T00:00:00Z",
+        "/v1/lookup?finality=safe",
     ] {
         let response = v2_lookup_response_for_database(
             &database,
@@ -44,7 +44,7 @@ async fn v2_lookup_rejects_invalid_request_shapes() -> Result<()> {
         .collect::<Vec<_>>();
     let response = v2_lookup_response_for_database(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": oversized_inputs}),
     )
     .await?;
@@ -61,7 +61,7 @@ async fn v2_lookup_validates_reverse_inputs_before_deployment_readiness() -> Res
     let database = TestDatabase::new_migrated().await?;
     let response = v2_lookup_response_for_database_with_public_namespaces(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"address": "not-an-address"}]}),
         &[],
     )
@@ -72,7 +72,7 @@ async fn v2_lookup_validates_reverse_inputs_before_deployment_readiness() -> Res
 
     let response = v2_lookup_response_for_database_with_public_namespaces(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"address": "0x0000000000000000000000000000000000000abc"}]}),
         &[],
     )
@@ -92,7 +92,7 @@ async fn v2_lookup_empty_public_namespace_set_takes_precedence_over_bound_cursor
 
     let first = v2_lookup_response_for_database_with_public_namespaces(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"address": address, "page_size": 1}]}),
         &["ens", "basenames"],
     )
@@ -105,7 +105,7 @@ async fn v2_lookup_empty_public_namespace_set_takes_precedence_over_bound_cursor
 
     let response = v2_lookup_response_for_database_with_public_namespaces(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"address": address, "page_size": 1, "cursor": cursor}]}),
         &[],
     )
@@ -153,7 +153,7 @@ async fn v2_lookup_name_only_refuses_while_interpret_redo_is_in_progress()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v2/lookup")
+                .uri("/v1/lookup")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&json!({
@@ -191,7 +191,7 @@ async fn v2_lookup_bare_reverse_discloses_a_redo_suppressed_request_chain() -> R
     .oneshot(
         Request::builder()
             .method("POST")
-            .uri("/v2/lookup")
+            .uri("/v1/lookup")
             .header("content-type", "application/json")
             .body(Body::from(
                 serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
@@ -236,7 +236,7 @@ async fn v2_lookup_bare_reverse_returns_conflict_when_every_public_namespace_is_
     .oneshot(
         Request::builder()
             .method("POST")
-            .uri("/v2/lookup")
+            .uri("/v1/lookup")
             .header("content-type", "application/json")
             .body(Body::from(
                 serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
@@ -270,7 +270,7 @@ async fn v2_lookup_exact_scope_fallback_refuses_while_interpret_redo_is_in_progr
     .oneshot(
         Request::builder()
             .method("POST")
-            .uri("/v2/lookup")
+            .uri("/v1/lookup")
             .header("content-type", "application/json")
             .body(Body::from(
                 serde_json::to_vec(&json!({
@@ -339,7 +339,7 @@ async fn v2_lookup_forward_results_are_in_order_with_head_meta() -> Result<()> {
     let token = payload["meta"]["as_of_token"]
         .as_str()
         .expect("lookup response must include meta.as_of_token");
-    let replay = v2_get_json(&database, &format!("/v2/names/case.eth?at={token}")).await?;
+    let replay = v2_get_json(&database, &format!("/v1/names/case.eth?at={token}")).await?;
     assert_eq!(replay["meta"]["as_of"], payload["meta"]["as_of"]);
     assert_eq!(replay["meta"]["as_of_token"], payload["meta"]["as_of_token"]);
 
@@ -816,7 +816,7 @@ async fn v2_lookup_serves_unchanged_phase_projection_after_head_advance() -> Res
 
     let response = v2_lookup_response_for_database(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"id": "public-gap", "name": "public-gap.eth"}]}),
     )
     .await?;
@@ -867,7 +867,7 @@ async fn v2_lookup_rejects_address_relation_from_another_phase_publication() -> 
 
     let response = v2_lookup_response_for_database(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"address": address}]}),
     )
     .await?;
@@ -1017,7 +1017,7 @@ async fn v2_lookup_rejects_primary_claim_from_future_phase_publication() -> Resu
 
     let response = v2_lookup_response_for_database(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"address": address}]}),
     )
     .await?;
@@ -1144,7 +1144,7 @@ async fn v2_lookup_rejects_head_reorg_before_project_republication() -> Result<(
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({
@@ -1229,7 +1229,7 @@ async fn v2_lookup_rejects_project_publication_between_selection_and_first_read(
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({
@@ -1270,7 +1270,7 @@ async fn v2_lookup_internal_head_selection_error_is_sanitized() -> Result<()> {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v2/lookup")
+                .uri("/v1/lookup")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&json!({
@@ -1348,14 +1348,14 @@ async fn v2_lookup_tokens_remain_snapshot_capable_while_collections_reject_at() 
 
     let replay = v2_get_response(
         &database,
-        &format!("/v2/names/missing.eth?at={token}"),
+        &format!("/v1/names/missing.eth?at={token}"),
     )
     .await?;
     assert_eq!(replay.status(), StatusCode::NOT_FOUND);
 
     let collection = v2_get_response(
         &database,
-        &format!("/v2/search?q=missing&namespace=ens&at={token}"),
+        &format!("/v1/search?q=missing&namespace=ens&at={token}"),
     )
     .await?;
     assert_eq!(collection.status(), StatusCode::BAD_REQUEST);
@@ -1366,7 +1366,7 @@ async fn v2_lookup_tokens_remain_snapshot_capable_while_collections_reject_at() 
     );
 
     let union_replay =
-        v2_get_response(&database, &format!("/v2/search?q=missing&at={token}")).await?;
+        v2_get_response(&database, &format!("/v1/search?q=missing&at={token}")).await?;
     assert_eq!(union_replay.status(), StatusCode::BAD_REQUEST);
 
     let public_payload = v2_lookup_json(
@@ -1387,7 +1387,7 @@ async fn v2_lookup_tokens_remain_snapshot_capable_while_collections_reject_at() 
         .as_str()
         .expect("public lookup response must include meta.as_of_token");
     let public_replay =
-        v2_get_response(&database, &format!("/v2/search?q=missing&at={public_token}")).await?;
+        v2_get_response(&database, &format!("/v1/search?q=missing&at={public_token}")).await?;
     assert_eq!(public_replay.status(), StatusCode::BAD_REQUEST);
     let public_replay_error: Value = read_json(public_replay).await?;
     assert_eq!(
@@ -1447,7 +1447,7 @@ async fn v2_lookup_serves_reverse_pagination_after_unrelated_head_advance() -> R
 
     let second_page = v2_lookup_response_for_database(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({
             "profile": "detail",
             "inputs": [{
@@ -1467,7 +1467,7 @@ async fn v2_lookup_serves_reverse_pagination_after_unrelated_head_advance() -> R
 
     let mismatch = v2_lookup_response_for_database(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({
             "profile": "detail",
             "inputs": [{
@@ -1597,7 +1597,7 @@ async fn v2_lookup_reverse_keeps_primary_order_and_flag_coherent_across_projecti
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         json!({
@@ -1661,7 +1661,7 @@ async fn v2_lookup_reverse_uses_candidate_name_for_order_flag_and_cursor_across_
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         json!({
@@ -1953,7 +1953,7 @@ async fn v2_lookup_rejects_union_scope_with_missing_phase_head() -> Result<()> {
         .await?;
     let public_response = v2_lookup_response_for_database(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({
             "inputs": [
                 {"id": "ens-miss", "name": "missing.eth"},
@@ -2097,7 +2097,7 @@ async fn v2_lookup_public_reverse_scope_uses_the_served_namespace_set() -> Resul
 
     let response = v2_lookup_response_for_database_with_public_namespaces(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"address": address}]}),
         &["ens"],
     )
@@ -2114,7 +2114,7 @@ async fn v2_lookup_public_reverse_scope_uses_the_served_namespace_set() -> Resul
 
     let codeployed_page = v2_lookup_response_for_database_with_public_namespaces(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"address": address, "page_size": 1}]}),
         &["ens", "basenames"],
     )
@@ -2126,7 +2126,7 @@ async fn v2_lookup_public_reverse_scope_uses_the_served_namespace_set() -> Resul
         .expect("co-deployed reverse page must include a cursor");
     let changed_set = v2_lookup_response_for_database_with_public_namespaces(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"address": address, "page_size": 1, "cursor": cursor}]}),
         &["ens"],
     )
@@ -2171,7 +2171,7 @@ async fn v2_lookup_production_derivation_uses_the_sepolia_authority_chain() -> R
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v2/lookup")
+                .uri("/v1/lookup")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&json!({
@@ -2234,7 +2234,7 @@ async fn v2_lookup_rejects_manifest_declaration_change_during_public_reverse_rea
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
@@ -2332,7 +2332,7 @@ async fn v2_lookup_rejects_interpret_redo_during_public_reverse_read() -> Result
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
@@ -2396,7 +2396,7 @@ async fn v2_lookup_allows_interpret_live_progress_during_public_reverse_read() -
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
@@ -2476,7 +2476,7 @@ async fn v2_lookup_rejects_public_namespace_becoming_ready_during_reverse_read()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
@@ -2550,7 +2550,7 @@ async fn v2_lookup_allows_manifest_freshness_change_without_authority_change() -
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
@@ -2590,7 +2590,7 @@ async fn v2_lookup_mixed_reverse_and_unserved_forward_namespace_fails_closed() -
 
     let response = v2_lookup_response_for_database_with_public_namespaces(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({
             "inputs": [
                 {"id": "reverse", "address": address},
@@ -2630,7 +2630,7 @@ async fn v2_lookup_rejects_single_scope_with_incompatible_project_generation() -
 
     let response = v2_lookup_response_for_database(
         &database,
-        "/v2/lookup",
+        "/v1/lookup",
         json!({"inputs": [{"id": "miss", "name": "missing.eth"}]}),
     )
     .await?;
@@ -2680,7 +2680,7 @@ async fn v2_lookup_serves_a_project_publication_a_few_blocks_behind_head() -> Re
 
         let response = v2_lookup_response_for_database(
             &database,
-            "/v2/lookup",
+            "/v1/lookup",
             json!({"inputs": [{"id": "miss", "name": "missing.eth"}]}),
         )
         .await?;
@@ -2908,7 +2908,7 @@ async fn v2_lookup_excludes_unsupported_rows_without_leaking_pipeline_reasons() 
 
         let response = v2_lookup_response_for_database(
             &database,
-            "/v2/lookup",
+            "/v1/lookup",
             json!({
                 "profile": "detail",
                 "inputs": [{
@@ -3067,7 +3067,7 @@ async fn v2_lookup_reverse_relation_page_revalidates_generation_before_second_sc
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         json!({
@@ -3595,7 +3595,7 @@ fn lookup_record_names(payload: &Value) -> Vec<&str> {
 }
 
 async fn v2_lookup_json(database: &TestDatabase, body: Value) -> Result<Value> {
-    let response = v2_lookup_response_for_database(database, "/v2/lookup", body).await?;
+    let response = v2_lookup_response_for_database(database, "/v1/lookup", body).await?;
     let status = response.status();
     let payload = read_json(response).await?;
     assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");

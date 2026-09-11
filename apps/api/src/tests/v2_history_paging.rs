@@ -18,9 +18,9 @@ async fn v2_history_routes_page_over_product_visible_rows() -> Result<()> {
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &internal).await?;
 
     let routes = [
-        "/v2/events?name=history.eth".to_owned(),
-        "/v2/names/history.eth/history".to_owned(),
-        format!("/v2/addresses/{ADDRESS}/history"),
+        "/v1/events?name=history.eth".to_owned(),
+        "/v1/names/history.eth/history".to_owned(),
+        format!("/v1/addresses/{ADDRESS}/history"),
     ];
     for route in &routes {
         assert_product_history_pages(&database, route).await?;
@@ -59,9 +59,9 @@ async fn v2_history_routes_treat_internal_only_matches_as_no_product_matches() -
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &internal).await?;
 
     let routes = [
-        "/v2/events?name=quiet.eth&page_size=2".to_owned(),
-        "/v2/names/quiet.eth/history?page_size=2".to_owned(),
-        format!("/v2/addresses/{ADDRESS}/history?page_size=2"),
+        "/v1/events?name=quiet.eth&page_size=2".to_owned(),
+        "/v1/names/quiet.eth/history?page_size=2".to_owned(),
+        format!("/v1/addresses/{ADDRESS}/history?page_size=2"),
     ];
     for route in &routes {
         let payload = v2_history_payload_for_database(&database, route).await?;
@@ -95,7 +95,7 @@ async fn v2_events_rejects_foreign_kind_anchor_for_explicit_type() -> Result<()>
     ));
     let response = v2_history_response_for_database(
         &database,
-        &format!("/v2/events?name=history.eth&type=registration&cursor={cursor}"),
+        &format!("/v1/events?name=history.eth&type=registration&cursor={cursor}"),
     )
     .await?;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -127,7 +127,7 @@ async fn v2_history_routes_continue_from_legacy_non_product_cursor() -> Result<(
     };
     let routes = [
         (
-            "/v2/events?name=history.eth&page_size=2",
+            "/v1/events?name=history.eth&page_size=2",
             crate::v2::encode(&crate::v2::events_cursor_payload(
                 &anchor,
                 &std::collections::BTreeMap::from([
@@ -138,7 +138,7 @@ async fn v2_history_routes_continue_from_legacy_non_product_cursor() -> Result<(
             vec!["renewal", "expiry"],
         ),
         (
-            "/v2/names/history.eth/history?page_size=2",
+            "/v1/names/history.eth/history?page_size=2",
             crate::v2::encode(&crate::v2::history_cursor_payload(
                 &anchor,
                 "ens",
@@ -148,7 +148,7 @@ async fn v2_history_routes_continue_from_legacy_non_product_cursor() -> Result<(
             vec!["renewal", "expiry"],
         ),
         (
-            "/v2/addresses/0x00000000000000000000000000000000000000cc/history?page_size=2",
+            "/v1/addresses/0x00000000000000000000000000000000000000cc/history?page_size=2",
             crate::v2::encode(&crate::v2::address_history_cursor_payload(
                 &anchor,
                 &address_binding,

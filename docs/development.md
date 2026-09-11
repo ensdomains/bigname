@@ -253,7 +253,7 @@ when bounded probes of the serving and readiness pools produce different
 tokens. These audit failures do not change `api_status`; the benchmark gate
 requires a populated identity and fails closed.
 
-Expected chains are the same set `/v2/status` reports: every chain with a
+Expected chains are the same set `/v1/status` reports: every chain with a
 stored head or any phase state. Three consequences worth knowing before paging
 on this endpoint:
 
@@ -264,7 +264,7 @@ on this endpoint:
   rather than reading the endpoint as a liveness proof for every chain.
 - Nothing removes a chain from the expected set on its own. A decommissioned
   chain keeps `stale` latched until its `chain_heads` and `chain_phase_state`
-  rows are deleted, which is the same removal `/v2/status` needs.
+  rows are deleted, which is the same removal `/v1/status` needs.
 - The runner records a chain's phase state when it initializes the chain, which
   is before that chain's first heartbeat. A staged startup therefore reports
   `degraded` until every expected chain has written a heartbeat, which is the

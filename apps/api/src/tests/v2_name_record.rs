@@ -1,6 +1,6 @@
 #[tokio::test]
 async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
-    let payload = v2_name_record_payload("/v2/names/Alice.eth").await?;
+    let payload = v2_name_record_payload("/v1/names/Alice.eth").await?;
 
     assert!(payload.get("page").is_none());
     assert_eq!(payload["meta"]["source"], json!("indexed"));
@@ -166,7 +166,7 @@ async fn v2_get_subnames_preserves_stored_ensip15_normalized_name_bytes() -> Res
 
     let payload = v2_subnames_payload_for_database(
         &database,
-        "/v2/names/parent.eth/subnames?page_size=20",
+        "/v1/names/parent.eth/subnames?page_size=20",
     )
     .await?;
     let row = payload["data"]
@@ -208,7 +208,7 @@ async fn v2_get_name_preserves_stored_ensip15_normalized_name_bytes() -> Result<
 
     let payload = v2_name_record_payload_for_database(
         &database,
-        "/v2/names/%E1%8F%A3%E1%8E%B3%E1%8E%A9.eth",
+        "/v1/names/%E1%8F%A3%E1%8E%B3%E1%8E%A9.eth",
     )
     .await?;
     assert_eq!(payload["data"]["name"], json!(stored_raw_name));
@@ -222,7 +222,7 @@ async fn v2_get_name_exposes_authority_unsupported_shape() -> Result<()> {
         "conflicting_current_ens_authority",
         "independent_ens_deployments_overlap",
     ] {
-        let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+        let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
             row.coverage = json!({
                 "status": "unsupported",
                 "exhaustiveness": "not_asserted",
@@ -263,7 +263,7 @@ async fn v2_get_name_downgrades_every_unsupported_reason() -> Result<()> {
             "a_reason_this_build_has_never_seen",
         ),
     ] {
-        let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+        let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
             row.coverage = json!({
                 "status": "unsupported",
                 "exhaustiveness": "not_asserted",
@@ -292,7 +292,7 @@ async fn v2_get_name_downgrades_every_unsupported_reason() -> Result<()> {
 
 #[tokio::test]
 async fn v2_get_name_does_not_serve_a_resolver_without_projected_authority() -> Result<()> {
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
         row.coverage = json!({
             "status": "unsupported",
             "exhaustiveness": "not_asserted",
@@ -308,7 +308,7 @@ async fn v2_get_name_does_not_serve_a_resolver_without_projected_authority() -> 
 
 #[tokio::test]
 async fn v2_get_name_exposes_projected_wrapper_state_and_fuses() -> Result<()> {
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
         row.declared_summary["wrapper_state"] = json!("locked");
         row.declared_summary["wrapper_fuses"] = json!({
             "fuses": 196_609,
@@ -365,7 +365,7 @@ async fn v2_get_name_rejects_unknown_wrapper_fuse_fields() -> Result<()> {
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth")
+                .uri("/v1/names/Alice.eth")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -381,7 +381,7 @@ async fn v2_get_name_rejects_unknown_wrapper_fuse_fields() -> Result<()> {
 
 #[tokio::test]
 async fn v2_get_name_response_omits_banned_v1_spellings() -> Result<()> {
-    let payload = v2_name_record_payload("/v2/names/Alice.eth").await?;
+    let payload = v2_name_record_payload("/v1/names/Alice.eth").await?;
     assert_no_banned_v1_spellings(&payload);
     Ok(())
 }
@@ -484,7 +484,7 @@ async fn v2_get_name_verified_source_basenames_keeps_stale_inventory_before_look
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/alice.base.eth?source=verified")
+                .uri("/v1/names/alice.base.eth?source=verified")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -507,7 +507,7 @@ async fn v2_get_name_verified_source_basenames_keeps_stale_inventory_before_look
 #[tokio::test]
 async fn v2_get_name_verified_source_reports_stale_when_lookup_state_is_unavailable(
 ) -> Result<()> {
-    let payload = v2_name_record_payload("/v2/names/Alice.eth?source=verified").await?;
+    let payload = v2_name_record_payload("/v1/names/Alice.eth?source=verified").await?;
 
     assert_eq!(payload["meta"]["source"], json!("verified"));
     assert_eq!(payload["data"]["status"], json!("stale"));
@@ -535,7 +535,7 @@ async fn v2_get_name_verified_source_reports_stale_when_lookup_state_is_unavaila
 
 #[tokio::test]
 async fn v2_get_name_verified_source_reports_unsupported_without_verified_boundary() -> Result<()> {
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth?source=verified", |row| {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth?source=verified", |row| {
         row.binding_kind = None;
         row.surface_binding_id = None;
         row.resource_id = None;
@@ -659,7 +659,7 @@ async fn v2_get_name_verified_source_accepts_event_linked_ownerless_registry_ser
     let response = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth?source=verified")
+                .uri("/v1/names/Alice.eth?source=verified")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -764,7 +764,7 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     let response = app_router(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth?source=verified")
+                .uri("/v1/names/Alice.eth?source=verified")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -796,7 +796,7 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     let repeated_response = app_router(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth?source=verified")
+                .uri("/v1/names/Alice.eth?source=verified")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -816,7 +816,7 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     let transport_failure_response = app_router(transport_failure_state)
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth?source=verified")
+                .uri("/v1/names/Alice.eth?source=verified")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -937,7 +937,7 @@ async fn v2_verified_records_return_conflict_when_project_generation_changes_dur
         app_router(state)
             .oneshot(
                 Request::builder()
-                    .uri("/v2/names/Alice.eth/records?source=verified&keys=addr:60")
+                    .uri("/v1/names/Alice.eth/records?source=verified&keys=addr:60")
                     .body(Body::empty())
                     .expect("request must build"),
             )
@@ -1041,7 +1041,7 @@ async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -
     let auto_response = app_router(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth/records?source=auto&keys=text:url,avatar")
+                .uri("/v1/names/Alice.eth/records?source=auto&keys=text:url,avatar")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1065,7 +1065,7 @@ async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -
     let verified_response = app_router(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth/records?source=verified&keys=addr:60")
+                .uri("/v1/names/Alice.eth/records?source=verified&keys=addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1086,7 +1086,7 @@ async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -
     let missing_response = app_router(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth/records?source=verified&keys=text:url")
+                .uri("/v1/names/Alice.eth/records?source=verified&keys=text:url")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1107,7 +1107,7 @@ async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -
     let summary_response = app_router(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth/records?source=auto")
+                .uri("/v1/names/Alice.eth/records?source=auto")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1128,7 +1128,7 @@ async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -
     let no_entrypoint_response = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth/records?source=auto&keys=addr:60")
+                .uri("/v1/names/Alice.eth/records?source=auto&keys=addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1214,7 +1214,7 @@ async fn assert_null_resolver_route_flip_is_stale(source: &str) -> Result<()> {
         .await?;
     let (_guard, control) =
         crate::v2::name_records_auto_fallback_test_hooks::install(&database.pool).await?;
-    let uri = format!("/v2/names/Alice.eth/records?source={source}&keys=addr:60");
+    let uri = format!("/v1/names/Alice.eth/records?source={source}&keys=addr:60");
     let request_task = tokio::spawn(async move {
         app_router(state)
             .oneshot(
@@ -1261,8 +1261,8 @@ async fn assert_null_resolver_route_flip_is_stale(source: &str) -> Result<()> {
 
 #[tokio::test]
 async fn v2_get_name_default_source_matches_explicit_indexed() -> Result<()> {
-    let default_payload = v2_name_record_payload("/v2/names/Alice.eth").await?;
-    let indexed_payload = v2_name_record_payload("/v2/names/Alice.eth?source=indexed").await?;
+    let default_payload = v2_name_record_payload("/v1/names/Alice.eth").await?;
+    let indexed_payload = v2_name_record_payload("/v1/names/Alice.eth?source=indexed").await?;
 
     assert_eq!(default_payload, indexed_payload);
 
@@ -1271,7 +1271,7 @@ async fn v2_get_name_default_source_matches_explicit_indexed() -> Result<()> {
 
 #[tokio::test]
 async fn v2_get_name_omits_record_maps_when_inventory_is_absent() -> Result<()> {
-    let payload = v2_name_payload_without_inventory("/v2/names/Alice.eth").await?;
+    let payload = v2_name_payload_without_inventory("/v1/names/Alice.eth").await?;
 
     assert_eq!(
         payload["data"]["unsupported_fields"],
@@ -1287,7 +1287,7 @@ async fn v2_get_name_omits_record_maps_when_inventory_is_absent() -> Result<()> 
 
 #[tokio::test]
 async fn v2_get_name_classifies_ens_v2_registry_as_registered() -> Result<()> {
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
         row.declared_summary["registration"] = json!({
             "status": "active",
             "authority_kind": "ens_v2_registry",
@@ -1306,7 +1306,7 @@ async fn v2_get_name_classifies_ens_v2_registry_as_registered() -> Result<()> {
 
 #[tokio::test]
 async fn v2_get_name_classifies_released_as_released() -> Result<()> {
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
         row.declared_summary["registration"] = json!({
             "status": "released",
             "authority_kind": "registrar",
@@ -1422,7 +1422,7 @@ async fn v2_get_name_withholds_retained_inventory_for_released_tombstone() -> Re
     // The fixture's inventory row and declared resolver stay attached: a
     // released tombstone must not serve them even if projection state loss
     // retains them.
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
         row.declared_summary["registration"]["status"] = json!("released");
         row.declared_summary["registration"]["released_at"] = json!("2026-06-14T00:00:00Z");
     })
@@ -1480,7 +1480,7 @@ async fn v2_get_name_skips_stale_inventory_for_released_tombstone() -> Result<()
     .execute(&database.pool)
     .await?;
 
-    let payload = v2_name_record_payload_for_database(&database, "/v2/names/Alice.eth").await?;
+    let payload = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
     let data = payload["data"].as_object().expect("data must be an object");
     assert_eq!(data.get("registration_status"), Some(&json!("released")));
     assert!(data.get("resolver").is_none());
@@ -1498,7 +1498,7 @@ async fn v2_get_name_withholds_expired_resource_identity_and_inventory_for_reser
 {
     // Model a reservation-selected row with inventory retained for the expired
     // resource. A reservation has no current registration.
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
         row.declared_summary["registration"] = json!({
             "status": "reserved",
             "expiry": 4_000_000_000_u64,
@@ -1522,7 +1522,7 @@ async fn v2_get_name_withholds_expired_resource_identity_and_inventory_for_reser
 #[tokio::test]
 async fn v2_get_name_records_withholds_retained_inventory_for_reservation() -> Result<()> {
     let payload = v2_name_records_payload_with_row_and_setup(
-        "/v2/names/Alice.eth/records?include=inventory",
+        "/v1/names/Alice.eth/records?include=inventory",
         |row| {
             row.declared_summary["registration"] = json!({
                 "status": "reserved",
@@ -1547,7 +1547,7 @@ async fn v2_get_name_records_withholds_retained_inventory_for_reservation() -> R
 #[tokio::test]
 async fn v2_get_name_records_verified_ignores_reservation_audit_selectors() -> Result<()> {
     let payload = v2_name_records_payload_with_row_and_setup(
-        "/v2/names/Alice.eth/records?source=verified&include=inventory",
+        "/v1/names/Alice.eth/records?source=verified&include=inventory",
         |row| {
             row.declared_summary["registration"] = json!({
                 "status": "reserved",
@@ -1586,7 +1586,7 @@ async fn v2_get_name_records_verified_ignores_reservation_audit_selectors() -> R
 #[tokio::test]
 async fn v2_get_name_records_verified_keeps_empty_records_for_active_name() -> Result<()> {
     let payload = v2_name_records_payload_with_row_and_setup(
-        "/v2/names/Alice.eth/records?source=verified",
+        "/v1/names/Alice.eth/records?source=verified",
         |_| {},
         |_, _, inventory| {
             inventory.selectors = json!([]);
@@ -1688,7 +1688,7 @@ async fn v2_get_name_verified_source_withholds_retained_inventory_for_released_t
     let response = app_router(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth?source=verified")
+                .uri("/v1/names/Alice.eth?source=verified")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1731,7 +1731,7 @@ async fn v2_get_name_verified_source_withholds_retained_inventory_for_released_t
     let canonical_response = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth?source=verified")
+                .uri("/v1/names/Alice.eth?source=verified")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1760,7 +1760,7 @@ async fn v2_get_name_verified_source_withholds_retained_inventory_for_released_t
 
 #[tokio::test]
 async fn v2_get_name_classifies_no_binding_as_unregistered() -> Result<()> {
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
         row.surface_binding_id = None;
         row.resource_id = None;
         row.token_lineage_id = None;
@@ -1781,7 +1781,7 @@ async fn v2_get_name_rejects_source_auto() -> Result<()> {
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/alice.eth?source=auto")
+                .uri("/v1/names/alice.eth?source=auto")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1838,7 +1838,7 @@ async fn v2_get_name_infers_exact_base_eth_as_ens() -> Result<()> {
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/base.eth")
+                .uri("/v1/names/base.eth")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1862,7 +1862,7 @@ async fn v2_get_name_rejects_trailing_dot() -> Result<()> {
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/alice.eth.")
+                .uri("/v1/names/alice.eth.")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1885,7 +1885,7 @@ async fn v2_get_name_uses_sepolia_positioned_at_token_on_mixed_phase_heads() -> 
     let at = v2_sepolia_snapshot_token();
     let payload = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_SEPOLIA_SNAPSHOT_NAME}?at={at}"),
+        &format!("/v1/names/{V2_SEPOLIA_SNAPSHOT_NAME}?at={at}"),
     )
     .await?;
 
@@ -1912,14 +1912,14 @@ async fn v2_get_name_at_tokens_round_trip_mainnet_and_sepolia_profiles() -> Resu
 
     let mainnet = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_MAINNET_SNAPSHOT_NAME}"),
+        &format!("/v1/names/{V2_MAINNET_SNAPSHOT_NAME}"),
     )
     .await?;
     let mainnet_at =
         v2_at_token_from_meta_as_of(&mainnet, "1", "ethereum", "ethereum-mainnet")?;
     let mainnet_replay = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_MAINNET_SNAPSHOT_NAME}?at={mainnet_at}"),
+        &format!("/v1/names/{V2_MAINNET_SNAPSHOT_NAME}?at={mainnet_at}"),
     )
     .await?;
     assert_eq!(mainnet_replay["meta"]["as_of"], mainnet["meta"]["as_of"]);
@@ -1928,7 +1928,7 @@ async fn v2_get_name_at_tokens_round_trip_mainnet_and_sepolia_profiles() -> Resu
     let sepolia_at = v2_sepolia_snapshot_token();
     let sepolia = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_SEPOLIA_SNAPSHOT_NAME}?at={sepolia_at}"),
+        &format!("/v1/names/{V2_SEPOLIA_SNAPSHOT_NAME}?at={sepolia_at}"),
     )
     .await?;
     let sepolia_replay_at = v2_at_token_from_meta_as_of(
@@ -1939,7 +1939,7 @@ async fn v2_get_name_at_tokens_round_trip_mainnet_and_sepolia_profiles() -> Resu
     )?;
     let sepolia_replay = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_SEPOLIA_SNAPSHOT_NAME}?at={sepolia_replay_at}"),
+        &format!("/v1/names/{V2_SEPOLIA_SNAPSHOT_NAME}?at={sepolia_replay_at}"),
     )
     .await?;
     assert_eq!(sepolia_replay["meta"]["as_of"], sepolia["meta"]["as_of"]);
@@ -1956,7 +1956,7 @@ async fn v2_get_name_without_at_keeps_mainnet_preference_on_mixed_phase_heads() 
 
     let payload = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_MAINNET_SNAPSHOT_NAME}"),
+        &format!("/v1/names/{V2_MAINNET_SNAPSHOT_NAME}"),
     )
     .await?;
 
@@ -1983,7 +1983,7 @@ async fn v2_get_name_uses_phase_snapshot() -> Result<()> {
 
     let payload = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_MAINNET_SNAPSHOT_NAME}"),
+        &format!("/v1/names/{V2_MAINNET_SNAPSHOT_NAME}"),
     )
     .await?;
     assert_eq!(payload["meta"]["as_of"]["1"]["block_hash"], V2_MAINNET_SNAPSHOT_HASH);
@@ -1998,7 +1998,7 @@ async fn v2_get_name_timestamp_at_uses_sepolia_when_only_sepolia_phase_head_exis
 
     let payload = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?at=2026-04-17T00:10:30Z"),
+        &format!("/v1/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?at=2026-04-17T00:10:30Z"),
     )
     .await?;
 
@@ -2019,7 +2019,7 @@ async fn v2_get_name_timestamp_at_uses_sepolia_when_only_sepolia_phase_head_exis
 
 #[tokio::test]
 async fn v2_get_name_records_returns_indexed_values() -> Result<()> {
-    let payload = v2_name_records_payload("/v2/names/Alice.eth/records").await?;
+    let payload = v2_name_records_payload("/v1/names/Alice.eth/records").await?;
 
     assert!(payload["data"].get("records").is_none());
     assert_eq!(payload["meta"]["source"], json!("indexed"));
@@ -2052,7 +2052,7 @@ async fn v2_get_name_records_returns_indexed_values() -> Result<()> {
 #[tokio::test]
 async fn v2_get_name_records_keys_filter_values_and_per_key_answers() -> Result<()> {
     let payload =
-        v2_name_records_payload("/v2/names/Alice.eth/records?keys=addr:60,text:description")
+        v2_name_records_payload("/v1/names/Alice.eth/records?keys=addr:60,text:description")
             .await?;
 
     assert_eq!(
@@ -2088,7 +2088,7 @@ async fn v2_get_name_records_keys_filter_values_and_per_key_answers() -> Result<
 #[tokio::test]
 async fn v2_get_name_records_flattens_projected_byte_address_values() -> Result<()> {
     let payload = v2_name_records_payload_with_setup(
-        "/v2/names/Alice.eth/records?keys=addr:0",
+        "/v1/names/Alice.eth/records?keys=addr:0",
         |_, _, inventory| {
             inventory.selectors = json!([{
                 "record_key": "addr:0",
@@ -2171,8 +2171,8 @@ async fn v2_records_and_name_detail_derive_ensip19_default_addresses() -> Result
         .await?;
 
     for uri in [
-        "/v2/names/Alice.eth/records?source=indexed&keys=addr:2147483649",
-        "/v2/names/Alice.eth/records?source=auto&keys=addr:2147483649",
+        "/v1/names/Alice.eth/records?source=indexed&keys=addr:2147483649",
+        "/v1/names/Alice.eth/records?source=auto&keys=addr:2147483649",
     ] {
         let response = app_router(state.clone())
             .oneshot(
@@ -2202,7 +2202,7 @@ async fn v2_records_and_name_detail_derive_ensip19_default_addresses() -> Result
     let response = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth?source=indexed")
+                .uri("/v1/names/Alice.eth?source=indexed")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2293,7 +2293,7 @@ async fn v2_ensip19_zero_default_matches_each_requested_getter() -> Result<()> {
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v2/names/Alice.eth/records?source={source}&keys=addr:60,addr:2147483649"
+                        "/v1/names/Alice.eth/records?source={source}&keys=addr:60,addr:2147483649"
                     ))
                     .body(Body::empty())
                     .expect("request must build"),
@@ -2313,7 +2313,7 @@ async fn v2_ensip19_zero_default_matches_each_requested_getter() -> Result<()> {
     let response = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth?source=indexed")
+                .uri("/v1/names/Alice.eth?source=indexed")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2340,7 +2340,7 @@ async fn v2_ensip19_zero_default_matches_each_requested_getter() -> Result<()> {
 #[tokio::test]
 async fn v2_indexed_records_do_not_derive_for_unflagged_resolvers() -> Result<()> {
     let payload = v2_name_records_payload_with_setup(
-        "/v2/names/Alice.eth/records?source=indexed&keys=addr:2147483649",
+        "/v1/names/Alice.eth/records?source=indexed&keys=addr:2147483649",
         |_, _, inventory| {
             inventory.selectors = json!([{
                 "record_key": "addr:2147483648",
@@ -2405,9 +2405,9 @@ async fn v2_pre_surface_recovered_record_is_authoritative_for_profile_and_record
 
     let mut payloads = Vec::new();
     for uri in [
-        "/v2/names/Alice.eth",
-        "/v2/names/Alice.eth/records?source=indexed&keys=text:pre-surface",
-        "/v2/names/Alice.eth/records?source=auto&keys=text:pre-surface&include=inventory",
+        "/v1/names/Alice.eth",
+        "/v1/names/Alice.eth/records?source=indexed&keys=text:pre-surface",
+        "/v1/names/Alice.eth/records?source=auto&keys=text:pre-surface&include=inventory",
     ] {
         let response = app_router(state.clone())
             .oneshot(
@@ -2502,9 +2502,9 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
     .await?;
 
     for uri in [
-        "/v2/names/Alice.eth",
-        "/v2/names/Alice.eth/records?source=indexed&keys=text:description",
-        "/v2/names/Alice.eth/records?source=auto&keys=text:description&include=inventory",
+        "/v1/names/Alice.eth",
+        "/v1/names/Alice.eth/records?source=indexed&keys=text:description",
+        "/v1/names/Alice.eth/records?source=auto&keys=text:description&include=inventory",
     ] {
         let response = app_router(database.app_state())
             .oneshot(
@@ -2567,7 +2567,7 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
 
 #[tokio::test]
 async fn v2_unclassified_serving_resource_does_not_expose_retained_records() -> Result<()> {
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
         let serving_resource_id = row.resource_id.expect("fixture resource");
         row.surface_binding_id = None;
         row.resource_id = None;
@@ -2598,7 +2598,7 @@ async fn v2_get_name_records_rejects_too_many_keys() -> Result<()> {
         .map(|index| format!("text:key{index}"))
         .collect::<Vec<_>>()
         .join(",");
-    let uri = format!("/v2/names/alice.eth/records?keys={keys}");
+    let uri = format!("/v1/names/alice.eth/records?keys={keys}");
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -2625,7 +2625,7 @@ async fn v2_get_name_records_rejects_too_many_keys() -> Result<()> {
 #[tokio::test]
 async fn v2_get_name_records_reports_unset_and_unsupported_per_key() -> Result<()> {
     let payload = v2_name_records_payload_with_setup(
-        "/v2/names/Alice.eth/records?keys=contenthash,text:email",
+        "/v1/names/Alice.eth/records?keys=contenthash,text:email",
         |_, _, inventory| {
             inventory.selectors = json!([
                 {
@@ -2700,7 +2700,7 @@ async fn v2_get_name_records_reports_unset_and_unsupported_per_key() -> Result<(
 #[tokio::test]
 async fn v2_get_name_records_include_inventory_uses_product_key_lists() -> Result<()> {
     let payload = v2_name_records_payload_with_setup(
-        "/v2/names/Alice.eth/records?keys=contenthash,text:email&include=inventory",
+        "/v1/names/Alice.eth/records?keys=contenthash,text:email&include=inventory",
         |_, _, inventory| {
             inventory.selectors = json!([
                 {
@@ -2770,7 +2770,7 @@ async fn v2_get_name_records_include_inventory_uses_product_key_lists() -> Resul
 #[tokio::test]
 async fn v2_get_name_records_inventory_partitions_unsupported_entries() -> Result<()> {
     let payload = v2_name_records_payload_with_setup(
-        "/v2/names/Alice.eth/records?keys=addr:60,avatar&include=inventory",
+        "/v1/names/Alice.eth/records?keys=addr:60,avatar&include=inventory",
         |_, _, inventory| {
             inventory.selectors = json!([
                 {
@@ -2826,7 +2826,7 @@ async fn v2_get_name_records_inventory_partitions_unsupported_entries() -> Resul
 #[tokio::test]
 async fn v2_get_name_records_inventory_absence_is_unknown_not_unsupported() -> Result<()> {
     let payload =
-        v2_name_payload_without_inventory("/v2/names/Alice.eth/records?keys=addr:60&include=inventory")
+        v2_name_payload_without_inventory("/v1/names/Alice.eth/records?keys=addr:60&include=inventory")
             .await?;
 
     assert_eq!(
@@ -2845,7 +2845,7 @@ async fn v2_get_name_records_inventory_absence_is_unknown_not_unsupported() -> R
 async fn v2_get_name_records_source_verified_reports_unsupported_without_lookup_topology(
 ) -> Result<()> {
     let payload = v2_name_records_payload_with_setup(
-        "/v2/names/Alice.eth/records?source=verified&keys=addr:60",
+        "/v1/names/Alice.eth/records?source=verified&keys=addr:60",
         |_, _, _| {},
     )
     .await?;
@@ -2886,7 +2886,7 @@ async fn v2_get_name_records_withholds_unproven_authority_without_verified_looku
     ] {
         for source in ["indexed", "verified", "auto"] {
             let payload = v2_name_records_payload_with_row_and_setup(
-                &format!("/v2/names/Alice.eth/records?source={source}&keys=addr:60"),
+                &format!("/v1/names/Alice.eth/records?source={source}&keys=addr:60"),
                 |row| {
                     row.coverage = json!({
                         "status":"unsupported",
@@ -2923,7 +2923,7 @@ async fn v2_get_name_records_withholds_unproven_authority_without_verified_looku
 #[tokio::test]
 async fn v2_unknown_pipeline_unsupported_reason_stays_in_band() -> Result<()> {
     let records = v2_name_records_payload_with_row_and_setup(
-        "/v2/names/Alice.eth/records?keys=addr:60",
+        "/v1/names/Alice.eth/records?keys=addr:60",
         |row| {
             row.coverage = json!({
                 "status": "unsupported",
@@ -2947,7 +2947,7 @@ async fn v2_unknown_pipeline_unsupported_reason_stays_in_band() -> Result<()> {
     );
 
     let verified =
-        v2_name_record_payload_with_row("/v2/names/Alice.eth?source=verified", |row| {
+        v2_name_record_payload_with_row("/v1/names/Alice.eth?source=verified", |row| {
             row.coverage = json!({
                 "status": "unsupported",
                 "unsupported_reason": "future_projection_gap"
@@ -3002,8 +3002,8 @@ async fn v2_verified_name_reads_reject_oversized_inventory_derived_selector_sets
     let state = database.app_state();
 
     for uri in [
-        "/v2/names/Alice.eth/records?source=verified",
-        "/v2/names/Alice.eth?source=verified",
+        "/v1/names/Alice.eth/records?source=verified",
+        "/v1/names/Alice.eth?source=verified",
     ] {
         let response = app_router(state.clone())
             .oneshot(
@@ -3027,7 +3027,7 @@ async fn v2_verified_name_reads_reject_oversized_inventory_derived_selector_sets
     let narrowed = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth/records?source=verified&keys=text:key-0")
+                .uri("/v1/names/Alice.eth/records?source=verified&keys=text:key-0")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3113,8 +3113,8 @@ async fn v2_get_basenames_records_source_auto_stays_base_scoped_without_fallback
         .await?;
 
     for uri in [
-        "/v2/names/alice.base.eth/records?source=auto",
-        "/v2/names/alice.base.eth/records?source=auto&keys=addr:60",
+        "/v1/names/alice.base.eth/records?source=auto",
+        "/v1/names/alice.base.eth/records?source=auto&keys=addr:60",
     ] {
         let response = app_router(database.app_state())
             .oneshot(
@@ -3152,7 +3152,7 @@ async fn v2_get_basenames_records_source_auto_retries_when_fallback_disappears_d
             .oneshot(
                 Request::builder()
                     .uri(
-                        "/v2/names/alice.base.eth/records?source=auto&keys=addr:60",
+                        "/v1/names/alice.base.eth/records?source=auto&keys=addr:60",
                     )
                     .body(Body::empty())
                     .expect("request must build"),
@@ -3327,7 +3327,7 @@ async fn v2_get_basenames_records_source_auto_retries_when_authority_reclassifie
             .oneshot(
                 Request::builder()
                     .uri(
-                        "/v2/names/alice.base.eth/records?source=auto&keys=addr:60",
+                        "/v1/names/alice.base.eth/records?source=auto&keys=addr:60",
                     )
                     .body(Body::empty())
                     .expect("request must build"),
@@ -3422,7 +3422,7 @@ async fn v2_get_basenames_records_source_auto_executes_verified_fallback_after_r
     let response = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/names/alice.base.eth/records?source=auto&keys=addr:60")
+                .uri("/v1/names/alice.base.eth/records?source=auto&keys=addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3517,7 +3517,7 @@ async fn v2_get_name_records_source_verified_executes_basenames_with_auxiliary_p
     let response = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/names/alice.base.eth/records?source=verified&keys=addr:60")
+                .uri("/v1/names/alice.base.eth/records?source=verified&keys=addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3570,7 +3570,7 @@ async fn v2_get_name_records_source_verified_executes_basenames_with_auxiliary_p
 async fn v2_get_name_records_source_verified_reports_unsupported_without_verified_boundary(
 ) -> Result<()> {
     let payload = v2_name_records_payload_with_row_and_setup(
-        "/v2/names/Alice.eth/records?source=verified&keys=avatar",
+        "/v1/names/Alice.eth/records?source=verified&keys=avatar",
         |row| {
             row.binding_kind = None;
             row.surface_binding_id = None;
@@ -3596,7 +3596,7 @@ async fn v2_get_name_records_source_verified_reports_unsupported_without_verifie
 #[tokio::test]
 async fn v2_get_name_records_source_auto_blends_indexed_and_verified_per_key() -> Result<()> {
     let payload = v2_name_records_payload_with_setup(
-        "/v2/names/Alice.eth/records?source=auto&keys=addr:60,text:email",
+        "/v1/names/Alice.eth/records?source=auto&keys=addr:60,text:email",
         |_, _, inventory| {
             inventory.unsupported_families = json!([
                 {
@@ -3640,7 +3640,7 @@ async fn v2_get_name_records_missing_name_returns_not_found() -> Result<()> {
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/missing.eth/records")
+                .uri("/v1/names/missing.eth/records")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3658,7 +3658,7 @@ async fn v2_get_name_records_missing_name_returns_not_found() -> Result<()> {
 #[tokio::test]
 async fn v2_get_name_records_response_omits_banned_v1_spellings() -> Result<()> {
     let payload =
-        v2_name_records_payload("/v2/names/Alice.eth/records?keys=addr:60&include=inventory")
+        v2_name_records_payload("/v1/names/Alice.eth/records?keys=addr:60&include=inventory")
             .await?;
     assert_no_banned_v1_spellings(&payload);
     Ok(())
@@ -3666,7 +3666,7 @@ async fn v2_get_name_records_response_omits_banned_v1_spellings() -> Result<()> 
 
 #[tokio::test]
 async fn v2_get_name_records_uses_envelope_shape() -> Result<()> {
-    let payload = v2_name_records_payload("/v2/names/Alice.eth/records?keys=addr:60").await?;
+    let payload = v2_name_records_payload("/v1/names/Alice.eth/records?keys=addr:60").await?;
 
     assert!(payload.get("page").is_none());
     assert!(payload["data"].is_object());
@@ -3686,7 +3686,7 @@ async fn v2_get_name_records_uses_envelope_shape() -> Result<()> {
 #[tokio::test]
 async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> Result<()> {
     let (database, payload) =
-        v2_subnames_payload("/v2/names/Parent.eth/subnames?page_size=3").await?;
+        v2_subnames_payload("/v1/names/Parent.eth/subnames?page_size=3").await?;
     let stored_owner: Option<String> = sqlx::query_scalar(
         "SELECT owner FROM bigname_phase.children_current
          WHERE decoded_name = 'gamma.parent.eth'",
@@ -3783,7 +3783,7 @@ async fn v2_get_subnames_keeps_zero_owner_for_ownerless_resolver_child() -> Resu
 
     let payload = v2_subnames_payload_for_database(
         &database,
-        "/v2/names/parent.eth/subnames?page_size=10",
+        "/v1/names/parent.eth/subnames?page_size=10",
     )
     .await?;
     let child = payload["data"]
@@ -3803,7 +3803,7 @@ async fn v2_get_subnames_keeps_zero_owner_for_ownerless_resolver_child() -> Resu
 #[tokio::test]
 async fn v2_get_subnames_paginates_with_opaque_cursor_without_overlap() -> Result<()> {
     let (database, first_page) =
-        v2_subnames_payload("/v2/names/parent.eth/subnames?page_size=2").await?;
+        v2_subnames_payload("/v1/names/parent.eth/subnames?page_size=2").await?;
     let next_cursor = first_page["page"]["next_cursor"]
         .as_str()
         .expect("first page must include a next cursor")
@@ -3812,7 +3812,7 @@ async fn v2_get_subnames_paginates_with_opaque_cursor_without_overlap() -> Resul
 
     let second_page = v2_subnames_payload_for_database(
         &database,
-        &format!("/v2/names/parent.eth/subnames?page_size=2&cursor={next_cursor}"),
+        &format!("/v1/names/parent.eth/subnames?page_size=2&cursor={next_cursor}"),
     )
     .await?;
 
@@ -3879,7 +3879,7 @@ async fn v2_get_subnames_uses_current_sepolia_anchor_on_mixed_phase_heads() -> R
 
     let payload = v2_subnames_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_SEPOLIA_SNAPSHOT_NAME}/subnames"),
+        &format!("/v1/names/{V2_SEPOLIA_SNAPSHOT_NAME}/subnames"),
     )
     .await?;
     assert_eq!(payload["meta"], json!({}));
@@ -3946,7 +3946,7 @@ async fn v2_get_subnames_rejects_cursor_reused_for_different_parent() -> Result<
     .await?;
 
     let first_page =
-        v2_subnames_payload_for_database(&database, "/v2/names/parent.eth/subnames?page_size=2")
+        v2_subnames_payload_for_database(&database, "/v1/names/parent.eth/subnames?page_size=2")
             .await?;
     let next_cursor = first_page["page"]["next_cursor"]
         .as_str()
@@ -3954,7 +3954,7 @@ async fn v2_get_subnames_rejects_cursor_reused_for_different_parent() -> Result<
 
     let response = v2_subnames_response_for_database(
         &database,
-        &format!("/v2/names/other.eth/subnames?page_size=2&cursor={next_cursor}"),
+        &format!("/v1/names/other.eth/subnames?page_size=2&cursor={next_cursor}"),
     )
     .await?;
 
@@ -3970,14 +3970,14 @@ async fn v2_get_subnames_rejects_cursor_reused_for_different_parent() -> Result<
 async fn v2_get_subnames_include_counts_adds_child_subname_count_only_when_requested()
 -> Result<()> {
     let (database, without_counts) =
-        v2_subnames_payload("/v2/names/parent.eth/subnames?page_size=3").await?;
+        v2_subnames_payload("/v1/names/parent.eth/subnames?page_size=3").await?;
     assert!(
         without_counts["data"][0].get("subname_count").is_none(),
         "subname_count must be omitted by default"
     );
 
     let with_counts =
-        v2_subnames_payload_for_database(&database, "/v2/names/parent.eth/subnames?include=counts")
+        v2_subnames_payload_for_database(&database, "/v1/names/parent.eth/subnames?include=counts")
             .await?;
     assert_eq!(with_counts["data"][0]["subname_count"], json!(1));
     assert_eq!(with_counts["data"][1]["subname_count"], json!(0));
@@ -4171,9 +4171,9 @@ async fn v2_get_subnames_paginates_across_a_child_with_no_observed_label() -> Re
     for _ in 0..5 {
         let uri = match cursor.as_deref() {
             Some(cursor) => format!(
-                "/v2/names/parent.eth/subnames?page_size=2&cursor={cursor}"
+                "/v1/names/parent.eth/subnames?page_size=2&cursor={cursor}"
             ),
-            None => "/v2/names/parent.eth/subnames?page_size=2".to_owned(),
+            None => "/v1/names/parent.eth/subnames?page_size=2".to_owned(),
         };
         let payload = v2_subnames_payload_for_database(&database, &uri).await?;
         for row in payload["data"].as_array().expect("subnames data") {
@@ -4199,7 +4199,7 @@ async fn v2_get_subnames_paginates_across_a_child_with_no_observed_label() -> Re
     // escape-encodes it. It is equally not an addressable name, and equally must not fail the page.
     seed_v2_subnames_undecodable_child(&database, "parent.eth", "0xfeed0002").await?;
     let with_undecodable =
-        v2_subnames_payload_for_database(&database, "/v2/names/parent.eth/subnames?page_size=20")
+        v2_subnames_payload_for_database(&database, "/v1/names/parent.eth/subnames?page_size=20")
             .await?;
     let names = with_undecodable["data"]
         .as_array()
@@ -4251,7 +4251,7 @@ async fn v2_get_subnames_gates_decoded_text_on_the_normalization_verdict() -> Re
     seed_v2_subnames_preimage_child(&database, "parent.eth", "Ni\u{200d}ck", false).await?;
 
     let payload =
-        v2_subnames_payload_for_database(&database, "/v2/names/parent.eth/subnames?page_size=20")
+        v2_subnames_payload_for_database(&database, "/v1/names/parent.eth/subnames?page_size=20")
             .await?;
     let rows = payload["data"].as_array().expect("subnames data").clone();
     let row_for_label = |label: &str| {
@@ -4364,7 +4364,7 @@ async fn v2_subname_counts_agree_with_the_page_when_a_child_target_is_orphaned()
 
     let counted = v2_subnames_payload_for_database(
         &database,
-        "/v2/names/parent.eth/subnames?include=counts",
+        "/v1/names/parent.eth/subnames?include=counts",
     )
     .await?;
     assert_eq!(counted["data"][0]["name"], json!("alpha.parent.eth"));
@@ -4411,14 +4411,14 @@ async fn v2_subname_counts_agree_with_the_page_when_a_child_target_is_orphaned()
 
     let page = v2_subnames_payload_for_database(
         &database,
-        "/v2/names/alpha.parent.eth/subnames?page_size=10",
+        "/v1/names/alpha.parent.eth/subnames?page_size=10",
     )
     .await?;
     assert_eq!(page["data"], json!([]));
 
     let recounted = v2_subnames_payload_for_database(
         &database,
-        "/v2/names/parent.eth/subnames?include=counts",
+        "/v1/names/parent.eth/subnames?include=counts",
     )
     .await?;
     assert_eq!(recounted["data"][0]["name"], json!("alpha.parent.eth"));
@@ -4615,7 +4615,7 @@ async fn v2_get_subnames_parent_with_zero_children_returns_empty_page() -> Resul
     seed_v2_subnames_parent(&database, "ens:empty.eth", "empty.eth", "node:empty.eth", 80).await?;
 
     let payload =
-        v2_subnames_payload_for_database(&database, "/v2/names/empty.eth/subnames").await?;
+        v2_subnames_payload_for_database(&database, "/v1/names/empty.eth/subnames").await?;
 
     assert_eq!(payload["data"], json!([]));
     assert_eq!(payload["page"]["has_more"], json!(false));
@@ -4633,7 +4633,7 @@ async fn v2_get_subnames_missing_parent_returns_not_found() -> Result<()> {
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/missing.eth/subnames")
+                .uri("/v1/names/missing.eth/subnames")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -4656,7 +4656,7 @@ async fn v2_get_subnames_rejects_malformed_cursor() -> Result<()> {
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/parent.eth/subnames?cursor=not-a-cursor")
+                .uri("/v1/names/parent.eth/subnames?cursor=not-a-cursor")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -4695,7 +4695,7 @@ async fn v2_get_subnames_rejects_wrong_sort_but_ignores_legacy_snapshot_componen
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/names/parent.eth/subnames?cursor={wrong_sort}"
+                    "/v1/names/parent.eth/subnames?cursor={wrong_sort}"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -4726,7 +4726,7 @@ async fn v2_get_subnames_rejects_wrong_sort_but_ignores_legacy_snapshot_componen
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/names/parent.eth/subnames?cursor={legacy_snapshot}"
+                    "/v1/names/parent.eth/subnames?cursor={legacy_snapshot}"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -4748,7 +4748,7 @@ async fn v2_sepolia_indexed_inventory_serves_name_and_records_at_snapshot() -> R
     seed_v2_sepolia_indexed_inventory(&database).await?;
     let name = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?source=indexed"),
+        &format!("/v1/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?source=indexed"),
     )
     .await?;
     assert_eq!(name["data"]["chain_id"], json!(11155111));
@@ -4765,7 +4765,7 @@ async fn v2_sepolia_indexed_inventory_serves_name_and_records_at_snapshot() -> R
         .expect("snapshot token");
     for source in ["indexed", "auto"] {
         let records = v2_name_record_payload_for_database(&database, &format!(
-            "/v2/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}/records?source={source}&at={at}&keys=addr:60,text:com.twitter&include=inventory",
+            "/v1/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}/records?source={source}&at={at}&keys=addr:60,text:com.twitter&include=inventory",
         )).await?;
         assert_eq!(records["meta"]["source"], json!("indexed"));
         assert_eq!(records["meta"]["as_of"], name["meta"]["as_of"]);
@@ -4784,7 +4784,7 @@ async fn v2_sepolia_verified_inventory_remains_unsupported() -> Result<()> {
     seed_v2_sepolia_indexed_inventory(&database).await?;
     let name = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?source=verified"),
+        &format!("/v1/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?source=verified"),
     )
     .await?;
     assert_eq!(name["data"]["status"], json!("unsupported"));
@@ -4794,7 +4794,7 @@ async fn v2_sepolia_verified_inventory_remains_unsupported() -> Result<()> {
     );
     let records = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}/records?source=verified&keys=addr:60",),
+        &format!("/v1/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}/records?source=verified&keys=addr:60",),
     )
     .await?;
     assert_eq!(
@@ -4811,7 +4811,7 @@ async fn v2_sepolia_indexed_inventory_missing_or_wrong_snapshot_is_not_served() 
     let database = TestDatabase::new_migrated().await?;
     seed_v2_sepolia_only_phase_head_name(&database).await?;
     let records_uri =
-        format!("/v2/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}/records?source=indexed&keys=addr:60",);
+        format!("/v1/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}/records?source=indexed&keys=addr:60",);
     let missing = v2_name_record_payload_for_database(&database, &records_uri).await?;
     assert_eq!(
         missing["data"]["records"]["addr:60"],
@@ -4821,7 +4821,7 @@ async fn v2_sepolia_indexed_inventory_missing_or_wrong_snapshot_is_not_served() 
     );
     let missing_name = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?source=indexed"),
+        &format!("/v1/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?source=indexed"),
     )
     .await?;
     assert!(missing_name["data"].get("addresses").is_none());
@@ -4861,7 +4861,7 @@ async fn v2_sepolia_indexed_inventory_missing_or_wrong_snapshot_is_not_served() 
     .execute(&database.pool)
     .await?;
     for uri in [
-        format!("/v2/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?source=indexed"),
+        format!("/v1/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?source=indexed"),
         records_uri,
     ] {
         let response = app_router(database.app_state())

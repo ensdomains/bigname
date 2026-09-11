@@ -9,7 +9,7 @@ of re-defining or assuming it.
 Three terms are overloaded enough that bare use is discouraged: **promotion**
 (always qualify: checkpoint promotion vs. capability promotion), **profile**
 (always qualify: deployment profile, resolver profile, exact-name profile, or
-the `/v2/lookup` `profile=` parameter), and **migration** (always qualify:
+the `/v1/lookup` `profile=` parameter), and **migration** (always qualify:
 bigname's own schema migration, written here as *schema-migration*, vs. the
 on-chain [ENSv1→ENSv2 migration](#ensv1ensv2-migration)). Entries below that
 describe retired bigname database state say *schema-migration-era*; they have
@@ -303,7 +303,7 @@ protocol never mix silently.
 the single manifest tree a runtime loads
 (`manifests/mainnet/` or `manifests/sepolia/`), which fixes its chains and
 admitted contracts. One runtime, one profile. "Profile" also means resolver
-profile, exact-name profile, or the `/v2/lookup` `profile=` parameter; always
+profile, exact-name profile, or the `/v1/lookup` `profile=` parameter; always
 qualify which one is meant.
 
 ## Derivation kind
@@ -1552,7 +1552,7 @@ a string a route puts in a name-typed field for a label
 bigname cannot state as a name. Registry events prove a child node and its
 labelhash without proving the label, so some children have no name to serve;
 rather than omit the row or return null, the read composes a readable stand-in.
-Two exist today, both on `GET /v2/names/{name}/subnames`: the placeholder
+Two exist today, both on `GET /v1/names/{name}/subnames`: the placeholder
 `[<labelhash-without-0x>].<parent-name>` for a label never observed or whose
 observed text fails ENSIP-15 normalization, and, for a
 label observed as bytes that are not valid UTF-8 or that contain a NUL, the
@@ -1719,7 +1719,7 @@ a row whose canonicality is `canonical`, `safe`, or
 kept as audit input; internal invalidation and reorg-repair machinery still
 consumes them. Readability is a statement about block canonicality only, not
 about support: a readable row may still carry an unsupported support status,
-and routes that additionally require supported rows say so. `POST /v2/lookup`
+and routes that additionally require supported rows say so. `POST /v1/lookup`
 reverse address results are one such route
 ([api-v2.md](api-v2.md#cursors-and-pagination)).
 
@@ -1960,7 +1960,7 @@ is re-registered mints a new lineage.
 
 ## Transport
 
-in `/v2/lookup` topology, the field describing a resolution
+in `/v1/lookup` topology, the field describing a resolution
 that was served across a chain boundary: `{source_chain_id, target_chain_id,
 contract_address, latest_event_kind}`, all `null` when no chain boundary was
 crossed. The only path that populates it is Basenames, whose names live on Base

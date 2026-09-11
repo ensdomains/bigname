@@ -235,7 +235,7 @@ async fn v2_address_names_rejects_unrecognized_namespace() -> Result<()> {
         .oneshot(
             Request::builder()
                 .uri(
-                    "/v2/addresses/0x0000000000000000000000000000000000000001/names?namespace=not-served",
+                    "/v1/addresses/0x0000000000000000000000000000000000000001/names?namespace=not-served",
                 )
                 .body(Body::empty())?,
         )
@@ -255,7 +255,7 @@ async fn v2_address_history_rejects_unrecognized_namespace() -> Result<()> {
         .oneshot(
             Request::builder()
                 .uri(
-                    "/v2/addresses/0x0000000000000000000000000000000000000001/history?namespace=not-served",
+                    "/v1/addresses/0x0000000000000000000000000000000000000001/history?namespace=not-served",
                 )
                 .body(Body::empty())?,
         )

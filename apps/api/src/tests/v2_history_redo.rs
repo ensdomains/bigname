@@ -6,9 +6,9 @@ async fn v2_history_routes_refuse_while_interpret_redo_is_in_progress() -> Resul
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
     let routes = [
-        "/v2/events?name=history.eth&page_size=2".to_owned(),
-        "/v2/names/history.eth/history?page_size=2".to_owned(),
-        format!("/v2/addresses/{ADDRESS}/history?page_size=2"),
+        "/v1/events?name=history.eth&page_size=2".to_owned(),
+        "/v1/names/history.eth/history?page_size=2".to_owned(),
+        format!("/v1/addresses/{ADDRESS}/history?page_size=2"),
     ];
 
     for route in &routes {
@@ -52,7 +52,7 @@ async fn v2_name_history_rejects_malformed_cursor_before_active_redo_fence() -> 
 
     let response = v2_history_response_for_database(
         &database,
-        "/v2/names/history.eth/history?cursor=garbage",
+        "/v1/names/history.eth/history?cursor=garbage",
     )
     .await?;
     let status = response.status();
@@ -67,7 +67,7 @@ async fn v2_name_history_rejects_malformed_cursor_before_active_redo_fence() -> 
 async fn v2_name_history_returns_stale_not_404_when_redo_orphans_the_surface() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
-    let route = "/v2/names/history.eth/history?page_size=2";
+    let route = "/v1/names/history.eth/history?page_size=2";
 
     assert_eq!(
         v2_history_response_for_database(&database, route)
@@ -102,9 +102,9 @@ async fn v2_history_routes_refuse_when_redo_finishes_after_anchor_resolution() -
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
     let routes = [
-        "/v2/events?name=history.eth&page_size=2".to_owned(),
-        "/v2/names/history.eth/history?page_size=2".to_owned(),
-        format!("/v2/addresses/{ADDRESS}/history?page_size=2"),
+        "/v1/events?name=history.eth&page_size=2".to_owned(),
+        "/v1/names/history.eth/history?page_size=2".to_owned(),
+        format!("/v1/addresses/{ADDRESS}/history?page_size=2"),
     ];
 
     for route in routes {
@@ -156,8 +156,8 @@ async fn v2_event_and_address_history_refuse_redo_before_name_enrichment() -> Re
     seed_v2_history_fixture(&database).await?;
 
     for route in [
-        "/v2/events?name=history.eth&page_size=2".to_owned(),
-        format!("/v2/addresses/{ADDRESS}/history?page_size=2"),
+        "/v1/events?name=history.eth&page_size=2".to_owned(),
+        format!("/v1/addresses/{ADDRESS}/history?page_size=2"),
     ] {
         let (_guard, control) =
             bigname_storage::history_anchor_read_test_hooks::install(

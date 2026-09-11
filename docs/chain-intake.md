@@ -52,7 +52,7 @@ as [required redo](glossary.md#redo-marker-scope). Sepolia's
 [provider-trusted verification](glossary.md#verification-level) readiness degrades
 until re-verification completes. On Base and Ethereum Mainnet, serving remains
 governed by Project: the demotion is visible in phase status and operator surfaces,
-but `/v2/status` readiness does not observe the Verify marker today. On every
+but `/v1/status` readiness does not observe the Verify marker today. On every
 chain, any prior level remains historical until the ordinary or continuous runner
 re-verifies.
 

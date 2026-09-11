@@ -36,7 +36,7 @@ async fn v2_get_primary_name_executes_lookup_each_time_without_legacy_persistenc
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -61,7 +61,7 @@ async fn v2_get_primary_name_executes_lookup_each_time_without_legacy_persistenc
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -160,7 +160,7 @@ async fn v2_get_primary_name_uses_one_phase_position_without_legacy_checkpoint()
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -191,7 +191,7 @@ async fn v2_get_primary_name_uses_one_phase_position_without_legacy_checkpoint()
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -272,7 +272,7 @@ async fn v2_get_primary_name_returns_mixed_answers_at_one_position() -> Result<(
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -331,7 +331,7 @@ async fn v2_get_primary_name_normalizes_schema_v2_successful_claim() -> Result<(
     let payload = v2_primary_name_payload_for_database(
         &database,
         &format!(
-            "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
+            "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
         ),
     )
     .await?;
@@ -376,7 +376,7 @@ async fn v2_get_primary_name_reports_an_unnormalizable_stored_claim_as_invalid_n
     let payload = v2_primary_name_payload_for_database(
         &database,
         &format!(
-            "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
+            "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
         ),
     )
     .await?;
@@ -422,7 +422,7 @@ async fn v2_get_primary_name_publishes_an_already_normalized_claim_as_stored() -
     let payload = v2_primary_name_payload_for_database(
         &database,
         &format!(
-            "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
+            "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
         ),
     )
     .await?;
@@ -493,7 +493,7 @@ async fn v2_get_primary_name_excludes_lower_height_orphaned_project_target() -> 
     let payload = v2_primary_name_payload_for_database(
         &database,
         &format!(
-            "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
+            "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
         ),
     )
     .await?;
@@ -535,7 +535,7 @@ async fn v2_get_primary_name_rejects_project_change_after_indexed_read() -> Resu
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
+                        "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
                     ))
                     .body(Body::empty())
                     .expect("request must build"),
@@ -615,7 +615,7 @@ async fn v2_get_primary_name_rejects_same_head_republication_during_mixed_read()
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
+                        "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
                     ))
                     .body(Body::empty())
                     .expect("request must build"),
@@ -677,7 +677,7 @@ async fn v2_get_primary_name_keeps_provider_response_timeout_in_band_without_per
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -742,7 +742,7 @@ async fn v2_get_primary_name_aborts_provider_transport_failure_without_persisten
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -774,7 +774,7 @@ async fn v2_get_basenames_primary_name_verified_is_explicitly_unsupported_and_ba
     let verified = v2_primary_name_payload_for_database(
         &database,
         &format!(
-            "/v2/addresses/{address}/primary-name?namespace=basenames&coin_type={V2_BASENAMES_PRIMARY_COIN_TYPE}&source=verified"
+            "/v1/addresses/{address}/primary-name?namespace=basenames&coin_type={V2_BASENAMES_PRIMARY_COIN_TYPE}&source=verified"
         ),
     )
     .await?;
@@ -796,7 +796,7 @@ async fn v2_get_basenames_primary_name_verified_is_explicitly_unsupported_and_ba
     let indexed = v2_primary_name_payload_for_database(
         &database,
         &format!(
-            "/v2/addresses/{address}/primary-name?namespace=basenames&coin_type={V2_BASENAMES_PRIMARY_COIN_TYPE}&source=indexed"
+            "/v1/addresses/{address}/primary-name?namespace=basenames&coin_type={V2_BASENAMES_PRIMARY_COIN_TYPE}&source=indexed"
         ),
     )
     .await?;
@@ -825,7 +825,7 @@ async fn v2_get_basenames_primary_name_normalization_gate_keeps_meta_base_scoped
     let verified = v2_primary_name_payload_for_database(
         &database,
         &format!(
-            "/v2/addresses/{address}/primary-name?namespace=basenames&coin_type={V2_BASENAMES_PRIMARY_COIN_TYPE}&source=verified"
+            "/v1/addresses/{address}/primary-name?namespace=basenames&coin_type={V2_BASENAMES_PRIMARY_COIN_TYPE}&source=verified"
         ),
     )
     .await?;
@@ -887,7 +887,7 @@ async fn v2_get_basenames_primary_name_without_persisted_verified_stays_base_sco
     let verified = v2_primary_name_payload_for_database(
         &database,
         &format!(
-            "/v2/addresses/{address}/primary-name?namespace=basenames&coin_type={V2_BASENAMES_PRIMARY_COIN_TYPE}&source=verified"
+            "/v1/addresses/{address}/primary-name?namespace=basenames&coin_type={V2_BASENAMES_PRIMARY_COIN_TYPE}&source=verified"
         ),
     )
     .await?;
@@ -905,7 +905,7 @@ async fn v2_get_basenames_primary_name_without_persisted_verified_stays_base_sco
     let omitted_source = v2_primary_name_payload_for_database(
         &database,
         &format!(
-            "/v2/addresses/{address}/primary-name?namespace=basenames&coin_type={V2_BASENAMES_PRIMARY_COIN_TYPE}"
+            "/v1/addresses/{address}/primary-name?namespace=basenames&coin_type={V2_BASENAMES_PRIMARY_COIN_TYPE}"
         ),
     )
     .await?;
@@ -936,7 +936,7 @@ async fn v2_get_primary_name_rejects_malformed_address() -> Result<()> {
     let database = TestDatabase::new(false).await?;
 
     let response =
-        v2_primary_name_response_for_database(&database, "/v2/addresses/not-an-address/primary-name")
+        v2_primary_name_response_for_database(&database, "/v1/addresses/not-an-address/primary-name")
             .await?;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -1006,7 +1006,7 @@ async fn v2_get_primary_name_refuses_a_supported_ens_v2_arm_claim_without_provid
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1089,7 +1089,7 @@ async fn a_supported_name_current_row_without_authority_arm_is_refused_without_f
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1173,7 +1173,7 @@ async fn v2_get_primary_name_refuses_an_unsupported_claim_without_provider_dispa
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1547,7 +1547,7 @@ async fn v2_get_primary_name_refuses_a_live_ens_v2_arm_claim_without_forward_dis
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1646,7 +1646,7 @@ async fn a_live_authority_refusal_overrides_a_different_projected_tuple_for_resp
         app_router(state).oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1733,7 +1733,7 @@ async fn an_unindexed_name_is_admitted_to_live_verification() -> Result<()> {
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1807,7 +1807,7 @@ async fn v2_get_primary_name_degrades_in_band_when_the_claim_projection_is_absen
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
