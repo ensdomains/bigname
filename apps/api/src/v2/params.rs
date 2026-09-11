@@ -5,10 +5,11 @@ use super::support::parse_evm_address;
 use super::{
     error::{V2Error, V2Result},
     vocab::{
-        AddressNamesDedupe, AddressNamesSort, Finality, HistoryEventType, HistoryScope, Relation,
-        RelationSet,
+        AddressNamesDedupe, AddressNamesSort, Finality, HistoryEventType, HistoryEventTypeSet,
+        HistoryScope, Relation, RelationSet,
     },
 };
+use sqlx::types::time::OffsetDateTime;
 
 pub(crate) const DEFAULT_PAGE_SIZE: u64 = 50;
 pub(crate) const MAX_PAGE_SIZE: u64 = 200;
@@ -28,9 +29,12 @@ pub(crate) struct RawQueryParams {
     pub(crate) name: Option<String>,
     pub(crate) registration_id: Option<String>,
     pub(crate) address: Option<String>,
+    pub(crate) resolver: Option<String>,
     pub(crate) relation: Option<String>,
     pub(crate) from_block: Option<String>,
     pub(crate) to_block: Option<String>,
+    pub(crate) from_timestamp: Option<String>,
+    pub(crate) to_timestamp: Option<String>,
     pub(crate) q: Option<String>,
     pub(crate) dedupe: Option<String>,
     pub(crate) sort: Option<String>,
@@ -49,19 +53,47 @@ pub(crate) struct QueryParams {
     pub(crate) namespace: Option<String>,
     pub(crate) include: Vec<String>,
     pub(crate) scope: HistoryScope,
-    pub(crate) event_type: Option<HistoryEventType>,
+    pub(crate) event_types: Option<HistoryEventTypeSet>,
     pub(crate) name: Option<String>,
     pub(crate) registration_id: Option<String>,
     pub(crate) address: Option<String>,
+    pub(crate) resolver: Option<ResolverSelector>,
     pub(crate) relation: Option<RelationSet>,
     pub(crate) from_block: Option<i64>,
     pub(crate) to_block: Option<i64>,
+    pub(crate) from_timestamp: Option<TimestampBound>,
+    pub(crate) to_timestamp: Option<TimestampBound>,
     pub(crate) q: Option<String>,
     pub(crate) dedupe: AddressNamesDedupe,
     pub(crate) sort: AddressNamesSort,
-    pub(crate) order: SortOrder,
+    /// `None` when the request omitted `order`; each route applies its own default.
+    pub(crate) order: Option<SortOrder>,
     pub(crate) cursor: Option<String>,
     pub(crate) page_size: u64,
+}
+
+/// A parsed RFC 3339 bound together with its canonical UTC wire form, which is
+/// what cursors bind so equivalent spellings continue the same query.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TimestampBound {
+    pub(crate) value: OffsetDateTime,
+    pub(crate) canonical: String,
+}
+
+/// A resolver contract named as `<numeric chain_id>:<address>`; the chain is
+/// carried as the storage slug and the address in lowercase canonical form.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolverSelector {
+    pub(crate) chain_id: u64,
+    pub(crate) chain_slug: &'static str,
+    pub(crate) address: String,
+}
+
+impl ResolverSelector {
+    /// Wire form cursors bind: `<numeric chain_id>:<lowercase address>`.
+    pub(crate) fn canonical(&self) -> String {
+        format!("{}:{}", self.chain_id, self.address)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -87,7 +119,7 @@ impl TryFrom<RawQueryParams> for QueryParams {
     type Error = V2Error;
 
     fn try_from(raw: RawQueryParams) -> Result<Self, Self::Error> {
-        Ok(Self {
+        let params = Self {
             at: raw.at.as_deref().map(parse_at).transpose()?,
             finality: parse_finality(raw.finality.as_deref())?,
             source: parse_source(raw.source.as_deref())?,
@@ -96,20 +128,32 @@ impl TryFrom<RawQueryParams> for QueryParams {
             namespace: trim_to_option(raw.namespace),
             include: parse_include(raw.include),
             scope: parse_scope(raw.scope.as_deref())?,
-            event_type: parse_event_type(raw.event_type.as_deref())?,
+            event_types: parse_event_types(raw.event_type.as_deref())?,
             name: trim_to_option(raw.name),
             registration_id: parse_registration_id(raw.registration_id)?,
             address: parse_address(raw.address)?,
+            resolver: parse_resolver_selector(raw.resolver)?,
             relation: parse_relation_set_param(raw.relation.as_deref())?,
             from_block: parse_block_bound(raw.from_block, "from_block")?,
             to_block: parse_block_bound(raw.to_block, "to_block")?,
+            from_timestamp: parse_timestamp_bound(raw.from_timestamp, "from_timestamp")?,
+            to_timestamp: parse_timestamp_bound(raw.to_timestamp, "to_timestamp")?,
             q: trim_to_option(raw.q),
             dedupe: parse_dedupe(raw.dedupe.as_deref())?,
             sort: parse_sort(raw.sort.as_deref())?,
             order: parse_order(raw.order.as_deref())?,
             cursor: trim_to_option(raw.cursor),
             page_size: parse_page_size(raw.page_size)?,
-        })
+        };
+        if matches!(
+            (params.from_timestamp.as_ref(), params.to_timestamp.as_ref()),
+            (Some(from), Some(to)) if from.value > to.value
+        ) {
+            return Err(V2Error::invalid_input(
+                "from_timestamp must be less than or equal to to_timestamp",
+            ));
+        }
+        Ok(params)
     }
 }
 
@@ -148,10 +192,11 @@ fn parse_source(value: Option<&str>) -> V2Result<RequestSource> {
     }
 }
 
-fn parse_order(value: Option<&str>) -> V2Result<SortOrder> {
+fn parse_order(value: Option<&str>) -> V2Result<Option<SortOrder>> {
     match value.map(str::trim).filter(|value| !value.is_empty()) {
-        None | Some("asc") => Ok(SortOrder::Asc),
-        Some("desc") => Ok(SortOrder::Desc),
+        None => Ok(None),
+        Some("asc") => Ok(Some(SortOrder::Asc)),
+        Some("desc") => Ok(Some(SortOrder::Desc)),
         Some(_) => Err(invalid_parameter("order")),
     }
 }
@@ -174,22 +219,66 @@ fn parse_scope(value: Option<&str>) -> V2Result<HistoryScope> {
     }
 }
 
-fn parse_event_type(value: Option<&str>) -> V2Result<Option<HistoryEventType>> {
-    match value.map(str::trim).filter(|value| !value.is_empty()) {
-        None => Ok(None),
-        Some("registration") => Ok(Some(HistoryEventType::Registration)),
-        Some("renewal") => Ok(Some(HistoryEventType::Renewal)),
-        Some("release") => Ok(Some(HistoryEventType::Release)),
-        Some("expiry") => Ok(Some(HistoryEventType::Expiry)),
-        Some("transfer") => Ok(Some(HistoryEventType::Transfer)),
-        Some("authority") => Ok(Some(HistoryEventType::Authority)),
-        Some("resolver") => Ok(Some(HistoryEventType::Resolver)),
-        Some("record") => Ok(Some(HistoryEventType::Record)),
-        Some("primary_name") => Ok(Some(HistoryEventType::PrimaryName)),
-        Some("permission") => Ok(Some(HistoryEventType::Permission)),
-        Some("subregistry") => Ok(Some(HistoryEventType::Subregistry)),
-        Some(_) => Err(invalid_parameter("type")),
+/// `type` accepts one product event type or a comma-separated set; the set is
+/// canonicalized so cursors bind one wire value per distinct set.
+fn parse_event_types(value: Option<&str>) -> V2Result<Option<HistoryEventTypeSet>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    let mut event_types = Vec::new();
+    for part in value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let Some(event_type) = HistoryEventType::from_wire(part) else {
+            return Err(invalid_parameter("type"));
+        };
+        event_types.push(event_type);
     }
+
+    HistoryEventTypeSet::from_event_types(event_types)
+        .map(Some)
+        .ok_or_else(|| invalid_parameter("type"))
+}
+
+fn parse_timestamp_bound(
+    value: Option<String>,
+    field_name: &'static str,
+) -> V2Result<Option<TimestampBound>> {
+    let Some(value) = trim_to_option(value) else {
+        return Ok(None);
+    };
+    let parsed = bigname_storage::parse_rfc3339_utc_timestamp(&value).map_err(|_| {
+        V2Error::invalid_input(format!("{field_name} must be an RFC 3339 timestamp"))
+    })?;
+    Ok(Some(TimestampBound {
+        canonical: format_timestamp_bound(parsed),
+        value: parsed,
+    }))
+}
+
+/// Canonical RFC 3339 UTC form; fractional seconds are kept only when present so
+/// whole-second inputs keep the same shape as row timestamps.
+fn format_timestamp_bound(value: OffsetDateTime) -> String {
+    let value = value.to_offset(sqlx::types::time::UtcOffset::UTC);
+    let mut formatted = format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        value.year(),
+        value.month() as u8,
+        value.day(),
+        value.hour(),
+        value.minute(),
+        value.second()
+    );
+    if value.nanosecond() != 0 {
+        let fraction = format!("{:09}", value.nanosecond());
+        formatted.push('.');
+        formatted.push_str(fraction.trim_end_matches('0'));
+    }
+    formatted.push('Z');
+    formatted
 }
 
 pub(crate) fn parse_relation_set_param(value: Option<&str>) -> V2Result<Option<RelationSet>> {
@@ -241,6 +330,31 @@ fn parse_address(value: Option<String>) -> V2Result<Option<String>> {
     parse_evm_address(&value, "address")
         .map(Some)
         .map_err(|error| V2Error::invalid_input(error.message))
+}
+
+fn parse_resolver_selector(value: Option<String>) -> V2Result<Option<ResolverSelector>> {
+    let Some(value) = trim_to_option(value) else {
+        return Ok(None);
+    };
+    let invalid = || {
+        V2Error::invalid_input(
+            "resolver must be <chain_id>:<address> with a supported numeric chain id",
+        )
+    };
+    let (chain_id, address) = value.split_once(':').ok_or_else(invalid)?;
+    let chain_id = chain_id.trim();
+    if chain_id.is_empty() || !chain_id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    let chain_id = chain_id.parse::<u64>().map_err(|_| invalid())?;
+    let chain_slug = super::chains::numeric_to_slug(chain_id).ok_or_else(invalid)?;
+    let address = parse_evm_address(address, "resolver")
+        .map_err(|error| V2Error::invalid_input(error.message))?;
+    Ok(Some(ResolverSelector {
+        chain_id,
+        chain_slug,
+        address,
+    }))
 }
 
 fn parse_block_bound(value: Option<String>, field_name: &'static str) -> V2Result<Option<i64>> {
@@ -399,7 +513,7 @@ mod tests {
         assert_eq!(defaulted.q, None);
         assert_eq!(defaulted.dedupe, AddressNamesDedupe::Name);
         assert_eq!(defaulted.sort, AddressNamesSort::Name);
-        assert_eq!(defaulted.order, SortOrder::Asc);
+        assert_eq!(defaulted.order, None);
 
         let params = parse(RawQueryParams {
             relation: Some("owner".to_owned()),
@@ -415,7 +529,7 @@ mod tests {
         assert_eq!(params.q, Some("alice".to_owned()));
         assert_eq!(params.dedupe, AddressNamesDedupe::Registration);
         assert_eq!(params.sort, AddressNamesSort::ExpiresAt);
-        assert_eq!(params.order, SortOrder::Desc);
+        assert_eq!(params.order, Some(SortOrder::Desc));
     }
 
     #[test]
@@ -505,7 +619,10 @@ mod tests {
         })
         .expect("event filters must parse");
 
-        assert_eq!(params.event_type, Some(HistoryEventType::Registration));
+        assert_eq!(
+            params.event_types,
+            Some(HistoryEventTypeSet::from(HistoryEventType::Registration))
+        );
         assert_eq!(params.name, Some("Alice.eth".to_owned()));
         assert_eq!(
             params.registration_id,
@@ -544,6 +661,78 @@ mod tests {
             },
         ] {
             let error = parse(raw).expect_err("bad event filter must fail");
+            assert_eq!(error.code(), ErrorCode::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn event_type_sets_parse_and_canonicalize_wire_values() {
+        let params = parse(RawQueryParams {
+            event_type: Some(" renewal, registration ,renewal".to_owned()),
+            ..RawQueryParams::default()
+        })
+        .expect("type set must parse");
+        assert_eq!(
+            params
+                .event_types
+                .as_ref()
+                .map(HistoryEventTypeSet::canonical_value),
+            Some("registration,renewal".to_owned())
+        );
+
+        for raw in ["registration,bogus", ",", "registration,,renewal,"] {
+            let result = parse(RawQueryParams {
+                event_type: Some(raw.to_owned()),
+                ..RawQueryParams::default()
+            });
+            if raw == "registration,,renewal," {
+                assert!(result.is_ok(), "empty parts are ignored: {raw}");
+            } else {
+                let error = result.expect_err("bad type set must fail");
+                assert_eq!(error.code(), ErrorCode::InvalidInput);
+            }
+        }
+    }
+
+    #[test]
+    fn timestamp_bounds_parse_canonicalize_and_validate_order() {
+        let params = parse(RawQueryParams {
+            from_timestamp: Some("2023-11-14T23:15:04+01:00".to_owned()),
+            to_timestamp: Some("2023-11-14T22:15:07.500Z".to_owned()),
+            ..RawQueryParams::default()
+        })
+        .expect("timestamp bounds must parse");
+        assert_eq!(
+            params
+                .from_timestamp
+                .as_ref()
+                .map(|bound| bound.canonical.as_str()),
+            Some("2023-11-14T22:15:04Z")
+        );
+        assert_eq!(
+            params
+                .to_timestamp
+                .as_ref()
+                .map(|bound| bound.canonical.as_str()),
+            Some("2023-11-14T22:15:07.5Z")
+        );
+
+        for raw in [
+            RawQueryParams {
+                from_timestamp: Some("yesterday".to_owned()),
+                ..RawQueryParams::default()
+            },
+            RawQueryParams {
+                to_timestamp: Some("1700000000".to_owned()),
+                ..RawQueryParams::default()
+            },
+            RawQueryParams {
+                from_timestamp: Some("2023-11-14T22:15:07Z".to_owned()),
+                to_timestamp: Some("2023-11-14T22:15:04Z".to_owned()),
+                ..RawQueryParams::default()
+            },
+        ] {
+            let error = parse(raw).expect_err("bad timestamp bound must fail");
             assert_eq!(error.code(), ErrorCode::InvalidInput);
         }
     }

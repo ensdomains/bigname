@@ -92,6 +92,7 @@ async fn v2_events_rejects_foreign_kind_anchor_for_explicit_type() -> Result<()>
             ("namespace".to_owned(), "ens".to_owned()),
             ("type".to_owned(), "registration".to_owned()),
         ]),
+        bigname_storage::HistoryOrder::Desc,
     ));
     let response = v2_history_response_for_database(
         &database,
@@ -124,6 +125,17 @@ async fn v2_history_routes_continue_from_legacy_non_product_cursor() -> Result<(
         namespace: "ens",
         relation: None,
         scope: crate::v2::HistoryScope::Both,
+        order: bigname_storage::HistoryOrder::Desc,
+        params: None,
+    };
+    let default_params = crate::v2::QueryParams::try_from(crate::v2::RawQueryParams::default())
+        .expect("default params must parse");
+    let history_binding = crate::v2::HistoryCursorBinding {
+        namespace: "ens",
+        parent_logical_name_id: &logical_name_id,
+        scope: crate::v2::HistoryScope::Both,
+        order: bigname_storage::HistoryOrder::Desc,
+        params: &default_params,
     };
     let routes = [
         (
@@ -134,6 +146,7 @@ async fn v2_history_routes_continue_from_legacy_non_product_cursor() -> Result<(
                     ("name".to_owned(), logical_name_id.clone()),
                     ("namespace".to_owned(), "ens".to_owned()),
                 ]),
+                bigname_storage::HistoryOrder::Desc,
             )),
             vec!["renewal", "expiry"],
         ),
@@ -141,9 +154,7 @@ async fn v2_history_routes_continue_from_legacy_non_product_cursor() -> Result<(
             "/v1/names/history.eth/history?page_size=2",
             crate::v2::encode(&crate::v2::history_cursor_payload(
                 &anchor,
-                "ens",
-                &logical_name_id,
-                crate::v2::HistoryScope::Both,
+                &history_binding,
             )),
             vec!["renewal", "expiry"],
         ),

@@ -3,7 +3,7 @@ async fn v2_get_history_returns_lean_product_rows_newest_first() -> Result<()> {
     let (database, payload) = v2_history_payload("/v1/names/History.eth/history?page_size=20").await?;
 
     assert_eq!(payload["page"]["page_size"], json!(20));
-    assert_eq!(payload["page"]["total_count"], Value::Null);
+    assert_eq!(payload["page"]["total_count"], json!(10));
     assert_eq!(payload["page"]["has_more"], json!(false));
     assert_eq!(payload["meta"], json!({}));
 
@@ -311,7 +311,10 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
         None,
         20,
         bigname_storage::HistorySummaryMode::Count,
-        &product_event_kinds,
+        &bigname_storage::HistoryPageOptions {
+            event_kinds: product_event_kinds,
+            ..bigname_storage::HistoryPageOptions::default()
+        },
         None,
     )
     .await?;
@@ -1691,4 +1694,573 @@ fn history_transaction_hashes(payload: &Value) -> Vec<&str> {
                 .expect("history row transaction_hash")
         })
         .collect()
+}
+
+#[tokio::test]
+async fn v2_history_order_asc_returns_oldest_first_with_order_bound_cursor() -> Result<()> {
+    let (database, first_page) =
+        v2_history_payload("/v1/names/History.eth/history?order=asc&page_size=4").await?;
+
+    assert_eq!(history_blocks(&first_page), vec![101, 102, 103, 104]);
+    assert_eq!(first_page["page"]["has_more"], json!(true));
+    let cursor = first_page["page"]["next_cursor"]
+        .as_str()
+        .expect("nonterminal asc page must provide a cursor")
+        .to_owned();
+
+    let second_page = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/names/history.eth/history?order=asc&page_size=4&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(history_blocks(&second_page), vec![105, 106, 107, 108]);
+    let cursor = second_page["page"]["next_cursor"]
+        .as_str()
+        .expect("second asc page must provide a cursor")
+        .to_owned();
+    let third_page = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/names/history.eth/history?order=asc&page_size=4&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(history_blocks(&third_page), vec![109, 110]);
+    assert_eq!(third_page["page"]["has_more"], json!(false));
+    assert_eq!(third_page["page"]["next_cursor"], Value::Null);
+
+    // An asc cursor cannot continue a desc (default) request.
+    let response = v2_history_response_for_database(
+        &database,
+        &format!("/v1/names/history.eth/history?page_size=4&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let default_page =
+        v2_history_payload_for_database(&database, "/v1/names/history.eth/history?page_size=3")
+            .await?;
+    assert_eq!(history_blocks(&default_page), vec![110, 109, 108]);
+    let desc_page = v2_history_payload_for_database(
+        &database,
+        "/v1/names/history.eth/history?order=desc&page_size=3",
+    )
+    .await?;
+    assert_eq!(history_blocks(&desc_page), vec![110, 109, 108]);
+
+    for route in [
+        "/v1/events?name=history.eth&order=asc&page_size=3",
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?order=asc&page_size=3",
+    ] {
+        let payload = v2_history_payload_for_database(&database, route).await?;
+        let blocks = history_blocks(&payload);
+        assert!(
+            blocks.windows(2).all(|pair| pair[0] < pair[1]),
+            "{route} must return oldest-first rows: {blocks:?}"
+        );
+        assert_eq!(blocks[0], 101, "{route} must start at the oldest row");
+    }
+
+    let response =
+        v2_history_response_for_database(&database, "/v1/events?name=history.eth&order=sideways")
+            .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_history_type_sets_filter_rows_and_bind_cursors() -> Result<()> {
+    let (database, payload) = v2_history_payload(
+        "/v1/names/history.eth/history?type=registration,renewal,%20renewal&page_size=20",
+    )
+    .await?;
+    let rows = payload["data"].as_array().expect("history data");
+    assert_eq!(history_types(rows), vec!["renewal", "registration"]);
+    assert_eq!(payload["page"]["total_count"], json!(2));
+
+    let events = v2_history_payload_for_database(
+        &database,
+        "/v1/events?name=history.eth&type=record,resolver,transfer&order=asc&page_size=2",
+    )
+    .await?;
+    assert_eq!(
+        history_types(events["data"].as_array().expect("events data")),
+        vec!["transfer", "resolver"]
+    );
+    assert_eq!(events["page"]["has_more"], json!(true));
+    let cursor = events["page"]["next_cursor"]
+        .as_str()
+        .expect("type-set page must provide a cursor")
+        .to_owned();
+    let continued = v2_history_payload_for_database(
+        &database,
+        &format!(
+            "/v1/events?name=history.eth&type=transfer,resolver,record&order=asc&page_size=2&cursor={cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(
+        history_types(continued["data"].as_array().expect("events data")),
+        vec!["record"]
+    );
+    // The same cursor cannot continue a request with a different type set.
+    let response = v2_history_response_for_database(
+        &database,
+        &format!("/v1/events?name=history.eth&type=record&order=asc&page_size=2&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let address = v2_history_payload_for_database(
+        &database,
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?type=authority,record&page_size=20",
+    )
+    .await?;
+    let types = history_types(address["data"].as_array().expect("address history data"));
+    assert!(!types.is_empty());
+    assert!(types.iter().all(|kind| *kind == "authority" || *kind == "record"), "{types:?}");
+
+    for route in [
+        "/v1/names/history.eth/history?type=registration,bogus",
+        "/v1/names/history.eth/history?type=,",
+        "/v1/events?name=history.eth&type=registered",
+    ] {
+        let response = v2_history_response_for_database(&database, route).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{route}");
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_history_timestamp_window_resolves_blocks_through_lineage() -> Result<()> {
+    // Fixture block N has timestamp 1_700_000_000 + N; block 104 is 2023-11-14T22:15:04Z.
+    let (database, payload) = v2_history_payload(
+        "/v1/names/history.eth/history?from_timestamp=2023-11-14T22:15:04Z&to_timestamp=2023-11-14T22:15:07Z&page_size=20",
+    )
+    .await?;
+    assert_eq!(history_blocks(&payload), vec![107, 106, 105, 104]);
+    assert_eq!(payload["page"]["total_count"], json!(4));
+
+    // A bound between two blocks snaps inward: 22:15:04.5 -> block 105, 22:15:06.5 -> block 106.
+    let payload = v2_history_payload_for_database(
+        &database,
+        "/v1/events?name=history.eth&from_timestamp=2023-11-14T22:15:04.500Z&to_timestamp=2023-11-14T22:15:06.500Z&order=asc",
+    )
+    .await?;
+    assert_eq!(history_blocks(&payload), vec![105, 106]);
+
+    // Open-ended bounds and numeric-offset timestamps work; block bounds intersect.
+    let payload = v2_history_payload_for_database(
+        &database,
+        "/v1/events?name=history.eth&from_timestamp=2023-11-14T23:15:08%2B01:00&to_block=109",
+    )
+    .await?;
+    assert_eq!(history_blocks(&payload), vec![109, 108]);
+
+    // A window after the last known block matches nothing.
+    let payload = v2_history_payload_for_database(
+        &database,
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?from_timestamp=2030-01-01T00:00:00Z",
+    )
+    .await?;
+    assert_eq!(payload["data"], json!([]));
+    assert_eq!(payload["page"]["total_count"], json!(0));
+
+    // Cursors bind the timestamp window.
+    let first = v2_history_payload_for_database(
+        &database,
+        "/v1/names/history.eth/history?from_timestamp=2023-11-14T22:15:04Z&page_size=2",
+    )
+    .await?;
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .expect("windowed page must provide a cursor")
+        .to_owned();
+    let response = v2_history_response_for_database(
+        &database,
+        &format!("/v1/names/history.eth/history?page_size=2&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let continued = v2_history_payload_for_database(
+        &database,
+        &format!(
+            "/v1/names/history.eth/history?from_timestamp=2023-11-14T22:15:04Z&page_size=2&cursor={cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(history_blocks(&continued), vec![108, 107]);
+
+    for route in [
+        "/v1/names/history.eth/history?from_timestamp=yesterday",
+        "/v1/names/history.eth/history?from_timestamp=2023-11-14T22:15:07Z&to_timestamp=2023-11-14T22:15:04Z",
+        "/v1/events?name=history.eth&to_timestamp=1700000000",
+    ] {
+        let response = v2_history_response_for_database(&database, route).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{route}");
+        assert_eq!(
+            read_json::<Value>(response).await?["error"]["code"],
+            json!("invalid_input"),
+            "{route}"
+        );
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_history_total_count_is_populated_only_for_anchored_requests() -> Result<()> {
+    let (database, payload) = v2_history_payload("/v1/names/history.eth/history?page_size=3").await?;
+    assert_eq!(payload["page"]["total_count"], json!(10));
+    assert_eq!(payload["page"]["has_more"], json!(true));
+
+    let payload =
+        v2_history_payload_for_database(&database, "/v1/events?name=history.eth&page_size=3")
+            .await?;
+    assert_eq!(payload["page"]["total_count"], json!(10));
+
+    let payload = v2_history_payload_for_database(
+        &database,
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?page_size=3",
+    )
+    .await?;
+    let total = payload["page"]["total_count"]
+        .as_u64()
+        .expect("address history must count anchored rows");
+    assert!(total >= 1);
+
+    let payload =
+        v2_history_payload_for_database(&database, "/v1/events?namespace=ens&page_size=3").await?;
+    assert_eq!(payload["page"]["total_count"], Value::Null);
+    let payload = v2_history_payload_for_database(
+        &database,
+        "/v1/events?namespace=ens&type=registration&from_block=100&to_block=200",
+    )
+    .await?;
+    assert_eq!(payload["page"]["total_count"], Value::Null);
+
+    database.cleanup().await
+}
+
+fn history_blocks(payload: &Value) -> Vec<i64> {
+    payload["data"]
+        .as_array()
+        .expect("history data")
+        .iter()
+        .map(|row| row["block_number"].as_i64().expect("history row block_number"))
+        .collect()
+}
+
+#[tokio::test]
+async fn v2_history_include_data_adds_friendly_payloads_and_keeps_lean_rows_otherwise(
+) -> Result<()> {
+    const RESOLVER: &str = "0x0000000000000000000000000000000000000abc";
+    let (database, lean) = v2_history_payload("/v1/names/history.eth/history?page_size=20").await?;
+    for row in lean["data"].as_array().expect("history data") {
+        assert!(row.get("data").is_none());
+        assert!(row.get("kind").is_none());
+        assert!(row.get("contract_address").is_none());
+    }
+    // The record write was emitted by the resolver contract; the fixture stores
+    // the emitter in mixed case on the raw fact reference.
+    sqlx::query(
+        "UPDATE bigname_phase.normalized_events \
+         SET raw_fact_ref = raw_fact_ref || '{\"emitting_address\":\"0x0000000000000000000000000000000000000ABC\"}'::jsonb \
+         WHERE event_identity = 'history-record'",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let payload = v2_history_payload_for_database(
+        &database,
+        "/v1/names/history.eth/history?include=data&page_size=20",
+    )
+    .await?;
+    let rows = payload["data"].as_array().expect("history data");
+    assert_eq!(rows.len(), 10);
+    let row_at = |block: i64| {
+        rows.iter()
+            .find(|row| row["block_number"] == json!(block))
+            .unwrap_or_else(|| panic!("row at block {block}"))
+    };
+    for row in rows {
+        assert!(row.get("kind").is_none(), "{row}");
+        assert!(row.get("contract_address").is_some(), "{row}");
+        assert!(row["data"].is_object(), "{row}");
+        for key in ["type", "name", "namespace", "registration_id", "block_number", "timestamp", "transaction_hash", "log_index"] {
+            assert!(row.get(key).is_some(), "{key} missing from {row}");
+        }
+        assert!(row.get("before_state").is_none());
+        assert!(row.get("after_state").is_none());
+        assert!(row.get("event_kind").is_none());
+    }
+    assert_no_banned_v1_spellings(&payload);
+
+    let registration = row_at(102);
+    assert!(registration.get("kind").is_none());
+    assert_eq!(registration["contract_address"], Value::Null);
+    assert_eq!(
+        registration["data"],
+        json!({
+            "registrant": "0x00000000000000000000000000000000000000aa",
+            "expires_at": "2030-03-17T17:46:40Z",
+        })
+    );
+    assert_eq!(
+        row_at(110)["data"],
+        json!({ "expires_at": "2031-10-17T10:40:00Z" })
+    );
+    assert_eq!(
+        row_at(109)["data"],
+        json!({ "expires_at": "2031-10-17T10:40:00Z" })
+    );
+    assert_eq!(row_at(108)["data"], json!({}));
+    assert_eq!(
+        row_at(103)["data"],
+        json!({ "to": "0x00000000000000000000000000000000000000bb" })
+    );
+    assert_eq!(
+        row_at(101)["data"],
+        json!({ "owner": "0x00000000000000000000000000000000000000cc" })
+    );
+    assert_eq!(
+        row_at(105)["data"],
+        json!({ "owner": "0x00000000000000000000000000000000000000cc" })
+    );
+    assert_eq!(
+        row_at(104)["data"],
+        json!({ "resolver": { "chain_id": 1, "address": RESOLVER } })
+    );
+    let record = row_at(106);
+    assert!(record.get("kind").is_none());
+    assert_eq!(record["contract_address"], json!(RESOLVER));
+    assert_eq!(
+        record["data"],
+        json!({
+            "key": "addr:60",
+            "coin_type": 60,
+            "value": "0x0000000000000000000000000000000000000def",
+        })
+    );
+    assert_eq!(
+        row_at(107)["data"],
+        json!({
+            "address": "0x00000000000000000000000000000000000000dd",
+            "powers": ["registration_control"],
+        })
+    );
+
+    let events = v2_history_payload_for_database(
+        &database,
+        "/v1/events?name=history.eth&type=record&include=data",
+    )
+    .await?;
+    let event_rows = events["data"].as_array().expect("events data");
+    assert_eq!(event_rows.len(), 1);
+    assert!(event_rows[0].get("kind").is_none());
+    assert_eq!(event_rows[0]["contract_address"], json!(RESOLVER));
+    assert_eq!(event_rows[0]["data"]["key"], json!("addr:60"));
+    let lean_events =
+        v2_history_payload_for_database(&database, "/v1/events?name=history.eth&type=record")
+            .await?;
+    assert!(lean_events["data"][0].get("data").is_none());
+    assert!(lean_events["data"][0].get("kind").is_none());
+
+    let address = v2_history_payload_for_database(
+        &database,
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?include=data&page_size=20",
+    )
+    .await?;
+    let address_rows = address["data"].as_array().expect("address history data");
+    assert!(!address_rows.is_empty());
+    assert!(address_rows.iter().all(|row| row.get("kind").is_none() && row["data"].is_object()));
+
+    for route in [
+        "/v1/names/history.eth/history?include=bogus",
+        "/v1/names/history.eth/history?include=data,bogus",
+        "/v1/events?name=history.eth&include=events",
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?include=payload",
+    ] {
+        let response = v2_history_response_for_database(&database, route).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{route}");
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_history_include_raw_exposes_storage_kind_only_behind_the_opt_in() -> Result<()> {
+    let (database, raw) =
+        v2_history_payload("/v1/names/history.eth/history?include=raw&page_size=20").await?;
+    let rows = raw["data"].as_array().expect("history data");
+    assert_eq!(rows.len(), 10);
+    for row in rows {
+        assert!(row["kind"].is_string(), "{row}");
+        assert!(row.get("data").is_none(), "{row}");
+        assert!(row.get("contract_address").is_none(), "{row}");
+        assert!(row.get("event_kind").is_none(), "{row}");
+    }
+    let row_at = |block: i64| {
+        rows.iter()
+            .find(|row| row["block_number"] == json!(block))
+            .unwrap_or_else(|| panic!("row at block {block}"))
+    };
+    assert_eq!(row_at(101)["kind"], json!("AuthorityTransferred"));
+    assert_eq!(row_at(102)["kind"], json!("RegistrationGranted"));
+    assert_eq!(row_at(103)["kind"], json!("TokenControlTransferred"));
+    assert_eq!(row_at(104)["kind"], json!("ResolverChanged"));
+    assert_eq!(row_at(105)["kind"], json!("AuthorityEpochChanged"));
+    assert_eq!(row_at(106)["kind"], json!("RecordChanged"));
+    assert_eq!(row_at(107)["kind"], json!("PermissionChanged"));
+    assert_eq!(row_at(108)["kind"], json!("RegistrationReleased"));
+    assert_eq!(row_at(109)["kind"], json!("ExpiryChanged"));
+    assert_eq!(row_at(110)["kind"], json!("RegistrationRenewed"));
+
+    // The two flags compose in either order.
+    for route in [
+        "/v1/names/history.eth/history?include=data,raw&page_size=20",
+        "/v1/names/history.eth/history?include=raw,%20data&page_size=20",
+    ] {
+        let both = v2_history_payload_for_database(&database, route).await?;
+        let rows = both["data"].as_array().expect("history data");
+        assert_eq!(rows.len(), 10, "{route}");
+        for row in rows {
+            assert!(row["kind"].is_string(), "{route}: {row}");
+            assert!(row["data"].is_object(), "{route}: {row}");
+            assert!(row.get("contract_address").is_some(), "{route}: {row}");
+        }
+    }
+
+    let events = v2_history_payload_for_database(
+        &database,
+        "/v1/events?name=history.eth&type=record&include=raw",
+    )
+    .await?;
+    assert_eq!(events["data"][0]["kind"], json!("RecordChanged"));
+    assert!(events["data"][0].get("data").is_none());
+    let events = v2_history_payload_for_database(
+        &database,
+        "/v1/events?name=history.eth&type=record&include=raw,data",
+    )
+    .await?;
+    assert_eq!(events["data"][0]["kind"], json!("RecordChanged"));
+    assert_eq!(events["data"][0]["data"]["key"], json!("addr:60"));
+
+    let address = v2_history_payload_for_database(
+        &database,
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?include=raw&page_size=20",
+    )
+    .await?;
+    let address_rows = address["data"].as_array().expect("address history data");
+    assert!(!address_rows.is_empty());
+    assert!(
+        address_rows
+            .iter()
+            .all(|row| row["kind"].is_string() && row.get("data").is_none())
+    );
+
+    for route in [
+        "/v1/names/history.eth/history?include=raw,bogus",
+        "/v1/events?name=history.eth&include=kind",
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?include=raw_kind",
+    ] {
+        let response = v2_history_response_for_database(&database, route).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{route}");
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_events_resolver_filter_lists_rows_for_one_resolver_contract() -> Result<()> {
+    const RESOLVER: &str = "0x0000000000000000000000000000000000000abc";
+    let (database, _) = v2_history_payload("/v1/names/history.eth/history?page_size=1").await?;
+    sqlx::query(
+        "UPDATE bigname_phase.normalized_events \
+         SET raw_fact_ref = raw_fact_ref || '{\"emitting_address\":\"0x0000000000000000000000000000000000000ABC\"}'::jsonb \
+         WHERE event_identity = 'history-record'",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    // The record write was emitted by the resolver and the pointer change names it.
+    let payload = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?resolver=1:{RESOLVER}"),
+    )
+    .await?;
+    assert_eq!(history_blocks(&payload), vec![106, 104]);
+    assert_eq!(
+        history_types(payload["data"].as_array().expect("events data")),
+        vec!["record", "resolver"]
+    );
+    assert_eq!(payload["page"]["total_count"], json!(2));
+    assert_eq!(payload["data"][0]["name"], json!("history.eth"));
+
+    let mixed_case = v2_history_payload_for_database(
+        &database,
+        "/v1/events?resolver=1:0x0000000000000000000000000000000000000ABC&order=asc",
+    )
+    .await?;
+    assert_eq!(history_blocks(&mixed_case), vec![104, 106]);
+
+    let detailed = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?resolver=1:{RESOLVER}&type=record&include=data"),
+    )
+    .await?;
+    assert_eq!(history_blocks(&detailed), vec![106]);
+    assert_eq!(detailed["data"][0]["contract_address"], json!(RESOLVER));
+
+    // Cursors bind the resolver filter.
+    let first = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?resolver=1:{RESOLVER}&page_size=1"),
+    )
+    .await?;
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .expect("resolver page must provide a cursor")
+        .to_owned();
+    let continued = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?resolver=1:{RESOLVER}&page_size=1&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(history_blocks(&continued), vec![104]);
+    let response = v2_history_response_for_database(
+        &database,
+        &format!(
+            "/v1/events?resolver=1:0x0000000000000000000000000000000000000bbb&page_size=1&cursor={cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Another chain or another resolver matches nothing; the chain scopes the read.
+    let empty = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?resolver=8453:{RESOLVER}"),
+    )
+    .await?;
+    assert_eq!(empty["data"], json!([]));
+    assert_eq!(empty["page"]["total_count"], json!(0));
+
+    for route in [
+        format!("/v1/events?resolver={RESOLVER}"),
+        format!("/v1/events?resolver=99:{RESOLVER}"),
+        "/v1/events?resolver=1:0x12".to_owned(),
+        format!("/v1/events?resolver=one:{RESOLVER}"),
+        format!("/v1/diagnostics/events?resolver=1:{RESOLVER}"),
+    ] {
+        let response = v2_history_response_for_database(&database, &route).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{route}");
+        assert_eq!(
+            read_json::<Value>(response).await?["error"]["code"],
+            json!("invalid_input"),
+            "{route}"
+        );
+    }
+
+    database.cleanup().await
 }

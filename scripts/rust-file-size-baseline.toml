@@ -97,3 +97,38 @@ justification = "The selected numeric registrar import keeps transfer authority 
 path = "crates/adapters/src/schema_v2/state_surfaces.rs"
 loc = 641
 justification = "The selected numeric registrar import retains current authority selection and registry resolver-read state together; the new readable-name registrar evidence and snapshot eligibility are isolated in a bounded sibling module."
+
+[[files]]
+path = "apps/api/src/v2/events.rs"
+loc = 765
+justification = "History ergonomics (order, type sets, timestamp windows, include=data|raw, resolver filter) keep the /v1/events handler, its cursor binding, and its filter parser adjacent; split the filter parser out on the next substantive touch."
+
+[[files]]
+path = "apps/api/src/v2/history.rs"
+loc = 714
+justification = "Name-history handler, the shared history read helpers (order, block window, capped total_count, cursor filter keys) and its cursor binding grew together; move the shared helpers into a sibling module on the next substantive touch."
+
+[[files]]
+path = "apps/api/src/v2/params.rs"
+loc = 778
+justification = "Shared query-parameter grammar gained timestamp bounds, type sets, and the resolver selector alongside sibling-branch additions; split per-parameter parsers into a submodule once the parallel branches land."
+
+[[files]]
+path = "apps/api/src/v2/resolvers.rs"
+loc = 721
+justification = "Resolver overview gained grant_event provenance for include=roles next to the existing overview assembly; move role provenance into overview_items on the next substantive touch."
+
+[[files]]
+path = "apps/api/src/v2/vocab.rs"
+loc = 689
+justification = "Product vocabulary gained HistoryEventTypeSet canonicalization alongside sibling-branch additions; split history vocabulary into a submodule once the parallel branches land."
+
+[[files]]
+path = "crates/storage/src/history.rs"
+loc = 685
+justification = "History read facade gained HistoryOrder, HistoryBlockWindow, HistoryPageOptions, and the resolver filter while keeping every loader signature in one place; move the option types into a sibling module on the next substantive touch."
+
+[[files]]
+path = "crates/storage/src/history/paging.rs"
+loc = 689
+justification = "Keyset paging gained the reversible order predicate, per-chain block windows, and the resolver filter, which share one SQL builder; split the filter pushers from the cursor predicate on the next substantive touch."

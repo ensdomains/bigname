@@ -889,15 +889,135 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   the resolver removes it.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/children`.
 
+### History collection filters
+
+`GET /v1/names/{name}/history`, `GET /v1/addresses/{address}/history`, and
+`GET /v1/events` share one filter and pagination vocabulary in addition to
+their route-specific anchors:
+
+- `order=asc|desc` selects the keyset direction over the shared chain-position
+  sort. `desc` (newest first) is the default; `asc` is the exact reverse of the
+  same total order, so the two directions enumerate identical row sets and an
+  `asc` first page is the oldest-first anchor of the collection.
+- `type` accepts one friendly event type or a comma-separated set, for example
+  `type=registration,renewal`. Parts are trimmed, empty parts are ignored,
+  duplicates collapse, and the set is canonicalized into the friendly
+  vocabulary order. A part outside the vocabulary or an entirely empty set
+  returns `400 invalid_input`. Rows match when their `type` is in the set.
+- `from_timestamp` and `to_timestamp` are inclusive RFC 3339 bounds (`Z` or a
+  numeric offset; fractional seconds allowed). They are resolved to block
+  ranges from readable chain lineage, never through RPC: for every chain the
+  deployment can serve, `from_timestamp` maps to the first readable block whose
+  timestamp is at or after the bound and `to_timestamp` to the last readable
+  block whose timestamp is at or before it, and rows are kept when their
+  `block_number` falls inside that chain's inclusive range. A chain with no
+  block satisfying a bound contributes no rows, so a window entirely after the
+  last indexed block matches nothing and returns `200` with empty `data`. Rows
+  without a chain position never match a timestamp window. `from_timestamp`
+  greater than `to_timestamp`, or a value that is not RFC 3339, returns `400
+  invalid_input`. On `/v1/events` the resolved window intersects an explicit
+  `from_block`/`to_block` range.
+- Cursors bind the order and every filter above. The cursor `sort` token
+  encodes the direction, and its filters carry the canonical `type` set and
+  the canonical UTC spelling of each timestamp bound, so a cursor issued by one
+  query cannot continue a query with a different direction, type set, or
+  window; the mismatch returns `400 invalid_input`. Equivalent spellings of the
+  same bound (`+01:00` versus `Z`) continue the same query.
+- `page.total_count` is populated for anchored history reads: name history and
+  address history always, and `/v1/events` when `name`, `registration_id`,
+  `address`, or `resolver` bounds the read. The count runs inside the same repeatable-read
+  transaction as the page over exactly the page's filters (scope, type set,
+  block and timestamp windows, product visibility, and duplicate suppression),
+  so it agrees with what paging would enumerate. It is capped: counting stops
+  after 10,000 product-visible rows and a larger result reports
+  `total_count=null`. Unanchored `/v1/events` reads (namespace, type, and block
+  or timestamp windows only) never count and always report `total_count=null`.
+
+### History event payloads (`include=data`, `include=raw`)
+
+The same three collections accept two independent `include` flags, alone or
+together in any order (`include=data`, `include=raw`, `include=data,raw`).
+`include` on these routes accepts only those two values; any other value
+returns `400 invalid_input`. Without either flag, rows keep their lean shape
+and carry none of the fields below.
+
+`include=data` adds two fields to every returned row:
+
+- `contract_address`: the lower-cased address of the contract that emitted the
+  underlying log. It is `null` for rows derived from interpreter state rather
+  than from one on-chain log.
+- `data`: an object derived from the stored normalized event's before/after
+  state, translated into dictionary vocabulary. Only fields the row actually
+  carries are present; absent or null source values are omitted rather than
+  serialized as `null`, so `data` may be `{}`. Addresses are lower-cased.
+  Contract pointers use the `{chain_id, address}` shape with the row's own
+  numeric `chain_id`; a zero-address pointer means "cleared" and is omitted, so
+  a `resolver` row whose `data` has no `resolver` records a clearing. Unix
+  expiry values become RFC 3339 `expires_at`.
+
+`include=raw` is a separate, explicit opt-in for explorer and diagnostic use.
+It adds one field:
+
+- `kind`: the raw storage event kind behind the friendly `type`, such as
+  `RegistrationGranted`, `LabelRegistered`, `RecordChanged`, or
+  `EACRolesChanged`. This is the one pipeline term the product tier exposes,
+  so an explorer that wants the upstream event name for a badge or a raw-type
+  facet does not have to fall back to diagnostics. It is never part of
+  `include=data`: product clients that render the friendly payload do not see
+  storage vocabulary unless they ask for it.
+
+Per friendly `type`, `data` may contain:
+
+| `type` | `data` fields |
+| --- | --- |
+| `registration` | `registrant`, `owner`, `expires_at`, `resolver: {chain_id, address}`, `subregistry: {chain_id, address}` |
+| `renewal`, `release` | `expires_at` |
+| `expiry` | `expires_at`, `fuses` (uint32 word when the change came through NameWrapper) |
+| `transfer` | `from`, `to`, `fuses` |
+| `authority` | `owner` (the new registry owner), `from` (the previous owner when the row retains it) |
+| `resolver` | `resolver: {chain_id, address}` (absent when the pointer was cleared) |
+| `record` | `key`, `value`, `coin_type` (number, for `addr:<coin_type>` keys). `key` is the stored record key; history retains writes outside the public record grammar (for example `name` or `abi:<content_type>`), so `key` may name a family the records route does not serve. `value` is present only when the write's value was retained: text values are strings, other families are hex strings. A record-version reset (raw kind `RecordVersionChanged`, visible with `include=raw`) carries no fields. |
+| `primary_name` | `address`, `coin_type` (number) |
+| `permission` | `address` (the subject), `powers` (product power vocabulary, as on permission rows), `fuses` (uint32 word for NameWrapper fuse changes) |
+| `subregistry` | `subregistry: {chain_id, address}` (absent when the link was cleared) |
+
+Example row from `GET /v1/names/alice.eth/history?include=data&type=record`:
+
+```json
+{
+  "type": "record",
+  "name": "alice.eth",
+  "namespace": "ens",
+  "registration_id": null,
+  "block_number": 19000106,
+  "timestamp": "2026-06-10T00:00:06Z",
+  "transaction_hash": "0x...",
+  "log_index": 12,
+  "contract_address": "0x231b0ee14048e9dccd1d247744d114a4eb5e8e63",
+  "data": { "key": "addr:60", "coin_type": 60, "value": "0x..." }
+}
+```
+
+The same row from `GET /v1/names/alice.eth/history?include=raw&type=record`
+carries the lean fields plus `"kind": "RecordChanged"` and no
+`contract_address` or `data`; `include=data,raw` carries all three.
+
+`data` never exposes before/after state, raw fact references, or other
+pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
+
 ### `GET /v1/names/{name}/history`
 
 - Method/path: `GET /v1/names/{name}/history`
 - Tier: product read.
 - Purpose: name history.
 - Request parameters: path `name`; query `namespace`,
-  `scope=name|registration|both`, `cursor`, `page_size`, and optional
+  `scope=name|registration|both`, `type`, `order=asc|desc`, `from_timestamp`,
+  `to_timestamp`, `include=data|raw`, `cursor`, `page_size`, and optional
   `finality=latest`. `at` and historical `finality` values are rejected by the
-  shared latest-state collection rule.
+  shared latest-state collection rule. `type`, `order`, and the timestamp
+  window follow the [history collection filters](#history-collection-filters);
+  `include=data` and `include=raw` add the [history event
+  payloads](#history-event-payloads-includedata-includeraw).
 - Response shape: `data` is an array of dedicated lean event rows:
   `{type, name, namespace, registration_id, block_number, timestamp,
   transaction_hash, log_index}`. `registration_id` carries actual registration
@@ -906,12 +1026,15 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   contract, including the committed companion change that adds `resource_id`
   for the underlying resource identity, is documented under
   [`GET /v1/events`](#get-v2events). Rows never include before/after
-  state, raw normalized-event payloads, or a `data` change object. Friendly
+  state or raw normalized-event payloads; without `include=data` they carry no
+  `data` or `contract_address`, without `include=raw` they carry no `kind`,
+  and with those flags they carry exactly the documented fields. Friendly
   `type` vocabulary: `registration`, `renewal`, `release`, `expiry`,
   `transfer`, `authority`, `resolver`, `record`, `primary_name`, `permission`,
   `subregistry` (an ENSv2 registration's subregistry link set or cleared).
-  Raw upstream or pipeline event kinds are diagnostics-only and are not emitted
-  by this product route. Slice 1 excludes every correlation-dependent normalized
+  Raw upstream or pipeline event kinds are not emitted by this product route
+  except as the `kind` field behind the explicit `include=raw` opt-in; the
+  diagnostics events route remains the raw surface. Slice 1 excludes every correlation-dependent normalized
   row with `consumer_visibility=candidate`, including a familiar event kind whose
   existence depends on correlation under an existing source family; diagnostics
   may expose those rows. An [independently admitted
@@ -933,12 +1056,15 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   validation, summary calculation, and pagination. Without a distinct control
   resource, the sole registry-resource row remains product-visible.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
-- Pagination behavior: standard newest-first keyset pagination by chain
-  position. The cursor is bound to the resolved namespace, parent name, scope,
-  and sort. Product event-type filtering is applied before page construction,
-  so `page_size`, `next_cursor`, and `has_more` describe product-visible
-  events. A nonterminal page contains `page_size` rows; only the terminal page
-  may be shorter.
+- Pagination behavior: keyset pagination by chain position, newest first
+  unless `order=asc`. The cursor is bound to the resolved namespace, parent
+  name, scope, direction, `type` set, and timestamp window. Product event-type
+  filtering, including an explicit `type` set, is applied before page
+  construction, so `page_size`, `next_cursor`, and `has_more` describe
+  product-visible events. A nonterminal page contains `page_size` rows; only
+  the terminal page may be shorter. `page.total_count` is the capped anchored
+  count described under the shared history filters: exact up to 10,000 rows,
+  `null` beyond.
 - Scope behavior: `scope=name` reads name-surface events only,
   `scope=registration` reads registration-resource events associated with the
   requested name, and `scope=both` reads both sets. `scope` defaults to `both`.
@@ -1369,9 +1495,14 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Tier: product read.
 - Purpose: address activity history.
 - Request parameters: path `address`; query `namespace`, `relation`,
-  `scope=name|registration|both`, `cursor`, `page_size`, and optional
-  `finality=latest`. `at` and historical `finality` values are rejected by the
-  shared latest-state collection rule.
+  `scope=name|registration|both`, `type`, `order=asc|desc`, `from_timestamp`,
+  `to_timestamp`, `include=data|raw`, `cursor`, `page_size`, and optional
+  `finality=latest`. `at`
+  and historical `finality` values are rejected by the shared latest-state
+  collection rule. `type`, `order`, and the timestamp window follow the
+  [history collection filters](#history-collection-filters); `include=data`
+  and `include=raw` add the [history event
+  payloads](#history-event-payloads-includedata-includeraw).
   `namespace` defaults to `ens` when omitted. `relation` accepts a
   comma-separated set of `owner`, `manager`, and `registrant`; `any`
   normalizes to all three values. Rows match when any listed relation matches.
@@ -1397,10 +1528,14 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   omits `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
   validity claim. True as-of/finality row-bounding is deferred to the
   revision-bound storage follow-up.
-- Pagination behavior: product event-type filtering runs before newest-first
-  keyset page construction, so `page_size`, `next_cursor`, and `has_more`
-  describe product-visible events. A nonterminal page contains `page_size`
-  rows; only the terminal page may be shorter.
+- Pagination behavior: product event-type filtering, including an explicit
+  `type` set, runs before keyset page construction (newest first unless
+  `order=asc`), so `page_size`, `next_cursor`, and `has_more` describe
+  product-visible events. The cursor is bound to the address, namespace,
+  relation set, scope, direction, `type` set, and timestamp window. A
+  nonterminal page contains `page_size` rows; only the terminal page may be
+  shorter. `page.total_count` is the capped anchored count described under
+  the shared history filters.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Address, namespace, and
   cursor-binding validation precede the first `redo_in_progress` check, so
@@ -1493,16 +1628,41 @@ For a registrar lease first identified by a later readable observation, registra
 
 - Method/path: `GET /v1/events`
 - Tier: product read.
-- Purpose: compact event search across name, address, registration, type, and
-  block filters.
-- Request parameters: query `namespace`, `name`, `address`,
-  `registration_id`, `type`, `from_block`, `to_block`, `cursor`, `page_size`,
-  and optional `finality=latest`. `at` and historical `finality` values are
-  rejected by the shared latest-state collection rule. When `name` is present
-  and `namespace` is omitted, namespace is inferred from the name; `namespace`
-  defaults to `ens` only when there is no name filter.
+- Purpose: compact event search across name, address, registration, resolver,
+  type, and block filters.
+- Request parameters: query `namespace`, `name`, `address`, `resolver`,
+  `registration_id`, `type`, `from_block`, `to_block`, `from_timestamp`,
+  `to_timestamp`, `order=asc|desc`, `include=data|raw`, `cursor`, `page_size`,
+  and optional `finality=latest`. `at` and historical `finality` values are rejected by the
+  shared latest-state collection rule. When `name` is present and `namespace`
+  is omitted, namespace is inferred from the name; `namespace` defaults to
+  `ens` only when there is neither a name filter nor a `resolver` filter (a
+  resolver contract serves whichever namespaces bind to it, so a bare
+  `resolver` read spans every namespace). `type` (one value or a
+  comma-separated set), `order`, and the timestamp window follow the [history
+  collection filters](#history-collection-filters); the resolved timestamp
+  window intersects an explicit `from_block`/`to_block` range. `include=data`
+  and `include=raw` add the [history event
+  payloads](#history-event-payloads-includedata-includeraw).
+  `resolver=<chain_id>:<address>` names one resolver contract by numeric chain
+  id (`1`, `8453`, `11155111`, `84532`) and EVM address; the address is
+  case-insensitive and cursors bind its lower-cased form. Any other shape —
+  a bare address, an unsupported chain id, or a malformed address — returns
+  `400 invalid_input`. The filter matches rows the resolver contract emitted
+  (record writes, permission changes, and other resolver-side events, judged by
+  the row's emitting contract) plus `resolver` pointer rows whose new or
+  previous pointer is that contract, so a resolver's timeline includes the
+  names pointing at it. It composes with every other filter and with
+  `include=data`, whose `contract_address` is the emitting contract. This
+  filter lives on `/v1/events` rather than as `include=events` on the resolver
+  overview because it is an unbounded, paginated, redo-guarded history read
+  with the shared `order`/`type`/timestamp vocabulary, whereas the overview's
+  `include=events` is a bounded `{count, by_type}` summary; nesting a second
+  paginated collection beside `bound_names` would give the overview two
+  independent cursors.
 - Response shape: `data` is an array of compact event rows with friendly
-  `type` vocabulary. Raw upstream event kinds are diagnostics-only. Event-row
+  `type` vocabulary. Raw upstream event kinds appear only as `kind` behind the
+  explicit `include=raw` opt-in. Event-row
   identity uses two fields with distinct meanings. `registration_id` is actual
   registration lifecycle identity: it is set only when the event is associated
   with a registration lifecycle and is `null` otherwise. `resource_id` carries
@@ -1547,10 +1707,16 @@ For a registrar lease first identified by a later readable observation, registra
   the sole registry-resource row remains product-visible.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
   (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L91 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L92 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L93 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L226 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L227 @ ens_v2@a971bd64) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L132 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L157 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L160 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L162 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L169 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json:L110-L158 @ ens_v2@a971bd64)
-- Pagination behavior: standard newest-first keyset pagination. Product
-  event-type filtering runs before page construction, so `page_size`,
-  `next_cursor`, and `has_more` describe product-visible events. A nonterminal
-  page contains `page_size` rows; only the terminal page may be shorter.
+- Pagination behavior: keyset pagination, newest first unless `order=asc`.
+  Product event-type filtering, including an explicit `type` set, runs before
+  page construction, so `page_size`, `next_cursor`, and `has_more` describe
+  product-visible events. The cursor is bound to the namespace, every anchor
+  and block filter (including `resolver`), the direction, the `type` set, and
+  the timestamp window. A nonterminal page contains `page_size` rows; only the
+  terminal page may be shorter. `page.total_count` follows the shared history
+  rule: populated (exact up to 10,000 rows, `null` beyond) when `name`,
+  `registration_id`, `address`, or `resolver` anchors the read, and always
+  `null` for unanchored reads.
 - Snapshot behavior: event rows come from current state. The response omits
   `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
   validity claim. True as-of/finality row-bounding is deferred to the
@@ -1615,13 +1781,39 @@ For a registrar lease first identified by a later readable observation, registra
   current alias-event rows and preserve each group’s stable order, and
   role-holder samples sort by address.
   `include=roles` items are `{address, registration_count, permission_count,
-  powers}`. `registration_count` is the number of distinct registrations with
+  powers, grant_event?}`. `registration_count` is the number of distinct registrations with
   resolver-scoped permission rows for the role address. `permission_count` is
   the number of those permission rows, not the number of powers expanded from
   them; a row granting multiple powers counts once. The former embedded
   `registration_ids` list is omitted because it was itself unbounded, and
   permission rows remain queryable through `GET /v1/permissions` using the
-  returned addresses. The resolver arrays are not independently pageable. This
+  returned addresses. `grant_event`, when present, is the provenance of the
+  event that granted the role: `{block_number, timestamp, transaction_hash,
+  log_index}` of the earliest canonical `permission`-type event, among the
+  events recorded as provenance on the holder's resolver-scoped permission
+  rows, whose subject is the holder (ties broken by `log_index`). It is read
+  from current permission rows and normalized events, not from the overview
+  summary, so it is omitted — never `null` — when the holder has no
+  resolver-scoped permission row, when the row's provenance names no
+  permission event for that subject, or when the granting event is no longer
+  canonical. Example item:
+
+  ```json
+  {
+    "address": "0x0000000000000000000000000000000000000abc",
+    "registration_count": 1,
+    "permission_count": 1,
+    "powers": ["set_records", "set_resolver"],
+    "grant_event": {
+      "block_number": 150,
+      "timestamp": "2023-11-14T22:15:50Z",
+      "transaction_hash": "0xgrant150tx",
+      "log_index": 3
+    }
+  }
+  ```
+
+  The resolver arrays are not independently pageable. This
   bounded-sample contract is
   the consumer-visible resolver-overview shape change delivered with
   [issue #401](https://github.com/ensdomains/bigname/issues/401); clients must

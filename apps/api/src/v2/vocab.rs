@@ -123,6 +123,13 @@ impl HistoryEventType {
         }
     }
 
+    pub(crate) fn from_wire(value: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|event_type| event_type.as_str() == value)
+    }
+
     pub(crate) const fn storage_event_kinds(self) -> &'static [&'static str] {
         match self {
             Self::Registration => &["RegistrationGranted", "LabelRegistered"],
@@ -141,6 +148,57 @@ impl HistoryEventType {
                 "EACRolesChanged",
             ],
             Self::Subregistry => &["SubregistryChanged"],
+        }
+    }
+}
+
+/// Non-empty set of product event types in canonical (`HistoryEventType::ALL`)
+/// order with duplicates removed, so equal sets always share one wire value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HistoryEventTypeSet {
+    event_types: Vec<HistoryEventType>,
+}
+
+impl HistoryEventTypeSet {
+    pub(crate) fn from_event_types(
+        event_types: impl IntoIterator<Item = HistoryEventType>,
+    ) -> Option<Self> {
+        let requested = event_types.into_iter().collect::<Vec<_>>();
+        let normalized = HistoryEventType::ALL
+            .iter()
+            .copied()
+            .filter(|candidate| requested.contains(candidate))
+            .collect::<Vec<_>>();
+        (!normalized.is_empty()).then_some(Self {
+            event_types: normalized,
+        })
+    }
+
+    pub(crate) fn as_slice(&self) -> &[HistoryEventType] {
+        &self.event_types
+    }
+
+    pub(crate) fn canonical_value(&self) -> String {
+        self.event_types
+            .iter()
+            .map(|event_type| event_type.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    pub(crate) fn storage_event_kinds(&self) -> Vec<String> {
+        self.event_types
+            .iter()
+            .flat_map(|event_type| event_type.storage_event_kinds())
+            .map(|kind| (*kind).to_owned())
+            .collect()
+    }
+}
+
+impl From<HistoryEventType> for HistoryEventTypeSet {
+    fn from(value: HistoryEventType) -> Self {
+        Self {
+            event_types: vec![value],
         }
     }
 }
@@ -542,6 +600,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn history_event_type_sets_canonicalize_order_and_duplicates() {
+        let set = HistoryEventTypeSet::from_event_types([
+            HistoryEventType::Renewal,
+            HistoryEventType::Registration,
+            HistoryEventType::Renewal,
+        ])
+        .expect("non-empty set must build");
+        assert_eq!(
+            set.as_slice(),
+            &[HistoryEventType::Registration, HistoryEventType::Renewal]
+        );
+        assert_eq!(set.canonical_value(), "registration,renewal");
+        assert_eq!(
+            set.storage_event_kinds(),
+            vec![
+                "RegistrationGranted".to_owned(),
+                "LabelRegistered".to_owned(),
+                "RegistrationRenewed".to_owned(),
+            ]
+        );
+        assert!(HistoryEventTypeSet::from_event_types([]).is_none());
+        assert_eq!(
+            HistoryEventType::from_wire("primary_name"),
+            Some(HistoryEventType::PrimaryName)
+        );
+        assert_eq!(HistoryEventType::from_wire("registered"), None);
     }
 
     #[test]

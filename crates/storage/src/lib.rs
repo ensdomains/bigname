@@ -59,14 +59,15 @@ pub use evm_primitives::{
 #[cfg(any(test, feature = "test-support"))]
 pub use history::history_anchor_read_test_hooks;
 pub use history::{
-    EventHistoryAddressFilter, EventHistoryFilter, HistoryChainPositionSample, HistoryCursor,
-    HistoryEvent, HistoryPage, HistoryScope, HistorySummary, HistorySummaryMode,
+    ChainBlockRange, EventHistoryAddressFilter, EventHistoryFilter, EventHistoryResolverFilter,
+    HistoryBlockWindow, HistoryChainPositionSample, HistoryCursor, HistoryEvent, HistoryOrder,
+    HistoryPage, HistoryPageOptions, HistoryScope, HistorySummary, HistorySummaryMode,
     InterpretRedoFence, InterpretRedoInProgress, InvalidHistoryCursor,
     capture_interpret_redo_fence, load_address_history, load_address_history_for_relations,
     load_address_history_page, load_address_history_page_for_relations, load_event_history,
-    load_event_history_page, load_event_history_page_with_redo_policy, load_name_history,
-    load_name_history_head, load_name_history_page, load_resource_history,
-    load_resource_history_page, revalidate_interpret_redo_fence,
+    load_event_history_page, load_event_history_page_with_redo_policy, load_history_events_by_ids,
+    load_name_history, load_name_history_head, load_name_history_page, load_resource_history,
+    load_resource_history_page, resolve_chain_block_ranges, revalidate_interpret_redo_fence,
 };
 pub use history::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
 pub use identity::{
@@ -118,8 +119,9 @@ pub use permissions::{
     load_permissions_current, load_permissions_current_account_resource_page,
     load_permissions_current_account_resource_page_count_summary,
     load_permissions_current_by_resource_ids, load_permissions_current_for_resolver_scope,
-    load_permissions_current_page, load_permissions_current_resolver_targets,
-    load_permissions_current_resource_summaries, load_permissions_current_resource_summary,
+    load_permissions_current_for_resolver_scope_subjects, load_permissions_current_page,
+    load_permissions_current_resolver_targets, load_permissions_current_resource_summaries,
+    load_permissions_current_resource_summary,
 };
 pub use phase_projection_reads::{
     DEFAULT_RESOLVER_CURRENT_READ_FILTER, PHASE_EXPECTED_CHAIN_IDS_SELECT,

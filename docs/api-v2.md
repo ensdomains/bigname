@@ -101,7 +101,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `at` | snapshot selector parameter for routes that support point-in-time reads | `chain_positions` query parameter and timestamp-specific ad hoc selectors |
 | `include` | route-documented expansion allowlist | comma-separated expansion flags, `meta` knobs, and route-specific include flags |
 | `sort` | route-documented sort field | `sort` (unchanged; allowed fields are now route-documented) |
-| `order` | sort direction, `asc` or `desc` | `order` (unchanged) |
+| `order` | sort direction, `asc` or `desc`; history collections default to `desc` (newest first) and treat `asc` as the exact reverse | `order` (unchanged) |
 | `scope` (history) | `name`, `registration`, `both` | `surface`, `resource`, `both` |
 | `grant_scope` | the protocol scope of a permission row: `root`, `registry`, `registration`, `resolver`, or `record_manager` | permission-row `scope` (renamed so history `scope` and permission scope are two names for two concepts) |
 | `verification` | typed checked-answer summary for claimed-vs-verified answers | `verified_state`, `verified_primary_name` section wrappers |
@@ -124,7 +124,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `role_summary` | grouped permission powers for dashboard-style name rows | `role_summary` (unchanged; rewritten to dictionary field names inside) |
 | `authority_context` | required permission-row marker from the [per-name ownership rule](consumer-capabilities.md#ensv1ensv2-mixed-history-ownership); [`current_for_name`](glossary.md#current-for-name-authority-context) means a `name` filter selected the current registration, while [`resource_audit`](glossary.md#resource-audit-context) makes no current-name claim | new in v2 |
 | `capabilities` | product-facing summary of supported namespace capabilities | capability flag summaries when exposed to product routes |
-| `type` | product event category label | `event_kind`, compact event `type` aliases |
+| `type` | product event category label; as a history filter, one label or a comma-separated set | `event_kind`, compact event `type` aliases |
 | `by_type` | map of product event `type` values to counts | event summary `by_kind` maps keyed by raw event kind |
 | `block_number` | EVM block number | block-number fields inside chain-position objects |
 | `block_hash` | EVM block hash | block-hash fields inside chain-position objects |
@@ -133,7 +133,13 @@ step-3-gate vocabulary needed by the route schemas:
 | `log_index` | EVM log index within a transaction | `log_index` (unchanged) |
 | `from_block` | inclusive lower block-number filter | `from_block` (unchanged) |
 | `to_block` | inclusive upper block-number filter | `to_block` (unchanged) |
-| `data` | envelope root payload, and event-row payload when nested inside an event row | compact event payload objects |
+| `from_timestamp` | inclusive lower RFC 3339 bound on history collections, resolved per chain to the first readable lineage block at or after it | new in v2 |
+| `to_timestamp` | inclusive upper RFC 3339 bound on history collections, resolved per chain to the last readable lineage block at or before it | new in v2 |
+| `data` | envelope root payload, and the `include=data` event-row payload when nested inside an event row (see [history event payloads](api-v2-routes.md#history-event-payloads-includedata-includeraw)) | compact event payload objects |
+| `kind` | raw storage event kind on an event row, exposed only behind the explicit `include=raw` opt-in (never part of `include=data`); the one pipeline term the product tier carries, for explorer and diagnostic use | `event_kind` |
+| `contract_address` | lower-cased emitting contract of an event row, exposed only with `include=data`; `null` for state-derived rows | `emitting_address` |
+| `resolver` (query) | `/v1/events` filter naming one resolver contract as `<chain_id>:<address>` (numeric chain id, case-insensitive address); matches rows the contract emitted plus `resolver` pointer rows naming it | new in v2 |
+| `grant_event` | on resolver-overview `include=roles` items: `{block_number, timestamp, transaction_hash, log_index}` of the earliest permission event that granted the role; omitted when unresolvable | permission-row `provenance.normalized_event_ids` |
 
 An admitted controller-free ENSv1 numeric registration can retain its resource and token lifecycle
 before its plaintext name is known. Such normalized events have no logical-name attachment.
@@ -254,7 +260,9 @@ Rules:
 - `token_id` stays a decimal string.
 - Pipeline vocabulary (`projection`, `sidecar`, `manifest`, `normalized event`,
   `raw fact`, table names) must not appear in product-route field names, enum
-  values, or error messages.
+  values, or error messages. The documented exception is the `kind` string on
+  `include=raw` event rows, which carries the raw storage event kind behind an
+  explicit opt-in.
 
 ## Envelope
 
@@ -303,9 +311,14 @@ Rules:
   populate it by counting the same readable current name/address rows used by
   the page query when the requested relation set maps directly to a stored role
   group. Relation sets that require post-filtering retain `total_count=null`.
-  Other routes populate it only where a precomputed count makes it cheap or
-  where they explicitly document `include=total_count`; they must not otherwise
-  run unconditional full counts on the request path.
+  Anchored history collections (name history, address history, and
+  `/v1/events` with a `name`, `registration_id`, `address`, or `resolver`
+  anchor) populate
+  it with a capped count over the page's exact filters: exact up to 10,000
+  product-visible rows, `null` beyond, and always `null` for unanchored event
+  reads. Other routes populate it only where a precomputed count makes it
+  cheap or where they explicitly document `include=total_count`; they must not
+  otherwise run unconditional full counts on the request path.
 - `meta` is always present. Single-resource routes that read chain-derived state
   include `meta.as_of` and `meta.as_of_token` when they can attribute at least
   one served snapshot-pinned chain position. Top-level collection routes omit
@@ -579,7 +592,9 @@ Common parameter rules:
 | `source` | names, records, primary-name | names and records use `indexed` (default) or `verified`; the records route also accepts `auto`; primary-name omits `source` to return all supported source answers and may use `indexed` or `verified` to request a subset |
 | `namespace` | name-inferred, address-anchored, and collection routes | explicit override or filter |
 | `include` | route-documented expansions | per-route allowlist |
-| `sort`, `order` | paginated routes that declare a sort set | route-documented field set plus `asc`/`desc` |
+| `sort`, `order` | paginated routes that declare a sort set; history collections accept `order` alone over their fixed chain-position sort | route-documented field set plus `asc`/`desc` |
+| `resolver` | `/v1/events` | `<chain_id>:<address>` resolver contract; anchors the read, suppresses the `ens` namespace default, and is bound by cursors |
+| `type`, `from_timestamp`, `to_timestamp` | name history, address history, `/v1/events` | friendly event type or comma-separated set; inclusive RFC 3339 bounds resolved to lineage block ranges (see [history collection filters](api-v2-routes.md#history-collection-filters)) |
 | `cursor`, `page_size` | every paginated route | opaque cursor; default 50, max 200 |
 
 For a cross-namespace read with no explicit `namespace`, the API accounts for
@@ -886,7 +901,12 @@ event-type filtering precedes keyset pagination, so page rows and continuation
 metadata describe only product-visible events. For requests without an explicit
 `type`, cursor anchor validation omits the implicit product event-type filter,
 so a still-existing non-product anchor continues to the next product-visible
-row. An explicit `type` remains part of anchor validation. Cursor bytes remain
+row. An explicit `type` (one label or a set) remains part of anchor validation.
+History cursors also encode the direction in their sort token and the
+canonical `type` set and timestamp bounds in their filters, so `order=asc`,
+`type`, `from_timestamp`, and `to_timestamp` each fail closed when a cursor is
+replayed against a different query; see the [history collection
+filters](api-v2-routes.md#history-collection-filters). Cursor bytes remain
 unstable.
 
 A full Interpret and Project re-walk that must not change product behavior at a

@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use axum::{Json, extract::State};
-use bigname_storage::{HistoryEvent as StorageHistoryEvent, HistorySummaryMode};
+use bigname_storage::{HistoryEvent as StorageHistoryEvent, HistoryOrder, HistorySummaryMode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -73,14 +73,14 @@ pub(crate) async fn get_diagnostic_events(
     let params = params.into_inner();
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let namespace = resolve_events_namespace(&params)?;
-    let parsed = parse_events_filter(&params, &namespace)?;
+    let parsed = parse_events_filter(&params, namespace.as_deref())?;
 
     let storage_cursor = params
         .cursor
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
-            events_storage_cursor(&payload, &parsed.cursor_filters)
+            events_storage_cursor(&payload, &parsed.cursor_filters, HistoryOrder::Desc)
         })
         .transpose()?;
 
@@ -107,10 +107,13 @@ pub(crate) async fn get_diagnostic_events(
         }
     })?;
 
-    let next_cursor = storage_page
-        .next_cursor
-        .as_ref()
-        .map(|cursor| encode(&events_cursor_payload(cursor, &parsed.cursor_filters)));
+    let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
+        encode(&events_cursor_payload(
+            cursor,
+            &parsed.cursor_filters,
+            HistoryOrder::Desc,
+        ))
+    });
     let has_more = next_cursor.is_some();
     let logical_name_ids = storage_page
         .rows
