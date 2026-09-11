@@ -24,6 +24,14 @@ pub const RECORD_INVENTORY_PROJECTION_LINEAGE_FILTER: &str = r#"
   )
 "#;
 
+/// A registration whose resolver pointer was cleared publishes a history-only inventory row: it
+/// carries the `provenance.attributed_event_ids` that registration-scoped name history reads back,
+/// and nothing else. It selects no records, so every record-serving read excludes it and a cleared
+/// name answers exactly as it does with no row at all (`inventory_not_available`).
+pub const RECORD_INVENTORY_RECORD_SERVING_FILTER: &str = r#"
+  AND ric.provenance ->> 'record_serving' IS DISTINCT FROM 'false'
+"#;
+
 pub const RECORD_INVENTORY_RESOURCE_CANONICALITY_FILTER: &str = r#"
   AND resource.canonicality_state IN (
       'canonical'::bigname_phase.canonicality_state,
@@ -52,6 +60,7 @@ impl Display for DefaultRecordInventoryCurrentReadFilter {
             RECORD_INVENTORY_PROJECTION_LINEAGE_FILTER,
             RECORD_INVENTORY_RESOURCE_CANONICALITY_FILTER,
             RECORD_INVENTORY_RESOURCE_LINEAGE_FILTER,
+            RECORD_INVENTORY_RECORD_SERVING_FILTER,
         ] {
             formatter.write_str(fragment)?;
         }

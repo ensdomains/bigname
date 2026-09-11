@@ -131,6 +131,9 @@ async fn load_record_inventory_current_matching_selected_snapshot_by_resource(
               'safe'::bigname_phase.canonicality_state,
               'finalized'::bigname_phase.canonicality_state
           )
+          -- A cleared registration's history-only row serves no records; probing it would only
+          -- find the record-serving read filter reject it and report an unloadable projection row.
+          AND ric.provenance ->> 'record_serving' IS DISTINCT FROM 'false'
         "#,
     )
     .bind(resource_id)

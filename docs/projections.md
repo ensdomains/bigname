@@ -590,7 +590,23 @@ staging applies the same guarded exception. Every `RecordChanged` or
 listed in the row's `provenance.attributed_event_ids`, whether or not it is
 the current value for its record key, so `registration`- and `both`-scope name
 history can read those node-keyed writes back; retracting one of those events
-restages the row like any other cited event. A `basenames_base_resolver` event
+restages the row like any other cited event. Attribution spans every resolver
+pointer the resource has selected, not only the current one: each pointer
+attributes the node-keyed writes on its resolver at chain positions before the
+pointer that superseded it, and the latest pointer is open-ended. A write is
+therefore attributed exactly when it was visible to the name at some point,
+because resolver storage persists and ENSv1 reads it at read time; a write on a
+resolver the name never selected, or made only after the name left that resolver
+for good, stays unattributed. Value selection does not widen with it: records,
+versions, resets, and `unsupported_reason`s are still selected only through the
+latest non-zero pointer. When the selected pointer is a clear, the registration
+has no pointer to serve records through, so it publishes a history-only row
+instead: the boundary anchors on the clearing `ResolverChanged`, `support_status`
+is `unsupported` with `resolver_pointer_cleared`, there are no selectors, no
+entries, and no `resolver_address`, and `provenance.record_serving` is `false` so
+every record-serving read excludes the row and a cleared name answers exactly as
+it does with no row at all. Only history reads it, for the
+`attributed_event_ids` it carries. A `basenames_base_resolver` event
 with no logical-name attribution may join only when the selected pointer is
 `basenames_base_registry`, with the same chain, node-to-namehash, and resolver
 emitter match. Basenames keeps the current resolver by node, permits its

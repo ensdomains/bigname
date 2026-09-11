@@ -7,6 +7,7 @@ pub(super) async fn build(
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
+    build_history_attribution(transaction, chain_id).await?;
     // Inventory ranks each resource's ResolverChanged events only after joining staged readable
     // surfaces, so an earlier event may win when a later event's name has no such surface. Once
     // selected, only that resolver contributes the boundary, selectors, and entries; a selected
@@ -149,11 +150,16 @@ pub(super) async fn build(
                    jsonb_agg(to_jsonb(attributed.normalized_event_id)
                              ORDER BY attributed.normalized_event_id) AS event_ids
             FROM (
-                SELECT DISTINCT event.attributed_resource_id AS resource_id,
+                SELECT event.attributed_resource_id AS resource_id,
                        event.normalized_event_id
                 FROM attributed_events event
                 WHERE event.logical_name_id IS NULL
                   AND event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
+                UNION
+                -- Writes the resource selected through an earlier pointer. Value selection above
+                -- keeps reading only the latest non-zero pointer; history must still list them.
+                SELECT resource_id, normalized_event_id
+                FROM project_record_history_attribution
             ) attributed
             GROUP BY attributed.resource_id
         ),
@@ -564,5 +570,266 @@ pub(super) async fn build(
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to build record_inventory_current", error))?;
+    build_cleared_pointer_rows(transaction, chain_id, target).await?;
+    Ok(())
+}
+
+/// Node-keyed record writes (every ENSv1 resolver write and every PublicResolverV2 write) carry no
+/// logical name or resource of their own, so only a resolver pointer can attribute them to a
+/// registration. Attribute each one through the pointer that selected its resolver: a pointer
+/// covers the writes on its resolver at chain positions before the pointer that superseded it, and
+/// the latest pointer is open-ended. Resolver storage is persistent and ENSv1 reads it at read
+/// time, so a write made before the pointer moved onto that resolver still served the name while
+/// the pointer stood — hence the window is bounded only on the newer side.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f)
+///
+/// The latest non-zero pointer's window is unbounded, so this reproduces the attribution the value
+/// selection already makes through `project_record_pointers` and adds every superseded pointer's.
+async fn build_history_attribution(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TEMP TABLE project_record_history_attribution ON COMMIT DROP AS
+        SELECT pointer.resource_id, event.normalized_event_id
+        FROM project_record_pointer_history pointer
+        JOIN project_events event
+          ON event.chain_id = $1
+         AND event.logical_name_id IS NULL
+         AND lower(event.after_state ->> 'node') = pointer.namehash
+         AND lower(COALESCE(
+                NULLIF(event.after_state ->> 'resolver', ''),
+                NULLIF(event.raw_fact_ref ->> 'emitting_address', '')
+             )) = pointer.resolver_address
+        WHERE event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
+          AND (
+              pointer.next_event_id IS NULL
+              OR ROW(
+                  COALESCE(event.block_number, -1),
+                  COALESCE(event.transaction_index, -1),
+                  COALESCE(event.log_index, -1),
+                  event.normalized_event_id
+              ) < ROW(
+                  pointer.next_block_number,
+                  pointer.next_transaction_index,
+                  pointer.next_log_index,
+                  pointer.next_event_id
+              )
+          )
+          AND (
+              (
+                  event.source_family = 'ens_v1_resolver_l1'
+                  AND pointer.pointer_source_family IN (
+                      'ens_v1_registry_l1',
+                      'ens_v1_registrar_l1',
+                      'ens_v1_wrapper_l1'
+                  )
+              )
+              OR (
+                  event.source_family = 'basenames_base_resolver'
+                  AND pointer.pointer_source_family = 'basenames_base_registry'
+              )
+          )
+        UNION
+        -- The guarded ENSv2-origin exception uses the exact declaration already selected by
+        -- resolver classification and applies only to pointers in that declaration's namespace.
+        SELECT pointer.resource_id, event.normalized_event_id
+        FROM project_record_pointer_history pointer
+        JOIN project_stage_resolver_current resolver
+          ON resolver.chain_id = $1
+         AND resolver.resolver_address = pointer.resolver_address
+         AND resolver.support_status = 'supported'
+         AND (resolver.declared_summary #>> '{classification,source_family}' =
+             'ens_v1_resolver_l1'
+          OR (resolver.declared_summary #>> '{classification,source_family}' =
+                  'ens_v2_resolver_l1'
+              AND resolver.declared_summary #>> '{classification,role}' =
+                  'public_resolver_v2'))
+         AND resolver.declared_summary #>> '{classification,basis}' =
+             'manifest_declared_address'
+        JOIN project_manifests declaration_manifest
+          ON declaration_manifest.manifest_id =
+             (resolver.provenance ->> 'manifest_id')::bigint
+         AND declaration_manifest.namespace = pointer.pointer_namespace
+        JOIN project_events event
+          ON event.chain_id = $1
+         AND event.logical_name_id IS NULL
+         AND event.source_family =
+             resolver.declared_summary #>> '{classification,source_family}'
+         AND (event.source_family <> 'ens_v2_resolver_l1'
+              OR (event.namespace = pointer.pointer_namespace
+                  AND event.source_manifest_id = declaration_manifest.manifest_id))
+         AND lower(event.after_state ->> 'node') = pointer.namehash
+         AND lower(COALESCE(
+                NULLIF(event.after_state ->> 'resolver', ''),
+                NULLIF(event.raw_fact_ref ->> 'emitting_address', '')
+             )) = pointer.resolver_address
+        WHERE event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
+          AND pointer.pointer_source_family IN (
+              'ens_v2_registry_l1', 'ens_v2_root_l1'
+          )
+          AND (
+              pointer.next_event_id IS NULL
+              OR ROW(
+                  COALESCE(event.block_number, -1),
+                  COALESCE(event.transaction_index, -1),
+                  COALESCE(event.log_index, -1),
+                  event.normalized_event_id
+              ) < ROW(
+                  pointer.next_block_number,
+                  pointer.next_transaction_index,
+                  pointer.next_log_index,
+                  pointer.next_event_id
+              )
+          )
+        "#,
+    )
+    .bind(chain_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database(
+            "failed to attribute historical pointer record writes",
+            error,
+        )
+    })?;
+    sqlx::query("CREATE INDEX ON project_record_history_attribution (resource_id)")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to index historical pointer attribution", error)
+        })?;
+    Ok(())
+}
+
+/// A selected clear leaves the registration with no pointer to serve records through, so the build
+/// above publishes no row for it. History still has to list the writes the registration made while
+/// it did have a resolver, and registration-scoped history reads those ids back from
+/// `record_inventory_current.provenance.attributed_event_ids`. Publish a history-only row anchored
+/// on the clearing pointer: no selectors, no entries, no `resolver_address`, and
+/// `provenance.record_serving = false` so every record-serving read filters it out and the routes
+/// keep answering a cleared name exactly as they do today (`inventory_not_available`).
+async fn build_cleared_pointer_rows(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target: &Marker,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        WITH cleared_pointers AS (
+            SELECT latest.*
+            FROM project_record_pointer_latest latest
+            WHERE NOT EXISTS (
+                SELECT 1 FROM project_record_pointers serving
+                WHERE serving.resource_id = latest.resource_id
+            )
+        ),
+        attribution AS (
+            SELECT attributed.resource_id,
+                   jsonb_agg(to_jsonb(attributed.normalized_event_id)
+                             ORDER BY attributed.normalized_event_id) AS event_ids
+            FROM (
+                SELECT DISTINCT resource_id, normalized_event_id
+                FROM project_record_history_attribution
+            ) attributed
+            GROUP BY attributed.resource_id
+        )
+        INSERT INTO project_stage_record_inventory_current (
+            resource_id, record_version_boundary_key, record_version_boundary,
+            selectors, unsupported_families, last_change, entries,
+            support_status, unsupported_reason, provenance, chain_positions,
+            canonicality_summary, manifest_version
+        )
+        SELECT pointer.resource_id,
+               concat(
+                   octet_length(pointer.logical_name_id), ':',
+                   pointer.logical_name_id, ';',
+                   octet_length(pointer.resource_id::text), ':',
+                   pointer.resource_id::text, ';',
+                   octet_length(pointer.pointer_event_id::text), ':',
+                   pointer.pointer_event_id::text, ';',
+                   octet_length('ResolverChanged'), ':', 'ResolverChanged', ';',
+                   octet_length($1::text), ':', $1::text, ';',
+                   octet_length(boundary.block_number::text), ':',
+                   boundary.block_number::text, ';',
+                   octet_length(boundary.block_hash), ':', boundary.block_hash, ';',
+                   octet_length(to_jsonb(boundary.block_timestamp) #>> '{}'), ':',
+                   to_jsonb(boundary.block_timestamp) #>> '{}', ';'
+               ),
+               jsonb_build_object(
+                   'logical_name_id', pointer.logical_name_id,
+                   'resource_id', pointer.resource_id,
+                   'normalized_event_id', pointer.pointer_event_id,
+                   'event_kind', 'ResolverChanged',
+                   'chain_position', jsonb_build_object(
+                       'chain_id', $1,
+                       'block_number', boundary.block_number,
+                       'block_hash', boundary.block_hash,
+                       'timestamp', boundary.block_timestamp
+                   )
+               ),
+               '[]'::jsonb,
+               '[]'::jsonb,
+               jsonb_build_object(
+                   'normalized_event_id', pointer.pointer_event_id,
+                   'event_kind', 'ResolverChanged',
+                   'chain_position', jsonb_build_object(
+                       'chain_id', $1,
+                       'block_number', boundary.block_number,
+                       'block_hash', boundary.block_hash,
+                       'timestamp', boundary.block_timestamp
+                   )
+               ),
+               '[]'::jsonb,
+               'unsupported',
+               'resolver_pointer_cleared',
+               jsonb_build_object(
+                   'chain_id', $1,
+                   'logical_name_id', pointer.logical_name_id,
+                   'resolver_pointer_event_id', pointer.pointer_event_id,
+                   'record_serving', false,
+                   'record_event_ids', '[]'::jsonb,
+                   'record_link_event_ids', '[]'::jsonb,
+                   'attributed_event_ids', attribution.event_ids,
+                   'read_rules', '[]'::jsonb,
+                   'coverage', jsonb_build_object(
+                       'status', 'projected',
+                       'exhaustiveness', 'not_asserted'
+                   )
+               ),
+               jsonb_strip_nulls(jsonb_build_object(
+                   'block_number', boundary.block_number,
+                   'block_hash', boundary.block_hash,
+                   'target_block_number', $2,
+                   'target_block_hash', $3
+               )),
+               jsonb_build_object(
+                   'state', 'canonical_lineage',
+                   'target_block_number', $2,
+                   'target_block_hash', $3
+               ),
+               pointer.pointer_manifest_version
+        FROM cleared_pointers pointer
+        JOIN attribution ON attribution.resource_id = pointer.resource_id
+        JOIN chain_lineage boundary
+          ON boundary.chain_id = $1
+         AND boundary.block_number = pointer.pointer_block_number
+         AND boundary.block_hash = pointer.pointer_block_hash
+        ORDER BY pointer.resource_id
+        "#,
+    )
+    .bind(chain_id)
+    .bind(target.number)
+    .bind(&target.hash)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database(
+            "failed to build cleared-pointer record_inventory_current history rows",
+            error,
+        )
+    })?;
     Ok(())
 }

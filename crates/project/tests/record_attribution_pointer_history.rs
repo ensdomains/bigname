@@ -4,7 +4,7 @@
 //! records the name serves, but it must not erase the fact that the earlier write happened:
 //! history attribution has to be retained independently of the current pointer selection.
 use anyhow::{Context, Result};
-use bigname_project::{BatchRequest, Engine, RunMode};
+use bigname_project::{BatchRequest, Engine, Marker, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
@@ -36,14 +36,16 @@ fn block(number: i64) -> Block {
 /// Positive control for the seed: with the pointer left on A the write is attributed.
 #[tokio::test]
 async fn node_keyed_write_is_attributed_while_the_pointer_is_unchanged() -> Result<()> {
-    let (write, attributed) = project_write_then_pointer_change("unchanged", RESOLVER_A).await?;
+    let (write, attributed) =
+        project_write_then_pointer_change("unchanged", RESOLVER_A, Execution::AllAtOnce).await?;
     assert_eq!(attributed, vec![write]);
     Ok(())
 }
 
 #[tokio::test]
 async fn node_keyed_write_stays_attributed_after_resolver_switch() -> Result<()> {
-    let (write, attributed) = project_write_then_pointer_change("switch", RESOLVER_B).await?;
+    let (write, attributed) =
+        project_write_then_pointer_change("switch", RESOLVER_B, Execution::AllAtOnce).await?;
     assert!(
         attributed.contains(&write),
         "the write to the previous resolver must stay attributed after the pointer moves: \
@@ -54,13 +56,56 @@ async fn node_keyed_write_stays_attributed_after_resolver_switch() -> Result<()>
 
 #[tokio::test]
 async fn node_keyed_write_stays_attributed_after_resolver_clear() -> Result<()> {
-    let (write, attributed) = project_write_then_pointer_change("clear", ZERO).await?;
+    let (write, attributed) =
+        project_write_then_pointer_change("clear", ZERO, Execution::AllAtOnce).await?;
     assert!(
         attributed.contains(&write),
         "the write to the cleared resolver must stay attributed after the pointer is cleared: \
          write={write} attributed={attributed:?}"
     );
     Ok(())
+}
+
+/// Attribution is state carried in the published row, so a staged batch that only sees the pointer
+/// change has to rebuild it from the resource's whole pointer chain, not from the window. Project
+/// the same seeds block by block and under redo and require the same attribution the all-at-once
+/// build reaches.
+#[tokio::test]
+async fn pointer_history_attribution_is_replay_safe() -> Result<()> {
+    for (case, later_resolver) in [("switch", RESOLVER_B), ("clear", ZERO)] {
+        let (write, all_at_once) =
+            project_write_then_pointer_change(case, later_resolver, Execution::AllAtOnce).await?;
+        assert!(
+            all_at_once.contains(&write),
+            "{case}: all-at-once must attribute the write: attributed={all_at_once:?}"
+        );
+        for execution in [Execution::Incremental, Execution::Redo] {
+            let (_, attributed) =
+                project_write_then_pointer_change(case, later_resolver, execution).await?;
+            assert_eq!(
+                attributed, all_at_once,
+                "{case}: {execution:?} attribution drifted from the all-at-once build"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Execution {
+    AllAtOnce,
+    Incremental,
+    Redo,
+}
+
+impl Execution {
+    fn label(self) -> &'static str {
+        match self {
+            Execution::AllAtOnce => "all_at_once",
+            Execution::Incremental => "incremental",
+            Execution::Redo => "redo",
+        }
+    }
 }
 
 /// Seeds: block 1000 sets the resolver pointer to A and writes a text record on A (node-keyed,
@@ -70,8 +115,9 @@ async fn node_keyed_write_stays_attributed_after_resolver_clear() -> Result<()> 
 async fn project_write_then_pointer_change(
     case: &str,
     later_resolver: &str,
+    execution: Execution,
 ) -> Result<(i64, Vec<i64>)> {
-    let (database, pool) = database(case).await?;
+    let (database, pool) = database(&format!("{case}_{}", execution.label())).await?;
     let blocks = [block(1000), block(1001)];
     seed(&pool, &blocks).await?;
     let logical_name_id = format!("{NAMESPACE}:{NODE}");
@@ -130,16 +176,17 @@ async fn project_write_then_pointer_change(
     .fetch_one(&pool)
     .await?;
 
-    Engine::new(pool.clone())
-        .run_batch(BatchRequest {
-            chain_id: CHAIN.to_owned(),
-            target_block: blocks[1].number,
-            affected_from_block: blocks[1].number,
-            affected_to_block: blocks[1].number,
-            resume_current: None,
-            mode: RunMode::Normal,
-        })
-        .await?;
+    match execution {
+        Execution::AllAtOnce => run(&pool, &blocks[1], None, RunMode::Normal).await?,
+        Execution::Incremental | Execution::Redo => {
+            run(&pool, &blocks[0], None, RunMode::Normal).await?;
+            let mode = match execution {
+                Execution::Redo => RunMode::Redo,
+                _ => RunMode::Normal,
+            };
+            run(&pool, &blocks[1], Some(&blocks[0]), mode).await?;
+        }
+    }
 
     let provenance: Option<Value> = sqlx::query_scalar(
         "SELECT provenance FROM record_inventory_current WHERE resource_id = $1::uuid",
@@ -155,6 +202,28 @@ async fn project_write_then_pointer_change(
         .unwrap_or_default();
     database.cleanup().await?;
     Ok((write, attributed))
+}
+
+async fn run(
+    pool: &PgPool,
+    target: &Block,
+    predecessor: Option<&Block>,
+    mode: RunMode,
+) -> Result<()> {
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: target.number,
+            affected_from_block: target.number,
+            affected_to_block: target.number,
+            resume_current: predecessor.map(|block| Marker {
+                number: block.number,
+                hash: block.hash.clone(),
+            }),
+            mode,
+        })
+        .await?;
+    Ok(())
 }
 
 async fn seed(pool: &PgPool, blocks: &[Block]) -> Result<()> {
