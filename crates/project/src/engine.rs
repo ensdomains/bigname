@@ -55,6 +55,14 @@ impl Engine {
             .map_err(|error| {
                 ProjectError::database("failed to configure project snapshot", error)
             })?;
+        // The builders' statements price far above jit_above_cost (the resolver build alone
+        // carries well over a hundred subplans), so PostgreSQL JIT-compiles them on every pass:
+        // measured at 7.8 s of a 7.9 s live-follow pass on Sepolia, against indexed work that
+        // completes in tens of milliseconds. Keep JIT off for the whole publication transaction.
+        sqlx::query("SET LOCAL jit = off")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| ProjectError::database("failed to disable project JIT", error))?;
         revalidate_target(&mut transaction, &request.chain_id, &target).await?;
 
         let full_rebuild =
