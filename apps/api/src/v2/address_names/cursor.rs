@@ -110,7 +110,9 @@ pub(crate) fn address_names_storage_cursor(
     })
 }
 
-fn cursor_last_item(cursor: &AddressNamesCurrentSortedCursor) -> BTreeMap<String, String> {
+pub(super) fn cursor_last_item(
+    cursor: &AddressNamesCurrentSortedCursor,
+) -> BTreeMap<String, String> {
     let (sort_kind, sort_value) = match &cursor.sort_value {
         AddressNamesCurrentSortedCursorValue::Name(value) => {
             (SORT_KIND_NAME.to_owned(), value.clone())
@@ -138,7 +140,7 @@ fn cursor_last_item(cursor: &AddressNamesCurrentSortedCursor) -> BTreeMap<String
     ])
 }
 
-fn cursor_sort_value(
+pub(super) fn cursor_sort_value(
     payload: &CursorPayload,
     sort: AddressNamesSort,
 ) -> V2Result<AddressNamesCurrentSortedCursorValue> {
@@ -169,7 +171,7 @@ fn cursor_sort_value(
     }
 }
 
-fn option_filter(value: Option<&str>) -> String {
+pub(super) fn option_filter(value: Option<&str>) -> String {
     value.unwrap_or(NONE_FILTER_VALUE).to_owned()
 }
 

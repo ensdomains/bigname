@@ -214,6 +214,16 @@ pub(crate) fn parse_relation_set_param(value: Option<&str>) -> V2Result<Option<R
         relations.push(relation);
     }
 
+    let mixes_resolves_to = relations.contains(&Relation::ResolvesTo)
+        && (has_any
+            || relations
+                .iter()
+                .any(|relation| *relation != Relation::ResolvesTo));
+    if mixes_resolves_to {
+        return Err(V2Error::invalid_input(
+            "relation=resolves_to cannot be combined with owner, manager, registrant, or any",
+        ));
+    }
     if has_any {
         return Ok(Some(RelationSet::all()));
     }
@@ -337,6 +347,7 @@ pub(crate) fn validate_latest_collection_selectors(
 
 #[cfg(test)]
 mod tests {
+    mod relation_tests;
     use super::*;
     use crate::v2::error::ErrorCode;
 

@@ -186,8 +186,13 @@ Field ownership:
   Reverse inputs default to `coin_type=60` when omitted. Reverse `relation`
   accepts a comma-separated set of `owner`, `manager`, and `registrant`; `any`
   is the normalized all-three set. Reverse rows match when any listed relation
-  matches. Batch limit is 1000 and is configurable with
-  `BIGNAME_API_LOOKUP_BATCH_LIMIT`.
+  matches. `relation=resolves_to` stands alone and answers the names whose
+  current `addr:<coin_type>` resolver record resolves to the input address for
+  the input `coin_type`, with the same matching rule, ENSIP-19 default-address
+  fallback, and exclusions as `GET /v1/addresses/{address}/names?relation=resolves_to`;
+  combining it with an authority relation or `any` returns `400
+  invalid_input`, and `any` never includes it. Batch limit is 1000 and is
+  configurable with `BIGNAME_API_LOOKUP_BATCH_LIMIT`.
 - Response shape: the common envelope. `data` is an array of result objects,
   not an object wrapper. The array contains one result per input in caller
   order. Each result is `{input, kind, status, unsupported_reason?,
@@ -196,7 +201,10 @@ Field ownership:
   synthesized. `kind` is `name` or `address`. Name results use `record` for the
   single record object. Reverse results use `records` for zero or more record
   rows with `is_primary` and `relations` in addition to the shared record
-  fields. Reverse `input.relation` echoes the normalized relation set; `any`
+  fields; a `resolves_to` row carries `relations: ["resolves_to"]` and
+  `resolution: {coin_type, record_key}`, and its `is_primary` and
+  `primary_address` follow the input `coin_type`. Reverse `input.relation`
+  echoes the normalized relation set; `any`
   serializes as `owner,manager,registrant` and reordered sets use canonical
   dictionary order. `profile=feed` returns a documented core-field subset of
   the same record object; it does not introduce another DTO.
@@ -229,7 +237,10 @@ Field ownership:
   issuing a second or later broad batch, it revalidates that generation and
   returns retryable `409 stale` if it changed. The API may return an as-filled
   page with `has_more=true` when it reaches the bounded post-filter scan cap;
-  clients continue with the returned `next_cursor`.
+  clients continue with the returned `next_cursor`. A `resolves_to` input pages
+  `address_records_current` in name order (not primary-first), its cursor
+  binds the address, coin type, relation, and public namespace set, and its
+  `total_count` is null.
 - Status semantics: per-result `status` uses the common result vocabulary.
   Name misses are in-band `not_found`; invalid names are in-band
   `invalid_name`. Name-only and exact-scope latest reads return retryable `409
@@ -269,7 +280,10 @@ Field ownership:
   one completed projection-phase generation. For each reverse result, the
   readable name fetched with the candidate row is the common source for the
   emitted normalized and display names, label-derived fields, primary-name
-  ordering, the `is_primary` result, and the reverse cursor. Public reverse
+  ordering, the `is_primary` result, and the reverse cursor. A `resolves_to`
+  input additionally requires each `address_records_current` row it serves to
+  be published at or before the selected head, and omits a name whose current
+  row is unreadable or unsupported at that snapshot. Public reverse
   lookup with no explicit namespace derives its snapshot scope from the
   namespaces served by the deployment, excluding a namespace
   while its selected authority chain has Interpret `redo_in_progress=true`,
@@ -1095,7 +1109,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Method/path: `GET /v1/addresses/{address}/names`
 - Tier: product read.
 - Purpose: names related to an address.
-- Request parameters: path `address`; query `namespace`, `relation`, `q`,
+- Request parameters: path `address`; query `namespace`, `relation`,
+  `coin_type`, `q`,
   `sort=name|expires_at|registered_at`, `order=asc|desc`,
   `dedupe=name|registration`, `include=role_summary`, `cursor`, `page_size`,
   and optional `finality=latest`. `at` and historical `finality` values are
@@ -1117,13 +1132,37 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   token-holder -> `owner`, effective-controller -> `manager`, and
   registrant -> `registrant`. `dedupe=name` groups by name surface and is the
   default; `dedupe=registration` groups by registration resource.
+  `relation=resolves_to` is the resolver-record relation: the names whose
+  current `addr:<coin_type>` resolver record resolves to the path address, read
+  from the `address_records_current` projection rather than the authority
+  relations. It stands alone: `resolves_to` combined with `owner`, `manager`,
+  `registrant`, or `any` returns `400 invalid_input`, and `any` never includes
+  it, because it is coin-type scoped and its rows are not authority claims.
+  `coin_type` (decimal ENSIP-9/SLIP-44 coin type, default `60`) is accepted
+  only with `relation=resolves_to`; supplying it with any other relation
+  returns `400 invalid_input`. A name matches when its serving resolver's
+  indexed inventory answers `addr:<coin_type>` with a 20-byte non-zero EVM
+  address equal to the path address, using the same rule as
+  `GET /v1/names/{name}/records`: the exact entry, or for an EVM coin type
+  (`60`, or an ENSIP-11 coin type `0x80000000 | chain_id`) the ENSIP-19 default
+  EVM address `addr:2147483648` when the resolver declares that read feature
+  and no exact entry for the coin type shadows it. Zero-address and cleared
+  records never match. `namespace`, `q`, `sort`, `order`, `dedupe`, and
+  `include=role_summary` apply as for the authority relations.
 - Response shape: `data` is an array of record-shaped rows with `name`,
   `display_name`, `namespace`, `namehash`, `owner`, `registrant`,
   `registration_status`, `registered_at`, `created_at`, and `expires_at`.
   Address-name rows add `is_primary` and `relations`, where `relations` is the
-  subset of `owner`, `manager`, and `registrant` that matched. `is_primary` is
+  subset of `owner`, `manager`, and `registrant` that matched, or
+  `["resolves_to"]` on a `relation=resolves_to` read. A `resolves_to` row also
+  carries `resolution: {coin_type, record_key}`: the coin type asked about and
+  the resolver record key that answered (`addr:<coin_type>`, or
+  `addr:2147483648` when the ENSIP-19 default EVM address answered).
+  `is_primary` is
   evaluated against that row namespace's coin-type-60 primary-name claim, not a
-  route-wide namespace shortcut. The claim is compared in the same normalized
+  route-wide namespace shortcut; a `resolves_to` row evaluates it against the
+  requested `coin_type`'s claim instead, so a name resolving to the address on
+  another EVM chain is marked primary by that chain's claim. The claim is compared in the same normalized
   form the indexed answer from `GET /v1/addresses/{address}/primary-name`
   publishes, so a successful claim recorded in a non-normalized spelling still
   marks its name primary. A spelling the projection already recorded as its
@@ -1142,7 +1181,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `GET /v1/permissions`.
 - Pagination behavior: standard collection pagination. Cursors are bound to
   address, optional namespace filter, normalized relation set, `q`, dedupe
-  mode, sort, and order.
+  mode, sort, and order; a `resolves_to` cursor additionally binds the coin
+  type, and a cursor minted for one relation set never resumes another.
 - Snapshot behavior: address-name rows come from current state. The response
   omits `meta.as_of` and `meta.as_of_token`; completeness metadata for
   `include=role_summary` remains available. Its cursor carries no snapshot

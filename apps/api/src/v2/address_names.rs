@@ -37,6 +37,9 @@ pub(crate) use self::cursor::{
 };
 
 mod cursor;
+mod resolves_to;
+
+pub(crate) use self::resolves_to::{AddressNameResolution, address_name_resolution};
 
 pub(crate) struct AddressNamesQueryParams;
 
@@ -46,6 +49,7 @@ impl QueryParamAllowlist for AddressNamesQueryParams {
         "at",
         "finality",
         "relation",
+        "coin_type",
         "q",
         "sort",
         "order",
@@ -77,6 +81,10 @@ pub(crate) struct AddressName {
     pub(crate) expires_at: Option<String>,
     pub(crate) relations: Vec<Relation>,
     pub(crate) is_primary: bool,
+    /// Present only on `relation=resolves_to` rows: the coin type asked about and the record
+    /// key that answered it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resolution: Option<AddressNameResolution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) record_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -105,6 +113,18 @@ pub(crate) async fn get_address_names(
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     if let Some(namespace) = params.namespace.as_deref() {
         ensure_public_namespace(namespace).map_err(api_error_to_v2)?;
+    }
+    if params
+        .relation
+        .as_ref()
+        .is_some_and(RelationSet::is_resolves_to)
+    {
+        return resolves_to::get_address_resolves_to(&state, &normalized_address, &params).await;
+    }
+    if params.coin_type.is_some() {
+        return Err(V2Error::invalid_input(
+            "coin_type requires relation=resolves_to",
+        ));
     }
     let namespace_filter = params.namespace.clone();
     let include_role_summary = address_names_include_role_summary(&params.include)?;
@@ -364,16 +384,20 @@ pub(crate) fn build_address_name(
             .map(relation_from_storage)
             .collect(),
         is_primary: primary_name == Some(entry.normalized_name.as_str()),
+        resolution: None,
         record_count,
         role_summary,
     }
 }
 
-pub(crate) fn relation_to_storage(relation: Relation) -> AddressNameRelation {
+/// The `address_names_current` relation an authority relation reads. `resolves_to` reads
+/// `address_records_current` instead and has no storage relation here.
+pub(crate) fn relation_to_storage(relation: Relation) -> Option<AddressNameRelation> {
     match relation {
-        Relation::Owner => AddressNameRelation::TokenHolder,
-        Relation::Manager => AddressNameRelation::EffectiveController,
-        Relation::Registrant => AddressNameRelation::Registrant,
+        Relation::Owner => Some(AddressNameRelation::TokenHolder),
+        Relation::Manager => Some(AddressNameRelation::EffectiveController),
+        Relation::Registrant => Some(AddressNameRelation::Registrant),
+        Relation::ResolvesTo => None,
     }
 }
 
@@ -382,7 +406,7 @@ pub(crate) fn relation_set_to_storage(relation_set: &RelationSet) -> Vec<Address
         .as_slice()
         .iter()
         .copied()
-        .map(relation_to_storage)
+        .filter_map(relation_to_storage)
         .collect()
 }
 
