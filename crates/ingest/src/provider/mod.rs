@@ -9,6 +9,7 @@ use std::{
 use anyhow::{Result, bail};
 use reqwest::Url;
 
+mod bloom;
 mod decode;
 mod http_client;
 mod request;
@@ -16,7 +17,10 @@ mod reth_db;
 mod rpc;
 mod types;
 
-pub use types::{Block, BlockBundle, HeadSnapshot, Log, Receipt, ResolvedBlock, Transaction};
+pub use bloom::bloom_contains;
+pub use types::{
+    Block, BlockBundle, HeadSnapshot, Log, Receipt, ResolvedBlock, Transaction, TransactionPayload,
+};
 
 use http_client::RecoveringHttpClient;
 use request::validate_endpoint;
@@ -25,6 +29,13 @@ use reth_db::RethDbProvider;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// How many JSON-RPC batches or range log queries a provider keeps in flight.
+///
+/// Remote endpoints answer one round trip at a time; a window's hash lookups, header
+/// lookups, range queries and per-transaction fetches are independent, so they overlap up
+/// to this bound rather than running strictly in sequence.
+pub const PROVIDER_PARALLELISM: usize = 8;
 
 #[derive(Clone)]
 pub enum ChainProvider {
@@ -94,22 +105,91 @@ impl ChainProvider {
         }
     }
 
-    pub async fn logs(
-        &self,
-        blocks: &[ResolvedBlock],
-        addresses: &[String],
-        topics: &[String],
-    ) -> Result<Vec<Log>> {
-        match self {
-            Self::JsonRpc(provider) => provider.logs(blocks, addresses, topics).await,
-            Self::RethDb(provider) => provider.logs(blocks, addresses, topics).await,
-        }
-    }
-
     pub async fn bundles(&self, blocks: &[ResolvedBlock]) -> Result<Vec<BlockBundle>> {
         match self {
             Self::JsonRpc(provider) => provider.bundles(blocks).await,
             Self::RethDb(provider) => provider.bundles(blocks).await,
+        }
+    }
+
+    /// Whether ingest fetches the selected transactions one by one instead of whole blocks.
+    ///
+    /// Only the remote JSON-RPC provider pays for a block body it discards. The datadir
+    /// reader already has the block in hand, so it keeps the bundle path.
+    pub(crate) const fn fetches_transactions(&self) -> bool {
+        matches!(self, Self::JsonRpc(_))
+    }
+
+    /// Range log lookup that does not re-resolve the blocks it touched.
+    ///
+    /// Returned logs are pinned to the hashes in `resolved`; the caller re-checks the
+    /// union of logged blocks once per window with [`Self::recheck_resolved`].
+    pub(crate) async fn range_logs(
+        &self,
+        resolved: &[ResolvedBlock],
+        from: i64,
+        to: i64,
+        addresses: &[String],
+        topics: &[String],
+    ) -> Result<Vec<Log>> {
+        if from > to || topics.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self {
+            Self::JsonRpc(provider) => {
+                let logs = provider.range_logs(from, to, addresses, topics).await?;
+                rpc::pin_logs_to_resolved(resolved, logs)
+            }
+            Self::RethDb(provider) => {
+                let blocks = resolved
+                    .iter()
+                    .filter(|block| (from..=to).contains(&block.number))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                provider.logs(&blocks, addresses, topics).await
+            }
+        }
+    }
+
+    /// Wide-range log lookup whose results are not yet pinned to any resolved window.
+    ///
+    /// Only the JSON-RPC provider prefetches: the datadir reader answers a window-sized
+    /// query from local storage, so there is no round trip to amortise.
+    pub(crate) async fn prefetch_range_logs(
+        &self,
+        from: i64,
+        to: i64,
+        addresses: &[String],
+        topics: &[String],
+    ) -> Result<Option<Vec<Log>>> {
+        match self {
+            Self::JsonRpc(provider) => provider
+                .range_logs(from, to, addresses, topics)
+                .await
+                .map(Some),
+            Self::RethDb(_) => Ok(None),
+        }
+    }
+
+    /// Confirms once per window that no logged block's hash moved during the lookups.
+    ///
+    /// The datadir reader pins hashes inside its own log read, so it has nothing to redo.
+    pub(crate) async fn recheck_resolved(&self, resolved: &[ResolvedBlock]) -> Result<()> {
+        match self {
+            Self::JsonRpc(provider) => provider.recheck_resolved(resolved).await,
+            Self::RethDb(_) => Ok(()),
+        }
+    }
+
+    pub(crate) async fn transaction_payloads(
+        &self,
+        hashes: &[String],
+    ) -> Result<Vec<TransactionPayload>> {
+        match self {
+            Self::JsonRpc(provider) => provider.transaction_payloads(hashes).await,
+            Self::RethDb(_) => {
+                bail!("the Reth datadir provider fetches whole blocks, not single transactions")
+            }
         }
     }
 

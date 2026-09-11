@@ -40,7 +40,7 @@ use sqlx::types::Uuid;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-use support::ScratchDatabase;
+use support::{ScratchDatabase, chain_double};
 
 const CHAIN: &str = "ethereum-sepolia";
 const REGISTRY: &str = "0x0000000000000000000000000000000000000047";
@@ -1158,24 +1158,33 @@ fn rpc_response(request: &Value, state: &RpcState) -> Value {
     let id = request.get("id").cloned().unwrap_or(json!(1));
     let params = request["params"].as_array().cloned().unwrap_or_default();
     let result = match request["method"].as_str().unwrap_or_default() {
-        "eth_getBlockByNumber" => {
-            params
-                .first()
-                .and_then(Value::as_str)
-                .and_then(|selector| match selector {
-                    "latest" | "safe" | "finalized" | "0x2" => {
-                        Some(block(2, params.get(1) == Some(&Value::Bool(true))))
-                    }
-                    "0x1" => Some(block(1, params.get(1) == Some(&Value::Bool(true)))),
-                    "0x0" => Some(block(0, params.get(1) == Some(&Value::Bool(true)))),
-                    _ => None,
-                })
-        }
+        "eth_getBlockByNumber" => params
+            .first()
+            .and_then(Value::as_str)
+            .and_then(|selector| match selector {
+                "latest" | "safe" | "finalized" | "0x2" => Some(2),
+                "0x1" => Some(1),
+                "0x0" => Some(0),
+                _ => None,
+            })
+            .map(|number| {
+                block(
+                    number,
+                    params.get(1) == Some(&Value::Bool(true)),
+                    &block_logs(state, number),
+                )
+            }),
         "eth_getBlockByHash" => params.first().and_then(Value::as_str).and_then(|hash| {
             [0, 1, 2]
                 .into_iter()
                 .find(|number| block_hash(*number) == hash)
-                .map(|number| block(number, params.get(1) == Some(&Value::Bool(true))))
+                .map(|number| {
+                    block(
+                        number,
+                        params.get(1) == Some(&Value::Bool(true)),
+                        &block_logs(state, number),
+                    )
+                })
         }),
         "eth_getLogs" => {
             let filter = params.first().cloned().unwrap_or_default();
@@ -1196,23 +1205,41 @@ fn rpc_response(request: &Value, state: &RpcState) -> Value {
             .and_then(Value::as_str)
             .map(|hash| match hash {
                 BLOCK_0 => json!([]),
-                BLOCK_1 => json!([receipt(1, TX_1)]),
-                BLOCK_2 => json!([receipt(2, TX_2)]),
+                BLOCK_1 => json!(block_receipts(state, 1)),
+                BLOCK_2 => json!(block_receipts(state, 2)),
                 _ => Value::Null,
             }),
-        _ => None,
+        method => chain_double::per_transaction_result(
+            method,
+            &params,
+            &[block_receipts(state, 1), block_receipts(state, 2)].concat(),
+            &[0, 1, 2]
+                .map(|number| block(number, true, &block_logs(state, number)))
+                .to_vec(),
+        ),
     };
     json!({"jsonrpc":"2.0","id":id,"result":result})
 }
 
-fn block(number: i64, full: bool) -> Value {
+/// The logs this double serves for one block, which are also the logs its header bloom
+/// commits to and the logs its receipts carry.
+fn block_logs(state: &RpcState, number: i64) -> Vec<Value> {
+    filter_logs(&state.logs, &json!({"blockHash": block_hash(number)}))
+}
+
+fn block_receipts(state: &RpcState, number: i64) -> Vec<Value> {
+    let transaction = if number == 1 { TX_1 } else { TX_2 };
+    chain_double::receipts_with_logs(&[receipt(number, transaction)], &block_logs(state, number))
+}
+
+fn block(number: i64, full: bool, logs: &[Value]) -> Value {
     let (hash, parent, transaction, to) = match number {
         0 => (BLOCK_0, format!("0x{}", "00".repeat(32)), None, REGISTRY),
         1 => (BLOCK_1, BLOCK_0.to_owned(), Some(TX_1), REGISTRY),
         _ => (BLOCK_2, BLOCK_1.to_owned(), Some(TX_2), RESOLVER),
     };
     let transactions = transaction.map_or_else(|| json!([]), |transaction| if full { json!([{"hash":transaction,"blockHash":hash,"blockNumber":format!("0x{number:x}"),"transactionIndex":"0x0","from":SENDER,"to":to,"input":"0x","value":"0x0"}]) } else { json!([transaction]) });
-    json!({"hash":hash,"parentHash":parent,"number":format!("0x{number:x}"),"timestamp":format!("0x{:x}", number + 100),"logsBloom":"0x","transactions":transactions})
+    json!({"hash":hash,"parentHash":parent,"number":format!("0x{number:x}"),"timestamp":format!("0x{:x}", number + 100),"logsBloom":chain_double::logs_bloom(logs),"transactions":transactions})
 }
 
 fn receipt(number: i64, transaction: &str) -> Value {

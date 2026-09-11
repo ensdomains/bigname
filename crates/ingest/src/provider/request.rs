@@ -198,6 +198,9 @@ pub(super) fn retryable(error: &anyhow::Error) -> bool {
             "connection closed",
             "provider block hashes changed during range log lookup",
             "provider returned log outside resolved block",
+            "provider omitted receipt for selected transaction",
+            "provider omitted transaction for selected log",
+            "provider returned a pending transaction for selected log",
             "reth db block hashes changed during log lookup",
             "-32005",
         ]

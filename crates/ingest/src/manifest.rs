@@ -56,6 +56,26 @@ struct RegistryAnnouncementWatch {
 }
 
 impl WatchFilter {
+    /// Builds a filter watching one address range, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn watching(
+        address: &str,
+        from_block: i64,
+        to_block: i64,
+        topic0s: &[String],
+    ) -> Self {
+        Self {
+            address_ranges: vec![AddressRange {
+                address: address.to_ascii_lowercase(),
+                from_block,
+                to_block,
+                topic0s: topic0s.to_vec(),
+            }],
+            all_emitter_ranges: Vec::new(),
+            registry_announcements: None,
+        }
+    }
+
     pub fn includes(&self, address: &str, topic0: &str, block_number: i64) -> bool {
         self.all_emitter_ranges.iter().any(|range| {
             (range.from_block..=range.to_block).contains(&block_number)

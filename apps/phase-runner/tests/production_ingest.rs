@@ -45,7 +45,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use support::ScratchDatabase;
+use support::{ScratchDatabase, chain_double};
 
 const BLOCK_0: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
 const BLOCK_1: &str = "0x0000000000000000000000000000000000000000000000000000000000000002";
@@ -3501,8 +3501,13 @@ async fn ingest_rejects_a_provider_without_checkpoint_heads() -> Result<()> {
     scratch.cleanup().await
 }
 
+/// A receipt whose log claims a different block is a corrupt answer, not a reorg race.
+///
+/// Ingest reads logs over a range and confirms each one inside the receipt that carries it.
+/// The receipt is fetched by transaction hash and pinned to the block the window resolved,
+/// so a log inside it that names another block cannot be explained by the chain moving.
 #[tokio::test]
-async fn block_hash_pinned_log_mismatch_is_terminal_data_integrity() -> Result<()> {
+async fn receipt_log_outside_its_transaction_is_terminal_data_integrity() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_block_hash_log_mismatch").await?;
     let chain_id = "rpc-block-hash-log-mismatch-test";
     seed_watch_set(scratch.pool(), chain_id).await?;
@@ -3523,9 +3528,14 @@ async fn block_hash_pinned_log_mismatch_is_terminal_data_integrity() -> Result<(
         .await;
     server.abort();
 
-    let error = outcome.expect_err("blockHash-pinned log mismatch must fail ingest");
+    let error = outcome.expect_err("a receipt log naming another block must fail ingest");
     assert_eq!(error.kind(), IngestErrorKind::DataIntegrity);
-    assert!(error.to_string().contains("outside blockHash-pinned block"));
+    assert!(
+        error
+            .to_string()
+            .contains("receipt log outside transaction"),
+        "{error}"
+    );
     scratch.cleanup().await
 }
 
@@ -3594,7 +3604,9 @@ async fn ingest_retries_a_fork_straddled_resolved_window() -> Result<()> {
         Arc::new(IngestPhase::with_engine(engine)),
     )?;
     run_until_ingest_handoff(runner, chain, scratch.pool(), BLOCK_1).await?;
-    assert!(rpc_state.window_resolves() >= 12);
+    // One resolve plus one re-resolve per attempt: the window's hash re-check now runs
+    // once after the last range log lookup instead of once per watch query.
+    assert!(rpc_state.window_resolves() >= 7);
 
     server.abort();
     scratch.cleanup().await
@@ -4319,7 +4331,13 @@ async fn announcement_rpc(Json(request): Json<Value>) -> Json<Value> {
     Json(announcement_rpc_response(&request))
 }
 
+/// Answers as a node would: per-transaction methods, receipt logs and header blooms
+/// derived from the blocks this double already serves.
 fn announcement_rpc_response(request: &Value) -> Value {
+    chain_double::node_shaped(request, &announcement_rpc_response_raw)
+}
+
+fn announcement_rpc_response_raw(request: &Value) -> Value {
     let id = request.get("id").cloned().unwrap_or(json!(1));
     let method = request["method"].as_str().unwrap_or_default();
     let params = request["params"].as_array().cloned().unwrap_or_default();
@@ -4574,6 +4592,12 @@ async fn crash_window_rpc(
 }
 
 fn crash_window_rpc_response(request: &Value, omit_second_log: bool) -> Value {
+    chain_double::node_shaped(request, &|inner| {
+        crash_window_rpc_response_raw(inner, omit_second_log)
+    })
+}
+
+fn crash_window_rpc_response_raw(request: &Value, omit_second_log: bool) -> Value {
     let id = request.get("id").cloned().unwrap_or(json!(1));
     let method = request["method"].as_str().unwrap_or_default();
     let params = request["params"].as_array().cloned().unwrap_or_default();
@@ -4758,8 +4782,17 @@ async fn watch_plan_boundary_rpc(
 }
 
 fn watch_plan_boundary_rpc_response(request: &Value, state: &WatchPlanBoundaryRpcState) -> Value {
+    chain_double::node_shaped(request, &|inner| {
+        watch_plan_boundary_rpc_response_raw(inner, state)
+    })
+}
+
+fn watch_plan_boundary_rpc_response_raw(
+    request: &Value,
+    state: &WatchPlanBoundaryRpcState,
+) -> Value {
     let hash_epoch = state.response_epoch(request);
-    let mut response = hash_switchable_rpc_response(request, hash_epoch);
+    let mut response = hash_switchable_rpc_response_raw(request, hash_epoch);
     let method = request["method"].as_str().unwrap_or_default();
     let epoch_boundary = match hash_epoch {
         0 => BLOCK_1,
@@ -4810,14 +4843,19 @@ fn watch_plan_boundary_rpc_response(request: &Value, state: &WatchPlanBoundaryRp
     if block_hash == BLOCK_0 {
         return response;
     }
-    let selects_boundary = filter.get("blockHash").is_some()
-        || (rpc_quantity(filter.get("fromBlock")).unwrap_or_default() <= 1
-            && rpc_quantity(filter.get("toBlock")).unwrap_or(i64::MAX) >= 1);
+    let range_selects_boundary = filter.get("blockHash").is_none()
+        && rpc_quantity(filter.get("fromBlock")).unwrap_or_default() <= 1
+        && rpc_quantity(filter.get("toBlock")).unwrap_or(i64::MAX) >= 1;
+    let selects_boundary = filter.get("blockHash").is_some() || range_selects_boundary;
     if !selects_boundary {
         response["result"] = json!([]);
         return response;
     }
-    state.boundary_log_calls.fetch_add(1, Ordering::SeqCst);
+    // Ingest reads the boundary through its range query; a blockHash-pinned read is only
+    // this double filling in a receipt's logs, and is not a window's boundary lookup.
+    if range_selects_boundary {
+        state.boundary_log_calls.fetch_add(1, Ordering::SeqCst);
+    }
     let addresses = filter
         .get("address")
         .map(string_filter_values)
@@ -4898,6 +4936,12 @@ async fn hash_switchable_rpc(
 }
 
 fn hash_switchable_rpc_response(request: &Value, hash_epoch: u8) -> Value {
+    chain_double::node_shaped(request, &|inner| {
+        hash_switchable_rpc_response_raw(inner, hash_epoch)
+    })
+}
+
+fn hash_switchable_rpc_response_raw(request: &Value, hash_epoch: u8) -> Value {
     let id = request.get("id").cloned().unwrap_or(json!(1));
     let method = request["method"].as_str().unwrap_or_default();
     let params = request["params"].as_array().cloned().unwrap_or_default();
@@ -5088,6 +5132,10 @@ async fn approval_rpc(Json(request): Json<Value>) -> Json<Value> {
 }
 
 fn approval_rpc_response(request: &Value) -> Value {
+    chain_double::node_shaped(request, &approval_rpc_response_raw)
+}
+
+fn approval_rpc_response_raw(request: &Value) -> Value {
     let id = request.get("id").cloned().unwrap_or(json!(1));
     let method = request["method"].as_str().unwrap_or_default();
     let params = request["params"].as_array().cloned().unwrap_or_default();
@@ -5298,6 +5346,12 @@ async fn fork_straddle_rpc(
 }
 
 fn fork_straddle_rpc_response(request: &Value, straddled: bool) -> Value {
+    chain_double::node_shaped(request, &|inner| {
+        fork_straddle_rpc_response_raw(inner, straddled)
+    })
+}
+
+fn fork_straddle_rpc_response_raw(request: &Value, straddled: bool) -> Value {
     let id = request.get("id").cloned().unwrap_or(json!(1));
     let method = request["method"].as_str().unwrap_or_default();
     let selection = request
@@ -5349,6 +5403,16 @@ async fn rpc(
 }
 
 fn rpc_response(
+    request: &Value,
+    checkpoint_support: bool,
+    mismatched_block_hash_log: bool,
+) -> Value {
+    chain_double::node_shaped(request, &|inner| {
+        rpc_response_raw(inner, checkpoint_support, mismatched_block_hash_log)
+    })
+}
+
+fn rpc_response_raw(
     request: &Value,
     checkpoint_support: bool,
     mismatched_block_hash_log: bool,

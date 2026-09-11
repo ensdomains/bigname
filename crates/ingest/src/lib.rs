@@ -6,6 +6,8 @@ mod fetching;
 mod manifest;
 mod plan;
 mod provider;
+#[cfg(test)]
+mod test_chain;
 mod verification;
 mod write;
 
