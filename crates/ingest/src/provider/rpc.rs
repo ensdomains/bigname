@@ -426,6 +426,10 @@ fn range_too_large(error: &anyhow::Error) -> bool {
         "result size exceeded",
         "more than 10000 results",
         "-32005",
+        // dRPC: "-32602: query block range exceeds server limit, narrow your filter: 1000".
+        "block range exceeds",
+        "exceeds server limit",
+        "narrow your filter",
     ]
     .iter()
     .any(|needle| error.contains(needle))
@@ -444,4 +448,22 @@ fn unsupported_checkpoint_tag(error: &anyhow::Error) -> bool {
         ]
         .iter()
         .any(|needle| error.contains(needle))
+}
+
+#[cfg(test)]
+mod range_limit_tests {
+    use super::range_too_large;
+
+    #[test]
+    fn hosted_block_range_limits_are_halved_not_terminal() {
+        for message in [
+            "provider returned JSON-RPC error for eth_getLogs: -32602: query block range exceeds server limit, narrow your filter: 1000",
+            "provider returned JSON-RPC error for eth_getLogs: -32005: query returned more than 10000 results",
+        ] {
+            assert!(range_too_large(&anyhow::anyhow!(message)), "{message}");
+        }
+        assert!(!range_too_large(&anyhow::anyhow!(
+            "provider returned JSON-RPC error for eth_getLogs: -32602: invalid argument 0: hex string"
+        )));
+    }
 }
