@@ -157,7 +157,9 @@ resolver also restores its baseline in that transaction without another call.
 Projection JSON coverage fields say only that the row was derived from stored
 canonical inputs: `status = "projected"` and
 `exhaustiveness = "not_asserted"`. Support remains separate in
-`support_status` and `unsupported_reason`.
+`support_status` and `unsupported_reason`. `account_permission_state_current`
+carries no coverage object at all, so it emits neither field; it has no serving
+reader yet, and a consumer must not probe it for one.
 
 `children_current.raw_label` and `children_current.raw_name` retain exact
 observed bytes, including shadow identities that cannot be represented safely
