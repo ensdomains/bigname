@@ -15,8 +15,9 @@ route's "Replaces (v1)" line was removed in C2; this contract took over the
 prefix in #315, and the public edge serves it.
 
 `GET /healthz` remains the unversioned operator health contract outside the
-versioned product routes. `GET /`, `GET /docs`, and `GET /openapi.json` are not
-served.
+versioned product routes. `GET /docs` serves the static API reference page
+(`apps/api/src/docs.html`); it documents this contract and is not part of it.
+`GET /` and `GET /openapi.json` are not served.
 
 ## Shared Route Rules
 
