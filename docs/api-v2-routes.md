@@ -1492,14 +1492,18 @@ For a registrar lease first identified by a later readable observation, registra
 
 - Method/path: `GET /v1/events`
 - Tier: product read.
-- Purpose: compact event search across name, address, registration, type, and
-  block filters.
+- Purpose: compact event search across name, address, contract, registration,
+  type, and block filters.
 - Request parameters: query `namespace`, `name`, `address`,
-  `registration_id`, `type`, `from_block`, `to_block`, `cursor`, `page_size`,
-  and optional `finality=latest`. `at` and historical `finality` values are
-  rejected by the shared latest-state collection rule. When `name` is present
-  and `namespace` is omitted, namespace is inferred from the name; `namespace`
-  defaults to `ens` only when there is no name filter.
+  `contract_address`, `registration_id`, `type`, `from_block`, `to_block`,
+  `cursor`, `page_size`, and optional `finality=latest`. `at` and historical
+  `finality` values are rejected by the shared latest-state collection rule.
+  When `name` is present and `namespace` is omitted, namespace is inferred
+  from the name; `namespace` defaults to `ens` only when there is no name
+  filter. `contract_address` keeps only events whose source log was emitted by
+  that contract (a registry, registrar, or resolver address, compared
+  case-insensitively); it combines with every other filter, and the cursor
+  binds it like the others.
 - Response shape: `data` is an array of compact event rows with friendly
   `type` vocabulary. Raw upstream event kinds are diagnostics-only. Event-row
   identity uses two fields with distinct meanings. `registration_id` is actual

@@ -88,6 +88,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `text_records` | text-key-to-value map | `text_records` (unchanged) |
 | `content_hash` | contenthash value | `content_hash` (unchanged) |
 | `resolver` | `{chain_id, address}` | `resolver_address`, `current_resolver`, declared resolver summaries |
+| `contract_address` | event filter for the contract that emitted an event's source log | `emitting_address` |
 | `chain_id` | numeric EVM chain id (`1`, `8453`); string-keyed in maps | string chain ids (`"ethereum-mainnet"`), position slot keys |
 | `network` | display slug (`ethereum`, `base`) | `network` (unchanged, display-only) |
 | `registration_id` | the one opaque stable handle for a registration lifecycle | `resource_id`, `resource_hex`, `resource`, `token_lineage_id`, `surface_binding_id` |

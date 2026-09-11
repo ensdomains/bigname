@@ -28,6 +28,7 @@ pub(crate) struct RawQueryParams {
     pub(crate) name: Option<String>,
     pub(crate) registration_id: Option<String>,
     pub(crate) address: Option<String>,
+    pub(crate) contract_address: Option<String>,
     pub(crate) relation: Option<String>,
     pub(crate) from_block: Option<String>,
     pub(crate) to_block: Option<String>,
@@ -53,6 +54,7 @@ pub(crate) struct QueryParams {
     pub(crate) name: Option<String>,
     pub(crate) registration_id: Option<String>,
     pub(crate) address: Option<String>,
+    pub(crate) contract_address: Option<String>,
     pub(crate) relation: Option<RelationSet>,
     pub(crate) from_block: Option<i64>,
     pub(crate) to_block: Option<i64>,
@@ -99,7 +101,8 @@ impl TryFrom<RawQueryParams> for QueryParams {
             event_type: parse_event_type(raw.event_type.as_deref())?,
             name: trim_to_option(raw.name),
             registration_id: parse_registration_id(raw.registration_id)?,
-            address: parse_address(raw.address)?,
+            address: parse_address(raw.address, "address")?,
+            contract_address: parse_address(raw.contract_address, "contract_address")?,
             relation: parse_relation_set_param(raw.relation.as_deref())?,
             from_block: parse_block_bound(raw.from_block, "from_block")?,
             to_block: parse_block_bound(raw.to_block, "to_block")?,
@@ -233,12 +236,12 @@ fn parse_registration_id(value: Option<String>) -> V2Result<Option<String>> {
         .map_err(|_| V2Error::invalid_input("registration_id must be a UUID"))
 }
 
-fn parse_address(value: Option<String>) -> V2Result<Option<String>> {
+fn parse_address(value: Option<String>, field: &'static str) -> V2Result<Option<String>> {
     let Some(value) = trim_to_option(value) else {
         return Ok(None);
     };
 
-    parse_evm_address(&value, "address")
+    parse_evm_address(&value, field)
         .map(Some)
         .map_err(|error| V2Error::invalid_input(error.message))
 }
