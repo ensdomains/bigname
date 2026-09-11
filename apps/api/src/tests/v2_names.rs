@@ -366,3 +366,118 @@ async fn v2_get_names_rejects_unbounded_or_malformed_requests() -> Result<()> {
 
     database.cleanup().await
 }
+
+#[tokio::test]
+async fn v2_indexed_name_read_carries_weak_etag_and_honours_if_none_match() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_alice_name_record_fixture(&database, |_| {}, |_, _, _| {}).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/Alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("indexed name request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let etag = response
+        .headers()
+        .get(axum::http::header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .expect("indexed name read must carry an ETag")
+        .to_owned();
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("public, max-age=12, stale-while-revalidate=48")
+    );
+    let payload: Value = read_json(response).await?;
+    let token = payload["meta"]["as_of_token"]
+        .as_str()
+        .expect("indexed name read must carry meta.as_of_token");
+    assert_eq!(etag, format!("W/\"{token}\""));
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/Alice.eth")
+                .header(axum::http::header::IF_NONE_MATCH, etag.as_str())
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("conditional indexed name request failed")?;
+    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::ETAG)
+            .and_then(|value| value.to_str().ok()),
+        Some(etag.as_str())
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .context("304 body must read")?;
+    assert!(body.is_empty(), "304 must carry no body");
+
+    // The same snapshot pinned explicitly yields the same validator; a verified read never does.
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/names/Alice.eth?at={token}"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("pinned indexed name request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::ETAG)
+            .and_then(|value| value.to_str().ok()),
+        Some(etag.as_str())
+    );
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/Alice.eth?source=verified")
+                .header(axum::http::header::IF_NONE_MATCH, "*")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("verified name request failed")?;
+    assert_ne!(response.status(), StatusCode::NOT_MODIFIED);
+    assert!(
+        !response.headers().contains_key(axum::http::header::ETAG),
+        "verified reads must not carry an ETag"
+    );
+    assert!(
+        !response
+            .headers()
+            .contains_key(axum::http::header::CACHE_CONTROL),
+        "verified reads must not carry Cache-Control"
+    );
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/Alice.eth/subnames")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("subnames request failed")?;
+    assert!(
+        !response.headers().contains_key(axum::http::header::ETAG),
+        "collections must not carry an ETag"
+    );
+
+    database.cleanup().await
+}

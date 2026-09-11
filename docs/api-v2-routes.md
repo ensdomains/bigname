@@ -173,6 +173,31 @@ Field ownership:
   already dictionary fields. Diagnostics may use pipeline vocabulary because
   their tier is explicitly separate from product reads.
 
+### Caching headers on indexed single-resource reads
+
+`GET /v1/names/{name}`, `GET /v1/names/{name}/records`,
+`GET /v1/resolvers/{chain_id}/{address}`, and
+`GET /v1/addresses/{address}/primary-name` answer an indexed read with two
+HTTP caching headers derived from the response itself:
+
+- `ETag: W/"<meta.as_of_token>"` — a weak validator equal to the snapshot
+  token the body already carries, so the validator changes exactly when the
+  served snapshot does and is the same for a latest-state read and an `at`
+  read pinned to that snapshot.
+- `Cache-Control: public, max-age=12, stale-while-revalidate=48` — one
+  Ethereum slot of freshness, after which a browser or edge revalidates with
+  `If-None-Match`; an edge may keep serving the held body for four more slots
+  while it revalidates.
+
+A request whose `If-None-Match` lists that validator (weak or strong form, or
+`*`) receives `304 Not Modified` with the same two headers and no body. The
+headers appear only on `200` responses whose body carries `meta.as_of_token`,
+and only for indexed reads: `source=verified` and `source=auto` execute against
+a provider per request and are never cached, and the primary-name route
+qualifies only when `source=indexed` is explicit, because its default answer
+set includes the verified source. Errors, `POST /v1/lookup`, and every
+collection route carry neither header.
+
 ## Tier 1: Lookup Primitives
 
 ### `POST /v1/lookup`

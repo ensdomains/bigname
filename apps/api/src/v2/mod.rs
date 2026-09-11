@@ -1,5 +1,6 @@
 mod address_history;
 mod address_names;
+mod cache_headers;
 mod chains;
 mod cursor;
 mod diag_events;
