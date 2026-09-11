@@ -303,7 +303,7 @@ fn validate_bloom_membership(log: &Log, header_by_hash: &BTreeMap<&str, &Block>)
     };
     for value in std::iter::once(log.address.as_str()).chain(log.topics.iter().map(String::as_str))
     {
-        let bytes = decode_hex(value).ok_or_else(|| {
+        let bytes = alloy_primitives::hex::decode(value).map_err(|_| {
             IngestError::data_integrity(format!(
                 "provider returned undecodable log value {value} at {} {}",
                 log.block_hash, log.log_index
@@ -317,16 +317,6 @@ fn validate_bloom_membership(log: &Log, header_by_hash: &BTreeMap<&str, &Block>)
         }
     }
     Ok(())
-}
-
-fn decode_hex(value: &str) -> Option<Vec<u8>> {
-    let value = value.strip_prefix("0x")?;
-    if value.len() % 2 != 0 {
-        return None;
-    }
-    (0..value.len() / 2)
-        .map(|index| u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok())
-        .collect()
 }
 
 /// Whole-block fetch, kept for the datadir provider and as the reference the tests compare

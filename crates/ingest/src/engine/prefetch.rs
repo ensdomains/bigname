@@ -131,6 +131,10 @@ impl<'a> Prefetcher<'a> {
         let range_to = from
             .saturating_add(PREFETCH_RANGE_BLOCKS - 1)
             .min(self.ceiling);
+        if range_to < to {
+            // A window wider than one prefetch range would be served a partial answer.
+            return window_logs(provider, resolved, query, from, to).await;
+        }
         let logs = provider
             .prefetch_range_logs(from, range_to, &query.addresses, &query.topic0s)
             .await
@@ -138,6 +142,11 @@ impl<'a> Prefetcher<'a> {
         let Some(logs) = logs else {
             return window_logs(provider, resolved, query, from, to).await;
         };
+        let window = logs
+            .iter()
+            .filter(|log| (from..=to).contains(&log.block_number))
+            .cloned()
+            .collect::<Vec<_>>();
         {
             let mut cache = self.cache.lock().await;
             cache.evict_below(from);
@@ -150,16 +159,6 @@ impl<'a> Prefetcher<'a> {
                 },
             );
         }
-        let window = self
-            .cache
-            .lock()
-            .await
-            .covered(
-                &(self.provider_key.clone(), QueryIdentity::of(query)),
-                from,
-                to,
-            )
-            .unwrap_or_default();
         match pinned(resolved, window) {
             Some(logs) => Ok(logs),
             // The provider answered the wide range from a lineage this window does not
