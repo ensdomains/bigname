@@ -1134,7 +1134,33 @@ async fn v2_lookup_rejects_head_reorg_before_project_republication() -> Result<(
         38,
     )
     .await?;
-    advance_v2_lookup_ethereum_head(&database, 39, "0xlookup-before-reorg").await?;
+    // The served block 39 is only canonical (not yet safe), so a reorg can still replace it.
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_lineage (
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state
+         ) VALUES (
+             'ethereum-mainnet', '0xlookup-before-reorg', 39,
+             '2026-04-17T00:00:39Z'::timestamptz, 'canonical'
+         )",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        "UPDATE chain_heads
+         SET latest_block_hash = '0xlookup-before-reorg',
+             latest_block_number = 39,
+             updated_at = now()
+         WHERE chain_id = 'ethereum-mainnet'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET current_block_number = 39, current_block_hash = '0xlookup-before-reorg'
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
     let (_guard, control) =
         crate::v2::lookup_served_head_revalidation_test_hooks::install(&database.lookup_pool)
             .await?;
@@ -1161,20 +1187,12 @@ async fn v2_lookup_rejects_head_reorg_before_project_republication() -> Result<(
     // A reorg replaces the served block 39 and extends the new fork to 40. The head moves on
     // before Project republishes, so the served publication is no longer on the readable path.
     sqlx::query(
-        "UPDATE bigname_phase.chain_lineage
-         SET canonicality_state = 'orphaned'
-         WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xlookup-before-reorg'",
-    )
-    .execute(&database.lookup_pool)
-    .await?;
-    sqlx::query(
         "INSERT INTO bigname_phase.chain_lineage (
              chain_id, block_hash, block_number, block_timestamp, canonicality_state
-         ) VALUES
-             ('ethereum-mainnet', '0xlookup-reorged-39', 39,
-              '2026-04-17T00:00:39Z'::timestamptz, 'canonical'),
-             ('ethereum-mainnet', '0xlookup-after-reorg', 40,
-              '2026-04-17T00:00:40Z'::timestamptz, 'canonical')",
+         ) VALUES (
+             'ethereum-mainnet', '0xlookup-after-reorg', 40,
+             '2026-04-17T00:00:40Z'::timestamptz, 'canonical'
+         )",
     )
     .execute(&database.lookup_pool)
     .await?;
@@ -1184,6 +1202,23 @@ async fn v2_lookup_rejects_head_reorg_before_project_republication() -> Result<(
              latest_block_number = 40,
              updated_at = now()
          WHERE chain_id = 'ethereum-mainnet'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_lineage
+         SET canonicality_state = 'orphaned'
+         WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xlookup-before-reorg'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_lineage (
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state
+         ) VALUES (
+             'ethereum-mainnet', '0xlookup-reorged-39', 39,
+             '2026-04-17T00:00:39Z'::timestamptz, 'canonical'
+         )",
     )
     .execute(&database.lookup_pool)
     .await?;
