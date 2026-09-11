@@ -69,11 +69,19 @@ impl State {
                 )
         });
         if should_release_active {
-            let next_authority = if self.v1_expiry_is_after_migration(&key, timestamp) {
-                None
-            } else {
-                self.v1_registry_authority_if_authentic(&key)
-            };
+            // Mirror the live release: a NameWrapper holds the registry node only on behalf of
+            // the lease it wrapped, so a lapsed wrapped lease leaves no ENSv1 authority to fall
+            // back to. Restoring the stored release must not revive that registry-only custody.
+            let lapsed_wrapper_custody = self
+                .v1_names
+                .get(&key)
+                .is_some_and(|active| active.authority_source_family == "ens_v1_wrapper_l1");
+            let next_authority =
+                if lapsed_wrapper_custody || self.v1_expiry_is_after_migration(&key, timestamp) {
+                    None
+                } else {
+                    self.v1_registry_authority_if_authentic(&key)
+                };
             self.activate_v1_authority(namespace, namehash, next_authority);
         }
     }
