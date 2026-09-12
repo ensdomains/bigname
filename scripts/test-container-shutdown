@@ -82,31 +82,57 @@ sha="${BIGNAME_E2E_SHUTDOWN_SOURCE_SHA:?explicit reviewed source SHA required}"
 [[ "$(git -C "$source_root" rev-parse HEAD)" == "$sha" ]]
 [[ -z "$(git -C "$source_root" status --porcelain)" ]]
 git -C "$source_root" log -1 --format="checkout_sha=%H tree=%T requested_sha=$sha"
-builder="${BIGNAME_E2E_SHUTDOWN_BUILDER:-bigname-shutdown-$$}"
-scratch="$(mktemp -d)"; created_builder=0
-export BIGNAME_E2E_SHUTDOWN_IMAGE="bigname-api-shutdown:$sha-$$"
-cleanup_build() {
-  rm -rf "$scratch"
-  docker image rm "$BIGNAME_E2E_SHUTDOWN_IMAGE" "bigname-shutdown-probe:$$" >/dev/null 2>&1 || true
-  if [[ "$created_builder" == 1 ]]; then docker buildx rm "$builder" >/dev/null 2>&1 || true; fi
-}
-trap cleanup_build EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-if [[ -z "${BIGNAME_E2E_SHUTDOWN_BUILDER:-}" ]]; then
-  cpu="$(awk '/Cpus_allowed_list/{split($2,a,/[-,]/);print a[1]}' /proc/self/status)"
-  if docker buildx inspect "$builder" >/dev/null 2>&1; then echo "owned builder name already exists" >&2; exit 1; fi
-  created_builder=1
-  docker buildx create --name "$builder" --driver docker-container --driver-opt "cpuset-cpus=$cpu" --driver-opt cpu-period=100000 --driver-opt cpu-quota=100000 --bootstrap
+if [[ -n "${BIGNAME_E2E_SHUTDOWN_IMAGE:-}" ]]; then
+  # CI supplies the image built from this checkout by the production Dockerfile.
+  expected_image="${BIGNAME_E2E_SHUTDOWN_IMAGE_ID:?build action image ID required}"
+  [[ "$expected_image" =~ ^sha256:[0-9a-f]{64}$ ]]
+  actual_image="$(docker image inspect --format '{{.Id}}' "$BIGNAME_E2E_SHUTDOWN_IMAGE")"
+  [[ "$actual_image" == "$expected_image" ]]
+  [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$actual_image")" == "$sha" ]]
+  docker image inspect "$actual_image" > "$BIGNAME_E2E_SHUTDOWN_EVIDENCE/build-image.json"
+  # Pin the test to the verified ID, even if a tag changes later.
+  export BIGNAME_E2E_SHUTDOWN_IMAGE="$actual_image"
+else
+  builder="${BIGNAME_E2E_SHUTDOWN_BUILDER:-bigname-shutdown-$$}"
+  scratch="$(mktemp -d)"; created_builder=0
+  export BIGNAME_E2E_SHUTDOWN_IMAGE="bigname-api-shutdown:$sha-$$"
+  cleanup_build() {
+    rm -rf "$scratch"
+    docker image rm "$BIGNAME_E2E_SHUTDOWN_IMAGE" "bigname-shutdown-probe:$$" >/dev/null 2>&1 || true
+    if [[ "$created_builder" == 1 ]]; then docker buildx rm "$builder" >/dev/null 2>&1 || true; fi
+  }
+  trap cleanup_build EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if [[ -z "${BIGNAME_E2E_SHUTDOWN_BUILDER:-}" ]]; then
+    cpu="$(awk '/Cpus_allowed_list/{split($2,a,/[-,]/);print a[1]}' /proc/self/status)"
+    if docker buildx inspect "$builder" >/dev/null 2>&1; then echo "owned builder name already exists" >&2; exit 1; fi
+    created_builder=1
+    docker buildx create --name "$builder" --driver docker-container --driver-opt "cpuset-cpus=$cpu" --driver-opt cpu-period=100000 --driver-opt cpu-quota=100000 --bootstrap
+  fi
+  mkdir "$scratch/src"
+  printf '%s\n' '[package]' 'name="shutdown-cpu-probe"' 'version="0.1.0"' 'edition="2021"' > "$scratch/Cargo.toml"
+  printf '%s\n' 'fn main() {}' > "$scratch/src/main.rs"
+  printf '%s\n' 'fn main() { assert_eq!(std::env::var("NUM_JOBS").unwrap(),"1"); assert_eq!(std::thread::available_parallelism().unwrap().get(),1); }' > "$scratch/build.rs"
+  printf '%s\n' 'FROM rust:1.93.1-bookworm' 'WORKDIR /probe' 'COPY . .' 'RUN cargo build --offline -vv' > "$scratch/Dockerfile"
+  docker buildx build --builder "$builder" --load -t "bigname-shutdown-probe:$$" "$scratch"
+  export CARGO_BUILD_JOBS=1 BIGNAME_BUILD_SHA="$sha"
+  docker buildx build --builder "$builder" --load --build-arg "BIGNAME_BUILD_SHA=$sha" -t "$BIGNAME_E2E_SHUTDOWN_IMAGE" "$source_root"
 fi
-mkdir "$scratch/src"
-printf '%s\n' '[package]' 'name="shutdown-cpu-probe"' 'version="0.1.0"' 'edition="2021"' > "$scratch/Cargo.toml"
-printf '%s\n' 'fn main() {}' > "$scratch/src/main.rs"
-printf '%s\n' 'fn main() { assert_eq!(std::env::var("NUM_JOBS").unwrap(),"1"); assert_eq!(std::thread::available_parallelism().unwrap().get(),1); }' > "$scratch/build.rs"
-printf '%s\n' 'FROM rust:1.93.1-bookworm' 'WORKDIR /probe' 'COPY . .' 'RUN cargo build --offline -vv' > "$scratch/Dockerfile"
-docker buildx build --builder "$builder" --load -t "bigname-shutdown-probe:$$" "$scratch"
-export CARGO_BUILD_JOBS=1 BIGNAME_BUILD_SHA="$sha"
-docker buildx build --builder "$builder" --load --build-arg "BIGNAME_BUILD_SHA=$sha" -t "$BIGNAME_E2E_SHUTDOWN_IMAGE" "$source_root"
+
+# Reuse the existing artifact bridge only for its exact canonical build command.
+# Generated-manifest builds still use real Cargo and restored dependencies.
+if [[ -n "${BIGNAME_E2E_CANONICAL_PHASE_RUNNER:-}" ]]; then
+  export BIGNAME_E2E_REAL_CARGO="${BIGNAME_E2E_REAL_CARGO:-$(command -v cargo)}"
+  bridge="$ROOT/tests/e2e/cargo-phase-runner-artifact"
+  host_triple="$("$BIGNAME_E2E_REAL_CARGO" -vV | sed -n 's/^host: //p')"
+  [[ -n "$host_triple" ]]
+  runner_env="CARGO_TARGET_${host_triple^^}_RUNNER"
+  runner_env="${runner_env//-/_}"
+  printf -v "$runner_env" '%s --run-test' "$bridge"
+  export "$runner_env"
+fi
+export BIGNAME_BUILD_SHA="$sha"
 export BIGNAME_E2E_SHUTDOWN_MODE=compose
 cd "$ROOT"
 cargo test --locked --manifest-path tests/e2e/Cargo.toml scenarios::service_shutdown::api_signals_drain_accepted_indexed_name_read -- --exact --nocapture

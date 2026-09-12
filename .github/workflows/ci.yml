@@ -991,6 +991,9 @@ jobs:
     name: test (API container shutdown)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    needs:
+      - e2e_build
+    if: ${{ !cancelled() && needs.e2e_build.result == 'success' }}
     services:
       postgres:
         image: postgres:16-alpine
@@ -1010,7 +1013,7 @@ jobs:
       BIGNAME_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
       BIGNAME_E2E_SHUTDOWN_SOURCE_SHA: ${{ github.sha }}
       BIGNAME_E2E_SHUTDOWN_EVIDENCE: ${{ github.workspace }}/target/api-container-shutdown
-      CARGO_BUILD_JOBS: "1"
+      CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
@@ -1028,13 +1031,93 @@ jobs:
         run: |
           scripts/sync-refs
           scripts/sync-refs --check
-      - name: Build canonical phase-runner prerequisite
-        env:
-          BIGNAME_BUILD_SHA: ${{ github.sha }}
+      - name: Compute phase-runner dependency-cache key
+        id: phase_runner_cache_key
         run: |
-          cargo build --locked --package phase-runner --bin phase-runner
-          sha256sum target/debug/phase-runner
+          root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+          e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
+          prefix="v1-rust-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
+          runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
+          primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
+          echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
+          echo "primary=$primary" >>"$GITHUB_OUTPUT"
+          echo "phase-runner dependency-cache primary key: $primary"
+
+      - name: Restore e2e phase-runner Cargo dependencies
+        id: phase_runner_cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ steps.phase_runner_cache_key.outputs.prefix }}
+          shared-key: phase-runner
+          add-job-id-key: false
+          add-rust-environment-hash-key: false
+          workspaces: ". -> target"
+          cache-workspace-crates: false
+          save-if: false
+
+      - name: Report phase-runner dependency cache
+        env:
+          CACHE_HIT: ${{ steps.phase_runner_cache.outputs.cache-hit }}
+          CACHE_PRIMARY_KEY: ${{ steps.phase_runner_cache_key.outputs.primary }}
+        run: |
+          echo "phase-runner dependency-cache primary key: $CACHE_PRIMARY_KEY"
+          echo "phase-runner dependency-cache hit: $CACHE_HIT"
+          {
+            echo "### phase-runner dependency cache"
+            echo
+            echo "- Primary key: \`$CACHE_PRIMARY_KEY\`"
+            echo "- Exact hit: \`$CACHE_HIT\`"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Download phase-runner artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.e2e_build.outputs.artifact-name }}
+          path: target/bigname-e2e-download
+          digest-mismatch: error
+
+      - name: Verify phase-runner artifact
+        run: |
+          artifact_dir="$GITHUB_WORKSPACE/target/bigname-e2e-artifact"
+          mkdir -p "$artifact_dir"
+          tar -xf target/bigname-e2e-download/phase-runner-e2e.tar -C "$artifact_dir"
+          (
+            cd "$artifact_dir"
+            sha256sum -c SHA256SUMS
+            grep -Fx "source SHA: $GITHUB_SHA" BUILD-METADATA
+            test -x phase-runner
+            file phase-runner
+            ldd phase-runner | tee dynamic-dependencies.txt
+            if grep -F "not found" dynamic-dependencies.txt; then
+              echo "phase-runner artifact has a missing dynamic dependency" >&2
+              exit 1
+            fi
+          )
+          echo "BIGNAME_E2E_CANONICAL_PHASE_RUNNER=$artifact_dir/phase-runner" >>"$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build exact production image
+        id: shutdown_image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          platforms: linux/amd64
+          build-args: |
+            RUST_VERSION=${{ env.RUST_VERSION }}
+            BIGNAME_BUILD_SHA=${{ github.sha }}
+          tags: bigname-api-shutdown:${{ github.sha }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: Prove exact-image API shutdown
+        env:
+          BIGNAME_E2E_SHUTDOWN_IMAGE: bigname-api-shutdown:${{ github.sha }}
+          BIGNAME_E2E_SHUTDOWN_IMAGE_ID: ${{ steps.shutdown_image.outputs.imageid }}
         run: scripts/test-container-shutdown
       - name: Retain shutdown evidence
         if: always()
