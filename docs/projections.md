@@ -589,6 +589,21 @@ remain on their name-side projections and routes instead of being duplicated
 into one resolver row. The resolver summary is diagnostic and does not replace
 exact-name topology.
 
+`resolver_current.unsupported_reason` for an ENSv2 resolver (and the
+`coverage.unsupported_reason` copied onto its record inventory) uses a closed
+vocabulary: `resolver_not_declared` when an exact `public_resolver_v2`
+declaration is required and absent (also the ENSv1 and Basenames reason for an
+undeclared address); `resolver_implementation_unknown` when a discovered proxy
+has no canonical `Upgraded` observation — neither an ERC-1967 `Upgraded` log
+nor a factory announcement — so its implementation is unknown;
+`resolver_implementation_not_declared` when the latest observation names an
+implementation outside the active manifest's `resolver_implementations`; and
+`resolver_binding_enumeration_not_projected` on the binding summary of a
+supported resolver whose family does not project binding enumeration.
+`resolver_implementation_unknown` replaced the earlier
+`resolver_upgrade_not_observed` string; readers that do not recognize a
+persisted reason keep mapping it to partial coverage.
+
 `record_inventory_current` records the selectors observed under a resource's
 latest retained linked resolver event whose name has a readable canonical
 surface staged at the target, with fallback to an earlier linked event when a

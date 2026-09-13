@@ -41,7 +41,12 @@ Each manifest contains:
 - `rollout_status` — `draft` | `shadow` | `active` | `deprecated`
 - `normalizer_version`
 - `resolver_implementations` — optional declared implementation artifacts and
-  implementation-sensitive `read_features` for upgradeable resolver families
+  implementation-sensitive `read_features` for upgradeable resolver families;
+  for `ens_v2_resolver_l1` the list is also the admission authority for
+  [announcement-admitted resolvers](glossary.md#resolver-announcement-admission)
+  and compiles an [implementation-announcement
+  watch](glossary.md#implementation-announcement-watch), so changing it
+  changes the watch plan
 - `correlation_addresses` — optional named, validated EVM addresses used only
   to correlate decoded observations across declared emitters; these entries do
   not declare contracts, add discovery edges, or widen the watch plan
@@ -151,11 +156,21 @@ manifest and is deferred to a follow-up admission decision.
 
 `resolver_implementations` does not admit an implementation as a watched
 emitter. The project phase uses
-the list only to classify a discovered ENSv2 resolver proxy after canonical
+the list to classify a discovered ENSv2 resolver proxy after canonical
 ERC-1967 `Upgraded` history identifies its current implementation. ENSv1 and
 Basenames resolver classification instead requires the resolver address itself
 to be an active `[[contracts]]` declaration. Neither path reads or infers a
 runtime code hash.
+
+For `ens_v2_resolver_l1`, the list also admits resolver proxies that announce a
+declared implementation, without waiting for a registry pointer; see
+[Resolver admission by implementation
+announcement](#resolver-admission-by-implementation-announcement). Each
+declared implementation compiles one watch-plan entry — the family's `Upgraded`
+topic across every emitter, narrowed by the indexed `implementation` topic to
+that address — so adding or removing an implementation is a [compiled watch
+plan](glossary.md#compiled-watch-plan) change and follows the [mandatory
+historical fetch rule](#mandatory-historical-fetch-after-watch-plan-widening).
 
 For `[[discovery_rules]]`, the only authorable `admission` value is `reachable_from_root` — the discovered edge is authoritative while its `from_role` endpoint remains reachable from an active manifest root under an allowed rule. Internal labels are storage tags, not authored values: `manifest_declared` is an `admission_basis`, and `manifest_declared_proxy` is the `discovery_source` written alongside it for manifest-declared proxy edges.
 
@@ -332,7 +347,7 @@ The `sepolia` deployment profile currently admits five ENSv2 families from the a
 - `ens_v2_root_l1` — `RootRegistry` at `0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c`, `start_block = 11163319`. The admitted deployment artifact identifies that address and names the contract type `PermissionedRegistry`. (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/RootRegistry.json:L2 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/RootRegistry.json:L1670 @ ens_v2@a971bd64) It is a tokenized, [resource](glossary.md)-scoped permissioned registry seed for parent graph state.[^v2-pr-l22][^v2-pr-l28] Its `root_registry` role records `subregistry` edges as name topology only: they do not admit or watch the child registry without an independent `RegistryCreated` announcement. The same role separately admits `resolver` addresses through `reachable_from_root`, targeting `ens_v2_resolver_l1`. `PermissionedRegistry` explicitly emits `ResolverUpdated` when a resolver is set and also emits it when registration supplies a nonzero resolver. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L150-L154 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L477-L478 @ ens_v2@a971bd64) The RootRegistry manages TLDs, so its empty suffix anchor represents a registered root label as the existing single-label logical name; the root-discovery projection regression proves that its resolver pointer and records attach to that same resource rather than creating a separate serving model. (upstream: .refs/ens_v2/docs/indexing-ensv2-events.md:L505-L509 @ ens_v2@a971bd64)
 - `ens_v2_registry_l1` — `ETHRegistry` at `0x67b728a792e789a8978b30cf1b3b641f19354b43`, `start_block = 11163391`, plus registry instances announced by `RegistryCreated()`. Direct `PermissionedRegistry` construction emits the announcement first; a `UserRegistry` proxy emits it during initialization. It admits the emitting address from that exact log position without requiring a parent link. `UserRegistryImpl` at `0x840fa461059862ea466a711e8c98c8de732061c0` is implementation metadata, not a separate owner. (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@a971bd64) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/UserRegistry.sol:L43 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/UserRegistry.sol:L47 @ ens_v2_sepolia_20260629@ccaeb58)[^v2-userreg-l15]
 - `ens_v2_registrar_l1` — `ETHRegistrar` at `0xa4449a0dd2b83007553d9b1d28b583a46a805a30`, `start_block = 11163403`. Admitted registration and renewal lifecycle facts; registered-name resource identity links back to the registry resource.[^v2-ethrc-l49][^v2-ethrc-l173]
-- `ens_v2_resolver_l1` — resolver contract instances discovered from either `ens_v2_registry_l1` or `ens_v2_root_l1` retain the manifest-configured normalized record and record-version observations; an applicable same-namespace exact contract declaration instead controls raw-log interpretation under the [declaration-precedence rule](architecture.md#discovery-graph). `PermissionedResolver` instances additionally provide alias, named-resource, and resolver-scoped EAC events. Resolver-local projection is supported only when the proxy's latest canonical ERC-1967 `Upgraded` event names an implementation in the active manifest's `resolver_implementations` list. The current declared `PermissionedResolverImpl` is `0x7e4b2d59938930168024201752ee5503df402303`; the contract inherits UUPS upgradeability and its deployment ABI exposes `Upgraded(address)`.[^v2-deploy-pres][^v2-pres-uups][^v2-pres-upgraded] A manifest admission change reclassifies the affected resolver inline during project-phase publication. No code-hash observation participates.
+- `ens_v2_resolver_l1` — resolver contract instances discovered from either `ens_v2_registry_l1` or `ens_v2_root_l1` retain the manifest-configured normalized record and record-version observations; an applicable same-namespace exact contract declaration instead controls raw-log interpretation under the [declaration-precedence rule](architecture.md#discovery-graph). `PermissionedResolver` instances additionally provide alias, named-resource, and resolver-scoped EAC events. Resolver-local projection is supported only when the proxy's latest canonical `Upgraded` observation (an ERC-1967 `Upgraded` log, or a declared-factory `ProxyDeployed` announcement recorded as one) names an implementation in the active manifest's `resolver_implementations` list. The current declared `PermissionedResolverImpl` is `0x7e4b2d59938930168024201752ee5503df402303`; the contract inherits UUPS upgradeability and its deployment ABI exposes `Upgraded(address)`.[^v2-deploy-pres][^v2-pres-uups][^v2-pres-upgraded] A manifest admission change reclassifies the affected resolver inline during project-phase publication. No code-hash observation participates.
 The fifth family, `ens_v2_migration_l1`, covers fixed ENSv1→ENSv2 migration
 controllers, terminal-holder and renewal-bridge markers, factory history,
 batch-reservation sender metadata, and scoped ENSv1 BaseRegistrar correlation.
@@ -1103,6 +1118,19 @@ declared addresses remain explicit watch targets.
 Adding a less general target already covered by an all-emitter event does not
 count as widening.
 
+An implementation-announcement entry is covered only by the same
+`(family, implementation, topic)` entry or by an all-emitter entry for the
+same topic. Adding a `resolver_implementations` address to an
+`ens_v2_resolver_l1` manifest that declares `Upgraded` therefore widens the
+plan from block zero and stamps the required Ingest redo like any other
+widening; removing one narrows. The first binary that compiles these entries
+widens every existing deployment whose active `ens_v2_resolver_l1` manifest
+already declares implementations, because the stored compiled plan preceding
+it has no such entry: that deployment's next manifest synchronization stamps
+the required Ingest redo from its ingest start and mints a manifest-authority
+marker, so its Interpret redo must be run as the attested full-range redo
+described below.
+
 For each newly widened direct-address watch, synchronization checks the
 continuous union of [persisted Ingest
 coverage](glossary.md#persisted-ingest-coverage) for the same chain, source
@@ -1491,6 +1519,66 @@ The legacy resolver-profile authority journal, input queue, and reconciliation t
 
 ERC-1967 `Upgraded(address)` logs from manifest-declared and event-announced contracts produce `Upgraded` normalized history on the emitting contract. (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/interfaces/IERC1967.sol:L13 @ basenames@1809bbc) Manifest synchronization does not infer upgrades from code-hash drift and does not synthesize drift-alert normalized events.
 
+### Resolver admission by implementation announcement
+
+A registry `ResolverUpdated` admits its target resolver from the pointer's
+block only, and Interpret performs no historical lookback for a newly admitted
+address: a resolver's earlier logs stay uninterpreted. On the Sepolia hackathon
+deployment every stored raw `Upgraded` from a discovered resolver preceded the
+registry pointer that discovered it (a census of bigname's stored Sepolia raw
+logs on 2026-09-13: 646 raw `Upgraded` logs and no normalized `Upgraded`; all
+148 from discovered resolvers preceded their admitting pointer, 21 of them
+earlier in the pointer's own block), so pointer-only discovery can never
+satisfy the implementation-based support rule.
+`ens_v2_resolver_l1` therefore also admits a resolver from the block in which
+it, or its factory, announces a declared implementation:
+
+- `Upgraded(address indexed implementation)` from any emitter whose indexed
+  `implementation` is in the same-namespace, same-deployment
+  `ens_v2_resolver_l1` manifest's `resolver_implementations` admits the emitter
+  as an `ens_v2_resolver_l1` instance from that block. The event is selected
+  across every emitter — the precedent is the ENSv1 resolver family's match-all
+  signature set — but narrowed by `topic1` to the declared implementation
+  addresses, both in the [compiled watch plan](glossary.md#compiled-watch-plan)
+  and in Interpret selection. `Upgraded` naming an undeclared implementation from
+  an unadmitted emitter is neither fetched nor selected. (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L627-L637 @ ens_v2@a971bd64) (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/interfaces/IERC1967.sol:L13 @ basenames@1809bbc)
+- `ProxyDeployed(sender, proxyAddress, salt, implementation)` from a declared
+  `ens_v2_migration_l1` `verifiable_factory` whose `implementation` is declared
+  the same way admits `proxyAddress` as an `ens_v2_resolver_l1` instance from
+  that block and records the announced implementation as the proxy's
+  implementation observation: an `Upgraded` normalized event on the proxy's own
+  `Upgraded` stream with `after_state.source_event = "ProxyDeployed"`, written
+  under the resolver manifest when that manifest declares `Upgraded`. No extra
+  fetch is involved; the factory's logs are already watched. (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/VerifiableFactory.json:L48 @ ens_v2@a971bd64)
+
+Both announcements write a `resolver` discovery edge with `discovery_source`
+`Upgraded` or `ProxyDeployed`, `admission_basis`
+`declared_resolver_implementation`, and the resolver manifest as
+`source_manifest_id`. A factory announcement's edge runs from the factory
+instance; a self-announcement's edge runs from the implementation's contract
+instance (the same instance the log's `proxy_implementation` edge names),
+because the schema admits no self-edge outside `registry_announcement`. The
+announcement edge never closes: a later registry pointer to another resolver
+closes only the pointer edge. Registry-pointer discovery is unchanged, and a
+resolver that announces nothing remains admitted only through its pointer and
+stays `unsupported` with `resolver_implementation_unknown`
+([projections.md](projections.md#resolver-and-records)).
+
+Same-block admission: when a discovery observation admits an address at block
+`B`, Interpret also interprets that address's earlier logs in block `B` (lower
+log index) in a second pass after the block's remaining logs, then restores
+chain order for the block's normalized events so stream-chained before-states
+follow log order. The result is a pure function of the block's raw logs. A log
+whose emitter is admitted only in a later block of the same batch stays
+uninterpreted — no lookback — and is recorded as an operator diagnostic in
+`interpret_decode_skips` ([storage.md](storage.md#table-ownership)).
+
+The project support rule for `ens_v2_resolver_l1` is unchanged in shape: an
+exact `public_resolver_v2` declaration is supported directly; otherwise the
+proxy is supported exactly when its latest canonical `Upgraded` observation —
+from an ERC-1967 log or a factory announcement — names a declared
+implementation.
+
 The schema-v2 project phase has no code-hash reader. ENSv1 and Basenames use
 only exact resolver addresses declared by the active manifest, while ENSv2
 uses the latest canonical resolver-family `Upgraded` history and the active
@@ -1511,6 +1599,12 @@ Watch-plan expansion starts from active manifest roots by `contract_instance_id`
   a later finite declaration cannot erase retained-history evidence; omitting a
   previously finite start likewise backdates that active epoch to zero. A
   readmission after retirement remains bounded after the preceding epoch.
+- An `ens_v2_resolver_l1` manifest that declares `Upgraded` compiles one
+  [implementation-announcement watch](glossary.md#implementation-announcement-watch)
+  per `resolver_implementations` entry: every emitter, the `Upgraded` topic,
+  `topic1` equal to that implementation, from block zero (clipped to the
+  chain's ingest start at runtime). It is not an all-emitter entry, so it does
+  not cover a discovered resolver's own address-scoped `Upgraded` watch.
 - Legacy watch rows may denormalize address and code-hash state, but their durable explanation path is `manifest root → discovery edge(s) → contract_instance_id`; schema-v2 resolver classification does not read that denormalization.
 - Address-only watch state is rebuildable from manifests, instance attributes, and active discovery edges.
 

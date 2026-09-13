@@ -640,6 +640,18 @@ Registry-name suffix labels are retained verbatim. Raw label text keys the live 
   controls raw-log interpretation without changing the originating ENSv2
   `ResolverUpdated` event, resolver binding, or discovery edge.[^v2-events-l59][^v2-pr-l141][^v2-pr-l225]
 
+- `Upgraded(implementation)` from any emitter, and `ProxyDeployed(sender,
+  proxyAddress, salt, implementation)` from a declared `verifiable_factory`,
+  admit the emitting proxy (or `proxyAddress`) as an `ens_v2_resolver_l1`
+  instance from that block when `implementation` is declared in the
+  same-deployment resolver manifest's `resolver_implementations`. The edge kind
+  is `resolver` with `admission_basis` `declared_resolver_implementation`; a
+  factory announcement also records the implementation as the proxy's
+  `Upgraded` observation. The rule and its watch-plan effect are specified in
+  [`manifests.md` § Resolver admission by implementation
+  announcement](manifests.md#resolver-admission-by-implementation-announcement).
+  (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L627-L637 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/VerifiableFactory.json:L48 @ ens_v2@a971bd64)
+
 Project applies the same declaration precedence when it classifies an active
 resolver-discovery admission for serving. An applicable exact resolver
 declaration in the same namespace has classification rank 0, ahead of the

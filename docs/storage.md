@@ -195,7 +195,7 @@ mandatory full Interpret and Project redos.
 | `project_redo_resolver_evidence` | Interpret, then Project consumption | Pre-delete resolver and permission-resource references preserved across Interpret retries for one redo range; redo coordination only, never serving data. |
 | `project_redo_expiry_roots` | Interpret, then Project consumption | Logical names or permission resources from state-derived ENSv2 path-expiry releases preserved before Interpret deletes a redo range; bounded projection-redo coordination only, never serving data. |
 | `project_redo_child_registration_history` | Interpret, then Project consumption | Child and registry identifiers from entry-creating events in an ENSv1→ENSv2 [migration `WrapperRegistry`](glossary.md#migration-registry-wrapperregistry), preserved before Interpret deletes a redo range; bounded child-scope coordination only, never serving data. |
-| `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding; never identity, normalized-event, projection, or serving data. |
+| `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding, and for logs that preceded their emitter's same-batch discovery admission; never identity, normalized-event, projection, or serving data. |
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or [discovery edges](glossary.md#discovery-graph--discovery-edge). The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner; manifest synchronization may stamp or widen required Ingest redo work recorded by the [manifest-authority marker](glossary.md#manifest-authority-marker), and Interpret may stamp discovery-owned required Ingest work in the transaction that finalizes a completed pass | Phase progress, repair work, and runtime liveness. Both coordination writers use the shared required-Ingest installer under the existing synchronization and runner phase-exclusion rules. They preserve lifecycle backup fields, clear resumable evidence for genuinely new demand, and never execute the redo. The phase runner remains the sole executor and redo authority. |
@@ -277,6 +277,16 @@ the raw-log position with that content hash, and Interpret inserts with conflict
 ignore, so replaying or redoing the same log under one interpreter build does
 not duplicate the diagnostic. The rows remain append-only across canonicality
 changes and derived-state rebuilds; they are not replay input.
+
+The same table also records a well-formed log that Interpret could not select
+because its emitter was admitted by discovery only in a later block of the
+same batch: discovery is forward-only from the admitting observation, so the
+earlier log stays uninterpreted. Such a row carries the source family the
+emitter interprets under, the log's `topic0` as its selection signature,
+`match_all = false`, and a `decode_context` naming the admitting block. A log
+from the admitting block itself is interpreted by the same-block second pass
+([manifests.md](manifests.md#resolver-admission-by-implementation-announcement))
+and produces no row.
 
 For a manifest-declared address, an omitted `start_block` is initially stored
 as `contract_instance_addresses.active_from_block_number = NULL`; interval
