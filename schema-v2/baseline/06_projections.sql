@@ -248,7 +248,9 @@ CREATE INDEX IF NOT EXISTS permissions_current_resolver_scope_idx
 
 CREATE TABLE IF NOT EXISTS account_permission_state_current (
     chain_id text NOT NULL,
-    authority_kind text NOT NULL CHECK (authority_kind = 'registry'),
+    authority_kind text NOT NULL
+        CONSTRAINT account_permission_state_current_authority_kind_check
+        CHECK (authority_kind IN ('registry', 'wrapper')),
     authority_contract text NOT NULL CHECK (authority_contract ~ '^0x[0-9a-f]{40}$'),
     authority_contract_instance_id uuid NOT NULL,
     owner text NOT NULL CHECK (owner ~ '^0x[0-9a-f]{40}$'),
@@ -268,7 +270,11 @@ CREATE TABLE IF NOT EXISTS account_permission_state_current (
     inserted_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (chain_id, authority_kind, authority_contract, owner, subject, relation_kind),
     CHECK (btrim(chain_id) <> ''),
-    CHECK ((approved AND effective_powers = '["registry_control"]'::jsonb)
+    CONSTRAINT account_permission_state_current_effective_powers_check CHECK (
+        (approved AND authority_kind = 'registry'
+            AND effective_powers = '["registry_control"]'::jsonb)
+        OR (approved AND authority_kind = 'wrapper'
+            AND effective_powers = '["wrapper_control"]'::jsonb)
         OR (NOT approved AND effective_powers = '[]'::jsonb)),
     CHECK (jsonb_typeof(grant_source) = 'object'),
     CHECK (revocation_source IS NULL OR jsonb_typeof(revocation_source) = 'object'),
@@ -288,7 +294,7 @@ CREATE INDEX IF NOT EXISTS account_permission_state_current_applicability_idx
 
 COMMENT ON TABLE account_permission_state_current IS 'Latest account-wide permission states.';
 COMMENT ON COLUMN account_permission_state_current.chain_id IS 'The chain identifier.';
-COMMENT ON COLUMN account_permission_state_current.authority_kind IS 'The authority class.';
+COMMENT ON COLUMN account_permission_state_current.authority_kind IS 'The authority class: registry (ENSv1/Basenames registry operators) or wrapper (NameWrapper operators).';
 COMMENT ON COLUMN account_permission_state_current.authority_contract IS 'The authority contract address.';
 COMMENT ON COLUMN account_permission_state_current.authority_contract_instance_id IS 'The admitted contract instance.';
 COMMENT ON COLUMN account_permission_state_current.owner IS 'The approving account.';
@@ -317,6 +323,7 @@ CREATE TABLE IF NOT EXISTS permissions_current_resource_summary (
     registry_contract text,
     registry_binding_provenance jsonb,
     registry_binding_chain_positions jsonb,
+    resource_restrictions jsonb,
     support_status text NOT NULL,
     unsupported_reason text,
     provenance jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -338,6 +345,8 @@ CREATE TABLE IF NOT EXISTS permissions_current_resource_summary (
             AND jsonb_typeof(registry_binding_provenance) = 'object'
             AND jsonb_typeof(registry_binding_chain_positions) = 'object')
     ),
+    CONSTRAINT permissions_current_resource_summary_restrictions_check
+        CHECK (resource_restrictions IS NULL OR jsonb_typeof(resource_restrictions) = 'object'),
     CHECK (support_status IN ('supported', 'unsupported')),
     CHECK (
         (support_status = 'supported' AND unsupported_reason IS NULL)
@@ -809,6 +818,8 @@ COMMENT ON COLUMN permissions_current_resource_summary.registry_binding_provenan
     'This object identifies the registry-owner evidence.';
 COMMENT ON COLUMN permissions_current_resource_summary.registry_binding_chain_positions IS
     'This object identifies the registry-owner chain position.';
+COMMENT ON COLUMN permissions_current_resource_summary.resource_restrictions IS
+    'The registration-level restriction block: NameWrapper state, expiry-effective fuses, and expiry, or ENSv2 locked roles.';
 COMMENT ON COLUMN permissions_current_resource_summary.support_status IS
     'This value states whether permission reads are supported.';
 COMMENT ON COLUMN permissions_current_resource_summary.unsupported_reason IS

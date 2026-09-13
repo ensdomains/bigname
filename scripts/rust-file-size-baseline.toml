@@ -102,11 +102,6 @@ loc = 849
 justification = "The record inventory build stays one SQL derivation (pointer eligibility, node-keyed attribution, value selection, cleared-pointer history rows); the mirror-resolver pass lives in record_inventory/mirror.rs and this file only swaps mirror pointers for the substituted ENSv1 pointers and calls it."
 
 [[files]]
-path = "crates/project/src/builders/permissions.rs"
-loc = 626
-justification = "Effective permission folding keeps wrapper fuse masking, partial-coverage summaries, and the narrowly provenance-gated ENSv2 expiry tombstone in one resource-keyed projection boundary."
-
-[[files]]
 path = "crates/storage/src/history.rs"
 loc = 691
 justification = "History read facade gained HistoryOrder, HistoryBlockWindow, HistoryPageOptions, the resolver filter, and the registry-route `contract_address` emitter filter while keeping every loader signature in one place; move the option types into a sibling module on the next substantive touch."

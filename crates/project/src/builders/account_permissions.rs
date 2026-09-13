@@ -19,9 +19,10 @@ pub(super) async fn build(
                    (event.after_state ->> 'approved')::boolean AS approved
             FROM project_events event
             WHERE event.event_kind = 'AccountPermissionChanged'
-              AND event.after_state #>> '{scope,authority_kind}' = 'registry'
+              AND event.after_state #>> '{scope,authority_kind}' IN ('registry', 'wrapper')
         ), ranked AS (
             SELECT event.*,
+                   event.after_state #>> '{scope,authority_kind}' AS authority_kind,
                    row_number() OVER (
                        PARTITION BY chain_id, authority_contract, owner, subject, relation_kind
                        ORDER BY block_number DESC, transaction_index DESC, log_index DESC,
@@ -44,7 +45,7 @@ pub(super) async fn build(
             transfer_behavior, provenance, chain_positions, canonicality_summary,
             manifest_version
         )
-        SELECT chain_id, 'registry', authority_contract,
+        SELECT chain_id, authority_kind, authority_contract,
                authority_contract_instance_id, owner, subject, relation_kind, approved,
                after_state -> 'effective_powers', after_state -> 'grant_source',
                NULLIF(after_state -> 'revocation_source', 'null'::jsonb),

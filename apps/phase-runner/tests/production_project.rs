@@ -1843,7 +1843,7 @@ async fn permission_support_marks_approvals_partial_without_hiding_known_control
             (
                 "wrapper".into(),
                 "unsupported".into(),
-                Some("ensv1_wrapper_holder_permissions_not_projected".into())
+                Some("wrapper_parent_and_resolver_delegation_not_projected".into())
             ),
             (
                 "future_authority".into(),
