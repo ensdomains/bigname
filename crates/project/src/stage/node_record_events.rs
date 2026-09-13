@@ -141,4 +141,27 @@ WHERE surface.chain_id = $1 AND surface.block_number <= $2
       '0x0000000000000000000000000000000000000000', ''
   )
   AND record_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+UNION
+-- The ENSv1 registry's resolver for a scoped name's node, whether or not the pointer event is
+-- linked to the name (a pre-surface pointer keeps null logical_name_id and resource_id). The
+-- ENSv1 mirror resolver walk reads these by node (builders/record_inventory/mirror.rs).
+SELECT event.normalized_event_id
+FROM (
+    SELECT logical_name_id FROM project_scope_names
+    UNION
+    SELECT logical_name_id FROM project_scope_children
+) scope
+JOIN name_surfaces surface USING (logical_name_id)
+JOIN normalized_events event
+  ON event.chain_id = surface.chain_id
+ AND event.namespace = surface.namespace
+ AND lower(event.after_state ->> 'node') = lower(surface.namehash)
+WHERE surface.chain_id = $1 AND surface.block_number <= $2
+  AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
+  AND event.event_kind = 'ResolverChanged'
+  AND event.source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')
+  AND event.logical_name_id IS NULL
+  AND event.block_number <= $2
+  AND event.consumer_visibility = 'activated'
+  AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
 "#;

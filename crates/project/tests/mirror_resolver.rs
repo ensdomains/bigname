@@ -13,6 +13,7 @@ const CHAIN: &str = "ethereum-sepolia";
 const V1_REGISTRY: &str = "0x4444444444444444444444444444444444444401";
 const V1_RESOLVER: &str = "0x1111111111111111111111111111111111111111";
 const PARENT_RESOLVER: &str = "0x3333333333333333333333333333333333333333";
+const UNDECLARED_RESOLVER: &str = "0x4848484848484848484848484848484848484848";
 const MIRROR: &str = "0x1010101010101010101010101010101010101010";
 const ZERO20: &str = "0x0000000000000000000000000000000000000000";
 const ADDRESS: &str = "0x2222222222222222222222222222222222222222";
@@ -35,6 +36,14 @@ enum V1Side {
     Absent,
     /// The ENSv1 registry cleared its resolver at block `base + 2`.
     Cleared,
+    /// The ENSv1 registry points the queried node at `resolver` from `base + pointer_block_offset`
+    /// through a pointer event with no logical name and no resource (a pre-surface pointer for a
+    /// node nobody owns in ENSv1); when `resolver` is the declared `V1_RESOLVER`, that resolver
+    /// stores a `text:url` for the node from `base + 1`.
+    NodeOnly {
+        resolver: &'static str,
+        pointer_block_offset: i64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +66,8 @@ struct Fixture {
     v2_payload: Option<Value>,
     v1_side: V1Side,
     ancestor: Ancestor,
+    /// The name whose ENSv2 pointer targets the mirror: `NAME` or the single-label `PARENT_NAME`.
+    queried: &'static str,
 }
 
 impl Fixture {
@@ -68,10 +79,15 @@ impl Fixture {
             v2_payload: None,
             v1_side,
             ancestor: Ancestor::None,
+            queried: NAME,
         }
     }
     fn with_ancestor(mut self, ancestor: Ancestor) -> Self {
         self.ancestor = ancestor;
+        self
+    }
+    fn single_label(mut self) -> Self {
+        self.queried = PARENT_NAME;
         self
     }
     fn parent_pointer_block(&self) -> Option<i64> {
@@ -410,6 +426,98 @@ async fn mirror_walks_to_the_nearest_ancestor_resolver_and_reads_the_queried_nod
 }
 
 #[tokio::test]
+async fn single_label_root_name_with_a_node_only_ensv1_pointer_records_the_walk() -> Result<()> {
+    // The ENSv1 registry sets resolvers for nodes nobody owns there: the pointer event carries no
+    // logical name and no resource. The walk must still see it (exact node, depth 0).
+    let node = bigname_lookup::ens_namehash_hex(PARENT_NAME)?;
+    let fixture = Fixture::declared(
+        "mirror_tld_undeclared",
+        V1Side::NodeOnly {
+            resolver: UNDECLARED_RESOLVER,
+            pointer_block_offset: 0,
+        },
+    )
+    .single_label();
+    let (database, pool) = project(&fixture, fixture.target(), Execution::FromZero).await?;
+    let v2 = inventory(&pool, V2_RESOURCE).await?;
+    assert_eq!(v2["support_status"], "unsupported", "{v2}");
+    assert_eq!(v2["unsupported_reason"], "mirrored_resolver_not_projected");
+    let mirror = &v2["provenance"]["mirror"];
+    assert_eq!(mirror["queried_node"], node, "{v2}");
+    assert_eq!(mirror["mirrored_node"], node);
+    assert_eq!(mirror["mirrored_name"], PARENT_NAME);
+    assert_eq!(mirror["ancestor_depth"], 0);
+    assert_eq!(mirror["forwarding"], "direct_call");
+    assert_eq!(mirror["mirrored_resolver_address"], UNDECLARED_RESOLVER);
+    // The pointer target is classified as an undeclared candidate; the walk records its reason.
+    assert_eq!(
+        mirror["mirrored_unsupported_reason"],
+        "resolver_not_declared"
+    );
+    assert_eq!(
+        mirror["mirrored_pointer_source_family"],
+        "ens_v1_registry_l1"
+    );
+    assert!(mirror["mirrored_pointer_event_id"].is_number(), "{v2}");
+    assert!(mirror.get("mirrored_resource_id").is_none(), "{v2}");
+    database.cleanup().await?;
+
+    // The same node-only pointer to a declared ENSv1 resolver derives the node's records, in
+    // every execution shape, including when the pointer arrives after the record write.
+    for (id, pointer_block_offset) in [("mirror_tld_declared", 0), ("mirror_tld_late", 2)] {
+        let fixture = Fixture::declared(
+            id,
+            V1Side::NodeOnly {
+                resolver: V1_RESOLVER,
+                pointer_block_offset,
+            },
+        )
+        .single_label();
+        let mut previous: Option<Value> = None;
+        for execution in [
+            Execution::FromZero,
+            Execution::PerBlock,
+            Execution::TwoByTwo,
+            Execution::Idempotent,
+            Execution::RedoLastBlock,
+        ] {
+            let (database, pool) = project(&fixture, fixture.target(), execution).await?;
+            let mut v2 = inventory(&pool, V2_RESOURCE).await?;
+            for section in ["chain_positions", "canonicality_summary"] {
+                let section = v2[section].as_object_mut().context("section")?;
+                section.remove("target_block_number");
+                section.remove("target_block_hash");
+            }
+            assert_eq!(
+                v2["support_status"], "supported",
+                "{id} {execution:?}: {v2}"
+            );
+            assert_eq!(
+                v2["entries"][0]["record_key"], "text:url",
+                "{id} {execution:?}: {v2}"
+            );
+            assert_eq!(v2["provenance"]["mirror"]["ancestor_depth"], 0);
+            assert_eq!(v2["provenance"]["mirror"]["mirrored_node"], node);
+            assert_eq!(
+                v2["provenance"]["mirror"]["mirrored_resolver_address"],
+                V1_RESOLVER
+            );
+            assert!(
+                v2["provenance"]["mirror"]
+                    .get("mirrored_resource_id")
+                    .is_none()
+            );
+            if let Some(previous) = &previous {
+                assert_eq!(&v2, previous, "{id} {execution:?} drifted");
+            }
+            previous = Some(v2);
+            database.cleanup().await?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn mirror_does_not_derive_through_an_extended_ancestor_resolver() -> Result<()> {
     let fixture = Fixture::declared("mirror_extended_ancestor", V1Side::Absent)
         .with_ancestor(Ancestor::Extended);
@@ -496,13 +604,13 @@ async fn undeclared_ensv2_resolver_without_upgrade_history_is_unchanged() -> Res
     let (database, pool) = project(&fixture, fixture.target(), Execution::FromZero).await?;
     let v2 = inventory(&pool, V2_RESOURCE).await?;
     assert_eq!(v2["support_status"], "unsupported", "{v2}");
-    assert_eq!(v2["unsupported_reason"], "resolver_upgrade_not_observed");
+    assert_eq!(v2["unsupported_reason"], "resolver_implementation_unknown");
     assert!(v2["provenance"].get("mirror").is_none(), "{v2}");
     let resolver = resolver_current(&pool, MIRROR).await?;
     assert_eq!(resolver["support_status"], "unsupported");
     assert_eq!(
         resolver["unsupported_reason"],
-        "resolver_upgrade_not_observed"
+        "resolver_implementation_unknown"
     );
     assert_eq!(
         resolver["declared_summary"]["classification"]["basis"], "erc1967_upgraded_history",
@@ -533,11 +641,28 @@ async fn hackathon_manifest_declares_the_mirror_and_classifies_it() -> Result<()
         .find(|loaded| loaded.manifest.source_family == "ens_v2_resolver_l1")
         .context("hackathon ens_v2_resolver_l1 manifest")?
         .manifest;
-    let mirror = manifest
+    let mirrors: Vec<_> = manifest
         .contracts
         .iter()
-        .find(|contract| contract.role == bigname_manifests::ENSV1_MIRROR_RESOLVER_ROLE)
-        .context("hackathon mirror declaration")?;
+        .filter(|contract| contract.role == bigname_manifests::ENSV1_MIRROR_RESOLVER_ROLE)
+        .collect();
+    assert_eq!(
+        mirrors
+            .iter()
+            .map(|contract| (contract.address.to_ascii_lowercase(), contract.start_block))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "0x10107255fda20ab6c37a0efca1e9465f25066a00".to_owned(),
+                Some(11_626_641)
+            ),
+            (
+                "0x1f11e5b8bca2ccfe13bd8431853db159c4e9849c".to_owned(),
+                Some(11_626_628)
+            ),
+        ]
+    );
+    let mirror = mirrors[0];
     assert_eq!(
         mirror.address.to_ascii_lowercase(),
         "0x10107255fda20ab6c37a0efca1e9465f25066a00"
@@ -557,6 +682,7 @@ async fn hackathon_manifest_declares_the_mirror_and_classifies_it() -> Result<()
         v2_payload: Some(serde_json::to_value(manifest)?),
         v1_side: V1Side::Projected,
         ancestor: Ancestor::None,
+        queried: NAME,
     };
     let (database, pool) = project(&fixture, fixture.target(), Execution::FromZero).await?;
     let resolver = resolver_current(&pool, address).await?;
@@ -796,9 +922,14 @@ async fn seed(pool: &PgPool, fixture: &Fixture) -> Result<()> {
             .bind(logical).bind(name).bind(dns).bind(node)
             .bind(labelhashes).bind(CHAIN).bind(block_hash(base)).bind(base).execute(pool).await?;
     }
+    let (queried_node, queried_logical_name_id) = if fixture.queried == NAME {
+        (node.clone(), logical_name_id.clone())
+    } else {
+        (parent_node.clone(), parent_logical_name_id.clone())
+    };
     for (resource, binding, arm, logical) in [
         (V1_RESOURCE, V1_BINDING, "ens_v1", &logical_name_id),
-        (V2_RESOURCE, V2_BINDING, "ens_v2", &logical_name_id),
+        (V2_RESOURCE, V2_BINDING, "ens_v2", &queried_logical_name_id),
         (
             PARENT_V1_RESOURCE,
             PARENT_V1_BINDING,
@@ -815,7 +946,7 @@ async fn seed(pool: &PgPool, fixture: &Fixture) -> Result<()> {
 
     let mut events = vec![Event {
         identity: "v2-pointer",
-        logical_name_id: Some(logical_name_id.clone()),
+        logical_name_id: Some(queried_logical_name_id.clone()),
         resource_id: Some(V2_RESOURCE),
         kind: "ResolverChanged",
         source_family: "ens_v2_root_l1",
@@ -823,9 +954,39 @@ async fn seed(pool: &PgPool, fixture: &Fixture) -> Result<()> {
         block: base,
         log_index: 0,
         emitter: V1_REGISTRY,
-        after_state: json!({"node": node, "resolver": fixture.mirror}),
+        after_state: json!({"node": queried_node, "resolver": fixture.mirror}),
     }];
-    if fixture.v1_side != V1Side::Absent {
+    if let V1Side::NodeOnly {
+        resolver,
+        pointer_block_offset,
+    } = fixture.v1_side
+    {
+        events.push(Event {
+            identity: "v1-node-pointer",
+            logical_name_id: None,
+            resource_id: None,
+            kind: "ResolverChanged",
+            source_family: "ens_v1_registry_l1",
+            manifest_id: None,
+            block: base + pointer_block_offset,
+            log_index: 5,
+            emitter: V1_REGISTRY,
+            after_state: json!({"node": queried_node, "resolver": resolver}),
+        });
+        if resolver == V1_RESOLVER {
+            events.push(record(
+                "v1-node-text",
+                base + 1,
+                6,
+                &queried_node,
+                V1_RESOLVER,
+                v1_manifest,
+                json!({"record_key": "text:url", "record_family": "text", "selector_key": "url",
+                       "source_event": "TextChanged", "value": "https://tld.example"}),
+            ));
+        }
+    }
+    if matches!(fixture.v1_side, V1Side::Projected | V1Side::Cleared) {
         events.push(Event {
             identity: "v1-pointer",
             logical_name_id: Some(logical_name_id.clone()),

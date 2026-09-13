@@ -68,17 +68,28 @@ pub(super) async fn stage_pointers(
         CREATE TEMP TABLE project_mirror_selection ON COMMIT DROP AS
         WITH registry_state AS (
             -- The ENSv1 registry's current resolver per node: the latest canonical registry-side
-            -- pointer, clears included, so a cleared exact node falls through to its ancestors.
-            SELECT DISTINCT ON (latest.namehash)
-                   latest.*, surface.namespace, surface.raw_name, surface.raw_labels,
-                   event.block_number AS v1_block_number, event.block_hash AS v1_block_hash
-            FROM project_record_pointer_latest latest
-            JOIN project_events event
-              ON event.normalized_event_id = latest.pointer_event_id
+            -- ResolverChanged for the node, clears included, so a cleared exact node falls through
+            -- to its ancestors. The registry sets resolvers for nodes without any ENSv1 owner or
+            -- surface link, so this is keyed by node, not by the event's resource or logical name
+            -- (a pre-surface pointer keeps both null; docs/storage.md).
+            SELECT DISTINCT ON (lower(event.after_state ->> 'node'))
+                   lower(event.after_state ->> 'node') AS namehash,
+                   event.resource_id,
+                   event.namespace AS pointer_namespace,
+                   event.source_family AS pointer_source_family,
+                   lower(event.after_state ->> 'resolver') AS resolver_address,
+                   event.manifest_version AS pointer_manifest_version,
+                   event.normalized_event_id AS pointer_event_id,
+                   event.block_number AS v1_block_number, event.block_hash AS v1_block_hash,
+                   surface.namespace, surface.raw_name, surface.raw_labels
+            FROM project_events event
             JOIN project_surfaces surface
-              ON surface.logical_name_id = latest.logical_name_id
-            WHERE latest.pointer_source_family IN ({V1_POINTER_FAMILIES})
-            ORDER BY latest.namehash,
+              ON lower(surface.namehash) = lower(event.after_state ->> 'node')
+             AND surface.namespace = event.namespace
+            WHERE event.event_kind = 'ResolverChanged'
+              AND event.source_family IN ({V1_POINTER_FAMILIES})
+              AND event.after_state ->> 'node' IS NOT NULL
+            ORDER BY lower(event.after_state ->> 'node'),
                      event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,

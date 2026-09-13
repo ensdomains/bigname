@@ -775,8 +775,11 @@ own storage for the queried node, while an `IExtendedResolver` receives
 
 Project reproduces this from the staged events at the target. The registry's
 resolver per node is the latest canonical `ens_v1_registry_l1`,
-`ens_v1_registrar_l1`, or `ens_v1_wrapper_l1` `ResolverChanged` for that
-namehash, clears included; the consulted nodes are the queried name's surface
+`ens_v1_registrar_l1`, or `ens_v1_wrapper_l1` `ResolverChanged` whose
+`after_state.node` is that namehash, clears included and whether or not the
+event is linked to a logical name or resource (the registry sets resolvers for
+nodes nobody owns in ENSv1, whose [pre-surface](glossary.md#pre-surface) pointer
+keeps both null); the consulted nodes are the queried name's surface
 and each proper ancestor surface below the root, matched by label suffix in the
 same namespace; the nearest consulted node with a nonzero resolver is selected.
 When the selected resolver is a supported, same-namespace `ens_v1_resolver_l1`
@@ -795,8 +798,9 @@ empty, never the ancestor's own records. `provenance.resolver_address` and
 `provenance.mirror = {resolver_address, mirrored_source_family:
 "ens_v1_resolver_l1", mirrored_registry_source_family: "ens_v1_registry_l1",
 mirrored_registry_address, queried_node, mirrored_node, mirrored_name,
-ancestor_depth, forwarding, mirrored_resolver_address, mirrored_resource_id,
-mirrored_pointer_event_id, mirrored_pointer_source_family}` records the walk:
+ancestor_depth, forwarding, mirrored_resolver_address, mirrored_resource_id?,
+mirrored_pointer_event_id, mirrored_pointer_source_family}` records the walk
+(`mirrored_resource_id` only when the selected pointer event carries one):
 `mirrored_node` and `mirrored_name` are the selected registry node and its raw
 name, `ancestor_depth` is `0` for the exact node and otherwise the number of
 leading labels the walk stripped, and `forwarding` is `direct_call` or
@@ -814,11 +818,12 @@ answer for a descendant is resolver-defined), alongside the selected node. A
 mirror whose own classification is unsupported or belongs to another namespace
 keeps the ordinary resolver reason or `resolver_classification_missing`. The
 derivation is a pure function of the staged events: incremental scope pairs a
-mirror-pointer resource with the ENSv1 pointer resources of its name and of every
-ancestor, pairs an ENSv1 pointer resource with the mirror-pointer resources of
-its name and of every descendant, stages the queried node's writes on every
-declared ENSv1 resolver, and re-scopes a mirrored row when the resolver it was
-derived from writes. An ancestor's resolver change or clear and a write for the
+mirror-pointer resource with the names (and any pointer resources) of every node
+its walk consults, pairs a scoped consulted name, pointer resource, or changed
+node-keyed ENSv1 pointer with the mirror-pointer resources of every name whose
+walk consults that node, stages a scoped name's node-keyed ENSv1 pointers and the
+queried node's writes on every declared ENSv1 resolver, and re-scopes a mirrored
+row when the resolver it was derived from writes. An ancestor's resolver change or clear and a write for the
 queried node therefore rebuild the mirrored row in the same publication, and
 full, incremental, and redo builds converge. `address_records_current` and
 name-side record reads consume mirrored rows like any other supported inventory.
