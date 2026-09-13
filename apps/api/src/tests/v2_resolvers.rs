@@ -1686,3 +1686,49 @@ async fn v2_resolver_roles_carry_grant_event_provenance() -> Result<()> {
     database.cleanup().await?;
     Ok(())
 }
+
+#[test]
+fn v2_resolver_overview_reports_a_declared_ensv1_mirror() {
+    let include = crate::v2::resolver_overview_include(&["nodes".to_owned()])
+        .expect("valid include must parse");
+    let plain = crate::v2::build_resolver_overview(
+        resolver_current_row("ethereum-sepolia", V2_RESOLVER_ADDRESS),
+        11_155_111,
+        include,
+        empty_bound_names(),
+    )
+    .expect("resolver overview must build");
+    assert!(
+        serde_json::to_value(plain)
+            .expect("overview must serialize")
+            .get("mirror")
+            .is_none()
+    );
+
+    let mut row = resolver_current_row("ethereum-sepolia", V2_RESOLVER_ADDRESS);
+    row.declared_summary["classification"] = json!({
+        "source_family": "ens_v2_resolver_l1",
+        "role": "ensv1_mirror_resolver",
+        "basis": "manifest_declared_address",
+        "read_features": [],
+        "mirror": {
+            "mirrored_source_family": "ens_v1_resolver_l1",
+            "mirrored_registry_source_family": "ens_v1_registry_l1",
+            "mirrored_registry_address": "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e"
+        }
+    });
+    let overview =
+        crate::v2::build_resolver_overview(row, 11_155_111, include, empty_bound_names())
+            .expect("resolver overview must build");
+    let value = serde_json::to_value(overview).expect("overview must serialize");
+    assert_eq!(
+        value["mirror"],
+        json!({
+            "kind": "ensv1_registry",
+            "registry": {
+                "chain_id": 11_155_111,
+                "address": "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e"
+            }
+        })
+    );
+}

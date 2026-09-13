@@ -43,8 +43,8 @@ review_justification = "Staging merge union of four parallel branches pushed the
 
 [[files]]
 path = "apps/api/src/v2/resolvers.rs"
-loc = 721
-justification = "Resolver overview gained grant_event provenance for include=roles next to the existing overview assembly; move role provenance into overview_items on the next substantive touch."
+loc = 610
+justification = "Resolver overview route: snapshot selection, bound-name paging, support meta, and the overview assembly (including the declared ENSv1 mirror field); grant_event provenance now lives in resolvers/role_grants.rs."
 
 [[files]]
 path = "apps/api/src/v2/subnames.rs"
@@ -95,6 +95,11 @@ justification = "The selected numeric registrar import retains current authority
 path = "crates/manifests/src/schema_v2_persistence.rs"
 loc = 607
 justification = "Manifest state, address-epoch persistence, and derived-phase invalidation remain in one transaction boundary; PR #583 grew the file to 598 lines on main and this branch's nine-line no-effect notice crosses the threshold when rebased. Split on the next substantive touch."
+
+[[files]]
+path = "crates/project/src/builders/record_inventory.rs"
+loc = 849
+justification = "The record inventory build stays one SQL derivation (pointer eligibility, node-keyed attribution, value selection, cleared-pointer history rows); the mirror-resolver pass lives in record_inventory/mirror.rs and this file only swaps mirror pointers for the substituted ENSv1 pointers and calls it."
 
 [[files]]
 path = "crates/project/src/builders/permissions.rs"

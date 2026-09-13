@@ -15,9 +15,12 @@ use crate::model::RawSourceManifest;
 use crate::{LoadedManifest, ManifestAbi, ManifestLoadStatus, ManifestLoadSummary};
 use crate::{ManifestRepository, SourceManifest, event_allows_empty_emitter_roles};
 
+#[path = "repository/mirror.rs"]
+mod mirror;
 #[path = "repository/read_features.rs"]
 mod read_features;
 
+use mirror::validate_mirror_declarations;
 use read_features::validate_read_features;
 
 pub fn load_repository(root: impl AsRef<Path>) -> Result<ManifestRepository> {
@@ -197,6 +200,7 @@ fn validate_repository_manifests(manifests: &[LoadedManifest]) -> Result<()> {
     }
 
     validate_migration_correlations(manifests)?;
+    validate_mirror_declarations(manifests)?;
     validate_block_derived_preimage_attribution(manifests)?;
 
     Ok(())

@@ -1,3 +1,5 @@
+mod mirror;
+
 use sqlx::{Postgres, Transaction};
 
 use crate::{Marker, ProjectError, Result};
@@ -8,13 +10,24 @@ pub(super) async fn build(
     target: &Marker,
 ) -> Result<()> {
     build_history_attribution(transaction, chain_id).await?;
+    mirror::stage_pointers(transaction, chain_id).await?;
     // Inventory ranks each resource's ResolverChanged events only after joining staged readable
     // surfaces, so an earlier event may win when a later event's name has no such surface. Once
     // selected, only that resolver contributes the boundary, selectors, and entries; a selected
     // clear suppresses the inventory row.
     sqlx::query(
         r#"
-        WITH pointers AS (SELECT * FROM project_record_pointers),
+        WITH pointers AS (
+            -- Mirror-pointer resources are re-pointed at the ENSv1 resolver the mirror would call
+            -- for the queried node (record_inventory/mirror.rs); same column order.
+            SELECT * FROM project_record_pointers pointer
+            WHERE NOT EXISTS (
+                SELECT 1 FROM project_mirror_pointers mirror
+                WHERE mirror.resource_id = pointer.resource_id
+            )
+            UNION ALL
+            SELECT * FROM project_mirror_substituted_pointers
+        ),
         pointer_eligibility AS (
             SELECT pointer.resource_id,
                    COALESCE(
@@ -570,6 +583,7 @@ pub(super) async fn build(
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to build record_inventory_current", error))?;
+    mirror::build(transaction, chain_id, target).await?;
     build_cleared_pointer_rows(transaction, chain_id, target).await?;
     Ok(())
 }

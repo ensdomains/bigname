@@ -14,6 +14,11 @@ pub const INDEXED_INVENTORY_NOT_AUTHORITATIVE_REASON: &str =
 #[serde(rename_all = "snake_case")]
 pub enum ResolverReadFeature {
     Ensip19DefaultAddress,
+    /// The resolver implements `IExtendedResolver`, so callers forward `resolve(name, data)` and
+    /// its answer for a name is resolver-defined rather than a node-keyed storage read.
+    /// (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L66-L70 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L108-L116 @ ens_v1@91c966f)
+    Ensip10ExtendedResolver,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

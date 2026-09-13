@@ -1756,7 +1756,168 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
             "0x7e4b2d59938930168024201752ee5503df402303".to_owned(),
         )]
     );
-    assert!(v2.contracts.is_empty());
+    assert_eq!(
+        v2.contracts
+            .iter()
+            .map(|contract| {
+                (
+                    contract.role.as_str(),
+                    normalize_address(&contract.address),
+                    contract.start_block,
+                )
+            })
+            .collect::<Vec<_>>(),
+        [(
+            ENSV1_MIRROR_RESOLVER_ROLE,
+            "0x5339161a7896ca9841ecc034a49edca40f7b9491".to_owned(),
+            Some(11_163_316),
+        )]
+    );
+    assert_eq!(
+        normalize_address(&v2.correlation_addresses[ENSV1_MIRROR_REGISTRY_CORRELATION_KEY]),
+        "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e"
+    );
+    Ok(())
+}
+
+fn mirror_manifest_pair() -> (String, String) {
+    let registry = manifest_contents()
+        .replacen(
+            "source_family = \"ens_v2_registry_l1\"",
+            "source_family = \"ens_v1_registry_l1\"",
+            1,
+        )
+        .replacen("proxy_kind = \"erc1967\"", "proxy_kind = \"none\"", 1)
+        .replacen(
+            "implementation = \"0x00000000000000000000000000000000000000DD\"\n",
+            "",
+            1,
+        );
+    let mirror = r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v2_resolver_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v2"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+discovery_rules = []
+
+[correlation_addresses]
+ens_v1_registry = "0x00000000000000000000000000000000000000AA"
+
+[capability_flags]
+
+[[contracts]]
+role = "ensv1_mirror_resolver"
+address = "0x0000000000000000000000000000000000000010"
+proxy_kind = "none"
+start_block = 34567
+"#
+    .to_owned();
+    (registry, mirror)
+}
+
+#[test]
+fn repository_loader_accepts_mirror_declaration_matching_the_ensv1_registry() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let (registry, mirror) = mirror_manifest_pair();
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &registry)?;
+    test_dir.write_manifest("ens", "ens_v2_resolver_l1", "v1", &mirror)?;
+    let repository = load_repository(&test_dir.path).context("matching mirror pair must load")?;
+    let declared = repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "ens_v2_resolver_l1")
+        .map(|loaded| &loaded.manifest.contracts[0])
+        .expect("mirror manifest loaded");
+    assert_eq!(declared.role, ENSV1_MIRROR_RESOLVER_ROLE);
+    Ok(())
+}
+
+#[test]
+fn repository_loader_rejects_mirror_declaration_disagreeing_with_the_ensv1_registry() -> Result<()>
+{
+    let test_dir = TestDir::new()?;
+    let (registry, mirror) = mirror_manifest_pair();
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &registry)?;
+    let mismatch = mirror.replacen(
+        "ens_v1_registry = \"0x00000000000000000000000000000000000000AA\"",
+        "ens_v1_registry = \"0x00000000000000000000000000000000000000BB\"",
+        1,
+    );
+    test_dir.write_manifest("ens", "ens_v2_resolver_l1", "v1", &mismatch)?;
+    let error = load_repository(&test_dir.path)
+        .expect_err("a mirror naming another ENSv1 registry must fail manifest load");
+    let message = error.to_string();
+    assert!(
+        message.contains(ENSV1_MIRROR_REGISTRY_CORRELATION_KEY)
+            && message.contains("ens_v1_registry_l1")
+            && message.contains("0x00000000000000000000000000000000000000bb")
+            && message.contains("0x00000000000000000000000000000000000000aa"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn repository_loader_requires_mirror_declarations_to_be_direct_and_correlated() -> Result<()> {
+    let (_, mirror) = mirror_manifest_pair();
+    for (label, broken, expected) in [
+        (
+            "missing correlation",
+            mirror.replacen(
+                "[correlation_addresses]\nens_v1_registry = \"0x00000000000000000000000000000000000000AA\"\n",
+                "",
+                1,
+            ),
+            "without correlation address ens_v1_registry",
+        ),
+        (
+            "proxy declaration",
+            mirror.replacen(
+                "proxy_kind = \"none\"",
+                "proxy_kind = \"erc1967\"\nimplementation = \"0x00000000000000000000000000000000000000DD\"",
+                1,
+            ),
+            "proxy_kind = \"none\" and no read_features",
+        ),
+        (
+            "read features",
+            mirror.replacen(
+                "proxy_kind = \"none\"",
+                "proxy_kind = \"none\"\nread_features = [\"ensip19_default_address\"]",
+                1,
+            ),
+            "proxy_kind = \"none\" and no read_features",
+        ),
+        (
+            "foreign family",
+            mirror.replacen(
+                "source_family = \"ens_v2_resolver_l1\"",
+                "source_family = \"ens_v1_resolver_l1\"",
+                1,
+            ),
+            "outside ens_v2_resolver_l1",
+        ),
+    ] {
+        let test_dir = TestDir::new()?;
+        let family = if label == "foreign family" {
+            "ens_v1_resolver_l1"
+        } else {
+            "ens_v2_resolver_l1"
+        };
+        test_dir.write_manifest("ens", family, "v1", &broken)?;
+        let Err(error) = load_repository(&test_dir.path) else {
+            panic!("{label}: mirror declaration must fail manifest load");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains(expected),
+            "{label}: unexpected error: {error:#}"
+        );
+    }
     Ok(())
 }
 

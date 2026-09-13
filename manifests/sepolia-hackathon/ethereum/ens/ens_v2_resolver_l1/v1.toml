@@ -14,7 +14,27 @@ resolver_implementations = [ { role = "permissioned_resolver", address = "0xa9d3
 roots = []
 discovery_rules = []
 
+# The ENSv1 mirror resolver declared below reads this ENSv1 registry; the loader requires it to
+# equal the active ens_v1_registry_l1 `registry` address on this chain.
+[correlation_addresses]
+ens_v1_registry = "0x82080Cc8ca78597BdE586A003D0a080c79a1814B"
+
 [capability_flags]
+
+# ENSv1 mirror resolver: an ENSv2-side resolver instance that stores no records and emits no
+# record events; it answers by finding the same name's resolver in the ENSv1 registry and
+# forwarding the call. Project serves names bound to it from the ENSv1 record index; see
+# docs/manifests.md section "ENSv1 mirror resolver declarations". Mirror behavior model:
+# (upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L38-L41 @ ens_v2@a971bd64)
+# (upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L74 @ ens_v2@a971bd64)
+# Creation block from the staging archive node (creation transaction
+# 0x9649d58d778eb472fcf0a61fd40f610999332cd95dba1b26e1f91822d4ad1de7); provenance and the
+# hackathon-variant qualification: docs/manifests.md section "Sepolia hackathon deployment evidence".
+[[contracts]]
+role = "ensv1_mirror_resolver"
+address = "0x10107255fDa20aB6c37a0Efca1e9465F25066a00"
+proxy_kind = "none"
+start_block = 11626641
 
 [[contracts]]
 role = "public_resolver_v2"

@@ -132,7 +132,7 @@ async fn create_declared_resolver_addresses(
          )) WITH ORDINALITY declarations(declaration, declaration_ordinality)
          WHERE (manifest.source_family = 'ens_v1_resolver_l1'
                 OR (manifest.source_family = 'ens_v2_resolver_l1'
-                    AND declaration ->> 'role' = 'public_resolver_v2'
+                    AND declaration ->> 'role' IN ('public_resolver_v2', 'ensv1_mirror_resolver')
                     AND declaration ->> 'proxy_kind' = 'none'))
            AND declaration ->> 'address' IS NOT NULL
            AND btrim(declaration ->> 'address') <> ''

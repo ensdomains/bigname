@@ -113,8 +113,12 @@ pub(super) async fn include_changed_record_consumers(
              FROM project_changed_events event
              JOIN record_inventory_current inventory
                ON inventory.provenance ->> 'chain_id' = $1
-              AND lower(inventory.provenance ->> 'resolver_address') =
-                  lower(event.raw_fact_ref ->> 'emitting_address')
+              AND lower(event.raw_fact_ref ->> 'emitting_address') IN (
+                  -- A mirrored row serves the writes of the ENSv1 resolver it was derived
+                  -- from (builders/record_inventory/mirror.rs), not of the mirror itself.
+                  lower(inventory.provenance ->> 'resolver_address'),
+                  lower(inventory.provenance #>> '{mirror,mirrored_resolver_address}')
+              )
              JOIN name_surfaces surface
                ON surface.logical_name_id =
                   inventory.provenance ->> 'logical_name_id'
@@ -190,6 +194,7 @@ pub(super) async fn close(
     loop {
         let before = scope_size(transaction).await?;
         include_pointer_names(transaction, chain_id, target.number).await?;
+        include_mirror_pairs(transaction, chain_id, target.number).await?;
         super::close_binding_scope(transaction, chain_id, target).await?;
         if scope_size(transaction).await? == before {
             return Ok(());
@@ -242,5 +247,100 @@ async fn include_pointer_names(
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to scope inventory pointer names", error))?;
+    Ok(())
+}
+
+async fn include_mirror_pairs(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target_block: i64,
+) -> Result<()> {
+    // A resource whose readable pointer targets a declared ENSv1 mirror resolver is served through
+    // the ENSv1 resolver the mirror finds for the name: the exact node's, else the nearest
+    // ancestor's (builders/record_inventory/mirror.rs). The sides rebuild together: scope the ENSv1
+    // pointer resources of the name and of every ancestor of a scoped mirror-pointer name, and the
+    // mirror-pointer resources of the name and of every descendant of a scoped ENSv1 pointer name.
+    sqlx::query(
+        "WITH readable_pointers AS (
+             SELECT event.resource_id, event.logical_name_id, event.source_family,
+                    lower(event.after_state ->> 'resolver') AS resolver_address
+             FROM normalized_events event
+             JOIN chain_lineage lineage
+               ON lineage.chain_id = event.chain_id
+              AND lineage.block_hash = event.block_hash
+              AND lineage.block_number = event.block_number
+             WHERE event.chain_id = $1
+               AND event.block_number <= $2
+               AND event.event_kind = 'ResolverChanged'
+               AND event.resource_id IS NOT NULL
+               AND event.logical_name_id IS NOT NULL
+               AND event.consumer_visibility = 'activated'
+               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+         ),
+         mirror_pointers AS (
+             SELECT pointer.*
+             FROM readable_pointers pointer
+             JOIN project_declared_resolver_addresses declaration
+               ON declaration.resolver_address = pointer.resolver_address
+              AND declaration.classification_role = 'ensv1_mirror_resolver'
+             WHERE pointer.source_family IN ('ens_v2_registry_l1', 'ens_v2_root_l1')
+         ),
+         v1_pointers AS (
+             SELECT * FROM readable_pointers
+             WHERE source_family IN (
+                 'ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1'
+             )
+         ),
+         surfaces AS (
+             SELECT DISTINCT surface.logical_name_id, surface.namespace, surface.raw_labels
+             FROM name_surfaces surface
+             JOIN (
+                 SELECT logical_name_id FROM mirror_pointers
+                 UNION
+                 SELECT logical_name_id FROM v1_pointers
+             ) named USING (logical_name_id)
+             JOIN chain_lineage lineage
+               ON lineage.chain_id = surface.chain_id
+              AND lineage.block_hash = surface.block_hash
+              AND lineage.block_number = surface.block_number
+             WHERE surface.chain_id = $1
+               AND surface.block_number <= $2
+               AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+         ),
+         -- Every registry node the mirror's resolver walk can consult for a mirrored name: the
+         -- name itself and each proper ancestor below the root.
+         walk AS (
+             SELECT mirror.resource_id AS mirror_resource_id,
+                    queried.namespace,
+                    queried.raw_labels[position : cardinality(queried.raw_labels)] AS suffix
+             FROM mirror_pointers mirror
+             JOIN surfaces queried ON queried.logical_name_id = mirror.logical_name_id
+             CROSS JOIN generate_series(1, cardinality(queried.raw_labels)) AS position
+         ),
+         pairs AS (
+             SELECT walk.mirror_resource_id, v1.resource_id AS v1_resource_id
+             FROM walk
+             JOIN surfaces consulted
+               ON consulted.namespace = walk.namespace
+              AND consulted.raw_labels = walk.suffix
+             JOIN v1_pointers v1 ON v1.logical_name_id = consulted.logical_name_id
+         )
+         INSERT INTO project_scope_resources
+         SELECT pair.v1_resource_id
+         FROM project_scope_resources scope
+         JOIN pairs pair ON pair.mirror_resource_id = scope.resource_id
+         UNION
+         SELECT pair.mirror_resource_id
+         FROM project_scope_resources scope
+         JOIN pairs pair ON pair.v1_resource_id = scope.resource_id
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(chain_id)
+    .bind(target_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to scope mirror resolver pairs", error))?;
     Ok(())
 }

@@ -1,16 +1,15 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use axum::{
     Json,
     extract::{Path, State},
 };
 use bigname_storage::{
-    ChainPositions, HistoryEvent as StorageHistoryEvent, NameCurrentListCursor,
-    NameCurrentListCursorValue, NameCurrentListRow, ResolverCurrentRow, SelectedSnapshot,
-    SnapshotPositionRequirement, SnapshotSelectionScope,
+    ChainPositions, NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListRow,
+    ResolverCurrentRow, SelectedSnapshot, SnapshotPositionRequirement, SnapshotSelectionScope,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracing::error;
 
 use super::support::parse_evm_address;
@@ -26,17 +25,17 @@ pub(crate) use bound_names_cursor::{
 mod overview_items;
 use overview_items::{projected_section_items, summary_is_supported};
 
-use super::{
-    Envelope, Finality, HistoryEventType, Meta, NameRecord, PRODUCT_PIPELINE_TERMS, Page,
-    QueryParamAllowlist, SnapshotReadResource, StrictQueryParams, V2Error, V2Result,
-    api_error_to_v2, build_name_record, contains_boundary_vocabulary, decode, encode,
-    encode_at_token, format_timestamp, history_event_type, name_record, numeric_to_slug,
-    resolve_v2_snapshot_for, snapshot_meta, snapshot_slot_for_slug,
-    vocab::{Completeness, Status},
-};
+#[path = "resolvers/role_grants.rs"]
+mod role_grants;
+use role_grants::{attach_role_grant_events, load_role_grant_events};
 
-/// Key of the provenance object attached to `include=roles` items.
-const ROLE_GRANT_EVENT_KEY: &str = "grant_event";
+use super::{
+    Envelope, Finality, Meta, NameRecord, PRODUCT_PIPELINE_TERMS, Page, QueryParamAllowlist,
+    SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_name_record,
+    contains_boundary_vocabulary, decode, encode, encode_at_token, name_record, numeric_to_slug,
+    resolve_v2_snapshot_for, snapshot_meta, snapshot_slot_for_slug,
+    vocab::{Completeness, Resolver, Status},
+};
 
 const BOUND_NAMES_SORT_TOKEN: &str = "name_asc";
 const RESOLVER_SECTIONS: [(&str, &str, &str); 4] = [
@@ -67,7 +66,16 @@ pub(crate) struct ResolverOverview {
     pub(crate) roles: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) events: Option<Value>,
+    /// Present only for a declared ENSv1 mirror resolver: the ENSv1 registry it reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mirror: Option<ResolverMirror>,
     pub(crate) bound_names: BoundNames,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct ResolverMirror {
+    pub(crate) kind: String,
+    pub(crate) registry: Resolver,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -244,139 +252,6 @@ pub(crate) async fn get_resolver(
     }))
 }
 
-/// Resolve the granting event for each declared role holder: the earliest
-/// permission-type event among the `permissions_current` provenance rows the
-/// holder has in this resolver's scope whose subject is the holder. Holders
-/// without a resolvable event are left untouched.
-async fn load_role_grant_events(
-    pool: &sqlx::PgPool,
-    row: &ResolverCurrentRow,
-    chain_id_slug: &str,
-    resolver_address: &str,
-) -> V2Result<BTreeMap<String, Value>> {
-    let subjects = row
-        .declared_summary
-        .get("role_holders")
-        .and_then(|summary| summary.get("items"))
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("subject").and_then(Value::as_str))
-                .map(str::to_ascii_lowercase)
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    if subjects.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let subjects = subjects.into_iter().collect::<Vec<_>>();
-
-    let permission_rows = bigname_storage::load_permissions_current_for_resolver_scope_subjects(
-        pool,
-        chain_id_slug,
-        resolver_address,
-        &subjects,
-    )
-    .await
-    .map_err(|error| {
-        error!(error = ?error, "failed to load resolver role permission rows");
-        V2Error::internal_error("failed to load resolver role provenance")
-    })?;
-
-    let mut event_ids_by_subject: BTreeMap<String, BTreeSet<i64>> = BTreeMap::new();
-    for permission_row in &permission_rows {
-        let ids = permission_row
-            .provenance
-            .get("normalized_event_ids")
-            .and_then(Value::as_array)
-            .map(|ids| ids.iter().filter_map(Value::as_i64).collect::<Vec<_>>())
-            .unwrap_or_default();
-        event_ids_by_subject
-            .entry(permission_row.subject.to_ascii_lowercase())
-            .or_default()
-            .extend(ids);
-    }
-    let all_ids = event_ids_by_subject
-        .values()
-        .flatten()
-        .copied()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    if all_ids.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-
-    let events = bigname_storage::load_history_events_by_ids(pool, &all_ids)
-        .await
-        .map_err(|error| {
-            error!(error = ?error, "failed to load resolver role grant events");
-            V2Error::internal_error("failed to load resolver role provenance")
-        })?;
-
-    let mut grant_events = BTreeMap::new();
-    for (subject, ids) in &event_ids_by_subject {
-        let grant = events
-            .iter()
-            .filter(|event| ids.contains(&event.normalized_event_id))
-            .filter(|event| {
-                history_event_type(&event.event_kind) == Some(HistoryEventType::Permission)
-            })
-            .filter(|event| {
-                event
-                    .after_state
-                    .get("subject")
-                    .and_then(Value::as_str)
-                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(subject))
-            })
-            .filter(|event| event.block_number.is_some())
-            .min_by_key(|event| {
-                (
-                    event.block_number,
-                    event.log_index,
-                    event.normalized_event_id,
-                )
-            });
-        if let Some(event) = grant {
-            grant_events.insert(subject.clone(), role_grant_event_value(event));
-        }
-    }
-    Ok(grant_events)
-}
-
-fn role_grant_event_value(event: &StorageHistoryEvent) -> Value {
-    let mut object = serde_json::Map::new();
-    object.insert("block_number".to_owned(), json!(event.block_number));
-    if let Some(timestamp) = event.block_timestamp {
-        object.insert("timestamp".to_owned(), json!(format_timestamp(timestamp)));
-    }
-    if let Some(transaction_hash) = event.transaction_hash.as_ref() {
-        object.insert("transaction_hash".to_owned(), json!(transaction_hash));
-    }
-    if let Some(log_index) = event.log_index {
-        object.insert("log_index".to_owned(), json!(log_index));
-    }
-    Value::Object(object)
-}
-
-fn attach_role_grant_events(roles: Option<&mut Value>, grant_events: &BTreeMap<String, Value>) {
-    let Some(items) = roles.and_then(Value::as_array_mut) else {
-        return;
-    };
-    for item in items {
-        let Some(object) = item.as_object_mut() else {
-            continue;
-        };
-        let Some(address) = object.get("address").and_then(Value::as_str) else {
-            continue;
-        };
-        if let Some(grant_event) = grant_events.get(&address.to_ascii_lowercase()) {
-            object.insert(ROLE_GRANT_EVENT_KEY.to_owned(), grant_event.clone());
-        }
-    }
-}
-
 async fn load_resolver_project_generations(
     pool: &sqlx::PgPool,
     selected: &SelectedSnapshot,
@@ -423,6 +298,7 @@ pub(crate) fn build_resolver_overview(
         }
     }
 
+    let mirror = resolver_mirror(&row.declared_summary, chain_id);
     Ok(ResolverOverview {
         chain_id,
         address: row.resolver_address,
@@ -431,7 +307,20 @@ pub(crate) fn build_resolver_overview(
         aliases,
         roles,
         events,
+        mirror,
         bound_names,
+    })
+}
+
+fn resolver_mirror(declared_summary: &Value, chain_id: u64) -> Option<ResolverMirror> {
+    let mirror = declared_summary.get("classification")?.get("mirror")?;
+    let address = mirror.get("mirrored_registry_address")?.as_str()?;
+    Some(ResolverMirror {
+        kind: "ensv1_registry".to_owned(),
+        registry: Resolver {
+            chain_id,
+            address: address.to_ascii_lowercase(),
+        },
     })
 }
 
