@@ -872,6 +872,120 @@ fn checked_in_hackathon_profile_declares_its_own_ens_execution_entrypoint() -> R
     Ok(())
 }
 
+/// The hackathon deployment's own ENSv1 ReverseRegistrar is declared under `ens_v1_reverse_l1`
+/// in the same shape as the Mainnet family: one direct `reverse_registrar` contract, one
+/// `ReverseClaimed` event mapped to `ReverseChanged`, no roots, discovery rules, or capability
+/// flags. It is what keys ENS/60 primary-name tuples for wallets that `setName` on this
+/// deployment. Its start is the contract's creation block, later than the registry it writes
+/// through (the default resolver is configured after construction), so the profile's intake
+/// floor is unchanged.
+#[test]
+fn checked_in_hackathon_profile_declares_the_reverse_registrar() -> Result<()> {
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia-hackathon"))?;
+    let reverse = repository
+        .manifests()
+        .iter()
+        .filter(|loaded| loaded.manifest.source_family == "ens_v1_reverse_l1")
+        .collect::<Vec<_>>();
+    assert_eq!(reverse.len(), 1, "one hackathon ens_v1_reverse_l1 manifest");
+    let manifest = &reverse[0].manifest;
+    assert_eq!(
+        reverse[0].relative_path,
+        std::path::Path::new("ethereum/ens/ens_v1_reverse_l1/v1.toml")
+    );
+    assert_eq!(manifest.namespace, "ens");
+    assert_eq!(manifest.chain, "ethereum-sepolia");
+    assert_eq!(manifest.deployment_epoch, "ens_v1_sepolia_hackathon");
+    assert_eq!(manifest.rollout_status, RolloutStatus::Active);
+    assert!(manifest.capability_flags.is_empty());
+    assert!(manifest.roots.is_empty());
+    assert!(manifest.discovery_rules.is_empty());
+    assert!(manifest.resolver_implementations.is_empty());
+    assert!(manifest.correlation_addresses.is_empty());
+
+    assert_eq!(manifest.contracts.len(), 1);
+    let registrar = &manifest.contracts[0];
+    assert_eq!(registrar.role, "reverse_registrar");
+    assert_eq!(
+        normalize_address(&registrar.address),
+        "0x060d5a54a8751eec63b756e32ef66f5eef418e60"
+    );
+    assert_eq!(registrar.proxy_kind, "none");
+    assert_eq!(registrar.implementation, None);
+    assert_eq!(registrar.start_block, Some(11_626_578));
+
+    let event_surface = |manifest: &SourceManifest| {
+        manifest
+            .abi
+            .events
+            .iter()
+            .map(|event| {
+                (
+                    event.name.clone(),
+                    event.fragment.clone(),
+                    event.emitter_roles.clone(),
+                    event.normalized_events.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        event_surface(manifest),
+        vec![(
+            "ReverseClaimed".to_owned(),
+            "event ReverseClaimed(address indexed addr, bytes32 indexed node)".to_owned(),
+            vec!["reverse_registrar".to_owned()],
+            vec!["ReverseChanged".to_owned()],
+        )]
+    );
+    let mainnet = load_repository(checked_in_manifest_root("manifests/mainnet"))?;
+    let mainnet_reverse = mainnet
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "ens_v1_reverse_l1")
+        .expect("mainnet ens_v1_reverse_l1 manifest");
+    assert_eq!(
+        event_surface(manifest),
+        event_surface(&mainnet_reverse.manifest),
+        "the hackathon reverse family declares the Mainnet event surface"
+    );
+    assert_eq!(
+        mainnet_reverse.manifest.contracts[0].role, registrar.role,
+        "the hackathon reverse family declares the Mainnet contract role"
+    );
+
+    // The registrar's constructor takes the hackathon registry, so the registry is created first;
+    // the default resolver is set after construction and may be created later. The profile's
+    // earliest declared start therefore stays the legacy registry's.
+    let start_of = |family: &str, role: &str| {
+        repository
+            .manifests()
+            .iter()
+            .filter(|loaded| loaded.manifest.source_family == family)
+            .flat_map(|loaded| loaded.manifest.contracts.iter())
+            .find(|contract| contract.role == role)
+            .and_then(|contract| contract.start_block)
+            .unwrap_or_else(|| panic!("hackathon {family} {role} start block"))
+    };
+    assert!(start_of("ens_v1_registry_l1", "registry") < 11_626_578);
+    let earliest_start = repository
+        .manifests()
+        .iter()
+        .flat_map(|loaded| {
+            let manifest = &loaded.manifest;
+            manifest.roots.iter().map(|root| root.start_block).chain(
+                manifest
+                    .contracts
+                    .iter()
+                    .map(|contract| contract.start_block),
+            )
+        })
+        .map(|start| start.expect("every hackathon declaration carries a start block"))
+        .min();
+    assert_eq!(earliest_start, Some(11_626_442));
+    Ok(())
+}
+
 #[test]
 fn checked_in_adapter_owned_approval_inventory_is_exact() -> Result<()> {
     let approval =

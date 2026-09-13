@@ -330,7 +330,7 @@ Capability ownership attaches to the declaring `source_family`. It is never impl
 
 The ENS primary-name route does not introduce a second manifest capability. `ens_execution` supplies the manifest selection for the request-scoped, hash-pinned ENS/60 missing-tuple lookup under the same owner manifest, without turning `verified_resolution = "shadow"` into a route-level primary-name support flag. Indexed exact-tuple claim state lives in `bigname_phase.primary_names_current`; provider lookup responses are not persisted as execution outcomes or traces.
 
-`ens_v1_reverse_l1` owns declared reverse-claim intake at the Mainnet `addr.reverse` Reverse Registrar `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l19] No dedicated `claimed_primary_name` flag is needed for that indexed claim-state contract.
+`ens_v1_reverse_l1` owns declared reverse-claim intake at the Mainnet `addr.reverse` Reverse Registrar `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l19] No dedicated `claimed_primary_name` flag is needed for that indexed claim-state contract. The separately evidenced `sepolia-hackathon` deployment profile declares the same family, role, and event surface at that deployment's own ReverseRegistrar `0x060D5a54a8751eEc63B756E32Ef66f5eEf418e60` ([§ Sepolia hackathon deployment evidence](#sepolia-hackathon-deployment-evidence)).
 
 `ens_v1_registry_l1` owns the current ENS registry at `0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E` with `start_block = 9380380`,[^subgraph-l15] plus `ENSRegistryOld` at `0x314159265dd8dbb310642f98f50c066173c1259b` with `start_block = 3327417` as old-registry [fallback-handoff](glossary.md#registry-fallback-handoff) input.[^subgraph-l39][^subgraph-l44] Old-registry logs do not union with current logs by latest block: a current-registry `NewOwner` or `Transfer` establishes the node's current-registry record; later old-registry `NewOwner`, `Transfer`, `NewTTL`, and non-root `NewResolver` updates for that node are suppressed.[^subgraph-ts-l134][^subgraph-ts-l230][^subgraph-ts-l238][^subgraph-ts-l246] Either ownership event creates the first current-registry record and ends a resolver pointer selected from the old registry because `ENSRegistryWithFallback.resolver` delegates only while that record does not exist. Resolver selections already made in the current registry survive later owner reassignments, including an old-registry `Transfer`. (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L54 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L172 @ ens_v1@91c966f) Root-resolver updates from the old registry are the one frozen exception.[^v1-ensregfb-l40]
 
@@ -1963,7 +1963,7 @@ upgrade observations remain distinct evidence requirements.
 
 The implementation, resolver-set and helper rows are provenance for the
 selected cohort; a row in this table is not itself a watch declaration. The
-nine indexing manifests declare only the roles used by the indexing path. ABI source
+ten indexing manifests declare only the roles used by the indexing path. ABI source
 citations constrain event layouts and behavior separately from this address
 provenance. Record-ID resolver semantics are specified above; direct
 PublicResolverV2 source support is integrated in this candidate, with combined
@@ -2011,9 +2011,10 @@ through this entrypoint on the hackathon deployment, with the primary-name
 reverse leg reading the active hackathon `ens_v1_registry_l1` registry.
 `GET /v1/namespaces/ens` reports both verified capabilities for
 `ethereum-sepolia` from these declarations plus the configured provider
-instead of `execution_entrypoint_not_declared`. This is the tenth manifest of
-the profile and declares no indexing role, root, discovery rule, or event; it
-changes the profile's fingerprint, so it ships by rebuilding the binary.
+instead of `execution_entrypoint_not_declared`. This manifest declares no
+indexing role, root, discovery rule, or event; like every manifest added to the
+profile it changes the profile's fingerprint, so it ships by rebuilding the
+binary.
 
 A further address, the `ensv1_mirror_resolver` declaration
 `0x10107255fda20ab6c37a0efca1e9465f25066a00`, was added on 2026-09-13 from the
@@ -2055,6 +2056,52 @@ embeds only that ENSv1 registry as an immutable and dispatches
 On staging it is the ENSv2 resolver pointer of the root TLD `reverse` and of
 the `bnmig-*` `.eth` registrations. Both mirror declarations share the family's
 `correlation_addresses.ens_v1_registry`; the loader validates each instance.
+
+The profile's `ens_v1_reverse_l1` manifest,
+`manifests/sepolia-hackathon/ethereum/ens/ens_v1_reverse_l1/v1.toml`, declares
+the hackathon deployment's own ENSv1 ReverseRegistrar
+`0x060d5a54a8751eec63b756e32ef66f5eef418e60` as its `reverse_registrar`, added on
+2026-09-14 from a Sepolia archive node rather than from the retained evidence
+packet above. Its creation transaction
+`0x506f2f6e792f6b9ce9f3d79dbd0a9e19ea0a27ed1de0147415e83daea1a24d9e` (block
+11626578) is a direct CREATE from the deployer
+`0x84d3a426d4e12e955d1df95db0b24fe26afe39d3` with the declared address as the
+receipt's `contractAddress`, and its single constructor argument is the
+hackathon ENSv1 registry `0x82080cc8ca78597bde586a003d0a080c79a1814b`, matching
+the pinned constructor `(ENS ensAddr)`. Fixed-block runtime reads confirm the
+role: it is `owner(namehash("addr.reverse"))` in that registry, `ens()` returns
+the registry, and `defaultResolver()` returns
+`0xaec512a71de820a57dc2aafc197a743d035b82df`, the profile's declared
+`public_resolver`. Its `setName` transactions emit `ReverseClaimed` (topic0
+`0x6ada868dd3058cf77a48a74489fd7963688e5464b2b0fa957ace976243270e92`) before
+the registry's `NewOwner`/`NewResolver` for `<addr>.addr.reverse` and the
+PublicResolver's `NameChanged`; the observed example is
+`0xf8b5249e78186013cb5080a15d2e5deb6e34d414f04accc6fd488f3ddd7ab9d6` (block
+11698738).
+(upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L23 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L28-L29 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83-L84 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L105-L113 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129-L130 @ ens_v1@91c966f)
+The declaration mirrors the Mainnet family exactly — role `reverse_registrar`,
+`ReverseClaimed(address indexed addr, bytes32 indexed node)` normalized to
+`ReverseChanged`, no roots, discovery rules, or capability flags — under
+`deployment_epoch = "ens_v1_sepolia_hackathon"` with `start_block = 11626578`,
+the creation block, following this profile's per-contract creation-block
+convention (the registrar predates the PublicResolver it later adopted as
+`defaultResolver`); the profile's earliest declared start remains 11626442. As on
+Mainnet, neither the registry nor the resolver manifest needs a root or
+discovery rule for the reverse tree: `addr.reverse` subnode writes are ordinary
+registry `NewOwner`/`NewResolver` intake. The `ReverseChanged` observation keys
+the wallet's ENS/60 tuple in `primary_names_current` and records the reverse
+node's resolver; the indexed claim value stays `not_found`, because the
+PublicResolver's `NameChanged` remains an unattributed name-family
+`RecordChanged` and current-head hydration admits only the Mainnet event-silent
+reverse resolver ([`projections.md` § Primary names](projections.md#primary-names),
+[`api-v2-routes.md`](api-v2-routes.md#public-record-field-completeness)); the
+claim value is served by the verified path. Whole-source identity for the
+deployed instance is not claimed. The canonical `sepolia` profile declares no
+reverse family; that gap is recorded as an open question, not closed here.
 
 One further identified address is intentionally not declared:
 `0x48d7edc9b7c683681336c0ea034e424c0c141d66`, the ENSv1 registry's resolver for
