@@ -796,6 +796,61 @@ async fn v2_lookup_marks_unsupported_phase_inventory_fields() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_lookup_detail_withholds_record_values_from_unsupported_inventory() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        "ens:unknown-resolver.eth",
+        "unknown-resolver.eth",
+        "unknown-resolver.eth",
+        "namehash:unknown-resolver.eth",
+        Uuid::from_u128(0x5a0207),
+        Uuid::from_u128(0x5a0208),
+        Uuid::from_u128(0x5a0209),
+        "0x0000000000000000000000000000000000000abc",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        38,
+    )
+    .await?;
+    // The seeded inventory retains a successful addr:60 entry; only its support flips, as for a
+    // name behind an ENSv2 resolver whose implementation is not an admitted profile.
+    let updated = sqlx::query(
+        r#"
+        UPDATE record_inventory_current inventory
+        SET support_status = 'unsupported',
+            unsupported_reason = 'resolver_upgrade_not_observed'
+        FROM name_current name
+        WHERE name.resource_id = inventory.resource_id
+          AND name.raw_name = 'unknown-resolver.eth'
+          AND inventory.entries @> '[{"record_key":"addr:60","status":"success"}]'::jsonb
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?
+    .rows_affected();
+    assert_eq!(updated, 1, "fixture must flip the row that carries the retained addr:60 value");
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"name": "unknown-resolver.eth"}]}),
+    )
+    .await?;
+    let record = &payload["data"][0]["record"];
+
+    assert_eq!(payload["data"][0]["status"], json!("ok"));
+    assert!(record.get("addresses").is_none(), "{record}");
+    assert!(record.get("primary_address").is_none(), "{record}");
+    assert!(record.get("text_records").is_none(), "{record}");
+    assert!(record.get("content_hash").is_none(), "{record}");
+    assert_eq!(
+        record["unsupported_fields"],
+        json!(["addresses", "content_hash", "primary_address", "text_records"])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_lookup_serves_unchanged_phase_projection_after_head_advance() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_identity_name(

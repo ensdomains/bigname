@@ -1,5 +1,5 @@
 use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow, SurfaceBindingKind};
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::types::time::OffsetDateTime;
 
 use super::*;
@@ -58,18 +58,50 @@ fn auto_rejects_derived_answer_from_nonauthoritative_inventory() {
 }
 
 #[test]
-fn auto_accepts_exact_success_from_nonauthoritative_inventory() {
+fn unsupported_inventory_refuses_exact_success_and_leaves_auto_unsatisfied() {
     let timestamp =
         OffsetDateTime::from_unix_timestamp(1_717_171_719).expect("test timestamp must be valid");
     let row = current_name_row(timestamp);
     let inventory = exact_success_inventory();
     let record = parse_resolution_record_key("addr:60").expect("test selector must parse");
 
-    let answer = indexed_satisfying_record_answer(&row, Some(&inventory), &record, false)
-        .expect("auto satisfaction must evaluate")
-        .expect("an exact indexed success does not depend on inventory exhaustiveness");
-    assert_eq!(answer.status, Status::Ok);
-    assert!(answer.meta.is_none());
+    let indexed = indexed_record_answer(Some(&inventory), &record)
+        .expect("explicit indexed evaluation must complete");
+    assert_eq!(indexed.status, Status::Unsupported);
+    assert_eq!(indexed.value, None);
+    assert_eq!(
+        indexed.unsupported_reason.as_deref(),
+        Some("resolver_upgrade_not_observed"),
+        "the row's own reason is the public reason"
+    );
+    assert!(
+        indexed_satisfying_record_answer(&row, Some(&inventory), &record, false)
+            .expect("auto satisfaction must evaluate")
+            .is_none(),
+        "a retained value on an unsupported row does not satisfy auto"
+    );
+}
+
+#[test]
+fn unsupported_inventory_reason_maps_through_the_projected_row_vocabulary() {
+    let record = parse_resolution_record_key("addr:60").expect("test selector must parse");
+    for (row_reason, public_reason) in [
+        // Pipeline wording cannot cross the serving boundary, and must not fail the request.
+        (
+            json!("coverage_incomplete"),
+            "unsupported_reason_unrecognized",
+        ),
+        // A row naming no reason reports the generic non-authoritative reason.
+        (Value::Null, "indexed_record_inventory_not_authoritative"),
+    ] {
+        let mut inventory = exact_success_inventory();
+        inventory.coverage = json!({"status":"unsupported","unsupported_reason": row_reason});
+
+        let indexed = indexed_record_answer(Some(&inventory), &record)
+            .expect("an unsupported inventory reason must not fail the request");
+        assert_eq!(indexed.status, Status::Unsupported, "{public_reason}");
+        assert_eq!(indexed.unsupported_reason.as_deref(), Some(public_reason));
+    }
 }
 
 #[test]
@@ -255,7 +287,7 @@ fn exact_success_inventory() -> RecordInventoryCurrentRow {
         provenance: json!({}),
         coverage: json!({
             "status":"unsupported",
-            "unsupported_reason":"coverage_incomplete"
+            "unsupported_reason":"resolver_upgrade_not_observed"
         }),
         chain_positions: json!({}),
         canonicality_summary: json!({}),

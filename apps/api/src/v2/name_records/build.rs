@@ -8,7 +8,9 @@ use serde_json::Value;
 use tracing::error;
 
 use crate::v2::name_record::row_has_current_registration;
-use crate::v2::support::{ResolutionRecordKey, build_lookup_resolution_verified_state};
+use crate::v2::support::{
+    ResolutionRecordKey, build_lookup_resolution_verified_state, serving_record_inventory,
+};
 
 use super::super::vocab::{
     MISSING_UNSUPPORTED_REASON, downgrades_unsupported_name, projected_row_product_reason,
@@ -112,11 +114,16 @@ pub(crate) fn build_indexed_name_records(
                 .as_ref()
                 .expect("requested indexed records must build an answer map"),
         ),
-        None => RecordValues {
-            addresses: record_addresses(record_inventory),
-            text_records: record_text_records(record_inventory),
-            content_hash: record_content_hash(record_inventory),
-        },
+        None => {
+            // Convenience maps read entries directly, so they apply the evaluator's coverage gate
+            // themselves: an unsupported row contributes no values.
+            let value_inventory = serving_record_inventory(record_inventory);
+            RecordValues {
+                addresses: record_addresses(value_inventory),
+                text_records: record_text_records(value_inventory),
+                content_hash: record_content_hash(value_inventory),
+            }
+        }
     };
 
     Ok(NameRecords {
@@ -313,14 +320,37 @@ fn indexed_record_answer(
         return unsupported_answer(INDEXED_INVENTORY_UNAVAILABLE_REASON);
     };
 
-    let mut answer = record_answer_from_indexed(evaluate_indexed_record(
+    let answer = evaluate_indexed_record(
         &record_inventory.entries,
         &record_inventory.provenance,
         &record_inventory.coverage,
         &record.record_key,
         &record.record_family,
         record.selector_key.as_deref(),
-    ))?;
+    );
+    if answer.status == IndexedRecordStatus::Unsupported
+        && serving_record_inventory(Some(record_inventory)).is_none()
+    {
+        // The row's own coverage refused the read, so the reason is a projected-row reason: it
+        // maps through the shared name-level vocabulary (unrecognized or pipeline-worded reasons
+        // become `unsupported_reason_unrecognized`) rather than the record-family map, which
+        // fails the request on pipeline wording.
+        return Ok(RecordAnswer {
+            status: Status::Unsupported,
+            value: None,
+            unsupported_reason: Some(projected_row_product_reason(
+                answer
+                    .unsupported_reason
+                    .as_deref()
+                    .unwrap_or(MISSING_UNSUPPORTED_REASON),
+                "rejected record inventory reason containing pipeline vocabulary",
+                "failed to map record inventory reason vocabulary",
+            )),
+            failure_reason: None,
+            meta: None,
+        });
+    }
+    let mut answer = record_answer_from_indexed(answer)?;
     if answer.status == Status::NotFound && answer.meta.is_none() {
         if let Some(gap) = inventory_item_for_record(&record_inventory.explicit_gaps, record) {
             answer.failure_reason = string_field(gap.get("gap_reason"))
@@ -499,14 +529,7 @@ fn supported_verified_record_keys(
 fn indexed_inventory_is_authoritative(
     record_inventory: Option<&RecordInventoryCurrentRow>,
 ) -> bool {
-    let Some(record_inventory) = record_inventory else {
-        return false;
-    };
-    string_field(record_inventory.coverage.get("unsupported_reason")).is_none()
-        && matches!(
-            string_field(record_inventory.coverage.get("status")).as_deref(),
-            Some("full" | "projected")
-        )
+    serving_record_inventory(record_inventory).is_some()
 }
 
 fn not_found_answer(failure_reason: Option<String>) -> V2Result<RecordAnswer> {

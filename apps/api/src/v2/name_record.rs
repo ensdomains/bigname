@@ -13,7 +13,7 @@ use super::support::{
     V2_RECORD_UNSUPPORTED_FIELD_NAMES, direct_json_field, load_name_current_for_selected_snapshot,
     map_internal_api_error, normalize_inferred_route_name, record_addresses_from_entries,
     record_content_hash_from_entries, record_text_records_from_entries, record_unsupported_fields,
-    snapshot_selection_api_error,
+    serving_record_inventory, snapshot_selection_api_error,
 };
 use super::{
     Envelope, QueryParamAllowlist, RegistryRef, RequestSource, SnapshotReadResource,
@@ -612,7 +612,7 @@ pub(super) fn record_content_hash(
 
 fn unsupported_fields(record_inventory: Option<&RecordInventoryCurrentRow>) -> Vec<String> {
     record_unsupported_fields(
-        record_inventory.is_some(),
+        serving_record_inventory(record_inventory).is_some(),
         record_inventory.map(|inventory| &inventory.unsupported_families),
         direct_json_field,
         V2_RECORD_UNSUPPORTED_FIELD_NAMES,
