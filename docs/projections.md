@@ -591,7 +591,12 @@ holder rows of the same log: Project folds permission rows by
 `(resource, subject, scope)` and keeps the newest by position and then
 `normalized_event_id`, so when the recipient is the delegate its holder grant
 (the later row) wins over the empty token-approval revocation. An approval that
-survives a transfer because `CANNOT_APPROVE` is burnt keeps its row. The delegate's only power is the
+survives a transfer because `CANNOT_APPROVE` is burnt keeps its row, and when
+that retained delegate is the outgoing holder the interpreter re-emits its
+token-approval grant after the holder revocation, because `getApproved` still
+names it and `canExtendSubnames` still admits it; without the re-emission the
+empty holder revocation would be its newest row and the fold would drop it.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L108-L121 @ ens_v1@91c966f) The delegate's only power is the
 `getApproved` branch of `canExtendSubnames`; transfers and `approve` itself
 accept only the holder and its operators.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L109-L136 @ ens_v1@91c966f)
