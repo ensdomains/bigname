@@ -176,6 +176,7 @@ sol! {
         string value
     );
     event ReverseClaimed(address indexed addr, bytes32 indexed node);
+    event NameChanged(bytes32 indexed node, string name);
     event LabelRegistered(
         uint256 indexed tokenId,
         bytes32 indexed labelHash,
@@ -13212,6 +13213,193 @@ async fn checked_in_sepolia_v1_resolver_logs_flow_through_interpret_and_project(
         }),
         "the original text record must remain in the projected inventory"
     );
+    scratch.cleanup().await
+}
+
+/// The separately evidenced `sepolia-hackathon` profile declares the hackathon deployment's own
+/// ENSv1 ReverseRegistrar under `ens_v1_reverse_l1`. A wallet's `setName` on it emits
+/// `ReverseClaimed`, then the registry's `NewOwner`/`NewResolver` for `<addr>.addr.reverse`, then
+/// the default PublicResolver's `NameChanged`
+/// (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83-L84 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129-L130 @ ens_v1@91c966f).
+/// Interpret must turn the claim into a `ReverseChanged` attributed to that registrar, and Project
+/// must publish the wallet's ENS/60 primary-name tuple keyed by it, pointing at the reverse node's
+/// resolver. The tuple's indexed claim value stays `not_found` on purpose: a PublicResolver
+/// `NameChanged` is retained as an unattributed name-family `RecordChanged` (no
+/// `primary_claim_source`), and current-head hydration admits only the Mainnet event-silent
+/// reverse resolver, so the claim value comes from the verified path.
+#[tokio::test]
+async fn checked_in_hackathon_reverse_claim_flows_through_interpret_and_project() -> Result<()> {
+    const CHAIN: &str = "ethereum-sepolia";
+    const REVERSE_REGISTRAR: &str = "0x060D5a54a8751eEc63B756E32Ef66f5eEf418e60";
+    const REGISTRY: &str = "0x82080Cc8ca78597BdE586A003D0a080c79a1814B";
+    const RESOLVER: &str = "0xaec512a71de820A57DC2aafc197a743D035b82df";
+    const WALLET: &str = "0x14da852647954d90b2e313d9cde524db31ce7cbc";
+    // Block of the observed `setName("bigname-verify.eth")` transaction on the hackathon deployment.
+    const CLAIM_BLOCK: i64 = 11_698_738;
+
+    let scratch = ScratchDatabase::create("production_project_hackathon_reverse_claim").await?;
+    let profile = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/sepolia-hackathon");
+    sync_schema_v2_repository(scratch.pool(), &load_repository(profile)?).await?;
+    insert_lineage_block(scratch.pool(), CHAIN, CLAIM_BLOCK).await?;
+
+    let wallet: Address = WALLET.parse()?;
+    let reverse_label = WALLET.trim_start_matches("0x").as_bytes();
+    let addr_reverse_node = raw_namehash(&[b"addr", b"reverse"]);
+    // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L15 @ ens_v1@91c966f)
+    assert_eq!(
+        format!("{addr_reverse_node:#x}"),
+        "0x91d1777781884d03a6757a803996e38de2a42967fb37eeaca72729271025a9e2"
+    );
+    let reverse_node = raw_namehash(&[reverse_label, b"addr", b"reverse"]);
+    let reverse_node_hex = format!("{reverse_node:#x}");
+
+    let logs = [
+        (
+            REVERSE_REGISTRAR,
+            ReverseClaimed {
+                addr: wallet,
+                node: reverse_node,
+            }
+            .encode_log_data(),
+        ),
+        (
+            REGISTRY,
+            NewOwner {
+                node: addr_reverse_node,
+                label: B256::from(keccak256(reverse_label)),
+                owner: wallet,
+            }
+            .encode_log_data(),
+        ),
+        (
+            REGISTRY,
+            NewResolver {
+                node: reverse_node,
+                resolver: RESOLVER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            RESOLVER,
+            NameChanged {
+                node: reverse_node,
+                name: "bigname-verify.eth".into(),
+            }
+            .encode_log_data(),
+        ),
+    ];
+    for (log_index, (emitter, log)) in logs.iter().enumerate() {
+        insert_raw_event_at(
+            scratch.pool(),
+            CHAIN,
+            CLAIM_BLOCK,
+            0,
+            i64::try_from(log_index)?,
+            emitter,
+            log.topics(),
+            log.data.as_ref(),
+        )
+        .await?;
+    }
+
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: CHAIN.into(),
+            from_block: CLAIM_BLOCK,
+            to_block: CLAIM_BLOCK,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+
+    let reverse: (String, String, Value) = sqlx::query_as(
+        "SELECT source_family, lower(raw_fact_ref ->> 'emitting_address'), after_state
+         FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'ReverseChanged'",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(reverse.0, "ens_v1_reverse_l1");
+    assert_eq!(reverse.1, REVERSE_REGISTRAR.to_ascii_lowercase());
+    assert_eq!(reverse.2["source_event"], "ReverseClaimed", "{}", reverse.2);
+    assert_eq!(reverse.2["address"], WALLET);
+    assert_eq!(reverse.2["coin_type"], "60");
+    assert_eq!(reverse.2["namespace"], "ens");
+    assert_eq!(
+        reverse.2["reverse_name"],
+        format!("{}.addr.reverse", WALLET.trim_start_matches("0x"))
+    );
+    assert_eq!(reverse.2["reverse_node"], reverse_node_hex);
+    assert_eq!(
+        reverse.2["claim_provenance"]["source_family"],
+        "ens_v1_reverse_l1"
+    );
+    assert_eq!(
+        reverse.2["claim_provenance"]["contract_role"],
+        "reverse_registrar"
+    );
+    assert_eq!(
+        reverse.2["claim_provenance"]["emitting_address"]
+            .as_str()
+            .map(str::to_ascii_lowercase),
+        Some(REVERSE_REGISTRAR.to_ascii_lowercase())
+    );
+
+    // The PublicResolver's NameChanged for the reverse node is name-family record history for the
+    // hackathon `ens_v1_resolver_l1` declaration, not an attributed primary-name claim.
+    let name_record: (String, String, bool) = sqlx::query_as(
+        "SELECT source_family, lower(raw_fact_ref ->> 'emitting_address'),
+                after_state ? 'primary_claim_source'
+         FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RecordChanged'
+           AND after_state ->> 'record_family' = 'name'",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        name_record,
+        (
+            "ens_v1_resolver_l1".into(),
+            RESOLVER.to_ascii_lowercase(),
+            false
+        )
+    );
+
+    run_project(
+        scratch.pool(),
+        CHAIN,
+        None,
+        RunMode::Normal,
+        CLAIM_BLOCK,
+        CLAIM_BLOCK,
+    )
+    .await?;
+
+    let primary: (String, Option<String>, Value) = sqlx::query_as(
+        "SELECT claim_status, raw_claim_name, claim_provenance
+         FROM primary_names_current
+         WHERE address = $1 AND coin_type = '60' AND namespace = 'ens'",
+    )
+    .bind(WALLET)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        primary.2["source_family"], "ens_v1_reverse_l1",
+        "{}",
+        primary.2
+    );
+    assert_eq!(primary.2["contract_role"], "reverse_registrar");
+    assert_eq!(primary.2["chain_id"], CHAIN);
+    assert_eq!(primary.2["reverse_node"], reverse_node_hex);
+    assert_eq!(primary.2["resolver_address"], RESOLVER.to_ascii_lowercase());
+    assert_eq!(primary.2["target_block_number"], CLAIM_BLOCK);
+    assert!(primary.2.get("claim_event_id").is_none(), "{}", primary.2);
+    assert_eq!((primary.0.as_str(), primary.1), ("not_found", None));
     scratch.cleanup().await
 }
 
