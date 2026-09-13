@@ -411,7 +411,7 @@ pub(super) async fn build(
                            THEN CASE WHEN NOT direct_public_v2 THEN 'resolver_not_declared' END
                        WHEN source_family = 'ens_v2_resolver_l1'
                         AND upgrade_event_id IS NULL
-                           THEN 'resolver_upgrade_not_observed'
+                           THEN 'resolver_implementation_unknown'
                        WHEN source_family = 'ens_v2_resolver_l1'
                         AND NOT upgraded_to_declared
                            THEN 'resolver_implementation_not_declared'
