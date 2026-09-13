@@ -31,6 +31,7 @@ const DELEGATE: &str = "0x00000000000000000000000000000000000000d1";
 const EXPIRY: i64 = 1_900_000_000;
 const PARENT_CANNOT_CONTROL: i64 = 1 << 16;
 const IS_DOT_ETH: i64 = 1 << 17;
+const CANNOT_UNWRAP: i64 = 1;
 const CANNOT_SET_RESOLVER: i64 = 8;
 const CAN_EXTEND_EXPIRY: i64 = 1 << 18;
 const HOLDER_POWERS: &[&str] = &[
@@ -228,7 +229,7 @@ async fn fuses(pool: &PgPool, node: &str, resource: &str, block: i64, fuses: i64
             "source_event": if block == 10 { "NameWrapped" } else { "FusesSet" },
             "node": node,
             "fuses": fuses,
-            "wrapper_state": if fuses & PARENT_CANNOT_CONTROL == 0 { "wrapped" } else { "emancipated" },
+            "wrapper_state": if fuses & CANNOT_UNWRAP != 0 { "locked" } else if fuses & PARENT_CANNOT_CONTROL == 0 { "wrapped" } else { "emancipated" },
             "expiry": if node == NODE { EXPIRY } else { EXPIRY2 },
         }),
     )
@@ -812,15 +813,17 @@ async fn wrapper_restrictions_close_on_a_2ld_unwrap_and_on_an_upgrade_burn() -> 
     assert_converges("wrapper_unwrap_shapes", events, 12, &[11, 12], check).await
 }
 
-// With CANNOT_APPROVE burnt the delegate survives both transfers: it becomes the holder, then
-// passes the token on and is served as the delegate again through the re-emitted grant.
+// With CANNOT_APPROVE burnt (which `_canFusesBeBurned` allows only on a locked name) the
+// delegate survives both transfers: it becomes the holder, then passes the token on and is
+// served as the delegate again through the re-emitted grant.
 // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L108-L121 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058-L1068 @ ens_v1@91c966f)
 #[tokio::test]
 async fn a_retained_delegate_who_passes_the_token_on_is_served_as_delegate_again() -> Result<()> {
     const CANNOT_APPROVE: i64 = 64;
     #[rustfmt::skip]
     async fn events(pool: &PgPool) -> Result<()> {
-        wrap(pool, NODE, RESOURCE, EXPIRY, PARENT_CANNOT_CONTROL | IS_DOT_ETH | CANNOT_APPROVE).await?;
+        wrap(pool, NODE, RESOURCE, EXPIRY, PARENT_CANNOT_CONTROL | CANNOT_UNWRAP | IS_DOT_ETH | CANNOT_APPROVE).await?;
         permission(pool, NODE, RESOURCE, 11, DELEGATE, &["extend_subname_expiry"], "token_approval", "Approval", true).await?;
         permission(pool, NODE, RESOURCE, 12, HOLDER, HOLDER_POWERS, "holder", "TransferSingle", false).await?;
         permission(pool, NODE, RESOURCE, 12, DELEGATE, HOLDER_POWERS, "holder", "TransferSingle", true).await?;
@@ -829,7 +832,8 @@ async fn a_retained_delegate_who_passes_the_token_on_is_served_as_delegate_again
         permission(pool, NODE, RESOURCE, 13, DELEGATE, &["extend_subname_expiry"], "token_approval", "TransferSingle", true).await
     }
     async fn check(pool: &PgPool, block: i64) -> Result<()> {
-        let masked = powers(&["approve", "extend_expiry"]);
+        // Locked: `resource_control` and `unwrap` clear; CANNOT_APPROVE removes `approve`.
+        let masked = powers(&["resource_control", "unwrap", "approve", "extend_expiry"]);
         let delegate = (
             DELEGATE.to_owned(),
             "token_approval".to_owned(),
