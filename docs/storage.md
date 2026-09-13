@@ -1344,8 +1344,9 @@ request-relative narrowing based on a proven registry-owner binding.
 `wrapper_parent_and_resolver_delegation_not_projected` marks NameWrapper
 resources partial: holders, operators, and per-token delegates are projected,
 while parent control of a wrapped subname and resolver delegation are not; the
-summary's `resource_restrictions` column carries the resource-level
-restriction block the API serves. Readers reject inconsistent typed combinations and
+summary's `resource_restrictions` column carries the
+[resource restrictions](glossary.md#resource-restrictions) block the API
+serves. Readers reject inconsistent typed combinations and
 map an unrecognized persisted unsupported reason to unknown partial product
 coverage rather than treating it as wrapper support or returning an internal
 server error. The adapter-owned mapping requires a full-history Interpret

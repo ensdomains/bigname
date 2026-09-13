@@ -555,15 +555,22 @@ rewriting which event established authority.
 For ENSv1 NameWrapper resources the interpreter emits the holder grant itself.
 `NameWrapped` grants the wrapped owner `resource_control`, `set_resolver`,
 `set_ttl`, `create_subnames`, `transfer`, `unwrap`, `burn_fuses`, `approve`,
-and `extend_subname_expiry` on the resource scope and `resolver_control` on the
-linked resolver; `TransferSingle` and `TransferBatch` revoke that set from the
-previous holder and grant it to the new one; a burn to the zero address and
-`NameUnwrapped` revoke it. Every NameWrapper burn other than the un-admitted
-upgrade path is followed by `NameUnwrapped`, and the burn revocation is kept so
-an upgraded name leaves no live holder row. Fuse state alone still manufactures
+`extend_subname_expiry`, and `extend_expiry` on the resource scope and
+`resolver_control` on the linked resolver; `TransferSingle` and `TransferBatch`
+revoke that set from the previous holder and grant it to the new one; a burn to
+the zero address revokes it and records the burn, so the `NameUnwrapped` that
+follows every burn other than the un-admitted upgrade path emits no second
+revocation, while an upgraded name still leaves no live holder row. Fuse state alone still manufactures
 no grant; Project masks each row with the current lifecycle and
 [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) fuse
-word, and `resource_control` additionally clears on a `locked` position.
+word: `resource_control` clears on a `locked` position, `burn_fuses` is present
+only while `PARENT_CANNOT_CONTROL` is burnt (until then `_canFusesBeBurned`
+rejects every owner-controlled burn and the holder cannot burn that
+parent-controlled bit), and `extend_expiry` is present only while
+`CAN_EXTEND_EXPIRY` is burnt.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L421-L437 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L443-L470 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058-L1068 @ ens_v1@91c966f)
 Returned permission rows join the same wrapper lifecycle and fuse summary as
 exact-name reads.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L902 @ ens_v1@91c966f)
@@ -577,8 +584,10 @@ receives `extend_subname_expiry` on the resource scope, an approval to the zero
 address revokes it, and the interpreter tracks the current delegate so it can
 revoke the row without an event when a transfer clears the approval
 (`CANNOT_APPROVE` unburnt, evaluated on the expiry-cleared fuse word) or a burn
-clears it unconditionally. An approval that survives a transfer because
-`CANNOT_APPROVE` is burnt keeps its row. The delegate's only power is the
+clears it unconditionally. The transfer revocation is emitted even when the
+delegate is the transfer recipient, so a restored interpreter that rebuilt the
+delegate from those rows replays identically. An approval that survives a
+transfer because `CANNOT_APPROVE` is burnt keeps its row. The delegate's only power is the
 `getApproved` branch of `canExtendSubnames`; transfers and `approve` itself
 accept only the holder and its operators.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L109-L136 @ ens_v1@91c966f)
@@ -617,16 +626,24 @@ approvals are not enumerated as rows.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L596 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
 
-The summary also carries `resource_restrictions`, the resource-level block the
-API serves as `restrictions`. For a NameWrapper resource whose wrapper fields
+The summary also carries `resource_restrictions`, the
+[resource restrictions](glossary.md#resource-restrictions) block the API
+serves as `restrictions`. For a NameWrapper resource whose wrapper fields
 would be served it is `{kind: ens_v1_wrapper, wrapper_state, fuses,
-expiry_seconds}` with the expiry-effective fuse word at the target timestamp;
-for an ENSv2 registry resource it is `{kind: ens_v2_registry, locked_roles}`,
-where `locked_roles` lists `unregister`, `renew`, `set_subregistry`,
-`set_resolver`, and `transfer` whose admin role (`can_transfer_admin` for
-`transfer`) no staged row on the resource or its registry root carries, because
-only a held admin role can grant or revoke that role and the registration
-cannot re-grant an admin role; it is `NULL` for every other resource.
+expiry_seconds}` with the expiry-effective fuse word at the target timestamp,
+and it is omitted once a later `NameUnwrapped` has closed the wrapper authority
+epoch (the `AuthorityEpochChanged` row it emits is newer than the `NameWrapped`
+token transfer); for an ENSv2 registry resource it is
+`{kind: ens_v2_registry, locked_roles}`, where `locked_roles` lists
+`unregister`, `renew`, `set_subregistry`, `set_resolver`, and `transfer` whose
+admin role (`can_transfer_admin` for `transfer`) no current row on the resource
+or its registry root carries, because only a held admin role can grant or
+revoke that role and the registration cannot re-grant an admin role; it is
+`NULL` for every other resource. The registry root is read from the resource
+identity table rather than the build scope, the admin rows are the staged rows
+for in-scope resources plus the live rows for every other resource, and a
+changed root permission scopes every registration of that registry, so
+incremental, redo, and full builds converge on `locked_roles`.
 (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L418-L424 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L453-L455 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L560-L572 @ ens_v2@a971bd64)

@@ -1347,10 +1347,11 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L137-L150 @ ens_v1@91c966f)
   A resource-bound read (`name` or `registration_id`) also returns a top-level
   `restrictions` object beside `data`, `page`, and `meta`: the
-  [resource restrictions](api-v2.md#resource-restrictions) of the selected
-  registration. It is omitted for address-only reads and when the registration
-  has no resource-level constraint model or its NameWrapper position has
-  expired with a cleared owner.
+  [resource restrictions](glossary.md#resource-restrictions) of the selected
+  registration (shape in [api-v2.md](api-v2.md#resource-restrictions)). It is
+  omitted for address-only reads and when the registration has no
+  resource-level constraint model, its NameWrapper position has expired with a
+  cleared owner, or `NameUnwrapped` has closed its wrapper authority epoch.
   `authority_context` is required on every row and records how that row was
   admitted under the per-name ownership rule. `powers` values come from the
   [permission powers vocabulary](api-v2.md#permission-powers-vocabulary), which
@@ -1408,7 +1409,8 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   `unsupported_reason=parent_and_resolver_delegation_permissions_not_supported`:
   its holder, operators, and delegate are rows, while the parent name's control
   over a non-emancipated wrapped subname and resolver operator/delegate
-  approvals are not enumerated.
+  approvals are not enumerated; the NameWrapper `Ownable` owner is a
+  deployment-wide administrator, not a per-registration permission.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565-L589 @ ens_v1@91c966f)
   Missing or
   unrecognized summary metadata returns `meta.completeness=partial` with
@@ -1534,7 +1536,7 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   `include=role_summary` adds
   `role_summary: [{address, grants: [{grant_scope, powers}]}]` grouped by the
   permission subject address, `restrictions` (the same
-  [resource restrictions](api-v2.md#resource-restrictions) object
+  [resource restrictions](glossary.md#resource-restrictions) object
   `GET /v1/permissions` returns for the row's registration, omitted when none
   applies), and `record_count` when record inventory exists
   for the row. `record_count` counts the known record selectors for the name's
