@@ -726,7 +726,10 @@ collection route carry neither header.
   exact resolver, a projected name identity and DNS wire name, no alias,
   linked-subregistry, projected wildcard, or cross-chain transport path, and an
   admitted Universal Resolver manifest entrypoint on that chain
-  (`ens_execution`, checked in for both profiles). Verified ENS reads follow
+  (`ens_execution`, checked in for both profiles; the separately evidenced
+  `sepolia-hackathon` profile declares its own hackathon Universal Resolver
+  under the same family, see `manifests.md` § Sepolia hackathon deployment
+  evidence). Verified ENS reads follow
   the same rules on both chains; only the chain, and therefore the
   `BIGNAME_API_CHAIN_RPC_URLS` entry they need (`ethereum-mainnet=` or
   `ethereum-sepolia=`), differs. This makes the indexed null-resolver miss

@@ -1767,6 +1767,9 @@ code does not by itself invalidate this direct-address evidence.
 | `resolver` | `0xa9d3814AB151BF6E37A427432795371a8361614e` | 11626723 | `0x9e9200392a53d541fd1821e9f24ade02d714c336cdaec24fd0b69ff369818680` |
 | `root` | `0xe7f0D5724f8337e3Aa9A9910540341Ff4273fEd9` | 11626631 | `0xe234ea2cd4d60ecd14f4e73cd9cae1709748ae7747c4612ef853412bf9520d32` |
 | `unlocked` | `0x97494264AD5437611CC2f43987c21F6F352D786a` | 11626736 | `0x7eded57da2eb0f421dcce1d57747830943fd8793e6cf429001f5fe4f2e014247` |
+| `universal-resolver` | `0xd26f2040d083af1cd2962ba303f4bea0c4faf142` | 11626766 | `0x1f8ba6f822c55a9c8a6e7876c28787e3786f030cb994f771be1fd93a86e78757` |
+| `universal-resolver-hop` | `0x1abed09f1f36383f27cf0b3a5e0ea1738e1fd921` | 11626767 | `0x07d2aed6f775866c28cb7a66986e766bcd7764b8d580c6600ad5ebac08761108` |
+| `universal-resolver-impl` | `0xfea8d4b7fcce0b8765c793d6695eac384aaa458f` | 11626768 | `0x15b04bcc15b410ce24579d1a21b20a0ad91c04f56bf90d2a91d8b5c081c5feff` |
 | `user-impl` | `0x47B442d0CF617c41CAbAFf5f02f44DD1e5f72546` | 11626728 | `0xad51f17b27a13e18bf40cad47f9156b44c4e6d151af076fe6e0f2457001889cb` |
 | `v1-registrar` | `0x48F94806C22F60A9C4757ef09889F3Ce6546bd2F` | 11626567 | `0xff1b7cdf6efce6c0bbaffcca51ecad4aab8fe05100cdef43e9e2773c083e3fea` |
 | `v1-registry` | `0x82080Cc8ca78597BdE586A003D0a080c79a1814B` | 11626443 | `0x613ef3cb64a195e0e93cf3ea7b3b0e59e708239142bec93d57e91fd1224218c2` |
@@ -1789,8 +1792,54 @@ upgrade observations remain distinct evidence requirements.
 
 The implementation, resolver-set and helper rows are provenance for the
 selected cohort; a row in this table is not itself a watch declaration. The
-nine manifests declare only the roles used by the indexing path. ABI source
+nine indexing manifests declare only the roles used by the indexing path. ABI source
 citations constrain event layouts and behavior separately from this address
 provenance. Record-ID resolver semantics are specified above; direct
 PublicResolverV2 source support is integrated in this candidate, with combined
 runtime validation still required.
+
+The three `universal-resolver*` rows are outside the recorded evidence
+decision packet above (the SHA-256 `9eecd3c3…` decision and the nineteen-hash
+inclusion packet `f3a9a799…` are unchanged) and carry their own basis: the
+address comes from the ensjs hackathon build (`packages/ensjs/src/clients/l1.ts`
+@ `c6e6970b`, `ensUniversalResolver` for Sepolia — external evidence under the
+same admission exception as the rest of this table), and the creation blocks
+and transactions are reth receipts read from an archive Sepolia node, each a
+direct `CREATE` (`to` null, `contractAddress` equal to the row address, status
+`0x1`) from the deployer EOA `0x84d3a426d4e12e955d1df95db0b24fe26afe39d3`,
+the same EOA that created the hackathon root registry. The proxy is ERC-1967:
+`Upgraded` at 11626945
+(`0xefc1aa70e53d2cbbddc5577a07bb04ad94984c1222fc9e0ae30ec82b7a904c35`) points
+it at the `universal-resolver-hop` row, itself an ERC-1967 proxy whose
+`Upgraded` at 11626946
+(`0x800d795d8673855ab8a675ed9f05c206ce27ef3707a5b4f2177c03bddf862d78`) points
+at the `universal-resolver-impl` row. The implementation's observed runtime
+dispatches `resolve(bytes,bytes)` and `reverse(bytes,uint256)` and embeds the
+hackathon `root` registry `0xe7f0D5724f8337e3Aa9A9910540341Ff4273fEd9` as an
+immutable. The hop and implementation rows are provenance only; as elsewhere in
+this table they record deployment and inclusion, not a proxy activation
+interval, and admit nothing by themselves.
+
+On this deployment profile `ens_execution` therefore points at the
+deployment's own Universal Resolver proxy `0xd26f2040d083af1cd2962ba303f4bea0c4faf142`
+under `manifests/sepolia-hackathon/ethereum/ens/ens_execution/v1.toml`, with
+`rollout_status = "shadow"`, `verified_resolution = "shadow"`,
+`deployment_epoch = "ens_v2_sepolia_hackathon"`, `proxy_kind = "none"` (the
+lookup entry is the proxy address, as in the Mainnet and Sepolia
+`ens_execution` files), and `start_block = 11626766` (the proxy creation
+block; the phase runner binds a nonzero hackathon intake start only when
+every declared root and contract carries a start block and the configured
+start equals the earliest of them, which remains 11626442). The
+canonical Sepolia proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` is
+unsuitable here: it resolves to an implementation that does not embed the
+hackathon root registry, so it cannot answer for names under that root. The
+shadow flag has the same meaning as on Mainnet and Sepolia — the lookup engine
+admits a shadow `ens_execution` manifest as the ENS entrypoint — so verified
+records and the request-scoped, hash-pinned ENS/60 primary-name lookup execute
+through this entrypoint on the hackathon deployment, with the primary-name
+reverse leg reading the active hackathon `ens_v1_registry_l1` registry.
+`GET /v1/namespaces/ens` reports both verified capabilities for
+`ethereum-sepolia` from these declarations plus the configured provider
+instead of `execution_entrypoint_not_declared`. This is the tenth manifest of
+the profile and declares no indexing role, root, discovery rule, or event; it
+changes the profile's fingerprint, so it ships by rebuilding the binary.

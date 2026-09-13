@@ -793,7 +793,11 @@ fn rejects_manifest_version_tag_mismatch() -> Result<()> {
 
 #[test]
 fn checked_in_manifest_trees_pass_repository_validation() -> Result<()> {
-    for profile_root in ["manifests/mainnet", "manifests/sepolia"] {
+    for profile_root in [
+        "manifests/mainnet",
+        "manifests/sepolia",
+        "manifests/sepolia-hackathon",
+    ] {
         let repository = load_repository(checked_in_manifest_root(profile_root))?;
         assert_eq!(
             repository.summary().status,
@@ -801,6 +805,70 @@ fn checked_in_manifest_trees_pass_repository_validation() -> Result<()> {
             "checked-in {profile_root} manifest tree must load"
         );
     }
+    Ok(())
+}
+
+/// The separately evidenced hackathon deployment profile declares its own ENS execution
+/// entrypoint: the hackathon deployment's Universal Resolver proxy, not the canonical Sepolia
+/// proxy, in the shape the lookup engine admits (`ens_execution` on `ethereum-sepolia`, role
+/// `universal_resolver`, shadow rollout with a shadow `verified_resolution` flag) and with a
+/// declared start so the profile's intake floor binding still sees a start on every contract.
+#[test]
+fn checked_in_hackathon_profile_declares_its_own_ens_execution_entrypoint() -> Result<()> {
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia-hackathon"))?;
+    let execution = repository
+        .manifests()
+        .iter()
+        .filter(|loaded| loaded.manifest.source_family == "ens_execution")
+        .collect::<Vec<_>>();
+    assert_eq!(execution.len(), 1, "one hackathon ens_execution manifest");
+    let manifest = &execution[0].manifest;
+    assert_eq!(
+        execution[0].relative_path,
+        std::path::Path::new("ethereum/ens/ens_execution/v1.toml")
+    );
+    assert_eq!(manifest.namespace, "ens");
+    assert_eq!(manifest.chain, "ethereum-sepolia");
+    assert_eq!(manifest.deployment_epoch, "ens_v2_sepolia_hackathon");
+    assert_eq!(manifest.rollout_status, RolloutStatus::Shadow);
+    assert!(matches!(
+        manifest.capability_flags.get("verified_resolution"),
+        Some(flag) if flag.status == CapabilitySupportStatus::Shadow
+    ));
+    assert!(manifest.roots.is_empty());
+    assert!(manifest.discovery_rules.is_empty());
+    assert!(manifest.abi.events.is_empty());
+    assert_eq!(manifest.contracts.len(), 1);
+    let entrypoint = &manifest.contracts[0];
+    assert_eq!(entrypoint.role, "universal_resolver");
+    assert_eq!(
+        entrypoint.address.to_ascii_lowercase(),
+        "0xd26f2040d083af1cd2962ba303f4bea0c4faf142"
+    );
+    assert_ne!(
+        entrypoint.address.to_ascii_lowercase(),
+        "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+        "the canonical Sepolia proxy does not embed the hackathon root registry"
+    );
+    assert_eq!(entrypoint.proxy_kind, "none");
+    assert_eq!(entrypoint.implementation, None);
+    assert_eq!(entrypoint.start_block, Some(11_626_766));
+
+    let earliest_start = repository
+        .manifests()
+        .iter()
+        .flat_map(|loaded| {
+            let manifest = &loaded.manifest;
+            manifest.roots.iter().map(|root| root.start_block).chain(
+                manifest
+                    .contracts
+                    .iter()
+                    .map(|contract| contract.start_block),
+            )
+        })
+        .map(|start| start.expect("every hackathon declaration carries a start block"))
+        .min();
+    assert_eq!(earliest_start, Some(11_626_442));
     Ok(())
 }
 
