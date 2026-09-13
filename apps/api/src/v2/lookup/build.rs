@@ -15,8 +15,7 @@ use crate::v2::{
     },
     shared_product_reason,
     vocab::{
-        MISSING_UNSUPPORTED_REASON, PARTIAL_SERVE_UNSUPPORTED_REASON, downgrades_unsupported_name,
-        projected_row_product_reason,
+        MISSING_UNSUPPORTED_REASON, downgrades_unsupported_name, projected_row_product_reason,
     },
 };
 
@@ -183,11 +182,9 @@ fn build_detail_record(
         .as_ref()
         .filter(|_| !unsupported_fields.contains("primary_address"))
         .and_then(|addresses| addresses.get(primary_coin_type).cloned());
-    let resolver = (has_current_registration
-        && string_field(record.row.coverage.get("unsupported_reason")).as_deref()
-            != Some(PARTIAL_SERVE_UNSUPPORTED_REASON))
-    .then(|| name_record::resolver(&record.row.declared_summary))
-    .flatten();
+    let resolver = name_record::identity_row_serves_resolver(&record.row)
+        .then(|| name_record::resolver(&record.row.declared_summary))
+        .flatten();
 
     Ok(LookupRecord {
         name: record.row.normalized_name.clone(),

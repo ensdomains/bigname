@@ -306,6 +306,62 @@ async fn v2_get_name_does_not_serve_a_resolver_without_projected_authority() -> 
     Ok(())
 }
 
+fn root_registry_tld_row(row: &mut bigname_storage::NameCurrentRow) {
+    // An ENSv2 TLD whose root-registry token has a resolver pointer but no observed registration:
+    // no binding, no selected authority, the pointer's token resource as serving resource.
+    row.coverage = json!({
+        "status": "unsupported",
+        "exhaustiveness": "not_asserted",
+        "unsupported_reason": "current_authority_not_projected"
+    });
+    row.serving_resource_id = row.resource_id.take();
+    row.surface_binding_id = None;
+    row.token_lineage_id = None;
+    row.binding_kind = None;
+    row.declared_summary["registration"] = json!({"status": null, "authority_kind": null});
+    row.declared_summary["control"] = json!({"status": null});
+    row.provenance["read_reachability"] = json!({
+        "basis": "root_registry_resolver_pointer",
+        "serving_resource_id": row.serving_resource_id
+    });
+}
+
+#[tokio::test]
+async fn v2_get_name_serves_a_root_registry_pointer_without_projected_authority() -> Result<()> {
+    let payload =
+        v2_name_record_payload_with_row("/v1/names/Alice.eth", root_registry_tld_row).await?;
+    let data = payload["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("status"), Some(&json!("ok")), "{payload}");
+    assert_eq!(
+        data.get("resolver"),
+        Some(&json!({
+            "chain_id": 1,
+            "address": "0x0000000000000000000000000000000000000abc"
+        })),
+        "{payload}"
+    );
+    assert_eq!(data.get("registration_status"), Some(&json!("unregistered")));
+    assert!(data.get("registration_id").is_none(), "{payload}");
+    assert!(data.get("owner").is_none_or(Value::is_null), "{payload}");
+    assert!(data.get("authority").is_none_or(Value::is_null), "{payload}");
+    assert_eq!(
+        data["addresses"]["60"],
+        json!("0x0000000000000000000000000000000000000def"),
+        "records come from the serving resource's inventory: {payload}"
+    );
+
+    // The same pointer evidence without a serving resource stays withheld.
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
+        root_registry_tld_row(row);
+        row.serving_resource_id = None;
+        row.provenance["read_reachability"] = json!({});
+    })
+    .await?;
+    assert_eq!(payload["data"]["status"], json!("ok"));
+    assert!(payload["data"].get("resolver").is_none(), "{payload}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_get_name_exposes_projected_wrapper_state_and_fuses() -> Result<()> {
     let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
@@ -2917,6 +2973,36 @@ async fn v2_get_name_records_withholds_unproven_authority_without_verified_looku
         }
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_classifies_a_root_registry_pointer_through_its_inventory() -> Result<()> {
+    for source in ["indexed", "auto"] {
+        let payload = v2_name_records_payload_with_row_and_setup(
+            &format!("/v1/names/Alice.eth/records?source={source}&keys=addr:60,text:description"),
+            root_registry_tld_row,
+            |_, _, _| {},
+        )
+        .await?;
+        assert_eq!(
+            payload["data"]["resolver"],
+            json!({
+                "chain_id": 1,
+                "address": "0x0000000000000000000000000000000000000abc"
+            }),
+            "{source}: {payload}"
+        );
+        assert_eq!(
+            payload["data"]["records"]["addr:60"],
+            json!({
+                "status": "ok",
+                "value": "0x0000000000000000000000000000000000000def"
+            }),
+            "{source}: {payload}"
+        );
+        assert_eq!(payload["meta"]["source"], json!("indexed"), "{source}");
+    }
     Ok(())
 }
 

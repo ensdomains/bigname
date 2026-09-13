@@ -27,7 +27,7 @@ justification = "Batch lookup keeps request parsing, name and address rendering,
 
 [[files]]
 path = "apps/api/src/v2/name_record.rs"
-loc = 635
+loc = 631
 justification = "Name record read gained authority/migrated_at (F3), include=counts (F5), and the registry-route subregistry pointer in one handler; move the auxiliary loaders into a sibling module on the next substantive touch."
 
 [[files]]

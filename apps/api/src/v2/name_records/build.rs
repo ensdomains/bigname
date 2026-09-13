@@ -73,6 +73,11 @@ fn authority_unsupported_reason(row: &NameCurrentRow) -> V2Result<Option<String>
         .filter(|reason| !reason.trim().is_empty())
         .unwrap_or_else(|| MISSING_UNSUPPORTED_REASON.to_owned());
     if !downgrades_unsupported_name(&reason) {
+        // An event-linked registry serving resource (an ENSv2 TLD's root-registry pointer) keeps
+        // the keys classifying through its inventory instead of the name-level short circuit.
+        if bigname_storage::name_current_has_event_linked_registry_serving(row) {
+            return Ok(None);
+        }
         return Ok(Some(INDEXED_INVENTORY_UNAVAILABLE_REASON.to_owned()));
     }
     // A name-level authority reason, so it maps through the shared name
