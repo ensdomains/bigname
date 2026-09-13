@@ -1560,7 +1560,10 @@ mod numeric_short_lease_connected {
         );
         assert_eq!(summary["registration"]["expiry"], expected["v1_expiry"]);
         assert_eq!(
-            summary.pointer("/resolver/address").cloned().unwrap_or(serde_json::Value::Null),
+            summary
+                .pointer("/resolver/address")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
             expected["expected_resolver"]
         );
         let registered_at: i64 = sqlx::query_scalar("SELECT extract(epoch FROM (declared_summary #>> '{registration,registered_at}')::timestamptz)::bigint FROM name_current WHERE logical_name_id=$1")
@@ -1756,15 +1759,10 @@ mod numeric_short_lease_connected {
                         1,
                         "real migration must activate"
                     );
-                    assert!(
-                        output
-                            .normalized_events
-                            .iter()
-                            .any(|event| event.event_kind
-                                == adapter::seam::TOKEN_CONTROL_TRANSFERRED_EVENT_KIND
-                                && event.log_index == Some(4)
-                                && event.resource_id == registrar_resource)
-                    );
+                    assert!(output.normalized_events.iter().any(|event| event.event_kind
+                        == adapter::seam::TOKEN_CONTROL_TRANSFERRED_EVENT_KIND
+                        && event.log_index == Some(4)
+                        && event.resource_id == registrar_resource));
                 }
                 write(pool, &part, &output).await?;
                 if to == 403 {

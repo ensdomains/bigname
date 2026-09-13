@@ -346,20 +346,27 @@ async fn write_bindings(
                     InterpretError::database("failed to write identity binding", error)
                 })?;
                 if written.is_none() {
-                    let existing: Option<(String, Uuid, String, String, time::OffsetDateTime, i64, String)> =
-                        sqlx::query_as(
-                            "
+                    let existing: Option<(
+                        String,
+                        Uuid,
+                        String,
+                        String,
+                        time::OffsetDateTime,
+                        i64,
+                        String,
+                    )> = sqlx::query_as(
+                        "
                             SELECT logical_name_id, resource_id, binding_kind, authority_arm,
                                    active_from, block_number, provenance::text
                             FROM surface_bindings
                             WHERE surface_binding_id = $1
                             ",
-                        )
-                        .bind(binding.surface_binding_id)
-                        .fetch_optional(&mut **transaction)
-                        .await
-                        .ok()
-                        .flatten();
+                    )
+                    .bind(binding.surface_binding_id)
+                    .fetch_optional(&mut **transaction)
+                    .await
+                    .ok()
+                    .flatten();
                     return Err(InterpretError::data_integrity(format!(
                         "surface binding {} is already bound to different identity data; \
                          incoming: name={} resource={} kind={} arm={} active_from={} block={} provenance={}; \
