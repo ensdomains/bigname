@@ -32,6 +32,12 @@ pub(super) enum WatchEmitter {
         family: String,
         address: String,
     },
+    // Every emitter, narrowed to logs whose indexed `topic1` is this declared resolver
+    // implementation; adding an implementation widens the plan by exactly this entry.
+    Implementation {
+        family: String,
+        implementation: String,
+    },
 }
 
 impl WatchEmitter {
@@ -524,67 +530,16 @@ pub(super) fn watch_is_covered(
             family: family.clone(),
             address: address.clone(),
         }),
+        WatchEmitter::Implementation {
+            family,
+            implementation,
+        } => covered(WatchEmitter::Implementation {
+            family: family.clone(),
+            implementation: implementation.clone(),
+        }),
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn checked_in_approvals_compile_only_for_declared_roles_and_intervals() -> Result<()> {
-        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut approval_count = 0;
-        for profile in ["mainnet", "sepolia"] {
-            let repository =
-                crate::load_repository(workspace_root.join("manifests").join(profile))?;
-            for loaded in repository.manifests() {
-                let compiled = compile_watch_scope(&loaded.manifest)?;
-                for event in &loaded.manifest.abi.events {
-                    let parsed = event.parsed_event_view()?;
-                    if !crate::is_address_scoped_approval(
-                        &loaded.manifest.source_family,
-                        &parsed.canonical_signature(),
-                    ) {
-                        continue;
-                    }
-                    approval_count += 1;
-                    let topic0 = parsed.topic0().expect("approval event topic0");
-                    let actual = compiled
-                        .iter()
-                        .filter(|entry| entry.topic0 == topic0)
-                        .map(|entry| match &entry.emitter {
-                            WatchEmitter::Address { family, address } => {
-                                assert_eq!(family, &loaded.manifest.source_family);
-                                (address.clone(), entry.start)
-                            }
-                            WatchEmitter::All | WatchEmitter::Family { .. } => panic!(
-                                "{} {} must not compile an all-emitter or discovered-family watch",
-                                loaded.manifest.source_family, event.name
-                            ),
-                        })
-                        .collect::<BTreeSet<_>>();
-                    let expected = loaded
-                        .manifest
-                        .contracts
-                        .iter()
-                        .filter(|contract| event.emitter_roles.contains(&contract.role))
-                        .map(|contract| {
-                            (
-                                crate::normalize_address(&contract.address),
-                                contract.start_block.unwrap_or(0),
-                            )
-                        })
-                        .collect::<BTreeSet<_>>();
-                    assert_eq!(
-                        actual, expected,
-                        "{} {} must follow its role declarations exactly",
-                        loaded.manifest.source_family, event.name
-                    );
-                }
-            }
-        }
-        assert_eq!(approval_count, 19);
-        Ok(())
-    }
-}
+#[path = "schema_v2_watch/tests.rs"]
+mod tests;

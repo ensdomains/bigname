@@ -3,7 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result};
 
 use super::{CompiledWatchEntry, WatchEmitter, insert_watch};
-use crate::{SourceManifest, all_emitter_topic0s, is_address_scoped_approval, normalize_address};
+use crate::{
+    SourceManifest, all_emitter_topic0s, implementation_announcement_topic0,
+    is_address_scoped_approval, normalize_address,
+};
 
 pub(super) fn compile_watch_scope(manifest: &SourceManifest) -> Result<Vec<CompiledWatchEntry>> {
     let mut family_topics = BTreeSet::new();
@@ -34,6 +37,21 @@ pub(super) fn compile_watch_scope(manifest: &SourceManifest) -> Result<Vec<Compi
     let mut watch = BTreeMap::new();
     for topic0 in &all_emitter_topics {
         insert_watch(&mut watch, WatchEmitter::All, topic0, 0);
+    }
+    if let Some(topic0) =
+        implementation_announcement_topic0(&manifest.source_family, &family_topics)
+    {
+        for implementation in &manifest.resolver_implementations {
+            insert_watch(
+                &mut watch,
+                WatchEmitter::Implementation {
+                    family: manifest.source_family.clone(),
+                    implementation: normalize_address(&implementation.address),
+                },
+                &topic0,
+                0,
+            );
+        }
     }
     if crate::uses_discovered_emitters(&manifest.source_family) {
         for topic0 in &family_topics {
