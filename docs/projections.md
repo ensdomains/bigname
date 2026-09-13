@@ -476,15 +476,19 @@ effective powers, provenance, and chain positions. The companion resource
 summary distinguishes authoritative empty enumeration from unsupported or
 partial permission support. Current non-wrapper summaries are partial because
 registrar token and account approvals, resolver operators and delegates, and
-ENSv2 registry operators are not indexed.
+ENSv2 registry operators are not indexed. NameWrapper summaries are partial for
+a narrower reason described below: holders, operators, and per-token delegates
+are rows, while parent control of a non-emancipated wrapped subname and resolver
+operators/delegates are not.
 
 `account_permission_state_current` separately folds `AccountPermissionChanged`
 events from the [`standard_approval`
 derivation](glossary.md#standard-approval-derivation) by chain, authority kind, authority contract,
 owner, subject, and relation. It retains both active and revoked latest states;
-`approved=true` carries `registry_control`, while `approved=false` carries no
-effective powers. Project never fans this account mapping out into per-name
-rows. After constructing `name_current`, Project carries the latest
+`approved=true` carries `registry_control` for a registry and `wrapper_control`
+for a NameWrapper, while `approved=false` carries no effective powers. Project
+never fans the registry mapping out into per-name rows; the NameWrapper mapping
+is fanned out as described below. After constructing `name_current`, Project carries the latest
 [registry-owner binding](glossary.md#registry-owner-binding) onto the resource
 selected for an ENSv1 or Basenames name. Registry-family owner observations are
 first ranked by logical name or emitting resource to suppress detached history,
@@ -548,13 +552,103 @@ narrowing](upstream.md#known-divergences). The retirement citation therefore
 explains why the rows are absent without
 rewriting which event established authority.
 
-For ENSv1 wrapper-backed resources, fuse state alone does not manufacture a
-holder grant. A separately observed compatible holder grant is masked by the
-current lifecycle and [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word)
-fuse rules. Returned permission rows
-join the same wrapper lifecycle and fuse summary as exact-name reads; this does
-not change the companion resource summary's unsupported wrapper-holder
-enumeration status. For ENSv2, permissions remain keyed by the
+For ENSv1 NameWrapper resources the interpreter emits the holder grant itself.
+`NameWrapped` grants the wrapped owner `resource_control`, `set_resolver`,
+`set_ttl`, `create_subnames`, `transfer`, `unwrap`, `burn_fuses`, `approve`,
+`extend_subname_expiry`, and `extend_expiry` on the resource scope and
+`resolver_control` on the linked resolver; `TransferSingle` and `TransferBatch`
+revoke that set from the previous holder and grant it to the new one; a burn to
+the zero address revokes it and records the burn, so the `NameUnwrapped` that
+follows every burn other than the un-admitted upgrade path emits no second
+revocation, while an upgraded name still leaves no live holder row. Fuse state alone still manufactures
+no grant; Project masks each row with the current lifecycle and
+[expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) fuse
+word: `resource_control` clears on a `locked` position, `burn_fuses` is present
+only while `PARENT_CANNOT_CONTROL` is burnt (until then `_canFusesBeBurned`
+rejects every owner-controlled burn and the holder cannot burn that
+parent-controlled bit), and `extend_expiry` is present only while
+`CAN_EXTEND_EXPIRY` is burnt.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L421-L437 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L443-L470 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058-L1068 @ ens_v1@91c966f)
+Returned permission rows join the same wrapper lifecycle and fuse summary as
+exact-name reads.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L902 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L483-L509 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L278 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L283-L299 @ ens_v1@91c966f)
+
+The per-token delegate comes from NameWrapper `Approval`: the approved address
+receives `extend_subname_expiry` on the resource scope, an approval to the zero
+address revokes it, and the interpreter tracks the current delegate so it can
+revoke the row without an event when a transfer clears the approval
+(`CANNOT_APPROVE` unburnt, evaluated on the expiry-cleared fuse word) or a burn
+clears it unconditionally. The transfer revocation is emitted even when the
+delegate is the transfer recipient, so a restored interpreter that rebuilt the
+delegate from those rows replays identically. An approval that survives a
+transfer because `CANNOT_APPROVE` is burnt keeps its row. The delegate's only power is the
+`getApproved` branch of `canExtendSubnames`; transfers and `approve` itself
+accept only the holder and its operators.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L109-L136 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L228-L238 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L837-L840 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L37-L47 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L137-L150 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L275 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L375-L378 @ ens_v1@91c966f)
+
+Owner-wide operators come from NameWrapper `ApprovalForAll`, normalized like
+registry operators into `account_permission_state_current` with
+`authority_kind=wrapper` and `wrapper_control`. Unlike registry operators,
+Project fans them out: after folding holder rows it joins every wrapper holder
+row (`grant_source.relation_kind=holder`) to the approved account rows whose
+owner is that holder and whose authority contract is the holder's NameWrapper,
+and inserts one row per operator and scope carrying the holder's masked powers
+with `grant_source.relation_kind=operator`. An operator who is also the token
+delegate keeps the operator set. Incremental builds read account state as the
+staged rows for changed keys plus the live rows for unchanged keys, and a
+changed wrapper approval scopes every resource its owner currently holds, so
+incremental, redo, and full builds converge. `canModifyName` and the
+ERC-1155-fuse approve and transfer checks authorize an operator exactly as the
+holder.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214-L222 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L105-L117 @ ens_v1@91c966f)
+
+The resource summary classifies a NameWrapper resource `unsupported` with
+`wrapper_parent_and_resolver_delegation_not_projected`, which readers map to
+partial coverage: the parent of a non-emancipated wrapped subname can still
+replace its owner, fuses, and expiry through `setSubnodeOwner`,
+`setSubnodeRecord`, and `setChildFuses`, and resolver operator/delegate
+approvals are not enumerated as rows.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L517 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L596 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
+
+The summary also carries `resource_restrictions`, the
+[resource restrictions](glossary.md#resource-restrictions) block the API
+serves as `restrictions`. For a NameWrapper resource whose wrapper fields
+would be served it is `{kind: ens_v1_wrapper, wrapper_state, fuses,
+expiry_seconds}` with the expiry-effective fuse word at the target timestamp,
+and it is omitted once a later `NameUnwrapped` has closed the wrapper authority
+epoch (the `AuthorityEpochChanged` row it emits is newer than the `NameWrapped`
+token transfer); for an ENSv2 registry resource it is
+`{kind: ens_v2_registry, locked_roles}`, where `locked_roles` lists
+`unregister`, `renew`, `set_subregistry`, `set_resolver`, and `transfer` whose
+admin role (`can_transfer_admin` for `transfer`) no current row on the resource
+or its registry root carries, because only a held admin role can grant or
+revoke that role and the registration cannot re-grant an admin role; it is
+`NULL` for every other resource. The registry root is read from the resource
+identity table rather than the build scope, the admin rows are the staged rows
+for in-scope resources plus the live rows for every other resource, and a
+changed root permission scopes every registration of that registry, so
+incremental, redo, and full builds converge on `locked_roles`.
+(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L418-L424 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L453-L455 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L560-L572 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L24-L45 @ ens_v2@a971bd64)
+For ENSv2, permissions remain keyed by the
 upstream resource linked to bigname `resource_id`, not by token ID.[^v2-iperm-l57][^v2-pr-l261][^v2-pr-l351]
 
 Unknown or inconsistent typed summary combinations are a storage error. A

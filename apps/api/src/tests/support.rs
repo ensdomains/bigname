@@ -640,7 +640,7 @@ fn phase_permission_summary_support(
         }
         Some("wrapper") => (
             "unsupported",
-            Some("ensv1_wrapper_holder_permissions_not_projected"),
+            Some("wrapper_parent_and_resolver_delegation_not_projected"),
         ),
         _ => (
             "unsupported",
@@ -678,12 +678,13 @@ async fn upsert_phase_permissions_current_resource_summary(
         INSERT INTO bigname_phase.permissions_current_resource_summary (
             resource_id, authority_kind, root_resource_id, support_status,
             unsupported_reason, provenance, chain_positions, canonicality_summary,
-            manifest_version, last_recomputed_at
+            manifest_version, last_recomputed_at, resource_restrictions
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (resource_id) DO UPDATE SET
             authority_kind = EXCLUDED.authority_kind,
             root_resource_id = EXCLUDED.root_resource_id,
+            resource_restrictions = EXCLUDED.resource_restrictions,
             support_status = EXCLUDED.support_status,
             unsupported_reason = EXCLUDED.unsupported_reason,
             provenance = EXCLUDED.provenance,
@@ -703,6 +704,7 @@ async fn upsert_phase_permissions_current_resource_summary(
     .bind(canonicality_summary)
     .bind(row.manifest_version)
     .bind(row.last_recomputed_at)
+    .bind(&row.resource_restrictions)
     .execute(pool)
     .await?;
     Ok(())
@@ -2905,7 +2907,7 @@ fn permission_current_resource_summary(
         Some(kind) if PHASE_PROJECTED_PERMISSION_AUTHORITY_KINDS.contains(&kind) => {
             bigname_storage::ResourcePermissionCoverage::operator_approval_surfaces_not_ingested()
         }
-        Some("wrapper") => bigname_storage::ResourcePermissionCoverage::ensv1_wrapper_holder_permissions_not_projected(),
+        Some("wrapper") => bigname_storage::ResourcePermissionCoverage::wrapper_parent_and_resolver_delegation_not_projected(),
         _ => bigname_storage::ResourcePermissionCoverage::resource_authority_not_projected(),
     };
     bigname_storage::PermissionsCurrentResourceSummary {
@@ -2913,6 +2915,7 @@ fn permission_current_resource_summary(
         authority_kind,
         root_resource_id: None,
         coverage,
+        resource_restrictions: None,
         provenance: json!({
             "derivation_kind": "permissions_current_resource_summary_rebuild",
             "chain_id": "ethereum-mainnet",

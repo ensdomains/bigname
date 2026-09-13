@@ -11,6 +11,7 @@ mod support;
 pub(in crate::schema_v2) mod unmasked_word;
 mod upgrade;
 mod wrapper;
+pub(in crate::schema_v2) use wrapper::{WrapperPermissionContext, append_delegate_permission};
 
 use std::collections::HashMap;
 

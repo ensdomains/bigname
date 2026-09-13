@@ -27,6 +27,7 @@ mod permissions;
 mod primary_name;
 mod registries;
 mod resolvers;
+mod restrictions;
 mod router;
 mod search;
 mod snapshots;

@@ -287,6 +287,7 @@ async fn canonical_fixture_builds_all_eight_projection_families() -> Result<()> 
                 "registry_contract": null,
                 "registry_owner": null,
                 "resource_id": RESOURCE,
+                "resource_restrictions": null,
                 "root_resource_id": null,
                 "support_status": "unsupported",
                 "unsupported_reason": "operator_approval_surfaces_not_ingested"
@@ -818,6 +819,7 @@ async fn permission_builder_preserves_grouped_history_output_exactly() -> Result
                 "registry_contract": null,
                 "registry_owner": null,
                 "resource_id": RESOURCE,
+                "resource_restrictions": null,
                 "root_resource_id": null,
                 "support_status": "unsupported",
                 "unsupported_reason": "operator_approval_surfaces_not_ingested"
@@ -1843,7 +1845,7 @@ async fn permission_support_marks_approvals_partial_without_hiding_known_control
             (
                 "wrapper".into(),
                 "unsupported".into(),
-                Some("ensv1_wrapper_holder_permissions_not_projected".into())
+                Some("wrapper_parent_and_resolver_delegation_not_projected".into())
             ),
             (
                 "future_authority".into(),
@@ -5053,6 +5055,9 @@ fn expected_wrapper_fuses(fuses: u32) -> Value {
 
 #[tokio::test]
 async fn wrapper_states_and_expiry_gate_permissions_and_controller_relations() -> Result<()> {
+    // A `wrapped` name keeps every holder power but `burn_fuses`: `_canFusesBeBurned` rejects an
+    // owner-controlled burn until the parent has burnt PARENT_CANNOT_CONTROL.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058-L1068 @ ens_v1@91c966f)
     let cases = [
         (
             "wrapped_expired",
@@ -5060,7 +5065,7 @@ async fn wrapper_states_and_expiry_gate_permissions_and_controller_relations() -
             "wrapped",
             2,
             Some("wrapped"),
-            9,
+            8,
             true,
             true,
         ),
@@ -5070,7 +5075,7 @@ async fn wrapper_states_and_expiry_gate_permissions_and_controller_relations() -
             "wrapped",
             2,
             Some("wrapped"),
-            9,
+            8,
             true,
             true,
         ),

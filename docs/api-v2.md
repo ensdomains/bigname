@@ -80,6 +80,9 @@ step-3-gate vocabulary needed by the route schemas:
 | `wrapper_state` | bigname's current ENSv1 NameWrapper lifecycle value: [`wrapped`](glossary.md#wrapped-namewrapper-state), [`emancipated`](glossary.md#emancipated-namewrapper-state), or [`locked`](glossary.md#locked-namewrapper-state); omitted when the current name is not in one of those states | raw NameWrapper fuse bitmap |
 | `wrapper_fuses` | typed summary of the current [expiry-effective NameWrapper fuse word](glossary.md#expiry-effective-namewrapper-fuse-word); present exactly when `wrapper_state` is present | raw NameWrapper fuse bitmap |
 | `fuses` | uint32 fuse word nested in `wrapper_fuses`; it is zero after wrapper expiry even though normalized events retain their expiry-unadjusted interpreted word | raw NameWrapper fuse bitmap |
+| `restrictions` | the [resource restrictions](glossary.md#resource-restrictions) of a registration, constraints that bind the registration itself rather than any one account: `{registration_id, kind, ...}` where `kind` is `ens_v1_wrapper` (with `wrapper_state`, `wrapper_fuses`, `wrapper_expires_at`) or `ens_v2_registry` (with `locked_roles`); see [resource restrictions](#resource-restrictions) | new in v2 |
+| `wrapper_expires_at` | RFC 3339 NameWrapper entry expiry inside an `ens_v1_wrapper` `restrictions` object; for a wrapped `.eth` second-level name it is the registrar expiry plus the 90-day grace period NameWrapper stores, so it is later than that name's `expires_at` | `expiry` on NameWrapper events |
+| `locked_roles` | inside an `ens_v2_registry` `restrictions` object: the token-scoped registry roles whose assignment can no longer change because no account holds the corresponding admin role on the registration or its registry root | new in v2 |
 | `authority` | the protocol arm that supplies the row's current registration and control fields: `ens_v1` or `ens_v2` (the selected [authority epoch](glossary.md#authority-epoch) arm). Omitted when the projection selected no ENSv1/ENSv2 arm — Basenames names have no era split, and an `unsupported` name detail object carries no registration fields | new in v2; the zigens `Domain.protocol` / `isMigrated` concept |
 | `migrated_at` | RFC 3339 block time of the activated `MigrationApplied` [migration boundary](glossary.md#migration-boundary) that proved the row's current `ens_v2` authority through an ENSv1→ENSv2 [migration authority transition](glossary.md#migration-authority-transition). Present only with `authority=ens_v2`; a name registered directly in ENSv2, or one still on `ens_v1`, omits it | new in v2 |
 | `primary_name` | primary name selected or claimed for an address/coin tuple | `claimed_primary_name`, `verified_primary_name` when surfaced as the selected name |
@@ -173,9 +176,20 @@ projection-owned per-resource permission summary. For a resource-bound
 `GET /v1/permissions` read, a non-wrapper summary whose standard operator,
 token-approval, or resolver-delegation paths are not fully served produces
 `meta.completeness=partial` with
-`approval_and_delegation_permissions_not_supported`. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) An ENSv1 wrapper-only
-summary instead produces `meta.completeness=unsupported` with
-`wrapper_holder_permissions_not_supported`. A missing or unrecognized summary
+`approval_and_delegation_permissions_not_supported`. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) An ENSv1 NameWrapper
+registration instead produces `meta.completeness=partial` with
+`parent_and_resolver_delegation_permissions_not_supported`: its token holder,
+the owner-wide operators that holder approved, and its per-token approved
+delegate are projected rows, while the parent name's control over a
+non-emancipated wrapped subname and resolver operator/delegate approvals are
+not enumerated as rows. The NameWrapper contract's `Ownable` owner is a
+deployment-wide administrator (it sets the upgrade contract and metadata
+service), not a per-registration permission, and is never a row.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565-L589 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L162 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L186 @ ens_v1@91c966f)
+A missing or unrecognized summary
 produces `meta.completeness=partial` with `permission_support_unknown`, which
 takes precedence over both known limitations.
 
@@ -208,8 +222,9 @@ serve known permission rows that apply to each resource, but those rows and the
 derived role summaries are not authoritative enumerations while the coverage
 described above remains partial. Zero returned rows therefore
 do not prove that no account can mutate the selected name or registration.
-NameWrapper holder enumeration remains a separate known unsupported class, and
-ENSv2 registry operator approval remains separately narrowed until indexed.
+NameWrapper holders, operators, and per-token delegates are projected rows;
+parent control of non-emancipated wrapped subnames and ENSv2 registry operator
+approval remain separately narrowed until indexed.
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
 
 `wrapper_fuses` has one stable shape on name detail, resolver `bound_names`,
@@ -248,18 +263,75 @@ permission rows does not make zero-row permission enumeration complete, so the
 `meta.completeness` and unsupported-reason rules above still apply.
 
 During `.eth` registrar grace, bigname keeps the existing approve-only policy
-interpretation for projected wrapper-holder powers: it removes owner
-modification and transfer powers except `approve` and `approve_wrapper`, then
-still applies `CANNOT_APPROVE`. Upstream's `canModifyName` rejects owner/operator
-modification during grace, while per-token `approve` routes through the
-ERC-1155-fuse owner/operator authorization path rather than that helper. This
-approve exception is bigname policy, not an upstream lifecycle state.
+interpretation for projected wrapper holder and operator powers: it removes
+owner modification and transfer powers except `approve` and `approve_wrapper`,
+then still applies `CANNOT_APPROVE`. Upstream's `canModifyName` rejects
+owner/operator modification during grace, while per-token `approve` routes
+through the ERC-1155-fuse owner/operator authorization path rather than that
+helper. This approve exception is bigname policy, not an upstream lifecycle
+state. The approved delegate's `extend_subname_expiry` is removed in grace as
+well, because `canExtendSubnames` applies the same grace check.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L222 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L228-L238 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L37 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L47 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L127 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L135 @ ens_v1@91c966f)
+
+### Resource restrictions
+
+`restrictions` describes the [resource restrictions](glossary.md#resource-restrictions)
+of a registration: constraints that bind the registration itself rather than
+any one account. `GET /v1/permissions` returns it once at the envelope's
+top level for a resource-bound read (`name` or `registration_id`), and
+`GET /v1/addresses/{address}/names?include=role_summary` returns it on each row
+next to `role_summary`. It is omitted when the registration has no
+resource-level constraint model (ENSv1 registrar- and registry-held names,
+Basenames), when a NameWrapper position has expired with a cleared owner, and
+once `NameUnwrapped` has closed the wrapper authority epoch: an explicit
+`registration_id` read of an unwrapped token returns no wrapper block, matching
+the sibling `wrapper_state` field, which appears only for a current NameWrapper
+registration.
+Name detail keeps `wrapper_state` and `wrapper_fuses` unchanged; `restrictions`
+adds to them and does not replace them.
+
+```json
+{
+  "registration_id": "…",
+  "kind": "ens_v1_wrapper",
+  "wrapper_state": "locked",
+  "wrapper_fuses": { "fuses": 196609, "cannot_unwrap": true, "…": "…" },
+  "wrapper_expires_at": "2027-03-01T00:00:00Z"
+}
+```
+
+- `kind=ens_v1_wrapper`: `wrapper_state` and `wrapper_fuses` use the same
+  atomic, [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word)
+  contract as name detail; a burnt fuse removes the matching power from every
+  holder, operator, and delegate row of the registration. `wrapper_expires_at`
+  is the NameWrapper entry expiry. For a wrapped `.eth` second-level name it is
+  the registrar expiry plus `GRACE_PERIOD`, and the holder's modification
+  powers already stop at the earlier grace boundary.
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L268-L277 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1082-L1089 @ ens_v1@91c966f)
+- `kind=ens_v2_registry`: `locked_roles` lists the token-scoped registry roles
+  `unregister`, `renew`, `set_subregistry`, `set_resolver`, and `transfer`
+  whose assignment can no longer change. A role is granted or revoked on a
+  registration only by an account whose admin roles, held on that registration
+  or on the registry root, cover it; on a registration the settable roles are
+  the held admin roles shifted down to their regular counterparts, so an admin
+  role cannot be re-granted once every holder has revoked it, and
+  `ROLE_CAN_TRANSFER_ADMIN`, checked only on the token owner, has no lower
+  role at all. `locked_roles` is therefore the set of those roles whose admin
+  counterpart (`can_transfer_admin` for `transfer`) no current permission row on
+  the registration or its root carries; whether the role itself is still held
+  is read from the rows. An empty list means every one of them can still change.
+  (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L418-L424 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L453-L455 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/access-control/libraries/EACBaseRolesLib.sol:L31-L34 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L560-L572 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L24-L45 @ ens_v2@a971bd64)
 
 ### Permission powers vocabulary
 
@@ -273,18 +345,37 @@ them.
 
 - **ENSv1 and Basenames projected control** (adapters
   `crates/adapters/src/schema_v2/protocol/v1/*`, projection
-  `crates/project/src/builders/permissions.rs`). These are the only two powers
-  today's interpreters emit for ENSv1 and Basenames names. Storage spells the
+  `crates/project/src/builders/permissions.rs`). Registrar- and registry-held
+  ENSv1 and Basenames names receive only these two powers. Storage spells the
   first `resource_control`; the API renames it `registration_control`.
 - **ENSv1 NameWrapper fuse vocabulary** (projection mask in
   `crates/project/src/builders/permissions.rs`). The projection recognises
   these names and removes each one from a wrapped name's effective powers when
   the corresponding NameWrapper fuse is burnt, evaluated with the
   [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) fuse
-  word. No current interpreter emits them, so they appear in served rows only
-  if a future interpreter grants them; they are documented so the mask's
-  meaning is fixed now.
+  word. The NameWrapper interpreter
+  (`crates/adapters/src/schema_v2/protocol/v1/wrapper/permissions.rs`, constant
+  `WRAPPER_HOLDER_POWERS`) grants the token holder `registration_control`,
+  `set_resolver`, `set_ttl`, `create_subnames`, `transfer`, `unwrap`,
+  `burn_fuses`, `approve`, `extend_subname_expiry`, and `extend_expiry` on the
+  registration and `resolver_control` on the linked resolver, because the
+  holder and any owner-wide operator pass `canModifyName`, the ERC-1155-fuse
+  approve and transfer checks, and `canExtendSubnames`; Project copies the
+  holder's masked set to each operator, and the per-token approved delegate
+  receives `extend_subname_expiry` alone, the only check that consults
+  `getApproved`. Two of the holder powers are gated on a fuse being burnt rather
+  than unburnt: `burn_fuses` requires `PARENT_CANNOT_CONTROL`, because
+  `_canFusesBeBurned` rejects every owner-controlled burn until the parent has
+  emancipated the name and the holder cannot burn that parent-controlled bit
+  itself, and `extend_expiry` requires `CAN_EXTEND_EXPIRY`.
+  The alias spellings stay recognised by the mask but no interpreter emits them.
   (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10-L16 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214-L238 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L421-L437 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L443-L470 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058-L1068 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L37-L47 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L137-L150 @ ens_v1@91c966f)
 - **ENSv2 role bitmaps** (adapters
   `crates/adapters/src/schema_v2/protocol/permissions.rs` and
   `v2_record_resolver/permissions.rs`). `EACRolesChanged` bitmaps are decoded
@@ -308,9 +399,11 @@ them.
 | `transfer` | wrapper mask | Removed under `CANNOT_TRANSFER` (4). |
 | `transfer_name` | wrapper mask | Alias of `transfer`; removed under `CANNOT_TRANSFER` (4). |
 | `unwrap` | wrapper mask | Removed under `CANNOT_UNWRAP` (1). |
-| `burn_fuses` | wrapper mask | Removed under `CANNOT_BURN_FUSES` (2). |
+| `burn_fuses` | wrapper mask | Removed under `CANNOT_BURN_FUSES` (2) and whenever `PARENT_CANNOT_CONTROL` (65536) is not burnt: `setFuses` routes through `_canFusesBeBurned`, which rejects any owner-controlled burn unless both `PARENT_CANNOT_CONTROL` and `CANNOT_UNWRAP` are set, and the holder cannot burn the parent-controlled bit, so on a `wrapped` name every non-zero `setFuses` reverts; once the parent has burnt `PARENT_CANNOT_CONTROL` the holder may burn `CANNOT_UNWRAP` together with other fuses. |
 | `approve` | wrapper mask | Removed under `CANNOT_APPROVE` (64); retained during `.eth` registrar grace (policy, see above). |
 | `approve_wrapper` | wrapper mask | Removed under `CANNOT_APPROVE` (64); retained during `.eth` registrar grace (policy, see above). |
+| `extend_subname_expiry` | ENSv1 NameWrapper | Held by the holder, each operator, and the per-token approved delegate: may extend a wrapped subname's expiry up to the parent's own expiry (`canExtendSubnames`). No fuse removes it; the `.eth` registrar grace boundary does. |
+| `extend_expiry` | ENSv1 NameWrapper; wrapper mask | Held by the holder and each operator only while `CAN_EXTEND_EXPIRY` (262144) is burnt: `extendExpiry` lets the name's own controller (`canModifyName`) extend the name's expiry up to the parent's expiry. Removed while the fuse is unburnt and during `.eth` registrar grace. |
 | `registrar` | ENSv2 registry | `ROLE_REGISTRAR` (bit 0): may register names. |
 | `register_reserved` | ENSv2 registry | `ROLE_REGISTER_RESERVED` (bit 4). |
 | `set_parent` | ENSv2 registry | `ROLE_SET_PARENT` (bit 8). |

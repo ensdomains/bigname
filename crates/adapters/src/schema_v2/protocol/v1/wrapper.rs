@@ -3,10 +3,7 @@ use alloy_sol_types::sol;
 use anyhow::bail;
 use serde_json::json;
 
-use super::super::{
-    EventDraft, Interpreted, NameDraft, ResourceDraft, ShadowNameDraft, ensure_declared,
-    permissions::{v1_grant_states, v1_revoke_states},
-};
+use super::super::{Interpreted, NameDraft, ResourceDraft, ShadowNameDraft, ensure_declared};
 use super::registry::{append_authority_transition, authority_kind};
 use super::support::{events_linked, single_event};
 use crate::evm_abi::{address_hex, decode_event_log, hex_string, u256_word_hex};
@@ -26,7 +23,12 @@ sol! {
     event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values);
 }
 
+mod permissions;
+use permissions::append_holder_permissions;
+pub(in crate::schema_v2) use permissions::{WrapperPermissionContext, append_delegate_permission};
+
 const CANNOT_UNWRAP: u32 = 1;
+const CANNOT_APPROVE: u32 = 64;
 const PARENT_CANNOT_CONTROL: u32 = 1 << 16;
 
 fn wrapper_state(fuses: u32) -> &'static str {
@@ -183,12 +185,30 @@ fn transfer_item(
     value: U256,
     identity_suffix: String,
 ) -> Interpreted {
-    if value != U256::from(1) || from == Address::ZERO || to == Address::ZERO {
+    if value != U256::from(1) || from == Address::ZERO {
         return Interpreted::new();
     }
     let namehash = u256_word_hex(id);
+    let namespace = &selected.source.namespace;
+    let source_event_kind = identity_suffix
+        .split(':')
+        .next()
+        .unwrap_or("TransferSingle")
+        .to_owned();
+    let wrapper = raw.emitting_address.to_ascii_lowercase();
+    if to == Address::ZERO {
+        return burn(
+            selected,
+            raw,
+            state,
+            &namehash,
+            wrapper,
+            &source_event_kind,
+            &identity_suffix,
+        );
+    }
     let Some((before, linked)) = state.transfer_v1_wrapper_owner(
-        &selected.source.namespace,
+        namespace,
         &namehash,
         &selected.source.source_family,
         address_hex(to),
@@ -210,76 +230,73 @@ fn transfer_item(
     );
     output.events[0].explicit_before = Some(json!({"from": address_hex(from)}));
     output.events[0].identity_suffix = format!("{identity_suffix}:{namehash}");
-    append_transfer_permissions(
-        &mut output,
-        &before,
-        &linked,
-        state.v1_resolver(&selected.source.namespace, &namehash),
-        &raw.chain_id,
-        &identity_suffix,
-    );
+    let context = WrapperPermissionContext {
+        name: &linked,
+        resolver: state.v1_resolver(namespace, &namehash),
+        chain_id: &raw.chain_id,
+        wrapper,
+        source_event_kind: &source_event_kind,
+        identity_suffix: &identity_suffix,
+    };
+    if let (Some(from_owner), Some(to_owner)) = (before.owner.as_deref(), linked.owner.as_deref())
+        && !from_owner.eq_ignore_ascii_case(to_owner)
+    {
+        append_holder_permissions(&mut output, &context, from_owner, false);
+        append_holder_permissions(&mut output, &context, to_owner, true);
+    }
+    // `_beforeTransfer` deletes the token approval unless CANNOT_APPROVE is burnt, judged on the
+    // expiry-cleared fuse word. The revocation is emitted even when the delegate is the recipient,
+    // so a restore that rebuilt the delegate from these rows replays identically.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L837-L840 @ ens_v1@91c966f)
+    let fuses = state
+        .v1_wrapper_effective_fuses(namespace, &namehash, raw.block_timestamp.unix_timestamp())
+        .unwrap_or(0);
+    if fuses & CANNOT_APPROVE == 0
+        && let Some(delegate) = state.set_v1_wrapper_delegate(namespace, &namehash, None)
+    {
+        append_delegate_permission(&mut output, &context, &delegate, false);
+    }
     output
 }
 
-fn append_transfer_permissions(
-    output: &mut Interpreted,
-    before: &crate::schema_v2::state::V1NameState,
-    after: &crate::schema_v2::state::V1NameState,
-    resolver: Option<String>,
-    chain_id: &str,
+// Every burn clears the token approval, and every burn except the un-admitted upgrade path is
+// followed by NameUnwrapped; revoking here keeps an upgraded name from retaining a live holder,
+// and the recorded burn keeps the following NameUnwrapped from revoking the holder twice.
+// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L278 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L483-L509 @ ens_v1@91c966f)
+fn burn(
+    selected: &Selected,
+    raw: &RawLogInput,
+    state: &mut State,
+    namehash: &str,
+    wrapper: String,
+    source_event_kind: &str,
     identity_suffix: &str,
-) {
-    let (Some(from), Some(to), Some(authority_key)) = (
-        before.owner.as_deref(),
-        after.owner.as_deref(),
-        after.authority_key.as_deref(),
-    ) else {
-        return;
+) -> Interpreted {
+    let mut output = Interpreted::new();
+    let namespace = &selected.source.namespace;
+    let Some(name) = state
+        .v1_name(namespace, namehash)
+        .filter(|name| name.authority_source_family == selected.source.source_family)
+    else {
+        return output;
     };
-    if from.eq_ignore_ascii_case(to) {
-        return;
+    let context = WrapperPermissionContext {
+        name: &name,
+        resolver: state.v1_resolver(namespace, namehash),
+        chain_id: &raw.chain_id,
+        wrapper,
+        source_event_kind,
+        identity_suffix,
+    };
+    if let Some(owner) = name.owner.as_deref() {
+        append_holder_permissions(&mut output, &context, owner, false);
+        state.set_v1_wrapper_burnt(namespace, namehash, true);
     }
-    let mut scopes = vec![(json!({"kind":"resource"}), "resource_control")];
-    if let Some(resolver) = resolver {
-        scopes.push((
-            json!({"kind":"resolver","chain_id":chain_id,"resolver_address":resolver}),
-            "resolver_control",
-        ));
+    if let Some(delegate) = state.set_v1_wrapper_delegate(namespace, namehash, None) {
+        append_delegate_permission(&mut output, &context, &delegate, false);
     }
-    for (index, (scope, power)) in scopes.into_iter().enumerate() {
-        for (grant, subject, action) in [(false, from, "revoke"), (true, to, "grant")] {
-            let (before_state, after_state) = if grant {
-                v1_grant_states(
-                    subject,
-                    scope.clone(),
-                    power,
-                    "wrapper",
-                    authority_key,
-                    "TokenControlTransferred",
-                )
-            } else {
-                v1_revoke_states(
-                    subject,
-                    scope.clone(),
-                    power,
-                    "wrapper",
-                    authority_key,
-                    "TokenControlTransferred",
-                )
-            };
-            output.events.push(EventDraft {
-                event_kind: "PermissionChanged".to_owned(),
-                logical_name_id: Some(after.logical_name_id.clone()),
-                resource_id: Some(after.resource_id),
-                identity_suffix: format!(
-                    "PermissionChanged:{identity_suffix}:{index}:{action}:{subject}"
-                ),
-                explicit_before: Some(before_state),
-                after_state,
-                state_scope: String::new(),
-            });
-        }
-    }
+    output
 }
 
 fn name_wrapped(
@@ -304,6 +321,10 @@ fn name_wrapped(
     let token_lineage_id = stable_uuid(&format!("token-lineage:{authority_key}"));
     let logical_name_id = format!("{}:{raw_namehash}", selected.source.namespace);
     let previous = state.v1_name(&selected.source.namespace, &raw_namehash);
+    // A freshly minted token carries no approval: `_burn` cleared any earlier one.
+    // (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L275 @ ens_v1@91c966f)
+    state.set_v1_wrapper_delegate(&selected.source.namespace, &raw_namehash, None);
+    state.set_v1_wrapper_burnt(&selected.source.namespace, &raw_namehash, false);
     let wrapper_data = state.wrap_v1_name(
         &selected.source.namespace,
         &raw_namehash,
@@ -375,6 +396,17 @@ fn name_wrapped(
         state.v1_resolver_link(&selected.source.namespace, &raw_namehash),
         None,
     );
+    if let Some(name) = state.v1_name(&selected.source.namespace, &raw_namehash) {
+        let context = WrapperPermissionContext {
+            name: &name,
+            resolver: state.v1_resolver(&selected.source.namespace, &raw_namehash),
+            chain_id: &raw.chain_id,
+            wrapper: raw.emitting_address.to_ascii_lowercase(),
+            source_event_kind: "NameWrapped",
+            identity_suffix: "NameWrapped",
+        };
+        append_holder_permissions(&mut output, &context, &address_hex(event.owner), true);
+    }
     if let Some(labels) = labels {
         output.names.push(NameDraft {
             labels,
@@ -417,6 +449,10 @@ fn name_unwrapped(
     )?;
     ensure_declared(selected, &["SurfaceUnbound"])?;
     let namehash = hex_string(event.node);
+    let wrapper_resolver = state.v1_resolver(&selected.source.namespace, &namehash);
+    let delegate = state.set_v1_wrapper_delegate(&selected.source.namespace, &namehash, None);
+    let holder_revoked_by_burn =
+        state.set_v1_wrapper_burnt(&selected.source.namespace, &namehash, false);
     state.note_v1_unwrap(
         &selected.source.namespace,
         &namehash,
@@ -454,5 +490,26 @@ fn name_unwrapped(
         resolver,
         None,
     );
+    if let Some(name) = linked
+        .as_ref()
+        .filter(|name| name.authority_source_family == selected.source.source_family)
+    {
+        let context = WrapperPermissionContext {
+            name,
+            resolver: wrapper_resolver,
+            chain_id: &raw.chain_id,
+            wrapper: raw.emitting_address.to_ascii_lowercase(),
+            source_event_kind: "NameUnwrapped",
+            identity_suffix: "NameUnwrapped",
+        };
+        if let Some(owner) = name.owner.as_deref()
+            && !holder_revoked_by_burn
+        {
+            append_holder_permissions(&mut output, &context, owner, false);
+        }
+        if let Some(delegate) = delegate {
+            append_delegate_permission(&mut output, &context, &delegate, false);
+        }
+    }
     Ok(output)
 }

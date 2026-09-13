@@ -248,7 +248,7 @@ pub(super) fn interpret(
     state: &mut State,
     registrar_context: super::migration::RegistrarContext,
 ) -> anyhow::Result<Interpreted> {
-    if let Some(output) = standard_approvals::interpret(selected, raw)? {
+    if let Some(output) = standard_approvals::interpret(selected, raw, state)? {
         return Ok(output);
     }
     let mut output = if v2_resolver::is_public_node_event(selected) {

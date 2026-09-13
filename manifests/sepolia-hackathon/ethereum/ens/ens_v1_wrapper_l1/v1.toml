@@ -25,7 +25,7 @@ start_block = 11626586
 name = "NameWrapped"
 fragment = "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)"
 emitter_roles = [ "name_wrapper" ]
-normalized_events = [ "TokenControlTransferred", "ExpiryChanged", "PermissionScopeChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved" ]
+normalized_events = [ "TokenControlTransferred", "ExpiryChanged", "PermissionScopeChanged", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved" ]
 
 # (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L35 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L37 @ ens_v1@91c966f)
@@ -36,7 +36,7 @@ normalized_events = [ "TokenControlTransferred", "ExpiryChanged", "PermissionSco
 name = "NameUnwrapped"
 fragment = "event NameUnwrapped(bytes32 indexed node, address owner)"
 emitter_roles = [ "name_wrapper" ]
-normalized_events = [ "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged" ]
+normalized_events = [ "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PermissionChanged" ]
 
 [[abi.events]]
 name = "FusesSet"

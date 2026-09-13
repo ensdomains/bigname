@@ -346,9 +346,11 @@ names alike, whether the name is registry-, registrar-, or NameWrapper-held.
 
 the adapter-owned derivation path for declaration-backed Ethereum approval
 events whose manifests deliberately leave `normalized_events` empty. In the
-current scope it emits `AccountPermissionChanged` only for admitted ENSv1 and
-Basenames registry `ApprovalForAll` logs; declared registrar, resolver, and
-NameWrapper approvals still decode without normalized output.
+current scope it emits `AccountPermissionChanged` for admitted ENSv1 and
+Basenames registry `ApprovalForAll` logs and for NameWrapper `ApprovalForAll`
+logs, and a resource-scoped `PermissionChanged` for the NameWrapper per-token
+`Approval`; declared registrar and resolver approvals still decode without
+normalized output.
 
 ## Discovery graph / discovery edge
 
@@ -570,6 +572,27 @@ normalized value.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L153 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L856 @ ens_v1@91c966f)
+
+## Resource restrictions
+
+bigname's name for the constraints that bind a registration itself rather than
+any one account's permission row: served as `restrictions` on
+`GET /v1/permissions` (resource-bound reads) and on
+`GET /v1/addresses/{address}/names?include=role_summary` rows, and stored as
+the Project-owned `permissions_current_resource_summary.resource_restrictions`
+column. For a current ENSv1 NameWrapper registration it is the lifecycle label,
+the [expiry-effective fuse word](#expiry-effective-namewrapper-fuse-word), and
+the entry expiry; for an ENSv2 registration it is `locked_roles`, the
+token-scoped registry roles whose assignment can no longer change because no
+current row on the registration or its registry root holds the matching admin
+role. It is absent for registrations without a resource-level constraint model
+(ENSv1 registrar- and registry-held names, Basenames), for an expired
+emancipated or locked NameWrapper position, and after `NameUnwrapped`. Field
+shapes are in [api-v2.md](api-v2.md#resource-restrictions); the derivation is in
+[projections.md](projections.md#permissions).
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058-L1068 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L418-L424 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L560-L572 @ ens_v2@a971bd64)
 
 ## ENSv1→ENSv2 migration
 

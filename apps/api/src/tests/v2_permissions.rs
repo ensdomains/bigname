@@ -779,11 +779,116 @@ async fn v2_permissions_empty_resource_fails_closed_from_typed_support_summary()
     .await?;
     let wrapper = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(wrapper["data"], json!([]));
-    assert_eq!(wrapper["meta"]["completeness"], json!("unsupported"));
+    assert_eq!(wrapper["meta"]["completeness"], json!("partial"));
     assert_eq!(
         wrapper["meta"]["unsupported_reason"],
-        json!("wrapper_holder_permissions_not_supported")
+        json!("parent_and_resolver_delegation_permissions_not_supported")
     );
+    assert!(wrapper.get("restrictions").is_none());
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_permissions_resource_bound_read_serves_wrapper_restrictions() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let resource_id = v2_permissions_current_resource_id();
+    let mut summary = permission_current_resource_summary(resource_id, Some("wrapper"));
+    summary.resource_restrictions = Some(json!({
+        "kind": "ens_v1_wrapper",
+        "wrapper_state": "locked",
+        "fuses": 196_609,
+        "expiry_seconds": 1_800_000_000,
+    }));
+    upsert_phase_permissions_current_resource_summary(&database.pool, &summary).await?;
+
+    let registration = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={resource_id}"),
+    )
+    .await?;
+    assert_eq!(
+        registration["restrictions"],
+        json!({
+            "kind": "ens_v1_wrapper",
+            "registration_id": resource_id.to_string(),
+            "wrapper_state": "locked",
+            "wrapper_fuses": {
+                "fuses": 196_609,
+                "cannot_unwrap": true,
+                "cannot_burn_fuses": false,
+                "cannot_transfer": false,
+                "cannot_set_resolver": false,
+                "cannot_set_ttl": false,
+                "cannot_create_subdomain": false,
+                "cannot_approve": false,
+                "parent_cannot_control": true,
+                "is_dot_eth": true,
+                "can_extend_expiry": false,
+            },
+            "wrapper_expires_at": "2027-01-15T08:00:00Z",
+        })
+    );
+    assert_eq!(registration["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        registration["meta"]["unsupported_reason"],
+        json!("parent_and_resolver_delegation_permissions_not_supported")
+    );
+
+    let by_name =
+        v2_permissions_payload_for_database(&database, "/v1/permissions?name=perms.eth").await?;
+    assert_eq!(by_name["restrictions"]["kind"], json!("ens_v1_wrapper"));
+
+    let address_only = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?address={V2_PERMISSIONS_SUBJECT}&page_size=10"),
+    )
+    .await?;
+    assert!(address_only.get("restrictions").is_none());
+    assert!(!address_only["data"].as_array().expect("rows").is_empty());
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_permissions_resource_bound_read_serves_registry_locked_roles() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let resource_id = v2_permissions_current_resource_id();
+    let mut summary = permission_current_resource_summary(resource_id, Some("ens_v2_registry"));
+    summary.resource_restrictions = Some(json!({
+        "kind": "ens_v2_registry",
+        "locked_roles": ["renew", "transfer"],
+    }));
+    upsert_phase_permissions_current_resource_summary(&database.pool, &summary).await?;
+
+    let payload = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={resource_id}"),
+    )
+    .await?;
+    assert_eq!(
+        payload["restrictions"],
+        json!({
+            "kind": "ens_v2_registry",
+            "registration_id": resource_id.to_string(),
+            "locked_roles": ["renew", "transfer"],
+        })
+    );
+    assert_eq!(
+        payload["meta"]["unsupported_reason"],
+        json!("approval_and_delegation_permissions_not_supported")
+    );
+
+    summary.resource_restrictions = None;
+    upsert_phase_permissions_current_resource_summary(&database.pool, &summary).await?;
+    let unrestricted = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={resource_id}"),
+    )
+    .await?;
+    assert!(unrestricted.get("restrictions").is_none());
 
     database.cleanup().await
 }

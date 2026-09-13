@@ -488,8 +488,10 @@ pub(super) async fn build(
                CASE
                    WHEN selected.relation = 'effective_controller'
                        AND summary.support_status = 'unsupported'
-                       AND summary.unsupported_reason =
-                           'operator_approval_surfaces_not_ingested'
+                       AND summary.unsupported_reason IN (
+                           'operator_approval_surfaces_not_ingested',
+                           'wrapper_parent_and_resolver_delegation_not_projected'
+                       )
                        THEN 'supported'
                    WHEN selected.relation = 'effective_controller'
                        THEN summary.support_status
@@ -498,8 +500,10 @@ pub(super) async fn build(
                CASE
                    WHEN selected.relation = 'effective_controller'
                        AND summary.support_status = 'unsupported'
-                       AND summary.unsupported_reason =
-                           'operator_approval_surfaces_not_ingested'
+                       AND summary.unsupported_reason IN (
+                           'operator_approval_surfaces_not_ingested',
+                           'wrapper_parent_and_resolver_delegation_not_projected'
+                       )
                        THEN NULL
                    WHEN selected.relation = 'effective_controller'
                        THEN summary.unsupported_reason

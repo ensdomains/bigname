@@ -216,6 +216,7 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
     }
     v1_registry::restore_migration_marker(state, event);
     v1_surface::restore_preimage(state, event);
+    restore_wrapper_delegate(state, event);
     if matches!(source_event, Some("NewOwner" | "Transfer"))
         && let Some(namehash) = event
             .after_state
@@ -477,11 +478,13 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
                     .and_then(Value::as_str)
                     .map(str::to_owned),
             );
+            state.set_v1_wrapper_delegate(&event.namespace, namehash, None);
         }
         Some("NameUnwrapped") => {
             let Some(namehash) = event.after_state.get("node").and_then(Value::as_str) else {
                 return;
             };
+            state.set_v1_wrapper_burnt(&event.namespace, namehash, false);
             state.release_v1_name(&event.namespace, namehash);
             if event.after_state.get("reactivated_resource_id").is_some() {
                 let at = event
@@ -496,4 +499,61 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
     }
 
     v1_transfer::restore(state, event);
+}
+
+// The wrapper interpreter records the per-token delegate as `relation_kind=token_approval`
+// permission rows, including the event-less clears it derives on transfer and burn, and it
+// records an ERC-1155 burn as a `relation_kind=holder` revocation whose subject is still the
+// linked owner (a plain transfer restores the new owner from `TokenControlTransferred` first).
+fn restore_wrapper_delegate(state: &mut State, event: &PriorEventInput) {
+    if event.event_kind != "PermissionChanged" || event.source_family != "ens_v1_wrapper_l1" {
+        return;
+    }
+    let source = event
+        .after_state
+        .get("grant_source")
+        .filter(|source| source.get("relation_kind").is_some())
+        .or_else(|| event.after_state.get("revocation_source"));
+    let Some(source) = source.filter(|source| {
+        matches!(
+            source.get("relation_kind").and_then(Value::as_str),
+            Some("token_approval" | "holder")
+        )
+    }) else {
+        return;
+    };
+    let (Some(node), Some(subject)) = (
+        source.get("node").and_then(Value::as_str),
+        event.after_state.get("subject").and_then(Value::as_str),
+    ) else {
+        return;
+    };
+    let granted = event
+        .after_state
+        .get("effective_powers")
+        .and_then(Value::as_array)
+        .is_some_and(|powers| !powers.is_empty());
+    if source.get("relation_kind").and_then(Value::as_str) == Some("holder") {
+        let burnt = !granted
+            && matches!(
+                source.get("source_event_kind").and_then(Value::as_str),
+                Some("TransferSingle" | "TransferBatch")
+            )
+            && state
+                .v1_name(&event.namespace, node)
+                .and_then(|name| name.owner)
+                .is_some_and(|owner| owner.eq_ignore_ascii_case(subject));
+        if burnt {
+            state.set_v1_wrapper_burnt(&event.namespace, node, true);
+        }
+        return;
+    }
+    if granted {
+        state.set_v1_wrapper_delegate(&event.namespace, node, Some(subject.to_owned()));
+    } else if state
+        .v1_wrapper_delegate(&event.namespace, node)
+        .is_some_and(|delegate| delegate.eq_ignore_ascii_case(subject))
+    {
+        state.set_v1_wrapper_delegate(&event.namespace, node, None);
+    }
 }

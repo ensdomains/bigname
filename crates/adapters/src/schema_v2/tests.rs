@@ -17,6 +17,9 @@ mod resolver_announcements;
 #[path = "tests/v1_pre_surface_resolver.rs"]
 mod v1_pre_surface_resolver;
 
+#[path = "tests/wrapper_permissions.rs"]
+mod wrapper_permissions;
+
 const CHAIN: &str = "adapter-test";
 const CONTRACT: &str = "0x0000000000000000000000000000000000000042";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
