@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result, bail};
 use bigname_domain::vocabulary::parse_alloy_evm_address;
 
@@ -5,28 +7,40 @@ use crate::{ENSV1_MIRROR_REGISTRY_CORRELATION_KEY, ENSV1_MIRROR_RESOLVER_ROLE, L
 
 /// A declared ENSv1 mirror resolver is an exact `ens_v2_resolver_l1` instance that reads one
 /// ENSv1 registry; the manifest names that registry so the loader can hold it to the active
-/// `ens_v1_registry_l1` declaration Project serves the mirrored records from.
+/// `ens_v1_registry_l1` declaration Project serves the mirrored records from. A family may declare
+/// several mirror instances; every one is validated and they share the family's correlation.
 pub(super) fn validate_mirror_declarations(manifests: &[LoadedManifest]) -> Result<()> {
     for loaded in manifests {
         let manifest = &loaded.manifest;
-        let Some(mirror) = manifest
+        let mirrors: Vec<_> = manifest
             .contracts
             .iter()
-            .find(|contract| contract.role == ENSV1_MIRROR_RESOLVER_ROLE)
-        else {
+            .filter(|contract| contract.role == ENSV1_MIRROR_RESOLVER_ROLE)
+            .collect();
+        if mirrors.is_empty() {
             continue;
-        };
+        }
         if manifest.source_family != "ens_v2_resolver_l1" {
             bail!(
                 "manifest {} declares {ENSV1_MIRROR_RESOLVER_ROLE} outside ens_v2_resolver_l1",
                 loaded.relative_path.display(),
             );
         }
-        if mirror.proxy_kind != "none" || !mirror.read_features.is_empty() {
-            bail!(
-                "manifest {} must declare {ENSV1_MIRROR_RESOLVER_ROLE} with proxy_kind = \"none\" and no read_features; the mirror stores no records and its getter behavior belongs to the mirrored ENSv1 resolver",
-                loaded.relative_path.display(),
-            );
+        let mut addresses = BTreeSet::new();
+        for mirror in &mirrors {
+            if mirror.proxy_kind != "none" || !mirror.read_features.is_empty() {
+                bail!(
+                    "manifest {} must declare {ENSV1_MIRROR_RESOLVER_ROLE} with proxy_kind = \"none\" and no read_features; the mirror stores no records and its getter behavior belongs to the mirrored ENSv1 resolver",
+                    loaded.relative_path.display(),
+                );
+            }
+            if !addresses.insert(mirror.address.to_ascii_lowercase()) {
+                bail!(
+                    "manifest {} declares {ENSV1_MIRROR_RESOLVER_ROLE} address {} more than once",
+                    loaded.relative_path.display(),
+                    mirror.address.to_ascii_lowercase(),
+                );
+            }
         }
         let correlation_address = manifest
             .correlation_addresses

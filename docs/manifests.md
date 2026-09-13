@@ -50,7 +50,7 @@ Each manifest contains:
 - `contracts`
 - `discovery_rules`
 
-For one `(namespace, source_family, chain)` tuple in a selected deployment-profile root, at most one manifest version may declare `rollout_status = "active"`. Zero active versions remains valid for a family whose versions are only `draft`, `shadow`, or `deprecated`. Each `(namespace, source_family, chain, deployment_epoch, manifest_version)` tuple may come from only one file; the loader rejects duplicate tuples across repository layouts regardless of rollout status. Within one manifest version, every `[[contracts]].role` must be unique. The loader rejects these violations before repository sync.
+For one `(namespace, source_family, chain)` tuple in a selected deployment-profile root, at most one manifest version may declare `rollout_status = "active"`. Zero active versions remains valid for a family whose versions are only `draft`, `shadow`, or `deprecated`. Each `(namespace, source_family, chain, deployment_epoch, manifest_version)` tuple may come from only one file; the loader rejects duplicate tuples across repository layouts regardless of rollout status. Within one manifest version, every `[[contracts]].role` must be unique, except the instance role `ensv1_mirror_resolver`, which may repeat with distinct addresses (see [ENSv1 mirror resolver declarations](#ensv1-mirror-resolver-declarations)). The loader rejects these violations before repository sync.
 
 Every active `ens_v2_migration_l1` manifest requires both
 `correlation_addresses.ens_v1_name_wrapper` and
@@ -497,12 +497,13 @@ is not a claim of setter, reset, replay, or public-route runtime acceptance.
 
 #### ENSv1 mirror resolver declarations
 
-An `ens_v2_resolver_l1` manifest may declare an exact
+An `ens_v2_resolver_l1` manifest may declare one or more exact
 [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
-instance with role `ensv1_mirror_resolver`, `proxy_kind = "none"`, no
-`read_features`, its deployment address, an applicable `start_block`, and the
-family-level `correlation_addresses.ens_v1_registry` described under
-[Required fields](#required-fields). Upstream's `ENSV1Resolver` is the model:
+instances, each with role `ensv1_mirror_resolver`, `proxy_kind = "none"`, no
+`read_features`, its own deployment address, and an applicable `start_block`,
+sharing the family-level `correlation_addresses.ens_v1_registry` described under
+[Required fields](#required-fields); the loader validates every instance and
+rejects a repeated address. Upstream's `ENSV1Resolver` is the model:
 it holds one ENSv1 registry as an immutable, finds the resolver for the
 requested name in that registry, and forwards the resolve call to it; it
 stores no records and defines no record events of its own.
@@ -527,7 +528,7 @@ address becomes a watched emitter of the family, adding it widens the watch plan
 and triggers the [mandatory historical fetch](#mandatory-historical-fetch-after-watch-plan-widening);
 the mirror emits no logs, so that fetch is empty. Discovery alone, matching
 selectors, or another role cannot authorize this classification, and an
-undeclared mirror instance keeps the existing `resolver_upgrade_not_observed`
+undeclared mirror instance keeps the existing `resolver_implementation_unknown`
 result.
 
 The `sepolia` profile declares the admitted deployment's `ENSV1Resolver` at
@@ -1888,3 +1889,40 @@ batch gateway provider, contract namer, and one ENSv1 registry and which exposes
 `REGISTRY_V1`; the pinned source is cited for the mirror behavior model only.
 (upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L18-L32 @ ens_v2@a971bd64)
 Whole-source identity for the deployed instance is not claimed.
+
+A second `ensv1_mirror_resolver` declaration,
+`0x1f11e5b8bca2ccfe13bd8431853db159c4e9849c`, was added on 2026-09-13 from the
+same archive node. Its creation transaction
+`0xad618fad5387815e3a32b49c73a9117e5a26c34cbeb74ca7531c294c8168e4e3` (block
+11626628) is a direct CREATE from the deployer
+`0x84d3a426d4e12e955d1df95db0b24fe26afe39d3`; the receipt is successful with the
+declared address as `contractAddress`, and the contract emitted no logs through
+the head observed on 2026-09-13. Its creation input carries three arguments —
+batch gateway provider `0x2ec67f0b950dae4dbfc19e984f657458affa885a`, contract
+namer `0x21a2b577709727119f1901314e0ba0150eafa15e`, and ENSv1 registry
+`0x82080cc8ca78597bde586a003d0a080c79a1814b` — matching the pinned constructor
+`(IGatewayProvider, IContractNamer, ENS)`, and its 10,688-byte runtime code
+embeds only that ENSv1 registry as an immutable and dispatches
+`resolve(bytes,bytes)` and `supportsInterface`.
+(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L28-L32 @ ens_v2@a971bd64)
+On staging it is the ENSv2 resolver pointer of the root TLD `reverse` and of
+the `bnmig-*` `.eth` registrations. Both mirror declarations share the family's
+`correlation_addresses.ens_v1_registry`; the loader validates each instance.
+
+One further identified address is intentionally not declared:
+`0x48d7edc9b7c683681336c0ea034e424c0c141d66`, the ENSv1 registry's resolver for
+the 1,281 hackathon TLD nodes whose ENSv2 pointer targets the first mirror. It
+was created at block 11626466 by
+`0xc08ebb56b2e1086f36cab1a785b71350b5ac1caef823fc40bd5112145ae5ae55` from the
+same deployer with constructor input (ENSv1 registry `0x82080cc8…`, DNSSEC
+oracle `0x023af42fa64c4195cb560e8a7ce4f8f0e778636a`, gateway URL
+`https://dnssec-oracle.ens.domains/`), matching the pinned `OffchainDNSResolver`
+constructor `(ENS, DNSSEC, string)`; its 7,858-byte runtime dispatches
+`resolve(bytes,bytes)`, `addr(bytes32)`, and `supportsInterface`, and it emitted
+no logs. That contract answers through CCIP-Read against DNSSEC proofs and keeps
+no indexable record storage, so it is not an `ens_v1_resolver_l1` declaration.
+(upstream: .refs/ens_v1/contracts/dnsregistrar/OffchainDNSResolver.sol:L24-L46 @ ens_v1@91c966f)
+The mirrored TLD rows therefore stay `mirrored_resolver_not_projected` with
+`provenance.mirror.mirrored_unsupported_reason = resolver_classification_missing`
+and `mirrored_resolver_address` naming this contract
+([`projections.md`](projections.md#resolver-and-records)).
