@@ -35,6 +35,7 @@ pub(crate) const PREFETCH_RANGE_BLOCKS: i64 = 10_000;
 struct QueryIdentity {
     addresses: Vec<String>,
     topic0s: Vec<String>,
+    topic1s: Vec<String>,
 }
 
 impl QueryIdentity {
@@ -42,6 +43,7 @@ impl QueryIdentity {
         Self {
             addresses: query.addresses.clone(),
             topic0s: query.topic0s.clone(),
+            topic1s: query.topic1s.clone(),
         }
     }
 }
@@ -136,7 +138,13 @@ impl<'a> Prefetcher<'a> {
             return window_logs(provider, resolved, query, from, to).await;
         }
         let logs = provider
-            .prefetch_range_logs(from, range_to, &query.addresses, &query.topic0s)
+            .prefetch_range_logs(
+                from,
+                range_to,
+                &query.addresses,
+                &query.topic0s,
+                &query.topic1s,
+            )
             .await
             .map_err(|error| provider_error("failed to prefetch selected chain logs", error))?;
         let Some(logs) = logs else {
@@ -189,7 +197,14 @@ pub(crate) async fn window_logs(
     to: i64,
 ) -> Result<Vec<Log>> {
     provider
-        .range_logs(resolved, from, to, &query.addresses, &query.topic0s)
+        .range_logs(
+            resolved,
+            from,
+            to,
+            &query.addresses,
+            &query.topic0s,
+            &query.topic1s,
+        )
         .await
         .map_err(|error| provider_error("failed to fetch selected chain logs", error))
 }

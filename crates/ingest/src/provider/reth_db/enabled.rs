@@ -92,12 +92,14 @@ impl RethDbProvider {
         blocks: &[ResolvedBlock],
         addresses: &[String],
         topics: &[String],
+        topic1s: &[String],
     ) -> Result<Vec<Log>> {
         let blocks = convert::normalized_contiguous_resolved_blocks(blocks)?;
         let addresses = addresses.to_vec();
         let topics = topics.to_vec();
+        let topic1s = topic1s.to_vec();
         self.blocking("fetch logs", move |reader| {
-            reader.logs(&blocks, &topics, &addresses)
+            reader.logs(&blocks, &topics, &addresses, &topic1s)
         })
         .await
     }

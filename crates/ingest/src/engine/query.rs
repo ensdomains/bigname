@@ -28,6 +28,11 @@ impl QueryContext<'_> {
 
     async fn logs(&self, query: &WatchQuery) -> Result<Vec<Log>> {
         if let Some(coinbase) = self.coinbase {
+            if !query.topic1s.is_empty() {
+                return Err(IngestError::configuration(
+                    "Coinbase SQL ingest does not support topic1-narrowed watch queries",
+                ));
+            }
             return coinbase
                 .fetch(
                     query.from_block,

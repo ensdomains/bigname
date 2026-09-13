@@ -140,8 +140,9 @@ impl JsonRpcProvider {
         to: i64,
         addresses: &[String],
         topics: &[String],
+        topic1s: &[String],
     ) -> Result<Vec<Log>> {
-        self.range_log_values(from, to, addresses, topics)
+        self.range_log_values(from, to, addresses, topics, topic1s)
             .await?
             .iter()
             .map(Log::from_unpinned_value)
@@ -203,9 +204,10 @@ impl JsonRpcProvider {
         to_block: i64,
         addresses: &[String],
         topics: &[String],
+        topic1s: &[String],
     ) -> Result<Vec<Log>> {
         let values = self
-            .range_log_values(from_block, to_block, addresses, topics)
+            .range_log_values(from_block, to_block, addresses, topics, topic1s)
             .await?;
         let logs = values
             .iter()
@@ -231,6 +233,7 @@ impl JsonRpcProvider {
         to_block: i64,
         addresses: &[String],
         topics: &[String],
+        topic1s: &[String],
     ) -> Result<Vec<Value>> {
         if from_block > to_block || topics.is_empty() {
             return Ok(Vec::new());
@@ -241,7 +244,7 @@ impl JsonRpcProvider {
             let result = self
                 .request(
                     "eth_getLogs",
-                    vec![range_log_filter(first, last, addresses, topics)?],
+                    vec![range_log_filter(first, last, addresses, topics, topic1s)?],
                 )
                 .await;
             match result {

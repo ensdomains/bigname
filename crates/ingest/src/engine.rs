@@ -495,11 +495,7 @@ impl Engine {
             })?;
         }
         let mut selected = selected_by_identity.into_values().collect::<Vec<_>>();
-        selected.retain(|log| {
-            log.topics
-                .first()
-                .is_some_and(|topic0| filter.includes(&log.address, topic0, log.block_number))
-        });
+        selected.retain(|log| filter.includes_log(&log.address, &log.topics, log.block_number));
         let facts = fetch_selected_facts(&provider, &resolved, selected.clone(), &filter).await?;
         let estimated_write_bytes = estimated_write_bytes(&facts);
         self.enforce_window_floor(chain_id, source, from, to)

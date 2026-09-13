@@ -12,7 +12,8 @@ use crate::{
     ErrorKind, IngestError, Result,
     event_signatures::{
         BASENAMES_BASE_RESOLVER_SOURCE_FAMILY, ENS_V1_RESOLVER_SOURCE_FAMILY,
-        ENS_V2_REGISTRY_SOURCE_FAMILY, ENS_V2_RESOLVER_SOURCE_FAMILY, registry_announcement_topic0,
+        ENS_V2_REGISTRY_SOURCE_FAMILY, ENS_V2_RESOLVER_SOURCE_FAMILY,
+        implementation_announcement_topic0, registry_announcement_topic0,
     },
 };
 
@@ -23,6 +24,7 @@ use crate::event_signatures::generic_resolver_topic0s;
 pub struct WatchFilter {
     address_ranges: Vec<AddressRange>,
     all_emitter_ranges: Vec<AllEmitterRange>,
+    implementation_ranges: Vec<ImplementationRange>,
     registry_announcements: Option<RegistryAnnouncementWatch>,
 }
 
@@ -32,6 +34,8 @@ pub struct WatchQuery {
     pub to_block: i64,
     pub addresses: Vec<String>,
     pub topic0s: Vec<String>,
+    /// Indexed `topic1` words the query is narrowed to; empty means any.
+    pub topic1s: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -47,6 +51,16 @@ struct AllEmitterRange {
     from_block: i64,
     to_block: i64,
     topic0s: Vec<String>,
+}
+
+/// Every emitter's `topic0` logs whose indexed `topic1` names a declared resolver
+/// implementation: the ERC-1967 `Upgraded(implementation)` announcement watch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ImplementationRange {
+    from_block: i64,
+    to_block: i64,
+    topic0: String,
+    topic1s: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -72,8 +86,27 @@ impl WatchFilter {
                 topic0s: topic0s.to_vec(),
             }],
             all_emitter_ranges: Vec::new(),
+            implementation_ranges: Vec::new(),
             registry_announcements: None,
         }
+    }
+
+    /// Whether a log with these topics is watched; `topic0`-only callers use [`Self::includes`].
+    pub fn includes_log(&self, address: &str, topics: &[String], block_number: i64) -> bool {
+        let Some(topic0) = topics.first() else {
+            return false;
+        };
+        self.includes(address, topic0, block_number)
+            || self.implementation_ranges.iter().any(|range| {
+                (range.from_block..=range.to_block).contains(&block_number)
+                    && range.topic0.eq_ignore_ascii_case(topic0)
+                    && topics.get(1).is_some_and(|topic1| {
+                        range
+                            .topic1s
+                            .iter()
+                            .any(|expected| expected.eq_ignore_ascii_case(topic1))
+                    })
+            })
     }
 
     pub fn includes(&self, address: &str, topic0: &str, block_number: i64) -> bool {
@@ -117,6 +150,7 @@ impl WatchFilter {
                 to_block,
                 addresses: addresses.into_iter().collect(),
                 topic0s,
+                topic1s: Vec::new(),
             })
             .collect::<Vec<_>>();
         let all_emitter_queries = self
@@ -132,8 +166,16 @@ impl WatchFilter {
                     to_block,
                     addresses: Vec::new(),
                     topic0s,
+                    topic1s: Vec::new(),
                 }),
         );
+        queries.extend(self.implementation_ranges.iter().map(|range| WatchQuery {
+            from_block: range.from_block,
+            to_block: range.to_block,
+            addresses: Vec::new(),
+            topic0s: vec![range.topic0.clone()],
+            topic1s: range.topic1s.clone(),
+        }));
         queries
     }
 
@@ -181,6 +223,7 @@ impl WatchFilter {
                 to_block,
                 addresses: addresses.into_iter().collect(),
                 topic0s: topics.clone(),
+                topic1s: Vec::new(),
             })
             .collect()
     }
@@ -238,6 +281,7 @@ pub async fn load_persisted_watch_filter(
     let mut role_topics_by_manifest = BTreeMap::new();
     let mut all_emitter_topics_by_manifest = BTreeMap::new();
     let mut all_emitter_ranges = Vec::new();
+    let mut implementation_ranges = Vec::new();
     let announcement_topic0 = registry_announcement_topic0();
     let mut announced_registry_topics = BTreeSet::new();
     for (manifest_id, payload) in payloads {
@@ -298,6 +342,24 @@ pub async fn load_persisted_watch_filter(
                     from_block,
                     to_block,
                     topic0s: all_emitter_topics,
+                });
+            }
+            if let Some(topic0) =
+                implementation_announcement_topic0(&manifest.source_family, &manifest_topics)
+                && !manifest.resolver_implementations.is_empty()
+            {
+                let mut topic1s = manifest
+                    .resolver_implementations
+                    .iter()
+                    .map(|implementation| bigname_manifests::address_topic(&implementation.address))
+                    .collect::<Vec<_>>();
+                topic1s.sort();
+                topic1s.dedup();
+                implementation_ranges.push(ImplementationRange {
+                    from_block,
+                    to_block,
+                    topic0,
+                    topic1s,
                 });
             }
         }
@@ -431,7 +493,10 @@ pub async fn load_persisted_watch_filter(
                     error,
                 )
             })?;
-    if (address_rows.is_empty() && discovery.discovered.is_empty() && all_emitter_ranges.is_empty())
+    if (address_rows.is_empty()
+        && discovery.discovered.is_empty()
+        && all_emitter_ranges.is_empty()
+        && implementation_ranges.is_empty())
         || topic0s.is_empty()
     {
         return Err(IngestError::configuration(format!(
@@ -487,6 +552,7 @@ pub async fn load_persisted_watch_filter(
     let filter = WatchFilter {
         address_ranges,
         all_emitter_ranges,
+        implementation_ranges,
         registry_announcements,
     };
     Ok(filter)

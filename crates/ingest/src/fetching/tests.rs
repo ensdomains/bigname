@@ -38,6 +38,7 @@ fn watch_query(from_block: i64, to_block: i64) -> WatchQuery {
         to_block,
         addresses: vec![WATCHED_ADDRESS.to_owned()],
         topic0s: vec![WATCHED_TOPIC.to_owned()],
+        topic1s: Vec::new(),
     }
 }
 
@@ -378,7 +379,14 @@ async fn the_block_bundle_window_request_profile_is_recorded() -> AnyResult<()> 
         .await?;
     let query = watch_query(FIRST_BLOCK, to);
     let logs = provider
-        .range_logs(&resolved, FIRST_BLOCK, to, &query.addresses, &query.topic0s)
+        .range_logs(
+            &resolved,
+            FIRST_BLOCK,
+            to,
+            &query.addresses,
+            &query.topic0s,
+            &query.topic1s,
+        )
         .await?;
     let logged = crate::engine::logged_blocks(&resolved, logs.iter());
     provider.recheck_resolved(&logged).await?;

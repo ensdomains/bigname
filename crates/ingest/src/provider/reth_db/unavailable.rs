@@ -31,6 +31,7 @@ impl RethDbProvider {
         _blocks: &[ResolvedBlock],
         _addresses: &[String],
         _topics: &[String],
+        _topic1s: &[String],
     ) -> Result<Vec<Log>> {
         bail!("Reth DB support was not compiled")
     }

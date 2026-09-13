@@ -273,10 +273,7 @@ fn validate_filter_completeness(
     selected_identities: &BTreeSet<(&str, i64)>,
 ) -> Result<()> {
     for log in &payload.receipt_logs {
-        let admitted = log
-            .topics
-            .first()
-            .is_some_and(|topic0| filter.includes(&log.address, topic0, log.block_number));
+        let admitted = filter.includes_log(&log.address, &log.topics, log.block_number);
         if admitted && !selected_identities.contains(&(log.block_hash.as_str(), log.log_index)) {
             return Err(IngestError::data_integrity(format!(
                 "range log query missed watched log {} {} in transaction {}",

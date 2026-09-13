@@ -131,13 +131,16 @@ impl ChainProvider {
         to: i64,
         addresses: &[String],
         topics: &[String],
+        topic1s: &[String],
     ) -> Result<Vec<Log>> {
         if from > to || topics.is_empty() {
             return Ok(Vec::new());
         }
         match self {
             Self::JsonRpc(provider) => {
-                let logs = provider.range_logs(from, to, addresses, topics).await?;
+                let logs = provider
+                    .range_logs(from, to, addresses, topics, topic1s)
+                    .await?;
                 rpc::pin_logs_to_resolved(resolved, logs)
             }
             Self::RethDb(provider) => {
@@ -146,7 +149,7 @@ impl ChainProvider {
                     .filter(|block| (from..=to).contains(&block.number))
                     .cloned()
                     .collect::<Vec<_>>();
-                provider.logs(&blocks, addresses, topics).await
+                provider.logs(&blocks, addresses, topics, topic1s).await
             }
         }
     }
@@ -161,10 +164,11 @@ impl ChainProvider {
         to: i64,
         addresses: &[String],
         topics: &[String],
+        topic1s: &[String],
     ) -> Result<Option<Vec<Log>>> {
         match self {
             Self::JsonRpc(provider) => provider
-                .range_logs(from, to, addresses, topics)
+                .range_logs(from, to, addresses, topics, topic1s)
                 .await
                 .map(Some),
             Self::RethDb(_) => Ok(None),
@@ -214,11 +218,12 @@ impl ChainProvider {
         to_block: i64,
         addresses: &[String],
         topics: &[String],
+        topic1s: &[String],
     ) -> Result<Vec<Log>> {
         match self {
             Self::JsonRpc(provider) => {
                 provider
-                    .verification_logs(from_block, to_block, addresses, topics)
+                    .verification_logs(from_block, to_block, addresses, topics, topic1s)
                     .await
             }
             Self::RethDb(provider) => {
@@ -227,7 +232,7 @@ impl ChainProvider {
                     .filter(|block| (from_block..=to_block).contains(&block.number))
                     .cloned()
                     .collect::<Vec<_>>();
-                provider.logs(&blocks, addresses, topics).await
+                provider.logs(&blocks, addresses, topics, topic1s).await
             }
         }
     }
