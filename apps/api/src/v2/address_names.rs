@@ -24,7 +24,9 @@ use super::{
     RegistrationStatus, Relation, RelationSet, SortOrder, StrictQueryParams, V2Error, V2Result,
     api_error_to_v2, decode, encode,
     name_record::{load_migrated_at, name_registration_fields},
-    permission_powers_value, permission_scope_value, validate_latest_collection_selectors,
+    permission_powers_value, permission_scope_value,
+    restrictions::ResourceRestrictions,
+    validate_latest_collection_selectors,
 };
 
 #[cfg(test)]
@@ -97,6 +99,10 @@ pub(crate) struct AddressName {
     pub(crate) record_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) role_summary: Option<Vec<AddressNameRoleSummary>>,
+    /// Present with `include=role_summary` when the row's registration has a resource-level
+    /// constraint model; the same block `GET /v1/permissions` serves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) restrictions: Option<ResourceRestrictions>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -306,7 +312,7 @@ pub(crate) async fn get_address_names(
             } else {
                 None
             };
-            Ok(build_address_name(
+            let mut row = build_address_name(
                 entry,
                 name_rows.get(&entry.logical_name_id),
                 primary_names_by_namespace
@@ -321,7 +327,15 @@ pub(crate) async fn get_address_names(
                 }),
                 record_counts_by_name.get(&entry.logical_name_id).copied(),
                 role_summary,
-            ))
+            );
+            if include_role_summary {
+                row.restrictions = permission_summaries
+                    .get(&entry.resource_id)
+                    .map(ResourceRestrictions::from_summary)
+                    .transpose()?
+                    .flatten();
+            }
+            Ok(row)
         })
         .collect::<V2Result<Vec<_>>>()?;
     let mut meta = Meta::default();
@@ -436,6 +450,7 @@ pub(crate) fn build_address_name(
         subname_count,
         record_count,
         role_summary,
+        restrictions: None,
     }
 }
 

@@ -345,7 +345,7 @@ them.
   the corresponding NameWrapper fuse is burnt, evaluated with the
   [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) fuse
   word. The NameWrapper interpreter
-  (`crates/adapters/src/schema_v2/protocol/v1/wrapper.rs`, constant
+  (`crates/adapters/src/schema_v2/protocol/v1/wrapper/permissions.rs`, constant
   `WRAPPER_HOLDER_POWERS`) grants the token holder `registration_control`,
   `set_resolver`, `set_ttl`, `create_subnames`, `transfer`, `unwrap`,
   `burn_fuses`, `approve`, and `extend_subname_expiry` on the registration and

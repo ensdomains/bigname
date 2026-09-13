@@ -9,16 +9,21 @@ use sqlx::types::Uuid;
 use super::{Completeness, Meta};
 
 const PERMISSION_SUPPORT_UNKNOWN_REASON: &str = "permission_support_unknown";
-const WRAPPER_HOLDER_PERMISSIONS_NOT_SUPPORTED_REASON: &str =
-    "wrapper_holder_permissions_not_supported";
+const PARENT_AND_RESOLVER_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON: &str =
+    "parent_and_resolver_delegation_permissions_not_supported";
 const APPROVAL_AND_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON: &str =
     "approval_and_delegation_permissions_not_supported";
 
+/// How completely the projection enumerates a registration's permission rows. Ordered from most
+/// to least complete; a mixed set of registrations reports the least complete member.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PermissionSupport {
     Full,
+    /// NameWrapper holders, operators, and per-token delegates are enumerated; parent control and
+    /// resolver-side delegation are not.
+    WrapperPartial,
+    /// Registrar- and registry-held rows without operator approvals and resolver delegation.
     ApprovalDelegationPartial,
-    WrapperUnsupported,
     Unknown,
 }
 
@@ -29,9 +34,7 @@ impl PermissionSupport {
             (Self::ApprovalDelegationPartial, _) | (_, Self::ApprovalDelegationPartial) => {
                 Self::ApprovalDelegationPartial
             }
-            (Self::WrapperUnsupported, _) | (_, Self::WrapperUnsupported) => {
-                Self::WrapperUnsupported
-            }
+            (Self::WrapperPartial, _) | (_, Self::WrapperPartial) => Self::WrapperPartial,
             (Self::Full, Self::Full) => Self::Full,
         }
     }
@@ -39,10 +42,12 @@ impl PermissionSupport {
     fn product_reason(self) -> Option<&'static str> {
         match self {
             Self::Full => None,
+            Self::WrapperPartial => {
+                Some(PARENT_AND_RESOLVER_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON)
+            }
             Self::ApprovalDelegationPartial => {
                 Some(APPROVAL_AND_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON)
             }
-            Self::WrapperUnsupported => Some(WRAPPER_HOLDER_PERMISSIONS_NOT_SUPPORTED_REASON),
             Self::Unknown => Some(PERMISSION_SUPPORT_UNKNOWN_REASON),
         }
     }
@@ -68,11 +73,11 @@ pub(crate) fn permission_support_for_resources(
                         ),
                     ) => PermissionSupport::ApprovalDelegationPartial,
                     (
-                        PermissionCoverageStatus::Unsupported,
+                        PermissionCoverageStatus::Partial,
                         Some(
-                            PermissionCoverageUnsupportedReason::Ensv1WrapperHolderPermissionsNotProjected,
+                            PermissionCoverageUnsupportedReason::WrapperParentAndResolverDelegationNotProjected,
                         ),
-                    ) => PermissionSupport::WrapperUnsupported,
+                    ) => PermissionSupport::WrapperPartial,
                     _ => PermissionSupport::Unknown,
                 },
                 None => PermissionSupport::Unknown,
@@ -86,34 +91,26 @@ pub(crate) fn apply_permissions_collection_support_meta(
     support: PermissionSupport,
     resource_bound: bool,
 ) {
-    let (completeness, reason) = match (resource_bound, support) {
+    let reason = match (resource_bound, support) {
         (true, PermissionSupport::Full) => return,
-        (true, PermissionSupport::ApprovalDelegationPartial) => (
-            Completeness::Partial,
-            APPROVAL_AND_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON,
-        ),
-        (true, PermissionSupport::WrapperUnsupported) => (
-            Completeness::Unsupported,
-            WRAPPER_HOLDER_PERMISSIONS_NOT_SUPPORTED_REASON,
-        ),
-        (true, PermissionSupport::Unknown) => {
-            (Completeness::Partial, PERMISSION_SUPPORT_UNKNOWN_REASON)
+        (true, PermissionSupport::WrapperPartial) => {
+            PARENT_AND_RESOLVER_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON
         }
-        (false, PermissionSupport::Unknown) => {
-            (Completeness::Partial, PERMISSION_SUPPORT_UNKNOWN_REASON)
+        (true, PermissionSupport::ApprovalDelegationPartial) => {
+            APPROVAL_AND_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON
         }
+        (_, PermissionSupport::Unknown) => PERMISSION_SUPPORT_UNKNOWN_REASON,
+        // An address-only read cannot enumerate approvals and delegations across every
+        // registration the address may reach, whatever each visible registration supports.
         (
             false,
             PermissionSupport::Full
-            | PermissionSupport::ApprovalDelegationPartial
-            | PermissionSupport::WrapperUnsupported,
-        ) => (
-            Completeness::Partial,
-            APPROVAL_AND_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON,
-        ),
+            | PermissionSupport::WrapperPartial
+            | PermissionSupport::ApprovalDelegationPartial,
+        ) => APPROVAL_AND_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON,
     };
 
-    meta.completeness = Some(completeness);
+    meta.completeness = Some(Completeness::Partial);
     meta.unsupported_reason = Some(reason.to_owned());
 }
 
@@ -143,6 +140,7 @@ mod tests {
             authority_kind: None,
             root_resource_id: None,
             coverage,
+            resource_restrictions: None,
             provenance: json!({}),
             chain_positions: json!({}),
             canonicality_summary: json!({}),
@@ -156,13 +154,13 @@ mod tests {
         let mut resource_meta = Meta::default();
         apply_permissions_collection_support_meta(
             &mut resource_meta,
-            PermissionSupport::WrapperUnsupported,
+            PermissionSupport::WrapperPartial,
             true,
         );
-        assert_eq!(resource_meta.completeness, Some(Completeness::Unsupported));
+        assert_eq!(resource_meta.completeness, Some(Completeness::Partial));
         assert_eq!(
             resource_meta.unsupported_reason.as_deref(),
-            Some(WRAPPER_HOLDER_PERMISSIONS_NOT_SUPPORTED_REASON)
+            Some(PARENT_AND_RESOLVER_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON)
         );
 
         let mut account_meta = Meta::default();
@@ -174,6 +172,17 @@ mod tests {
         assert_eq!(account_meta.completeness, Some(Completeness::Partial));
         assert_eq!(
             account_meta.unsupported_reason.as_deref(),
+            Some(APPROVAL_AND_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON)
+        );
+
+        let mut wrapper_account_meta = Meta::default();
+        apply_permissions_collection_support_meta(
+            &mut wrapper_account_meta,
+            PermissionSupport::WrapperPartial,
+            false,
+        );
+        assert_eq!(
+            wrapper_account_meta.unsupported_reason.as_deref(),
             Some(APPROVAL_AND_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON)
         );
     }
@@ -196,7 +205,7 @@ mod tests {
                 wrapper_id,
                 summary(
                     wrapper_id,
-                    ResourcePermissionCoverage::ensv1_wrapper_holder_permissions_not_projected(),
+                    ResourcePermissionCoverage::wrapper_parent_and_resolver_delegation_not_projected(),
                 ),
             ),
             (
@@ -214,7 +223,7 @@ mod tests {
         );
         assert_eq!(
             permission_support_for_resources(&[full_id, wrapper_id], &summaries),
-            PermissionSupport::WrapperUnsupported
+            PermissionSupport::WrapperPartial
         );
         assert_eq!(
             permission_support_for_resources(&[wrapper_id, partial_id], &summaries),
@@ -229,12 +238,12 @@ mod tests {
     #[test]
     fn role_summary_support_marks_only_the_expansion_non_authoritative() {
         assert_eq!(
-            PermissionSupport::WrapperUnsupported.merge(PermissionSupport::Unknown),
+            PermissionSupport::WrapperPartial.merge(PermissionSupport::Unknown),
             PermissionSupport::Unknown
         );
 
         let mut meta = Meta::default();
-        apply_role_summary_support_meta(&mut meta, PermissionSupport::Unknown);
+        apply_role_summary_support_meta(&mut meta, PermissionSupport::WrapperPartial);
 
         assert_eq!(meta.completeness, Some(Completeness::Partial));
         assert_eq!(
@@ -243,7 +252,7 @@ mod tests {
         );
         assert_eq!(
             meta.unsupported_reason.as_deref(),
-            Some(PERMISSION_SUPPORT_UNKNOWN_REASON)
+            Some(PARENT_AND_RESOLVER_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON)
         );
     }
 }

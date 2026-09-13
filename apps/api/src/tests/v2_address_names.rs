@@ -764,6 +764,7 @@ async fn v2_address_role_summary_marks_wrapper_empty_as_non_authoritative() -> R
 
     assert_eq!(payload["data"][0]["name"], json!("beta.eth"));
     assert_eq!(payload["data"][0]["role_summary"], json!([]));
+    assert!(payload["data"][0].get("restrictions").is_none());
     assert_eq!(payload["meta"]["completeness"], json!("partial"));
     assert_eq!(
         payload["meta"]["unsupported_fields"],
@@ -771,8 +772,59 @@ async fn v2_address_role_summary_marks_wrapper_empty_as_non_authoritative() -> R
     );
     assert_eq!(
         payload["meta"]["unsupported_reason"],
-        json!("wrapper_holder_permissions_not_supported")
+        json!("parent_and_resolver_delegation_permissions_not_supported")
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_address_role_summary_serves_restrictions_per_row() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let resource_id = Uuid::from_u128(0xb100);
+    let mut summary = permission_current_resource_summary(resource_id, Some("wrapper"));
+    summary.resource_restrictions = Some(json!({
+        "kind": "ens_v1_wrapper",
+        "wrapper_state": "emancipated",
+        "fuses": 65_536,
+        "expiry_seconds": 1_900_000_000,
+    }));
+    upsert_phase_permissions_current_resource_summary(&database.pool, &summary).await?;
+
+    let with_summary = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=beta&include=role_summary"),
+    )
+    .await?;
+    assert_eq!(with_summary["data"][0]["name"], json!("beta.eth"));
+    assert_eq!(
+        with_summary["data"][0]["restrictions"]["kind"],
+        json!("ens_v1_wrapper")
+    );
+    assert_eq!(
+        with_summary["data"][0]["restrictions"]["registration_id"],
+        json!(resource_id.to_string())
+    );
+    assert_eq!(
+        with_summary["data"][0]["restrictions"]["wrapper_state"],
+        json!("emancipated")
+    );
+    assert_eq!(
+        with_summary["data"][0]["restrictions"]["wrapper_fuses"]["parent_cannot_control"],
+        json!(true)
+    );
+    assert_eq!(
+        with_summary["data"][0]["restrictions"]["wrapper_expires_at"],
+        json!("2030-03-17T17:46:40Z")
+    );
+
+    let without_summary = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=beta"),
+    )
+    .await?;
+    assert!(without_summary["data"][0].get("restrictions").is_none());
 
     database.cleanup().await
 }

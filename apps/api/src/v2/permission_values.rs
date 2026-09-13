@@ -91,6 +91,9 @@ mod tests {
         include_str!("../../../../crates/project/src/builders/permissions.rs");
     /// The only powers today's ENSv1 and Basenames interpreters emit.
     const V1_EMITTED_STORAGE_POWERS: &[&str] = &["resource_control", "resolver_control"];
+    const V1_WRAPPER_INTERPRETER: &str = include_str!(
+        "../../../../crates/adapters/src/schema_v2/protocol/v1/wrapper/permissions.rs"
+    );
 
     fn documented_powers() -> BTreeSet<String> {
         let start = DOCS
@@ -147,10 +150,35 @@ mod tests {
         })
     }
 
+    /// Names the NameWrapper interpreter grants: every string literal inside the
+    /// `WRAPPER_HOLDER_POWERS`, `WRAPPER_DELEGATE_POWERS`, and `RESOLVER_CONTROL_POWERS` slices.
+    fn wrapper_interpreter_powers() -> impl Iterator<Item = String> {
+        [
+            "WRAPPER_HOLDER_POWERS",
+            "WRAPPER_DELEGATE_POWERS",
+            "RESOLVER_CONTROL_POWERS",
+        ]
+        .into_iter()
+        .flat_map(|constant| {
+            let start = V1_WRAPPER_INTERPRETER
+                .find(&format!("const {constant}: &[&str] = &["))
+                .unwrap_or_else(|| panic!("wrapper interpreter must define {constant}"));
+            let body = &V1_WRAPPER_INTERPRETER[start..];
+            let end = body.find("];").expect("wrapper power slice must close");
+            body[..end]
+                .split('"')
+                .skip(1)
+                .step_by(2)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+    }
+
     fn code_powers() -> BTreeSet<String> {
         V1_EMITTED_STORAGE_POWERS
             .iter()
             .map(|power| (*power).to_owned())
+            .chain(wrapper_interpreter_powers())
             .chain(wrapper_mask_powers())
             .chain(role_table_powers(V2_ROLE_TABLES, "REGISTRY_ROLE_BITS"))
             .chain(role_table_powers(V2_ROLE_TABLES, "RESOLVER_ROLE_BITS"))

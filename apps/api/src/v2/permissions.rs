@@ -16,7 +16,9 @@ use super::permission_support::{
 use super::{
     AddressNameGrant, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, QueryParams,
     StrictQueryParams, V2Error, V2Result, decode, encode, permission_powers_value,
-    permission_scope_value, validate_latest_collection_selectors,
+    permission_scope_value,
+    restrictions::ResourceRestrictions,
+    validate_latest_collection_selectors,
     vocab::{AuthorityContext, WrapperFuses, WrapperState},
 };
 
@@ -74,6 +76,16 @@ pub(crate) struct PermissionRow {
     pub(crate) lineage: Option<PermissionLineage>,
 }
 
+/// The `GET /v1/permissions` body: the collection envelope plus, for a resource-bound read, the
+/// selected registration's [resource restrictions](../../../../docs/api-v2.md#resource-restrictions).
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct PermissionsResponse {
+    #[serde(flatten)]
+    pub(crate) envelope: Envelope<Vec<PermissionRow>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) restrictions: Option<ResourceRestrictions>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct PermissionLineage {
     pub(crate) grant: Value,
@@ -88,7 +100,7 @@ pub(crate) struct PermissionLineage {
 pub(crate) async fn get_permissions(
     params: PermissionsQuery,
     State(state): State<AppState>,
-) -> V2Result<Json<Envelope<Vec<PermissionRow>>>> {
+) -> V2Result<Json<PermissionsResponse>> {
     let params = params.into_inner();
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let include_lineage = permissions_include_lineage(&params.include)?;
@@ -170,24 +182,33 @@ pub(crate) async fn get_permissions(
         permission_support,
         resolved.resource_id.is_some(),
     );
+    let restrictions = resolved
+        .resource_id
+        .and_then(|resource_id| permission_summaries.get(&resource_id))
+        .map(ResourceRestrictions::from_summary)
+        .transpose()?
+        .flatten();
 
-    Ok(Json(Envelope {
-        data,
-        page: Some(Page {
-            cursor: params.cursor.clone(),
-            next_cursor,
-            page_size: params.page_size,
-            total_count: None,
-            has_more,
-        }),
-        meta,
+    Ok(Json(PermissionsResponse {
+        envelope: Envelope {
+            data,
+            page: Some(Page {
+                cursor: params.cursor.clone(),
+                next_cursor,
+                page_size: params.page_size,
+                total_count: None,
+                has_more,
+            }),
+            meta,
+        },
+        restrictions,
     }))
 }
 
 fn empty_permissions_response(
     params: &QueryParams,
     selection: EmptyPermissionsSelection,
-) -> Json<Envelope<Vec<PermissionRow>>> {
+) -> Json<PermissionsResponse> {
     let mut meta = Meta::default();
 
     match selection {
@@ -197,16 +218,19 @@ fn empty_permissions_response(
         EmptyPermissionsSelection::SupersededNameRegistrationPair => {}
     }
 
-    Json(Envelope {
-        data: Vec::new(),
-        page: Some(Page {
-            cursor: params.cursor.clone(),
-            next_cursor: None,
-            page_size: params.page_size,
-            total_count: None,
-            has_more: false,
-        }),
-        meta,
+    Json(PermissionsResponse {
+        envelope: Envelope {
+            data: Vec::new(),
+            page: Some(Page {
+                cursor: params.cursor.clone(),
+                next_cursor: None,
+                page_size: params.page_size,
+                total_count: None,
+                has_more: false,
+            }),
+            meta,
+        },
+        restrictions: None,
     })
 }
 
