@@ -2072,4 +2072,9 @@ no indexable record storage, so it is not an `ens_v1_resolver_l1` declaration.
 The mirrored TLD rows therefore stay `mirrored_resolver_not_projected` with
 `provenance.mirror.mirrored_unsupported_reason = resolver_classification_missing`
 and `mirrored_resolver_address` naming this contract
-([`projections.md`](projections.md#resolver-and-records)).
+([`projections.md`](projections.md#resolver-and-records)). Those TLDs have no
+observed root-registry registration, so their names stay
+`current_authority_not_projected`; name detail, batch lookup, and the records
+route still serve the first mirror as their resolver through the
+[root-registry resolver pointer](glossary.md#root-registry-resolver-pointer),
+and each requested key reports `mirrored_resolver_not_projected`.

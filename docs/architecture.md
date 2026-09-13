@@ -64,7 +64,8 @@ wildcards for pattern operators, and use explicit `COLLATE "C"`.
 `Domain_orderBy.name` orders the served display name with that collation. The
 complete split is defined in [`consumer-capabilities.md`](consumer-capabilities.md#graphql-compatibility).
 Resolver record fields select the sole projected inventory for the name's
-current control resource or, for an ownerless V1 registry name, its retained
+current control resource or, for an ownerless V1 registry name or an ENSv2 TLD with a
+[root-registry resolver pointer](glossary.md#root-registry-resolver-pointer), its retained
 [serving resource](glossary.md#serving-resource), without coupling the
 inventory's event boundary to the later name-publication target. If a resource has multiple
 inventory rows and no declared boundary selects exactly one, the operation

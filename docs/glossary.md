@@ -1986,6 +1986,21 @@ returning data.
 **Serving resource** — the typed `resource_id` reference used to select resolver and record data
 when a name has no current control binding. It preserves event-derived read reachability only: it
 does not establish a registration, authority, address-to-name relation, or permission grant.
+Two event-linked bases select one: the retained registry resolver pointer of an ownerless ENSv1
+or Basenames registry name, and the [root-registry resolver
+pointer](#root-registry-resolver-pointer) of an ENSv2 TLD.
+
+<a id="root-registry-resolver-pointer"></a>
+**Root-registry resolver pointer** — the resolver an ENSv2 root registry stores for a TLD token
+and returns while the label is unexpired. When the TLD's registration was never observed, the
+token has a resource and a pointer but no surface binding, so the name is
+`current_authority_not_projected`; the current nonzero pointer still becomes the TLD's serving
+resource (`read_reachability.basis = root_registry_resolver_pointer`) so name detail, batch
+lookup, the records route, and `bound_names` serve the resolver and its inventory without
+inventing the TLD's registration, authority, or control. A reservation or release on the token
+resource, or a state-derived expiry clear, withdraws it.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L150-L155 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
 
 ## Shadow
 

@@ -1110,7 +1110,11 @@ resource-less. This does not restore a current binding. Registry-only ENSv1 and
 Basenames names are different when a current nonzero resolver pointer remains
 event-linked: `name_current.resource_id` stays null while the
 [`serving_resource_id`](glossary.md#serving-resource) joins resolver and
-inventory reads without creating control. An explicitly released ENSv2 name
+inventory reads without creating control. An ENSv2 TLD whose root-registry
+token has a current [root-registry resolver
+pointer](glossary.md#root-registry-resolver-pointer) but no observed
+registration takes the same shape while its row stays
+`current_authority_not_projected`. An explicitly released ENSv2 name
 instead keeps a row for a [released v2
 authority](glossary.md#released-v2-authority) whose `resource_id` still
 references the released resource, but its `serving_resource_id` is null; the

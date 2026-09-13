@@ -246,10 +246,15 @@ collection route carry neither header.
   `registration_id`. It also omits `resolver` and resolver-record fields unless
   it is
   an ownerless ENSv1 or Basenames registry row whose current registry resolver
-  pointer is retained (a [serving resource](glossary.md#serving-resource)).
+  pointer is retained (a [serving resource](glossary.md#serving-resource)), or
+  an ENSv2 TLD with a current
+  [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
+  and no projected authority.
   That classified row serves its resolver without acquiring registration
   identity or control. Indexed records are served when its serving resource has
-  supported inventory.
+  supported inventory. The TLD row keeps `status=unsupported` with
+  `current_authority_not_projected` and the full detail shape; only the
+  resolver and resolver-record fields are added.
   `profile=detail` name results and reverse rows take `addresses`,
   `text_records`, `content_hash`, and `primary_address` only from a record
   inventory whose coverage is authoritative. When the serving resolver's
@@ -606,7 +611,10 @@ collection route carry neither header.
   `registration_id`. It also omits `resolver` and resolver-record fields unless
   it is
   an ownerless ENSv1 or Basenames registry row whose current registry resolver
-  pointer is retained (a [serving resource](glossary.md#serving-resource)).
+  pointer is retained (a [serving resource](glossary.md#serving-resource)), or
+  an ENSv2 TLD with a current
+  [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
+  and no projected authority.
   For that classified row, indexed name detail serves the resolver and records
   present in its serving resource's inventory. `source=verified` executes lookup
   through the surviving resolver when the ordinary lookup capability supports
@@ -630,7 +638,12 @@ collection route carry neither header.
   For `source=indexed`, a row classified as
   `current_authority_not_projected` remains `status=ok` for the identity and
   registration fields that can be served, but omits `resolver`; retained
-  resolver-pointer evidence is not presented as current authority.
+  resolver-pointer evidence is not presented as current authority. The one
+  exception is an ENSv2 TLD whose current
+  [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
+  is its serving resource: the row stays `current_authority_not_projected` and
+  unregistered, `authority` stays absent, and `resolver` and the resolver-record
+  fields are served from that pointer and its inventory.
   An ownerless ENSv1 or Basenames registry row with a zero [getter-visible
   owner](glossary.md#getter-visible-owner) is instead supported and unregistered.
   When a current event-linked nonzero registry resolver pointer survives, name
@@ -682,7 +695,10 @@ collection route carry neither header.
   A name with no current registration returns no declared resolver or retained
   record values and does not execute verified lookup unless it is
   an ownerless ENSv1 or Basenames registry row whose current registry resolver
-  pointer is retained (a [serving resource](glossary.md#serving-resource)).
+  pointer is retained (a [serving resource](glossary.md#serving-resource)), or
+  an ENSv2 TLD with a current
+  [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
+  and no projected authority.
   That classified row serves its resolver and any records present in its serving
   resource's inventory. Verified lookup runs through the surviving resolver
   when the ordinary lookup capability supports it. An ownerless ENSv2
@@ -935,7 +951,15 @@ collection route carry neither header.
   short-circuits those three sources before provider execution, but keeps its
   documented behavior: the response has no resolver values and reports each
   requested or inventory-derived key as `status=unsupported`
-  with `inventory_not_available`.
+  with `inventory_not_available`. A `current_authority_not_projected` TLD
+  whose current
+  [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
+  is its serving resource does not enter that short circuit either: the
+  response carries that resolver and each key classifies through the serving
+  resource's inventory, so a TLD pointed at an
+  [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
+  reports `mirrored_resolver_not_projected` per key when the mirror's registry
+  walk finds no projected ENSv1 resolver.
   A supported ownerless registry name does not enter that short circuit merely because its control
   state is unregistered. Indexed reads use the [serving resource](glossary.md#serving-resource)'s inventory, verified reads select
   the surviving resolver, and `source=auto` follows the ordinary indexed/verified blend. Owner zero
@@ -2058,7 +2082,12 @@ For a registrar lease first identified by a later readable observation, registra
   row-local mixed-authority status, so callers use name detail or batch lookup
   for the explicit coverage reason. A row classified as
   `current_authority_not_projected` is also absent from `bound_names`; retained
-  resolver-pointer evidence does not establish listing membership.
+  resolver-pointer evidence does not establish listing membership. The
+  exception is an ENSv2 TLD whose current
+  [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
+  is its serving resource: like the ownerless ENSv1 or Basenames row below, it
+  is eligible only where the resolver family's binding-enumeration capability
+  is supported.
   An ownerless ENSv2 reservation is likewise absent: a retained reservation
   resolver or former-resource pointer is not a resolver selected by a current
   registration. This intentionally narrows ENSv2, which stores and returns a

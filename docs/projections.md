@@ -286,7 +286,18 @@ greater block number and, within one block, the normalized event stored later.
 [serving resource](glossary.md#serving-resource) when no control binding is open. It is not a binding, registration,
 address relation, or permission authority. Resolver and record readers use
 `COALESCE(serving_resource_id, resource_id)`; control, relation, and permission builders use only
-`resource_id`.
+`resource_id`. `provenance.read_reachability.basis` names how the serving resource was
+selected: `retained_registry_resolver_pointer` for an ownerless ENSv1 or Basenames registry
+name (registry owner proven zero, row supported and unregistered), or
+`root_registry_resolver_pointer` for an ENSv2 TLD whose root-registry token has a
+current nonzero resolver pointer but no observed registration, so no surface binding and no
+selected authority. That TLD row keeps `current_authority_not_projected`: the pointer is
+followed from the name-linked root-registry `ResolverChanged` to its token resource, the
+latest pointer on that resource wins (a state-derived expiry clear names the resource but no
+logical name), and a reservation or release on the resource keeps the pointer out of serving.
+The root registry stores the pointer per token and returns it while the label is unexpired.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L150-L155 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
 Its projection provenance stores the [source family](glossary.md#source-family)
 of the event that selected the current resolver pointer. Resolver binding
 summaries use that stored event provenance rather than a prior resolver row's
