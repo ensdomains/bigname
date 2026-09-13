@@ -31,6 +31,9 @@ pub(super) fn restore(state: &mut State, event: &PriorEventInput) {
             &event.source_family,
             to.to_owned(),
         );
+        // A burnt token cannot move again before `NameWrapped`, so a transfer clears a burn
+        // recorded from an earlier holder revocation whose own transfer was folded away.
+        state.set_v1_wrapper_burnt(&event.namespace, namehash, false);
     } else if matches!(
         event.source_family.as_str(),
         "ens_v1_registrar_l1" | "basenames_base_registrar"

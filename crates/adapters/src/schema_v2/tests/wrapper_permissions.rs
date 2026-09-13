@@ -610,3 +610,33 @@ fn transfer_batch_moves_the_holder_of_every_wrapped_name_it_lists() -> anyhow::R
     assert_eq!(transfers, 2);
     Ok(())
 }
+
+// Under CANNOT_APPROVE the approval survives transfers; a delegate who received the token and
+// later passes it on is still `getApproved`, so its token-approval grant is re-emitted after its
+// holder revocation and stays the newest row for that subject.
+// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L108-L121 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L837-L840 @ ens_v1@91c966f)
+#[test]
+fn a_retained_delegate_who_passes_the_token_on_keeps_its_approval_row() -> anyhow::Result<()> {
+    let logs = vec![
+        wrapped(1, 0),
+        fuses_set(2, PARENT_CANNOT_CONTROL | CANNOT_UNWRAP | CANNOT_APPROVE),
+        approval(3, HOLDER, address(DELEGATE)),
+        transfer(4, HOLDER, address(DELEGATE)),
+        transfer(5, DELEGATE, address(NEXT_HOLDER)),
+    ];
+    let output = interpret_test_batch(input(logs.clone()))?;
+    assert_eq!(
+        permission_rows(&output),
+        vec![
+            row(1, HOLDER, "holder", true, HOLDER_POWERS),
+            row(3, DELEGATE, "token_approval", true, DELEGATE_POWERS),
+            row(4, HOLDER, "holder", false, HOLDER_POWERS),
+            row(4, DELEGATE, "holder", true, HOLDER_POWERS),
+            row(5, DELEGATE, "holder", false, HOLDER_POWERS),
+            row(5, NEXT_HOLDER, "holder", true, HOLDER_POWERS),
+            row(5, DELEGATE, "token_approval", true, DELEGATE_POWERS),
+        ]
+    );
+    assert_restore_matches(&logs, 4, 5)
+}
