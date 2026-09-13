@@ -112,14 +112,18 @@ only then deploy the matching API as required by the
 > **Our rule / why**: See [storage semantics](storage.md). The adapter keeps its signed timestamp representation without failing an otherwise valid numeric lifecycle observation. No controller string-decoder width change is included in this composition.
 > **Since**: `2026-09-10`
 
-> **NameWrapper self-transfer clears the token approval without a log** —
+> **NameWrapper `safeTransferFrom` self-transfer clears the token approval without a log** —
 > `ERC1155Fuse._transfer` runs `_beforeTransfer`, which deletes the per-token
 > approval unless `CANNOT_APPROVE` is burnt, and then returns before emitting
 > `TransferSingle` when the token's owner is also the recipient. bigname derives
 > the delegate's `PermissionChanged` revocation from observed transfer logs, so
-> after a self-transfer it keeps the approved delegate's row until the next
-> observed `Approval`, transfer, burn, or unwrap of that name.
+> after such a self-transfer it keeps the approved delegate's row until the next
+> observed `Approval`, transfer, burn, or unwrap of that name. The batch path
+> has no early return: `safeBatchTransferFrom` still emits `TransferBatch` for a
+> self-transfer, which the interpreter observes and handles (no holder change,
+> approval revoked unless `CANNOT_APPROVE` is burnt).
 > **Upstream**: (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L281-L306 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L155-L197 @ ens_v1@91c966f)
 > (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L815-L840 @ ens_v1@91c966f)
 > **Our rule / why**: there is no raw fact to attribute the clear to; inventing
 > a state-derived revocation would require calling `getApproved`, which the
