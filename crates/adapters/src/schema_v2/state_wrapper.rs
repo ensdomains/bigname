@@ -245,6 +245,24 @@ impl State {
         }
     }
 
+    /// Whether the holder row of a still-linked wrapper name was already revoked by an ERC-1155
+    /// burn, so the `NameUnwrapped` that follows the burn does not revoke it a second time.
+    /// Returns the previous flag.
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+    pub(in crate::schema_v2) fn set_v1_wrapper_burnt(
+        &mut self,
+        namespace: &str,
+        namehash: &str,
+        burnt: bool,
+    ) -> bool {
+        let key = v1_key(namespace, namehash);
+        if burnt {
+            self.v1_wrapper_burnt.insert(key).is_some()
+        } else {
+            self.v1_wrapper_burnt.remove(&key).is_some()
+        }
+    }
+
     pub(in crate::schema_v2) fn v1_wrapper_delegate(
         &self,
         namespace: &str,

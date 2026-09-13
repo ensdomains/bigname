@@ -101,6 +101,7 @@ pub(super) struct State {
     v1_names: OrdMap<String, V1NameState>,
     v1_wrapper_data: OrdMap<String, V1WrapperData>,
     v1_wrapper_delegates: OrdMap<String, String>,
+    v1_wrapper_burnt: imbl::OrdSet<String>,
     v1_pending_unwraps: OrdMap<String, (String, i64)>,
     v1_registrar_transaction: wrapper::V1RegistrarTransaction,
     v1_registrar_controllers: OrdSet<String>,

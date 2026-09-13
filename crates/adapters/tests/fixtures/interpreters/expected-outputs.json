@@ -4156,7 +4156,7 @@
             "subject": "0x0000000000000000000000000000000000002611"
           },
           "after_state": {
-            "effective_powers": ["resource_control", "set_resolver", "set_ttl", "create_subnames", "transfer", "unwrap", "burn_fuses", "approve", "extend_subname_expiry"],
+            "effective_powers": ["resource_control", "set_resolver", "set_ttl", "create_subnames", "transfer", "unwrap", "burn_fuses", "approve", "extend_subname_expiry", "extend_expiry"],
             "grant_source": {
               "authority_contract": "0x00000000000000000000000000000000000026aa",
               "authority_kind": "wrapper",
@@ -5603,7 +5603,7 @@
         },
         {
           "after_state": {
-            "effective_powers": ["resource_control", "set_resolver", "set_ttl", "create_subnames", "transfer", "unwrap", "burn_fuses", "approve", "extend_subname_expiry"],
+            "effective_powers": ["resource_control", "set_resolver", "set_ttl", "create_subnames", "transfer", "unwrap", "burn_fuses", "approve", "extend_subname_expiry", "extend_expiry"],
             "grant_source": {
               "authority_contract": "0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401",
               "authority_kind": "wrapper",

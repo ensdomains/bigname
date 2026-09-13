@@ -10,9 +10,12 @@ use crate::schema_v2::protocol::{EventDraft, Interpreted};
 use crate::schema_v2::state::V1NameState;
 
 /// Powers of the ERC-1155 holder and of every owner-wide operator: `canModifyName` and the
-/// ERC-1155-fuse approve and transfer checks accept both identically, and both pass
-/// `canExtendSubnames`.
+/// ERC-1155-fuse approve and transfer checks accept both identically, both pass
+/// `canExtendSubnames`, and `extendExpiry` lets the name's own controller extend its expiry once
+/// `CAN_EXTEND_EXPIRY` is burnt. Project masks `burn_fuses` and `extend_expiry` on the
+/// expiry-effective fuse word; the interpreter emits the unmasked set.
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214-L238 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L443-L470 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L37-L47 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L137-L150 @ ens_v1@91c966f)
 const WRAPPER_HOLDER_POWERS: &[&str] = &[
@@ -25,6 +28,7 @@ const WRAPPER_HOLDER_POWERS: &[&str] = &[
     "burn_fuses",
     "approve",
     "extend_subname_expiry",
+    "extend_expiry",
 ];
 /// The per-token approved address only passes the `getApproved` branch of `canExtendSubnames`.
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L228-L238 @ ens_v1@91c966f)

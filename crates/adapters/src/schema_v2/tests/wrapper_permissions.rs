@@ -26,6 +26,7 @@ const HOLDER_POWERS: &[&str] = &[
     "burn_fuses",
     "approve",
     "extend_subname_expiry",
+    "extend_expiry",
 ];
 
 fn wrapper_manifest() -> ManifestInput {
@@ -48,6 +49,12 @@ fn wrapper_manifest() -> ManifestInput {
             (
                 "TransferSingle",
                 "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)",
+                &["name_wrapper"],
+                &["TokenControlTransferred", "PermissionChanged"],
+            ),
+            (
+                "TransferBatch",
+                "event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)",
                 &["name_wrapper"],
                 &["TokenControlTransferred", "PermissionChanged"],
             ),
@@ -80,9 +87,23 @@ fn wrapper_manifest() -> ManifestInput {
 }
 
 fn node() -> B256 {
-    crate::schema_v2::common::namehash_raw([b"alice".as_slice(), b"eth"].into_iter())
+    node_of(&["alice", "eth"])
+}
+
+fn node_of(labels: &[&str]) -> B256 {
+    crate::schema_v2::common::namehash_raw(labels.iter().map(|label| label.as_bytes()))
         .parse()
         .expect("namehash must parse")
+}
+
+fn dns_name(labels: &[&str]) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    for label in labels {
+        encoded.push(u8::try_from(label.len()).expect("short label"));
+        encoded.extend_from_slice(label.as_bytes());
+    }
+    encoded.push(0);
+    encoded
 }
 
 fn address(value: &str) -> Address {
@@ -90,13 +111,36 @@ fn address(value: &str) -> Address {
 }
 
 fn wrapped(block: i64, fuses: u32) -> RawLogInput {
+    wrapped_labels(block, &["alice", "eth"], fuses)
+}
+
+fn wrapped_labels(block: i64, labels: &[&str], fuses: u32) -> RawLogInput {
     raw_at(
         NameWrapped {
-            node: node(),
-            name: vec![5, b'a', b'l', b'i', b'c', b'e', 3, b'e', b't', b'h', 0].into(),
+            node: node_of(labels),
+            name: dns_name(labels).into(),
             owner: address(HOLDER),
             fuses,
             expiry: 42,
+        }
+        .encode_log_data(),
+        block,
+        0,
+        CONTRACT,
+    )
+}
+
+fn transfer_batch(block: i64, from: &str, to: Address, nodes: &[B256]) -> RawLogInput {
+    raw_at(
+        v2_registry::TransferBatch {
+            operator: address(from),
+            from: address(from),
+            to,
+            ids: nodes
+                .iter()
+                .map(|node| U256::from_be_bytes(node.0))
+                .collect(),
+            values: nodes.iter().map(|_| U256::from(1)).collect(),
         }
         .encode_log_data(),
         block,
@@ -197,12 +241,24 @@ fn input(raw_logs: Vec<RawLogInput>) -> BatchInput {
     }
 }
 
-/// `(block, subject, relation, granted, powers)` for every `PermissionChanged` row.
+/// `(block, subject, relation, granted, powers)` for every `PermissionChanged` row of `alice.eth`.
 fn permission_rows(output: &BatchOutput) -> Vec<(i64, String, String, bool, serde_json::Value)> {
+    permission_rows_for(output, node())
+}
+
+fn permission_rows_for(
+    output: &BatchOutput,
+    node: B256,
+) -> Vec<(i64, String, String, bool, serde_json::Value)> {
     output
         .normalized_events
         .iter()
-        .filter(|event| event.event_kind == "PermissionChanged")
+        .filter(|event| {
+            let expected = json!(format!("{node:#x}"));
+            event.event_kind == "PermissionChanged"
+                && (event.after_state["grant_source"]["node"] == expected
+                    || event.after_state["revocation_source"]["node"] == expected)
+        })
         .map(|event| {
             let after = &event.after_state;
             let granted = !after["grant_source"].is_null();
@@ -214,7 +270,7 @@ fn permission_rows(output: &BatchOutput) -> Vec<(i64, String, String, bool, serd
             assert_eq!(source["kind"], "ens_v1_authority");
             assert_eq!(source["authority_kind"], "wrapper");
             assert_eq!(source["authority_contract"], CONTRACT);
-            assert_eq!(source["node"], format!("{:#x}", node()));
+            assert_eq!(source["node"], format!("{node:#x}"));
             assert_eq!(after["scope"], json!({"kind": "resource"}));
             (
                 event.block_number.expect("wrapper rows carry a block"),
@@ -397,5 +453,141 @@ fn repeated_and_foreign_wrapper_approvals_emit_nothing() -> anyhow::Result<()> {
     // An approval for a token the wrapper never wrapped has no name to bind to.
     let foreign = interpret_test_batch(input(vec![approval(1, HOLDER, address(DELEGATE))]))?;
     assert!(foreign.normalized_events.is_empty());
+    Ok(())
+}
+
+/// Replays `logs[split..]` on state restored from `logs[..split]` through both prior-event paths
+/// and asserts the permission rows match the single-pass rows from `split_block` on.
+fn assert_restore_matches(
+    logs: &[RawLogInput],
+    split: usize,
+    split_block: i64,
+) -> anyhow::Result<()> {
+    let output = interpret_test_batch(input(logs.to_vec()))?;
+    let head = input(logs[..split].to_vec());
+    let (first, _) = interpret_test_batch_incremental(head.clone(), None)?;
+    let mut tail = input(logs[split..].to_vec());
+    for prior in [
+        first.normalized_events.iter().map(prior_event).collect(),
+        seam::fold_prior_events(vec![], &first.normalized_events, &head.blocks)?,
+    ] {
+        tail.prior_events = prior;
+        let restored = interpret_test_batch(tail.clone())?;
+        assert_eq!(
+            permission_rows(&restored),
+            permission_rows(&output)
+                .into_iter()
+                .filter(|(block, ..)| *block >= split_block)
+                .collect::<Vec<_>>()
+        );
+    }
+    Ok(())
+}
+
+// `_beforeTransfer` deletes the approval whoever the recipient is; the delegate who becomes the
+// holder loses the token-approval row and gains the holder row.
+// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L837-L840 @ ens_v1@91c966f)
+#[test]
+fn a_delegate_who_becomes_the_holder_still_loses_the_token_approval() -> anyhow::Result<()> {
+    let logs = vec![
+        wrapped(1, 0),
+        approval(2, HOLDER, address(DELEGATE)),
+        transfer(3, HOLDER, address(DELEGATE)),
+    ];
+    let output = interpret_test_batch(input(logs.clone()))?;
+    assert_eq!(
+        permission_rows(&output),
+        vec![
+            row(1, HOLDER, "holder", true, HOLDER_POWERS),
+            row(2, DELEGATE, "token_approval", true, DELEGATE_POWERS),
+            row(3, HOLDER, "holder", false, HOLDER_POWERS),
+            row(3, DELEGATE, "holder", true, HOLDER_POWERS),
+            row(3, DELEGATE, "token_approval", false, DELEGATE_POWERS),
+        ]
+    );
+    assert_restore_matches(&logs, 2, 3)
+}
+
+// The ERC-1155 burn already revoked the holder; the `NameUnwrapped` that follows it must not
+// revoke the same holder again, in the first pass or after a restore.
+// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L278 @ ens_v1@91c966f)
+#[test]
+fn a_burn_followed_by_name_unwrapped_revokes_the_holder_once() -> anyhow::Result<()> {
+    let logs = vec![
+        wrapped(1, 0),
+        approval(2, HOLDER, address(DELEGATE)),
+        transfer(3, HOLDER, Address::ZERO),
+        unwrapped(4, HOLDER),
+    ];
+    let output = interpret_test_batch(input(logs.clone()))?;
+    assert_eq!(
+        permission_rows(&output),
+        vec![
+            row(1, HOLDER, "holder", true, HOLDER_POWERS),
+            row(2, DELEGATE, "token_approval", true, DELEGATE_POWERS),
+            row(3, HOLDER, "holder", false, HOLDER_POWERS),
+            row(3, DELEGATE, "token_approval", false, DELEGATE_POWERS),
+        ]
+    );
+    let unbound = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "AuthorityEpochChanged"
+                && event.after_state["source_event"] == "NameUnwrapped"
+        })
+        .expect("NameUnwrapped closes the wrapper authority epoch");
+    assert!(unbound.resource_id.is_some());
+    assert_restore_matches(&logs, 3, 4)?;
+
+    // A plain transfer to a new holder followed by an unwrap still revokes that holder once.
+    let logs = vec![
+        wrapped(1, 0),
+        transfer(2, HOLDER, address(NEXT_HOLDER)),
+        unwrapped(3, NEXT_HOLDER),
+    ];
+    let output = interpret_test_batch(input(logs.clone()))?;
+    assert_eq!(
+        permission_rows(&output),
+        vec![
+            row(1, HOLDER, "holder", true, HOLDER_POWERS),
+            row(2, HOLDER, "holder", false, HOLDER_POWERS),
+            row(2, NEXT_HOLDER, "holder", true, HOLDER_POWERS),
+            row(3, NEXT_HOLDER, "holder", false, HOLDER_POWERS),
+        ]
+    );
+    assert_restore_matches(&logs, 2, 3)
+}
+
+// `TransferBatch` moves every listed token; each wrapped name changes holder independently.
+// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L155-L197 @ ens_v1@91c966f)
+#[test]
+fn transfer_batch_moves_the_holder_of_every_wrapped_name_it_lists() -> anyhow::Result<()> {
+    let bob = node_of(&["bob", "eth"]);
+    let output = interpret_test_batch(input(vec![
+        wrapped(1, 0),
+        wrapped_labels(2, &["bob", "eth"], 0),
+        transfer_batch(3, HOLDER, address(NEXT_HOLDER), &[node(), bob]),
+    ]))?;
+    for (block, node) in [(1, node()), (2, bob)] {
+        assert_eq!(
+            permission_rows_for(&output, node),
+            vec![
+                row(block, HOLDER, "holder", true, HOLDER_POWERS),
+                row(3, HOLDER, "holder", false, HOLDER_POWERS),
+                row(3, NEXT_HOLDER, "holder", true, HOLDER_POWERS),
+            ]
+        );
+    }
+    let transfers = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.event_kind == "TokenControlTransferred"
+                && event.after_state["source_event"] == "TransferBatch"
+        })
+        .count();
+    assert_eq!(transfers, 2);
     Ok(())
 }

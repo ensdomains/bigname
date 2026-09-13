@@ -245,14 +245,14 @@ fn transfer_item(
         append_holder_permissions(&mut output, &context, to_owner, true);
     }
     // `_beforeTransfer` deletes the token approval unless CANNOT_APPROVE is burnt, judged on the
-    // expiry-cleared fuse word. A delegate who becomes the holder is superseded by the grant.
+    // expiry-cleared fuse word. The revocation is emitted even when the delegate is the recipient,
+    // so a restore that rebuilt the delegate from these rows replays identically.
     // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L837-L840 @ ens_v1@91c966f)
     let fuses = state
         .v1_wrapper_effective_fuses(namespace, &namehash, raw.block_timestamp.unix_timestamp())
         .unwrap_or(0);
     if fuses & CANNOT_APPROVE == 0
         && let Some(delegate) = state.set_v1_wrapper_delegate(namespace, &namehash, None)
-        && !delegate.eq_ignore_ascii_case(&address_hex(to))
     {
         append_delegate_permission(&mut output, &context, &delegate, false);
     }
@@ -260,7 +260,8 @@ fn transfer_item(
 }
 
 // Every burn clears the token approval, and every burn except the un-admitted upgrade path is
-// followed by NameUnwrapped; revoking here keeps an upgraded name from retaining a live holder.
+// followed by NameUnwrapped; revoking here keeps an upgraded name from retaining a live holder,
+// and the recorded burn keeps the following NameUnwrapped from revoking the holder twice.
 // (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L278 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L483-L509 @ ens_v1@91c966f)
 fn burn(
@@ -290,6 +291,7 @@ fn burn(
     };
     if let Some(owner) = name.owner.as_deref() {
         append_holder_permissions(&mut output, &context, owner, false);
+        state.set_v1_wrapper_burnt(namespace, namehash, true);
     }
     if let Some(delegate) = state.set_v1_wrapper_delegate(namespace, namehash, None) {
         append_delegate_permission(&mut output, &context, &delegate, false);
@@ -322,6 +324,7 @@ fn name_wrapped(
     // A freshly minted token carries no approval: `_burn` cleared any earlier one.
     // (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L275 @ ens_v1@91c966f)
     state.set_v1_wrapper_delegate(&selected.source.namespace, &raw_namehash, None);
+    state.set_v1_wrapper_burnt(&selected.source.namespace, &raw_namehash, false);
     let wrapper_data = state.wrap_v1_name(
         &selected.source.namespace,
         &raw_namehash,
@@ -448,6 +451,8 @@ fn name_unwrapped(
     let namehash = hex_string(event.node);
     let wrapper_resolver = state.v1_resolver(&selected.source.namespace, &namehash);
     let delegate = state.set_v1_wrapper_delegate(&selected.source.namespace, &namehash, None);
+    let holder_revoked_by_burn =
+        state.set_v1_wrapper_burnt(&selected.source.namespace, &namehash, false);
     state.note_v1_unwrap(
         &selected.source.namespace,
         &namehash,
@@ -497,7 +502,9 @@ fn name_unwrapped(
             source_event_kind: "NameUnwrapped",
             identity_suffix: "NameUnwrapped",
         };
-        if let Some(owner) = name.owner.as_deref() {
+        if let Some(owner) = name.owner.as_deref()
+            && !holder_revoked_by_burn
+        {
             append_holder_permissions(&mut output, &context, owner, false);
         }
         if let Some(delegate) = delegate {
