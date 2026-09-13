@@ -5,6 +5,10 @@ pub const ENSIP19_DEFAULT_COIN_TYPE: u64 = 1 << 31;
 pub const ETH_COIN_TYPE: u64 = 60;
 pub const ENSIP19_DEFAULT_RECORD_KEY: &str = "addr:2147483648";
 const ZERO20_HEX: &str = "0x0000000000000000000000000000000000000000";
+/// Reason an indexed read reports when the inventory row's coverage is not authoritative and the
+/// row names no reason of its own.
+pub const INDEXED_INVENTORY_NOT_AUTHORITATIVE_REASON: &str =
+    "indexed_record_inventory_not_authoritative";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +61,14 @@ pub const fn ensip19_default_fallback_target(coin_type: u64) -> bool {
     ensip19_chain_from_coin_type(coin_type) > 0
 }
 
+/// Answer one record key from a projected record inventory row.
+///
+/// The row's coverage gates the whole read. An inventory serves values, derived answers, and
+/// authoritative absence only while its coverage is authoritative (`status` `full` or `projected`
+/// with no `unsupported_reason`). An `unsupported` row, such as a name behind a resolver whose
+/// implementation is not an admitted profile, may retain entries for diagnostics, but they are not
+/// answers: every key reports the row's own reason instead
+/// (`docs/api-v2-routes.md` § `GET /v1/names/{name}/records`).
 pub fn evaluate_indexed_record(
     entries: &Value,
     provenance: &Value,
@@ -65,6 +77,13 @@ pub fn evaluate_indexed_record(
     record_family: &str,
     selector_key: Option<&str>,
 ) -> IndexedRecordAnswer {
+    if !coverage_is_authoritative(coverage) {
+        return unsupported(
+            coverage_unsupported_reason(coverage)
+                .unwrap_or(INDEXED_INVENTORY_NOT_AUTHORITATIVE_REASON),
+        );
+    }
+
     if let Some(entry) = find_entry(entries, record_key, record_family, selector_key) {
         let exact = answer_from_entry(entry, record_family);
         if exact.status != IndexedRecordStatus::NotFound
@@ -73,10 +92,6 @@ pub fn evaluate_indexed_record(
                     .as_array()
                     .is_some_and(|keys| keys.iter().any(|key| key.as_str() == Some(record_key))))
         {
-            if exact.status == IndexedRecordStatus::NotFound && !coverage_is_authoritative(coverage)
-            {
-                return unsupported("indexed_record_inventory_not_authoritative");
-            }
             return exact;
         }
     }
@@ -86,9 +101,6 @@ pub fn evaluate_indexed_record(
         .flatten()
         .is_some_and(ensip19_default_fallback_target);
     if eligible_coin_type && has_ensip19_rule(provenance) {
-        if !coverage_is_authoritative(coverage) {
-            return unsupported("ensip19_default_address_source_unavailable");
-        }
         let derivation = Some(IndexedRecordDerivation {
             rule: ResolverReadFeature::Ensip19DefaultAddress,
             source_record_key: ENSIP19_DEFAULT_RECORD_KEY.to_owned(),
@@ -123,21 +135,13 @@ pub fn evaluate_indexed_record(
                 }
             };
         }
-        return if coverage_is_authoritative(coverage) {
-            IndexedRecordAnswer {
-                derivation,
-                ..not_found()
-            }
-        } else {
-            unsupported("ensip19_default_address_source_unavailable")
+        return IndexedRecordAnswer {
+            derivation,
+            ..not_found()
         };
     }
 
-    if coverage_is_authoritative(coverage) {
-        not_found()
-    } else {
-        unsupported("indexed_record_inventory_not_authoritative")
-    }
+    not_found()
 }
 
 impl IndexedRecordStatus {
@@ -258,12 +262,24 @@ fn has_ensip19_rule(provenance: &Value) -> bool {
         })
 }
 
-fn coverage_is_authoritative(coverage: &Value) -> bool {
+/// Whether a record inventory row's coverage lets its entries answer: coverage `status` is `full`
+/// or `projected` and the row carries no `unsupported_reason` key. Any other coverage, including a
+/// null reason, fails closed. Routes that render inventory values outside [`evaluate_indexed_record`]
+/// use the same test so one row is either serving or unsupported everywhere.
+pub fn coverage_is_authoritative(coverage: &Value) -> bool {
     coverage.get("unsupported_reason").is_none()
         && matches!(
             coverage.get("status").and_then(Value::as_str),
             Some("full" | "projected")
         )
+}
+
+fn coverage_unsupported_reason(coverage: &Value) -> Option<&str> {
+    coverage
+        .get("unsupported_reason")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
 }
 
 fn not_found() -> IndexedRecordAnswer {
@@ -345,21 +361,98 @@ mod tests {
                 "addr",
                 Some("60"),
             );
-            if exact == Some("not_found")
-                && provenance["exact_nonempty_not_found_record_keys"] == json!(["addr:60"])
-            {
-                assert_eq!(
-                    incomplete.unsupported_reason.as_deref(),
-                    Some("indexed_record_inventory_not_authoritative")
-                );
-            }
+            // Unsupported coverage refuses every read, an exact success entry included; a row
+            // naming no reason reports the generic non-authoritative reason.
+            assert_eq!(incomplete.status, Unsupported, "{entries}; {provenance}");
             assert_eq!(
-                incomplete.status,
-                if exact == Some("success") {
-                    Success
-                } else {
-                    Unsupported
-                }
+                incomplete.unsupported_reason.as_deref(),
+                Some(INDEXED_INVENTORY_NOT_AUTHORITATIVE_REASON)
+            );
+            assert_eq!(incomplete.value, None);
+        }
+    }
+
+    #[test]
+    fn unsupported_coverage_refuses_retained_values_with_the_row_reason() {
+        let entries = json!([
+            {"record_key":"addr:60","record_family":"addr","selector_key":"60","status":"success",
+             "value":"0xFA75ED860000000000000000000000000000ABCD"},
+            {"record_key":"text:url","record_family":"text","selector_key":"url","status":"success",
+             "value":{"value":"https://value.example"}},
+            {"record_key":"contenthash","record_family":"contenthash","selector_key":null,
+             "status":"success","value":{"encoding":"hex","bytes":"0xe3010170"}}
+        ]);
+        let unsupported = json!({
+            "status":"unsupported",
+            "exhaustiveness":"not_asserted",
+            "unsupported_reason":"resolver_upgrade_not_observed"
+        });
+        for (record_key, family, selector) in [
+            ("addr:60", "addr", Some("60")),
+            ("text:url", "text", Some("url")),
+            ("contenthash", "contenthash", None),
+            ("text:missing", "text", Some("missing")),
+        ] {
+            let answer = evaluate_indexed_record(
+                &entries,
+                &rule(),
+                &unsupported,
+                record_key,
+                family,
+                selector,
+            );
+            assert_eq!(
+                answer.status,
+                IndexedRecordStatus::Unsupported,
+                "{record_key}"
+            );
+            assert_eq!(answer.value, None, "{record_key}");
+            assert_eq!(
+                answer.unsupported_reason.as_deref(),
+                Some("resolver_upgrade_not_observed"),
+                "{record_key}"
+            );
+            assert_eq!(answer.derivation, None, "{record_key}");
+        }
+
+        // The same entries answer once the row is supported, so the refusal is the coverage's.
+        let served = evaluate_indexed_record(
+            &entries,
+            &rule(),
+            &projected(),
+            "addr:60",
+            "addr",
+            Some("60"),
+        );
+        assert_eq!(served.status, IndexedRecordStatus::Success);
+        assert_eq!(
+            served.value,
+            Some(json!("0xfa75ed860000000000000000000000000000abcd"))
+        );
+
+        // A null or blank reason falls back to the generic non-authoritative reason.
+        for coverage in [
+            json!({"status":"unsupported","unsupported_reason":null}),
+            json!({"status":"unsupported","unsupported_reason":""}),
+            json!({"status":"partial"}),
+        ] {
+            let answer = evaluate_indexed_record(
+                &entries,
+                &rule(),
+                &coverage,
+                "addr:60",
+                "addr",
+                Some("60"),
+            );
+            assert_eq!(
+                answer.status,
+                IndexedRecordStatus::Unsupported,
+                "{coverage}"
+            );
+            assert_eq!(
+                answer.unsupported_reason.as_deref(),
+                Some(INDEXED_INVENTORY_NOT_AUTHORITATIVE_REASON),
+                "{coverage}"
             );
         }
     }
