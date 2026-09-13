@@ -1333,8 +1333,24 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   wrapper_state?, wrapper_fuses?}`. The two wrapper fields use the same atomic,
   [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word)
   contract as name detail and appear only for a returned current ENSv1 wrapper
-  registration. Their presence does not widen wrapper-holder enumeration;
-  request-relative completeness metadata below remains authoritative.
+  registration. For a current ENSv1 NameWrapper registration the rows are the
+  ERC-1155 token holder, each owner-wide operator the holder approved for as
+  long as that approval stands, and the per-token approved delegate. Operator
+  rows carry the holder's powers because NameWrapper authorizes the holder and
+  its operators identically; the delegate carries only
+  `extend_subname_expiry`; every row applies the expiry-effective fuse mask, and
+  rows revoke on transfer, unwrap, approval revocation, and expiry. Request-
+  relative completeness metadata below remains authoritative.
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214-L238 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L37-L47 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L105-L117 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L137-L150 @ ens_v1@91c966f)
+  A resource-bound read (`name` or `registration_id`) also returns a top-level
+  `restrictions` object beside `data`, `page`, and `meta`: the
+  [resource restrictions](api-v2.md#resource-restrictions) of the selected
+  registration. It is omitted for address-only reads and when the registration
+  has no resource-level constraint model or its NameWrapper position has
+  expired with a cleared owner.
   `authority_context` is required on every row and records how that row was
   admitted under the per-name ownership rule. `powers` values come from the
   [permission powers vocabulary](api-v2.md#permission-powers-vocabulary), which
@@ -1344,8 +1360,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   `{grant, revocation?, inheritance_path?, transfer_behavior?}`. Product lineage
   is a bounded summary; deep provenance stays on diagnostics authority/events
   routes. Lineage objects expose only allowlisted fields: `kind`,
-  `registration_id`, `resolver: {chain_id, address}`, and `powers` when those
-  fields apply. `kind` values are `event`, `permission`,
+  `registration_id`, `resolver: {chain_id, address}`, `powers`, and
+  `relation` when those fields apply. `relation` names the NameWrapper relation
+  behind an `ens_v1_authority` grant or revocation: `holder`, `operator`, or
+  `token_approval`. `kind` values are `event`, `permission`,
   `registration_authority`, `registration_rebound`, `ens_v1_authority`,
   `resolver_root_fallback`, and `registry_root_fallback`. Diagnostics-only
   storage keys such as event provenance, upstream/root resources,
@@ -1385,9 +1403,14 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   `unsupported_reason=approval_and_delegation_permissions_not_supported`.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
-  (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) A
-  wrapper-only resource returns `meta.completeness=unsupported` with
-  `unsupported_reason=wrapper_holder_permissions_not_supported`. Missing or
+  (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) An
+  ENSv1 NameWrapper resource returns `meta.completeness=partial` with
+  `unsupported_reason=parent_and_resolver_delegation_permissions_not_supported`:
+  its holder, operators, and delegate are rows, while the parent name's control
+  over a non-emancipated wrapped subname and resolver operator/delegate
+  approvals are not enumerated.
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565-L589 @ ens_v1@91c966f)
+  Missing or
   unrecognized summary metadata returns `meta.completeness=partial` with
   `unsupported_reason=permission_support_unknown` and takes precedence. A mixed
   wrapper/non-wrapper request uses the approval/delegation partial reason. An
@@ -1397,9 +1420,9 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   do not prove that no account can mutate the selected name or registration.
   Projected rows are not suppressed by these classifications and remain useful,
   but neither the page nor a role summary is an authoritative permission
-  enumeration while the partial marker is present. NameWrapper holder
-  enumeration remains separately unsupported, and ENSv2 registry operator
-  approval remains separately narrowed until indexed.
+  enumeration while the partial marker is present. Parent control of
+  non-emancipated wrapped subnames and ENSv2 registry operator approval remain
+  separately narrowed until indexed.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) A `name` filter
   resolves only the selected current registration: a migrated name returns its
   ENSv2 permission rows, while an explicit `registration_id` can still select a
@@ -1510,7 +1533,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   resolver data.
   `include=role_summary` adds
   `role_summary: [{address, grants: [{grant_scope, powers}]}]` grouped by the
-  permission subject address and `record_count` when record inventory exists
+  permission subject address, `restrictions` (the same
+  [resource restrictions](api-v2.md#resource-restrictions) object
+  `GET /v1/permissions` returns for the row's registration, omitted when none
+  applies), and `record_count` when record inventory exists
   for the row. `record_count` counts the known record selectors for the name's
   current registration, including unsupported-family selectors and excluding
   explicit gaps. `grant_scope` uses the same shape documented for
@@ -1540,9 +1566,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   returns `meta.completeness=partial`,
   `meta.unsupported_fields=["role_summary"]`, and
   `unsupported_reason=approval_and_delegation_permissions_not_supported`. An
-  ENSv1 wrapper-only summary uses the same `partial` response classification and
+  ENSv1 NameWrapper summary uses the same `partial` response classification and
   unsupported field with
-  `unsupported_reason=wrapper_holder_permissions_not_supported`. Projected
+  `unsupported_reason=parent_and_resolver_delegation_permissions_not_supported`.
+  Projected
   grants remain in `role_summary`, but the expansion is non-authoritative;
   therefore an empty summary is not a proven empty permission set. A mixed
   wrapper/non-wrapper page uses the approval/delegation reason. Missing or

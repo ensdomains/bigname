@@ -251,8 +251,10 @@ list: their ABI decoding is declaration-backed, while any normalized output is
 an adapter-owned mapping versioned by the
 [interpreter content hash](glossary.md#interpreter-content-hash). The admitted
 ENSv1 and Basenames registry `ApprovalForAll` declarations map to
-`AccountPermissionChanged`; registrar, resolver, and NameWrapper approvals
-remain decoded with no normalized output. Standard approval events are watched
+`AccountPermissionChanged`, the NameWrapper `ApprovalForAll` declaration maps
+to the same kind, and the NameWrapper `Approval` declaration maps to a
+resource-scoped `PermissionChanged`; registrar and resolver approvals remain
+decoded with no normalized output. Standard approval events are watched
 only at explicitly declared, role-eligible
 contract addresses and their declared historical intervals; they are not added
 to generic resolver [all-emitter watches](glossary.md#watch-plan--watched-tuple).

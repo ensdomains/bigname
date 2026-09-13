@@ -346,9 +346,11 @@ names alike, whether the name is registry-, registrar-, or NameWrapper-held.
 
 the adapter-owned derivation path for declaration-backed Ethereum approval
 events whose manifests deliberately leave `normalized_events` empty. In the
-current scope it emits `AccountPermissionChanged` only for admitted ENSv1 and
-Basenames registry `ApprovalForAll` logs; declared registrar, resolver, and
-NameWrapper approvals still decode without normalized output.
+current scope it emits `AccountPermissionChanged` for admitted ENSv1 and
+Basenames registry `ApprovalForAll` logs and for NameWrapper `ApprovalForAll`
+logs, and a resource-scoped `PermissionChanged` for the NameWrapper per-token
+`Approval`; declared registrar and resolver approvals still decode without
+normalized output.
 
 ## Discovery graph / discovery edge
 
