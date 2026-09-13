@@ -3919,9 +3919,9 @@ async fn root_resolver_discovery_projects_single_label_records_in_normal_and_red
     assert_eq!(pointer.1, DISCOVERED_RESOLVER);
     assert_eq!(pointer.4, "box");
 
-    let edge: (i64, String, String, String) = sqlx::query_as(
-        "SELECT count(*), min(source.source_family), min(address.address),
-                min(edge.admission_basis)
+    let edges: Vec<(String, String, String, i64, String)> = sqlx::query_as(
+        "SELECT source.source_family, address.address, edge.admission_basis,
+                edge.active_from_block_number, edge.discovery_source
          FROM discovery_edges edge
          JOIN manifest_versions source ON source.manifest_id = edge.source_manifest_id
          JOIN contract_instance_addresses address
@@ -3929,19 +3929,32 @@ async fn root_resolver_discovery_projects_single_label_records_in_normal_and_red
           AND address.chain_id = edge.chain_id
          WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
            AND edge.deactivated_at IS NULL
-           AND edge.canonicality_state IN ('canonical', 'safe', 'finalized')",
+           AND edge.canonicality_state IN ('canonical', 'safe', 'finalized')
+         ORDER BY edge.active_from_block_number",
     )
     .bind(chain)
-    .fetch_one(scratch.pool())
+    .fetch_all(scratch.pool())
     .await?;
     assert_eq!(
-        edge,
-        (
-            1,
-            "ens_v2_root_l1".into(),
-            DISCOVERED_RESOLVER.into(),
-            "reachable_from_root".into(),
-        )
+        edges,
+        [
+            (
+                "ens_v2_root_l1".into(),
+                DISCOVERED_RESOLVER.into(),
+                "reachable_from_root".into(),
+                1,
+                "ResolverUpdated".into(),
+            ),
+            (
+                "ens_v2_resolver_l1".into(),
+                DISCOVERED_RESOLVER.into(),
+                "declared_resolver_implementation".into(),
+                2,
+                "Upgraded".into(),
+            ),
+        ],
+        "the registry pointer admits the proxy; its later Upgraded to a declared implementation \
+         is recorded as a second, later resolver edge"
     );
 
     let record_topic = format!("{:#x}", TextChanged::SIGNATURE_HASH);
@@ -3988,7 +4001,7 @@ async fn root_resolver_discovery_projects_single_label_records_in_normal_and_red
     .bind(DISCOVERED_RESOLVER)
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(replay_counts, (1, 1, 2));
+    assert_eq!(replay_counts, (2, 1, 2));
     run_project(scratch.pool(), chain, 2, 0, 2).await?;
     assert_root_resolver_projection(scratch.pool(), chain, &pointer.2, pointer.3).await?;
     scratch.cleanup().await
