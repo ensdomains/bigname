@@ -89,6 +89,16 @@ fn push_wrapper_permissions(
         .unwrap_or_default()
         .to_owned();
     let action = if grant { "grant" } else { "revoke" };
+    // Token-approval rows share one retained-state key per name and subject whether they come
+    // from an `Approval` log or from the event-less clear on transfer or burn, so a restore that
+    // keeps only the newest row per key sees the clear that followed a grant. Holder rows keep
+    // the default per-subject key.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L837-L840 @ ens_v1@91c966f)
+    let state_scope = if relation_kind == "token_approval" {
+        format!("{}:{node}:-:{subject}:token_approval", context.wrapper)
+    } else {
+        String::new()
+    };
     for (index, (scope, powers)) in scopes.into_iter().enumerate() {
         let (before, after) = v1_wrapper_states(
             grant,
@@ -113,7 +123,7 @@ fn push_wrapper_permissions(
             ),
             explicit_before: Some(before),
             after_state: after,
-            state_scope: String::new(),
+            state_scope: state_scope.clone(),
         });
     }
 }
