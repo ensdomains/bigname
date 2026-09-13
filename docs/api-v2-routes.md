@@ -617,7 +617,8 @@ collection route carry neither header.
   such as one behind a resolver whose implementation is not an admitted
   profile, omits those four fields and lists them in `unsupported_fields`
   exactly as a missing inventory does; `status` and `resolver` keep following
-  the name row, and `GET /v1/names/{name}/records` serves the per-key reason. An ownerless ENSv2
+  the name row, and `GET /v1/names/{name}/records` serves the per-key reason.
+  An ownerless ENSv2
   reservation does not meet this exception, even if identity attached to a
   resource or record inventory was retained for audit. This intentionally
   differs from ENSv2, which stores and returns a reservation resolver until
