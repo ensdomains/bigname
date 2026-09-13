@@ -105,8 +105,13 @@ performs a fresh reverse lookup at the selected Ethereum position; a projected
 `primary_names_current` claim is not required. When a projected claim exists,
 the route consults it before live execution so unsupported exact-name coverage
 or an unverifiable selected [authority arm](glossary.md#authority-epoch) can
-refuse the forward call. After the reverse leg, the same exact-name gate applies
-to the live claim. An absent readable exact-name row admits the forward call.
+refuse the forward call. An arm is verifiable when the selected `ens_execution`
+manifest lists it in `verified_authority_arms` (`manifests.md` §
+`verified_authority_arms`; absent means `["ens_v1"]`, the Mainnet and Sepolia
+declaration; the `sepolia-hackathon` manifest lists `ens_v2` as well because its
+proxy is a UniversalResolverV2). After the reverse leg, the same exact-name
+gate applies to the live claim. An absent readable exact-name row admits the
+forward call.
 The live reverse claim must already be byte-normalized, and the route accepts it
 only when the forward address matches the requested address. A reverse claim
 alone is not proof of a primary name.[^v1-aur-l217][^v1-aur-l263][^v1-aur-l269]

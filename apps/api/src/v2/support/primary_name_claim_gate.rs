@@ -1,8 +1,10 @@
 use super::*;
 use crate::v2::vocab::{MISSING_UNSUPPORTED_REASON, projected_row_product_reason};
 
-/// The public reason for a claim whose selected authority has no declared entrypoint to verify
-/// through. Distinct from an unsupported exact-name projection, which reports its own reason.
+/// The public reason for a claim whose selected authority arm the deployment's `ens_execution`
+/// declaration does not admit (`docs/manifests.md` § `verified_authority_arms`), or for a
+/// supported row missing its arm. Distinct from an unsupported exact-name projection, which
+/// reports its own reason.
 pub(super) const CLAIM_AUTHORITY_NOT_VERIFIABLE: &str = "exact_name_authority_not_verifiable";
 
 pub(super) enum ForwardGateDecision {
@@ -15,9 +17,9 @@ pub(super) enum ForwardGateDecision {
 }
 
 /// Whether forward verification may run for this address's projected claim. A claim the exact-name
-/// projection does not support, and a claim whose selected authority is an arm this deployment
-/// declares no execution entrypoint for, are both answered in band rather than resolved through
-/// the superseded ENSv1 authority.
+/// projection does not support, and a claim whose selected authority is an arm the deployment's
+/// execution declaration does not admit, are both answered in band rather than resolved through
+/// an entrypoint the name's own authority selection has ruled out.
 pub(super) async fn unverifiable_claim_authority(
     pool: &PgPool,
     address: &str,
@@ -99,9 +101,9 @@ pub(super) async fn unverifiable_name_authority(
         )));
     }
 
-    // No manifest declares an execution entrypoint for any arm but ENSv1, so this deployment has
-    // no forward-resolution path for a name whose selected authority is a later arm. We decline
-    // rather than resolve such a name through the ENSv1 entrypoint, whose answer our own authority
+    // The selected `ens_execution` manifest declares which authority arms its Universal Resolver
+    // can answer for. A name whose selected arm is outside that declaration has no forward path
+    // here; we decline rather than resolve it through an entrypoint whose answer our own authority
     // selection has already ruled out as the current one.
     let Some(authority_arm) = row
         .provenance
@@ -110,16 +112,54 @@ pub(super) async fn unverifiable_name_authority(
     else {
         // Unlike an absent row, a present supported row must carry the projected authority choice.
         // Missing selection provenance is a projection anomaly, so forward verification fails
-        // closed instead of silently using the ENSv1 entrypoint.
+        // closed instead of silently using the entrypoint.
         return Ok(ForwardGateDecision::Refuse(
             CLAIM_AUTHORITY_NOT_VERIFIABLE.to_owned(),
         ));
     };
-    Ok(if authority_arm == "ens_v1" {
+    let lookup_chain_id = ens_primary_name_lookup_chain(pool, namespace).await?;
+    let admitted_arms =
+        match bigname_lookup::admitted_verified_authority_arms(pool, &lookup_chain_id).await {
+            Ok(arms) => arms,
+            // No declared entrypoint at all: nothing is verifiable, and the live lookup would
+            // report the same in its own vocabulary, so decline in band before dispatching.
+            Err(error) if error.kind() == bigname_lookup::ErrorKind::Unsupported => {
+                return Ok(ForwardGateDecision::Refuse(
+                    CLAIM_AUTHORITY_NOT_VERIFIABLE.to_owned(),
+                ));
+            }
+            Err(error) => return Err(admitted_arms_error(namespace, error)),
+        };
+    Ok(if admitted_arms.iter().any(|arm| arm == authority_arm) {
         ForwardGateDecision::Admit
     } else {
         ForwardGateDecision::Refuse(CLAIM_AUTHORITY_NOT_VERIFIABLE.to_owned())
     })
+}
+
+fn admitted_arms_error(namespace: &str, error: bigname_lookup::LookupError) -> ApiError {
+    warn!(
+        service = "api",
+        namespace = %namespace,
+        error_kind = ?error.kind(),
+        error = %error.message(),
+        "failed to read the admitted verified authority arms"
+    );
+    match error.kind() {
+        bigname_lookup::ErrorKind::Configuration
+        | bigname_lookup::ErrorKind::Stale
+        | bigname_lookup::ErrorKind::ConcurrentState => ApiError {
+            status: StatusCode::CONFLICT,
+            code: "stale",
+            message: "verified primary-name lookup must be retried".to_owned(),
+        },
+        bigname_lookup::ErrorKind::Unsupported
+        | bigname_lookup::ErrorKind::Transport
+        | bigname_lookup::ErrorKind::Execution
+        | bigname_lookup::ErrorKind::Database => {
+            ApiError::internal_error("failed to read the admitted verified authority arms")
+        }
+    }
 }
 
 fn projection_unavailable(error: &anyhow::Error) -> bool {
