@@ -682,6 +682,15 @@ collection route carry neither header.
   Product records use product reason vocabulary: retained-selector misses use
   `value_not_retained`, and phase-unsupported record families use
   `record_family_not_supported`.
+  A name whose current ENSv2 resolver is a declared
+  [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
+  keeps that mirror as `data.resolver`, and its indexed `records`, `addresses`,
+  `text_records`, `content_hash`, and `include=inventory` come from the same
+  name's ENSv1 inventory exactly as Project derived them
+  ([`projections.md`](projections.md#resolver-and-records)); the response shape
+  does not change. When that ENSv1 side is not projected the inventory is
+  unsupported with `mirrored_resolver_not_projected`, and `source=auto` falls
+  back to verified lookup as for any unsupported inventory.
 
   Representative keyed answers and convenience fields are:
 
@@ -1960,6 +1969,12 @@ For a registrar lease first identified by a later readable observation, registra
 - Response shape: `data` is a resolver overview in product vocabulary. The
   route includes route-local `bound_names: {data, page}`, a nested collection
   of record-shaped name rows that replaces resolver-based name filtering.
+  `data.mirror` is present only when the resolver is a declared
+  [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver):
+  `{kind: "ensv1_registry", registry: {chain_id, address}}` names the ENSv1
+  registry whose resolvers answer for the names bound to it; the overview's
+  own `counts` and sections still describe this resolver's bindings, not the
+  mirrored ENSv1 resolvers.
   Those rows use the same optional, atomic `wrapper_state` and `wrapper_fuses`
   contract as exact-name detail; the fields are present only for a current
   ENSv1 NameWrapper registration at the served projection timestamp.

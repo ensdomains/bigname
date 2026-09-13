@@ -6728,3 +6728,51 @@ async fn v2_get_name_include_counts_counts_direct_subnames_of_the_parent() -> Re
 
     database.cleanup().await
 }
+
+#[tokio::test]
+async fn v2_get_name_records_serves_inventory_mirrored_from_ensv1() -> Result<()> {
+    // Project publishes a name bound to a declared ENSv1 mirror resolver with the same name's
+    // ENSv1 inventory and `provenance.mirror`; the route serves it like any supported inventory.
+    const MIRROR: &str = "0x1010101010101010101010101010101010101010";
+    let payload = v2_name_records_payload_with_row_and_setup(
+        "/v1/names/alice.eth/records?keys=addr:60,text:description&include=inventory",
+        |row| {
+            row.declared_summary["resolver"]["address"] = json!(MIRROR);
+        },
+        |_, _, inventory| {
+            inventory.provenance["resolver_address"] = json!(MIRROR);
+            inventory.provenance["mirror"] = json!({
+                "resolver_address": MIRROR,
+                "mirrored_source_family": "ens_v1_resolver_l1",
+                "mirrored_registry_source_family": "ens_v1_registry_l1",
+                "mirrored_registry_address": "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e",
+                "mirrored_resolver_address": "0x0000000000000000000000000000000000000abc",
+                "mirrored_resource_id": "00000000-0000-0000-0000-000000000b100",
+                "mirrored_pointer_event_id": 77,
+                "mirrored_pointer_source_family": "ens_v1_registry_l1"
+            });
+        },
+    )
+    .await?;
+    assert_eq!(payload["meta"]["source"], json!("indexed"));
+    assert_eq!(payload["data"]["resolver"]["address"], json!(MIRROR));
+    assert_eq!(payload["data"]["records"]["addr:60"]["status"], json!("ok"));
+    assert_eq!(
+        payload["data"]["records"]["addr:60"]["value"],
+        json!("0x0000000000000000000000000000000000000def")
+    );
+    assert_eq!(
+        payload["data"]["records"]["text:description"],
+        json!({"status": "ok", "value": "Alice profile"})
+    );
+    assert_eq!(
+        payload["data"]["addresses"],
+        json!({"60": "0x0000000000000000000000000000000000000def"})
+    );
+    let known = payload["data"]["inventory"]["known_keys"]
+        .as_array()
+        .expect("inventory known keys");
+    assert!(known.contains(&json!("addr:60")) && known.contains(&json!("text:description")));
+    assert!(payload["data"].get("mirror").is_none());
+    Ok(())
+}

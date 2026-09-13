@@ -147,6 +147,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `kind` | raw storage event kind on an event row, exposed only behind the explicit `include=raw` opt-in (never part of `include=data`); the one pipeline term the product tier carries, for explorer and diagnostic use | `event_kind` |
 | `contract_address` | lower-cased emitting contract of an event row, exposed only with `include=data`; `null` for state-derived rows | `emitting_address` |
 | `resolver` (query) | `/v1/events` filter naming one resolver contract as `<chain_id>:<address>` (numeric chain id, case-insensitive address); matches rows the contract emitted plus `resolver` pointer rows naming it | new in v2 |
+| `mirror` | on the resolver overview, present only for a declared [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver): `{kind: "ensv1_registry", registry: {chain_id, address}}`, the ENSv1 registry whose resolvers answer for names bound to this resolver | `declared_summary.classification.mirror`, `ensv1_mirror_resolver` |
 | `grant_event` | on resolver-overview `include=roles` items: `{block_number, timestamp, transaction_hash, log_index}` of the earliest permission event that granted the role; omitted when unresolvable | permission-row `provenance.normalized_event_ids` |
 
 An admitted controller-free ENSv1 numeric registration can retain its resource and token lifecycle
@@ -807,6 +808,12 @@ route:
 Rules:
 
 - `unsupported_reason` is required when `status=unsupported`.
+- `mirrored_resolver_not_projected` is the projected inventory reason for a
+  name whose current ENSv2 resolver is a declared
+  [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
+  while the same name's ENSv1 side has no projected resolver or inventory; it
+  crosses the serving boundary unchanged wherever a route exposes the inventory
+  reason.
 - A read over a projected row keys `unsupported` on that row's own coverage
   status, not on a list of known reasons: an unsupported row serves
   `status=unsupported` even when it names no reason or names a reason the build
