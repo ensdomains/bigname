@@ -234,6 +234,12 @@ pub(super) enum DiscoveryDraft {
         admission_basis: String,
         observation_key: String,
     },
+    /// A proxy announcing its implementation. Admits the proxy as a resolver only when the
+    /// implementation is declared in a same-deployment `resolver_implementations` list.
+    ResolverAnnouncement {
+        proxy_address: String,
+        implementation: String,
+    },
 }
 
 pub(super) fn interpret(

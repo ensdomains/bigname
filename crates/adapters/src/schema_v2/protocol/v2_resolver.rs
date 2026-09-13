@@ -475,12 +475,16 @@ pub(super) fn upgraded(selected: &Selected, raw: &RawLogInput) -> anyhow::Result
     );
     output.discovery.push(DiscoveryDraft::Edge {
         edge_kind: "proxy_implementation".to_owned(),
-        to_address: implementation,
+        to_address: implementation.clone(),
         admission_basis: "erc1967_upgrade_event".to_owned(),
         observation_key: format!(
             "proxy-implementation:{}",
             raw.emitting_address.to_ascii_lowercase()
         ),
+    });
+    output.discovery.push(DiscoveryDraft::ResolverAnnouncement {
+        proxy_address: raw.emitting_address.clone(),
+        implementation,
     });
     Ok(output)
 }

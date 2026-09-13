@@ -413,9 +413,9 @@ fn interpret_raw(
     output: &mut BatchOutput,
     migration_observations: &mut Vec<super::protocol::MigrationObservation>,
     registrar_registry_setups: &RegistrarRegistrySetups,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let Some(selected) = catalog.select(raw)? else {
-        return Ok(());
+        return Ok(false);
     };
     let mut registrar_context = if selected.source.source_family == "ens_v1_registrar_l1" {
         super::migration::registrar_context(catalog, &selected, raw)?
@@ -468,7 +468,7 @@ fn interpret_raw(
                     match_all: selected.match_all,
                     decode_context: error.to_string(),
                 });
-                return Ok(());
+                return Ok(true);
             }
             Err(error) => {
                 return Err(error).with_context(|| {
@@ -510,7 +510,14 @@ fn interpret_raw(
         output,
     );
     super::identity::materialize(&selected, raw, &interpreted, state, output)?;
-    super::discovery::materialize(catalog, &selected, raw, interpreted.discovery, output)?;
+    super::discovery::materialize(
+        catalog,
+        &selected,
+        raw,
+        interpreted.discovery,
+        state,
+        output,
+    )?;
     if let Some(migration_source) = registrar_migration_source {
         migration_observations.extend(interpreted.migration_observations);
         super::normalized::materialize_for_source(
@@ -524,7 +531,7 @@ fn interpret_raw(
         debug_assert!(interpreted.migration_events.is_empty());
         migration_observations.extend(interpreted.migration_observations);
     }
-    Ok(())
+    Ok(true)
 }
 
 fn registrar_registry_setups(

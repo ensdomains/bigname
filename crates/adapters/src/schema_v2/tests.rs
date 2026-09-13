@@ -11,6 +11,9 @@ mod migration;
 #[path = "tests/record_id_resolver.rs"]
 mod record_id_resolver;
 
+#[path = "tests/resolver_announcements.rs"]
+mod resolver_announcements;
+
 #[path = "tests/v1_pre_surface_resolver.rs"]
 mod v1_pre_surface_resolver;
 

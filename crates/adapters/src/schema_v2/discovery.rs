@@ -7,7 +7,8 @@ use super::{
         AddressAdmissionInput, BatchOutput, ContractAddress, ContractInstance, DiscoveryEdge,
         DiscoveryEdgeClosure, RawLogInput,
     },
-    protocol::DiscoveryDraft,
+    protocol::{DiscoveryDraft, EventDraft},
+    state::State,
 };
 
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
@@ -17,6 +18,7 @@ pub(super) fn materialize(
     selected: &Selected,
     raw: &RawLogInput,
     discoveries: Vec<DiscoveryDraft>,
+    state: &mut State,
     output: &mut BatchOutput,
 ) -> anyhow::Result<()> {
     for discovery in discoveries {
@@ -34,7 +36,14 @@ pub(super) fn materialize(
                 let address = normalize_address(&raw.emitting_address)?;
                 let instance = selected.contract_instance_id;
                 let observation_key = format!("registry-announcement:{address}");
-                push_contract(output, selected, raw, instance, &address, "RegistryCreated");
+                push_contract(
+                    output,
+                    selected.source.manifest_id,
+                    raw,
+                    instance,
+                    &address,
+                    "RegistryCreated",
+                );
                 output.discovery_edges.push(DiscoveryEdge {
                     chain_id: raw.chain_id.clone(),
                     edge_kind: "registry_announcement".to_owned(),
@@ -160,7 +169,7 @@ pub(super) fn materialize(
                 }
                 push_contract(
                     output,
-                    selected,
+                    selected.source.manifest_id,
                     raw,
                     target,
                     &address,
@@ -199,6 +208,107 @@ pub(super) fn materialize(
                     });
                 }
             }
+            DiscoveryDraft::ResolverAnnouncement {
+                proxy_address,
+                implementation,
+            } => {
+                let implementation = normalize_address(&implementation)?;
+                let Some(authority_source) = catalog
+                    .resolver_implementation_authority(&selected.source, &implementation)
+                    .cloned()
+                else {
+                    continue;
+                };
+                let authority = authority_source.manifest_id;
+                let address = normalize_address(&proxy_address)?;
+                // A factory announcement is the proxy's implementation observation for the
+                // support rule, recorded on the proxy's own `Upgraded` stream (same state scope
+                // as its ERC-1967 `Upgraded` log) when the authority declares that history.
+                if selected.event.name == "ProxyDeployed"
+                    && authority_source.events.iter().any(|event| {
+                        event.name == "Upgraded"
+                            && event
+                                .normalized_events
+                                .iter()
+                                .any(|kind| kind == "Upgraded")
+                    })
+                {
+                    super::normalized::materialize_for_source(
+                        &authority_source,
+                        raw,
+                        vec![EventDraft {
+                            event_kind: "Upgraded".to_owned(),
+                            logical_name_id: None,
+                            resource_id: None,
+                            identity_suffix: format!("Upgraded:announced:{address}"),
+                            explicit_before: None,
+                            after_state: serde_json::json!({
+                                "source_event": "ProxyDeployed",
+                                "proxy_address": address,
+                                "implementation": implementation,
+                            }),
+                            state_scope: format!("{address}:-:-:-:Upgraded"),
+                        }],
+                        state,
+                        output,
+                    );
+                }
+                let target = catalog
+                    .contract_instance_for_address(&address, raw.block_number)?
+                    .unwrap_or_else(|| contract_id(&raw.chain_id, &address));
+                // A self-announcing proxy (`Upgraded`) has no announcing contract of its own; the
+                // edge runs from the implementation instance its `proxy_implementation` edge just
+                // materialized. A factory announcement (`ProxyDeployed`) runs from the factory.
+                let from = if selected.event.name == "Upgraded" {
+                    catalog
+                        .contract_instance_for_address(&implementation, raw.block_number)?
+                        .unwrap_or_else(|| contract_id(&raw.chain_id, &implementation))
+                } else {
+                    selected.contract_instance_id
+                };
+                let observation_key = format!(
+                    "resolver-announcement:{}:{address}",
+                    selected.event.name.to_ascii_lowercase()
+                );
+                push_contract(
+                    output,
+                    authority,
+                    raw,
+                    target,
+                    &address,
+                    &selected.event.name,
+                );
+                output.discovery_edges.push(DiscoveryEdge {
+                    chain_id: raw.chain_id.clone(),
+                    edge_kind: "resolver".to_owned(),
+                    from_contract_instance_id: from,
+                    to_contract_instance_id: target,
+                    discovery_source: selected.event.name.clone(),
+                    admission_basis: super::catalog::ANNOUNCEMENT_ADMISSION_BASIS.to_owned(),
+                    source_manifest_id: authority,
+                    observation_key: observation_key.clone(),
+                    active_from_block_number: raw.block_number,
+                    active_from_block_hash: raw.block_hash.clone(),
+                    canonicality_state: raw.canonicality_state.clone(),
+                    provenance: discovery_provenance(
+                        raw,
+                        &selected.event.name,
+                        authority,
+                        &observation_key,
+                    ),
+                });
+                catalog.admit(AddressAdmissionInput {
+                    address,
+                    contract_instance_id: target,
+                    source_manifest_id: Some(authority),
+                    role: None,
+                    discovery_edge_kind: Some("resolver".to_owned()),
+                    discovery_from_contract_instance_id: Some(from),
+                    discovery_observation_key: Some(observation_key),
+                    active_from_block: Some(raw.block_number),
+                    active_to_block: None,
+                });
+            }
         }
     }
     Ok(())
@@ -223,13 +333,13 @@ fn discovery_provenance(
 
 fn push_contract(
     output: &mut BatchOutput,
-    selected: &Selected,
+    manifest_id: i64,
     raw: &RawLogInput,
     instance: uuid::Uuid,
     address: &str,
     source_event: &str,
 ) {
-    let source_provenance = provenance(raw, source_event, selected.source.manifest_id);
+    let source_provenance = provenance(raw, source_event, manifest_id);
     output.contract_instances.push(ContractInstance {
         contract_instance_id: instance,
         chain_id: raw.chain_id.clone(),
@@ -242,7 +352,7 @@ fn push_contract(
         address: address.to_owned(),
         active_from_block_number: raw.block_number,
         active_from_block_hash: raw.block_hash.clone(),
-        source_manifest_id: selected.source.manifest_id,
+        source_manifest_id: manifest_id,
         provenance: source_provenance,
     });
 }

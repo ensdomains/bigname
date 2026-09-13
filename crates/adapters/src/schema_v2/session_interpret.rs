@@ -60,9 +60,11 @@ fn interpret_once(
     let mut raw_logs = raw_logs.into_iter().peekable();
     let mut committed_state = state.clone();
     committed_state.begin_batch();
+    let mut unselected = Vec::new();
     for block in blocks {
         let mut block_output = BatchOutput::default();
         let mut block_raw_logs = Vec::new();
+        let mut deferred = Vec::new();
         let first_migration_observation = migration_observations.len();
         let mut block_state = committed_state.clone();
         crate::schema_v2::settle_block_boundary(
@@ -76,14 +78,40 @@ fn interpret_once(
         }) {
             block_raw_logs.push(raw_logs.next().expect("peeked raw log"));
             let raw = block_raw_logs.last().expect("collected raw log");
-            interpret_raw(
+            if !interpret_raw(
                 catalog,
                 raw,
                 &mut block_state,
                 &mut block_output,
                 &mut migration_observations,
                 &registrar_registry_setups,
-            )?;
+            )? {
+                deferred.push(block_raw_logs.len() - 1);
+            }
+        }
+        // A discovery observation admits its target from its own block, which includes the
+        // target's earlier logs in that block (an ERC-1967 proxy announces its implementation
+        // during construction, before any registry can point at it). Interpret those logs
+        // once the block's admissions are settled, then restore chain order so stream-chained
+        // before-states follow log order rather than interpretation order.
+        let first_recovered_event = block_output.normalized_events.len();
+        for index in deferred {
+            let raw = &block_raw_logs[index];
+            if !interpret_raw(
+                catalog,
+                raw,
+                &mut block_state,
+                &mut block_output,
+                &mut migration_observations,
+                &registrar_registry_setups,
+            )? {
+                unselected.push(raw.clone());
+            }
+        }
+        if block_output.normalized_events.len() > first_recovered_event {
+            block_output
+                .normalized_events
+                .sort_by_key(|event| (event.transaction_index, event.log_index));
         }
         crate::schema_v2::protocol::reconcile_block(
             catalog,
@@ -113,7 +141,41 @@ fn interpret_once(
             "terminal {authority_arm} binding closure for {logical_name_id} was not handled in its adapter batch"
         );
     }
+    record_pre_admission_skips(catalog, &unselected, &mut output);
     crate::schema_v2::identity::compact_reserved_label_preimages(&mut output)?;
     crate::schema_v2::migration::correlate(catalog, migration_observations, &mut output)?;
     Ok(output)
+}
+
+/// Discovery is forward-only and performs no lookback: a log from an address admitted later in
+/// the same batch stays uninterpreted. Record it so the drop is visible rather than silent.
+fn record_pre_admission_skips(
+    catalog: &Catalog,
+    unselected: &[RawLogInput],
+    output: &mut BatchOutput,
+) {
+    for raw in unselected {
+        let Some(topic0) = raw.topics.first() else {
+            continue;
+        };
+        let Some((admitted_at, source_family)) = catalog.later_discovery_admission(raw) else {
+            continue;
+        };
+        output.decode_skips.push(crate::schema_v2::DecodeSkip {
+            chain_id: raw.chain_id.clone(),
+            block_hash: raw.block_hash.clone(),
+            block_number: raw.block_number,
+            transaction_hash: raw.transaction_hash.clone(),
+            log_index: raw.log_index,
+            emitting_address: raw.emitting_address.clone(),
+            source_family,
+            selection_topic0: topic0.clone(),
+            match_all: false,
+            decode_context: format!(
+                "log precedes its emitter's discovery admission at block {admitted_at}; \
+                 interpretation is forward-only from the admitting observation and performs no \
+                 lookback"
+            ),
+        });
+    }
 }

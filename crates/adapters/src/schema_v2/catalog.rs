@@ -1,3 +1,6 @@
+#[path = "catalog_announcements.rs"]
+mod announcements;
+pub(super) use announcements::ANNOUNCEMENT_ADMISSION_BASIS;
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, bail};
@@ -231,7 +234,9 @@ impl Catalog {
 
         for source in &self.manifests {
             for event in source.events.iter().filter(|event| {
-                event.topic0.eq_ignore_ascii_case(topic0) && self.is_match_all(source, event)
+                event.topic0.eq_ignore_ascii_case(topic0)
+                    && (self.is_match_all(source, event)
+                        || announcements::announces_declared_implementation(source, event, raw))
             }) {
                 let contract_instance_id = self
                     .admissions
