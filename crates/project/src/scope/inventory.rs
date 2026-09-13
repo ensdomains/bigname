@@ -190,6 +190,7 @@ pub(super) async fn close(
     loop {
         let before = scope_size(transaction).await?;
         include_pointer_names(transaction, chain_id, target.number).await?;
+        include_mirror_pairs(transaction, chain_id, target.number).await?;
         super::close_binding_scope(transaction, chain_id, target).await?;
         if scope_size(transaction).await? == before {
             return Ok(());
@@ -242,5 +243,66 @@ async fn include_pointer_names(
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to scope inventory pointer names", error))?;
+    Ok(())
+}
+
+async fn include_mirror_pairs(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target_block: i64,
+) -> Result<()> {
+    // A resource whose readable pointer targets a declared ENSv1 mirror resolver serves the same
+    // name's ENSv1 inventory (builders/record_inventory/mirror.rs), so the two sides rebuild
+    // together: scope the ENSv1 pointer resources of a scoped mirror-pointer name, and the
+    // mirror-pointer resources of a scoped ENSv1 pointer name.
+    sqlx::query(
+        "WITH readable_pointers AS (
+             SELECT event.resource_id, event.logical_name_id, event.source_family,
+                    lower(event.after_state ->> 'resolver') AS resolver_address
+             FROM normalized_events event
+             JOIN chain_lineage lineage
+               ON lineage.chain_id = event.chain_id
+              AND lineage.block_hash = event.block_hash
+              AND lineage.block_number = event.block_number
+             WHERE event.chain_id = $1
+               AND event.block_number <= $2
+               AND event.event_kind = 'ResolverChanged'
+               AND event.resource_id IS NOT NULL
+               AND event.logical_name_id IS NOT NULL
+               AND event.consumer_visibility = 'activated'
+               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+         ),
+         mirror_pointers AS (
+             SELECT pointer.*
+             FROM readable_pointers pointer
+             JOIN project_declared_resolver_addresses declaration
+               ON declaration.resolver_address = pointer.resolver_address
+              AND declaration.classification_role = 'ensv1_mirror_resolver'
+             WHERE pointer.source_family IN ('ens_v2_registry_l1', 'ens_v2_root_l1')
+         ),
+         v1_pointers AS (
+             SELECT * FROM readable_pointers
+             WHERE source_family IN (
+                 'ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1'
+             )
+         )
+         INSERT INTO project_scope_resources
+         SELECT v1.resource_id
+         FROM project_scope_resources scope
+         JOIN mirror_pointers mirror USING (resource_id)
+         JOIN v1_pointers v1 USING (logical_name_id)
+         UNION
+         SELECT mirror.resource_id
+         FROM project_scope_resources scope
+         JOIN v1_pointers v1 USING (resource_id)
+         JOIN mirror_pointers mirror USING (logical_name_id)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(chain_id)
+    .bind(target_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to scope mirror resolver pairs", error))?;
     Ok(())
 }

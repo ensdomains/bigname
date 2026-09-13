@@ -752,6 +752,47 @@ rotating a proxy to an unflagged implementation removes the rule on the same
 scoped rebuild. Full and incremental rebuilds select the feature from the same
 current resolver classification.
 
+A pointer from `ens_v2_registry_l1` or `ens_v2_root_l1` whose target is a
+supported
+[ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
+(`classification.role = ensv1_mirror_resolver`, declared under
+[`manifests.md`](manifests.md#ensv1-mirror-resolver-declarations)) is excluded
+from the node-keyed attribution above, because the mirror stores no records.
+Project instead derives that resource's `record_inventory_current` row from the
+ENSv1 side of the same name at the same target: the latest canonical
+`ens_v1_registry_l1`, `ens_v1_registrar_l1`, or `ens_v1_wrapper_l1`
+`ResolverChanged` for the same namehash selects the ENSv1 resource, and that
+resource's staged inventory row supplies `selectors`, `entries`,
+`unsupported_families`, `last_change`, the record version boundary (re-keyed to
+the mirrored resource), `provenance.record_event_ids`,
+`provenance.attributed_event_ids`, `provenance.read_rules`, and
+`exact_nonempty_not_found_record_keys`. `provenance.resolver_address` and
+`provenance.resolver_pointer_event_id` stay the name's own mirror pointer, and
+`provenance.mirror = {resolver_address, mirrored_source_family:
+"ens_v1_resolver_l1", mirrored_registry_source_family: "ens_v1_registry_l1",
+mirrored_registry_address, mirrored_resolver_address, mirrored_resource_id,
+mirrored_pointer_event_id, mirrored_pointer_source_family}` records the
+derivation. This follows the mirror, which looks the name up in the ENSv1
+registry and forwards resolution to the resolver it finds.
+(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L38-L41 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L74 @ ens_v2@a971bd64)
+Only the exact node is modeled. When the ENSv1 registry has no current nonzero
+resolver for the node, its latest selection is a clear, the ENSv1 resolver is
+itself a mirror, or the ENSv1 inventory is absent or unsupported, the mirrored
+row is `unsupported` with `mirrored_resolver_not_projected`
+(`provenance.mirror.mirrored_unsupported_reason` carries the ENSv1 row's reason
+when there is one), with no entries and no read rules, so that indexed reads
+never assert absence where the chain may still answer through an ancestor
+resolver ([known divergence](upstream.md#known-divergences)). A mirror whose own
+classification is unsupported or belongs to another namespace keeps the ordinary
+resolver reason or `resolver_classification_missing`. The derivation is a pure
+function of the staged ENSv1 and ENSv2 events: incremental scope pairs the two
+sides (scoping a mirror-pointer resource scopes the same name's ENSv1 pointer
+resources and vice versa), so an ENSv1 record write, resolver change, or clear
+rebuilds the mirrored row in the same publication, and full, incremental, and
+redo builds converge. `address_records_current` and name-side record reads
+consume mirrored rows like any other supported inventory.
+
 For ENSv1, an admitted current resolver may contribute supported address, text,
 and contenthash inventory. An unlisted or unsupported resolver family stays
 explicitly unsupported. For ENSv2, current-emitter version evidence may define a
