@@ -587,7 +587,8 @@ token-scoped registry roles whose assignment can no longer change because no
 current row on the registration or its registry root holds the matching admin
 role. It is absent for registrations without a resource-level constraint model
 (ENSv1 registrar- and registry-held names, Basenames), for an expired
-emancipated or locked NameWrapper position, and after `NameUnwrapped`. Field
+emancipated or locked NameWrapper position, and once the wrapped token is burnt
+or unwrapped. Field
 shapes are in [api-v2.md](api-v2.md#resource-restrictions); the derivation is in
 [projections.md](projections.md#permissions).
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058-L1068 @ ens_v1@91c966f)

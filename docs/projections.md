@@ -586,8 +586,12 @@ revoke the row without an event when a transfer clears the approval
 (`CANNOT_APPROVE` unburnt, evaluated on the expiry-cleared fuse word) or a burn
 clears it unconditionally. The transfer revocation is emitted even when the
 delegate is the transfer recipient, so a restored interpreter that rebuilt the
-delegate from those rows replays identically. An approval that survives a
-transfer because `CANNOT_APPROVE` is burnt keeps its row. The delegate's only power is the
+delegate from those rows replays identically, and it is emitted before the
+holder rows of the same log: Project folds permission rows by
+`(resource, subject, scope)` and keeps the newest by position and then
+`normalized_event_id`, so when the recipient is the delegate its holder grant
+(the later row) wins over the empty token-approval revocation. An approval that
+survives a transfer because `CANNOT_APPROVE` is burnt keeps its row. The delegate's only power is the
 `getApproved` branch of `canExtendSubnames`; transfers and `approve` itself
 accept only the holder and its operators.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L109-L136 @ ens_v1@91c966f)
@@ -631,9 +635,13 @@ The summary also carries `resource_restrictions`, the
 serves as `restrictions`. For a NameWrapper resource whose wrapper fields
 would be served it is `{kind: ens_v1_wrapper, wrapper_state, fuses,
 expiry_seconds}` with the expiry-effective fuse word at the target timestamp,
-and it is omitted once a later `NameUnwrapped` has closed the wrapper authority
-epoch (the `AuthorityEpochChanged` row it emits is newer than the `NameWrapped`
-token transfer); for an ENSv2 registry resource it is
+and it is omitted once the newest wrapper lifecycle evidence on the resource is
+a close rather than an open: opens are the `NameWrapped` token transfer and any
+resource-scope holder grant, closes are the `NameUnwrapped`
+`AuthorityEpochChanged`/`SurfaceUnbound` rows and any resource-scope holder
+revocation without a following grant, which covers the `.eth` 2LD unwrap whose
+epoch row lands on the reactivated registrar resource and the un-admitted
+`upgrade()` burn that emits no `NameUnwrapped`; for an ENSv2 registry resource it is
 `{kind: ens_v2_registry, locked_roles}`, where `locked_roles` lists
 `unregister`, `renew`, `set_subregistry`, `set_resolver`, and `transfer` whose
 admin role (`can_transfer_admin` for `transfer`) no current row on the resource
