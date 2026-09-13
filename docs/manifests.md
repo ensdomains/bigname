@@ -2013,8 +2013,8 @@ reverse leg reading the active hackathon `ens_v1_registry_l1` registry.
 `ethereum-sepolia` from these declarations plus the configured provider
 instead of `execution_entrypoint_not_declared`. This manifest declares no
 indexing role, root, discovery rule, or event; like every manifest added to the
-profile it changes the profile's fingerprint, so it ships by rebuilding the
-binary.
+`sepolia-hackathon` [deployment profile](glossary.md#deployment-profile) it changes
+that deployment profile's fingerprint, so it ships by rebuilding the binary.
 
 A further address, the `ensv1_mirror_resolver` declaration
 `0x10107255fda20ab6c37a0efca1e9465f25066a00`, was added on 2026-09-13 from the
@@ -2057,7 +2057,8 @@ On staging it is the ENSv2 resolver pointer of the root TLD `reverse` and of
 the `bnmig-*` `.eth` registrations. Both mirror declarations share the family's
 `correlation_addresses.ens_v1_registry`; the loader validates each instance.
 
-The profile's `ens_v1_reverse_l1` manifest,
+The `sepolia-hackathon` [deployment profile](glossary.md#deployment-profile)'s
+`ens_v1_reverse_l1` manifest,
 `manifests/sepolia-hackathon/ethereum/ens/ens_v1_reverse_l1/v1.toml`, declares
 the hackathon deployment's own ENSv1 ReverseRegistrar
 `0x060d5a54a8751eec63b756e32ef66f5eef418e60` as its `reverse_registrar`, added on
@@ -2071,7 +2072,7 @@ hackathon ENSv1 registry `0x82080cc8ca78597bde586a003d0a080c79a1814b`, matching
 the pinned constructor `(ENS ensAddr)`. Fixed-block runtime reads confirm the
 role: it is `owner(namehash("addr.reverse"))` in that registry, `ens()` returns
 the registry, and `defaultResolver()` returns
-`0xaec512a71de820a57dc2aafc197a743d035b82df`, the profile's declared
+`0xaec512a71de820a57dc2aafc197a743d035b82df`, the deployment profile's declared
 `public_resolver`. Its `setName` transactions emit `ReverseClaimed` (topic0
 `0x6ada868dd3058cf77a48a74489fd7963688e5464b2b0fa957ace976243270e92`) before
 the registry's `NewOwner`/`NewResolver` for `<addr>.addr.reverse` and the
@@ -2087,21 +2088,22 @@ The declaration mirrors the Mainnet family exactly — role `reverse_registrar`,
 `ReverseClaimed(address indexed addr, bytes32 indexed node)` normalized to
 `ReverseChanged`, no roots, discovery rules, or capability flags — under
 `deployment_epoch = "ens_v1_sepolia_hackathon"` with `start_block = 11626578`,
-the creation block, following this profile's per-contract creation-block
+the creation block, following this deployment profile's per-contract creation-block
 convention (the registrar predates the PublicResolver it later adopted as
-`defaultResolver`); the profile's earliest declared start remains 11626442. As on
+`defaultResolver`); the deployment profile's earliest declared start remains 11626442. As on
 Mainnet, neither the registry nor the resolver manifest needs a root or
 discovery rule for the reverse tree: `addr.reverse` subnode writes are ordinary
 registry `NewOwner`/`NewResolver` intake. The `ReverseChanged` observation keys
 the wallet's ENS/60 tuple in `primary_names_current` and records the reverse
 node's resolver; the indexed claim value stays `not_found`, because the
 PublicResolver's `NameChanged` remains an unattributed name-family
-`RecordChanged` and current-head hydration admits only the Mainnet event-silent
-reverse resolver ([`projections.md` § Primary names](projections.md#primary-names),
+`RecordChanged` and current-head [hydration](glossary.md#hydration) admits only the
+Mainnet [event-silent](glossary.md#event-silent) reverse resolver
+([`projections.md` § Primary names](projections.md#primary-names),
 [`api-v2-routes.md`](api-v2-routes.md#public-record-field-completeness)); the
 claim value is served by the verified path. Whole-source identity for the
-deployed instance is not claimed. The canonical `sepolia` profile declares no
-reverse family; that gap is recorded as an open question, not closed here.
+deployed instance is not claimed. The canonical `sepolia` deployment profile
+declares no `ens_v1_reverse_l1`; adding one is out of scope for this change.
 
 One further identified address is intentionally not declared:
 `0x48d7edc9b7c683681336c0ea034e424c0c141d66`, the ENSv1 registry's resolver for
