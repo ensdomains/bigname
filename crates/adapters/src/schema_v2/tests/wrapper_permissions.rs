@@ -324,9 +324,9 @@ fn wrapper_holder_operator_and_delegate_rows_follow_the_token_lifecycle() -> any
             row(3, DELEGATE, "token_approval", true, DELEGATE_POWERS),
             row(4, DELEGATE, "token_approval", false, DELEGATE_POWERS),
             row(4, NEXT_DELEGATE, "token_approval", true, DELEGATE_POWERS),
+            row(5, NEXT_DELEGATE, "token_approval", false, DELEGATE_POWERS),
             row(5, HOLDER, "holder", false, HOLDER_POWERS),
             row(5, NEXT_HOLDER, "holder", true, HOLDER_POWERS),
-            row(5, NEXT_DELEGATE, "token_approval", false, DELEGATE_POWERS),
             row(6, LAST_DELEGATE, "token_approval", true, DELEGATE_POWERS),
             row(7, NEXT_HOLDER, "holder", false, HOLDER_POWERS),
             row(7, LAST_DELEGATE, "token_approval", false, DELEGATE_POWERS),
@@ -485,7 +485,8 @@ fn assert_restore_matches(
 }
 
 // `_beforeTransfer` deletes the approval whoever the recipient is; the delegate who becomes the
-// holder loses the token-approval row and gains the holder row.
+// holder loses the token-approval row and gains the holder row, and the revocation is emitted
+// first so Project's newest-row fold over (resource, subject, scope) keeps the holder grant.
 // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L837-L840 @ ens_v1@91c966f)
 #[test]
 fn a_delegate_who_becomes_the_holder_still_loses_the_token_approval() -> anyhow::Result<()> {
@@ -500,11 +501,29 @@ fn a_delegate_who_becomes_the_holder_still_loses_the_token_approval() -> anyhow:
         vec![
             row(1, HOLDER, "holder", true, HOLDER_POWERS),
             row(2, DELEGATE, "token_approval", true, DELEGATE_POWERS),
+            row(3, DELEGATE, "token_approval", false, DELEGATE_POWERS),
             row(3, HOLDER, "holder", false, HOLDER_POWERS),
             row(3, DELEGATE, "holder", true, HOLDER_POWERS),
-            row(3, DELEGATE, "token_approval", false, DELEGATE_POWERS),
         ]
     );
+    let position = |relation: &str| {
+        output
+            .normalized_events
+            .iter()
+            .position(|event| {
+                event.block_number == Some(3)
+                    && event.event_kind == "PermissionChanged"
+                    && event.after_state["subject"] == DELEGATE
+                    && event
+                        .after_state
+                        .get("grant_source")
+                        .filter(|source| !source.is_null())
+                        .or_else(|| event.after_state.get("revocation_source"))
+                        .is_some_and(|source| source["relation_kind"] == relation)
+            })
+            .expect("row for the delegate")
+    };
+    assert!(position("token_approval") < position("holder"));
     assert_restore_matches(&logs, 2, 3)
 }
 
