@@ -266,9 +266,13 @@ async fn public_v2_requires_direct_declaration_and_does_not_enumerate() -> TestR
         let payload = json!({"deployment_epoch":"test", "contracts": if declared {
             json!([{"role":role,"address":RESOLVER,"proxy_kind":proxy,"start_block":20}])
         } else { json!([]) }});
+        // The events reference the manifest through a composite key that includes
+        // source_family, so detach them while both sides change family.
+        sqlx::query("UPDATE normalized_events SET source_manifest_id = NULL")
+            .execute(&pool).await?;
         sqlx::query("UPDATE manifest_versions SET source_family = 'ens_v2_resolver_l1', manifest_payload = $1")
             .bind(&payload).execute(&pool).await?;
-        sqlx::query("UPDATE normalized_events SET source_family = 'ens_v2_resolver_l1', after_state = CASE WHEN event_kind = 'SourceManifestUpdated' THEN jsonb_set(after_state, '{manifest_payload}', $1) ELSE after_state END")
+        sqlx::query("UPDATE normalized_events SET source_family = 'ens_v2_resolver_l1', after_state = CASE WHEN event_kind = 'SourceManifestUpdated' THEN jsonb_set(after_state, '{manifest_payload}', $1) ELSE after_state END, source_manifest_id = (SELECT manifest_id FROM manifest_versions)")
             .bind(&payload).execute(&pool).await?;
         Engine::new(pool.clone())
             .run_batch(BatchRequest {
