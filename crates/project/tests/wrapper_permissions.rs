@@ -811,3 +811,38 @@ async fn wrapper_restrictions_close_on_a_2ld_unwrap_and_on_an_upgrade_burn() -> 
     }
     assert_converges("wrapper_unwrap_shapes", events, 12, &[11, 12], check).await
 }
+
+// With CANNOT_APPROVE burnt the delegate survives both transfers: it becomes the holder, then
+// passes the token on and is served as the delegate again through the re-emitted grant.
+// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L108-L121 @ ens_v1@91c966f)
+#[tokio::test]
+async fn a_retained_delegate_who_passes_the_token_on_is_served_as_delegate_again() -> Result<()> {
+    const CANNOT_APPROVE: i64 = 64;
+    #[rustfmt::skip]
+    async fn events(pool: &PgPool) -> Result<()> {
+        wrap(pool, NODE, RESOURCE, EXPIRY, PARENT_CANNOT_CONTROL | IS_DOT_ETH | CANNOT_APPROVE).await?;
+        permission(pool, NODE, RESOURCE, 11, DELEGATE, &["extend_subname_expiry"], "token_approval", "Approval", true).await?;
+        permission(pool, NODE, RESOURCE, 12, HOLDER, HOLDER_POWERS, "holder", "TransferSingle", false).await?;
+        permission(pool, NODE, RESOURCE, 12, DELEGATE, HOLDER_POWERS, "holder", "TransferSingle", true).await?;
+        permission(pool, NODE, RESOURCE, 13, DELEGATE, HOLDER_POWERS, "holder", "TransferSingle", false).await?;
+        permission(pool, NODE, RESOURCE, 13, NEXT_HOLDER, HOLDER_POWERS, "holder", "TransferSingle", true).await?;
+        permission(pool, NODE, RESOURCE, 13, DELEGATE, &["extend_subname_expiry"], "token_approval", "TransferSingle", true).await
+    }
+    async fn check(pool: &PgPool, block: i64) -> Result<()> {
+        let masked = powers(&["approve", "extend_expiry"]);
+        let delegate = (
+            DELEGATE.to_owned(),
+            "token_approval".to_owned(),
+            json!(["extend_subname_expiry"]),
+        );
+        let expected = match block {
+            10 => vec![holder(HOLDER, masked)],
+            11 => vec![holder(HOLDER, masked), delegate],
+            12 => vec![holder(DELEGATE, masked)],
+            _ => vec![holder(NEXT_HOLDER, masked), delegate],
+        };
+        assert_eq!(rows(pool, RESOURCE).await?, expected, "block {block}");
+        Ok(())
+    }
+    assert_converges("wrapper_retained_delegate", events, 13, &[12, 13], check).await
+}
