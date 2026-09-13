@@ -479,6 +479,7 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
                     .map(str::to_owned),
             );
             state.set_v1_wrapper_delegate(&event.namespace, namehash, None);
+            state.set_v1_wrapper_burnt(&event.namespace, namehash, false);
         }
         Some("NameUnwrapped") => {
             let Some(namehash) = event.after_state.get("node").and_then(Value::as_str) else {
@@ -502,7 +503,8 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
 }
 
 // The wrapper interpreter records the per-token delegate as `relation_kind=token_approval`
-// permission rows, including the event-less clears it derives on transfer and burn, and it
+// permission rows, including the event-less clears it derives on transfer and burn (all under
+// one retained-state key per name and subject, so the newest of them survives folding), and it
 // records an ERC-1155 burn as a `relation_kind=holder` revocation whose subject is still the
 // linked owner (a plain transfer restores the new owner from `TokenControlTransferred` first).
 fn restore_wrapper_delegate(state: &mut State, event: &PriorEventInput) {
