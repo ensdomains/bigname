@@ -383,55 +383,57 @@ BEGIN
         RETURN 'guard_rejected';
     END IF;
 
-    SELECT candidate.entry
-    INTO indexed_entry
-    FROM jsonb_array_elements(compared_entries)
-        WITH ORDINALITY AS candidate(entry, ordinal)
-    WHERE candidate.entry ->> 'record_key' = requested_record_key
-       OR (
-            candidate.entry ->> 'record_family' = selector_family
-            AND (candidate.entry ->> 'selector_key')
-                IS NOT DISTINCT FROM selector_key
-       )
-       OR (
-            requested_record_key = 'avatar'
-            AND candidate.entry ->> 'record_key' = 'text:avatar'
-       )
-    ORDER BY CASE
-        WHEN candidate.entry ->> 'record_key' = 'text:avatar'
-            AND requested_record_key = 'avatar'
-        THEN 1
-        ELSE 0
-    END,
-    candidate.ordinal
-    LIMIT 1;
+    IF compared_support_status IS DISTINCT FROM 'supported' THEN
+        -- The row's coverage is not authoritative: it serves no value, derivation, or absence,
+        -- so the comparison target is the same refusal the records route serves.
+        indexed_answer := jsonb_build_object('status', 'unsupported');
+    ELSE
+        SELECT candidate.entry
+        INTO indexed_entry
+        FROM jsonb_array_elements(compared_entries)
+            WITH ORDINALITY AS candidate(entry, ordinal)
+        WHERE candidate.entry ->> 'record_key' = requested_record_key
+           OR (
+                candidate.entry ->> 'record_family' = selector_family
+                AND (candidate.entry ->> 'selector_key')
+                    IS NOT DISTINCT FROM selector_key
+           )
+           OR (
+                requested_record_key = 'avatar'
+                AND candidate.entry ->> 'record_key' = 'text:avatar'
+           )
+        ORDER BY CASE
+            WHEN candidate.entry ->> 'record_key' = 'text:avatar'
+                AND requested_record_key = 'avatar'
+            THEN 1
+            ELSE 0
+        END,
+        candidate.ordinal
+        LIMIT 1;
 
-    IF (indexed_entry IS NULL OR indexed_entry ->> 'status' = 'not_found')
-       AND NOT COALESCE(
-           requested_record_key = 'addr:60'
-           AND indexed_entry ->> 'status' = 'not_found'
-           AND jsonb_typeof(compared_provenance -> 'exact_nonempty_not_found_record_keys') = 'array'
-           AND compared_provenance -> 'exact_nonempty_not_found_record_keys'
-               @> jsonb_build_array(requested_record_key),
-           false
-       )
-       AND selector_family = 'addr'
-       AND (
-           selector_key = '60'
-           OR selector_key::numeric BETWEEN 2147483649::numeric AND 4294967295::numeric
-       )
-       AND EXISTS (
-           SELECT 1
-           FROM jsonb_array_elements(COALESCE(
-               compared_provenance -> 'read_rules', '[]'::jsonb
-           )) rule
-           WHERE rule ->> 'kind' = 'ensip19_default_address'
-             AND rule ->> 'source_record_key' = 'addr:2147483648'
-       )
-    THEN
-        IF compared_support_status <> 'supported' THEN
-            indexed_entry := jsonb_build_object('status', 'unsupported');
-        ELSE
+        IF (indexed_entry IS NULL OR indexed_entry ->> 'status' = 'not_found')
+           AND NOT COALESCE(
+               requested_record_key = 'addr:60'
+               AND indexed_entry ->> 'status' = 'not_found'
+               AND jsonb_typeof(compared_provenance -> 'exact_nonempty_not_found_record_keys') = 'array'
+               AND compared_provenance -> 'exact_nonempty_not_found_record_keys'
+                   @> jsonb_build_array(requested_record_key),
+               false
+           )
+           AND selector_family = 'addr'
+           AND (
+               selector_key = '60'
+               OR selector_key::numeric BETWEEN 2147483649::numeric AND 4294967295::numeric
+           )
+           AND EXISTS (
+               SELECT 1
+               FROM jsonb_array_elements(COALESCE(
+                   compared_provenance -> 'read_rules', '[]'::jsonb
+               )) rule
+               WHERE rule ->> 'kind' = 'ensip19_default_address'
+                 AND rule ->> 'source_record_key' = 'addr:2147483648'
+           )
+        THEN
             SELECT candidate.entry
             INTO default_entry
             FROM jsonb_array_elements(compared_entries)
@@ -468,40 +470,36 @@ BEGIN
                 indexed_entry := jsonb_build_object('status', 'unsupported');
             END IF;
         END IF;
-    ELSIF (indexed_entry IS NULL OR indexed_entry ->> 'status' = 'not_found')
-          AND compared_support_status <> 'supported'
-    THEN
-        indexed_entry := jsonb_build_object('status', 'unsupported');
-    END IF;
 
-    IF indexed_entry IS NULL THEN
-        indexed_answer := jsonb_build_object('status', 'not_found');
-    ELSE
-        indexed_status := CASE COALESCE(
-            indexed_entry ->> 'status',
-            'unsupported'
-        )
-            WHEN 'failed' THEN 'execution_failed'
-            ELSE COALESCE(indexed_entry ->> 'status', 'unsupported')
-        END;
-        indexed_answer := jsonb_build_object('status', indexed_status);
-        IF indexed_status = 'success' THEN
-            indexed_value := COALESCE(
-                indexed_entry #> '{value,value}',
-                indexed_entry #> '{value,bytes}',
-                indexed_entry -> 'value'
-            );
-            IF jsonb_typeof(indexed_value) = 'string' THEN
-                indexed_answer := indexed_answer || jsonb_build_object(
-                    'value',
-                    CASE
-                        WHEN selector_family = 'addr'
-                            THEN lower(indexed_value #>> '{}')
-                        ELSE indexed_value #>> '{}'
-                    END
+        IF indexed_entry IS NULL THEN
+            indexed_answer := jsonb_build_object('status', 'not_found');
+        ELSE
+            indexed_status := CASE COALESCE(
+                indexed_entry ->> 'status',
+                'unsupported'
+            )
+                WHEN 'failed' THEN 'execution_failed'
+                ELSE COALESCE(indexed_entry ->> 'status', 'unsupported')
+            END;
+            indexed_answer := jsonb_build_object('status', indexed_status);
+            IF indexed_status = 'success' THEN
+                indexed_value := COALESCE(
+                    indexed_entry #> '{value,value}',
+                    indexed_entry #> '{value,bytes}',
+                    indexed_entry -> 'value'
                 );
-            ELSE
-                indexed_answer := jsonb_build_object('status', 'unsupported');
+                IF jsonb_typeof(indexed_value) = 'string' THEN
+                    indexed_answer := indexed_answer || jsonb_build_object(
+                        'value',
+                        CASE
+                            WHEN selector_family = 'addr'
+                                THEN lower(indexed_value #>> '{}')
+                            ELSE indexed_value #>> '{}'
+                        END
+                    );
+                ELSE
+                    indexed_answer := jsonb_build_object('status', 'unsupported');
+                END IF;
             END IF;
         END IF;
     END IF;

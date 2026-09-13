@@ -3632,6 +3632,166 @@ async fn v2_get_name_records_source_auto_blends_indexed_and_verified_per_key() -
     Ok(())
 }
 
+fn unsupported_resolver_inventory(inventory: &mut bigname_storage::RecordInventoryCurrentRow) {
+    // A name behind an ENSv2 resolver whose implementation is not an admitted profile: the
+    // projection keeps the entries it saw for diagnostics but marks the row unsupported.
+    inventory.selectors = json!([
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "cacheable": true
+        },
+        {
+            "record_key": "text:description",
+            "record_family": "text",
+            "selector_key": "description",
+            "cacheable": true
+        }
+    ]);
+    inventory.entries = json!([
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0xfa75ed860000000000000000000000000000abcd"
+            }
+        },
+        {
+            "record_key": "text:description",
+            "record_family": "text",
+            "selector_key": "description",
+            "status": "success",
+            "value": { "value": "served by an unknown resolver implementation" }
+        }
+    ]);
+    inventory.explicit_gaps = json!([]);
+    inventory.unsupported_families = json!([]);
+    inventory.coverage = json!({
+        "status": "unsupported",
+        "exhaustiveness": "not_asserted",
+        "unsupported_reason": "resolver_upgrade_not_observed"
+    });
+}
+
+#[tokio::test]
+async fn v2_get_name_records_withholds_values_from_unsupported_inventory() -> Result<()> {
+    let payload = v2_name_records_payload_with_setup(
+        "/v1/names/Alice.eth/records?keys=addr:60,text:description,avatar&include=inventory",
+        |_, _, inventory| unsupported_resolver_inventory(inventory),
+    )
+    .await?;
+
+    assert_eq!(payload["meta"]["source"], json!("indexed"));
+    // The declared registry pointer is registry evidence and stays; the values do not.
+    assert_eq!(
+        payload["data"]["resolver"],
+        json!({
+            "chain_id": 1,
+            "address": "0x0000000000000000000000000000000000000abc"
+        })
+    );
+    assert_eq!(payload["data"]["addresses"], json!({}));
+    assert_eq!(payload["data"]["text_records"], json!({}));
+    assert_eq!(payload["data"]["content_hash"], Value::Null);
+    let refused = json!({
+        "status": "unsupported",
+        "unsupported_reason": "resolver_upgrade_not_observed"
+    });
+    assert_eq!(
+        payload["data"]["records"],
+        json!({
+            "addr:60": refused,
+            "text:description": refused,
+            "avatar": refused
+        })
+    );
+    assert_eq!(
+        payload["data"]["inventory"],
+        json!({
+            "known_keys": [],
+            "unset_keys": [],
+            "unsupported_keys": ["addr:60", "avatar", "text:description"]
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_convenience_maps_skip_unsupported_inventory() -> Result<()> {
+    let payload = v2_name_records_payload_with_setup(
+        "/v1/names/Alice.eth/records",
+        |_, _, inventory| unsupported_resolver_inventory(inventory),
+    )
+    .await?;
+
+    assert!(payload["data"].get("records").is_none());
+    assert_eq!(payload["data"]["addresses"], json!({}));
+    assert_eq!(payload["data"]["text_records"], json!({}));
+    assert_eq!(payload["data"]["content_hash"], Value::Null);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_source_auto_does_not_satisfy_from_unsupported_inventory()
+-> Result<()> {
+    let payload = v2_name_records_payload_with_setup(
+        "/v1/names/Alice.eth/records?source=auto&keys=addr:60",
+        |_, _, inventory| unsupported_resolver_inventory(inventory),
+    )
+    .await?;
+
+    // The retained entry does not satisfy auto; the key goes to verified lookup, which this
+    // fixture cannot execute, so no value is served either way.
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(payload["data"]["addresses"], json!({}));
+    assert_eq!(payload["data"]["records"]["addr:60"]["status"], json!("unsupported"));
+    assert_eq!(
+        payload["data"]["records"]["addr:60"]["unsupported_reason"],
+        json!("verified_records_not_supported")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_withholds_indexed_record_fields_from_unsupported_inventory() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_record_fixture(
+        &database,
+        |_| {},
+        |_, _, inventory| unsupported_resolver_inventory(inventory),
+    )
+    .await?;
+
+    let payload = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
+
+    assert_eq!(payload["data"]["status"], json!("ok"));
+    assert_eq!(
+        payload["data"]["resolver"],
+        json!({
+            "chain_id": 1,
+            "address": "0x0000000000000000000000000000000000000abc"
+        })
+    );
+    assert!(payload["data"].get("addresses").is_none());
+    assert!(payload["data"].get("text_records").is_none());
+    assert!(payload["data"].get("content_hash").is_none());
+    assert!(payload["data"].get("primary_address").is_none());
+    assert_eq!(
+        payload["data"]["unsupported_fields"],
+        json!(["addresses", "content_hash", "primary_address", "text_records"])
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_get_name_records_missing_name_returns_not_found() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;

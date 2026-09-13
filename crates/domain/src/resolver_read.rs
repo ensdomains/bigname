@@ -5,6 +5,10 @@ pub const ENSIP19_DEFAULT_COIN_TYPE: u64 = 1 << 31;
 pub const ETH_COIN_TYPE: u64 = 60;
 pub const ENSIP19_DEFAULT_RECORD_KEY: &str = "addr:2147483648";
 const ZERO20_HEX: &str = "0x0000000000000000000000000000000000000000";
+/// Reason an indexed read reports when the inventory row's coverage is not authoritative and the
+/// row names no reason of its own.
+pub const INDEXED_INVENTORY_NOT_AUTHORITATIVE_REASON: &str =
+    "indexed_record_inventory_not_authoritative";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +61,14 @@ pub const fn ensip19_default_fallback_target(coin_type: u64) -> bool {
     ensip19_chain_from_coin_type(coin_type) > 0
 }
 
+/// Answer one record key from a projected record inventory row.
+///
+/// The row's coverage gates the whole read. An inventory serves values, derived answers, and
+/// authoritative absence only while its coverage is authoritative (`status` `full` or `projected`
+/// with no `unsupported_reason`). An `unsupported` row, such as a name behind a resolver whose
+/// implementation is not an admitted profile, may retain entries for diagnostics, but they are not
+/// answers: every key reports the row's own reason instead
+/// (`docs/api-v2-routes.md` § `GET /v1/names/{name}/records`).
 pub fn evaluate_indexed_record(
     entries: &Value,
     provenance: &Value,
@@ -65,6 +77,13 @@ pub fn evaluate_indexed_record(
     record_family: &str,
     selector_key: Option<&str>,
 ) -> IndexedRecordAnswer {
+    if !coverage_is_authoritative(coverage) {
+        return unsupported(
+            coverage_unsupported_reason(coverage)
+                .unwrap_or(INDEXED_INVENTORY_NOT_AUTHORITATIVE_REASON),
+        );
+    }
+
     if let Some(entry) = find_entry(entries, record_key, record_family, selector_key) {
         let exact = answer_from_entry(entry, record_family);
         if exact.status != IndexedRecordStatus::NotFound
@@ -73,10 +92,6 @@ pub fn evaluate_indexed_record(
                     .as_array()
                     .is_some_and(|keys| keys.iter().any(|key| key.as_str() == Some(record_key))))
         {
-            if exact.status == IndexedRecordStatus::NotFound && !coverage_is_authoritative(coverage)
-            {
-                return unsupported("indexed_record_inventory_not_authoritative");
-            }
             return exact;
         }
     }
@@ -86,9 +101,6 @@ pub fn evaluate_indexed_record(
         .flatten()
         .is_some_and(ensip19_default_fallback_target);
     if eligible_coin_type && has_ensip19_rule(provenance) {
-        if !coverage_is_authoritative(coverage) {
-            return unsupported("ensip19_default_address_source_unavailable");
-        }
         let derivation = Some(IndexedRecordDerivation {
             rule: ResolverReadFeature::Ensip19DefaultAddress,
             source_record_key: ENSIP19_DEFAULT_RECORD_KEY.to_owned(),
@@ -123,21 +135,13 @@ pub fn evaluate_indexed_record(
                 }
             };
         }
-        return if coverage_is_authoritative(coverage) {
-            IndexedRecordAnswer {
-                derivation,
-                ..not_found()
-            }
-        } else {
-            unsupported("ensip19_default_address_source_unavailable")
+        return IndexedRecordAnswer {
+            derivation,
+            ..not_found()
         };
     }
 
-    if coverage_is_authoritative(coverage) {
-        not_found()
-    } else {
-        unsupported("indexed_record_inventory_not_authoritative")
-    }
+    not_found()
 }
 
 impl IndexedRecordStatus {
@@ -258,12 +262,24 @@ fn has_ensip19_rule(provenance: &Value) -> bool {
         })
 }
 
-fn coverage_is_authoritative(coverage: &Value) -> bool {
+/// Whether a record inventory row's coverage lets its entries answer: coverage `status` is `full`
+/// or `projected` and the row carries no `unsupported_reason` key. Any other coverage, including a
+/// null reason, fails closed. Routes that render inventory values outside [`evaluate_indexed_record`]
+/// use the same test so one row is either serving or unsupported everywhere.
+pub fn coverage_is_authoritative(coverage: &Value) -> bool {
     coverage.get("unsupported_reason").is_none()
         && matches!(
             coverage.get("status").and_then(Value::as_str),
             Some("full" | "projected")
         )
+}
+
+fn coverage_unsupported_reason(coverage: &Value) -> Option<&str> {
+    coverage
+        .get("unsupported_reason")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
 }
 
 fn not_found() -> IndexedRecordAnswer {
@@ -287,290 +303,4 @@ fn unsupported(reason: &str) -> IndexedRecordAnswer {
 }
 
 #[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-
-    fn projected() -> Value {
-        json!({"status": "projected", "exhaustiveness": "not_asserted"})
-    }
-
-    fn rule() -> Value {
-        json!({"read_rules": [{
-            "kind": "ensip19_default_address",
-            "source_record_key": ENSIP19_DEFAULT_RECORD_KEY
-        }]})
-    }
-
-    #[test]
-    fn exact_nonempty_absence_marker_only_blocks_matching_derivation() {
-        use IndexedRecordStatus::{NotFound, Success, Unsupported};
-        for (exact, marker, expected, derived) in [
-            (None, json!([]), Success, true),
-            (Some("not_found"), json!([]), Success, true),
-            (Some("not_found"), json!(["addr:60"]), NotFound, false),
-            (None, json!(["addr:60"]), Success, true),
-            (Some("success"), json!(["addr:60"]), Success, false),
-            (Some("not_found"), json!("addr:60"), Success, true),
-        ] {
-            let mut entries = json!([{"record_key":ENSIP19_DEFAULT_RECORD_KEY,
-                "record_family":"addr", "selector_key":"2147483648", "status":"success",
-                "value":"0x1111111111111111111111111111111111111111"}]);
-            if let Some(status) = exact {
-                entries
-                    .as_array_mut()
-                    .unwrap()
-                    .push(json!({"record_key":"addr:60",
-                    "record_family":"addr", "selector_key":"60", "status":status,
-                    "value":"0x2222222222222222222222222222222222222222"}));
-            }
-            let mut provenance = rule();
-            provenance["exact_nonempty_not_found_record_keys"] = marker;
-            let answer = evaluate_indexed_record(
-                &entries,
-                &provenance,
-                &projected(),
-                "addr:60",
-                "addr",
-                Some("60"),
-            );
-            assert_eq!(answer.status, expected, "{entries}; {provenance}");
-            assert_eq!(answer.derivation.is_some(), derived);
-            let incomplete = evaluate_indexed_record(
-                &entries,
-                &provenance,
-                &json!({"status":"unsupported"}),
-                "addr:60",
-                "addr",
-                Some("60"),
-            );
-            if exact == Some("not_found")
-                && provenance["exact_nonempty_not_found_record_keys"] == json!(["addr:60"])
-            {
-                assert_eq!(
-                    incomplete.unsupported_reason.as_deref(),
-                    Some("indexed_record_inventory_not_authoritative")
-                );
-            }
-            assert_eq!(
-                incomplete.status,
-                if exact == Some("success") {
-                    Success
-                } else {
-                    Unsupported
-                }
-            );
-        }
-    }
-
-    #[test]
-    fn ensip19_xor_boundaries_match_chain_from_coin_type() {
-        for (coin_type, expected_chain, eligible) in [
-            (59, 0, false),
-            (60, 1, true),
-            (2_147_483_648, 0, false),
-            (2_147_483_649, 1, true),
-            (4_294_967_295, 2_147_483_647, true),
-            (4_294_967_296, 0, false),
-            (u64::MAX, 0, false),
-        ] {
-            assert_eq!(ensip19_chain_from_coin_type(coin_type), expected_chain);
-            assert_eq!(ensip19_default_fallback_target(coin_type), eligible);
-        }
-    }
-
-    #[test]
-    fn exact_success_wins_over_default() {
-        let answer = evaluate_indexed_record(
-            &json!([
-                {"record_key":"addr:2147483649","record_family":"addr","selector_key":"2147483649","status":"success","value":"0xEXACT"},
-                {"record_key":ENSIP19_DEFAULT_RECORD_KEY,"record_family":"addr","selector_key":"2147483648","status":"success","value":"0xDEFAULT"}
-            ]),
-            &rule(),
-            &projected(),
-            "addr:2147483649",
-            "addr",
-            Some("2147483649"),
-        );
-        assert_eq!(answer.status, IndexedRecordStatus::Success);
-        assert_eq!(answer.value, Some(json!("0xexact")));
-        assert_eq!(answer.derivation, None);
-    }
-
-    #[test]
-    fn missing_or_not_found_exact_uses_default_with_metadata() {
-        for entries in [
-            json!([{"record_key":ENSIP19_DEFAULT_RECORD_KEY,"record_family":"addr","selector_key":"2147483648","status":"success","value":"0xDEFAULT"}]),
-            json!([
-                {"record_key":"addr:2147483649","record_family":"addr","selector_key":"2147483649","status":"not_found"},
-                {"record_key":ENSIP19_DEFAULT_RECORD_KEY,"record_family":"addr","selector_key":"2147483648","status":"success","value":"0xDEFAULT"}
-            ]),
-        ] {
-            let answer = evaluate_indexed_record(
-                &entries,
-                &rule(),
-                &projected(),
-                "addr:2147483649",
-                "addr",
-                Some("2147483649"),
-            );
-            assert_eq!(answer.status, IndexedRecordStatus::Success);
-            assert_eq!(answer.value, Some(json!("0xdefault")));
-            assert_eq!(
-                answer.derivation,
-                Some(IndexedRecordDerivation {
-                    rule: ResolverReadFeature::Ensip19DefaultAddress,
-                    source_record_key: ENSIP19_DEFAULT_RECORD_KEY.to_owned(),
-                })
-            );
-        }
-    }
-
-    #[test]
-    fn derived_zero20_matches_the_requested_verified_decode() {
-        let zero20 = json!([{
-            "record_key":ENSIP19_DEFAULT_RECORD_KEY,
-            "record_family":"addr",
-            "selector_key":"2147483648",
-            "status":"success",
-            "value":{"encoding":"hex","bytes":"0x0000000000000000000000000000000000000000"}
-        }]);
-        let expected_derivation = Some(IndexedRecordDerivation {
-            rule: ResolverReadFeature::Ensip19DefaultAddress,
-            source_record_key: ENSIP19_DEFAULT_RECORD_KEY.to_owned(),
-        });
-
-        let legacy = evaluate_indexed_record(
-            &zero20,
-            &rule(),
-            &projected(),
-            "addr:60",
-            "addr",
-            Some("60"),
-        );
-        assert_eq!(legacy.status, IndexedRecordStatus::NotFound);
-        assert_eq!(legacy.value, None);
-        assert_eq!(legacy.derivation, expected_derivation);
-
-        let multicoin = evaluate_indexed_record(
-            &zero20,
-            &rule(),
-            &projected(),
-            "addr:2147483649",
-            "addr",
-            Some("2147483649"),
-        );
-        assert_eq!(multicoin.status, IndexedRecordStatus::Success);
-        assert_eq!(
-            multicoin.value,
-            Some(json!("0x0000000000000000000000000000000000000000"))
-        );
-        assert_eq!(multicoin.derivation, expected_derivation);
-
-        let nonzero = evaluate_indexed_record(
-            &json!([{
-                "record_key":ENSIP19_DEFAULT_RECORD_KEY,
-                "record_family":"addr",
-                "selector_key":"2147483648",
-                "status":"success",
-                "value":{"encoding":"hex","bytes":"0x0000000000000000000000000000000000000def"}
-            }]),
-            &rule(),
-            &projected(),
-            "addr:60",
-            "addr",
-            Some("60"),
-        );
-        assert_eq!(nonzero.status, IndexedRecordStatus::Success);
-        assert_eq!(
-            nonzero.value,
-            Some(json!("0x0000000000000000000000000000000000000def"))
-        );
-        assert_eq!(nonzero.derivation, expected_derivation);
-    }
-
-    #[test]
-    fn authoritative_default_absence_is_a_derived_miss() {
-        let answer = evaluate_indexed_record(
-            &json!([]),
-            &rule(),
-            &projected(),
-            "addr:60",
-            "addr",
-            Some("60"),
-        );
-        assert_eq!(answer.status, IndexedRecordStatus::NotFound);
-        assert!(answer.derivation.is_some());
-    }
-
-    #[test]
-    fn incomplete_or_unsupported_default_source_is_nonterminal() {
-        let incomplete = evaluate_indexed_record(
-            &json!([]),
-            &rule(),
-            &json!({"status":"unsupported","unsupported_reason":"coverage_incomplete"}),
-            "addr:60",
-            "addr",
-            Some("60"),
-        );
-        assert_eq!(incomplete.status, IndexedRecordStatus::Unsupported);
-
-        let unsupported = evaluate_indexed_record(
-            &json!([{"record_key":ENSIP19_DEFAULT_RECORD_KEY,"record_family":"addr","selector_key":"2147483648","status":"unsupported","unsupported_reason":"value_not_retained"}]),
-            &rule(),
-            &projected(),
-            "addr:60",
-            "addr",
-            Some("60"),
-        );
-        assert_eq!(unsupported.status, IndexedRecordStatus::Unsupported);
-    }
-
-    #[test]
-    fn exact_unsupported_does_not_assume_empty_storage() {
-        let answer = evaluate_indexed_record(
-            &json!([
-                {"record_key":"addr:60","record_family":"addr","selector_key":"60","status":"unsupported","unsupported_reason":"value_not_retained"},
-                {"record_key":ENSIP19_DEFAULT_RECORD_KEY,"record_family":"addr","selector_key":"2147483648","status":"success","value":"0xDEFAULT"}
-            ]),
-            &rule(),
-            &projected(),
-            "addr:60",
-            "addr",
-            Some("60"),
-        );
-        assert_eq!(answer.status, IndexedRecordStatus::Unsupported);
-        assert_eq!(answer.derivation, None);
-    }
-
-    #[test]
-    fn default_key_ineligible_and_non_addr_requests_never_derive() {
-        for (record_key, family, selector, expected) in [
-            (
-                ENSIP19_DEFAULT_RECORD_KEY,
-                "addr",
-                Some("2147483648"),
-                IndexedRecordStatus::Success,
-            ),
-            ("addr:59", "addr", Some("59"), IndexedRecordStatus::NotFound),
-            (
-                "text:url",
-                "text",
-                Some("url"),
-                IndexedRecordStatus::NotFound,
-            ),
-        ] {
-            let answer = evaluate_indexed_record(
-                &json!([{"record_key":ENSIP19_DEFAULT_RECORD_KEY,"record_family":"addr","selector_key":"2147483648","status":"success","value":"0xDEFAULT"}]),
-                &rule(),
-                &projected(),
-                record_key,
-                family,
-                selector,
-            );
-            assert_eq!(answer.status, expected);
-            assert_eq!(answer.derivation, None);
-        }
-    }
-}
+mod tests;

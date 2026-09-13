@@ -126,7 +126,9 @@ active resolution-divergence observation. The API role has `EXECUTE` on those
 functions but no direct write privilege on the ledger table.
 
 An observation records the logical name, resolver identity, request kind,
-selected positions, and indexed/live comparison. Reorg handling clears active
+selected positions, and indexed/live comparison. The indexed side is the same
+evaluator the records route serves: an `unsupported` record inventory row
+compares as `unsupported`, never as a retained entry value. Reorg handling clears active
 observations whose recorded positions include an orphaned block. The ledger is
 diagnostic evidence only; indexed projection reads and verified provider reads
 do not consume it as an answer.

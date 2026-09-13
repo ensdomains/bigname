@@ -249,7 +249,14 @@ collection route carry neither header.
   pointer is retained (a [serving resource](glossary.md#serving-resource)).
   That classified row serves its resolver without acquiring registration
   identity or control. Indexed records are served when its serving resource has
-  inventory.
+  supported inventory.
+  `profile=detail` name results and reverse rows take `addresses`,
+  `text_records`, `content_hash`, and `primary_address` only from a record
+  inventory whose coverage is authoritative. When the serving resolver's
+  inventory row is `unsupported`, those four fields are omitted and listed in
+  the record's `unsupported_fields`, exactly as when no inventory exists;
+  `status` and `resolver` keep following the name row. The per-key reason is
+  served by `GET /v1/names/{name}/records`.
   See [registration status](api-v2.md#status-vocabulary) for the upstream
   basis.
   An ownerless ENSv2 reservation does not meet this exception, even if identity
@@ -603,7 +610,15 @@ collection route carry neither header.
   For that classified row, indexed name detail serves the resolver and records
   present in its serving resource's inventory. `source=verified` executes lookup
   through the surviving resolver when the ordinary lookup capability supports
-  it. Neither path acquires registration identity or control. An ownerless ENSv2
+  it. Neither path acquires registration identity or control.
+  Indexed `addresses`, `text_records`, `content_hash`, and `primary_address`
+  come only from a record inventory whose coverage is authoritative (`full` or
+  `projected` with no `unsupported_reason`). An `unsupported` inventory row,
+  such as one behind a resolver whose implementation is not an admitted
+  profile, omits those four fields and lists them in `unsupported_fields`
+  exactly as a missing inventory does; `status` and `resolver` keep following
+  the name row, and `GET /v1/names/{name}/records` serves the per-key reason.
+  An ownerless ENSv2
   reservation does not meet this exception, even if identity attached to a
   resource or record inventory was retained for audit. This intentionally
   differs from ENSv2, which stores and returns a reservation resolver until
@@ -682,6 +697,27 @@ collection route carry neither header.
   Product records use product reason vocabulary: retained-selector misses use
   `value_not_retained`, and phase-unsupported record families use
   `record_family_not_supported`.
+  Indexed record values are served only from a record inventory whose coverage
+  is authoritative: coverage `status` is `full` or `projected` and it names no
+  `unsupported_reason`. A name whose serving resolver's inventory row is
+  `unsupported` (for example an ENSv2 name behind a resolver whose
+  implementation is not an admitted profile) publishes no record values even
+  when the projection retained entries for diagnostics. `source=indexed` then
+  reports every requested key as `status=unsupported` with the row's own reason,
+  mapped through the shared name-level vocabulary: a reason this build does not
+  recognize or that carries pipeline wording becomes
+  `unsupported_reason_unrecognized`, and a row naming no reason reports
+  `indexed_record_inventory_not_authoritative`. `addresses` and `text_records`
+  are `{}`, `content_hash` carries no value, and `resolver` still reports the
+  declared registry pointer, which is registry evidence rather than a record.
+  `include=inventory` lists every product key the row knows about (selectors,
+  entries, explicit gaps, and the requested keys) under `unsupported_keys`;
+  `known_keys` and `unset_keys` are empty because an unsupported row can assert
+  neither presence nor absence. `source=auto` treats those keys as unsatisfied
+  and executes verified lookup for them; `source=verified` is unaffected by
+  indexed coverage. The divergence ledger applies the same refusal: a verified
+  answer over an unsupported inventory is compared against an `unsupported`
+  indexed result, never against a retained entry value.
 
   Representative keyed answers and convenience fields are:
 

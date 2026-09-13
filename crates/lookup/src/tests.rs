@@ -334,22 +334,43 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
             "supported",
         )
     })
-    .chain([(
-        "exact not found with non-authoritative coverage",
-        "text:empty".to_owned(),
-        json!([{
-            "record_key":"text:empty",
-            "record_family":"text",
-            "selector_key":"empty",
-            "status":"not_found"
-        }]),
-        json!({}),
-        json!({
-            "status":"unsupported",
-            "unsupported_reason":"coverage_incomplete"
-        }),
-        "unsupported",
-    )]);
+    .chain([
+        (
+            "exact not found with non-authoritative coverage",
+            "text:empty".to_owned(),
+            json!([{
+                "record_key":"text:empty",
+                "record_family":"text",
+                "selector_key":"empty",
+                "status":"not_found"
+            }]),
+            json!({}),
+            json!({
+                "status":"unsupported",
+                "unsupported_reason":"coverage_incomplete"
+            }),
+            "unsupported",
+        ),
+        // A retained value on an unsupported row is diagnostics, not an answer: both derivations
+        // must compare the live result against `unsupported`, never against the entry value.
+        (
+            "exact success with unsupported coverage",
+            "addr:60".to_owned(),
+            json!([{
+                "record_key":"addr:60",
+                "record_family":"addr",
+                "selector_key":"60",
+                "status":"success",
+                "value":"0xFA75ED860000000000000000000000000000ABCD"
+            }]),
+            json!({}),
+            json!({
+                "status":"unsupported",
+                "unsupported_reason":"coverage_incomplete"
+            }),
+            "unsupported",
+        ),
+    ]);
     let marker_value = "0x2222222222222222222222222222222222222222";
     let marker_cases = [
         ("marked absence", Some("not_found"), json!(["addr:60"])),
@@ -460,6 +481,9 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
         .bind(&record_key)
         .fetch_one(fixture.pool())
         .await?;
+        if case_name == "exact success with unsupported coverage" {
+            assert_eq!(rust_answer, json!({"status":"unsupported"}), "{case_name}");
+        }
         if provenance
             .get("exact_nonempty_not_found_record_keys")
             .is_some()
