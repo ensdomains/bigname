@@ -1332,9 +1332,12 @@ resolver found there
 (upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L38-L41 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L74 @ ens_v2@a971bd64).
 Project classifies the address as supported without `Upgraded` history and
-serves a name bound to it from the same name's ENSv1 record inventory, marking
-the row with `provenance.mirror`; when the ENSv1 side has no projected resolver
-the row is unsupported with `mirrored_resolver_not_projected`. See
+serves a name bound to it from the storage of the ENSv1 resolver the mirror's
+registry walk selects, the exact node's or else the nearest ancestor's, read for
+the queried node, marking the row with `provenance.mirror` (`mirrored_node`,
+`ancestor_depth`, `forwarding`); when no consulted node has a projected resolver,
+or the selected ancestor resolver is declared `ensip10_extended_resolver`, the
+row is unsupported with `mirrored_resolver_not_projected`. See
 [manifest declarations](manifests.md#ensv1-mirror-resolver-declarations) and
 [projections](projections.md#resolver-and-records).
 
@@ -1787,7 +1790,10 @@ a manifest-authorized, implementation-sensitive
 resolver getter behavior that Project copies into the current resolver
 classification and then into record-inventory read rules. It authorizes a
 deterministic indexed read from projected records; it does not create record
-events, synthetic selectors, or reusable provider results.
+events, synthetic selectors, or reusable provider results. The vocabulary is
+`ensip19_default_address` (a getter fallback) and `ensip10_extended_resolver`
+(a capability statement that the resolver answers `resolve(name, data)`, which
+only narrows what Project derives through it).
 
 <a id="registry-fallback-handoff"></a>
 ## Registry fallback handoff

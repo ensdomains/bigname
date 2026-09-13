@@ -2,10 +2,31 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{Marker, ProjectError, Result};
 
-/// Serving pointers whose current resolver is a declared ENSv1 mirror resolver
-/// (`docs/manifests.md` § ENSv1 mirror resolver declarations). The mirror stores no records, so
-/// the ordinary node-keyed attribution finds nothing on it; `build` derives these resources'
-/// inventory from the ENSv1 resolver the same name selects instead.
+/// ENSv1 registry-side pointer families whose `ResolverChanged` events state the ENSv1 registry's
+/// current resolver for a node.
+const V1_POINTER_FAMILIES: &str =
+    "'ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1'";
+
+/// Stage the pointers whose current resolver is a declared ENSv1 mirror resolver
+/// (`docs/manifests.md` § ENSv1 mirror resolver declarations) and select, for each, the ENSv1
+/// resolver the mirror would call.
+///
+/// The mirror finds the resolver with `RegistryUtils.findResolver` over the ENSv1 registry: it
+/// walks the DNS-encoded name toward the root and returns the nearest node with a nonzero registry
+/// resolver, the exact node first; the root node itself is never consulted.
+/// (upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L38-L41 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)
+/// It then calls that resolver with the original calldata: an immediate resolver receives the
+/// queried node's getter call directly, so it answers with its own storage for the queried node,
+/// while an `IExtendedResolver` receives `resolve(name, data)` and answers by its own logic.
+/// (upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L69 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L66-L70 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L88-L96 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L108-L127 @ ens_v1@91c966f)
+///
+/// `project_mirror_substituted_pointers` therefore re-points each derivable mirrored resource at
+/// the selected ENSv1 resolver while keeping the queried node, so the ordinary node-keyed
+/// attribution computes exactly the records that resolver stores for the queried node.
 pub(super) async fn stage_pointers(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -41,110 +62,256 @@ pub(super) async fn stage_pointers(
         .map_err(|error| {
             ProjectError::database("failed to index mirror resolver pointers", error)
         })?;
-    Ok(())
-}
 
-/// One inventory row per mirror pointer, copied from the staged inventory of the ENSv1 resource
-/// whose registry resolver the mirror would read: the latest ENSv1-family `ResolverChanged` for
-/// the same namehash at the target. The mirror looks the name up in the ENSv1 registry and
-/// forwards resolution to the resolver it finds there.
-/// (upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L38-L41 @ ens_v2@a971bd64)
-/// (upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L74 @ ens_v2@a971bd64)
-/// Only the exact node is modeled: a cleared or absent ENSv1 resolver, an ENSv1 side that is
-/// itself a mirror, or an unsupported ENSv1 inventory publishes `mirrored_resolver_not_projected`
-/// rather than walking to an ancestor resolver (`docs/upstream.md` § Known divergences).
-pub(super) async fn build(
-    transaction: &mut Transaction<'_, Postgres>,
-    chain_id: &str,
-    target: &Marker,
-) -> Result<()> {
-    sqlx::query(
+    let selection = format!(
         r#"
-        WITH v1_pointers AS (
-            SELECT DISTINCT ON (latest.namehash) latest.*
+        CREATE TEMP TABLE project_mirror_selection ON COMMIT DROP AS
+        WITH registry_state AS (
+            -- The ENSv1 registry's current resolver per node: the latest canonical registry-side
+            -- pointer, clears included, so a cleared exact node falls through to its ancestors.
+            SELECT DISTINCT ON (latest.namehash)
+                   latest.*, surface.namespace, surface.raw_name, surface.raw_labels,
+                   event.block_number AS v1_block_number, event.block_hash AS v1_block_hash
             FROM project_record_pointer_latest latest
             JOIN project_events event
               ON event.normalized_event_id = latest.pointer_event_id
-            WHERE latest.pointer_source_family IN (
-                'ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1'
-            )
+            JOIN project_surfaces surface
+              ON surface.logical_name_id = latest.logical_name_id
+            WHERE latest.pointer_source_family IN ({V1_POINTER_FAMILIES})
             ORDER BY latest.namehash,
                      event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
         ),
-        mirrored AS (
-            SELECT mirror.*,
-                   v1.resource_id AS mirrored_resource_id,
-                   v1.resolver_address AS mirrored_resolver_address,
-                   v1.pointer_event_id AS mirrored_pointer_event_id,
-                   v1.pointer_source_family AS mirrored_pointer_source_family,
-                   inventory.record_version_boundary AS v1_boundary,
-                   inventory.selectors AS v1_selectors,
-                   inventory.unsupported_families AS v1_unsupported_families,
-                   inventory.last_change AS v1_last_change,
-                   inventory.entries AS v1_entries,
-                   inventory.support_status AS v1_support_status,
-                   inventory.unsupported_reason AS v1_unsupported_reason,
-                   inventory.provenance AS v1_provenance,
-                   inventory.chain_positions AS v1_chain_positions,
-                   inventory.manifest_version AS v1_manifest_version,
-                   inventory.resource_id IS NOT NULL
-                       AND inventory.support_status = 'supported'
-                       AND NOT EXISTS (
-                           SELECT 1 FROM project_mirror_pointers nested
-                           WHERE nested.resource_id = v1.resource_id
-                       )
-                       AND NOT EXISTS (
-                           SELECT 1 FROM project_stage_resolver_current nested
-                           WHERE nested.chain_id = $1
-                             AND nested.resolver_address = v1.resolver_address
-                             AND nested.declared_summary #>> '{classification,role}' =
-                                 'ensv1_mirror_resolver'
-                       ) AS v1_projected
+        walk AS (
+            -- Every registry node the walk consults for the queried name: the name itself and each
+            -- proper ancestor below the root, deepest first.
+            SELECT mirror.resource_id, queried.namespace, position - 1 AS ancestor_depth,
+                   queried.raw_labels[position : cardinality(queried.raw_labels)] AS suffix
             FROM project_mirror_pointers mirror
-            LEFT JOIN v1_pointers v1
-              ON v1.namehash = mirror.namehash
-             AND v1.resolver_address IS NOT NULL
-             AND v1.resolver_address NOT IN (
-                 '0x0000000000000000000000000000000000000000', ''
-             )
-            LEFT JOIN project_stage_record_inventory_current inventory
-              ON inventory.resource_id = v1.resource_id
-             AND inventory.provenance ->> 'record_serving' IS DISTINCT FROM 'false'
+            JOIN project_surfaces queried
+              ON queried.logical_name_id = mirror.logical_name_id
+            CROSS JOIN generate_series(1, cardinality(queried.raw_labels)) AS position
         ),
-        classified AS (
-            SELECT mirrored.*,
-                   mirror_support_status = 'supported'
-                       AND mirror_namespace_matches
-                       AND v1_projected AS supported,
+        candidates AS (
+            SELECT walk.resource_id,
+                   walk.ancestor_depth,
+                   registry.resource_id AS mirrored_resource_id,
+                   registry.namehash AS mirrored_node,
+                   registry.raw_name AS mirrored_name,
+                   registry.resolver_address AS mirrored_resolver_address,
+                   registry.pointer_event_id AS mirrored_pointer_event_id,
+                   registry.pointer_source_family AS mirrored_pointer_source_family,
+                   registry.pointer_namespace AS mirrored_pointer_namespace,
+                   registry.pointer_manifest_version AS mirrored_pointer_manifest_version,
+                   registry.v1_block_number AS mirrored_block_number,
+                   registry.v1_block_hash AS mirrored_block_hash
+            FROM walk
+            JOIN registry_state registry
+              ON registry.namespace = walk.namespace
+             AND registry.raw_labels = walk.suffix
+            WHERE registry.resolver_address IS NOT NULL
+              AND registry.resolver_address NOT IN (
+                  '0x0000000000000000000000000000000000000000', ''
+              )
+        ),
+        nearest AS (
+            SELECT DISTINCT ON (resource_id) *
+            FROM candidates
+            ORDER BY resource_id, ancestor_depth ASC, mirrored_pointer_event_id DESC
+        )
+        SELECT nearest.*,
+               CASE WHEN COALESCE(
+                        resolver.declared_summary #> '{{classification,read_features}}',
+                        '[]'::jsonb
+                    ) ? 'ensip10_extended_resolver'
+                    THEN 'extended_resolve' ELSE 'direct_call' END AS forwarding,
+               CASE
+                   WHEN resolver.resolver_address IS NULL
+                       THEN 'resolver_classification_missing'
+                   WHEN resolver.declared_summary #>> '{{classification,role}}' =
+                        'ensv1_mirror_resolver'
+                       THEN 'mirrored_resolver_is_mirror'
+                   WHEN resolver.support_status IS DISTINCT FROM 'supported'
+                       THEN COALESCE(
+                           resolver.unsupported_reason, 'resolver_classification_missing'
+                       )
+                   WHEN resolver.declared_summary #>> '{{classification,source_family}}' <>
+                        'ens_v1_resolver_l1'
+                       THEN 'mirrored_resolver_not_ensv1'
+                   WHEN declaration_manifest.manifest_id IS NULL
+                       THEN 'resolver_classification_missing'
+                   WHEN nearest.ancestor_depth > 0
+                    AND COALESCE(
+                        resolver.declared_summary #> '{{classification,read_features}}',
+                        '[]'::jsonb
+                    ) ? 'ensip10_extended_resolver'
+                       THEN 'ensip10_extended_resolver'
+               END AS mirrored_unsupported_reason,
+               COALESCE(resolver.manifest_version, 1) AS mirrored_resolver_manifest_version
+        FROM nearest
+        LEFT JOIN project_stage_resolver_current resolver
+          ON resolver.chain_id = $1
+         AND resolver.resolver_address = nearest.mirrored_resolver_address
+        LEFT JOIN project_manifests declaration_manifest
+          ON declaration_manifest.manifest_id = (resolver.provenance ->> 'manifest_id')::bigint
+         AND declaration_manifest.namespace = nearest.mirrored_pointer_namespace
+        "#
+    );
+    sqlx::query(&selection)
+        .bind(chain_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to select mirrored ENSv1 resolvers", error)
+        })?;
+    sqlx::query(
+        r#"
+        CREATE TEMP TABLE project_mirror_substituted_pointers ON COMMIT DROP AS
+        SELECT mirror.resource_id,
+               mirror.logical_name_id,
+               selection.mirrored_pointer_namespace AS pointer_namespace,
+               selection.mirrored_pointer_source_family AS pointer_source_family,
+               mirror.namehash,
+               selection.mirrored_resolver_address AS resolver_address,
+               GREATEST(
+                   mirror.pointer_manifest_version,
+                   selection.mirrored_pointer_manifest_version
+               ) AS pointer_manifest_version,
+               mirror.pointer_event_id,
+               CASE WHEN selection.mirrored_block_number > mirror.pointer_block_number
+                    THEN selection.mirrored_block_number
+                    ELSE mirror.pointer_block_number END AS pointer_block_number,
+               CASE WHEN selection.mirrored_block_number > mirror.pointer_block_number
+                    THEN selection.mirrored_block_hash
+                    ELSE mirror.pointer_block_hash END AS pointer_block_hash
+        FROM project_mirror_pointers mirror
+        JOIN project_mirror_selection selection USING (resource_id)
+        WHERE mirror.mirror_support_status = 'supported'
+          AND mirror.mirror_namespace_matches
+          AND selection.mirrored_unsupported_reason IS NULL
+        "#,
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to substitute mirrored resolver pointers", error)
+    })?;
+    for statement in [
+        "CREATE INDEX ON project_mirror_selection (resource_id)",
+        "CREATE INDEX ON project_mirror_substituted_pointers (resource_id)",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to index mirrored resolver selection", error)
+            })?;
+    }
+    Ok(())
+}
+
+/// The `provenance.mirror` object shared by derived and unsupported mirrored rows.
+const MIRROR_PROVENANCE: &str = r#"
+jsonb_strip_nulls(jsonb_build_object(
+    'resolver_address', mirror.resolver_address,
+    'mirrored_source_family', 'ens_v1_resolver_l1',
+    'mirrored_registry_source_family', 'ens_v1_registry_l1',
+    'mirrored_registry_address', mirror.mirror_classification ->> 'mirrored_registry_address',
+    'queried_node', mirror.namehash,
+    'mirrored_node', selection.mirrored_node,
+    'mirrored_name', selection.mirrored_name,
+    'ancestor_depth', selection.ancestor_depth,
+    'forwarding', selection.forwarding,
+    'mirrored_resolver_address', selection.mirrored_resolver_address,
+    'mirrored_resource_id', selection.mirrored_resource_id,
+    'mirrored_pointer_event_id', selection.mirrored_pointer_event_id,
+    'mirrored_pointer_source_family', selection.mirrored_pointer_source_family,
+    'mirrored_unsupported_reason', selection.mirrored_unsupported_reason
+))
+"#;
+
+/// Finish the mirrored rows after the ordinary build: rows computed through a substituted pointer
+/// take the mirror back as `provenance.resolver_address` and gain `provenance.mirror`; every other
+/// mirror pointer publishes an explicit `mirrored_resolver_not_projected` row (or the mirror's own
+/// classification reason) with no entries and no read rules.
+pub(super) async fn build(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target: &Marker,
+) -> Result<()> {
+    let finish = format!(
+        r#"
+        UPDATE project_stage_record_inventory_current inventory
+        SET provenance = inventory.provenance || jsonb_build_object(
+                'resolver_address', mirror.resolver_address,
+                'mirror', {MIRROR_PROVENANCE}
+            ),
+            unsupported_reason = CASE WHEN inventory.support_status = 'unsupported'
+                THEN 'mirrored_resolver_not_projected' ELSE inventory.unsupported_reason END,
+            unsupported_families = CASE WHEN inventory.support_status = 'unsupported'
+                THEN (
+                    SELECT COALESCE(jsonb_agg(CASE
+                        WHEN family ->> 'record_family' = 'resolver_classification'
+                            THEN jsonb_build_object(
+                                'record_family', 'resolver_classification',
+                                'unsupported_reason', 'mirrored_resolver_not_projected'
+                            )
+                        ELSE family END), '[]'::jsonb)
+                    FROM jsonb_array_elements(inventory.unsupported_families) family
+                )
+                ELSE inventory.unsupported_families END,
+            manifest_version = GREATEST(
+                inventory.manifest_version,
+                COALESCE(mirror.mirror_manifest_version, 1),
+                selection.mirrored_resolver_manifest_version
+            )
+        FROM project_mirror_substituted_pointers substituted
+        JOIN project_mirror_pointers mirror USING (resource_id)
+        JOIN project_mirror_selection selection USING (resource_id)
+        WHERE inventory.resource_id = substituted.resource_id
+        "#
+    );
+    sqlx::query(&finish)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to finish derived mirrored inventory rows", error)
+        })?;
+
+    let unsupported = format!(
+        r#"
+        WITH classified AS (
+            SELECT mirror.*,
                    CASE
-                       WHEN mirror_support_status IS DISTINCT FROM 'supported'
-                           THEN COALESCE(mirror_unsupported_reason, 'resolver_classification_missing')
-                       WHEN NOT mirror_namespace_matches
+                       WHEN mirror.mirror_support_status IS DISTINCT FROM 'supported'
+                           THEN COALESCE(
+                               mirror.mirror_unsupported_reason, 'resolver_classification_missing'
+                           )
+                       WHEN NOT mirror.mirror_namespace_matches
                            THEN 'resolver_classification_missing'
-                       WHEN NOT v1_projected
-                           THEN 'mirrored_resolver_not_projected'
+                       ELSE 'mirrored_resolver_not_projected'
                    END AS unsupported_reason,
-                   CASE WHEN v1_projected THEN v1_boundary ->> 'normalized_event_id' END
-                       AS boundary_event_id,
-                   CASE WHEN v1_projected THEN v1_boundary ->> 'event_kind' END
-                       AS boundary_event_kind,
-                   CASE WHEN v1_projected
-                        THEN v1_boundary -> 'chain_position'
-                        ELSE jsonb_strip_nulls(jsonb_build_object(
-                            'chain_id', $1,
-                            'block_number', boundary.block_number,
-                            'block_hash', boundary.block_hash,
-                            'timestamp', boundary.block_timestamp
-                        ))
-                   END AS boundary_position
-            FROM mirrored
+                   {MIRROR_PROVENANCE} AS mirror_provenance,
+                   jsonb_strip_nulls(jsonb_build_object(
+                       'chain_id', $1,
+                       'block_number', boundary.block_number,
+                       'block_hash', boundary.block_hash,
+                       'timestamp', boundary.block_timestamp
+                   )) AS boundary_position,
+                   COALESCE(selection.mirrored_resolver_manifest_version, 1)
+                       AS mirrored_resolver_manifest_version
+            FROM project_mirror_pointers mirror
+            LEFT JOIN project_mirror_selection selection USING (resource_id)
             LEFT JOIN chain_lineage boundary
               ON boundary.chain_id = $1
-             AND boundary.block_number = mirrored.pointer_block_number
-             AND boundary.block_hash = mirrored.pointer_block_hash
+             AND boundary.block_number = mirror.pointer_block_number
+             AND boundary.block_hash = mirror.pointer_block_hash
+            WHERE NOT EXISTS (
+                SELECT 1 FROM project_mirror_substituted_pointers substituted
+                WHERE substituted.resource_id = mirror.resource_id
+            )
         )
         INSERT INTO project_stage_record_inventory_current (
             resource_id, record_version_boundary_key, record_version_boundary,
@@ -156,10 +323,7 @@ pub(super) async fn build(
                concat(
                    octet_length(logical_name_id), ':', logical_name_id, ';',
                    octet_length(resource_id::text), ':', resource_id::text, ';',
-                   octet_length(COALESCE(boundary_event_id, '')), ':',
-                   COALESCE(boundary_event_id, ''), ';',
-                   octet_length(COALESCE(boundary_event_kind, '')), ':',
-                   COALESCE(boundary_event_kind, ''), ';',
+                   '0:;', '0:;',
                    octet_length($1::text), ':', $1::text, ';',
                    octet_length(boundary_position ->> 'block_number'), ':',
                    boundary_position ->> 'block_number', ';',
@@ -171,74 +335,41 @@ pub(super) async fn build(
                jsonb_build_object(
                    'logical_name_id', logical_name_id,
                    'resource_id', resource_id,
-                   'normalized_event_id', boundary_event_id::bigint,
-                   'event_kind', boundary_event_kind,
+                   'normalized_event_id', NULL,
+                   'event_kind', NULL,
                    'chain_position', boundary_position
                ),
-               CASE WHEN supported THEN v1_selectors ELSE '[]'::jsonb END,
-               CASE WHEN supported THEN v1_unsupported_families
-                    ELSE jsonb_build_array(jsonb_build_object(
-                        'record_family', 'resolver_classification',
-                        'unsupported_reason', unsupported_reason
-                    )) END,
-               CASE WHEN supported THEN v1_last_change
-                    ELSE jsonb_build_object(
-                        'normalized_event_id', pointer_event_id,
-                        'event_kind', 'ResolverChanged',
-                        'chain_position', boundary_position
-                    ) END,
-               CASE WHEN supported THEN v1_entries ELSE '[]'::jsonb END,
-               CASE WHEN supported THEN 'supported' ELSE 'unsupported' END,
+               '[]'::jsonb,
+               jsonb_build_array(jsonb_build_object(
+                   'record_family', 'resolver_classification',
+                   'unsupported_reason', unsupported_reason
+               )),
+               jsonb_build_object(
+                   'normalized_event_id', pointer_event_id,
+                   'event_kind', 'ResolverChanged',
+                   'chain_position', boundary_position
+               ),
+               '[]'::jsonb,
+               'unsupported',
                unsupported_reason,
                jsonb_build_object(
                    'chain_id', $1,
                    'logical_name_id', logical_name_id,
                    'resolver_address', resolver_address,
                    'resolver_pointer_event_id', pointer_event_id,
-                   'record_event_ids', CASE WHEN supported
-                       THEN COALESCE(v1_provenance -> 'record_event_ids', '[]'::jsonb)
-                       ELSE '[]'::jsonb END,
-                   'record_link_event_ids', CASE WHEN supported
-                       THEN COALESCE(v1_provenance -> 'record_link_event_ids', '[]'::jsonb)
-                       ELSE '[]'::jsonb END,
-                   'attributed_event_ids', CASE WHEN supported
-                       THEN COALESCE(v1_provenance -> 'attributed_event_ids', '[]'::jsonb)
-                       ELSE '[]'::jsonb END,
-                   'read_rules', CASE WHEN supported
-                       THEN COALESCE(v1_provenance -> 'read_rules', '[]'::jsonb)
-                       ELSE '[]'::jsonb END,
+                   'record_event_ids', '[]'::jsonb,
+                   'record_link_event_ids', '[]'::jsonb,
+                   'attributed_event_ids', '[]'::jsonb,
+                   'read_rules', '[]'::jsonb,
                    'coverage', jsonb_build_object(
                        'status', 'projected',
                        'exhaustiveness', 'not_asserted'
                    ),
-                   'mirror', jsonb_strip_nulls(jsonb_build_object(
-                       'resolver_address', resolver_address,
-                       'mirrored_source_family', 'ens_v1_resolver_l1',
-                       'mirrored_registry_source_family', 'ens_v1_registry_l1',
-                       'mirrored_registry_address',
-                           mirror_classification ->> 'mirrored_registry_address',
-                       'mirrored_resolver_address', mirrored_resolver_address,
-                       'mirrored_resource_id', mirrored_resource_id,
-                       'mirrored_pointer_event_id', mirrored_pointer_event_id,
-                       'mirrored_pointer_source_family', mirrored_pointer_source_family,
-                       'mirrored_unsupported_reason',
-                           CASE WHEN NOT supported THEN v1_unsupported_reason END
-                   ))
-               ) || CASE WHEN supported AND v1_provenance ? 'exact_nonempty_not_found_record_keys'
-                   THEN jsonb_build_object('exact_nonempty_not_found_record_keys',
-                       v1_provenance -> 'exact_nonempty_not_found_record_keys')
-                   ELSE '{}'::jsonb END,
+                   'mirror', mirror_provenance
+               ),
                jsonb_strip_nulls(jsonb_build_object(
-                   'block_number', CASE
-                       WHEN supported
-                        AND (v1_chain_positions ->> 'block_number')::bigint >= pointer_block_number
-                           THEN v1_chain_positions -> 'block_number'
-                       ELSE to_jsonb(pointer_block_number) END,
-                   'block_hash', CASE
-                       WHEN supported
-                        AND (v1_chain_positions ->> 'block_number')::bigint >= pointer_block_number
-                           THEN v1_chain_positions -> 'block_hash'
-                       ELSE to_jsonb(pointer_block_hash) END,
+                   'block_number', pointer_block_number,
+                   'block_hash', pointer_block_hash,
                    'target_block_number', $2,
                    'target_block_hash', $3
                )),
@@ -250,19 +381,20 @@ pub(super) async fn build(
                GREATEST(
                    pointer_manifest_version,
                    COALESCE(mirror_manifest_version, 1),
-                   COALESCE(CASE WHEN supported THEN v1_manifest_version END, 1)
+                   mirrored_resolver_manifest_version
                )
         FROM classified
         ORDER BY resource_id
-        "#,
-    )
-    .bind(chain_id)
-    .bind(target.number)
-    .bind(&target.hash)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| {
-        ProjectError::database("failed to build mirrored record_inventory_current rows", error)
-    })?;
+        "#
+    );
+    sqlx::query(&unsupported)
+        .bind(chain_id)
+        .bind(target.number)
+        .bind(&target.hash)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to build unsupported mirrored inventory rows", error)
+        })?;
     Ok(())
 }

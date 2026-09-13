@@ -102,8 +102,9 @@ consumers that keep `proxy_kind` in the manifest schema.
 `resolver_implementations` is a list of `{ role, address, read_features? }`
 entries with unique addresses; several implementation generations may share
 one role. `[[contracts]]` also accepts `read_features`. Each feature list is
-deduplicated and uses the closed `ensip19_default_address` vocabulary in this
-release. Unknown or duplicate values fail loading. Contract-level features are
+deduplicated and uses the closed vocabulary `ensip19_default_address`,
+`ensip10_extended_resolver` in this release. Unknown or duplicate values fail
+loading. Contract-level features are
 valid only for resolver roles with `proxy_kind = "none"`; proxy-sensitive
 features belong on the implementation declaration. A family with any
 `resolver_implementations` entries rejects contract-level read features except
@@ -128,6 +129,21 @@ uses the requested getter's verified decode. A derived coin-type-60 zero address
 is `not_found`, while an EVM-range multicoin request preserves the same non-empty
 20 zero bytes. This target-specific normalization does not alter exact stored
 records.
+
+`ensip10_extended_resolver` states that the declared resolver implements
+`IExtendedResolver`: a caller that finds it for a name forwards
+`resolve(name, data)` rather than the node-keyed getter, so its answer for a name
+reached by ancestor walk is resolver-defined.
+(upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L66-L70 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L108-L116 @ ens_v1@91c966f)
+Project consumes it only to refuse deriving an
+[ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)'s
+inventory through such an ancestor
+([`projections.md`](projections.md#resolver-and-records)); it authorizes no
+getter and no watch-plan expansion. No admitted ENSv1 resolver generation
+declares it: the pinned `PublicResolver` inherits the profile resolvers and
+`Multicallable`, not `IExtendedResolver`.
+(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20-L31 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)
@@ -502,10 +518,11 @@ direct `public_resolver_v2` role; no `Upgraded` history is required), and
 publishes `declared_summary.classification.mirror = {mirrored_source_family:
 "ens_v1_resolver_l1", mirrored_registry_source_family: "ens_v1_registry_l1",
 mirrored_registry_address}` on `resolver_current`. A name whose current ENSv2
-resolver pointer targets the mirror is then served from the same name's ENSv1
-inventory as specified in [`projections.md`](projections.md#resolver-and-records);
-bigname models only the exact node's ENSv1 resolver, not upstream's ancestor
-walk ([known divergence](upstream.md#known-divergences)). Because the declared
+resolver pointer targets the mirror is then served through the ENSv1 resolver
+the mirror's registry walk selects, the exact node's or else the nearest
+ancestor's, read for the queried node as specified in
+[`projections.md`](projections.md#resolver-and-records); an ancestor declared
+`ensip10_extended_resolver` is not derived through. Because the declared
 address becomes a watched emitter of the family, adding it widens the watch plan
 and triggers the [mandatory historical fetch](#mandatory-historical-fetch-after-watch-plan-widening);
 the mirror emits no logs, so that fetch is empty. Discovery alone, matching

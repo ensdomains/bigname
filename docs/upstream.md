@@ -124,28 +124,6 @@ only then deploy the matching API as required by the
 > provenance or weakening discovery and implementation-history requirements.
 > **Since**: `2026-09-09`
 
-> **ENSv1 mirror resolver serves the exact node only** — A name whose ENSv2
-> resolver is a declared [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
-> is served from bigname's ENSv1 inventory for the same namehash. When the ENSv1
-> registry has no nonzero resolver for that exact node, the inventory is
-> `unsupported` with `mirrored_resolver_not_projected` instead of following an
-> ancestor's resolver.
-> **Upstream**: the mirror finds the resolver with `RegistryUtils.findResolver`,
-> which walks toward the root and returns the nearest ancestor's nonzero
-> resolver when the exact node has none, then forwards the call there
-> `(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L38-L41 @ ens_v2@a971bd64)`
-> `(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L16-L38 @ ens_v1@91c966f)`
-> `(upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L69 @ ens_v2@a971bd64)`.
-> **Our rule**: `docs/projections.md` § Resolver and records and
-> `docs/manifests.md` § ENSv1 mirror resolver declarations.
-> **Why**: indexed inventory models exact-node ENSv1 resolvers; explicit
-> `unsupported` keeps `source=auto` falling back to verified lookup rather than
-> asserting absence where the chain may answer through a wildcard ancestor.
-> The hackathon instance is additionally a variant of the pinned contract
-> (`docs/manifests.md` § Sepolia hackathon deployment evidence); the pinned
-> source is cited for the behavior model only.
-> **Since**: `2026-09-13`
-
 
 Intentional differences between our docs/manifests and upstream. Every divergence lives here so that citations reading "differently than upstream" are legible instead of looking like bugs. If a divergence is not in this list, it should be treated as drift and closed — either by updating our doc or by adding the entry.
 

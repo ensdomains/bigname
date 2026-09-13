@@ -811,9 +811,10 @@ Rules:
 - `mirrored_resolver_not_projected` is the projected inventory reason for a
   name whose current ENSv2 resolver is a declared
   [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
-  while the same name's ENSv1 side has no projected resolver or inventory; it
-  crosses the serving boundary unchanged wherever a route exposes the inventory
-  reason.
+  while the ENSv1 resolver the mirror's registry walk selects for the name (the
+  exact node's, else the nearest ancestor's) is not projected, or is an
+  ancestor's declared `ensip10_extended_resolver`; it crosses the serving
+  boundary unchanged wherever a route exposes the inventory reason.
 - A read over a projected row keys `unsupported` on that row's own coverage
   status, not on a list of known reasons: an unsupported row serves
   `status=unsupported` even when it names no reason or names a reason the build

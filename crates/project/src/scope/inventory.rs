@@ -113,8 +113,12 @@ pub(super) async fn include_changed_record_consumers(
              FROM project_changed_events event
              JOIN record_inventory_current inventory
                ON inventory.provenance ->> 'chain_id' = $1
-              AND lower(inventory.provenance ->> 'resolver_address') =
-                  lower(event.raw_fact_ref ->> 'emitting_address')
+              AND lower(event.raw_fact_ref ->> 'emitting_address') IN (
+                  -- A mirrored row serves the writes of the ENSv1 resolver it was derived
+                  -- from (builders/record_inventory/mirror.rs), not of the mirror itself.
+                  lower(inventory.provenance ->> 'resolver_address'),
+                  lower(inventory.provenance #>> '{mirror,mirrored_resolver_address}')
+              )
              JOIN name_surfaces surface
                ON surface.logical_name_id =
                   inventory.provenance ->> 'logical_name_id'
@@ -251,10 +255,11 @@ async fn include_mirror_pairs(
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
-    // A resource whose readable pointer targets a declared ENSv1 mirror resolver serves the same
-    // name's ENSv1 inventory (builders/record_inventory/mirror.rs), so the two sides rebuild
-    // together: scope the ENSv1 pointer resources of a scoped mirror-pointer name, and the
-    // mirror-pointer resources of a scoped ENSv1 pointer name.
+    // A resource whose readable pointer targets a declared ENSv1 mirror resolver is served through
+    // the ENSv1 resolver the mirror finds for the name: the exact node's, else the nearest
+    // ancestor's (builders/record_inventory/mirror.rs). The sides rebuild together: scope the ENSv1
+    // pointer resources of the name and of every ancestor of a scoped mirror-pointer name, and the
+    // mirror-pointer resources of the name and of every descendant of a scoped ENSv1 pointer name.
     sqlx::query(
         "WITH readable_pointers AS (
              SELECT event.resource_id, event.logical_name_id, event.source_family,
@@ -286,17 +291,50 @@ async fn include_mirror_pairs(
              WHERE source_family IN (
                  'ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1'
              )
+         ),
+         surfaces AS (
+             SELECT DISTINCT surface.logical_name_id, surface.namespace, surface.raw_labels
+             FROM name_surfaces surface
+             JOIN (
+                 SELECT logical_name_id FROM mirror_pointers
+                 UNION
+                 SELECT logical_name_id FROM v1_pointers
+             ) named USING (logical_name_id)
+             JOIN chain_lineage lineage
+               ON lineage.chain_id = surface.chain_id
+              AND lineage.block_hash = surface.block_hash
+              AND lineage.block_number = surface.block_number
+             WHERE surface.chain_id = $1
+               AND surface.block_number <= $2
+               AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+         ),
+         -- Every registry node the mirror's resolver walk can consult for a mirrored name: the
+         -- name itself and each proper ancestor below the root.
+         walk AS (
+             SELECT mirror.resource_id AS mirror_resource_id,
+                    queried.namespace,
+                    queried.raw_labels[position : cardinality(queried.raw_labels)] AS suffix
+             FROM mirror_pointers mirror
+             JOIN surfaces queried ON queried.logical_name_id = mirror.logical_name_id
+             CROSS JOIN generate_series(1, cardinality(queried.raw_labels)) AS position
+         ),
+         pairs AS (
+             SELECT walk.mirror_resource_id, v1.resource_id AS v1_resource_id
+             FROM walk
+             JOIN surfaces consulted
+               ON consulted.namespace = walk.namespace
+              AND consulted.raw_labels = walk.suffix
+             JOIN v1_pointers v1 ON v1.logical_name_id = consulted.logical_name_id
          )
          INSERT INTO project_scope_resources
-         SELECT v1.resource_id
+         SELECT pair.v1_resource_id
          FROM project_scope_resources scope
-         JOIN mirror_pointers mirror USING (resource_id)
-         JOIN v1_pointers v1 USING (logical_name_id)
+         JOIN pairs pair ON pair.mirror_resource_id = scope.resource_id
          UNION
-         SELECT mirror.resource_id
+         SELECT pair.mirror_resource_id
          FROM project_scope_resources scope
-         JOIN v1_pointers v1 USING (resource_id)
-         JOIN mirror_pointers mirror USING (logical_name_id)
+         JOIN pairs pair ON pair.v1_resource_id = scope.resource_id
          ON CONFLICT DO NOTHING",
     )
     .bind(chain_id)

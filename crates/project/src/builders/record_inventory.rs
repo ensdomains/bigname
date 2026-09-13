@@ -18,11 +18,15 @@ pub(super) async fn build(
     sqlx::query(
         r#"
         WITH pointers AS (
+            -- Mirror-pointer resources are re-pointed at the ENSv1 resolver the mirror would call
+            -- for the queried node (record_inventory/mirror.rs); same column order.
             SELECT * FROM project_record_pointers pointer
             WHERE NOT EXISTS (
                 SELECT 1 FROM project_mirror_pointers mirror
                 WHERE mirror.resource_id = pointer.resource_id
             )
+            UNION ALL
+            SELECT * FROM project_mirror_substituted_pointers
         ),
         pointer_eligibility AS (
             SELECT pointer.resource_id,

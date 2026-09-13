@@ -685,12 +685,16 @@ collection route carry neither header.
   A name whose current ENSv2 resolver is a declared
   [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
   keeps that mirror as `data.resolver`, and its indexed `records`, `addresses`,
-  `text_records`, `content_hash`, and `include=inventory` come from the same
-  name's ENSv1 inventory exactly as Project derived them
-  ([`projections.md`](projections.md#resolver-and-records)); the response shape
-  does not change. When that ENSv1 side is not projected the inventory is
-  unsupported with `mirrored_resolver_not_projected`, and `source=auto` falls
-  back to verified lookup as for any unsupported inventory.
+  `text_records`, `content_hash`, and `include=inventory` come from the ENSv1
+  resolver the mirror's registry walk selects for the name (the exact node's,
+  else the nearest ancestor's), read for the queried node exactly as Project
+  derived it ([`projections.md`](projections.md#resolver-and-records)); the
+  response shape does not change, and an ancestor-derived answer is usually
+  empty because it is the ancestor resolver's storage for this node. When no
+  consulted node has a projected resolver, or the selected ancestor resolver is
+  declared `ensip10_extended_resolver`, the inventory is unsupported with
+  `mirrored_resolver_not_projected`, and `source=auto` falls back to verified
+  lookup as for any unsupported inventory.
 
   Representative keyed answers and convenience fields are:
 

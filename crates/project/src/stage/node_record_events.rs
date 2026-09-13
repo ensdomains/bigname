@@ -84,6 +84,35 @@ JOIN LATERAL (
       AND event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
       AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
     UNION ALL
+    -- A pointer to a declared ENSv1 mirror resolver is served through whichever declared ENSv1
+    -- resolver the mirror finds for the queried node (builders/record_inventory/mirror.rs), so
+    -- stage that node's writes on every declared ENSv1 resolver.
+    SELECT event.normalized_event_id, event.chain_id,
+           event.block_number, event.block_hash
+    FROM normalized_events event
+    JOIN project_declared_resolver_addresses ensv1
+      ON ensv1.source_family = 'ens_v1_resolver_l1'
+     AND ensv1.resolver_address = lower(COALESCE(
+             NULLIF(event.after_state ->> 'resolver', ''),
+             NULLIF(event.raw_fact_ref ->> 'emitting_address', '')
+         ))
+    WHERE pointer.pointer_source_family IN ('ens_v2_registry_l1', 'ens_v2_root_l1')
+      AND EXISTS (
+          SELECT 1
+          FROM project_declared_resolver_addresses mirror
+          WHERE mirror.namespace = pointer.namespace
+            AND mirror.resolver_address = pointer.resolver_address
+            AND mirror.classification_role = 'ensv1_mirror_resolver'
+      )
+      AND event.chain_id = $1
+      AND event.logical_name_id IS NULL
+      AND event.source_family = 'ens_v1_resolver_l1'
+      AND lower(event.after_state ->> 'node') = lower(surface.namehash)
+      AND event.block_number <= $2
+      AND event.consumer_visibility = 'activated'
+      AND event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
+      AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+    UNION ALL
     SELECT event.normalized_event_id, event.chain_id,
            event.block_number, event.block_hash
     FROM normalized_events event
