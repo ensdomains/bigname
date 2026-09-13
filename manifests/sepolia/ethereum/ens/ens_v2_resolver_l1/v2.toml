@@ -19,10 +19,30 @@ resolver_implementations = [
   { role = "permissioned_resolver", address = "0x7e4b2d59938930168024201752ee5503df402303", read_features = ["ensip19_default_address"] },
 ]
 roots = []
-contracts = []
 discovery_rules = []
 
+# The ENSv1 mirror resolver declared below reads this ENSv1 registry; the loader requires it to
+# equal the active ens_v1_registry_l1 `registry` address on this chain.
+[correlation_addresses]
+ens_v1_registry = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e"
+
 [capability_flags]
+
+# ENSv1 mirror resolver (`ENSV1Resolver`): the admitted deployment's placeholder resolver for
+# premigration reservations and unmigrated WrapperRegistry children. It stores no records and
+# emits no record events; Project serves names bound to it from the ENSv1 record index. Role
+# semantics: docs/manifests.md section "ENSv1 mirror resolver declarations". Address, receipt
+# block 11163316 (0xaa56b4) and constructor registry argument from the admitted artifact:
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ENSV1Resolver.json:L2 @ ens_v2@a971bd64)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ENSV1Resolver.json:L727-L736 @ ens_v2@a971bd64)
+# (upstream: .refs/ens_v2/contracts/deploy/00_ENSV1Resolver.ts:L13-L23 @ ens_v2@a971bd64)
+# (upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L38-L41 @ ens_v2@a971bd64)
+# (upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L74 @ ens_v2@a971bd64)
+[[contracts]]
+role = "ensv1_mirror_resolver"
+address = "0x5339161a7896Ca9841EcC034A49eDca40f7b9491"
+proxy_kind = "none"
+start_block = 11163316
 
 # Resolver event ABI fragments consumed by ENSv2 resolver and permissions adapters.
 # DataChanged and NamedDataResource are intentionally outside record and permission

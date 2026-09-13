@@ -62,6 +62,16 @@ the family's `name_wrapper` or `registrar` contract address. A missing key,
 missing contract role, or mismatch fails manifest loading before any declaration
 can affect a watch plan.
 
+An `ens_v2_resolver_l1` manifest that declares an
+[ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
+(`[[contracts]].role = "ensv1_mirror_resolver"`) likewise requires
+`correlation_addresses.ens_v1_registry`, the ENSv1 registry the mirror reads.
+When an active `ens_v1_registry_l1` family exists for the same namespace and
+chain, the loader requires that value to equal its `registry` contract address,
+because Project serves the mirrored records from that family's index. The
+mirror declaration must use `proxy_kind = "none"` and no `read_features`; see
+[ENSv1 mirror resolver declarations](#ensv1-mirror-resolver-declarations).
+
 The loader also rejects two active manifest versions on the same chain when both declare the same address as roots or both declare it as contracts, their open-ended `start_block` ranges overlap, and either family feeds manifest-declared event data into `PreimageObserved` rows produced directly from block logs. Those families are `ens_v1_registrar_l1`, `basenames_base_registrar`, `ens_v1_wrapper_l1`, `ens_v2_root_l1`, `ens_v2_registry_l1`, `ens_v2_registrar_l1`, `ens_v2_resolver_l1`, and `ens_v2_migration_l1`. This check does not compare a root declaration with a contract declaration or inspect `correlation_addresses`. Two roots or two contracts may still share an address when neither family is in that list; this is why the shared `l1_resolver` declaration in `basenames_l1_compat` and `basenames_execution` is accepted.
 
 Each `[[roots]]` and `[[contracts]]` entry may declare an optional `start_block`.
@@ -332,7 +342,7 @@ The `sepolia` deployment profile currently admits five ENSv2 families from the a
 - `ens_v2_root_l1` — `RootRegistry` at `0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c`, `start_block = 11163319`. The admitted deployment artifact identifies that address and names the contract type `PermissionedRegistry`. (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/RootRegistry.json:L2 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/RootRegistry.json:L1670 @ ens_v2@a971bd64) It is a tokenized, [resource](glossary.md)-scoped permissioned registry seed for parent graph state.[^v2-pr-l22][^v2-pr-l28] Its `root_registry` role records `subregistry` edges as name topology only: they do not admit or watch the child registry without an independent `RegistryCreated` announcement. The same role separately admits `resolver` addresses through `reachable_from_root`, targeting `ens_v2_resolver_l1`. `PermissionedRegistry` explicitly emits `ResolverUpdated` when a resolver is set and also emits it when registration supplies a nonzero resolver. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L150-L154 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L477-L478 @ ens_v2@a971bd64) The RootRegistry manages TLDs, so its empty suffix anchor represents a registered root label as the existing single-label logical name; the root-discovery projection regression proves that its resolver pointer and records attach to that same resource rather than creating a separate serving model. (upstream: .refs/ens_v2/docs/indexing-ensv2-events.md:L505-L509 @ ens_v2@a971bd64)
 - `ens_v2_registry_l1` — `ETHRegistry` at `0x67b728a792e789a8978b30cf1b3b641f19354b43`, `start_block = 11163391`, plus registry instances announced by `RegistryCreated()`. Direct `PermissionedRegistry` construction emits the announcement first; a `UserRegistry` proxy emits it during initialization. It admits the emitting address from that exact log position without requiring a parent link. `UserRegistryImpl` at `0x840fa461059862ea466a711e8c98c8de732061c0` is implementation metadata, not a separate owner. (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@a971bd64) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/UserRegistry.sol:L43 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/UserRegistry.sol:L47 @ ens_v2_sepolia_20260629@ccaeb58)[^v2-userreg-l15]
 - `ens_v2_registrar_l1` — `ETHRegistrar` at `0xa4449a0dd2b83007553d9b1d28b583a46a805a30`, `start_block = 11163403`. Admitted registration and renewal lifecycle facts; registered-name resource identity links back to the registry resource.[^v2-ethrc-l49][^v2-ethrc-l173]
-- `ens_v2_resolver_l1` — resolver contract instances discovered from either `ens_v2_registry_l1` or `ens_v2_root_l1` retain the manifest-configured normalized record and record-version observations; an applicable same-namespace exact contract declaration instead controls raw-log interpretation under the [declaration-precedence rule](architecture.md#discovery-graph). `PermissionedResolver` instances additionally provide alias, named-resource, and resolver-scoped EAC events. Resolver-local projection is supported only when the proxy's latest canonical ERC-1967 `Upgraded` event names an implementation in the active manifest's `resolver_implementations` list. The current declared `PermissionedResolverImpl` is `0x7e4b2d59938930168024201752ee5503df402303`; the contract inherits UUPS upgradeability and its deployment ABI exposes `Upgraded(address)`.[^v2-deploy-pres][^v2-pres-uups][^v2-pres-upgraded] A manifest admission change reclassifies the affected resolver inline during project-phase publication. No code-hash observation participates.
+- `ens_v2_resolver_l1` — resolver contract instances discovered from either `ens_v2_registry_l1` or `ens_v2_root_l1` retain the manifest-configured normalized record and record-version observations; an applicable same-namespace exact contract declaration instead controls raw-log interpretation under the [declaration-precedence rule](architecture.md#discovery-graph). `PermissionedResolver` instances additionally provide alias, named-resource, and resolver-scoped EAC events. Resolver-local projection is supported only when the proxy's latest canonical ERC-1967 `Upgraded` event names an implementation in the active manifest's `resolver_implementations` list. The current declared `PermissionedResolverImpl` is `0x7e4b2d59938930168024201752ee5503df402303`; the contract inherits UUPS upgradeability and its deployment ABI exposes `Upgraded(address)`.[^v2-deploy-pres][^v2-pres-uups][^v2-pres-upgraded] A manifest admission change reclassifies the affected resolver inline during project-phase publication. No code-hash observation participates. The family also declares the admitted deployment's `ENSV1Resolver` as an exact [ENSv1 mirror resolver](#ensv1-mirror-resolver-declarations) so that premigration reservations and unmigrated `WrapperRegistry` children bound to it serve their ENSv1 records.
 The fifth family, `ens_v2_migration_l1`, covers fixed ENSv1→ENSv2 migration
 controllers, terminal-holder and renewal-bridge markers, factory history,
 batch-reservation sender metadata, and scoped ENSv1 BaseRegistrar correlation.
@@ -363,7 +373,7 @@ bridges from, in `deployment_epoch = "ens_v1"`:
 
 The two zero values are conservative watch lower bounds, not asserted deployment blocks; they use the existing [retired automatic-bootstrap divergence](upstream.md#known-divergences). Reverse resolvers, `ExtendedDNSResolver` / `OffchainDNSResolver`, and `UniversalResolver` are excluded. `OwnedResolver` is also outside the closed family: the pinned Mainnet deployment set records `EthOwnedResolver` and its `.eth`-level setup, but Mainnet's resolver manifest does not admit it; Sepolia's deployment artifact identifies `0x15222A1C2Bf3A4c24eAd1634B8Ee399fd95c3aaf` at block `3790128`, and that address is absent from the app's approved resolver list.[^v1-mainnet-owned-resolver][^v1-sepolia-owned-resolver]
 
-The normalized ENSv1 resolver address set is disjoint from every address-bearing field in the active Sepolia `ens_v2_resolver_l1` manifest; its complete resolver-side set is the `permissioned_resolver` implementation metadata address `0x7e4b2d59938930168024201752ee5503df402303`. That implementation is v2 classification metadata, not an ENSv1 direct-address admission. The ENSv2 deployment's premigration registrar assigns the separate `ENSV1Resolver` mirror at `0x5339161a7896ca9841ecc034a49edca40f7b9491`; that mirror finds the selected resolver through the ENSv1 registry and forwards resolution there. The serving-side mirror stays in the ENSv2 deployment, while v1 record ingestion and exact resolver classification stay in `ens_v1_resolver_l1`.[^v2-sepolia-v1-mirror]
+The normalized ENSv1 resolver address set is disjoint from every address-bearing field in the active Sepolia `ens_v2_resolver_l1` manifest; its complete resolver-side set is the `permissioned_resolver` implementation metadata address `0x7e4b2d59938930168024201752ee5503df402303` and the exact `ensv1_mirror_resolver` declaration at `0x5339161a7896ca9841ecc034a49edca40f7b9491`. The implementation is v2 classification metadata, not an ENSv1 direct-address admission. The ENSv2 deployment's premigration registrar assigns that `ENSV1Resolver` mirror; the mirror finds the selected resolver through the ENSv1 registry and forwards resolution there. The serving-side mirror stays in the ENSv2 deployment and is classified there, while v1 record ingestion and exact resolver classification stay in `ens_v1_resolver_l1`; Project serves a mirror-bound name from this family's inventory ([ENSv1 mirror resolver declarations](#ensv1-mirror-resolver-declarations)).[^v2-sepolia-v1-mirror]
 
 The latest resolver declares `read_features = ["ensip19_default_address"]`, matching its app metadata and inherited `AddrResolver` fallback behavior. Project therefore publishes the ENSIP-19 default-address read rule for `0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5`; the other three generations remain unflagged.[^v1-sepolia-app-resolvers]
 
@@ -468,6 +478,51 @@ because its inherited getter falls back when the exact coin-type bytes are empty
 Permissioned resolver proxies retain their canonical `Upgraded` implementation
 checks, and the existing ENSv1 resolver path remains separate. This local slice
 is not a claim of setter, reset, replay, or public-route runtime acceptance.
+
+#### ENSv1 mirror resolver declarations
+
+An `ens_v2_resolver_l1` manifest may declare an exact
+[ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
+instance with role `ensv1_mirror_resolver`, `proxy_kind = "none"`, no
+`read_features`, its deployment address, an applicable `start_block`, and the
+family-level `correlation_addresses.ens_v1_registry` described under
+[Required fields](#required-fields). Upstream's `ENSV1Resolver` is the model:
+it holds one ENSv1 registry as an immutable, finds the resolver for the
+requested name in that registry, and forwards the resolve call to it; it
+stores no records and defines no record events of its own.
+(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L18-L19 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L38-L41 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L74 @ ens_v2@a971bd64)
+
+The declaration is a classification input, not a record source. Project
+classifies the address as supported `ens_v2_resolver_l1` /
+`ensv1_mirror_resolver` with basis `manifest_declared_address` when the exact
+same-namespace declaration applies (the same declaration-precedence rule as the
+direct `public_resolver_v2` role; no `Upgraded` history is required), and
+publishes `declared_summary.classification.mirror = {mirrored_source_family:
+"ens_v1_resolver_l1", mirrored_registry_source_family: "ens_v1_registry_l1",
+mirrored_registry_address}` on `resolver_current`. A name whose current ENSv2
+resolver pointer targets the mirror is then served from the same name's ENSv1
+inventory as specified in [`projections.md`](projections.md#resolver-and-records);
+bigname models only the exact node's ENSv1 resolver, not upstream's ancestor
+walk ([known divergence](upstream.md#known-divergences)). Because the declared
+address becomes a watched emitter of the family, adding it widens the watch plan
+and triggers the [mandatory historical fetch](#mandatory-historical-fetch-after-watch-plan-widening);
+the mirror emits no logs, so that fetch is empty. Discovery alone, matching
+selectors, or another role cannot authorize this classification, and an
+undeclared mirror instance keeps the existing `resolver_upgrade_not_observed`
+result.
+
+The `sepolia` profile declares the admitted deployment's `ENSV1Resolver` at
+`0x5339161a7896ca9841ecc034a49edca40f7b9491` from receipt block `11163316`,
+whose constructor `registryV1` argument is the admitted Sepolia ENSv1 registry
+`0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e`.
+(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ENSV1Resolver.json:L2 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ENSV1Resolver.json:L727-L736 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/deploy/00_ENSV1Resolver.ts:L13-L23 @ ens_v2@a971bd64)
+The `sepolia-hackathon` profile declares its mirror instance from the
+external-evidence basis recorded under
+[Sepolia hackathon deployment evidence](#sepolia-hackathon-deployment-evidence).
 
 #### ENSv2 migration-family admission plan
 
@@ -1794,3 +1849,25 @@ citations constrain event layouts and behavior separately from this address
 provenance. Record-ID resolver semantics are specified above; direct
 PublicResolverV2 source support is integrated in this candidate, with combined
 runtime validation still required.
+
+A twentieth address, the `ensv1_mirror_resolver` declaration
+`0x10107255fda20ab6c37a0efca1e9465f25066a00`, was added on 2026-09-13 from the
+staging archive node rather than from the retained evidence packet above. Its
+creation transaction
+`0x9649d58d778eb472fcf0a61fd40f610999332cd95dba1b26e1f91822d4ad1de7` (block
+11626641, hash `0x359e597e782a665a32f16798ae913c6e24a01f881e7889318f2ccdf639a75fc7`)
+is a direct CREATE from the root-registry deployer
+`0x84d3a426d4e12e955d1df95db0b24fe26afe39d3`; the receipt is successful and
+its `contractAddress` is the declared address, `eth_getCode` returns empty at
+11626640 and code from 11626641 on, and the contract emitted no logs through the
+head observed on 2026-09-13. The head runtime code embeds the hackathon ENSv1
+registry `0x82080cc8…` and root registry `0xe7f0d572…` as immutables and its
+dispatcher carries `supportsInterface`, `resolve(bytes,bytes)`,
+`getResolver(bytes)`, `supportsFeature`, `gateways`, `BATCH_GATEWAY_PROVIDER`,
+`CONTRACT_NAMER`, and `ROOT_REGISTRY` selectors but not `REGISTRY_V1()`, and the
+creation input carried seven address arguments. The instance is therefore a
+hackathon variant of the pinned `ENSV1Resolver`, whose constructor takes the
+batch gateway provider, contract namer, and one ENSv1 registry and which exposes
+`REGISTRY_V1`; the pinned source is cited for the mirror behavior model only.
+(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L18-L32 @ ens_v2@a971bd64)
+Whole-source identity for the deployed instance is not claimed.

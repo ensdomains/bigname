@@ -1321,6 +1321,23 @@ Its effect is that a name resolves correctly through the ENSv2 tree while ENSv1
 is still its authority, so attributing which version served a resolution is
 time-dependent and cannot be read off the resolver pointer alone.
 
+## ENSv1 mirror resolver (`ensv1_mirror_resolver`)
+
+bigname's manifest role for a declared instance of the
+[v1 fallback resolver](#v1-fallback-resolver-ensv1resolver-exposed-as-v1_resolver)
+contract family: an `ens_v2_resolver_l1` contract declaration whose address
+stores no records and answers a name by reading the ENSv1 registry named in the
+manifest's `correlation_addresses.ens_v1_registry` and forwarding to the
+resolver found there
+(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L38-L41 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L74 @ ens_v2@a971bd64).
+Project classifies the address as supported without `Upgraded` history and
+serves a name bound to it from the same name's ENSv1 record inventory, marking
+the row with `provenance.mirror`; when the ENSv1 side has no projected resolver
+the row is unsupported with `mirrored_resolver_not_projected`. See
+[manifest declarations](manifests.md#ensv1-mirror-resolver-declarations) and
+[projections](projections.md#resolver-and-records).
+
 ## Exact-name profile (`exact_name_profile`)
 
 the per-manifest capability

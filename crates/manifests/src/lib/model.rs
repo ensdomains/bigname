@@ -100,6 +100,12 @@ pub struct NamespaceManifestSnapshot {
     pub last_updated: String,
 }
 
+/// `[[contracts]].role` of a declared ENSv2-side resolver instance that stores no records and answers
+/// by forwarding to the same name's ENSv1 resolver (`docs/manifests.md` § ENSv1 mirror resolver).
+pub const ENSV1_MIRROR_RESOLVER_ROLE: &str = "ensv1_mirror_resolver";
+/// `correlation_addresses` key naming the ENSv1 registry a declared mirror resolver reads.
+pub const ENSV1_MIRROR_REGISTRY_CORRELATION_KEY: &str = "ens_v1_registry";
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SourceManifest {
     pub manifest_version: u64,
