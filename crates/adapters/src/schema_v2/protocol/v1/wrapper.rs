@@ -3,9 +3,7 @@ use alloy_sol_types::sol;
 use anyhow::bail;
 use serde_json::json;
 
-use super::super::{
-    EventDraft, Interpreted, NameDraft, ResourceDraft, ShadowNameDraft, ensure_declared,
-};
+use super::super::{Interpreted, NameDraft, ResourceDraft, ShadowNameDraft, ensure_declared};
 use super::registry::{append_authority_transition, authority_kind};
 use super::support::{events_linked, single_event};
 use crate::evm_abi::{address_hex, decode_event_log, hex_string, u256_word_hex};
@@ -13,7 +11,7 @@ use crate::schema_v2::{
     catalog::Selected,
     common::{decode_dns_labels, namehash_raw, stable_uuid, surface_labels},
     model::RawLogInput,
-    state::{State, V1NameState},
+    state::State,
 };
 
 sol! {

@@ -287,6 +287,7 @@ async fn canonical_fixture_builds_all_eight_projection_families() -> Result<()> 
                 "registry_contract": null,
                 "registry_owner": null,
                 "resource_id": RESOURCE,
+                "resource_restrictions": null,
                 "root_resource_id": null,
                 "support_status": "unsupported",
                 "unsupported_reason": "operator_approval_surfaces_not_ingested"
@@ -818,6 +819,7 @@ async fn permission_builder_preserves_grouped_history_output_exactly() -> Result
                 "registry_contract": null,
                 "registry_owner": null,
                 "resource_id": RESOURCE,
+                "resource_restrictions": null,
                 "root_resource_id": null,
                 "support_status": "unsupported",
                 "unsupported_reason": "operator_approval_surfaces_not_ingested"
