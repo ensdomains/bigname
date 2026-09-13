@@ -596,6 +596,11 @@ that retained delegate is the outgoing holder the interpreter re-emits its
 token-approval grant after the holder revocation, because `getApproved` still
 names it and `canExtendSubnames` still admits it; without the re-emission the
 empty holder revocation would be its newest row and the fold would drop it.
+Every token-approval row of a name and subject, whether from an `Approval` log
+or from the event-less clear on transfer or burn, shares one
+[interpreter state key](glossary.md#interpreter-state-key), so a resumed
+interpreter that keeps only the newest row per key restores the clear that
+followed a grant and replays the same rows as the first pass.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L108-L121 @ ens_v1@91c966f) The delegate's only power is the
 `getApproved` branch of `canExtendSubnames`; transfers and `approve` itself
 accept only the holder and its operators.
