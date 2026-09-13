@@ -706,6 +706,29 @@ async fn hackathon_manifest_declares_the_mirror_and_classifies_it() -> Result<()
         V1_RESOLVER
     );
     database.cleanup().await?;
+
+    // The second declared instance classifies and serves the same way once a name points at it.
+    let second: &'static str = Box::leak(mirrors[1].address.to_ascii_lowercase().into_boxed_str());
+    let fixture = Fixture {
+        id: "mirror_hackathon_second",
+        base: i64::try_from(mirrors[1].start_block.unwrap())? + 1,
+        mirror: second,
+        v2_payload: Some(serde_json::to_value(manifest)?),
+        v1_side: V1Side::Projected,
+        ancestor: Ancestor::None,
+        queried: NAME,
+    };
+    let (database, pool) = project(&fixture, fixture.target(), Execution::FromZero).await?;
+    let resolver = resolver_current(&pool, second).await?;
+    assert_eq!(resolver["support_status"], "supported", "{resolver}");
+    assert_eq!(
+        resolver["declared_summary"]["classification"]["role"],
+        "ensv1_mirror_resolver"
+    );
+    let v2 = inventory(&pool, V2_RESOURCE).await?;
+    assert_eq!(v2["support_status"], "supported", "{v2}");
+    assert_eq!(v2["provenance"]["resolver_address"], second);
+    database.cleanup().await?;
     Ok(())
 }
 

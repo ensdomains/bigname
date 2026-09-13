@@ -518,7 +518,9 @@ instances, each with role `ensv1_mirror_resolver`, `proxy_kind = "none"`, no
 `read_features`, its own deployment address, and an applicable `start_block`,
 sharing the family-level `correlation_addresses.ens_v1_registry` described under
 [Required fields](#required-fields); the loader validates every instance and
-rejects a repeated address. Upstream's `ENSV1Resolver` is the model:
+rejects a repeated address. Manifest sync persists each instance under its own
+`declaration_name` `ensv1_mirror_resolver@<lowercase address>` with `role =
+ensv1_mirror_resolver` (see [contract instance admission and continuity](#contract-instance-admission-and-continuity)). Upstream's `ENSV1Resolver` is the model:
 it holds one ENSv1 registry as an immutable, finds the resolver for the
 requested name in that registry, and forwards the resolve call to it; it
 stores no records and defines no record events of its own.
@@ -1033,7 +1035,7 @@ creates the new bounded active range.
 
 - `[[roots]]` seed canonical graph and watch-plan expansion; otherwise they follow the same identity rules as `[[contracts]]`.
 - Reusing the same address on the same chain across manifest versions, even across an inactive gap, carries forward the existing `contract_instance_id` and appends a new non-overlapping active range.
-- Changing a declared address closes the prior active range and admits a new instance, with a new `contract_instance_id` rather than ID reuse. No discovery edge records the succession: the loader writes only `proxy_implementation` edges, and the [`migration` edge kind](glossary.md#migration-edge-migration) the schema permits is [reserved surface](glossary.md#reserved-surface) with no writer. What ties the two instances together is the manifest declaration, not their addresses: successive manifest versions carry the same `(chain_id, declaration_kind, declaration_name, role)` tuple against different declared addresses. Do not try to recover succession from the instances' active ranges — a retired address is closed at the chain head observed when the manifest loaded, while its successor opens at its own declared `start_block`, so the two ranges frequently overlap instead of abutting.
+- Changing a declared address closes the prior active range and admits a new instance, with a new `contract_instance_id` rather than ID reuse. No discovery edge records the succession: the loader writes only `proxy_implementation` edges, and the [`migration` edge kind](glossary.md#migration-edge-migration) the schema permits is [reserved surface](glossary.md#reserved-surface) with no writer. What ties the two instances together is the manifest declaration, not their addresses: successive manifest versions carry the same `(chain_id, declaration_kind, declaration_name, role)` tuple against different declared addresses. `declaration_name` is the role for every singleton role; the repeatable `ensv1_mirror_resolver` instance role persists `ensv1_mirror_resolver@<lowercase address>` per instance, so mirror instances are identified by address, never succeed one another, and a re-addressed mirror is a new declaration plus a retired one. Do not try to recover succession from the instances' active ranges — a retired address is closed at the chain head observed when the manifest loaded, while its successor opens at its own declared `start_block`, so the two ranges frequently overlap instead of abutting.
 - `proxy_kind = "none"` resolves the declared address directly; `implementation` is omitted.
 - `proxy_kind != "none"` requires `implementation`. The proxy and implementation are separate instances linked by a time-ranged proxy/implementation edge.
 - Changing only `implementation` keeps the proxy's identity. The implementation instance is reused if its address reappears, otherwise a new one is minted.
