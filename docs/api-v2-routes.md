@@ -265,9 +265,10 @@ collection route carry neither header.
   See [registration status](api-v2.md#status-vocabulary) for the upstream
   basis.
   An ownerless ENSv2 reservation does not meet this exception, even if identity
-  attached to a resource or record inventory was retained for audit. This
-  intentionally differs from ENSv2, which stores and returns a reservation
-  resolver until expiry.
+  attached to a resource or record inventory was retained for audit, unless it
+  is a root-registry TLD reservation served through the root-registry resolver
+  pointer above. This intentionally differs from ENSv2, which stores and
+  returns a reservation resolver until expiry.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
 - Pagination behavior: top-level `page` is absent. Reverse inputs use the
@@ -628,7 +629,9 @@ collection route carry neither header.
   the name row, and `GET /v1/names/{name}/records` serves the per-key reason.
   An ownerless ENSv2
   reservation does not meet this exception, even if identity attached to a
-  resource or record inventory was retained for audit. This intentionally
+  resource or record inventory was retained for audit, unless it is a
+  root-registry TLD reservation served through the root-registry resolver
+  pointer above. This intentionally
   differs from ENSv2, which stores and returns a reservation resolver until
   expiry.
   See [registration status](api-v2.md#status-vocabulary) for the upstream
@@ -702,7 +705,9 @@ collection route carry neither header.
   That classified row serves its resolver and any records present in its serving
   resource's inventory. Verified lookup runs through the surviving resolver
   when the ordinary lookup capability supports it. An ownerless ENSv2
-  reservation does not meet this exception. `include=inventory` does not expose
+  reservation does not meet this exception unless it is a root-registry TLD
+  reservation served through the root-registry resolver pointer above.
+  `include=inventory` does not expose
   inventory retained for a former or audit-only resource. This intentionally
   omits the resolver that ENSv2 can store and return for an unexpired
   reservation.
@@ -2088,10 +2093,11 @@ For a registrar lease first identified by a later readable observation, registra
   is its serving resource: like the ownerless ENSv1 or Basenames row below, it
   is eligible only where the resolver family's binding-enumeration capability
   is supported.
-  An ownerless ENSv2 reservation is likewise absent: a retained reservation
-  resolver or former-resource pointer is not a resolver selected by a current
-  registration. This intentionally narrows ENSv2, which stores and returns a
-  reservation resolver until expiry.
+  An ownerless ENSv2 reservation is likewise absent, other than a root-registry
+  TLD reservation served through the root-registry resolver pointer above: a
+  retained reservation resolver or former-resource pointer is not a resolver
+  selected by a current registration. This intentionally narrows ENSv2, which
+  stores and returns a reservation resolver until expiry.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
   A positively classified ownerless ENSv1 or Basenames registry row is

@@ -1997,10 +1997,17 @@ token has a resource and a pointer but no surface binding, so the name is
 `current_authority_not_projected`; the current nonzero pointer still becomes the TLD's serving
 resource (`read_reachability.basis = root_registry_resolver_pointer`) so name detail, batch
 lookup, the records route, and `bound_names` serve the resolver and its inventory without
-inventing the TLD's registration, authority, or control. A reservation or release on the token
-resource, or a state-derived expiry clear, withdraws it.
+inventing the TLD's registration, authority, or control. A root-registry reservation (owner
+zero, `LabelReserved`, on staging with an infinite expiry) does not withdraw it: the root
+registry sets and returns a reservation's resolver the same way, so this is the one ENSv2
+reservation whose resolver bigname serves; reservations in other ENSv2 registries keep the
+documented narrowing. A `RegistrationReleased` on the token resource at or after the pointer, or
+a later zero/null `ResolverChanged` (the state-derived expiry clear), withdraws it; a finite
+expiry therefore withdraws through the expiry release the interpreter derives, and an infinite
+expiry never does.
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L150-L155 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L463-L478 @ ens_v2@a971bd64)
 
 ## Shadow
 

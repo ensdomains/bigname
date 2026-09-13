@@ -619,7 +619,9 @@ family's binding-enumeration capability.
 See [registration status](#status-vocabulary) for the upstream basis.
 The ENSv2 rule is an intentional product
 narrowing: ENSv2 stores a nonzero resolver supplied for an ownerless
-reservation and returns it until expiry. (upstream:
+reservation and returns it until expiry. A root-registry TLD reservation is the
+one exception: its pointer is served as a
+[root-registry resolver pointer](glossary.md#root-registry-resolver-pointer). (upstream:
 .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @
 ens_v2@a971bd64) (upstream:
 .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @
@@ -877,8 +879,8 @@ an ownerless ENSv1 or Basenames registry row whose current registry resolver
 pointer is retained (a [serving resource](glossary.md#serving-resource)). It
 serves indexed records when retained inventory exists; routes with source
 selection can also serve verified records under the ordinary lookup capability.
-An ENSv2 TLD whose root-registry registration is not projected serves the same
-way from its current
+An ENSv2 TLD whose root-registry token is reserved or whose registration is
+not projected serves the same way from its current
 [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
 while it stays `current_authority_not_projected` and
 `registration_status=unregistered`: the root registry stores the pointer per

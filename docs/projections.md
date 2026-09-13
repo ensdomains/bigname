@@ -290,12 +290,16 @@ address relation, or permission authority. Resolver and record readers use
 selected: `retained_registry_resolver_pointer` for an ownerless ENSv1 or Basenames registry
 name (registry owner proven zero, row supported and unregistered), or
 `root_registry_resolver_pointer` for an ENSv2 TLD whose root-registry token has a
-current nonzero resolver pointer but no observed registration, so no surface binding and no
-selected authority. That TLD row keeps `current_authority_not_projected`: the pointer is
-followed from the name-linked root-registry `ResolverChanged` to its token resource, the
-latest pointer on that resource wins (a state-derived expiry clear names the resource but no
-logical name), and a reservation or release on the resource keeps the pointer out of serving.
-The root registry stores the pointer per token and returns it while the label is unexpired.
+current nonzero resolver pointer but no registration (typically a reservation: owner zero with
+the pointer set in the same block), so no surface binding and no selected authority. That TLD
+row keeps `current_authority_not_projected`: the pointer is followed from the name-linked
+root-registry `ResolverChanged` to its token resource, the latest pointer on that resource
+wins (a state-derived expiry clear names the resource but no logical name), and a
+`RegistrationReleased` on the resource at or after the pointer withdraws it. A reservation does
+not withdraw it, and the row's lifecycle summary still reports the reservation. The root
+registry stores the pointer per token, for reservations too, and returns it while the label is
+unexpired; a finite reservation expiry withdraws through the interpreter's derived expiry
+release and pointer clear, an infinite one never does.
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L150-L155 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
 Its projection provenance stores the [source family](glossary.md#source-family)

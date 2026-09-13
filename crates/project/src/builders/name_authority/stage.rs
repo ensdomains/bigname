@@ -342,10 +342,13 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
          -- registry keys the pointer by token and returns it while the label is unexpired
          -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L150-L155 @ ens_v2@a971bd64)
          -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64);
-         -- the pointer serves as the TLD's serving resource without projecting authority. The
-         -- state-derived expiry clear and release name the resource but no logical name, so the
-         -- resource is followed from the name-linked pointer; a reservation or release on that
-         -- resource keeps the pointer out of serving.
+         -- the pointer serves as the TLD's serving resource without projecting authority. A
+         -- reservation (owner zero, `LabelReserved`) does not withdraw it: the root registry sets
+         -- and returns the reservation's resolver the same way
+         -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L463-L478 @ ens_v2@a971bd64).
+         -- The state-derived expiry clear and release name the resource but no logical name, so the
+         -- resource is followed from the name-linked pointer; a release at or after the pointer, or
+         -- a later zero/null pointer, withdraws it.
          SELECT authority.logical_name_id,
                 pointer.resource_id AS serving_resource_id,
                 pointer.chain_id AS resolver_chain_id,
@@ -389,11 +392,18 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
            AND lower(pointer.after_state ->> 'resolver') <>
                '0x0000000000000000000000000000000000000000'
            AND NOT EXISTS (
-               SELECT 1 FROM project_events lifecycle
-               WHERE lifecycle.resource_id = pointer.resource_id
-                 AND lifecycle.source_family = 'ens_v2_root_l1'
-                 AND lifecycle.event_kind IN (
-                     'RegistrationReserved', 'RegistrationReleased'
+               SELECT 1 FROM project_events release
+               WHERE release.resource_id = pointer.resource_id
+                 AND release.source_family = 'ens_v2_root_l1'
+                 AND release.event_kind = 'RegistrationReleased'
+                 AND (
+                     release.block_number,
+                     COALESCE(release.transaction_index, -1),
+                     COALESCE(release.log_index, -1)
+                 ) >= (
+                     pointer.block_number,
+                     COALESCE(pointer.transaction_index, -1),
+                     COALESCE(pointer.log_index, -1)
                  )
            )",
         "CREATE UNIQUE INDEX ON project_name_serving (logical_name_id)",

@@ -78,10 +78,15 @@ struct Fixture {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum V2Lifecycle {
     None,
-    /// The label is reserved (owner zero) with the pointer supplied at reservation, `base`.
+    /// The staging shape: the label is reserved (owner zero, infinite expiry) with the pointer
+    /// supplied at reservation in the same block, and a label preimage is observed later.
     Reserved,
-    /// The token's path expired at `base + 2`: the interpreter releases the registration and
-    /// clears the pointer through state-derived events that name the resource but no logical name.
+    /// The token was released at `base + 2` through a state-derived release that names the
+    /// resource but no logical name, with no pointer clear.
+    ReleasedOnly,
+    /// The reserved token's path expired at `base + 2`: the interpreter releases the reservation
+    /// and clears the pointer through state-derived events that name the resource but no logical
+    /// name.
     Expired,
 }
 
@@ -549,9 +554,27 @@ async fn root_registry_tld_without_a_registration_serves_its_pointer() -> Result
     // as the TLD's serving resource; the inventory keeps classifying through the mirror walk.
     let node = bigname_lookup::ens_namehash_hex(PARENT_NAME)?;
     let logical_name_id = format!("ens:{node}");
-    for (id, resolver, expected_support) in [
-        ("tld_root_declared", V1_RESOLVER, "supported"),
-        ("tld_root_undeclared", UNDECLARED_RESOLVER, "unsupported"),
+    for (id, resolver, expected_support, lifecycle) in [
+        (
+            "tld_root_declared",
+            V1_RESOLVER,
+            "supported",
+            V2Lifecycle::None,
+        ),
+        (
+            "tld_root_undeclared",
+            UNDECLARED_RESOLVER,
+            "unsupported",
+            V2Lifecycle::None,
+        ),
+        // The staging TLDs: reserved with the pointer in the same block. The reservation is
+        // reported but does not withdraw the pointer.
+        (
+            "tld_root_reserved",
+            UNDECLARED_RESOLVER,
+            "unsupported",
+            V2Lifecycle::Reserved,
+        ),
     ] {
         let fixture = Fixture::declared(
             id,
@@ -561,7 +584,8 @@ async fn root_registry_tld_without_a_registration_serves_its_pointer() -> Result
             },
         )
         .single_label()
-        .unbound();
+        .unbound()
+        .with_v2_lifecycle(lifecycle);
         let mut previous: Option<Value> = None;
         for execution in [
             Execution::FromZero,
@@ -588,8 +612,14 @@ async fn root_registry_tld_without_a_registration_serves_its_pointer() -> Result
             let summary = &name["declared_summary"];
             assert_eq!(summary["resolver"]["address"], MIRROR, "{summary}");
             assert_eq!(summary["resolver"]["chain_id"], CHAIN);
-            assert_eq!(summary["registration"]["status"], Value::Null);
+            let expected_registration = if lifecycle == V2Lifecycle::Reserved {
+                json!("reserved")
+            } else {
+                Value::Null
+            };
+            assert_eq!(summary["registration"]["status"], expected_registration);
             assert_eq!(summary["registration"]["authority_kind"], Value::Null);
+            assert_eq!(summary["registration"]["registrant"], Value::Null);
             assert_eq!(
                 summary["coverage"]["enumeration_basis"],
                 "event_linked_registry_resolver"
@@ -667,11 +697,11 @@ async fn root_registry_tld_without_a_registration_serves_its_pointer() -> Result
     assert_eq!(name["provenance"]["read_reachability"], json!({}));
     database.cleanup().await?;
 
-    // A reserved label and an expired token do not serve the pointer: the reservation is the
-    // documented ENSv2 narrowing, and the expiry clears the pointer through a state-derived event
-    // that carries the resource but no logical name.
+    // A release on the token resource at or after the pointer withdraws it, with or without the
+    // pointer clear the interpreter derives alongside an expiry; both name the resource but no
+    // logical name.
     for (id, lifecycle) in [
-        ("tld_root_reserved", V2Lifecycle::Reserved),
+        ("tld_root_released", V2Lifecycle::ReleasedOnly),
         ("tld_root_expired", V2Lifecycle::Expired),
     ] {
         let fixture = Fixture::declared(
@@ -1180,40 +1210,66 @@ async fn seed(pool: &PgPool, fixture: &Fixture) -> Result<()> {
     }];
     match fixture.v2_lifecycle {
         V2Lifecycle::None => {}
-        V2Lifecycle::Reserved => events.push(Event {
-            identity: "v2-reserved",
-            logical_name_id: Some(queried_logical_name_id.clone()),
-            resource_id: Some(V2_RESOURCE),
-            kind: "RegistrationReserved",
-            source_family: "ens_v2_root_l1",
-            manifest_id: Some(root_manifest),
-            block: base,
-            log_index: 1,
-            emitter: V1_REGISTRY,
-            after_state: json!({"source_event": "LabelReserved", "status": "reserved",
-                                "expiry": 1_900_000_000}),
-        }),
-        V2Lifecycle::Expired => {
+        V2Lifecycle::Reserved | V2Lifecycle::Expired => {
+            let expiry = if fixture.v2_lifecycle == V2Lifecycle::Reserved {
+                json!(u64::MAX)
+            } else {
+                json!(1_800_000_011)
+            };
+            events.push(Event {
+                identity: "v2-reserved",
+                logical_name_id: Some(queried_logical_name_id.clone()),
+                resource_id: Some(V2_RESOURCE),
+                kind: "RegistrationReserved",
+                source_family: "ens_v2_root_l1",
+                manifest_id: Some(root_manifest),
+                block: base,
+                log_index: 1,
+                emitter: V1_REGISTRY,
+                after_state: json!({"source_event": "LabelReserved", "status": "reserved",
+                                    "expiry": expiry}),
+            });
+            events.push(Event {
+                identity: "v2-preimage",
+                logical_name_id: Some(queried_logical_name_id.clone()),
+                resource_id: None,
+                kind: "PreimageObserved",
+                source_family: "ens_v2_root_l1",
+                manifest_id: Some(root_manifest),
+                block: base + 1,
+                log_index: 7,
+                emitter: V1_REGISTRY,
+                after_state: json!({"label": fixture.queried}),
+            });
+        }
+        V2Lifecycle::ReleasedOnly => {}
+    }
+    if matches!(
+        fixture.v2_lifecycle,
+        V2Lifecycle::ReleasedOnly | V2Lifecycle::Expired
+    ) {
+        {
             let expired = json!({
                 "source_event": "RegistryPathExpired", "derived_from": "interpreter_state",
                 "terminal_reason": "registry_name_binding_expired", "expiry": 1_800_000_011
             });
-            for (identity, kind, log_index, field, value) in [
-                (
-                    "v2-expiry-release",
-                    "RegistrationReleased",
-                    0,
-                    "status",
-                    json!("released"),
-                ),
-                (
+            let mut transitions = vec![(
+                "v2-expiry-release",
+                "RegistrationReleased",
+                0,
+                "status",
+                json!("released"),
+            )];
+            if fixture.v2_lifecycle == V2Lifecycle::Expired {
+                transitions.push((
                     "v2-expiry-pointer",
                     "ResolverChanged",
                     1,
                     "resolver",
                     Value::Null,
-                ),
-            ] {
+                ));
+            }
+            for (identity, kind, log_index, field, value) in transitions {
                 let mut after_state = expired.clone();
                 after_state[field] = value;
                 events.push(Event {

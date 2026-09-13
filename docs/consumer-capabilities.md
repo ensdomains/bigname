@@ -291,7 +291,8 @@ subnames include a read-only row only while a current nonzero event-linked
 resolver exists; and resolver `bound_names` remains subject to the resolver
 family's existing binding-enumeration capability. Registration/control fields,
 address-name relations, and owner-derived permissions stay absent. An ENSv2 TLD
-whose root-registry registration is not observed reads the same way from its
+whose root-registry token is reserved, or whose registration is not observed,
+reads the same way from its
 [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
 while staying `current_authority_not_projected`. When the
 latest nonzero registry resolver selection predates the [name surface](glossary.md#surface-name-surface), the event that first makes the surface active
