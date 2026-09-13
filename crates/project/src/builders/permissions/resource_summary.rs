@@ -2,10 +2,16 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{Marker, ProjectError, Result};
 
+/// Per-resource permission summary, including the `resource_restrictions` block. ENSv2
+/// `locked_roles` reads the registry root from the identity table and the admin rows from the
+/// staged rows for in-scope resources plus the live rows for every other resource, so an
+/// incremental build sees a root that its own window never touched; a full rebuild has every
+/// row staged.
 pub(super) async fn build(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target: &Marker,
+    full_rebuild: bool,
 ) -> Result<()> {
     let resource_summary_query = [
         r#"
@@ -127,6 +133,41 @@ pub(super) async fn build(
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
         ),
+        -- `NameWrapped` mints the token (recorded as the wrapper `TokenControlTransferred`) and
+        -- `NameUnwrapped` closes the wrapper authority epoch; the wrapper restrictions block is
+        -- served only while the latest of the two is the mint.
+        -- (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L893-L902 @ ens_v1@91c966f)
+        -- (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+        wrapper_lifecycles AS (
+            SELECT DISTINCT ON (event.resource_id) event.resource_id,
+                   event.after_state ->> 'source_event' = 'NameUnwrapped' AS unwrapped
+            FROM project_events event
+            WHERE event.source_family = 'ens_v1_wrapper_l1' AND event.resource_id IS NOT NULL
+              AND (
+                    (event.event_kind = 'TokenControlTransferred'
+                     AND event.after_state ->> 'source_event' = 'NameWrapped')
+                 OR (event.event_kind IN ('AuthorityEpochChanged', 'SurfaceUnbound')
+                     AND event.after_state ->> 'source_event' = 'NameUnwrapped')
+              )
+            ORDER BY event.resource_id, event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
+                     event.normalized_event_id DESC
+        ),
+        registry_roots AS (
+            SELECT root.resource_id, root.provenance ->> 'registry_contract_instance_id' AS registry
+            FROM resources root
+            JOIN chain_lineage lineage
+              ON lineage.chain_id = root.chain_id
+             AND lineage.block_hash = root.block_hash
+             AND lineage.block_number = root.block_number
+            WHERE root.chain_id = $1
+              AND root.block_number <= $2
+              AND root.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND root.provenance ->> 'upstream_resource' =
+                  '0x0000000000000000000000000000000000000000000000000000000000000000'
+              AND root.provenance ->> 'registry_contract_instance_id' IS NOT NULL
+        ),
         "#,
         super::expiry_retirement::V2_RESOURCE_REVIVALS_CTE,
         ",",
@@ -162,16 +203,31 @@ pub(super) async fn build(
                    retirement.source_manifest_id AS expiry_retirement_source_manifest_id, retirement.source_family AS expiry_retirement_source_family,
                    retirement.manifest_version AS expiry_retirement_manifest_version, retirement.block_number AS expiry_retirement_block_number,
                    retirement.block_hash AS expiry_retirement_block_hash, retirement.transaction_index AS expiry_retirement_transaction_index,
-                   retirement.log_index AS expiry_retirement_log_index
+                   retirement.log_index AS expiry_retirement_log_index,
+                   COALESCE(lifecycle.unwrapped, false) AS wrapper_unwrapped
             FROM project_resources resource
             LEFT JOIN resource_event_summaries summary USING (resource_id)
             LEFT JOIN wrapper_modifiers modifier USING (resource_id)
             LEFT JOIN wrapper_expiries expiry USING (resource_id)
+            LEFT JOIN wrapper_lifecycles lifecycle USING (resource_id)
             LEFT JOIN expiry_retirements retirement USING (resource_id)
+        ),
+        admin_rows AS (
+            SELECT staged.resource_id, staged.scope_kind, staged.effective_powers
+            FROM project_stage_permissions_current staged
+            UNION ALL
+            SELECT live.resource_id, live.scope_kind, live.effective_powers
+            FROM permissions_current live
+            WHERE NOT $4
+              AND live.provenance ->> 'chain_id' = $1
+              AND NOT EXISTS (
+                  SELECT 1 FROM project_scope_resources scope
+                  WHERE scope.resource_id = live.resource_id
+              )
         ),
         v2_admin_powers AS (
             SELECT row.resource_id, array_agg(DISTINCT power.value) AS admins
-            FROM project_stage_permissions_current row
+            FROM admin_rows row
             CROSS JOIN LATERAL jsonb_array_elements_text(row.effective_powers) power
             WHERE row.scope_kind IN ('registry', 'root')
               AND (power.value LIKE 'admin\_%' OR power.value = 'can_transfer_admin')
@@ -187,6 +243,7 @@ pub(super) async fn build(
                root_resource.resource_id,
                CASE
                    WHEN resource.authority_kind = 'wrapper'
+                    AND NOT resource.wrapper_unwrapped
                     AND effective_wrapper.wrapper_state IS NOT NULL
                        THEN jsonb_build_object(
                            'kind', 'ens_v1_wrapper',
@@ -270,12 +327,9 @@ pub(super) async fn build(
                    1
                )
         FROM resource_authority resource
-        LEFT JOIN project_resources root_resource
+        LEFT JOIN registry_roots root_resource
           ON resource.authority_kind = 'ens_v2_registry'
-         AND root_resource.provenance ->> 'registry_contract_instance_id' =
-             resource.provenance ->> 'registry_contract_instance_id'
-         AND root_resource.provenance ->> 'upstream_resource' =
-             '0x0000000000000000000000000000000000000000000000000000000000000000'
+         AND root_resource.registry = resource.provenance ->> 'registry_contract_instance_id'
         LEFT JOIN target_time ON TRUE
         CROSS JOIN LATERAL (
             SELECT CASE
@@ -326,6 +380,7 @@ pub(super) async fn build(
         .bind(chain_id)
         .bind(target.number)
         .bind(&target.hash)
+        .bind(full_rebuild)
         .execute(&mut **transaction)
         .await
         .map_err(|error| ProjectError::database("failed to build resource permissions", error))?;

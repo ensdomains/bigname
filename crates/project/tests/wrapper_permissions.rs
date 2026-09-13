@@ -1,7 +1,10 @@
 //! NameWrapper holder, operator, and delegate permission rows converge across full,
 //! incremental, and redo builds, and the per-resource summary carries the wrapper
-//! `resource_restrictions` block.
+//! `resource_restrictions` block while the name is wrapped.
 //! (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214-L238 @ ens_v1@91c966f)
+//! (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L421-L437 @ ens_v1@91c966f)
+//! (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L443-L470 @ ens_v1@91c966f)
+//! (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058-L1068 @ ens_v1@91c966f)
 //! (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L105-L117 @ ens_v1@91c966f)
 
 use anyhow::Result;
@@ -23,11 +26,13 @@ const HOLDER: &str = "0x00000000000000000000000000000000000000a1";
 const NEXT_HOLDER: &str = "0x00000000000000000000000000000000000000a2";
 const OPERATOR: &str = "0x00000000000000000000000000000000000000e1";
 const NEXT_OPERATOR: &str = "0x00000000000000000000000000000000000000e2";
+const SECOND_OPERATOR: &str = "0x00000000000000000000000000000000000000e3";
 const DELEGATE: &str = "0x00000000000000000000000000000000000000d1";
 const EXPIRY: i64 = 1_900_000_000;
 const PARENT_CANNOT_CONTROL: i64 = 1 << 16;
 const IS_DOT_ETH: i64 = 1 << 17;
 const CANNOT_SET_RESOLVER: i64 = 8;
+const CAN_EXTEND_EXPIRY: i64 = 1 << 18;
 const HOLDER_POWERS: &[&str] = &[
     "resource_control",
     "set_resolver",
@@ -38,6 +43,7 @@ const HOLDER_POWERS: &[&str] = &[
     "burn_fuses",
     "approve",
     "extend_subname_expiry",
+    "extend_expiry",
 ];
 const TABLES: &str =
     "permissions_current account_permission_state_current permissions_current_resource_summary";
@@ -222,7 +228,7 @@ async fn fuses(pool: &PgPool, node: &str, resource: &str, block: i64, fuses: i64
             "source_event": if block == 10 { "NameWrapped" } else { "FusesSet" },
             "node": node,
             "fuses": fuses,
-            "wrapper_state": "emancipated",
+            "wrapper_state": if fuses & PARENT_CANNOT_CONTROL == 0 { "wrapped" } else { "emancipated" },
             "expiry": if node == NODE { EXPIRY } else { EXPIRY2 },
         }),
     )
@@ -300,25 +306,41 @@ async fn seed(pool: &PgPool) -> Result<()> {
     ))
     .execute(pool)
     .await?;
+    // The second name starts `wrapped` (its parent still controls it) and is emancipated at 12.
     for (node, resource, expiry, word) in [
         (NODE, RESOURCE, EXPIRY, PARENT_CANNOT_CONTROL | IS_DOT_ETH),
-        (NODE2, RESOURCE2, EXPIRY2, PARENT_CANNOT_CONTROL),
+        (NODE2, RESOURCE2, EXPIRY2, 0),
     ] {
         event(pool, Some(node), Some(resource), 10, 0, "ExpiryChanged", "wrap", json!({}), json!({
             "source_event": "NameWrapped", "node": node, "expiry": expiry,
+            "authority_kind": "wrapper", "authority_key": authority_key(node),
+        })).await?;
+        event(pool, Some(node), Some(resource), 10, 0, "TokenControlTransferred", "wrap", json!({"from": null}), json!({
+            "source_event": "NameWrapped", "node": node, "owner": HOLDER, "to": HOLDER, "fuses": word,
             "authority_kind": "wrapper", "authority_key": authority_key(node),
         })).await?;
         fuses(pool, node, resource, 10, word).await?;
         permission(pool, node, resource, 10, HOLDER, HOLDER_POWERS, "holder", "NameWrapped", true).await?;
     }
     approval(pool, 11, HOLDER, OPERATOR, true).await?;
+    approval(pool, 11, HOLDER, SECOND_OPERATOR, true).await?;
     permission(pool, NODE, RESOURCE, 12, DELEGATE, &["extend_subname_expiry"], "token_approval", "Approval", true).await?;
-    fuses(pool, NODE, RESOURCE, 13, PARENT_CANNOT_CONTROL | IS_DOT_ETH | CANNOT_SET_RESOLVER).await?;
+    approval(pool, 12, HOLDER, DELEGATE, true).await?;
+    fuses(pool, NODE2, RESOURCE2, 12, PARENT_CANNOT_CONTROL).await?;
+    fuses(pool, NODE, RESOURCE, 13, PARENT_CANNOT_CONTROL | IS_DOT_ETH | CANNOT_SET_RESOLVER | CAN_EXTEND_EXPIRY).await?;
+    approval(pool, 13, HOLDER, SECOND_OPERATOR, false).await?;
     permission(pool, NODE, RESOURCE, 14, HOLDER, HOLDER_POWERS, "holder", "TransferSingle", false).await?;
     permission(pool, NODE, RESOURCE, 14, NEXT_HOLDER, HOLDER_POWERS, "holder", "TransferSingle", true).await?;
     permission(pool, NODE, RESOURCE, 14, DELEGATE, &["extend_subname_expiry"], "token_approval", "TransferSingle", false).await?;
     approval(pool, 15, NEXT_HOLDER, NEXT_OPERATOR, true).await?;
     permission(pool, NODE, RESOURCE, 16, NEXT_HOLDER, HOLDER_POWERS, "holder", "NameUnwrapped", false).await?;
+    event(pool, Some(NODE), Some(RESOURCE), 16, 0, "AuthorityEpochChanged", "unwrap", json!({
+        "authority_kind": "wrapper", "authority_key": authority_key(NODE),
+    }), json!({
+        "source_event": "NameUnwrapped", "node": NODE, "owner": NEXT_HOLDER,
+        "unwrapped_at": timestamp(16), "authority_kind": null, "authority_key": null,
+        "reactivated_resource_id": null, "reactivated_token_lineage_id": null,
+    })).await?;
     Ok(())
 }
 
@@ -398,6 +420,25 @@ fn powers(without: &[&str]) -> Value {
     )
 }
 
+fn holder(subject: &str, powers: Value) -> (String, String, Value) {
+    (subject.to_owned(), "holder".to_owned(), powers)
+}
+
+fn operator(subject: &str, powers: Value) -> (String, String, Value) {
+    (subject.to_owned(), "operator".to_owned(), powers)
+}
+
+/// `burn_fuses` needs `PARENT_CANNOT_CONTROL` and `extend_expiry` needs `CAN_EXTEND_EXPIRY`, so
+/// an emancipated name without the latter fuse serves every holder power but `extend_expiry`.
+fn emancipated() -> Value {
+    powers(&["extend_expiry"])
+}
+
+/// A `wrapped` name cannot have its fuses burnt by its holder at all.
+fn still_wrapped() -> Value {
+    powers(&["burn_fuses", "extend_expiry"])
+}
+
 #[tokio::test]
 async fn wrapper_holder_operator_and_delegate_rows_converge_across_build_modes() -> Result<()> {
     let (full_database, full) = database("wrapper_permissions_full").await?;
@@ -410,60 +451,82 @@ async fn wrapper_holder_operator_and_delegate_rows_converge_across_build_modes()
     let mut marker = run(&incremental, 10, None).await?;
     assert_eq!(
         rows(&incremental, RESOURCE).await?,
-        vec![(HOLDER.to_owned(), "holder".to_owned(), powers(&[]))]
+        vec![holder(HOLDER, emancipated())]
     );
     assert_eq!(
         rows(&incremental, RESOURCE2).await?,
-        vec![(HOLDER.to_owned(), "holder".to_owned(), powers(&[]))]
+        vec![holder(HOLDER, still_wrapped())]
+    );
+    assert_eq!(
+        restrictions(&incremental, RESOURCE2).await?,
+        Some(json!({
+            "kind": "ens_v1_wrapper",
+            "wrapper_state": "wrapped",
+            "fuses": 0,
+            "expiry_seconds": EXPIRY2,
+        }))
     );
 
-    // ApprovalForAll fans the holder set out to the operator on every held registration.
+    // ApprovalForAll fans the holder set out to each operator on every held registration.
     marker = run(&incremental, 11, Some(marker)).await?;
-    for resource in [RESOURCE, RESOURCE2] {
-        assert_eq!(
-            rows(&incremental, resource).await?,
-            vec![
-                (HOLDER.to_owned(), "holder".to_owned(), powers(&[])),
-                (OPERATOR.to_owned(), "operator".to_owned(), powers(&[])),
-            ]
-        );
-    }
+    assert_eq!(
+        rows(&incremental, RESOURCE).await?,
+        vec![
+            holder(HOLDER, emancipated()),
+            operator(OPERATOR, emancipated()),
+            operator(SECOND_OPERATOR, emancipated()),
+        ]
+    );
+    assert_eq!(
+        rows(&incremental, RESOURCE2).await?,
+        vec![
+            holder(HOLDER, still_wrapped()),
+            operator(OPERATOR, still_wrapped()),
+            operator(SECOND_OPERATOR, still_wrapped()),
+        ]
+    );
 
-    // The token approval carries only the `canExtendSubnames` branch.
+    // The token approval carries only the `canExtendSubnames` branch, but a delegate who is also
+    // an operator keeps the operator set; the parent emancipating the second name restores
+    // `burn_fuses` there.
     marker = run(&incremental, 12, Some(marker)).await?;
     assert_eq!(
         rows(&incremental, RESOURCE).await?,
         vec![
-            (HOLDER.to_owned(), "holder".to_owned(), powers(&[])),
-            (
-                DELEGATE.to_owned(),
-                "token_approval".to_owned(),
-                json!(["extend_subname_expiry"])
-            ),
-            (OPERATOR.to_owned(), "operator".to_owned(), powers(&[])),
+            holder(HOLDER, emancipated()),
+            operator(DELEGATE, emancipated()),
+            operator(OPERATOR, emancipated()),
+            operator(SECOND_OPERATOR, emancipated()),
+        ]
+    );
+    assert_eq!(
+        rows(&incremental, RESOURCE2).await?,
+        vec![
+            holder(HOLDER, emancipated()),
+            operator(DELEGATE, emancipated()),
+            operator(OPERATOR, emancipated()),
+            operator(SECOND_OPERATOR, emancipated()),
         ]
     );
 
-    // A burnt fuse masks holder and operator alike, and the summary reports it.
+    // A burnt fuse masks holder and operator alike, `CAN_EXTEND_EXPIRY` unlocks `extend_expiry`,
+    // the summary reports the word, and ApprovalForAll(false) removes an operator everywhere.
     marker = run(&incremental, 13, Some(marker)).await?;
+    let masked = powers(&["set_resolver"]);
     assert_eq!(
         rows(&incremental, RESOURCE).await?,
         vec![
-            (
-                HOLDER.to_owned(),
-                "holder".to_owned(),
-                powers(&["set_resolver"])
-            ),
-            (
-                DELEGATE.to_owned(),
-                "token_approval".to_owned(),
-                json!(["extend_subname_expiry"])
-            ),
-            (
-                OPERATOR.to_owned(),
-                "operator".to_owned(),
-                powers(&["set_resolver"])
-            ),
+            holder(HOLDER, masked.clone()),
+            operator(DELEGATE, masked.clone()),
+            operator(OPERATOR, masked.clone()),
+        ]
+    );
+    assert_eq!(
+        rows(&incremental, RESOURCE2).await?,
+        vec![
+            holder(HOLDER, emancipated()),
+            operator(DELEGATE, emancipated()),
+            operator(OPERATOR, emancipated()),
         ]
     );
     assert_eq!(
@@ -471,7 +534,7 @@ async fn wrapper_holder_operator_and_delegate_rows_converge_across_build_modes()
         Some(json!({
             "kind": "ens_v1_wrapper",
             "wrapper_state": "emancipated",
-            "fuses": PARENT_CANNOT_CONTROL | IS_DOT_ETH | CANNOT_SET_RESOLVER,
+            "fuses": PARENT_CANNOT_CONTROL | IS_DOT_ETH | CANNOT_SET_RESOLVER | CAN_EXTEND_EXPIRY,
             "expiry_seconds": EXPIRY,
         }))
     );
@@ -480,17 +543,14 @@ async fn wrapper_holder_operator_and_delegate_rows_converge_across_build_modes()
     marker = run(&incremental, 14, Some(marker)).await?;
     assert_eq!(
         rows(&incremental, RESOURCE).await?,
-        vec![(
-            NEXT_HOLDER.to_owned(),
-            "holder".to_owned(),
-            powers(&["set_resolver"])
-        )]
+        vec![holder(NEXT_HOLDER, masked.clone())]
     );
     assert_eq!(
         rows(&incremental, RESOURCE2).await?,
         vec![
-            (HOLDER.to_owned(), "holder".to_owned(), powers(&[])),
-            (OPERATOR.to_owned(), "operator".to_owned(), powers(&[])),
+            holder(HOLDER, emancipated()),
+            operator(DELEGATE, emancipated()),
+            operator(OPERATOR, emancipated()),
         ]
     );
 
@@ -500,28 +560,22 @@ async fn wrapper_holder_operator_and_delegate_rows_converge_across_build_modes()
     assert_eq!(
         rows(&incremental, RESOURCE).await?,
         vec![
-            (
-                NEXT_HOLDER.to_owned(),
-                "holder".to_owned(),
-                powers(&["set_resolver"])
-            ),
-            (
-                NEXT_OPERATOR.to_owned(),
-                "operator".to_owned(),
-                powers(&["set_resolver"])
-            ),
+            holder(NEXT_HOLDER, masked.clone()),
+            operator(NEXT_OPERATOR, masked),
         ]
     );
+    assert!(restrictions(&incremental, RESOURCE).await?.is_some());
 
-    // Unwrapping clears the registration; the second name expires by clock alone and loses its
-    // holder, its operator, and its restrictions block.
+    // Unwrapping clears the registration and its restrictions block; the second name expires by
+    // clock alone and loses its holder, its operators, and its restrictions block.
     run(&incremental, 16, Some(marker)).await?;
     assert_eq!(rows(&incremental, RESOURCE).await?, Vec::new());
+    assert_eq!(restrictions(&incremental, RESOURCE).await?, None);
     assert_eq!(rows(&incremental, RESOURCE2).await?, Vec::new());
     assert_eq!(restrictions(&incremental, RESOURCE2).await?, None);
     assert_eq!(snapshot(&incremental).await?, full_snapshot);
 
-    for block in [11, 14, 15] {
+    for block in [11, 12, 13, 14, 15, 16] {
         redo(&full, 16, block).await?;
         assert_eq!(
             snapshot(&full).await?,
@@ -563,6 +617,21 @@ async fn wrapper_operator_rows_carry_fanout_provenance_and_owner() -> Result<()>
     );
     assert_eq!(provenance["holder"], json!(HOLDER));
     assert!(provenance["operator_normalized_event_ids"].is_array());
+
+    // The delegate who is also an operator carries the operator row and remembers the merge.
+    let (grant_source, provenance): (Value, Value) = sqlx::query_as(
+        "SELECT grant_source, provenance FROM permissions_current
+         WHERE resource_id = $1::uuid AND subject = $2",
+    )
+    .bind(RESOURCE)
+    .bind(DELEGATE)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(grant_source["relation_kind"], json!("operator"));
+    assert_eq!(
+        provenance["superseded_relation_kind"],
+        json!("token_approval")
+    );
 
     let (authority_kind, powers): (String, Value) = sqlx::query_as(
         "SELECT authority_kind, effective_powers FROM account_permission_state_current

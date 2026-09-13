@@ -5055,6 +5055,9 @@ fn expected_wrapper_fuses(fuses: u32) -> Value {
 
 #[tokio::test]
 async fn wrapper_states_and_expiry_gate_permissions_and_controller_relations() -> Result<()> {
+    // A `wrapped` name keeps every holder power but `burn_fuses`: `_canFusesBeBurned` rejects an
+    // owner-controlled burn until the parent has burnt PARENT_CANNOT_CONTROL.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058-L1068 @ ens_v1@91c966f)
     let cases = [
         (
             "wrapped_expired",
@@ -5062,7 +5065,7 @@ async fn wrapper_states_and_expiry_gate_permissions_and_controller_relations() -
             "wrapped",
             2,
             Some("wrapped"),
-            9,
+            8,
             true,
             true,
         ),
@@ -5072,7 +5075,7 @@ async fn wrapper_states_and_expiry_gate_permissions_and_controller_relations() -
             "wrapped",
             2,
             Some("wrapped"),
-            9,
+            8,
             true,
             true,
         ),

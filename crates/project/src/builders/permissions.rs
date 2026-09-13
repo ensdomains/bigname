@@ -347,6 +347,9 @@ pub(super) async fn build(
                             (effective_wrapper.fuses & 1) <> 0
                         WHEN 'burn_fuses' THEN
                             (effective_wrapper.fuses & 2) <> 0
+                            OR (effective_wrapper.fuses & 65536) = 0
+                        WHEN 'extend_expiry' THEN
+                            (effective_wrapper.fuses & 262144) = 0
                         WHEN 'approve' THEN
                             (effective_wrapper.fuses & 64) <> 0
                         WHEN 'approve_wrapper' THEN
@@ -386,6 +389,6 @@ pub(super) async fn build(
         .await
         .map_err(|error| ProjectError::database("failed to build permissions_current", error))?;
     wrapper_operators::build(transaction, chain_id, full_rebuild).await?;
-    resource_summary::build(transaction, chain_id, target).await?;
+    resource_summary::build(transaction, chain_id, target, full_rebuild).await?;
     Ok(())
 }
