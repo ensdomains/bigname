@@ -133,14 +133,21 @@ pub(super) async fn build(
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
         ),
-        -- `NameWrapped` mints the token (recorded as the wrapper `TokenControlTransferred`) and
-        -- `NameUnwrapped` closes the wrapper authority epoch; the wrapper restrictions block is
-        -- served only while the latest of the two is the mint.
+        -- `NameWrapped` mints the token (recorded as the wrapper `TokenControlTransferred` and a
+        -- holder grant), `NameUnwrapped` closes the wrapper authority epoch, and every burn,
+        -- including the un-admitted `upgrade()` path that emits no `NameUnwrapped`, revokes the
+        -- holder without a grant. The wrapper restrictions block is served only while the newest
+        -- of these is a mint or a holder grant, so a plain transfer (revoke, then grant) keeps it.
         -- (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L893-L902 @ ens_v1@91c966f)
         -- (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+        -- (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L483-L509 @ ens_v1@91c966f)
         wrapper_lifecycles AS (
             SELECT DISTINCT ON (event.resource_id) event.resource_id,
-                   event.after_state ->> 'source_event' = 'NameUnwrapped' AS unwrapped
+                   CASE
+                       WHEN event.event_kind = 'PermissionChanged'
+                           THEN jsonb_array_length(event.after_state -> 'effective_powers') = 0
+                       ELSE event.after_state ->> 'source_event' = 'NameUnwrapped'
+                   END AS unwrapped
             FROM project_events event
             WHERE event.source_family = 'ens_v1_wrapper_l1' AND event.resource_id IS NOT NULL
               AND (
@@ -148,6 +155,13 @@ pub(super) async fn build(
                      AND event.after_state ->> 'source_event' = 'NameWrapped')
                  OR (event.event_kind IN ('AuthorityEpochChanged', 'SurfaceUnbound')
                      AND event.after_state ->> 'source_event' = 'NameUnwrapped')
+                 OR (event.event_kind = 'PermissionChanged'
+                     AND event.after_state -> 'scope' ->> 'kind' = 'resource'
+                     AND jsonb_typeof(event.after_state -> 'effective_powers') = 'array'
+                     AND COALESCE(
+                             event.after_state -> 'grant_source' ->> 'relation_kind',
+                             event.after_state -> 'revocation_source' ->> 'relation_kind'
+                         ) = 'holder')
               )
             ORDER BY event.resource_id, event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,

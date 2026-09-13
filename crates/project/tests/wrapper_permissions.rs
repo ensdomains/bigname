@@ -276,7 +276,7 @@ async fn approval(
 }
 
 #[rustfmt::skip]
-async fn seed(pool: &PgPool) -> Result<()> {
+async fn seed_identity(pool: &PgPool) -> Result<()> {
     for block in 10..=16 {
         sqlx::query(
             "INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
@@ -306,22 +306,30 @@ async fn seed(pool: &PgPool) -> Result<()> {
     ))
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Block 10 `NameWrapped` rows for one name: expiry, token mint, fuse word, holder grant.
+#[rustfmt::skip]
+async fn wrap(pool: &PgPool, node: &str, resource: &str, expiry: i64, word: i64) -> Result<()> {
+    event(pool, Some(node), Some(resource), 10, 0, "ExpiryChanged", "wrap", json!({}), json!({
+        "source_event": "NameWrapped", "node": node, "expiry": expiry,
+        "authority_kind": "wrapper", "authority_key": authority_key(node),
+    })).await?;
+    event(pool, Some(node), Some(resource), 10, 0, "TokenControlTransferred", "wrap", json!({"from": null}), json!({
+        "source_event": "NameWrapped", "node": node, "owner": HOLDER, "to": HOLDER, "fuses": word,
+        "authority_kind": "wrapper", "authority_key": authority_key(node),
+    })).await?;
+    fuses(pool, node, resource, 10, word).await?;
+    permission(pool, node, resource, 10, HOLDER, HOLDER_POWERS, "holder", "NameWrapped", true).await
+}
+
+#[rustfmt::skip]
+async fn seed(pool: &PgPool) -> Result<()> {
+    seed_identity(pool).await?;
     // The second name starts `wrapped` (its parent still controls it) and is emancipated at 12.
-    for (node, resource, expiry, word) in [
-        (NODE, RESOURCE, EXPIRY, PARENT_CANNOT_CONTROL | IS_DOT_ETH),
-        (NODE2, RESOURCE2, EXPIRY2, 0),
-    ] {
-        event(pool, Some(node), Some(resource), 10, 0, "ExpiryChanged", "wrap", json!({}), json!({
-            "source_event": "NameWrapped", "node": node, "expiry": expiry,
-            "authority_kind": "wrapper", "authority_key": authority_key(node),
-        })).await?;
-        event(pool, Some(node), Some(resource), 10, 0, "TokenControlTransferred", "wrap", json!({"from": null}), json!({
-            "source_event": "NameWrapped", "node": node, "owner": HOLDER, "to": HOLDER, "fuses": word,
-            "authority_kind": "wrapper", "authority_key": authority_key(node),
-        })).await?;
-        fuses(pool, node, resource, 10, word).await?;
-        permission(pool, node, resource, 10, HOLDER, HOLDER_POWERS, "holder", "NameWrapped", true).await?;
-    }
+    wrap(pool, NODE, RESOURCE, EXPIRY, PARENT_CANNOT_CONTROL | IS_DOT_ETH).await?;
+    wrap(pool, NODE2, RESOURCE2, EXPIRY2, 0).await?;
     approval(pool, 11, HOLDER, OPERATOR, true).await?;
     approval(pool, 11, HOLDER, SECOND_OPERATOR, true).await?;
     permission(pool, NODE, RESOURCE, 12, DELEGATE, &["extend_subname_expiry"], "token_approval", "Approval", true).await?;
@@ -659,4 +667,147 @@ async fn wrapper_operator_rows_carry_fanout_provenance_and_owner() -> Result<()>
 
     database.cleanup().await?;
     Ok(())
+}
+
+const REGISTRAR_RESOURCE: &str = "9a7c0c1e-5b2d-5a3e-8f10-00000000d0d0";
+
+/// Full and incremental snapshots agree, and every redo of `blocks` reproduces the full snapshot.
+async fn assert_converges(
+    prefix: &str,
+    seed_events: impl AsyncFn(&PgPool) -> Result<()>,
+    target: i64,
+    blocks: &[i64],
+    check: impl AsyncFn(&PgPool, i64) -> Result<()>,
+) -> Result<()> {
+    let (full_database, full) = database(&format!("{prefix}_full")).await?;
+    seed_identity(&full).await?;
+    seed_events(&full).await?;
+    run(&full, target, None).await?;
+    let full_snapshot = snapshot(&full).await?;
+    check(&full, target).await?;
+
+    let (incremental_database, incremental) = database(&format!("{prefix}_incremental")).await?;
+    seed_identity(&incremental).await?;
+    seed_events(&incremental).await?;
+    let mut marker = run(&incremental, 10, None).await?;
+    check(&incremental, 10).await?;
+    for block in 11..=target {
+        marker = run(&incremental, block, Some(marker)).await?;
+        check(&incremental, block).await?;
+    }
+    assert_eq!(snapshot(&incremental).await?, full_snapshot);
+    for block in blocks {
+        redo(&full, target, *block).await?;
+        assert_eq!(
+            snapshot(&full).await?,
+            full_snapshot,
+            "redo of block {block}"
+        );
+    }
+    full_database.cleanup().await?;
+    incremental_database.cleanup().await?;
+    Ok(())
+}
+
+// A transfer to the approved delegate: the interpreter emits the token-approval revocation
+// before the holder rows, so the fold keeps the recipient's holder grant, and the recipient's
+// own operators fan out from it.
+// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L837-L840 @ ens_v1@91c966f)
+#[tokio::test]
+async fn a_delegate_who_receives_the_token_becomes_its_holder() -> Result<()> {
+    #[rustfmt::skip]
+    async fn events(pool: &PgPool) -> Result<()> {
+        wrap(pool, NODE, RESOURCE, EXPIRY, PARENT_CANNOT_CONTROL | IS_DOT_ETH).await?;
+        approval(pool, 11, HOLDER, OPERATOR, true).await?;
+        approval(pool, 11, DELEGATE, NEXT_OPERATOR, true).await?;
+        permission(pool, NODE, RESOURCE, 12, DELEGATE, &["extend_subname_expiry"], "token_approval", "Approval", true).await?;
+        permission(pool, NODE, RESOURCE, 13, DELEGATE, &["extend_subname_expiry"], "token_approval", "TransferSingle", false).await?;
+        permission(pool, NODE, RESOURCE, 13, HOLDER, HOLDER_POWERS, "holder", "TransferSingle", false).await?;
+        permission(pool, NODE, RESOURCE, 13, DELEGATE, HOLDER_POWERS, "holder", "TransferSingle", true).await
+    }
+    async fn check(pool: &PgPool, block: i64) -> Result<()> {
+        let expected = match block {
+            10 => vec![holder(HOLDER, emancipated())],
+            11 => vec![
+                holder(HOLDER, emancipated()),
+                operator(OPERATOR, emancipated()),
+            ],
+            12 => vec![
+                holder(HOLDER, emancipated()),
+                (
+                    DELEGATE.to_owned(),
+                    "token_approval".to_owned(),
+                    json!(["extend_subname_expiry"]),
+                ),
+                operator(OPERATOR, emancipated()),
+            ],
+            _ => vec![
+                holder(DELEGATE, emancipated()),
+                operator(NEXT_OPERATOR, emancipated()),
+            ],
+        };
+        assert_eq!(rows(pool, RESOURCE).await?, expected, "block {block}");
+        assert!(
+            restrictions(pool, RESOURCE).await?.is_some(),
+            "block {block}"
+        );
+        Ok(())
+    }
+    assert_converges("wrapper_delegate_recipient", events, 13, &[12, 13], check).await
+}
+
+// The `.eth` 2LD unwrap puts `AuthorityEpochChanged` on the reactivated registrar resource and
+// only `SurfaceUnbound` on the wrapper resource; the un-admitted `upgrade()` path burns the token
+// without any `NameUnwrapped`. Both close the wrapper restrictions block.
+// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L483-L509 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+#[tokio::test]
+async fn wrapper_restrictions_close_on_a_2ld_unwrap_and_on_an_upgrade_burn() -> Result<()> {
+    #[rustfmt::skip]
+    async fn events(pool: &PgPool) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO resources (resource_id, token_lineage_id, chain_id, block_hash, block_number, canonicality_state)
+             VALUES ($1::uuid, NULL, $2, $3, 10, 'canonical')",
+        )
+        .bind(REGISTRAR_RESOURCE).bind(CHAIN).bind(hash(10))
+        .execute(pool)
+        .await?;
+        wrap(pool, NODE, RESOURCE, EXPIRY, PARENT_CANNOT_CONTROL | IS_DOT_ETH).await?;
+        wrap(pool, NODE2, RESOURCE2, EXPIRY2, PARENT_CANNOT_CONTROL).await?;
+        approval(pool, 11, HOLDER, OPERATOR, true).await?;
+        // 2LD unwrap with registrar reactivation.
+        event(pool, Some(NODE), Some(RESOURCE), 12, 0, "SurfaceUnbound", "unwrap", json!({
+            "authority_kind": "wrapper", "authority_key": authority_key(NODE),
+        }), json!({
+            "source_event": "NameUnwrapped", "node": NODE, "owner": HOLDER, "unwrapped_at": timestamp(12),
+            "authority_kind": "wrapper", "authority_key": authority_key(NODE), "active_to": timestamp(12),
+            "reactivated_resource_id": REGISTRAR_RESOURCE, "reactivated_token_lineage_id": null,
+        })).await?;
+        event(pool, Some(NODE), Some(REGISTRAR_RESOURCE), 12, 0, "AuthorityEpochChanged", "unwrap", json!({
+            "authority_kind": "wrapper", "authority_key": authority_key(NODE),
+        }), json!({
+            "source_event": "NameUnwrapped", "node": NODE, "owner": HOLDER, "unwrapped_at": timestamp(12),
+            "authority_kind": "registrar", "authority_key": format!("registrar:{CHAIN}:1:{NODE}"),
+            "reactivated_resource_id": REGISTRAR_RESOURCE, "reactivated_token_lineage_id": null,
+        })).await?;
+        permission(pool, NODE, RESOURCE, 12, HOLDER, HOLDER_POWERS, "holder", "NameUnwrapped", false).await?;
+        // upgrade(): a bare burn, no NameUnwrapped.
+        permission(pool, NODE2, RESOURCE2, 12, HOLDER, HOLDER_POWERS, "holder", "TransferSingle", false).await
+    }
+    async fn check(pool: &PgPool, block: i64) -> Result<()> {
+        for resource in [RESOURCE, RESOURCE2] {
+            if block < 12 {
+                assert!(
+                    restrictions(pool, resource).await?.is_some(),
+                    "block {block}"
+                );
+                assert!(!rows(pool, resource).await?.is_empty(), "block {block}");
+            } else {
+                assert_eq!(restrictions(pool, resource).await?, None, "block {block}");
+                assert_eq!(rows(pool, resource).await?, Vec::new(), "block {block}");
+            }
+        }
+        Ok(())
+    }
+    assert_converges("wrapper_unwrap_shapes", events, 12, &[11, 12], check).await
 }
