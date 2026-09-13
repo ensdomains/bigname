@@ -179,6 +179,63 @@ pub(in crate::schema_v2) fn v1_revoke_states(
     )
 }
 
+pub(in crate::schema_v2) struct V1WrapperGrant<'a> {
+    pub subject: &'a str,
+    pub scope: Value,
+    pub powers: &'a [&'a str],
+    pub node: &'a str,
+    pub authority_key: &'a str,
+    pub authority_contract: &'a str,
+    pub relation_kind: &'a str,
+    pub source_event_kind: &'a str,
+}
+
+/// NameWrapper holder, operator, and per-token delegate rows share one source shape so Project
+/// can fan operators out from `relation_kind=holder` rows and the restore path can find the
+/// delegate through `node`.
+pub(in crate::schema_v2) fn v1_wrapper_states(
+    grant: bool,
+    permission: V1WrapperGrant<'_>,
+) -> (Value, Value) {
+    let source = json!({
+        "kind":"ens_v1_authority",
+        "authority_kind":"wrapper",
+        "authority_key":permission.authority_key,
+        "authority_contract":permission.authority_contract,
+        "relation_kind":permission.relation_kind,
+        "node":permission.node,
+        "source_event_kind":permission.source_event_kind,
+    });
+    let transfer_behavior = if permission.relation_kind == "token_approval" {
+        "cleared_on_transfer_unless_cannot_approve"
+    } else {
+        "replace_on_authority_change"
+    };
+    let base = |effective_powers: Value, grant_source: Value, revocation_source: Value| {
+        json!({
+            "subject":permission.subject,
+            "scope":permission.scope,
+            "effective_powers":effective_powers,
+            "grant_source":grant_source,
+            "revocation_source":revocation_source,
+            "inheritance_path":[],
+            "transfer_behavior":transfer_behavior,
+        })
+    };
+    let powers = json!(permission.powers);
+    if grant {
+        (
+            base(json!([]), Value::Null, Value::Null),
+            base(powers, source, Value::Null),
+        )
+    } else {
+        (
+            base(powers, source.clone(), Value::Null),
+            base(json!([]), Value::Null, source),
+        )
+    }
+}
+
 fn powers(bitmap: U256, vocabulary: V2Vocabulary) -> Vec<String> {
     role_bits(vocabulary)
         .iter()

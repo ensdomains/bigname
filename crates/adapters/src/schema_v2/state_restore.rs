@@ -216,6 +216,7 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
     }
     v1_registry::restore_migration_marker(state, event);
     v1_surface::restore_preimage(state, event);
+    restore_wrapper_delegate(state, event);
     if matches!(source_event, Some("NewOwner" | "Transfer"))
         && let Some(namehash) = event
             .after_state
@@ -477,6 +478,7 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
                     .and_then(Value::as_str)
                     .map(str::to_owned),
             );
+            state.set_v1_wrapper_delegate(&event.namespace, namehash, None);
         }
         Some("NameUnwrapped") => {
             let Some(namehash) = event.after_state.get("node").and_then(Value::as_str) else {
@@ -496,4 +498,41 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
     }
 
     v1_transfer::restore(state, event);
+}
+
+// The wrapper interpreter records the per-token delegate as `relation_kind=token_approval`
+// permission rows, including the event-less clears it derives on transfer and burn.
+fn restore_wrapper_delegate(state: &mut State, event: &PriorEventInput) {
+    if event.event_kind != "PermissionChanged" || event.source_family != "ens_v1_wrapper_l1" {
+        return;
+    }
+    let source = event
+        .after_state
+        .get("grant_source")
+        .filter(|source| source.get("relation_kind").is_some())
+        .or_else(|| event.after_state.get("revocation_source"));
+    let Some(source) = source.filter(|source| {
+        source.get("relation_kind").and_then(Value::as_str) == Some("token_approval")
+    }) else {
+        return;
+    };
+    let (Some(node), Some(subject)) = (
+        source.get("node").and_then(Value::as_str),
+        event.after_state.get("subject").and_then(Value::as_str),
+    ) else {
+        return;
+    };
+    let granted = event
+        .after_state
+        .get("effective_powers")
+        .and_then(Value::as_array)
+        .is_some_and(|powers| !powers.is_empty());
+    if granted {
+        state.set_v1_wrapper_delegate(&event.namespace, node, Some(subject.to_owned()));
+    } else if state
+        .v1_wrapper_delegate(&event.namespace, node)
+        .is_some_and(|delegate| delegate.eq_ignore_ascii_case(subject))
+    {
+        state.set_v1_wrapper_delegate(&event.namespace, node, None);
+    }
 }
