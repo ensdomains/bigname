@@ -289,10 +289,15 @@ top level for a resource-bound read (`name` or `registration_id`), and
 next to `role_summary`. It is omitted when the registration has no
 resource-level constraint model (ENSv1 registrar- and registry-held names,
 Basenames), when a NameWrapper position has expired with a cleared owner, and
-once `NameUnwrapped` has closed the wrapper authority epoch: an explicit
-`registration_id` read of an unwrapped token returns no wrapper block, matching
-the sibling `wrapper_state` field, which appears only for a current NameWrapper
+once the wrapped token is burnt or unwrapped: the block is served only while the
+newest NameWrapper lifecycle evidence on the registration is the mint or a
+holder grant, so `NameUnwrapped` removes it and so does the bare ERC-1155 burn
+of the un-admitted `upgrade()` path, which emits no `NameUnwrapped`. An explicit
+`registration_id` read of such a token returns no wrapper block, matching the
+sibling `wrapper_state` field, which appears only for a current NameWrapper
 registration.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L483-L509 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
 Name detail keeps `wrapper_state` and `wrapper_fuses` unchanged; `restrictions`
 adds to them and does not replace them.
 

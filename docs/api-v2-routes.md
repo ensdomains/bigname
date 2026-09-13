@@ -1351,7 +1351,7 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   registration (shape in [api-v2.md](api-v2.md#resource-restrictions)). It is
   omitted for address-only reads and when the registration has no
   resource-level constraint model, its NameWrapper position has expired with a
-  cleared owner, or `NameUnwrapped` has closed its wrapper authority epoch.
+  cleared owner, or its wrapped token has been burnt or unwrapped.
   `authority_context` is required on every row and records how that row was
   admitted under the per-name ownership rule. `powers` values come from the
   [permission powers vocabulary](api-v2.md#permission-powers-vocabulary), which

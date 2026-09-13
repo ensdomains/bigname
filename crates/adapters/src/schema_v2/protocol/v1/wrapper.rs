@@ -238,15 +238,11 @@ fn transfer_item(
         source_event_kind: &source_event_kind,
         identity_suffix: &identity_suffix,
     };
-    if let (Some(from_owner), Some(to_owner)) = (before.owner.as_deref(), linked.owner.as_deref())
-        && !from_owner.eq_ignore_ascii_case(to_owner)
-    {
-        append_holder_permissions(&mut output, &context, from_owner, false);
-        append_holder_permissions(&mut output, &context, to_owner, true);
-    }
     // `_beforeTransfer` deletes the token approval unless CANNOT_APPROVE is burnt, judged on the
     // expiry-cleared fuse word. The revocation is emitted even when the delegate is the recipient,
-    // so a restore that rebuilt the delegate from these rows replays identically.
+    // so a restore that rebuilt the delegate from these rows replays identically, and it is
+    // emitted BEFORE the holder rows: Project folds rows by (resource, subject, scope) and keeps
+    // the newest, so the recipient's holder grant must be the later row when it is the delegate.
     // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L837-L840 @ ens_v1@91c966f)
     let fuses = state
         .v1_wrapper_effective_fuses(namespace, &namehash, raw.block_timestamp.unix_timestamp())
@@ -255,6 +251,12 @@ fn transfer_item(
         && let Some(delegate) = state.set_v1_wrapper_delegate(namespace, &namehash, None)
     {
         append_delegate_permission(&mut output, &context, &delegate, false);
+    }
+    if let (Some(from_owner), Some(to_owner)) = (before.owner.as_deref(), linked.owner.as_deref())
+        && !from_owner.eq_ignore_ascii_case(to_owner)
+    {
+        append_holder_permissions(&mut output, &context, from_owner, false);
+        append_holder_permissions(&mut output, &context, to_owner, true);
     }
     output
 }
