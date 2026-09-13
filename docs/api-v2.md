@@ -508,7 +508,7 @@ inventory, and resolver `bound_names` omits the row unless it is
 an ownerless ENSv1 or Basenames registry row whose current registry resolver
 pointer is retained (a [serving resource](glossary.md#serving-resource)). That
 retained pointer permits resolver and record reads without acquiring registration
-identity or control. Indexed records require retained inventory;
+identity or control. Indexed records require retained, supported inventory;
 routes with source selection let verified and auto records follow the ordinary
 lookup capability, and resolver `bound_names` remains subject to the resolver
 family's binding-enumeration capability.
@@ -827,7 +827,12 @@ Rules:
 
 A keyed resolver record answer contains `status`. It contains `value` only
 when `status` is `ok`; `unsupported_reason`, `failure_reason`, and `meta` are
-present only where the route contract permits them.
+present only where the route contract permits them. An indexed keyed answer is
+taken from a record inventory only while that inventory's coverage is
+authoritative (`full` or `projected` with no `unsupported_reason`); an
+`unsupported` inventory row yields `status=unsupported` with the row's reason
+and no `value` for every key, whatever entries the projection retained
+([api-v2-routes.md](api-v2-routes.md#get-v1namesnamerecords)).
 
 For a successful `contenthash` answer, `value` is a lowercase,
 `0x`-prefixed hex string containing the bytes returned by the resolver. The API

@@ -757,7 +757,12 @@ and contenthash inventory. An unlisted or unsupported resolver family stays
 explicitly unsupported. For ENSv2, current-emitter version evidence may define a
 boundary while the unadmitted resolver profile still publishes no record
 values. Basenames record facts remain gated by the admitted Base resolver
-profile.
+profile. Readers enforce this on the inventory row itself: the records route,
+name detail, batch lookup, the GraphQL resolver fields, the
+`address_records_current` builder, and the divergence-ledger comparison take
+values only from a `supported` row. Entries retained on an `unsupported` row are
+diagnostics for operators, never answers
+([api-v2-routes.md](api-v2-routes.md#get-v1namesnamerecords)).
 
 `GET /v1/names/{name}/records` reads this inventory for `indexed` behavior.
 `verified` and `auto` may use fresh schema-v2 lookup as described in

@@ -1721,7 +1721,11 @@ consumes them. Readability is a statement about block canonicality only, not
 about support: a readable row may still carry an unsupported support status,
 and routes that additionally require supported rows say so. `POST /v1/lookup`
 reverse address results are one such route
-([api-v2.md](api-v2.md#cursors-and-pagination)).
+([api-v2.md](api-v2.md#cursors-and-pagination)); indexed resolver-record values
+on `GET /v1/names/{name}/records`, `GET /v1/names/{name}`, and `POST /v1/lookup`
+name results are another: a readable but `unsupported` record inventory row
+serves no record values, only its unsupported reason
+([api-v2-routes.md](api-v2-routes.md#get-v1namesnamerecords)).
 
 ## Re-derivation boundary
 
