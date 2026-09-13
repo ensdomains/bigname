@@ -135,6 +135,11 @@ impl ManifestStartupLock {
                         error,
                     )
                 })?;
+        crate::database::observe_connection(&mut connection, "manifest_lock")
+            .await
+            .map_err(|error| {
+                RunnerError::database("manifest lock measurement witness failed", error)
+            })?;
         sqlx::query("SELECT pg_advisory_lock(hashtextextended($1::text, 0::bigint))")
             .bind(MANIFEST_STARTUP_LOCK_NAME)
             .execute(&mut connection)

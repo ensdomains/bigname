@@ -4,6 +4,7 @@ use alloy_consensus::{Transaction as _, TxReceipt};
 use alloy_primitives::{Address, B256};
 use anyhow::{Context, Result, bail};
 
+use crate::measurement::{self as memory, Measured};
 use crate::provider::{Block, Log, Receipt, ResolvedBlock, Transaction};
 
 pub(super) fn provider_block_from_header(
@@ -50,6 +51,9 @@ pub(super) fn provider_receipts_and_logs_from_recovered(
     block: &Block,
 ) -> Result<(Vec<Receipt>, Vec<Log>)> {
     let transactions = recovered.transactions_with_sender().collect::<Vec<_>>();
+    memory::observe("reth_recovered_transaction_refs", || {
+        memory::inline(&transactions)
+    });
     if receipts.len() != transactions.len() {
         bail!("Reth DB receipt and transaction counts differ");
     }
@@ -101,11 +105,27 @@ pub(super) fn provider_receipts_and_logs_from_recovered(
                 .context("Reth DB log index overflow")?;
         }
     }
+    memory::observe("reth_converted_receipts_logs", || {
+        output_receipts.footprint().combine(output_logs.footprint())
+    });
     Ok((output_receipts, output_logs))
 }
 
 pub(super) fn normalized_resolved_blocks(blocks: &[ResolvedBlock]) -> Result<Vec<ResolvedBlock>> {
     let mut seen = BTreeSet::new();
+    let mut input_size = memory::Footprint::default();
+    memory::observe("reth_normalization_input", || {
+        input_size = memory::Footprint::entries::<ResolvedBlock>(blocks.len());
+        for block in blocks {
+            input_size = input_size.combine(block.hash.footprint());
+        }
+        input_size
+    });
+    let mut summary = NormalizationProgress {
+        input: input_size,
+        output: Default::default(),
+        count: 0,
+    };
     blocks
         .iter()
         .map(|block| {
@@ -113,10 +133,18 @@ pub(super) fn normalized_resolved_blocks(blocks: &[ResolvedBlock]) -> Result<Vec
             if !seen.insert(block.number) {
                 bail!("provider requested duplicate block {}", block.number);
             }
-            Ok(ResolvedBlock {
+            summary.count = seen.len();
+            let normalized = ResolvedBlock {
                 number: block.number,
                 hash: hash_hex(parse_b256(&block.hash, "block hash")?),
-            })
+            };
+            if memory::capture().is_some() {
+                summary.output = summary.output.combine(normalized.footprint());
+                if memory::progress_due(seen.len()) {
+                    summary.emit();
+                }
+            }
+            Ok(normalized)
         })
         .collect()
 }
@@ -125,6 +153,7 @@ pub(super) fn normalized_contiguous_resolved_blocks(
     blocks: &[ResolvedBlock],
 ) -> Result<Vec<ResolvedBlock>> {
     let blocks = normalized_resolved_blocks(blocks)?;
+    memory::observe("reth_normalized_output", || blocks.footprint());
     for pair in blocks.windows(2) {
         if pair[1].number != pair[0].number + 1 {
             bail!("provider log range is not contiguous");
@@ -159,4 +188,24 @@ pub(super) fn u64_to_i64(value: u64, label: &str) -> Result<i64> {
 
 fn usize_to_i64(value: usize, label: &str) -> Result<i64> {
     i64::try_from(value).with_context(|| format!("{label} {value} does not fit in i64"))
+}
+
+struct NormalizationProgress {
+    input: memory::Footprint,
+    output: memory::Footprint,
+    count: usize,
+}
+impl NormalizationProgress {
+    fn emit(&self) {
+        memory::observe("reth_normalization_overlap", || {
+            self.input
+                .combine(self.output)
+                .combine(memory::Footprint::entries::<i64>(self.count))
+        });
+    }
+}
+impl Drop for NormalizationProgress {
+    fn drop(&mut self) {
+        self.emit();
+    }
 }

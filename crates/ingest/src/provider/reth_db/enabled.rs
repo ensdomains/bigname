@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use crate::measurement::{self as memory, Measured};
 use alloy_consensus::BlockHeader as _;
 use alloy_primitives::B256;
 use anyhow::{Context, Result, bail};
@@ -76,13 +77,20 @@ impl RethDbProvider {
     }
 
     pub async fn resolve(&self, numbers: &[i64]) -> Result<Vec<ResolvedBlock>> {
+        memory::observe("reth_resolve_input", || {
+            memory::Footprint::entries::<i64>(numbers.len())
+        });
         let numbers = numbers.to_vec();
+        memory::observe("reth_resolve_owned_numbers", || {
+            memory::Footprint::entries::<i64>(numbers.capacity())
+        });
         self.blocking("resolve blocks", move |reader| reader.resolve(&numbers))
             .await
     }
 
     pub async fn headers(&self, blocks: &[ResolvedBlock]) -> Result<Vec<Block>> {
         let blocks = blocks.to_vec();
+        memory::observe("reth_owned_header_selection", || blocks.footprint());
         self.blocking("fetch headers", move |reader| reader.headers(&blocks))
             .await
     }
@@ -96,6 +104,12 @@ impl RethDbProvider {
         let blocks = convert::normalized_contiguous_resolved_blocks(blocks)?;
         let addresses = addresses.to_vec();
         let topics = topics.to_vec();
+        memory::observe("reth_owned_log_inputs", || {
+            blocks
+                .footprint()
+                .combine(addresses.footprint())
+                .combine(topics.footprint())
+        });
         self.blocking("fetch logs", move |reader| {
             reader.logs(&blocks, &topics, &addresses)
         })
@@ -114,9 +128,15 @@ impl RethDbProvider {
         F: FnOnce(&RethDbReader) -> Result<T> + Send + 'static,
     {
         let reader = Arc::clone(&self.reader);
-        task::spawn_blocking(move || operation(&reader))
-            .await
-            .with_context(|| format!("Reth DB task failed while trying to {label}"))?
+        let context = memory::capture();
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
+        task::spawn_blocking(move || {
+            tracing::dispatcher::with_default(&dispatch, || {
+                memory::blocking(context, || operation(&reader))
+            })
+        })
+        .await
+        .with_context(|| format!("Reth DB task failed while trying to {label}"))?
     }
 }
 
@@ -186,6 +206,7 @@ impl RethDbReader {
         let factory = self.factory()?;
         if let Some((from, to)) = contiguous_numbers(numbers)? {
             let headers = factory.sealed_headers_range(from..=to)?;
+            memory::observe("reth_resolve_headers", || memory::inline(&headers));
             if headers.len() != numbers.len() {
                 bail!("Reth DB omitted headers from a contiguous range");
             }
@@ -222,6 +243,7 @@ impl RethDbReader {
         let factory = self.factory()?;
         if let Some((from, to)) = contiguous_resolved(blocks)? {
             let headers = factory.sealed_headers_range(from..=to)?;
+            memory::observe("reth_header_range", || memory::inline(&headers));
             if headers.len() != blocks.len() {
                 bail!("Reth DB omitted headers from a resolved range");
             }
@@ -267,6 +289,9 @@ impl RethDbReader {
                 if block.number != expected.number {
                     bail!("Reth DB returned a block bundle at the wrong height");
                 }
+                memory::observe("reth_native_bundle", || {
+                    memory::Footprint::entries::<reth_ethereum::Receipt>(receipts.capacity())
+                });
                 let transactions = provider_transactions_from_recovered(&recovered, &block)?;
                 let (receipts, logs) =
                     provider_receipts_and_logs_from_recovered(&receipts, &recovered, &block)?;
@@ -301,6 +326,9 @@ impl RethDbReader {
 
     fn revalidate(&self, blocks: &[ResolvedBlock]) -> Result<()> {
         let numbers = blocks.iter().map(|block| block.number).collect::<Vec<_>>();
+        memory::observe("reth_revalidation_numbers", || {
+            memory::Footprint::entries::<i64>(numbers.capacity())
+        });
         if self.resolve(&numbers)? != blocks {
             bail!("Reth DB block hashes changed during log lookup");
         }

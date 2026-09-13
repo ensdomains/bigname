@@ -1,0 +1,487 @@
+#!/usr/bin/env python3
+"""Pure admission/stream validator tests. Does not launch an experiment."""
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import unittest
+from unittest.mock import patch, Mock
+import io
+import json
+import os
+import hashlib
+from contextlib import ExitStack
+from tempfile import TemporaryDirectory
+
+loader = importlib.machinery.SourceFileLoader("measurement", str(Path(__file__).with_name("measure-verify-memory")))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+
+
+def fixture():
+    state = {"phase_status": "completed", "current_block_number": 10, "verification_level": "quick_synced", "redo_in_progress": False}
+    result = dict(chain="ethereum-mainnet", chain_id=1, **{"from": 2, "to": 5}, run_id="validator",
+                  runner_bytes=2**32, postgres_bytes=2**31, seconds=30,
+                  base_tree="26ba8684d6d255a5f5e157174a8e9d1a9e0f7619", independent_source_history_reviewed=True,
+                  legal_redo_reviewed=True, manifest_sync_unchanged=True, build_test_chains_including_this=1,
+                  initial_state=state, expected_final_state=state, ingest_start=0,
+                  source_objects=[{}] * 8, source_descriptors=["a", "b"], disk_paths=["/unused"], pg_temp_dirs=["/unused"], finalized_end_hash="a" * 66, complete_receipt_bytes_max=1000)
+    for key in ("binary_sha256", "fixture_sha256", "instrumentation_commit", "manifest_sha256", "density_inventory_sha256", "allocation_receipt_sha256"):
+        result[key] = "a" * 64
+    for side in ("stored", "provider"):
+        result[side] = dict(unique_rows=1, logical_bytes=100, cumulative_rows=1, cumulative_bytes=100, largest_log=100)
+    return result
+
+
+def event(stage, sequence=1, **overrides):
+    f = dict(schema=1, run="validator", valid=True, sequence=sequence, stage=stage,
+             stored_rows=1, stored_bytes=100, provider_rows=1, provider_bytes=100,
+             marker_number=5, marker_hash="a" * 66, source_level="node_checked", max_item_bytes=100, rows=1, logical_bytes=100, chain="ethereum-mainnet", **{"from": 2, "to": 5})
+    f.update(attempt=0 if stage in module.ROOT_STAGES else 1, query_kind="stored" if stage == "stored_query_return" else "ordinary", query_ordinal=0)
+    f.update(native_block=5, receipt_bytes=20, hash_bytes=30, output_bytes=50, receipt_capacity=0, hash_capacity=0, output_capacity=0, exposed_capacity_bytes=0)
+    f.update(overrides)
+    return dict(target="bigname_memory", fields=f)
+
+
+def complete_stream():
+    stages = sorted(module.REQUIRED - {"provider_query_return", "reth_complete_receipt_peak"})
+    stages += ["reth_native_query_start", "reth_complete_receipt_peak", "reth_native_query_loaded", "reth_native_logical_peak", "reth_native_capacity_peak", "provider_query_return"]
+    return [event(stage, sequence) for sequence, stage in enumerate(stages, 1)]
+
+
+class ValidatorTests(unittest.TestCase):
+    def test_admission_requires_real_prerequisites(self):
+        module.admission(fixture())
+        for key, value in (("chain_id", 11155111), ("independent_source_history_reviewed", False),
+                           ("legal_redo_reviewed", False), ("manifest_sync_unchanged", False),
+                           ("seconds", 1801), ("runner_bytes", 2**32 + 1),
+                           ("build_test_chains_including_this", 5), ("complete_receipt_bytes_max", 0)):
+            a = fixture(); a[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError): module.admission(a)
+        a = fixture(); a["initial_state"]["redo_in_progress"] = True
+        with self.assertRaises(ValueError): module.admission(a)
+
+    def test_out_of_envelope_cannot_be_truncated(self):
+        for side in ("stored", "provider"):
+            for key, value in (("unique_rows", 250001), ("logical_bytes", 128 * 2**20 + 1),
+                               ("cumulative_rows", 500001), ("cumulative_bytes", 256 * 2**20 + 1),
+                               ("largest_log", 2**20 + 1)):
+                a = fixture(); a[side][key] = value
+                with self.subTest(side=side, key=key), self.assertRaises(ValueError): module.admission(a)
+
+    def test_baseline_without_observations_is_red(self):
+        reader = module.Observations(fixture())
+        reader.accept({"fields": {"message": "verification batch matched"}})
+        with self.assertRaises(ValueError): reader.finish()
+
+    def test_complete_stream_and_selected_counts(self):
+        reader = module.Observations(fixture())
+        for value in complete_stream(): reader.accept(value)
+        reader.finish()
+        reader.final["stored_final"]["rows"] = 0
+        with self.assertRaises(ValueError): reader.finish()
+
+    def test_failed_incomplete_or_misattributed_output(self):
+        for stage, overrides in (("compare_matched", {"from": 3}), ("provider_trusted", {}),
+                                 ("compared_rpc", {}), ("stored_query_return", {"max_item_bytes": 101}),
+                                 ("provider_query_return", {"provider_rows": 500001}),
+                                 ("process_start", {"valid": False}), ("process_start", {"run": "other"}),
+                                 ("reth_complete_receipt_peak", {"logical_bytes": 1001})):
+            with self.subTest(stage=stage), self.assertRaises(ValueError): module.Observations(fixture()).accept(event(stage, **overrides))
+
+    def test_lost_events_invalidate_completion(self):
+        reader = module.Observations(fixture())
+        with self.assertRaises(ValueError): reader.accept(event("process_start", 2))
+
+    def test_duplicate_gap_unknown_and_attempt_mix(self):
+        reader = module.Observations(fixture())
+        reader.accept(event("process_start"))
+        with self.assertRaises(ValueError): reader.accept(event("process_start"))
+        with self.assertRaises(ValueError): module.Observations(fixture()).accept(event("unknown"))
+        reader = module.Observations(fixture())
+        for value in complete_stream(): reader.accept(value)
+        with self.assertRaises(ValueError):
+            reader.accept(event("stored_final", len(complete_stream()) + 1, attempt=2)); reader.finish()
+
+    def test_exact_cumulative_and_largest_inventory(self):
+        for key in ("cumulative_rows", "cumulative_bytes", "largest_log"):
+            a = fixture(); a["stored"][key] += 1
+            reader = module.Observations(a)
+            for value in complete_stream(): reader.accept(value)
+            with self.subTest(key=key), self.assertRaises(ValueError): reader.finish()
+
+    def test_native_witness_completeness_and_query_bounds(self):
+        for missing in module.NATIVE_WITNESSES:
+            reader = module.Observations(fixture())
+            values = [v for v in complete_stream() if v["fields"]["stage"] != missing]
+            with self.subTest(missing=missing), self.assertRaises(ValueError):
+                for sequence, value in enumerate(values, 1):
+                    value["fields"]["sequence"] = sequence; reader.accept(value)
+        for overrides in ({"query_ordinal": 1}, {"attempt": 2}, {"native_block": 2}):
+            reader = module.Observations(fixture())
+            reader.accept(event("reth_native_query_start", **{"from": 3}))
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                reader.accept(event("reth_native_logical_peak", 2, **dict({"from": 3}, **overrides)))
+        reader = module.Observations(fixture())
+        for sequence, stage in enumerate(("reth_native_query_start", "reth_native_query_empty", "reth_complete_receipt_peak", "provider_query_return"), 1):
+            reader.accept(event(stage, sequence, rows=0, logical_bytes=0, max_item_bytes=0))
+        self.assertIsNone(reader.native)
+
+    def test_drain_is_bounded_and_checks_each_read(self):
+        class Growing:
+            def readline(self, limit): return "{}\n"
+        observer, check = Mock(), Mock()
+        self.assertEqual(module.drain(Growing(), "", observer, check), "")
+        self.assertEqual(check.call_count, 64)
+        check.side_effect = [None, ValueError("deadline")]
+        with self.assertRaisesRegex(ValueError, "deadline"):
+            module.drain(Growing(), "", observer, check)
+        with self.assertRaises(ValueError):
+            module.drain(io.StringIO("x" * 65537), "", observer, Mock())
+
+    def collector_run(self, drift=False, final_event=None, seconds=30, cleanup_elapsed=0,
+                      manifest_drift=False, snapshot=False, source_kind="reth-db", binary_drift=False, overlap=None, sigterm=False, child_mask=False):
+        # Exercise the real run/finally path with no subprocess, database or cgroup access.
+        with TemporaryDirectory() as directory, ExitStack() as stack:
+            root = Path(directory); a = fixture(); a["seconds"] = seconds; objects = []; endpoints = {}
+            clock = stack.enter_context(patch.object(module.time, "monotonic", return_value=0))
+            binary = root / "live-runner"; binary.write_bytes(b"admitted binary")
+            manifests = root / "live-manifests"; manifests.mkdir()
+            (manifests / "watch.toml").write_text("watch = 1\n")
+            for name in ("INTAKE", "REFERENCE"):
+                endpoint = root / name; endpoint.mkdir(); endpoints[name] = str(endpoint)
+                for child in ("", "db", "static_files", "rocksdb"):
+                    path = endpoint / child
+                    if child: path.mkdir()
+                    st = path.stat(); objects.append(dict(path=str(path), device=st.st_dev, inode=st.st_ino))
+            a.update(source_objects=objects, source_endpoints=endpoints,
+                     source_descriptors=[f"ethereum-mainnet:{name}:{source_kind}:chain_start:0={name}" for name in endpoints],
+                     binary=str(binary), binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+                     runner_cgroup=str(root), postgres_cgroup="postgres", manifests_root=str(manifests), writable_path="unused")
+            if overlap == "equal": a["postgres_cgroup"] = str(root)
+            if overlap == "parent": a["postgres_cgroup"] = str(root.parent)
+            if overlap == "child": a["postgres_cgroup"] = str(root / "nested")
+            a["manifest_sha256"] = "c4ee76fadb335328e50a750a9b04ece6934ef9406c5ab1e2a74aa6c8e8584d06"
+            if binary_drift == "before": binary.write_bytes(b"replacement binary")
+            if manifest_drift: (manifests / "watch.toml").write_text("watch = 2\n")
+            (root / "cgroup.kill").touch(); (root / "time.txt").write_text("Maximum resident set size (kbytes): 1")
+            calls = {"runner": 0, "postgres": 0}
+            def group(path):
+                role = "runner" if path == str(root) else "postgres"; calls[role] += 1
+                values = dict(max=0, oom=0, oom_kill=0)
+                if final_event and role == final_event[0] and calls[role] >= final_event[2]: values[final_event[1]] = 1
+                return {"memory.max": str(a[role + "_bytes"]), "memory.swap.max": "0", "memory.current": "1",
+                        "memory.events": "\n".join(f"{key} {value}" for key, value in values.items()),
+                        "cgroup.procs": str(os.getpid()) if role == "runner" and calls[role] == 2 else ""}
+            env = dict(endpoints)
+            if drift: env["REFERENCE"] = str(root / "unadmitted")
+            stack.enter_context(patch.dict(module.os.environ, env, clear=True))
+            def observe(*args):
+                if binary_drift: binary.write_bytes(b"replacement binary")
+                if snapshot: (manifests / "watch.toml").write_text("watch = 2\n")
+                return {"state": a["initial_state"], "stats_reset": "same", "verification_reader": {"state": a["initial_state"], "stats_reset": "same"}}
+            database = Mock(side_effect=observe)
+            blocked, pending = {module.signal.SIGUSR1}, False
+            def masking(how, signals):
+                nonlocal blocked, pending
+                previous = set(blocked)
+                blocked = blocked | set(signals) if how == module.signal.SIG_BLOCK else set(signals)
+                if pending and module.signal.SIGTERM not in blocked:
+                    pending = False; module.signal.getsignal(module.signal.SIGTERM)(module.signal.SIGTERM, None)
+                return previous
+            stack.enter_context(patch.object(module.signal, "pthread_sigmask", side_effect=masking))
+            def clean(*args):
+                if sigterm: self.assertEqual(module.signal.getsignal(module.signal.SIGTERM), module.signal.SIG_IGN)
+                clock.return_value = cleanup_elapsed
+            cleanup = Mock(side_effect=clean)
+            def draining(*args):
+                if sigterm is True:
+                    handler = module.signal.getsignal(module.signal.SIGTERM)
+                    self.assertTrue(callable(handler), "SIGTERM handler missing before detached launch")
+                    handler(module.signal.SIGTERM, None)
+                return ""
+            for name, value in (("cgroup", group),
+                                ("postgres", database),
+                                ("Observations", Mock()), ("terminate_owned", cleanup),
+                                ("status", Mock(return_value={"VmHWM": 1})), ("drain", draining)):
+                stack.enter_context(patch.object(module, name, value))
+            stack.enter_context(patch.object(module.os, "statvfs", return_value=Mock(f_bavail=200 * 2**30, f_frsize=1)))
+            process = Mock(returncode=0); process.poll.return_value = 0
+            def launching(*args, **kwargs):
+                nonlocal pending
+                if child_mask:
+                    with patch.object(module.os, "setsid"), patch.object(module.signal, "signal") as disposition, patch.object(module.signal, "pthread_sigmask") as mask:
+                        kwargs["preexec_fn"]()
+                    disposition.assert_called_once_with(module.signal.SIGTERM, module.signal.SIG_DFL)
+                    mask.assert_called_once_with(module.signal.SIG_SETMASK, {module.signal.SIGUSR1})
+                if sigterm == "launch":
+                    if module.signal.SIGTERM in blocked: pending = True
+                    else: module.signal.getsignal(module.signal.SIGTERM)(module.signal.SIGTERM, None)
+                return process
+            launch = stack.enter_context(patch.object(module.subprocess, "Popen", side_effect=launching))
+            resolve = Path.resolve
+            def resolved(path, *args, **kwargs):
+                if path == Path(f"/proc/{os.getpid()}/exe"): return resolve(Path(launch.call_args.args[0][4]))
+                return resolve(path, *args, **kwargs)
+            stack.enter_context(patch.object(Path, "resolve", resolved))
+            previous_term = module.signal.getsignal(module.signal.SIGTERM)
+            try: result = module.run(a, root)
+            finally:
+                if seconds <= module.CLEANUP_RESERVE: launch.assert_not_called()
+                if manifest_drift or overlap or binary_drift == "before": launch.assert_not_called(); database.assert_not_called()
+                if sigterm:
+                    cleanup.assert_called_once_with(a["runner_cgroup"], process)
+                    self.assertEqual(module.signal.getsignal(module.signal.SIGTERM), previous_term)
+                    self.assertEqual(blocked, {module.signal.SIGUSR1})
+            if not drift: self.assertEqual(launch.call_args.kwargs["env"]["REFERENCE"], endpoints["REFERENCE"])
+            if binary_drift:
+                used = Path(launch.call_args.args[0][4]); self.assertNotEqual(used, binary)
+                self.assertEqual(used.read_bytes(), b"admitted binary"); self.assertEqual(used.stat().st_mode & 0o222, 0)
+            if snapshot:
+                command = launch.call_args.args[0]; used = Path(command[command.index("--manifests-root") + 1])
+                self.assertNotEqual(used, manifests)
+                self.assertEqual((used / "watch.toml").read_text(), "watch = 1\n")
+                self.assertEqual((used / "watch.toml").stat().st_mode & 0o222, 0)
+            return result
+
+    def test_full_measurement_requires_positive_loaded_native_query(self):
+        empty = [event(stage, rows=0, logical_bytes=0, max_item_bytes=0, stored_rows=0, stored_bytes=0, provider_rows=0, provider_bytes=0, receipt_bytes=0, hash_bytes=0, output_bytes=0)
+                 for stage in ("reth_native_query_start", "reth_native_query_empty", "reth_complete_receipt_peak", "provider_query_return")]
+        a = fixture()
+        for side in ("stored", "provider"): a[side] = dict.fromkeys(a[side], 0)
+        reader = module.Observations(a)
+        values = [v for v in complete_stream() if v["fields"]["stage"] not in module.NATIVE_WITNESSES]
+        with self.assertRaisesRegex(ValueError, "positive loaded"):
+            for sequence, value in enumerate(values, 1):
+                f = value["fields"]; f["sequence"] = sequence
+                if f["stage"] == "reth_native_query_loaded": f["stage"] = "reth_native_query_empty"
+                for key in ("rows", "logical_bytes", "max_item_bytes", "stored_rows", "stored_bytes", "provider_rows", "provider_bytes", "receipt_bytes", "hash_bytes", "output_bytes"): f[key] = 0
+                reader.accept(value)
+            reader.finish()
+        reader = module.Observations(fixture())
+        for sequence, value in enumerate(empty + complete_stream(), 1):
+            value["fields"]["sequence"] = sequence; reader.accept(value)
+        reader.finish()
+
+    def test_main_uses_same_admission_bytes_after_path_replacement(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory); path = root / "input.json"; out = root / "output"
+            a = fixture(); raw = json.dumps(a).encode(); path.write_bytes(raw)
+            changed = json.dumps(dict(a, run_id="replacement")); read, digest = Path.read_bytes, module.digest
+            def replacing_read(file):
+                data = read(file)
+                if file == path: path.write_text(changed)
+                return data
+            def replacing_digest(file):
+                value = digest(file); path.write_text(changed); return value
+            argv = ["collector", "--admission", str(path), "--admission-sha256", hashlib.sha256(raw).hexdigest(), "--output", str(out)]
+            with patch.object(module.sys, "argv", argv), patch.object(Path, "read_bytes", replacing_read), patch.object(module, "digest", replacing_digest), patch.object(module, "run", return_value={"valid": True}) as run:
+                self.assertEqual(module.main(), 0)
+                self.assertEqual(run.call_args.args[0], a); self.assertEqual(read(out / "admission.json"), raw)
+                self.assertNotEqual(read(path), raw)
+
+    def test_collector_rejects_retry_even_when_final_inventory_matches(self):
+        for partial in ([], [event("stored_map_before_query_consume")]):
+            reader = module.Observations(fixture()); values = partial + complete_stream()
+            with self.subTest(partial=bool(partial)), self.assertRaisesRegex(ValueError, "attempt"):
+                for sequence, value in enumerate(values, 1):
+                    value["fields"]["sequence"] = sequence
+                    if value not in partial and value["fields"]["stage"] not in module.ROOT_STAGES: value["fields"]["attempt"] = 2
+                    reader.accept(value)
+                reader.finish()
+
+    def test_collector_launches_digest_bound_binary_after_replacement(self):
+        self.assertTrue(self.collector_run(binary_drift=True)["valid"])
+        with self.assertRaisesRegex(ValueError, "binary differs"): self.collector_run(binary_drift="before")
+
+    def test_collector_rejects_overlapping_cgroups_before_observation(self):
+        for overlap in ("equal", "parent", "child"):
+            with self.subTest(overlap=overlap), self.assertRaisesRegex(ValueError, "cgroup overlap"):
+                self.collector_run(overlap=overlap)
+
+    def test_collector_sigterm_runs_cleanup_and_restores_handler(self):
+        with self.assertRaisesRegex(InterruptedError, "SIGTERM"): self.collector_run(sigterm=True)
+
+    def test_collector_sigterm_during_launch_waits_for_process_ownership(self):
+        with self.assertRaisesRegex(InterruptedError, "SIGTERM"): self.collector_run(sigterm="launch")
+
+    def test_collector_child_restores_signal_delivery_after_cgroup_join(self):
+        self.assertTrue(self.collector_run(child_mask=True)["valid"])
+
+    def test_collector_rejects_manifest_drift_before_observation(self):
+        with self.assertRaisesRegex(ValueError, "manifest differs"): self.collector_run(manifest_drift=True)
+
+    def test_collector_launches_verified_readonly_manifest_snapshot(self):
+        self.assertTrue(self.collector_run(snapshot=True)["valid"])
+
+    def test_collector_accepts_runner_source_kind_spellings(self):
+        for kind in ("reth-db", "reth_db", " ReTh-Db "):
+            with self.subTest(kind=kind): self.assertTrue(self.collector_run(source_kind=kind)["valid"])
+
+    def test_manifest_digest_binds_names_bytes_and_rejects_symlinks(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory); path = root / "watch.toml"; path.write_text("watch = 1\n")
+            expected = "c4ee76fadb335328e50a750a9b04ece6934ef9406c5ab1e2a74aa6c8e8584d06"
+            self.assertEqual(module.manifest_tree(root), expected)
+            path.write_text("watch = 2\n"); self.assertNotEqual(module.manifest_tree(root), expected)
+            path.write_text("watch = 1\n"); path.rename(root / "renamed.toml")
+            self.assertNotEqual(module.manifest_tree(root), expected)
+            (root / "watch.toml").symlink_to(root / "renamed.toml")
+            with self.assertRaisesRegex(ValueError, "symlink"): module.manifest_tree(root)
+
+    def test_collector_rejects_endpoint_drift(self):
+        with self.assertRaisesRegex(ValueError, "source endpoint differs"):
+            self.collector_run(drift=True)
+
+    def test_collector_rejects_final_memory_events(self):
+        self.assertTrue(self.collector_run()["valid"])
+        for role in ("runner", "postgres"):
+            for event in ("max", "oom", "oom_kill"):
+                for snapshot in (3, 4):
+                    with self.subTest(role=role, event=event, snapshot=snapshot), self.assertRaisesRegex(ValueError, "memory limit encountered"):
+                        self.collector_run(final_event=(role, event, snapshot))
+
+    def postgres_observation(self, attributed=False, slow_exit=False, outside_reader=False, frozen=False, state_drift=False):
+        a = fixture(); a["database"] = dict(name="fixture", oid=1, system_identifier="cluster")
+        a["postgres_cgroup"] = "/owned"
+        value = dict(a["database"], state=a["initial_state"], stats_reset="same", backend_pid=77,
+                     server_address="127.0.0.1", server_port=5432, client_address="127.0.0.1", client_port=60000)
+        wire = (json.dumps(value) + "\n").encode(); clients = []
+        admitted_env = {"BIGNAME_DATABASE_URL": "writer", "BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL": "reader"}
+        def launch(*args, **kwargs):
+            client = Mock(); client.url = kwargs["env"]["PGDATABASE"]; clients.append(client)
+            if slow_exit: client.wait.side_effect = [module.subprocess.TimeoutExpired("psql", 1), 0]
+            return client
+        with ExitStack() as stack, patch.dict(module.os.environ, {"BIGNAME_DATABASE_URL": "writer", "BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL": "reader"}, clear=True), \
+             patch.object(module.subprocess, "Popen", side_effect=launch), \
+             patch.object(module.select, "select", return_value=([True], [], [])), \
+             patch.object(module.os, "read", return_value=wire), \
+             patch.object(module, "cgroup", return_value={"cgroup.procs": ""}):
+            if attributed:
+                def held(*args):
+                    clients[-1].wait.assert_not_called()
+                    if outside_reader and clients[-1].url == "reader": raise ValueError("PostgreSQL cgroup attribution reader outside")
+                    return {"host_pid": 901 if clients[-1].url == "writer" else 902}
+                stack.enter_context(patch.object(module, "postgres_connection", side_effect=held))
+            if frozen:
+                module.os.environ.update({key: "drifted" for key in admitted_env})
+            if state_drift:
+                changed = dict(value, state={"different": True})
+                module.os.read.side_effect = [wire, (json.dumps(changed) + "\n").encode()]
+            try: return module.postgres(a, launch_env=admitted_env if frozen else None)
+            finally:
+                for client in clients:
+                    client.stdin.close.assert_called_once(); client.stdout.close.assert_called_once()
+                    if slow_exit: client.kill.assert_called_once()
+
+    def test_postgres_rejects_reader_outside_writer_allocation(self):
+        with self.assertRaisesRegex(ValueError, "PostgreSQL cgroup attribution reader outside"):
+            self.postgres_observation(attributed=True, outside_reader=True)
+
+    def test_postgres_uses_frozen_launch_urls_and_records_both_witnesses(self):
+        result = self.postgres_observation(attributed=True, frozen=True)
+        self.assertEqual(result["cgroup_connection"], {"host_pid": 901})
+        self.assertEqual(result["verification_reader"]["cgroup_connection"], {"host_pid": 902})
+        with self.assertRaisesRegex(ValueError, "writer/reader observation state differs"):
+            self.postgres_observation(attributed=True, state_drift=True)
+
+    def test_postgres_rejects_unattributed_connection(self):
+        with self.assertRaisesRegex(ValueError, "PostgreSQL cgroup attribution"):
+            self.postgres_observation()
+
+    def test_postgres_observation_releases_held_client(self):
+        for slow in (False, True):
+            with self.subTest(slow_exit=slow):
+                self.assertEqual(self.postgres_observation(attributed=True, slow_exit=slow)["cgroup_connection"], {"host_pid": 901})
+
+    def test_postgres_connection_requires_owned_socket_and_namespace_pid(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for child in ("fd", "net", "ns"): (root / child).mkdir()
+            (root / "fd/3").symlink_to("socket:[99]")
+            (root / "ns/pid").symlink_to("pid:[12]"); (root / "ns/net").symlink_to("net:[34]")
+            status = "NSpid:\t901\t77\n"; (root / "status").write_text(status)
+            a = {"postgres_cgroup": "owned"}
+            with patch.object(module, "Path", side_effect=lambda *args: root if args == ("/proc", "901") else Path(*args)), \
+                 patch.object(module, "cgroup", return_value={"cgroup.procs": "901"}):
+                for host, table, encoded in (("127.0.0.1", "tcp", "0100007F"), ("::1", "tcp6", "00000000000000000000000001000000")):
+                    value = dict(backend_pid=77, server_address=host, server_port=5432, client_address=host, client_port=60000)
+                    row = f"0: {encoded}:1538 {encoded}:EA60 01 0:0 0:0 0 0 0 99\n"
+                    (root / "net" / table).write_text("header\n" + row)
+                    self.assertEqual(module.postgres_connection(a, value)["host_pid"], 901)
+                    for bad in ("", "NSpid: 902 77\n", "NSpid: 901 78\n"):
+                        (root / "status").write_text(bad)
+                        with self.assertRaises(ValueError): module.postgres_connection(a, value)
+                    (root / "status").write_text(status)
+                    for bad in (row.replace(":EA60", ":EA61"), row.replace(" 99", " 98"), row + row):
+                        (root / "net" / table).write_text("header\n" + bad)
+                        with self.assertRaises(ValueError): module.postgres_connection(a, value)
+
+    def test_stream_requires_all_actual_connection_roles_and_bounds_count(self):
+        reader = module.Observations(fixture())
+        reader.database_check = lambda f: {"role": f["database_role"]}; reader.database_witnesses = []
+        with self.assertRaisesRegex(ValueError, "database connection witnesses missing"):
+            for value in complete_stream(): reader.accept(value)
+            reader.finish()
+        reader = module.Observations(fixture(), lambda f: {"role": f["database_role"]})
+        values = [event("postgres_connection", attempt=0, database_role=role) for role in ("writer", "reader", "manifest_lock", "phase_lock")]
+        for sequence, value in enumerate(values + complete_stream(), 1):
+            value["fields"]["sequence"] = sequence; reader.accept(value)
+        reader.finish()
+        while len(reader.database_witnesses) < 128:
+            reader.accept(event("postgres_connection", reader.sequence + 1, attempt=0, database_role="writer"))
+        with self.assertRaisesRegex(ValueError, "connection ceiling"):
+            reader.accept(event("postgres_connection", reader.sequence + 1, attempt=0, database_role="writer"))
+
+    def test_actual_database_witness_requires_both_live_endpoint_owners(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for pid, inner, inode in ((901, 77, 99), (902, 88, 100)):
+                proc = root / str(pid)
+                for child in ("fd", "net", "ns"): (proc / child).mkdir(parents=True)
+                (proc / "status").write_text(f"NSpid: {pid} {inner}\n")
+                (proc / "fd/3").symlink_to(f"socket:[{inode}]")
+                (proc / "ns/pid").symlink_to(f"pid:[{pid}]"); (proc / "ns/net").symlink_to("net:[34]")
+            a = dict(database=dict(name="fixture", oid=1, system_identifier="cluster"), postgres_cgroup="pg", runner_cgroup="runner")
+            value = dict(a["database"], backend_pid=77, server_address="127.0.0.1", server_port=5432, client_address="127.0.0.1", client_port=60000)
+            fields = dict(database_role="writer", runner_pid=88, database=json.dumps(value))
+            rows = {901: "0: 0100007F:1538 0100007F:EA60 01 0:0 0:0 0 0 0 99\n", 902: "0: 0100007F:EA60 0100007F:1538 01 0:0 0:0 0 0 0 100\n"}
+            for pid, row in rows.items(): (root / str(pid) / "net/tcp").write_text("header\n" + row)
+            members = {"pg": "901", "runner": "902"}
+            with patch.object(module, "Path", side_effect=lambda *args: root / args[1] if len(args) == 2 and args[0] == "/proc" else Path(*args)), patch.object(module, "cgroup", side_effect=lambda group: {"cgroup.procs": members[group]}):
+                witness = module.runner_database(a, fields, float("inf"))
+                self.assertEqual((witness["backend"]["host_pid"], witness["runner"]["host_pid"]), (901, 902))
+                for group in members:
+                    saved = members[group]; members[group] = ""
+                    with self.subTest(group=group), self.assertRaises(ValueError): module.runner_database(a, fields, float("inf"))
+                    members[group] = saved
+                self.assertEqual(module.postgres_connection(a, value)["host_pid"], 901)
+                (root / "902/net/tcp").write_text("header\n" + rows[902].replace(":EA60", ":EA61"))
+                with self.assertRaisesRegex(ValueError, "runner cgroup"): module.runner_database(a, fields, float("inf"))
+                (root / "902/net/tcp").write_text("header\n" + rows[902])
+                with self.assertRaisesRegex(ValueError, "identity"):
+                    module.runner_database(a, dict(fields, database=json.dumps(dict(value, system_identifier="other"))), float("inf"))
+                with self.assertRaisesRegex(ValueError, "deadline"): module.runner_database(a, fields, 0)
+                (root / "901/fd/3").unlink()
+                with self.assertRaisesRegex(ValueError, "PostgreSQL cgroup"): module.runner_database(a, fields, float("inf"))
+
+    def test_collector_deadline_includes_startup_and_cleanup(self):
+        for options in ({"seconds": 10}, {"cleanup_elapsed": 31}):
+            with self.subTest(options=options), self.assertRaisesRegex(ValueError, "deadline"):
+                self.collector_run(**options)
+        with self.subTest(duration=True): self.assertEqual(self.collector_run(cleanup_elapsed=5)["seconds"], 5)
+
+    def test_cleanup_kills_child_after_leader_exit(self):
+        process = Mock(); process.poll.return_value = 0
+        members = Mock(); members.read_text.side_effect = ["123", "123", "123", "", ""]
+        kill_file = Mock()
+        def path(group, name): return members if name == "cgroup.procs" else kill_file
+        with patch.object(module, "Path", side_effect=path), patch.object(module.os, "kill") as term, patch.object(module.time, "monotonic", side_effect=[0, 4, 5]):
+            module.terminate_owned("owned", process)
+        term.assert_called_once_with(123, module.signal.SIGTERM)
+        kill_file.write_text.assert_called_once_with("1")
+        process.wait.assert_called_once_with(timeout=3)
+
+
+if __name__ == "__main__":
+    unittest.main()

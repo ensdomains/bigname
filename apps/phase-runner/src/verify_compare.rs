@@ -3,6 +3,7 @@ use std::{
     fmt,
 };
 
+use bigname_ingest::measurement::{self as memory, Measured};
 use bigname_ingest::{VerificationBatch, VerificationLog};
 
 use crate::verify_store::StoredVerificationBatch;
@@ -45,6 +46,9 @@ pub(crate) fn compare(
         ));
     }
 
+    memory::observe("both_vectors", || {
+        stored.logs.footprint().combine(reference.logs.footprint())
+    });
     let stored = logs_by_position(&stored.logs);
     let reference = logs_by_position(&reference.logs);
     let positions = stored
@@ -52,6 +56,13 @@ pub(crate) fn compare(
         .chain(reference.keys())
         .copied()
         .collect::<BTreeSet<_>>();
+    memory::observe("compare_position_maps", || {
+        memory::Footprint::entries::<((i64, i64), &VerificationLog)>(stored.len())
+            .combine(memory::Footprint::entries::<((i64, i64), &VerificationLog)>(reference.len()))
+    });
+    memory::observe("compare_position_union", || {
+        memory::Footprint::entries::<(i64, i64)>(positions.len())
+    });
     for position in positions {
         let ours = stored.get(&position);
         let theirs = reference.get(&position);
@@ -80,6 +91,8 @@ pub(crate) fn compare(
             (None, None) => {}
         }
     }
+    memory::scratch_summary();
+    memory::observe("compare_matched", Default::default);
     None
 }
 
@@ -148,6 +161,11 @@ fn compare_log(
         .iter()
         .map(|topic| topic.to_ascii_lowercase())
         .collect::<Vec<_>>();
+    memory::scratch("compare_topic_scratch", || {
+        ours_topics
+            .footprint()
+            .combine(reference_topics.footprint())
+    });
     if ours_topics != reference_topics {
         return Some(mismatch(
             block,
@@ -208,6 +226,7 @@ fn bytes_hex(bytes: &[u8]) -> String {
 }
 
 fn bounded(value: String) -> String {
+    memory::observe("diagnostic_before_truncate", || value.footprint());
     const LIMIT: usize = 1_024;
     if value.len() <= LIMIT {
         return value;

@@ -28,6 +28,11 @@ impl PhaseLock {
                  {error}"
                 ))
             })?;
+        crate::database::observe_connection(&mut connection, "phase_lock")
+            .await
+            .map_err(|error| {
+                RunnerError::database("phase lock measurement witness failed", error)
+            })?;
         let lock_name = lock_name(chain_id, phase);
         let acquired: bool = sqlx::query_scalar(
             "SELECT pg_try_advisory_lock(hashtextextended($1::text, 0::bigint))",

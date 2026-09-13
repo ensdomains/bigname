@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use sqlx::{
-    PgPool,
+    PgConnection, PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 
@@ -39,6 +39,7 @@ impl RunnerDatabase {
         let connect_options = stamp_interpreter_content_hash(options);
         let pool = PgPoolOptions::new()
             .max_connections(maximum_connections.max(1))
+            .after_connect(|connection, _| Box::pin(observe_connection(connection, "writer")))
             .connect_with(connect_options.clone())
             .await
             .map_err(|error| {
@@ -87,9 +88,9 @@ impl VerificationDatabase {
             .after_connect(|connection, _metadata| {
                 Box::pin(async move {
                     sqlx::query("SET default_transaction_read_only = on")
-                        .execute(connection)
+                        .execute(&mut *connection)
                         .await?;
-                    Ok(())
+                    observe_connection(connection, "reader").await
                 })
             })
             .connect_with(options)
@@ -289,4 +290,36 @@ pub fn stamp_interpreter_content_hash(options: PgConnectOptions) -> PgConnectOpt
         ),
         ("search_path", PHASE_SEARCH_PATH),
     ])
+}
+
+/// In measurement mode, witness each actual session before pool or lock use.
+pub(crate) async fn observe_connection(
+    connection: &mut PgConnection,
+    role: &'static str,
+) -> Result<(), sqlx::Error> {
+    use bigname_ingest::measurement;
+    if measurement::capture().is_none() {
+        return Ok(());
+    }
+    let query = "SELECT json_build_object(
+        'backend_pid',pg_backend_pid(),
+        'server_address',inet_server_addr(),'server_port',inet_server_port(),
+        'client_address',inet_client_addr(),'client_port',inet_client_port(),
+        'name',current_database(),'oid',(SELECT oid FROM pg_database WHERE datname=current_database()),
+        'system_identifier',(SELECT system_identifier::text FROM pg_control_system()))::text";
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sqlx::query_scalar::<_, String>(query).fetch_one(connection),
+    )
+    .await;
+    if let Ok(Ok(witness)) = result
+        && witness.len() <= 4096
+    {
+        measurement::database::observe(role, Some(&witness));
+        return Ok(());
+    }
+    measurement::database::observe(role, None);
+    Err(sqlx::Error::Protocol(
+        "database measurement witness failed".into(),
+    ))
 }

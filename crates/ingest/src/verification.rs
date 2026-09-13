@@ -1,3 +1,4 @@
+use crate::measurement::{self as memory, Measured};
 use std::collections::BTreeMap;
 
 use tokio::sync::Mutex;
@@ -84,6 +85,14 @@ impl VerificationProvider {
         to_block: i64,
     ) -> Result<VerificationBatch> {
         let _fetch_guard = self.fetch_lock.lock().await;
+        memory::observe(
+            if self.kind == VerificationProviderKind::LocalReth {
+                "compared_local_reth"
+            } else {
+                "compared_rpc"
+            },
+            Default::default,
+        );
         if from_block < 0 || from_block > to_block {
             return Err(IngestError::configuration(format!(
                 "verification range {from_block}..={to_block} is invalid"
@@ -100,6 +109,7 @@ impl VerificationProvider {
                     error,
                 )
             })?;
+        memory::observe("reference_resolved", || resolved.footprint());
         let end = resolved
             .last()
             .filter(|block| block.number == to_block)
@@ -112,11 +122,15 @@ impl VerificationProvider {
 
         let mut selected_by_identity = BTreeMap::new();
         let queries = filter.queries();
+        memory::observe("watch_queries_before_mutation", || queries.footprint());
+        let mut accounting = memory::Identity::default();
         fetch_queries(
             &self.provider,
             &resolved,
             &queries,
             &mut selected_by_identity,
+            &mut accounting,
+            "ordinary",
         )
         .await?;
         if let Some(announcement_topic0) = filter.registry_announcement_topic0() {
@@ -129,17 +143,30 @@ impl VerificationProvider {
                 })
                 .map(|log| (log.address.clone(), log.block_number))
                 .collect::<Vec<_>>();
+            memory::observe("reference_announcements", || {
+                let mut f = memory::Footprint::entries::<(String, i64)>(announcements.capacity());
+                for (address, _) in &announcements {
+                    f = f.combine(address.footprint());
+                }
+                f
+            });
             let supplemental =
                 filter.admit_registry_announcements(announcements, from_block, to_block);
+            memory::observe("watch_queries_after_mutation", || {
+                queries.footprint().combine(supplemental.footprint())
+            });
             fetch_queries(
                 &self.provider,
                 &resolved,
                 &supplemental,
                 &mut selected_by_identity,
+                &mut accounting,
+                "supplemental",
             )
             .await?;
         }
 
+        accounting.emit("provider_identity_map");
         let end_after = self
             .provider
             .resolve(&[to_block])
@@ -157,6 +184,7 @@ impl VerificationProvider {
                     "verification reference omitted target block {to_block} on recheck"
                 ))
             })?;
+        memory::observe("reference_target_rechecked", || end_after.footprint());
         if end_after != end {
             return Err(IngestError::transient(format!(
                 "verification reference target block changed during range lookup: {} became {}",
@@ -177,6 +205,7 @@ impl VerificationProvider {
             })
             .map(VerificationLog::from)
             .collect::<Vec<_>>();
+        memory::observe("provider_before_sort", || logs.footprint());
         logs.sort_by_key(|log| {
             (
                 log.block_number,
@@ -185,6 +214,7 @@ impl VerificationProvider {
                 log.block_hash.clone(),
             )
         });
+        memory::observe("provider_final", || logs.footprint());
         Ok(VerificationBatch {
             end: VerificationMarker {
                 number: end.number,
@@ -201,23 +231,44 @@ async fn fetch_queries(
     resolved: &[ResolvedBlock],
     queries: &[crate::manifest::WatchQuery],
     selected_by_identity: &mut BTreeMap<(String, i64), Log>,
+    accounting: &mut memory::Identity,
+    kind: &'static str,
 ) -> Result<()> {
-    for query in queries {
-        let logs = provider
-            .verification_logs(
+    for (ordinal, query) in queries.iter().enumerate() {
+        let logs = memory::query(
+            kind,
+            ordinal,
+            query.from_block,
+            query.to_block,
+            provider.verification_logs(
                 resolved,
                 query.from_block,
                 query.to_block,
                 &query.addresses,
                 &query.topic0s,
-            )
-            .await
-            .map_err(|error| provider_error("failed to fetch verification logs", error))?;
+            ),
+        )
+        .await
+        .map_err(|error| provider_error("failed to fetch verification logs", error))?;
+        let raw = memory::returned(
+            "provider",
+            kind,
+            ordinal,
+            query.from_block,
+            query.to_block,
+            || logs.footprint(),
+        );
+        accounting.query(raw, memory::inline(&logs).owned);
         for log in logs {
             let key = (log.block_hash.clone(), log.log_index);
-            if let Some(previous) = selected_by_identity.insert(key.clone(), log.clone())
-                && previous != log
+            accounting.consume(&log);
+            if let Some(previous) = accounting.inserted(
+                selected_by_identity.insert(key.clone(), log.clone()),
+                selected_by_identity,
+                &key,
+            ) && previous != log
             {
+                accounting.emit("provider_identity_conflict");
                 return Err(IngestError::data_integrity(format!(
                     "verification reference returned conflicting log identity {} {}",
                     key.0, key.1
@@ -240,5 +291,14 @@ impl From<Log> for VerificationLog {
             topics: log.topics,
             data: log.data,
         }
+    }
+}
+
+impl Measured for crate::manifest::WatchQuery {
+    fn footprint(&self) -> memory::Footprint {
+        self.addresses
+            .footprint()
+            .combine(self.topic0s.footprint())
+            .combine(memory::Footprint::entries::<i64>(2))
     }
 }

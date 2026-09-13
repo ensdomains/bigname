@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 
+use crate::measurement::{self as memory, Measured};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
@@ -113,6 +114,7 @@ impl JsonRpcProvider {
         validate_contiguous(resolved)?;
         let mut queue = VecDeque::from([(0usize, resolved.len())]);
         let mut values = Vec::new();
+        let mut raw_footprint = memory::Footprint::default();
         while let Some((start, end)) = queue.pop_front() {
             let first = resolved[start].number;
             let last = resolved[end - 1].number;
@@ -123,7 +125,16 @@ impl JsonRpcProvider {
                 )
                 .await;
             match result {
-                Ok(Some(Value::Array(logs))) => values.extend(logs),
+                Ok(Some(Value::Array(logs))) => {
+                    memory::observe("rpc_intake_split_response", || {
+                        let f = logs.footprint();
+                        let mut nested = f;
+                        nested.owned = nested.owned.saturating_sub(memory::inline(&logs).owned);
+                        raw_footprint = raw_footprint.combine(nested);
+                        f
+                    });
+                    values.extend(logs);
+                }
                 Ok(Some(_)) => bail!("provider returned a non-array log result"),
                 Ok(None) => bail!("provider returned null logs for {first}..={last}"),
                 Err(error) if end - start > 1 && range_too_large(&error) => {
@@ -134,6 +145,11 @@ impl JsonRpcProvider {
                 Err(error) => return Err(error),
             }
         }
+        memory::observe("rpc_intake_raw_accumulated", || {
+            let mut f = raw_footprint;
+            f.owned = memory::sum(f.owned, memory::inline(&values).owned);
+            f
+        });
         let by_number = resolved
             .iter()
             .map(|block| (block.number, block.hash.as_str()))
@@ -146,6 +162,11 @@ impl JsonRpcProvider {
                 .with_context(|| format!("provider returned log for block {number}"))?;
             logs.push(Log::from_value(value, hash, number)?);
         }
+        memory::observe("rpc_intake_raw_and_typed", || {
+            let mut f = raw_footprint.combine(logs.footprint());
+            f.owned = memory::sum(f.owned, memory::inline(&values).owned);
+            f
+        });
         if self
             .resolve(&by_number.keys().copied().collect::<Vec<_>>())
             .await?
@@ -181,6 +202,9 @@ impl JsonRpcProvider {
                 Ok(log)
             })
             .collect::<Result<Vec<_>>>()?;
+        memory::observe("rpc_verification_raw_and_typed", || {
+            values.footprint().combine(logs.footprint())
+        });
         Ok(logs)
     }
 
@@ -196,6 +220,7 @@ impl JsonRpcProvider {
         }
         let mut queue = VecDeque::from([(from_block, to_block)]);
         let mut values = Vec::new();
+        let mut raw_footprint = memory::Footprint::default();
         while let Some((first, last)) = queue.pop_front() {
             let result = self
                 .request(
@@ -204,7 +229,16 @@ impl JsonRpcProvider {
                 )
                 .await;
             match result {
-                Ok(Some(Value::Array(logs))) => values.extend(logs),
+                Ok(Some(Value::Array(logs))) => {
+                    memory::observe("rpc_verification_split_response", || {
+                        let f = logs.footprint();
+                        let mut nested = f;
+                        nested.owned = nested.owned.saturating_sub(memory::inline(&logs).owned);
+                        raw_footprint = raw_footprint.combine(nested);
+                        f
+                    });
+                    values.extend(logs);
+                }
                 Ok(Some(_)) => bail!("provider returned a non-array log result"),
                 Ok(None) => bail!("provider returned null logs for {first}..={last}"),
                 Err(error) if first < last && range_too_large(&error) => {
@@ -215,6 +249,11 @@ impl JsonRpcProvider {
                 Err(error) => return Err(error),
             }
         }
+        memory::observe("rpc_verification_raw_accumulated", || {
+            let mut f = raw_footprint;
+            f.owned = memory::sum(f.owned, memory::inline(&values).owned);
+            f
+        });
         Ok(values)
     }
 
@@ -223,6 +262,7 @@ impl JsonRpcProvider {
         for expected in resolved {
             bundles.push(self.bundle(expected).await?);
         }
+        memory::observe("rpc_block_bundles", || bundles.footprint());
         Ok(bundles)
     }
 

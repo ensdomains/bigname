@@ -1026,3 +1026,172 @@ is not graceful success.
 Use disposable services for shutdown experiments, never the active production
 API or database. Fixture and container tests are not rollout, restore, or
 beta-launch evidence. No runner stop command or grace is added by this slice.
+
+## Opt-in Verify memory observations
+
+`BIGNAME_VERIFY_MEMORY_RUN_ID` enables diagnostic collection accounting. Use a
+nonempty ASCII alphanumeric, hyphen or underscore identifier of at most 64 bytes.
+Leave it unset in ordinary operation. Enable the `bigname_memory=info` tracing
+target to retain its JSON events. Missing or invalid events invalidate the
+measurement, not the application's comparison result. This diagnostic path
+introduces no production row/byte limit or new verification behavior.
+
+The first dense Mainnet experiment requires a separately approved admission
+record and runtime allocation. It must use real stored facts and an independent
+local reth reference through the supported CLI. A
+[provider-trusted](../glossary.md#verification-level) pass, fake
+reference or RPC fixture does not satisfy Mainnet evidence. Admission includes
+historical source independence, opened storage-object identities, unpruned
+reference data, legal exact-range Verify-only redo, retained extent/level and
+manifest equality at startup. CLI startup synchronizes manifests even for
+Verify-only redo. Do not manufacture checkpoints, alter source permissions or
+read a live private database to make this experiment possible.
+
+The finite `scripts/measure-verify-memory` collector consumes existing resources;
+it cannot provision, restore, build or allocate them. Supply `--admission`, its
+reviewed `--admission-sha256`, and a new `--output` directory. The admission is
+read once; those exact verified bytes are parsed and archived. Database URLs and
+source endpoint values remain environment variables. The allocation owner
+supplies the directly authenticated SELECT-only verification role, writer role,
+and source descriptors. Set the usual `BIGNAME_DATABASE_URL` and
+`BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL` values privately.
+The collector requires direct TCP PostgreSQL access and host `/proc` visibility.
+It checks both writer and verification-reader URLs from the frozen launch
+environment. It holds each observation connection open and matches its backend namespace PID,
+TCP endpoints and socket inode to the admitted PostgreSQL cgroup. Empty,
+unrelated, ambiguous or unreadable attribution fails admission; no proxy,
+Unix-socket fallback or additional SQL privilege is used. The observation client
+has bounded query/read/exit waits included in startup and total elapsed time.
+Both observation witnesses and states are retained; their states must agree.
+In measurement mode, every actual writer/reader pool connection (including
+replacements), manifest startup lock and phase lock emits a connection witness
+before use through the same sequenced diagnostic stream. Each identity query
+has a two-second timeout; failure invalidates measurement and rejects that
+connection. The collector requires all four roles and at most 128 connection
+records. Within one second per record and the overall cleanup reserve, it
+matches the backend socket to the PostgreSQL cgroup and the reciprocal socket
+to the runner cgroup. A closed, unreadable or unmatched socket invalidates the
+measurement, even when the separate observation probes passed. These records
+are evidence, not an acknowledgement protocol: successful real Linux validation
+must establish that startup and lock lifetimes allow a usable valid collection.
+Ordinary execution and verification-reader read-only settings are unchanged.
+
+Admission JSON records `run_id`, `chain`, numeric `chain_id`, inclusive `from`/
+`to`, `binary`, `binary_sha256`, `instrumentation_commit`, `base_tree`,
+`fixture_sha256`, `manifest_sha256`, `density_inventory_sha256`, and
+`allocation_receipt_sha256`. Include reviewed booleans
+`independent_source_history_reviewed`, `legal_redo_reviewed`, and
+`manifest_sync_unchanged`; these refer to the sealed supporting records and do
+not replace them. Include `source_objects` with path/device/inode for both
+source datadirs and opened storage children, two `source_descriptors`,
+plus `source_endpoints` mapping each descriptor’s environment-variable name to
+its admitted absolute local reth datadir. The collector binds the exact launch
+environment to those endpoints and requires each datadir, `db`, `static_files`
+and `rocksdb` identity in the admitted inventory. Include
+`manifests_root`, `writable_path`, `disk_paths`, owned `pg_temp_dirs`,
+`runner_cgroup`, `postgres_cgroup`, memory ceilings `runner_bytes` and
+`postgres_bytes`, deadline `seconds`, and `build_test_chains_including_this`.
+Resolved runner and PostgreSQL cgroup paths must be disjoint: equal paths and
+ancestor/descendant allocations are rejected before observation. The executable
+is copied and hashed before observation, limited to 256 MiB and the startup
+deadline; redo launches that owned read-only copy, which remains in the output.
+Account for this additional artifact alongside the manifest and diagnostic files.
+
+`manifest_sha256` binds raw TOML bytes and relative POSIX filenames: SHA-256 of
+UTF-8 compact JSON (no ASCII escaping or whitespace) containing sorted
+`[filename, lowercase_sha256_of_file_bytes]` pairs. This includes normalizer
+version lines and is distinct from the runner's semantic manifest hash.
+Before database observation, the collector verifies an owned read-only copy
+under the output directory and passes that snapshot to redo. Symlinks, empty
+trees, more than 4,096 TOML files or 64 MiB of TOML bytes are rejected.
+Source kinds accept the runner's case, surrounding whitespace and hyphen/underscore
+normalization (`reth-db` / `reth_db`); launch retains each exact descriptor.
+
+Include `database` (name, OID, system_identifier), `initial_state`,
+`expected_final_state` (phase_status, current_block_number/current_block_hash,
+verification_level, redo_in_progress), `ingest_start`, `finalized_end_hash`,
+and `complete_receipt_bytes_max`. Each of `stored` and `provider` supplies
+`unique_rows`, `logical_bytes`, `cumulative_rows`, `cumulative_bytes` and
+`largest_log`. Unknown values fail admission. A partial redo may preserve the
+old normal cursor and weaker whole-extent level; its comparison end is separate.
+
+Experimental maxima are 131,072 blocks, 1,800 seconds including startup and
+cleanup, 4 GiB runner and 2 GiB PostgreSQL, no swap escape, and at least 100 GiB
+free. Per side: 250,000 selected rows/128 MiB logical content, 500,000 cumulative
+query rows/256 MiB content including duplicates and supplemental queries, and
+1 MiB per log. Lower admitted ceilings are allowed; these are not deployment
+budgets. The collector reserves the last 20 seconds for termination. Four
+concurrent build/test execution chains, including nested work, remain the limit.
+
+Log logical bytes are 24 for three i64 fields plus UTF-8 block hash, transaction
+hash, address, topic lengths and decoded data length. Exposed capacity counts
+vector backing storage and owned string/buffer capacities; it excludes allocator
+metadata and B-tree nodes. Position maps borrow payloads. Identity summaries
+record actual retained string/vector capacities after insertion, subtract replaced
+values, and decrement consumed query payloads separately from iterator backing.
+Their high-water event uses rows for duplicate count, logical_bytes for retained
+content peak, max_item_bytes for overlap content and exposed_capacity_bytes for
+simultaneous exposed buffers, including the consumed original and replaced value.
+A duplicate insertion's discarded temporary key capacity and B-tree internals
+remain unknown; these observations are not complete allocator peaks. Do not sum
+unrelated maxima.
+
+Native receipt content uses receipt inline sizes, log inline sizes, topic bytes
+and data lengths; shared/native backing capacities remain unknown. Native logical
+and capacity peaks have separate witnesses: block, receipt rows/bytes/capacity,
+transaction-hash bytes/capacity and output rows/bytes/capacity. Each witness sums
+only those simultaneously live collections. Primitive summaries are emitted every 256 visited blocks and at query end/error.
+Each publication includes the retained receipt maximum and both simultaneous
+peak witnesses, so earlier peaks survive later intervals; the visited position
+is separate from each peak's block. A killed process may lose updates since its
+last publication. Receipt and hash-map accounting updates remain per block, but
+publication is bounded; map construction stays separate from its returned vector.
+Normalization also publishes only at intervals and end/error, not per block. RPC JSON
+content/structure estimates differ from decoded log bytes. Response text and
+JSON coexist during parsing; parsed JSON and cloned results coexist later.
+RPC transport ordinals are separate from outer Verify attempts and retain method,
+split bounds when applicable, and send/read/cancellation, HTTP, decode, RPC-error
+or success outcome. `known_body_bytes` means completed decoded response text,
+not wire bytes; partial bodies are unknown. Failed and successful complete-body
+byte counters are separate and cumulative, including retry and split work.
+Normalization records borrowed input, growing normalized content/buffers and
+set entries; collect-internal backing and B-tree nodes remain unknown. Watch
+mutation records the actual ordinary/supplemental query collections and input
+announcements; private WatchFilter heap buffers are not exposed or estimated.
+Selected-facts primitives include remaining input, stable bundles, retained maps
+and temporary value/key clones; collection-internal staging and allocator details
+remain unknown. Logical and capacity peaks are separate maxima, not one witness.
+Sorting/collection-internal allocator peaks remain estimates. Observation work
+itself has overhead, so this patch is not an uninstrumented performance result.
+The `scratch_run_high_water` event reports only exposed scratch capacities.
+
+The collector samples actual runner/PG processes and cgroups at 100 ms intervals,
+records sampling gaps, GNU time's runner maximum RSS, memory peaks/events and
+PostgreSQL statistics. `temp_bytes` is cumulative writes; sampled temp-file bytes
+are a separate occupancy observation. Reth file-backed RSS, anonymous RSS,
+cgroup charges and logical content are different quantities. Never drop shared
+host caches. Keep RPC and selected-facts fixture results separate from Mainnet;
+those paths are not exercised by the direct local-reth Verify comparison.
+
+Missing stages, wrong source, cap encounters, timeout, incomplete comparison,
+wrong final state or output loss invalidate evidence. Preserve every failure and
+its identities; no silent shrinking/retry. Sequence assignment and emission are
+serialized; the collector rejects gaps, duplicates, unknown stages and all
+attempts after the first, and reconciles exact cumulative/largest-item inventory.
+A constant-size current-query summary requires both native witnesses when receipts
+were loaded, checks their exact query/attempt identity and query bounds, and is
+finalized at provider return. An explicitly empty native path requires zero rows
+and no fabricated witnesses. Completion requires at least one loaded query with
+a positive receipt witness; an entirely empty run cannot establish this measurement.
+These summaries do not retain per-query history.
+Drains have a fixed budget and enforce deadline/output bytes during each read.
+A collector SIGTERM raises into cleanup; repeated TERM is ignored during cleanup
+and the caller's signal handler is restored afterward. SIGTERM delivery is deferred
+through launch and process assignment; the child restores default TERM handling
+and its inherited signal mask after joining the owned cgroup. Cleanup sends TERM to the
+exclusively assigned cgroup, then uses `cgroup.kill`
+for survivors independently of the GNU-time leader and checks the group is empty.
+Original and cleanup failures are both retained. The allocation owner then returns/removes
+only its disposable database/cgroups and records cleanup; no shared prune or live
+service change is authorized. A successful observation does not close #642 or
+select the eventual production bound.

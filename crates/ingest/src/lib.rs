@@ -4,6 +4,7 @@ mod error;
 mod event_signatures;
 mod fetching;
 mod manifest;
+pub mod measurement;
 mod plan;
 mod provider;
 mod verification;

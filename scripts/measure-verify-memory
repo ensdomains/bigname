@@ -1,0 +1,524 @@
+#!/usr/bin/env python3
+"""One admitted Verify-only experiment. Never provisions, restores, or builds."""
+import argparse
+from contextlib import contextmanager
+import hashlib
+import json
+import os
+from pathlib import Path
+import signal
+import select
+import socket
+import subprocess
+import sys
+import time
+
+REQUIRED = {"process_start", "redo_initialized", "compared_local_reth", "stored_query_return",
+            "stored_identity_map", "stored_final", "stored_retained", "reference_resolved",
+            "reth_log_headers", "reth_complete_receipt_peak", "provider_query_return",
+            "provider_identity_map", "reference_target_rechecked", "provider_final",
+            "both_vectors", "compare_position_maps", "compare_position_union",
+            "compare_matched", "compared_end", "redo_cli_complete"}
+CLEANUP_RESERVE = 20
+LIMITS = {"runner_bytes": 4 * 2**30, "postgres_bytes": 2 * 2**30, "seconds": 1800}
+
+
+def require(ok, message):
+    if not ok:
+        raise ValueError(message)
+
+
+def digest(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for data in iter(lambda: stream.read(1024 * 1024), b""):
+            h.update(data)
+    return h.hexdigest()
+
+
+def manifest_tree(root, snapshot=None, deadline=float("inf")):
+    root = Path(root)
+    require(root.is_dir() and not root.is_symlink(), "manifest root differs")
+    entries, total = [], 0
+    for path in root.rglob("*"):
+        require(time.monotonic() < deadline - CLEANUP_RESERVE, "manifest deadline")
+        require(not path.is_symlink(), "manifest symlink")
+        if path.is_dir(): continue
+        require(path.is_file(), "manifest file type")
+        if path.suffix != ".toml": continue
+        require(len(entries) < 4096, "manifest file envelope")
+        with path.open("rb") as stream:
+            data = stream.read(64 * 2**20 - total + 1)
+        total += len(data)
+        require(total <= 64 * 2**20, "manifest byte envelope")
+        relative = path.relative_to(root)
+        entries.append([relative.as_posix(), hashlib.sha256(data).hexdigest()])
+        if snapshot is not None:
+            target = snapshot / relative
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with target.open("xb") as stream: stream.write(data)
+            target.chmod(0o400)
+    require(entries, "manifest tree empty")
+    if snapshot is not None:
+        for path in sorted(snapshot.rglob("*"), reverse=True):
+            if path.is_dir(): path.chmod(0o500)
+        snapshot.chmod(0o500)
+    return hashlib.sha256(json.dumps(sorted(entries), ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def admission(a):
+    require(a["chain"] == "ethereum-mainnet" and a["chain_id"] == 1, "Mainnet required")
+    require(0 <= a["from"] <= a["to"] and a["to"] - a["from"] < 131072, "range")
+    for key in ("binary_sha256", "fixture_sha256", "instrumentation_commit", "base_tree",
+                "manifest_sha256", "density_inventory_sha256", "allocation_receipt_sha256"):
+        require(isinstance(a[key], str) and len(a[key]) in (40, 64), "missing identity: " + key)
+    require(a["base_tree"] == "26ba8684d6d255a5f5e157174a8e9d1a9e0f7619", "wrong base")
+    require(a["independent_source_history_reviewed"] is True and a["legal_redo_reviewed"] is True,
+            "source/redo admission is required")
+    require(a["manifest_sync_unchanged"] is True, "manifest startup changes")
+    require(a["build_test_chains_including_this"] <= 4, "execution chain census")
+    for key, limit in LIMITS.items():
+        require(0 < a[key] <= limit, key)
+    for side in ("stored", "provider"):
+        f = a[side]
+        for key, limit in (("unique_rows", 250000), ("logical_bytes", 128 * 2**20),
+                           ("cumulative_rows", 500000), ("cumulative_bytes", 256 * 2**20),
+                           ("largest_log", 2**20)):
+            require(type(f[key]) is int and 0 <= f[key] <= limit, side + ": " + key)
+    require(type(a["complete_receipt_bytes_max"]) is int and a["complete_receipt_bytes_max"] > 0,
+            "complete receipt census absent")
+    require(a["initial_state"]["redo_in_progress"] is False, "resumed suffix prohibited")
+    require(a["initial_state"]["current_block_number"] >= a["to"], "retained extent")
+    require(a["initial_state"]["verification_level"] is not None, "retained level")
+    require(a["ingest_start"] <= a["from"], "ingest extent")
+    require(len(a["source_objects"]) >= 8 and len(a["source_descriptors"]) == 2, "source inventory absent")
+    require(a["disk_paths"] and a["pg_temp_dirs"], "filesystem inventory absent")
+    require(a["initial_state"]["phase_status"] == "completed", "settled fixture required")
+    require(a["finalized_end_hash"] and a["expected_final_state"], "final-state contract")
+    return a
+
+
+def cgroup(path):
+    p = Path(path)
+    values = {}
+    for key in ("memory.max", "memory.peak", "memory.current", "memory.swap.max",
+                "memory.events", "memory.stat", "cgroup.procs"):
+        values[key] = (p / key).read_text().strip()
+    return values
+
+
+def counters(text):
+    return {key: int(value) for key, value in (line.split() for line in text.splitlines())}
+
+
+def tcp_connection(group, value, namespace_pid, reverse, deadline):
+    require(value["server_address"] and value["client_address"], "direct TCP PostgreSQL observation required")
+    family = socket.AF_INET6 if ":" in value["server_address"] else socket.AF_INET
+    def check(): require(time.monotonic() < deadline, "database socket scan deadline")
+    def address(host, port):
+        raw = socket.inet_pton(family, host)
+        return "".join(f"{int.from_bytes(raw[i:i+4], sys.byteorder):08X}" for i in range(0, len(raw), 4)) + f":{port:04X}"
+    endpoints = [address(value["server_address"], value["server_port"]), address(value["client_address"], value["client_port"])]
+    if reverse: endpoints.reverse()
+    matches = []
+    for pid in cgroup(group)["cgroup.procs"].split():
+        check(); proc = Path("/proc", pid)
+        try:
+            hierarchy = next((line.split()[1:] for line in (proc / "status").read_text().splitlines() if line.startswith("NSpid:")), [])
+            if not hierarchy or hierarchy[0] != pid or int(hierarchy[-1]) != namespace_pid: continue
+            descriptors = set()
+            for fd in (proc / "fd").iterdir(): check(); descriptors.add(str(fd.readlink()))
+            with (proc / "net" / ("tcp6" if family == socket.AF_INET6 else "tcp")).open() as table:
+                next(table, None)
+                for line in table:
+                    check(); fields = line.split()
+                    if fields[1:3] == endpoints and fields[3] == "01" and f"socket:[{fields[9]}]" in descriptors:
+                        matches.append(dict(host_pid=int(pid), namespace_pids=hierarchy, socket_inode=fields[9],
+                                            pid_namespace=str((proc / "ns/pid").readlink()), net_namespace=str((proc / "ns/net").readlink())))
+        except FileNotFoundError:
+            continue
+    check(); require(len(matches) == 1, ("runner" if reverse else "PostgreSQL") + " cgroup attribution is absent or ambiguous")
+    return matches[0]
+
+
+def postgres_connection(a, value, deadline=float("inf")):
+    return tcp_connection(a["postgres_cgroup"], value, value["backend_pid"], False, min(deadline, time.monotonic() + 1))
+
+
+DATABASE_ROLES = {"writer", "reader", "manifest_lock", "phase_lock"}
+
+
+def runner_database(a, fields, deadline):
+    require(fields["database_role"] in DATABASE_ROLES, "unknown database connection role")
+    value = json.loads(fields["database"])
+    require({k: value[k] for k in ("name", "oid", "system_identifier")} == a["database"], "runner database identity differs")
+    until = min(time.monotonic() + 1, deadline - CLEANUP_RESERVE)
+    return {"role": fields["database_role"], "database": value,
+            "backend": postgres_connection(a, value, until),
+            "runner": tcp_connection(a["runner_cgroup"], value, fields["runner_pid"], True, until)}
+
+
+def postgres_observation(a, deadline, launch_env, url_name):
+    # Keep this direct observation session alive while checking its backend's socket ownership.
+    query = """SELECT json_build_object(
+      'backend_pid',pg_backend_pid(),'server_address',inet_server_addr(),'server_port',inet_server_port(),
+      'client_address',inet_client_addr(),'client_port',inet_client_port(),
+      'name',current_database(),'oid',(SELECT oid FROM pg_database WHERE datname=current_database()),
+      'system_identifier',(SELECT system_identifier::text FROM pg_control_system()),
+      'state',(SELECT json_build_object('phase_status',phase_status,
+         'current_block_number',current_block_number,'current_block_hash',current_block_hash,
+         'verification_level',verification_level,'redo_in_progress',redo_in_progress)
+         FROM bigname_phase.chain_phase_state WHERE chain_id='ethereum-mainnet' AND phase_name='verify'),
+      'temp_bytes',temp_bytes,'temp_files',temp_files,'stats_reset',stats_reset)
+      FROM pg_stat_database WHERE datname=current_database()"""
+    until = min(time.monotonic() + 3, deadline - 10)
+    require(time.monotonic() < until, "deadline before PostgreSQL observation")
+    env = dict(launch_env, PGDATABASE=launch_env[url_name], PGCONNECT_TIMEOUT="2",
+               PGOPTIONS=launch_env.get("PGOPTIONS", "") + " -c statement_timeout=2000")
+    process = subprocess.Popen(["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1"], env=env,
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        process.stdin.write((query + ";\n").encode()); process.stdin.flush()
+        data = b""
+        while b"\n" not in data:
+            require(select.select([process.stdout], [], [], max(0, until - time.monotonic()))[0], "PostgreSQL observation deadline")
+            chunk = os.read(process.stdout.fileno(), 65537 - len(data))
+            require(chunk and len(data) + len(chunk) <= 65536, "PostgreSQL observation missing or oversized")
+            data += chunk
+        value = json.loads(data)
+        require({k: value[k] for k in ("name", "oid", "system_identifier")} == a["database"], "database identity differs")
+        value["cgroup_connection"] = postgres_connection(a, value, until)
+        require(time.monotonic() < until, "PostgreSQL observation deadline")
+        return value
+    finally:
+        process.stdin.close()
+        try: process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill(); process.wait(timeout=1)
+        finally: process.stdout.close()
+
+
+def postgres(a, deadline=float("inf"), launch_env=None):
+    env = dict(os.environ) if launch_env is None else launch_env
+    writer = postgres_observation(a, deadline, env, "BIGNAME_DATABASE_URL")
+    reader = postgres_observation(a, deadline, env, "BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL")
+    require(writer["state"] == reader["state"], "writer/reader observation state differs")
+    return dict(writer, verification_reader=reader)
+
+
+ROOT_STAGES = {"process_start", "redo_initialized", "redo_cli_complete"}
+KNOWN_STAGES = REQUIRED | {"postgres_connection", "provider_trusted", "compared_rpc", "stored_map_before_query_consume",
+    "identity_high_water", "stored_before_sort", "provider_before_sort", "reference_announcements",
+    "stored_identity_conflict", "provider_identity_conflict", "scratch_run_high_water", "diagnostic_before_truncate",
+    "reth_requested_numbers", "reth_resolve_input", "reth_resolve_owned_numbers", "reth_resolve_headers",
+    "reth_query_selection", "reth_normalization_input", "reth_normalized_output", "reth_normalization_overlap",
+    "reth_owned_log_inputs", "reth_revalidation_numbers", "reth_native_overlap",
+    "reth_owned_header_selection", "reth_header_range", "reth_native_bundle", "reth_recovered_transaction_refs",
+    "reth_converted_receipts_logs", "reth_query_output_before_revalidation", "reth_receipt_batch", "reth_transaction_hash_map",
+    "reth_native_progress", "reth_native_logical_peak", "reth_native_capacity_peak",
+    "watch_queries_before_mutation", "watch_queries_after_mutation",
+    "reth_native_query_start", "reth_native_query_loaded", "reth_native_query_empty"}
+NATIVE_WITNESSES = {"reth_native_logical_peak", "reth_native_capacity_peak"}
+NATIVE_QUERY = NATIVE_WITNESSES | {"reth_native_query_loaded", "reth_native_query_empty", "reth_native_progress", "reth_complete_receipt_peak", "reth_transaction_hash_map"}
+
+
+class Observations:
+    def __init__(self, a, database_check=None):
+        self.database_check, self.database_witnesses = database_check, []
+        self.a, self.stages, self.sequence = a, set(), 0
+        self.native, self.loaded_native = None, False
+        self.root, self.final, self.last, self.largest, self.compared = set(), {}, {}, dict(stored=0, provider=0), False
+
+    def accept(self, value):
+        f = value.get("fields", {})
+        if value.get("target") != "bigname_memory": return
+        require(f["schema"] == 1 and f["run"] == self.a["run_id"] and f["valid"], "invalid diagnostic")
+        require(f["sequence"] == self.sequence + 1, "duplicate, gap or reordered event")
+        self.sequence = f["sequence"]
+        stage = f["stage"]
+        require(stage in KNOWN_STAGES, "unknown stage")
+        require(stage not in ("provider_trusted", "compared_rpc"), "wrong reference path")
+        if stage == "postgres_connection":
+            require(f["attempt"] == 0 and self.database_check is not None, "database witness checker missing")
+            require(len(self.database_witnesses) < 128, "database connection ceiling")
+            self.database_witnesses.append(self.database_check(f))
+            return
+        if stage in ROOT_STAGES:
+            require(f["attempt"] == 0, "root attempt")
+            self.root.add(stage)
+        else:
+            require(f["chain"] == self.a["chain"] and self.a["from"] <= f["from"] <= f["to"] <= self.a["to"], "stage range/chain")
+            require(f["attempt"] == 1, "Verify attempt must remain first; retry invalidates evidence")
+            self.stages.add(stage)
+        key = tuple(f[k] for k in ("attempt", "query_kind", "query_ordinal", "from", "to"))
+        if stage == "reth_native_query_start":
+            require(self.native is None and f["query_kind"] in ("ordinary", "supplemental") and type(f["query_ordinal"]) is int and f["query_ordinal"] >= 0, "native query start")
+            self.native = {"key": key, "witnesses": set(), "outcome": None, "positive_receipts": False}
+        if stage in NATIVE_QUERY:
+            require(self.native is not None and self.native["key"] == key, "native query attribution")
+            if stage in NATIVE_WITNESSES: self.native["witnesses"].add(stage)
+            if stage == "reth_complete_receipt_peak" and f["receipt_bytes"] > 0: self.native["positive_receipts"] = True
+            if stage in ("reth_native_query_loaded", "reth_native_query_empty"):
+                require(self.native["outcome"] is None, "duplicate native end")
+                self.native["outcome"] = stage
+        if stage == "provider_query_return":
+            require(self.native is not None and self.native["key"] == key, "native query return attribution")
+            if self.native["outcome"] == "reth_native_query_empty":
+                require(f["rows"] == 0 and f["logical_bytes"] == 0 and f["max_item_bytes"] == 0 and not self.native["witnesses"], "false empty native path")
+            else:
+                require(self.native["outcome"] == "reth_native_query_loaded" and NATIVE_WITNESSES <= self.native["witnesses"], "missing native witnesses")
+                self.loaded_native |= self.native["positive_receipts"]
+            self.native = None
+        self.last = f
+        for side in ("stored", "provider"):
+            require(f[side + "_rows"] <= self.a[side]["cumulative_rows"] and f[side + "_bytes"] <= self.a[side]["cumulative_bytes"], "cumulative inventory exceeded")
+        if stage in ("stored_query_return", "provider_query_return"):
+            side = stage.split("_")[0]
+            require(f["query_kind"] in (("stored",) if side == "stored" else ("ordinary", "supplemental")) and type(f["query_ordinal"]) is int and f["query_ordinal"] >= 0, "query attribution")
+            self.largest[side] = max(self.largest[side], f["max_item_bytes"])
+            require(self.largest[side] <= self.a[side]["largest_log"], "individual inventory exceeded")
+        if stage in ("stored_final", "provider_final"):
+            require(f["rows"] <= 250000 and f["logical_bytes"] <= 128 * 2**20, "selected ceiling")
+            self.final[stage] = f
+        if stage == "compare_matched":
+            require((f["from"], f["to"]) == (self.a["from"], self.a["to"]), "incomplete comparison")
+            self.compared = True
+        if stage == "compared_end":
+            require((f["marker_number"], f["marker_hash"], f["source_level"]) == (self.a["to"], self.a["finalized_end_hash"], "node_checked"), "compared end differs")
+        if stage in ("reth_native_logical_peak", "reth_native_capacity_peak"):
+            require(f["from"] <= f["native_block"] <= f["to"], "native witness range")
+            require(f["logical_bytes"] == f["receipt_bytes"] + f["hash_bytes"] + f["output_bytes"], "native simultaneous content")
+            require(f["exposed_capacity_bytes"] == f["receipt_capacity"] + f["hash_capacity"] + f["output_capacity"], "native simultaneous capacity")
+        if stage in ("reth_complete_receipt_peak", "reth_receipt_batch"):
+            require(f["logical_bytes"] <= self.a["complete_receipt_bytes_max"], "receipt census exceeded")
+
+    def finish(self):
+        require(self.native is None, "unfinished native query")
+        if self.database_check is not None:
+            require(DATABASE_ROLES <= {v["role"] for v in self.database_witnesses}, "runner database connection witnesses missing")
+        require(self.loaded_native, "no positive loaded native query")
+        require(ROOT_STAGES <= self.root and REQUIRED - ROOT_STAGES <= self.stages and self.compared, "missing successful-attempt stages")
+        for side in ("stored", "provider"):
+            f, admitted = self.final[side + "_final"], self.a[side]
+            require((f["rows"], f["logical_bytes"], self.largest[side], self.last[side + "_rows"], self.last[side + "_bytes"]) == (admitted["unique_rows"], admitted["logical_bytes"], admitted["largest_log"], admitted["cumulative_rows"], admitted["cumulative_bytes"]), "fixture inventory differs")
+
+
+def drain(stream, pending, observer, check):
+    # Fixed work budget keeps sampling and termination independent of log throughput.
+    for _ in range(64):
+        check()
+        line = stream.readline(65537 - len(pending))
+        if not line: break
+        pending += line
+        require(len(pending) <= 65536, "oversized diagnostic line")
+        if pending.endswith("\n"):
+            observer.accept(json.loads(pending)); pending = ""
+    return pending
+
+
+def terminate_owned(group, process):
+    # The cgroup was admitted empty and exclusively assigned; the leader is not its lifetime.
+    for pid in Path(group, "cgroup.procs").read_text().split():
+        try: os.kill(int(pid), signal.SIGTERM)
+        except ProcessLookupError: pass
+    until = time.monotonic() + 3
+    while Path(group, "cgroup.procs").read_text().strip() and time.monotonic() < until: time.sleep(0.05)
+    if Path(group, "cgroup.procs").read_text().strip(): Path(group, "cgroup.kill").write_text("1")
+    if process is not None: process.wait(timeout=3)
+    until = time.monotonic() + 3
+    while Path(group, "cgroup.procs").read_text().strip() and time.monotonic() < until: time.sleep(0.05)
+    require(not Path(group, "cgroup.procs").read_text().strip(), "owned process survives cleanup")
+
+
+def status(pid):
+    value = {}
+    for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+        if line.startswith(("VmRSS:", "VmHWM:", "RssAnon:", "RssFile:")):
+            key, count, _ = line.split()
+            value[key[:-1]] = int(count) * 1024
+    return value
+
+
+def source_environment(a):
+    env = dict(os.environ, BIGNAME_VERIFY_MEMORY_RUN_ID=a["run_id"], RUST_LOG="bigname_memory=info")
+    names = []
+    for descriptor in a["source_descriptors"]:
+        fields, name = descriptor.split("=", 1); fields = fields.split(":")
+        require(len(fields) in (5, 6) and fields[0] == "ethereum-mainnet" and fields[2].strip().lower().replace("-", "_") == "reth_db", "source descriptor differs")
+        names.append(name)
+    require(len(set(names)) == 2 and set(names) == set(a["source_endpoints"]), "source endpoint inventory differs")
+    paths = {Path(source["path"]).resolve() for source in a["source_objects"]}
+    for name in names:
+        endpoint = a["source_endpoints"][name]
+        require(isinstance(endpoint, str) and Path(endpoint).is_absolute() and env.get(name) == endpoint, "source endpoint differs")
+        require(all((Path(endpoint) / child).resolve() in paths for child in ("", "db", "static_files", "rocksdb")), "source storage inventory differs")
+    for source in a["source_objects"]:
+        st = Path(source["path"]).stat()
+        require((st.st_dev, st.st_ino) == (source["device"], source["inode"]), "source identity differs")
+    require(len({(s["device"], s["inode"]) for s in a["source_objects"]}) == len(a["source_objects"]), "aliased source objects")
+    return env
+
+
+def unchanged_memory_events(before, after):
+    previous, current = counters(before["memory.events"]), counters(after["memory.events"])
+    require(all(current[key] == previous[key] for key in ("max", "oom", "oom_kill")), "memory limit encountered")
+
+
+def binary_snapshot(a, out, deadline):
+    target = out / "runner"
+    h, total = hashlib.sha256(), 0
+    with open(a["binary"], "rb") as source, target.open("xb") as copy:
+        for data in iter(lambda: source.read(1024 * 1024), b""):
+            require(time.monotonic() < deadline - CLEANUP_RESERVE, "binary deadline")
+            total += len(data)
+            require(total <= 256 * 2**20, "binary artifact envelope")
+            h.update(data); copy.write(data)
+    require(h.hexdigest() == a["binary_sha256"], "binary differs")
+    target.chmod(0o500)
+    return target
+
+
+@contextmanager
+def termination_guard():
+    def terminate(signum, frame): raise InterruptedError("collector SIGTERM")
+    previous = signal.signal(signal.SIGTERM, terminate)
+    try: yield
+    finally: signal.signal(signal.SIGTERM, previous)
+
+
+def run(a, out):
+    with termination_guard(): return run_guarded(a, out)
+
+
+def run_guarded(a, out):
+    started = time.monotonic()
+    deadline = started + a["seconds"]
+    runner, postgres_group = (Path(a[key + "_cgroup"]).resolve() for key in ("runner", "postgres"))
+    require(not runner.is_relative_to(postgres_group) and not postgres_group.is_relative_to(runner), "cgroup overlap")
+    binary = binary_snapshot(a, out, deadline)
+    snapshot = out / "manifests"
+    snapshot.mkdir(mode=0o700)
+    require(manifest_tree(a["manifests_root"], snapshot, deadline) == a["manifest_sha256"], "manifest differs")
+    env = source_environment(a)
+    require(Path(a["runner_cgroup"], "cgroup.kill").exists(), "atomic owned cleanup unavailable")
+    before = {"runner": cgroup(a["runner_cgroup"]), "postgres": cgroup(a["postgres_cgroup"])}
+    require(not before["runner"]["cgroup.procs"], "runner allocation is occupied")
+    for key in ("runner", "postgres"):
+        require(int(before[key]["memory.max"]) == a[key + "_bytes"], "effective memory ceiling")
+        require(before[key]["memory.swap.max"] == "0", "unaccounted swap")
+    db_before = postgres(a, deadline, env)
+    require(db_before["state"] == a["initial_state"], "initial redo state differs")
+    (out / "before.json").write_text(json.dumps({"cgroups": before, "postgres": db_before}))
+    command = [str(binary), "redo", "--chain", "ethereum-mainnet", "--phase", "verify",
+               "--from-block", str(a["from"]), "--to-block", str(a["to"]),
+               "--manifests-root", str(snapshot), "--minimum-free-disk-bytes", "107374182400",
+               "--writable-path", a["writable_path"]]
+    for descriptor in a["source_descriptors"]:
+        command.extend(["--source", descriptor])
+    def enter():
+        os.setsid()
+        Path(a["runner_cgroup"], "cgroup.procs").write_text(str(os.getpid()))
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    observer = Observations(a, lambda fields: runner_database(a, fields, deadline))
+    last_sample, peak_rss, runner_seen = None, 0, False
+    process = None
+    try:
+        with open(out / "events.jsonl", "xb", buffering=0) as log, open(out / "stderr.txt", "xb") as err:
+            require(time.monotonic() < deadline - CLEANUP_RESERVE, "deadline; startup exhausted cleanup reserve")
+            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+            try:
+                process = subprocess.Popen(["/usr/bin/time", "-v", "-o", str(out / "time.txt"), *command],
+                                           stdout=log, stderr=err, env=env, preexec_fn=enter)
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            with open(out / "events.jsonl", "r") as events, open(out / "samples.jsonl", "x") as samples:
+                pending = ""
+                while True:
+                    now = time.monotonic()
+                    require(now < deadline - CLEANUP_RESERVE, "deadline; cleanup reserve reached")
+                    for path in a["disk_paths"]:
+                        fs = os.statvfs(path)
+                        require(fs.f_bavail * fs.f_frsize >= 100 * 2**30, "disk floor")
+                    require((out / "events.jsonl").stat().st_size + (out / "stderr.txt").stat().st_size <= 64 * 2**20,
+                            "diagnostic disk envelope")
+                    def envelope():
+                        require(time.monotonic() < deadline - CLEANUP_RESERVE, "deadline; cleanup reserve reached")
+                        require((out / "events.jsonl").stat().st_size + (out / "stderr.txt").stat().st_size <= 64 * 2**20, "diagnostic disk envelope")
+                    pending = drain(events, pending, observer, envelope)
+                    sample = {"seconds": now - started, "gap": None if last_sample is None else now - last_sample}
+                    for role in ("runner", "postgres"):
+                        cg = cgroup(a[role + "_cgroup"])
+                        unchanged_memory_events(before[role], cg)
+                        sample[role] = {"cgroup_current": int(cg["memory.current"]), "processes": {}}
+                        for pid in cg["cgroup.procs"].split():
+                            try:
+                                values = status(pid)
+                                sample[role]["processes"][pid] = values
+                                if role == "runner" and Path(f"/proc/{pid}/exe").resolve() == binary.resolve():
+                                    peak_rss = max(peak_rss, values.get("VmHWM", 0)); runner_seen = True
+                            except FileNotFoundError:
+                                pass
+                    sample["postgres"]["sampled_temp_file_bytes"] = sum(
+                        p.stat().st_size for directory in a["pg_temp_dirs"] for p in Path(directory).glob("pgsql_tmp*") if p.is_file())
+                    samples.write(json.dumps(sample) + "\n")
+                    last_sample = now
+                    if process.poll() is not None and events.tell() == (out / "events.jsonl").stat().st_size:
+                        require(not pending, "interrupted diagnostic output")
+                        break
+                    time.sleep(0.1)
+        require(process.returncode == 0, "runner failed")
+        require(runner_seen and peak_rss > 0, "actual runner RSS missing")
+        observer.finish()
+        db_after = postgres(a, deadline, env)
+        require(db_after["state"] == a["expected_final_state"], "durable final state differs")
+        for observation in (None, "verification_reader"):
+            old, new = (db_before, db_after) if observation is None else (db_before[observation], db_after[observation])
+            require(new["stats_reset"] == old["stats_reset"], "PostgreSQL statistics reset")
+        time_text = (out / "time.txt").read_text()
+        require("Maximum resident set size (kbytes):" in time_text, "GNU time peak missing")
+        after = {key: cgroup(a[key + "_cgroup"]) for key in ("runner", "postgres")}
+        for key in after: unchanged_memory_events(before[key], after[key])
+        result = {"valid": True, "database_connections": observer.database_witnesses, "sampled_runner_hwm_bytes": peak_rss, "postgres_before": db_before,
+                  "postgres_after": db_after, "before": before,
+                  "after": after,
+                  "not_exercised": ["rpc", "selected_facts"], "seconds": time.monotonic() - started}
+        return result
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)  # Finish owned cleanup even after repeated TERM.
+        original = sys.exc_info()[1]
+        try:
+            terminate_owned(a["runner_cgroup"], process)
+        except (OSError, ValueError, subprocess.SubprocessError) as cleanup:
+            (out / "cleanup-failure.json").write_text(json.dumps({"cleanup": str(cleanup), "original": str(original)}))
+            if original is None: raise
+        final = {key: cgroup(a[key + "_cgroup"]) for key in ("runner", "postgres")}
+        (out / "after-cgroups.json").write_text(json.dumps(final))
+        if original is None:
+            for key in final: unchanged_memory_events(before[key], final[key])
+            result["seconds"] = time.monotonic() - started
+            require(result["seconds"] < a["seconds"], "deadline exceeded during completion")
+        # Preallocated PostgreSQL and cgroups belong to allocation owner; never destroy them here.
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--admission", required=True)
+    parser.add_argument("--admission-sha256", required=True)
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args()
+    raw = Path(args.admission).read_bytes()
+    require(hashlib.sha256(raw).hexdigest() == args.admission_sha256, "admission digest differs")
+    a = admission(json.loads(raw))
+    out = Path(args.output); out.mkdir(exist_ok=False)
+    (out / "admission.json").write_bytes(raw)
+    try:
+        result = run(a, out)
+    except (ValueError, OSError, KeyError, subprocess.SubprocessError, json.JSONDecodeError, KeyboardInterrupt) as error:
+        result = {"valid": False, "reason": type(error).__name__ + ": " + str(error)}
+    (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+    return 0 if result["valid"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
