@@ -190,7 +190,10 @@ fn implementation_announcement_topic_requires_the_resolver_family_and_upgraded()
         alloy_primitives::keccak256("Upgraded(address)".as_bytes())
     );
     assert_eq!(
-        implementation_announcement_topic0(ENS_V2_RESOLVER_SOURCE_FAMILY, &[upgraded.clone()]),
+        implementation_announcement_topic0(
+            ENS_V2_RESOLVER_SOURCE_FAMILY,
+            std::slice::from_ref(&upgraded)
+        ),
         Some(upgraded.clone())
     );
     assert_eq!(
