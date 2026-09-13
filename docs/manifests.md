@@ -542,7 +542,7 @@ address becomes a watched emitter of the family, adding it widens the watch plan
 and triggers the [mandatory historical fetch](#mandatory-historical-fetch-after-watch-plan-widening);
 the mirror emits no logs, so that fetch is empty. Discovery alone, matching
 selectors, or another role cannot authorize this classification, and an
-undeclared mirror instance keeps the existing `resolver_upgrade_not_observed`
+undeclared mirror instance keeps the existing `resolver_implementation_unknown`
 result.
 
 The `sepolia` profile declares the admitted deployment's `ENSV1Resolver` at

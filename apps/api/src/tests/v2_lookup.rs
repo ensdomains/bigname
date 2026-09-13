@@ -818,7 +818,7 @@ async fn v2_lookup_detail_withholds_record_values_from_unsupported_inventory() -
         r#"
         UPDATE record_inventory_current inventory
         SET support_status = 'unsupported',
-            unsupported_reason = 'resolver_upgrade_not_observed'
+            unsupported_reason = 'resolver_implementation_unknown'
         FROM name_current name
         WHERE name.resource_id = inventory.resource_id
           AND name.raw_name = 'unknown-resolver.eth'

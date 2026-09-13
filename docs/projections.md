@@ -601,7 +601,7 @@ implementation outside the active manifest's `resolver_implementations`; and
 `resolver_binding_enumeration_not_projected` on the binding summary of a
 supported resolver whose family does not project binding enumeration.
 `resolver_implementation_unknown` replaced the earlier
-`resolver_upgrade_not_observed` string; readers that do not recognize a
+`resolver_implementation_unknown` string; readers that do not recognize a
 persisted reason keep mapping it to partial coverage.
 
 `record_inventory_current` records the selectors observed under a resource's

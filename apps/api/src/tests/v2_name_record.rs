@@ -3673,7 +3673,7 @@ fn unsupported_resolver_inventory(inventory: &mut bigname_storage::RecordInvento
     inventory.coverage = json!({
         "status": "unsupported",
         "exhaustiveness": "not_asserted",
-        "unsupported_reason": "resolver_upgrade_not_observed"
+        "unsupported_reason": "resolver_implementation_unknown"
     });
 }
 
@@ -3699,7 +3699,7 @@ async fn v2_get_name_records_withholds_values_from_unsupported_inventory() -> Re
     assert_eq!(payload["data"]["content_hash"], Value::Null);
     let refused = json!({
         "status": "unsupported",
-        "unsupported_reason": "resolver_upgrade_not_observed"
+        "unsupported_reason": "resolver_implementation_unknown"
     });
     assert_eq!(
         payload["data"]["records"],

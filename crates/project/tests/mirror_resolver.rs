@@ -496,13 +496,13 @@ async fn undeclared_ensv2_resolver_without_upgrade_history_is_unchanged() -> Res
     let (database, pool) = project(&fixture, fixture.target(), Execution::FromZero).await?;
     let v2 = inventory(&pool, V2_RESOURCE).await?;
     assert_eq!(v2["support_status"], "unsupported", "{v2}");
-    assert_eq!(v2["unsupported_reason"], "resolver_upgrade_not_observed");
+    assert_eq!(v2["unsupported_reason"], "resolver_implementation_unknown");
     assert!(v2["provenance"].get("mirror").is_none(), "{v2}");
     let resolver = resolver_current(&pool, MIRROR).await?;
     assert_eq!(resolver["support_status"], "unsupported");
     assert_eq!(
         resolver["unsupported_reason"],
-        "resolver_upgrade_not_observed"
+        "resolver_implementation_unknown"
     );
     assert_eq!(
         resolver["declared_summary"]["classification"]["basis"], "erc1967_upgraded_history",

@@ -71,7 +71,7 @@ fn unsupported_inventory_refuses_exact_success_and_leaves_auto_unsatisfied() {
     assert_eq!(indexed.value, None);
     assert_eq!(
         indexed.unsupported_reason.as_deref(),
-        Some("resolver_upgrade_not_observed"),
+        Some("resolver_implementation_unknown"),
         "the row's own reason is the public reason"
     );
     assert!(
@@ -287,7 +287,7 @@ fn exact_success_inventory() -> RecordInventoryCurrentRow {
         provenance: json!({}),
         coverage: json!({
             "status":"unsupported",
-            "unsupported_reason":"resolver_upgrade_not_observed"
+            "unsupported_reason":"resolver_implementation_unknown"
         }),
         chain_positions: json!({}),
         canonicality_summary: json!({}),

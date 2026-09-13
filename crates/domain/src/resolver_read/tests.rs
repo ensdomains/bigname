@@ -79,7 +79,7 @@ fn unsupported_coverage_refuses_retained_values_with_the_row_reason() {
     let unsupported = json!({
         "status":"unsupported",
         "exhaustiveness":"not_asserted",
-        "unsupported_reason":"resolver_upgrade_not_observed"
+        "unsupported_reason":"resolver_implementation_unknown"
     });
     for (record_key, family, selector) in [
         ("addr:60", "addr", Some("60")),
@@ -103,7 +103,7 @@ fn unsupported_coverage_refuses_retained_values_with_the_row_reason() {
         assert_eq!(answer.value, None, "{record_key}");
         assert_eq!(
             answer.unsupported_reason.as_deref(),
-            Some("resolver_upgrade_not_observed"),
+            Some("resolver_implementation_unknown"),
             "{record_key}"
         );
         assert_eq!(answer.derivation, None, "{record_key}");
