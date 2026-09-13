@@ -1837,6 +1837,81 @@ fn repository_loader_accepts_mirror_declaration_matching_the_ensv1_registry() ->
 }
 
 #[test]
+fn repository_loader_validates_every_mirror_instance_of_a_family() -> Result<()> {
+    let (registry, mirror) = mirror_manifest_pair();
+    let second = r#"
+[[contracts]]
+role = "ensv1_mirror_resolver"
+address = "0x0000000000000000000000000000000000000011"
+proxy_kind = "none"
+start_block = 34560
+"#;
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &registry)?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_resolver_l1",
+        "v1",
+        &format!("{mirror}{second}"),
+    )?;
+    let repository =
+        load_repository(&test_dir.path).context("two mirror instances must load together")?;
+    let declared: Vec<_> = repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "ens_v2_resolver_l1")
+        .expect("mirror manifest loaded")
+        .manifest
+        .contracts
+        .iter()
+        .filter(|contract| contract.role == ENSV1_MIRROR_RESOLVER_ROLE)
+        .map(|contract| contract.address.to_ascii_lowercase())
+        .collect();
+    assert_eq!(
+        declared,
+        [
+            "0x0000000000000000000000000000000000000010",
+            "0x0000000000000000000000000000000000000011"
+        ]
+    );
+
+    // The second instance is validated on its own terms, not skipped after the first.
+    for (label, broken, expected) in [
+        (
+            "proxy second",
+            format!(
+                "{mirror}{}",
+                second.replace("proxy_kind = \"none\"", "proxy_kind = \"erc1967\"")
+            ),
+            "proxy_kind",
+        ),
+        (
+            "duplicate address",
+            format!(
+                "{mirror}{}",
+                second.replace(
+                    "0x0000000000000000000000000000000000000011",
+                    "0x0000000000000000000000000000000000000010"
+                )
+            ),
+            "more than once",
+        ),
+    ] {
+        let test_dir = TestDir::new()?;
+        test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &registry)?;
+        test_dir.write_manifest("ens", "ens_v2_resolver_l1", "v1", &broken)?;
+        let Err(error) = load_repository(&test_dir.path) else {
+            panic!("{label}: second mirror instance must be validated");
+        };
+        assert!(
+            error.to_string().contains(expected),
+            "{label}: unexpected error: {error:#}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn repository_loader_rejects_mirror_declaration_disagreeing_with_the_ensv1_registry() -> Result<()>
 {
     let test_dir = TestDir::new()?;

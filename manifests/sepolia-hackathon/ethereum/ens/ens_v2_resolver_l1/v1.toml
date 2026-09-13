@@ -36,6 +36,17 @@ address = "0x10107255fDa20aB6c37a0Efca1e9465F25066a00"
 proxy_kind = "none"
 start_block = 11626641
 
+# Second mirror instance: the pinned three-argument ENSV1Resolver (batch gateway provider,
+# contract namer, ENSv1 registry 0x82080cc8...), created at block 11626628 by
+# 0xad618fad5387815e3a32b49c73a9117e5a26c34cbeb74ca7531c294c8168e4e3 from the same deployer.
+# Constructor shape: (upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L28-L32 @ ens_v2@a971bd64)
+# Provenance: docs/manifests.md section "Sepolia hackathon deployment evidence".
+[[contracts]]
+role = "ensv1_mirror_resolver"
+address = "0x1F11e5b8BCa2CcFE13Bd8431853db159c4E9849c"
+proxy_kind = "none"
+start_block = 11626628
+
 [[contracts]]
 role = "public_resolver_v2"
 address = "0xF9de4979DdB290baF5B760D0e788125017Bc33f6"

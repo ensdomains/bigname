@@ -12,7 +12,10 @@ use bigname_domain::{
 
 use crate::attribution::validate_block_derived_preimage_attribution;
 use crate::model::RawSourceManifest;
-use crate::{LoadedManifest, ManifestAbi, ManifestLoadStatus, ManifestLoadSummary};
+use crate::{
+    ENSV1_MIRROR_RESOLVER_ROLE, LoadedManifest, ManifestAbi, ManifestLoadStatus,
+    ManifestLoadSummary,
+};
 use crate::{ManifestRepository, SourceManifest, event_allows_empty_emitter_roles};
 
 #[path = "repository/mirror.rs"]
@@ -399,7 +402,11 @@ fn validate_manifest_metadata(
 
     let mut contract_roles = BTreeSet::new();
     for contract in &manifest.contracts {
-        if !contract_roles.insert(contract.role.as_str()) {
+        // The ENSv1 mirror role names an instance kind, not a singleton: a family may declare
+        // several mirror instances, which repository/mirror.rs holds to distinct addresses.
+        if contract.role != ENSV1_MIRROR_RESOLVER_ROLE
+            && !contract_roles.insert(contract.role.as_str())
+        {
             bail!(
                 "source family {} manifest version {} in {} duplicates contract role {}",
                 manifest.source_family,
