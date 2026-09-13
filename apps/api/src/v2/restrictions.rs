@@ -136,6 +136,69 @@ mod tests {
     use crate::v2::ErrorCode;
     use bigname_storage::ResourcePermissionCoverage;
 
+    const PROJECTION: &str =
+        include_str!("../../../../crates/project/src/builders/permissions/resource_summary.rs");
+    const V2_ROLE_TABLES: &str =
+        include_str!("../../../../crates/adapters/src/schema_v2/protocol/permissions.rs");
+
+    /// `(role, admin)` pairs from the projection's `VALUES (ordinal, 'role', 'admin')` list.
+    fn projected_lock_pairs() -> Vec<(String, String)> {
+        let start = PROJECTION
+            .find("AS locked_roles")
+            .expect("projection must build locked_roles");
+        let end = start
+            + PROJECTION[start..]
+                .find(") role(ordinality, name, admin)")
+                .expect("projection must close its role list");
+        PROJECTION[start..end]
+            .lines()
+            .filter_map(|line| {
+                let quoted = line.trim().strip_prefix('(')?.split_once(", '")?.1;
+                let (role, rest) = quoted.split_once("', '")?;
+                Some((role.to_owned(), rest.split('\'').next()?.to_owned()))
+            })
+            .collect()
+    }
+
+    fn registry_role_names() -> Vec<String> {
+        let start = V2_ROLE_TABLES
+            .find("REGISTRY_ROLE_BITS: &[(usize, &str)] = &[")
+            .expect("registry role table must exist");
+        let end = start
+            + V2_ROLE_TABLES[start..]
+                .find("];")
+                .expect("table must close");
+        V2_ROLE_TABLES[start..end]
+            .lines()
+            .filter_map(|line| line.trim().split_once(", \"")?.1.strip_suffix("\"),"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The served `locked_roles` names, the projection's role-to-admin pairs, and the interpreter's
+    /// registry role vocabulary describe the same five token-scoped roles.
+    #[test]
+    fn lockable_roles_bind_the_projection_and_the_registry_role_vocabulary() {
+        let pairs = projected_lock_pairs();
+        let names = registry_role_names();
+        assert_eq!(
+            pairs
+                .iter()
+                .map(|(role, _)| role.as_str())
+                .collect::<Vec<_>>(),
+            LOCKABLE_ROLES
+        );
+        for (role, admin) in &pairs {
+            assert!(names.contains(admin), "{admin} must be a registry role");
+            if role == "transfer" {
+                assert_eq!(admin, "can_transfer_admin");
+            } else {
+                assert!(names.contains(role), "{role} must be a registry role");
+                assert_eq!(*admin, format!("admin_{role}"));
+            }
+        }
+    }
+
     fn summary(restrictions: Option<Value>) -> PermissionsCurrentResourceSummary {
         PermissionsCurrentResourceSummary {
             resource_id: Uuid::from_u128(0x77),
