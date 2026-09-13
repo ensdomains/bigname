@@ -348,6 +348,50 @@ pub(crate) async fn load_snapshot(
     })
 }
 
+/// The ENS [authority arms](../../../docs/glossary.md#authority-epoch) whose names the selected
+/// `ens_execution` entrypoint on `chain_id` may verify: the manifest's `verified_authority_arms`,
+/// defaulting to `["ens_v1"]`. Uses the same active-or-shadow entrypoint selection at the readable
+/// head that record and primary-name lookup use, so callers gate on exactly what would execute.
+pub async fn admitted_verified_authority_arms(
+    pool: &PgPool,
+    chain_id: &str,
+) -> Result<Vec<String>> {
+    let chain = ens_l1_chain(chain_id).ok_or_else(|| {
+        LookupError::unsupported(format!(
+            "ENS verified lookup has no execution entrypoint on {chain_id}"
+        ))
+    })?;
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(database("start verified authority arm read"))?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .map_err(database("set verified authority arm read isolation"))?;
+    let head = load_head(&mut transaction, chain_id).await?;
+    let entrypoint = routes::entrypoint_authority(Namespace::Ens, chain)?;
+    let manifest = manifests::load_entrypoint(
+        &mut transaction,
+        manifests::EntrypointQuery {
+            namespace: ENS_NAMESPACE,
+            source_family: entrypoint.source_family.as_str(),
+            chain_id,
+            role: entrypoint.role,
+            allow_shadow: entrypoint.allow_shadow,
+            execution_block_number: head.block_number,
+            required_manifest_version: entrypoint.required_manifest_version,
+            require_resolution_capability: true,
+        },
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(database("commit verified authority arm read"))?;
+    Ok(manifest.verified_authority_arms)
+}
+
 /// Manifest entrypoints and the readable head for ENS primary-name lookup on `chain_id`, which
 /// must be the Ethereum L1 the deployment profile projects (Mainnet or Sepolia).
 pub(crate) async fn load_ens_primary_name_authority(

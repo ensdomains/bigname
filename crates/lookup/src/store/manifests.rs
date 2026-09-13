@@ -21,6 +21,11 @@ pub(super) struct ManifestEntry {
     manifest_row_xmin: String,
     declaration_id: String,
     declaration_row_xmin: String,
+    /// `verified_authority_arms` from the manifest payload, defaulted to `["ens_v1"]` when the
+    /// manifest declares none (`docs/manifests.md` § `verified_authority_arms`). Kept out of the
+    /// serialized execution authority: `manifest_row_xmin` already fences a payload change.
+    #[serde(skip)]
+    pub verified_authority_arms: Vec<String>,
 }
 
 pub(super) async fn load_entrypoint(
@@ -49,7 +54,13 @@ pub(super) async fn load_entrypoint(
                manifest.manifest_id::text AS manifest_id,
                manifest.manifest_row_xmin,
                declaration.manifest_contract_instance_id::text AS declaration_id,
-               declaration.xmin::text AS declaration_row_xmin
+               declaration.xmin::text AS declaration_row_xmin,
+               ARRAY(
+                   SELECT jsonb_array_elements_text(COALESCE(
+                       manifest.manifest_payload -> 'verified_authority_arms',
+                       '["ens_v1"]'::jsonb
+                   ))
+               ) AS verified_authority_arms
         FROM authoritative_manifest manifest
         JOIN manifest_contract_instances declaration
           ON declaration.manifest_id = manifest.manifest_id

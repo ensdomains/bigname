@@ -54,6 +54,10 @@ Each manifest contains:
 - `roots`
 - `contracts`
 - `discovery_rules`
+- `verified_authority_arms` — optional, `ens_execution` only: the ENS
+  [authority arms](glossary.md#authority-epoch) whose names the declared
+  Universal Resolver may verify; absent means `["ens_v1"]` (see
+  [`verified_authority_arms`](#verified_authority_arms))
 
 For one `(namespace, source_family, chain)` tuple in a selected deployment-profile root, at most one manifest version may declare `rollout_status = "active"`. Zero active versions remains valid for a family whose versions are only `draft`, `shadow`, or `deprecated`. Each `(namespace, source_family, chain, deployment_epoch, manifest_version)` tuple may come from only one file; the loader rejects duplicate tuples across repository layouts regardless of rollout status. Within one manifest version, every `[[contracts]].role` must be unique, except the instance role `ensv1_mirror_resolver`, which may repeat with distinct addresses (see [ENSv1 mirror resolver declarations](#ensv1-mirror-resolver-declarations)). The loader rejects these violations before repository sync.
 
@@ -213,6 +217,35 @@ as capability keys: the product namespace route intentionally maps a closed
 set of declared capability names, while the diagnostics manifest route exposes
 the complete source-family metadata.
 
+### `verified_authority_arms`
+
+`verified_authority_arms` is an optional top-level list that only an
+`ens_execution` manifest may carry. It names the ENS
+[authority arms](glossary.md#authority-epoch) — `ens_v1`, `ens_v2`, or both —
+whose names the declared `universal_resolver` entrypoint may answer for. The
+lookup engine reads the list from the selected active-or-shadow `ens_execution`
+manifest at the readable head and refuses a verified record, name-detail,
+batch-lookup, diagnostics, or forward primary-name read for a name whose
+selected `authority_arm` is not listed; the API reports that refusal in band
+(`docs/api-v2-routes.md`, `docs/execution.md`). A `verified_authority_arms`
+change is a manifest-payload change and moves the manifest row the engine
+fences on, so an in-flight verified read that started under the previous
+declaration is rejected as concurrent state rather than served across the
+change.
+
+When the field is absent the manifest admits `["ens_v1"]`, which is what the
+Mainnet and Sepolia `ens_execution` manifests keep: their proxy resolves through
+the ENSv1 registry walk, so an `ens_v2`-selected name has no execution path
+there. The `sepolia-hackathon` profile declares `["ens_v1", "ens_v2"]` because
+its own proxy is a UniversalResolverV2 whose `resolve(bytes,bytes)` walks the
+hackathon root registry
+(upstream: .refs/ens_v2/contracts/src/universalResolver/UniversalResolverV2.sol:L73-L80 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L21-L45 @ ens_v2@a971bd64).
+Listing `ens_v1` on an ENSv2 profile keeps the status quo: ENSv1-arm names
+remain verifiable through that profile's Universal Resolver. The loader rejects
+the field on any other source family, an empty list, an arm outside
+`ens_v1`/`ens_v2`, and duplicate entries.
+
 ### `chain`
 
 `chain` names the authority chain for that manifest within the selected deployment profile. Mainnet manifests use chain IDs like `ethereum-mainnet` and `base-mainnet`. Sepolia support is additive as a separate manifest profile root and chain-ID set.
@@ -326,7 +359,7 @@ Capability ownership attaches to the declaring `source_family`. It is never impl
 
 ### ENS mainnet
 
-`ens_execution` owns verified resolution at the ENS Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` with `verified_resolution = "shadow"`.[^ens-docs-univ][^v1-ur-deploy][^v1-ursol-l8] The pinned `.refs/` artifact is the implementation/ABI anchor; the lookup entry is the proxy address. The shadow flag records manifest ownership for the execution substrate; public ENS verified-resolution support is gated by the route-level support classes in `docs/api-v2-routes.md` and `docs/execution.md`, not by widening this manifest flag.
+`ens_execution` owns verified resolution at the ENS Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` with `verified_resolution = "shadow"`.[^ens-docs-univ][^v1-ur-deploy][^v1-ursol-l8] The pinned `.refs/` artifact is the implementation/ABI anchor; the lookup entry is the proxy address. The shadow flag records manifest ownership for the execution substrate; public ENS verified-resolution support is gated by the route-level support classes in `docs/api-v2-routes.md` and `docs/execution.md`, not by widening this manifest flag. The manifest declares no [`verified_authority_arms`](#verified_authority_arms), so it admits the default `["ens_v1"]`: the Mainnet profile has no ENSv2 arm to verify.
 
 The ENS primary-name route does not introduce a second manifest capability. `ens_execution` supplies the manifest selection for the request-scoped, hash-pinned ENS/60 missing-tuple lookup under the same owner manifest, without turning `verified_resolution = "shadow"` into a route-level primary-name support flag. Indexed exact-tuple claim state lives in `bigname_phase.primary_names_current`; provider lookup responses are not persisted as execution outcomes or traces.
 
@@ -385,7 +418,7 @@ The preceding `ens_v2_sepolia_dev` manifest versions remain checked in as `depre
 
 ### ENS execution (`sepolia` deployment profile)
 
-`ens_execution` owns verified resolution on Sepolia at the same ENS Universal Resolver proxy address as Mainnet, `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`, with `verified_resolution = "shadow"` and `rollout_status = "shadow"`, under `manifests/sepolia/ethereum/ens/ens_execution/v1.toml`. The admitted 2026-06-29 Sepolia deployment artifact deploys the proxy at that address (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/UpgradableUniversalResolverProxy.json:L2 @ ens_v2@a971bd64); the non-admitted 2026-07-30 redeploy keeps it (upstream: .refs/ens_v2/contracts/deployments/sepolia/UpgradableUniversalResolverProxy.json:L2 @ ens_v2@a971bd64). As on Mainnet, the pinned ENSv1 deployment artifact is the implementation/ABI anchor and the lookup entry is the proxy address (upstream: .refs/ens_v1/deployments/sepolia/UniversalResolver.json:L2 @ ens_v1@91c966f). The shadow flag has the same meaning as on Mainnet: it records manifest ownership for the execution substrate, and the lookup engine admits a shadow `ens_execution` manifest as the ENS entrypoint on either chain. Verified records and the request-scoped, hash-pinned ENS/60 primary-name lookup execute through this entrypoint on Sepolia under the same rules as Mainnet; the primary-name reverse leg additionally reads the active `ens_v1_registry_l1` registry declared below. The API's `GET /v1/namespaces/ens` reports both verified capabilities per chain from these declarations plus the configured provider.
+`ens_execution` owns verified resolution on Sepolia at the same ENS Universal Resolver proxy address as Mainnet, `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`, with `verified_resolution = "shadow"` and `rollout_status = "shadow"`, under `manifests/sepolia/ethereum/ens/ens_execution/v1.toml`. The admitted 2026-06-29 Sepolia deployment artifact deploys the proxy at that address (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/UpgradableUniversalResolverProxy.json:L2 @ ens_v2@a971bd64); the non-admitted 2026-07-30 redeploy keeps it (upstream: .refs/ens_v2/contracts/deployments/sepolia/UpgradableUniversalResolverProxy.json:L2 @ ens_v2@a971bd64). As on Mainnet, the pinned ENSv1 deployment artifact is the implementation/ABI anchor and the lookup entry is the proxy address (upstream: .refs/ens_v1/deployments/sepolia/UniversalResolver.json:L2 @ ens_v1@91c966f). The shadow flag has the same meaning as on Mainnet: it records manifest ownership for the execution substrate, and the lookup engine admits a shadow `ens_execution` manifest as the ENS entrypoint on either chain. Verified records and the request-scoped, hash-pinned ENS/60 primary-name lookup execute through this entrypoint on Sepolia under the same rules as Mainnet; the primary-name reverse leg additionally reads the active `ens_v1_registry_l1` registry declared below. The API's `GET /v1/namespaces/ens` reports both verified capabilities per chain from these declarations plus the configured provider. The manifest declares no [`verified_authority_arms`](#verified_authority_arms) and so admits the default `["ens_v1"]`: the canonical proxy walks the ENSv1 registry, and a name whose selected authority is the `ens_v2` arm is refused in band rather than resolved through an entrypoint its own authority selection has ruled out.
 
 ### ENSv1 (`sepolia` deployment profile)
 
@@ -2011,7 +2044,14 @@ through this entrypoint on the hackathon deployment, with the primary-name
 reverse leg reading the active hackathon `ens_v1_registry_l1` registry.
 `GET /v1/namespaces/ens` reports both verified capabilities for
 `ethereum-sepolia` from these declarations plus the configured provider
-instead of `execution_entrypoint_not_declared`. This is the tenth manifest of
+instead of `execution_entrypoint_not_declared`. Unlike the Mainnet and Sepolia
+files, this manifest declares
+[`verified_authority_arms = ["ens_v1", "ens_v2"]`](#verified_authority_arms):
+the hackathon proxy is a UniversalResolverV2 whose walk descends the hackathon
+root registry
+(upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L21-L45 @ ens_v2@a971bd64),
+so verified reads execute for names whose selected authority is the ENSv2 arm
+as well as for ENSv1-arm names, which stay verifiable through the same proxy. This is the tenth manifest of
 the profile and declares no indexing role, root, discovery rule, or event; it
 changes the profile's fingerprint, so it ships by rebuilding the binary.
 

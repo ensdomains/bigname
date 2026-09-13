@@ -25,7 +25,9 @@ pub use reverse_names::{
     execute_ens_reverse_name_multicall,
 };
 pub use rpc::{ChainRpcUrls, fetch_network_head_block_number};
-pub use store::{VerifiedExecutionEntrypoint, verified_execution_entrypoint};
+pub use store::{
+    VerifiedExecutionEntrypoint, admitted_verified_authority_arms, verified_execution_entrypoint,
+};
 pub use text_records::{
     EnsTextRecordMulticallBlock, EnsTextRecordMulticallRequest, EnsTextRecordMulticallResult,
     MULTICALL3_ADDRESS, ens_namehash_hex, execute_ens_text_record_multicall,

@@ -24,6 +24,7 @@ use crate::{
     BASENAMES_NAMESPACE, ChainRpcUrls, ENS_NAMESPACE, EnsPrimaryNameStatus, ErrorKind,
     LedgerAction, LookupEngine, LookupPosition, LookupRequest, LookupResponse, RecordSelector,
     abi::{dns_encode_name, hex_string, namehash},
+    admitted_verified_authority_arms,
     ccip::encode_offchain_lookup_for_test,
 };
 
@@ -2923,6 +2924,50 @@ async fn unsupported_active_ens_manifest_does_not_fall_back_to_shadow() -> AnyRe
         .lookup(lookup_request(&fixture.logical_name_id)?)
         .await
         .expect_err("an active manifest without the role must not fall back to shadow");
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn admitted_verified_authority_arms_follow_the_selected_entrypoint_declaration()
+-> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    assert_eq!(
+        admitted_verified_authority_arms(fixture.pool(), ETHEREUM).await?,
+        ["ens_v1"],
+        "an execution manifest without the declaration admits only the ENSv1 arm"
+    );
+
+    sqlx::query(
+        "UPDATE manifest_versions
+         SET manifest_payload = manifest_payload
+             || '{\"verified_authority_arms\": [\"ens_v1\", \"ens_v2\"]}'::jsonb
+         WHERE source_family = 'ens_execution'",
+    )
+    .execute(fixture.pool())
+    .await?;
+    assert_eq!(
+        admitted_verified_authority_arms(fixture.pool(), ETHEREUM).await?,
+        ["ens_v1", "ens_v2"]
+    );
+
+    let error = admitted_verified_authority_arms(fixture.pool(), BASE)
+        .await
+        .expect_err("Base is not an ENS execution chain");
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+
+    sqlx::query(
+        "UPDATE manifest_versions
+         SET manifest_payload = '{\"capability_flags\": {}}'::jsonb
+         WHERE source_family = 'ens_execution'",
+    )
+    .execute(fixture.pool())
+    .await?;
+    let error = admitted_verified_authority_arms(fixture.pool(), ETHEREUM)
+        .await
+        .expect_err("a manifest without the resolution capability declares no entrypoint");
     assert_eq!(error.kind(), ErrorKind::Unsupported);
 
     fixture.cleanup().await?;

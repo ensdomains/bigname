@@ -853,6 +853,12 @@ fn checked_in_hackathon_profile_declares_its_own_ens_execution_entrypoint() -> R
     assert_eq!(entrypoint.proxy_kind, "none");
     assert_eq!(entrypoint.implementation, None);
     assert_eq!(entrypoint.start_block, Some(11_626_766));
+    assert_eq!(
+        manifest.verified_authority_arms.as_deref(),
+        Some(&["ens_v1".to_owned(), "ens_v2".to_owned()][..]),
+        "the hackathon UniversalResolverV2 admits both ENS arms"
+    );
+    assert_eq!(manifest.verified_authority_arms(), ["ens_v1", "ens_v2"]);
 
     let earliest_start = repository
         .manifests()
@@ -869,6 +875,137 @@ fn checked_in_hackathon_profile_declares_its_own_ens_execution_entrypoint() -> R
         .map(|start| start.expect("every hackathon declaration carries a start block"))
         .min();
     assert_eq!(earliest_start, Some(11_626_442));
+    Ok(())
+}
+
+#[test]
+fn checked_in_l1_execution_manifests_admit_only_the_ensv1_arm_by_default() -> Result<()> {
+    for profile in ["manifests/mainnet", "manifests/sepolia"] {
+        let repository = load_repository(checked_in_manifest_root(profile))?;
+        let execution = repository
+            .manifests()
+            .iter()
+            .filter(|loaded| loaded.manifest.source_family == "ens_execution")
+            .collect::<Vec<_>>();
+        assert_eq!(execution.len(), 1, "{profile}: one ens_execution manifest");
+        let manifest = &execution[0].manifest;
+        assert_eq!(manifest.verified_authority_arms, None, "{profile}");
+        assert_eq!(
+            manifest.verified_authority_arms(),
+            DEFAULT_VERIFIED_AUTHORITY_ARMS,
+            "{profile}"
+        );
+        assert_eq!(manifest.verified_authority_arms(), ["ens_v1"], "{profile}");
+        let payload = serde_json::to_value(manifest)?;
+        assert!(
+            payload.get("verified_authority_arms").is_none(),
+            "{profile}: an absent declaration must not appear in the synced payload"
+        );
+    }
+    Ok(())
+}
+
+fn execution_manifest_contents(verified_authority_arms: Option<&str>) -> String {
+    let arms = verified_authority_arms
+        .map(|arms| format!("verified_authority_arms = {arms}\n"))
+        .unwrap_or_default();
+    format!(
+        r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_execution"
+chain = "ethereum-sepolia"
+deployment_epoch = "fixture"
+rollout_status = "shadow"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+discovery_rules = []
+{arms}
+[capability_flags]
+verified_resolution = "shadow"
+
+[[contracts]]
+role = "universal_resolver"
+address = "0x00000000000000000000000000000000000000EE"
+proxy_kind = "none"
+"#
+    )
+}
+
+fn load_execution_manifest(contents: &str) -> Result<ManifestRepository> {
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest_for_chain_combo("ethereum", "ens", "ens_execution", "v1", contents)?;
+    load_repository(&test_dir.path)
+}
+
+#[test]
+fn repository_loader_validates_verified_authority_arms() -> Result<()> {
+    let admitted = load_execution_manifest(&execution_manifest_contents(Some(
+        "[\"ens_v1\", \"ens_v2\"]",
+    )))?;
+    let manifest = &admitted.manifests()[0].manifest;
+    assert_eq!(manifest.verified_authority_arms(), ["ens_v1", "ens_v2"]);
+    assert_eq!(
+        serde_json::to_value(manifest)?["verified_authority_arms"],
+        json!(["ens_v1", "ens_v2"]),
+        "a declaration must reach the synced payload the lookup engine reads"
+    );
+    let round_trip: SourceManifest = serde_json::from_value(serde_json::to_value(manifest)?)?;
+    assert_eq!(&round_trip, manifest);
+
+    let ens_v2_only = load_execution_manifest(&execution_manifest_contents(Some("[\"ens_v2\"]")))?;
+    assert_eq!(
+        ens_v2_only.manifests()[0]
+            .manifest
+            .verified_authority_arms(),
+        ["ens_v2"]
+    );
+
+    let defaulted = load_execution_manifest(&execution_manifest_contents(None))?;
+    assert_eq!(
+        defaulted.manifests()[0].manifest.verified_authority_arms(),
+        ["ens_v1"]
+    );
+
+    for (case, contents, expected) in [
+        (
+            "unknown arm",
+            execution_manifest_contents(Some("[\"ens_v3\"]")),
+            "unknown verified authority arm \"ens_v3\"",
+        ),
+        (
+            "basenames is not an ENS arm",
+            execution_manifest_contents(Some("[\"ens_v1\", \"basenames\"]")),
+            "unknown verified authority arm \"basenames\"",
+        ),
+        (
+            "empty list",
+            execution_manifest_contents(Some("[]")),
+            "declares empty verified_authority_arms",
+        ),
+        (
+            "duplicate arm",
+            execution_manifest_contents(Some("[\"ens_v1\", \"ens_v1\"]")),
+            "duplicates verified authority arm \"ens_v1\"",
+        ),
+    ] {
+        let error = load_execution_manifest(&contents).expect_err(case);
+        assert!(
+            format!("{error:#}").contains(expected),
+            "{case} returned an unexpected error: {error:#}"
+        );
+    }
+
+    let error = load_one(&manifest_contents().replacen(
+        "\n[capability_flags]",
+        "\nverified_authority_arms = [\"ens_v1\"]\n\n[capability_flags]",
+        1,
+    ))
+    .expect_err("a non-execution family must not declare arms");
+    assert!(
+        format!("{error:#}").contains("only source family ens_execution may declare"),
+        "{error:#}"
+    );
     Ok(())
 }
 
