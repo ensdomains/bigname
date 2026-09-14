@@ -292,6 +292,25 @@ of the event that selected the current resolver pointer. Resolver binding
 summaries use that stored event provenance rather than a prior resolver row's
 classification.
 
+`declared_summary.topology` is the lookup engine's routing input
+(`architecture.md` § `verified_queries`, `execution.md` § Resolver-record
+lookup). Project writes it in a fixed order and each builder fills only rows the
+earlier ones left without one: alias paths, observed wildcard paths, ownerless
+ENS registry pointers, then exact-surface direct ENS names, then Basenames
+transport. The direct builder covers an ENS name bound through its selected
+`declared_registry_path` binding on either [authority arm](glossary.md#authority-epoch):
+one `registry_path` hop for the binding, one `resolver_path` hop for the
+projected exact resolver (a declared ENSv1 mirror resolver stays the mirror
+address), empty `subregistry_path`, null wildcard, alias, and transport detail,
+and `version_boundaries` copied from the binding resource's
+`record_inventory_current.record_version_boundary`. A bound name whose exact
+resolver is null keeps no topology so the Universal Resolver discovery route
+classifies it from the absent shape, and a bound name whose binding resource has
+no inventory row is skipped because the engine requires the copied boundary to
+equal the inventory row's. Whether a verified read may then execute for the
+name's arm is decided per deployment profile by the `ens_execution` manifest's
+`verified_authority_arms`, not by the topology.
+
 When a retained direct-registry authority first becomes name-addressable, its
 [`state-derived normalized event`](glossary.md#state-derived-normalized-event)
 of kind `SurfaceBound` carries the observed registry owner. The exact-name

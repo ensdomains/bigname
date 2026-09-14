@@ -2,6 +2,7 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{Marker, ProjectError, Result};
 
+mod direct;
 mod serialization;
 
 pub(super) async fn build(
@@ -12,6 +13,7 @@ pub(super) async fn build(
     project_alias_topology(transaction).await?;
     project_wildcard_topology(transaction).await?;
     project_ownerless_ens_topology(transaction).await?;
+    direct::build(transaction).await?;
     project_basenames_transport(transaction, chain_id, target).await?;
     serialization::serialize_projected_topologies(transaction).await?;
     Ok(())

@@ -768,7 +768,22 @@ collection route carry neither header.
   answer. The ENSIP-19 default-address rule below is one such rule.
   `source=auto` blends per key: indexed answers are used where they satisfy the
   requested key, and only the remaining supported keys fall back to verified
-  lookup. [Universal Resolver ancestor
+  lookup. A verified read has two closed refusal reasons of its own, reported
+  per key on this route and as `data.unsupported_reason` on the verified
+  exact-name detail route: `verified_records_not_supported` when the projected
+  row carries no topology the engine admits (a bound name without a record
+  inventory row, a null-resolver row outside the discovery shape below, an
+  out-of-class shape, or no admitted execution entrypoint), and
+  `exact_name_authority_not_verifiable` when the row's selected
+  [authority arm](glossary.md#authority-epoch) is outside the
+  `verified_authority_arms` the selected `ens_execution` manifest declares
+  (`manifests.md` § `verified_authority_arms`; absent means `["ens_v1"]`, so
+  an `ens_v2`-selected name is refused on the Mainnet and Sepolia profiles and
+  admitted on `sepolia-hackathon`). Neither refusal dispatches a provider call.
+  Bound ENS names of either arm with a non-null exact resolver carry a
+  projected direct topology (`execution.md` § Resolver-record lookup), so an
+  admitted arm executes the direct route and compares against the indexed
+  inventory like any other direct route. [Universal Resolver ancestor
   discovery](glossary.md#universal-resolver-ancestor-discovery) applies when a
   readable ENS name on the deployment profile's Ethereum L1 (Mainnet under
   `manifests/mainnet`, Sepolia under `manifests/sepolia`) has a null projected

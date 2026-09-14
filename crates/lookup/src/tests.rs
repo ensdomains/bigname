@@ -58,7 +58,20 @@ enum RpcResponse {
 #[derive(Clone, Copy)]
 enum FixtureKind {
     Ens,
+    /// An ENS name whose selected authority arm is `ens_v2`, projected with a direct topology, on
+    /// an `ens_execution` entrypoint that declares `verified_authority_arms = ["ens_v1", "ens_v2"]`.
+    EnsV2Arm,
     Basenames,
+}
+
+impl FixtureKind {
+    fn authority_arm(self) -> &'static str {
+        match self {
+            Self::Ens => "ens_v1",
+            Self::EnsV2Arm => "ens_v2",
+            Self::Basenames => "basenames",
+        }
+    }
 }
 
 struct Fixture {
@@ -2931,6 +2944,90 @@ async fn unsupported_active_ens_manifest_does_not_fall_back_to_shadow() -> AnyRe
 }
 
 #[tokio::test]
+async fn ens_v2_arm_direct_route_executes_and_compares_through_an_admitting_entrypoint()
+-> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::EnsV2Arm, INDEXED_VALUE).await?;
+    let arm: String = sqlx::query_scalar(
+        "SELECT provenance #>> '{authority_selection,authority_arm}' FROM name_current",
+    )
+    .fetch_one(fixture.pool())
+    .await?;
+    assert_eq!(arm, "ens_v2");
+
+    let response = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(response.entrypoint_address, UNIVERSAL_RESOLVER);
+    assert_eq!(response.records.len(), 1);
+    assert_eq!(
+        response.records[0].status,
+        crate::LookupRecordStatus::Success
+    );
+    assert_eq!(response.records[0].ledger_action, LedgerAction::Written);
+    assert_eq!(
+        ledger_count(fixture.pool()).await?,
+        1,
+        "a direct ENSv2-arm route is compared against its indexed inventory like any direct route"
+    );
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests[0]["params"][0]["to"], UNIVERSAL_RESOLVER);
+    assert_hash_pinned(&requests, ETHEREUM_HASH);
+    Ok(())
+}
+
+#[tokio::test]
+async fn ens_v2_arm_is_refused_before_rpc_by_an_ens_v1_only_entrypoint() -> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::EnsV2Arm, INDEXED_VALUE).await?;
+    for payload in [
+        // The default: no declaration admits only the ENSv1 arm.
+        "manifest_payload - 'verified_authority_arms'",
+        "manifest_payload || '{\"verified_authority_arms\": [\"ens_v1\"]}'::jsonb",
+    ] {
+        sqlx::query(&format!(
+            "UPDATE manifest_versions SET manifest_payload = {payload}
+             WHERE source_family = 'ens_execution'"
+        ))
+        .execute(fixture.pool())
+        .await?;
+        let error = lookup_engine(fixture.pool(), "http://127.0.0.1:1")?
+            .lookup(lookup_request(&fixture.logical_name_id)?)
+            .await
+            .expect_err("an ENSv2-arm name must not execute through an ENSv1-only entrypoint");
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert_eq!(
+            error.refusal(),
+            Some(crate::LookupRefusal::AuthorityArmNotAdmitted),
+            "{payload}: {error}"
+        );
+    }
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    // The ENSv1 arm stays admitted by the same default declaration.
+    sqlx::query(
+        "UPDATE name_current SET provenance = jsonb_build_object(
+             'authority_selection', jsonb_build_object('authority_arm', 'ens_v1'))",
+    )
+    .execute(fixture.pool())
+    .await?;
+    sqlx::query("UPDATE surface_bindings SET authority_arm = 'ens_v1'")
+        .execute(fixture.pool())
+        .await?;
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(
+        INDEXED_VALUE,
+    ))])
+    .await?;
+    let response = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(
+        response.records[0].status,
+        crate::LookupRecordStatus::Success
+    );
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn admitted_verified_authority_arms_follow_the_selected_entrypoint_declaration()
 -> AnyResult<()> {
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
@@ -3352,7 +3449,7 @@ async fn setup_fixture(kind: FixtureKind, indexed_value: &str) -> AnyResult<Fixt
     apply_baseline(database.pool()).await?;
     let (namespace, name, resolver_chain, resolver_hash, entrypoint, role, source_family) =
         match kind {
-            FixtureKind::Ens => (
+            FixtureKind::Ens | FixtureKind::EnsV2Arm => (
                 ENS_NAMESPACE,
                 "alice.eth",
                 ETHEREUM,
@@ -3425,7 +3522,7 @@ async fn setup_fixture(kind: FixtureKind, indexed_value: &str) -> AnyResult<Fixt
         },
     });
     let transport = match kind {
-        FixtureKind::Ens => json!({
+        FixtureKind::Ens | FixtureKind::EnsV2Arm => json!({
             "source_chain_id": null,
             "target_chain_id": null,
             "contract_address": null,
@@ -3463,6 +3560,7 @@ async fn setup_fixture(kind: FixtureKind, indexed_value: &str) -> AnyResult<Fixt
         resolver_hash,
         resource_id,
         binding_id,
+        kind.authority_arm(),
         &topology,
         &boundary,
         &name_positions,
@@ -3470,6 +3568,16 @@ async fn setup_fixture(kind: FixtureKind, indexed_value: &str) -> AnyResult<Fixt
         indexed_value,
     )
     .await?;
+    if matches!(kind, FixtureKind::EnsV2Arm) {
+        sqlx::query(
+            "UPDATE manifest_versions
+             SET manifest_payload = manifest_payload
+                 || '{\"verified_authority_arms\": [\"ens_v1\", \"ens_v2\"]}'::jsonb
+             WHERE source_family = 'ens_execution'",
+        )
+        .execute(database.pool())
+        .await?;
+    }
 
     Ok(Fixture {
         database,
@@ -3698,6 +3806,7 @@ async fn seed_identity_and_projection(
     block_hash: &str,
     resource_id: &str,
     binding_id: &str,
+    authority_arm: &str,
     topology: &Value,
     boundary: &Value,
     name_positions: &Value,
@@ -3735,8 +3844,7 @@ async fn seed_identity_and_projection(
         "INSERT INTO surface_bindings
             (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from,
              chain_id, block_hash, block_number, canonicality_state)
-         VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path',
-                 CASE WHEN $2 LIKE 'basenames:%' THEN 'basenames' ELSE 'ens_v1' END,
+         VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', $6,
                  '2026-08-03T00:00:00Z', $4, $5, 10, 'canonical')",
     )
     .bind(binding_id)
@@ -3744,6 +3852,7 @@ async fn seed_identity_and_projection(
     .bind(resource_id)
     .bind(chain_id)
     .bind(block_hash)
+    .bind(authority_arm)
     .execute(pool)
     .await?;
     sqlx::query(
@@ -3752,8 +3861,11 @@ async fn seed_identity_and_projection(
              resource_id, binding_kind, declared_summary, support_status,
              provenance, chain_positions, canonicality_summary, manifest_version)
          VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid, 'declared_registry_path',
-                 jsonb_build_object('topology', $7::jsonb), 'supported', '{}', $8,
-                 jsonb_build_object('state', 'canonical'), 1)",
+                 jsonb_build_object('topology', $7::jsonb), 'supported',
+                 jsonb_build_object(
+                     'authority_selection', jsonb_build_object('authority_arm', $9::text)
+                 ),
+                 $8, jsonb_build_object('state', 'canonical'), 1)",
     )
     .bind(logical_name_id)
     .bind(namespace)
@@ -3763,6 +3875,7 @@ async fn seed_identity_and_projection(
     .bind(resource_id)
     .bind(topology)
     .bind(name_positions)
+    .bind(authority_arm)
     .execute(pool)
     .await?;
     let selectors = json!([{

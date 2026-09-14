@@ -1317,9 +1317,9 @@ Unsupported records remain requestable through verified execution where possible
 
 Execution-derived answers per requested record selector, reusing `ResultStatus`. Verified queries do not backfill `record_inventory` or `record_cache` in the same response.
 
-Public verified support is narrower than the topology model. ENS supports:
+Public verified support is narrower than the topology model. Every ENS class is first gated by the selected [authority arm](glossary.md#authority-epoch): the selected `ens_execution` manifest's `verified_authority_arms` (`manifests.md` § `verified_authority_arms`) must list the row's projected arm, else the read is refused as `exact_name_authority_not_verifiable`. ENS supports:
 
-- exact-surface direct path: `resolver_path[0].logical_name_id == route surface`, `wildcard.source=null`, `alias.final_target=null`, all `transport=null`
+- exact-surface direct path: `resolver_path[0].logical_name_id == route surface`, `wildcard.source=null`, `alias.final_target=null`, all `transport=null`; Project writes this topology for names bound through their selected `declared_registry_path` binding on either arm with a non-null exact resolver and a record inventory row (`projections.md` § Exact-name projection)
 - exact-surface alias-only non-direct: same but `alias.final_target` non-null with non-empty `hops`
 - exact-surface wildcard-derived: `wildcard.source` non-null with non-empty `matched_labels`, `resolver_path[0].logical_name_id == wildcard.source.logical_name_id`, `alias.final_target=null`, `subregistry_path=[]`, `transport=null`
 - [Universal Resolver ancestor

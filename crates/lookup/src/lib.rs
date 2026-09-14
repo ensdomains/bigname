@@ -17,7 +17,7 @@ mod text_records;
 mod types;
 
 pub use engine::LookupEngine;
-pub use error::{ErrorKind, LookupError, Result};
+pub use error::{ErrorKind, LookupError, LookupRefusal, Result};
 pub use primary_name::{EnsPrimaryNameLookup, EnsPrimaryNameStatus};
 pub use record_selector::RecordSelector;
 pub use reverse_names::{

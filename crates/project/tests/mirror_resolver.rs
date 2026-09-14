@@ -754,6 +754,206 @@ fn boundary_key(boundary: &Value, chain_id: &str) -> String {
     .collect()
 }
 
+/// Both selected `declared_registry_path` bindings receive an exact-surface direct topology: the
+/// ENSv1-arm parent through its declared resolver and the ENSv2-arm child through the mirror,
+/// each copying the record boundary of its binding resource's inventory
+/// (`docs/execution.md` § Resolver-record lookup, `docs/projections.md` § Exact-name projection).
+#[tokio::test]
+async fn direct_bound_names_of_both_arms_project_a_direct_topology() -> Result<()> {
+    let fixture =
+        Fixture::declared("direct_topology", V1Side::Projected).with_ancestor(Ancestor::Direct {
+            pointer_block_offset: 0,
+        });
+    let (database, pool) = project_direct_fixture(&fixture).await?;
+    for (name, arm, resource, resolver, binding) in [
+        (
+            PARENT_NAME,
+            "ens_v1",
+            PARENT_V1_RESOURCE,
+            PARENT_RESOLVER,
+            PARENT_V1_BINDING,
+        ),
+        (NAME, "ens_v2", V2_RESOURCE, MIRROR, V2_BINDING),
+    ] {
+        let logical_name_id = format!("ens:{}", bigname_lookup::ens_namehash_hex(name)?);
+        let row = name_current(&pool, &logical_name_id).await?;
+        assert_eq!(row["support_status"], "supported", "{row}");
+        assert_eq!(
+            row["provenance"]["authority_selection"]["authority_arm"], arm,
+            "{row}"
+        );
+        assert_eq!(row["surface_binding_id"], binding, "{row}");
+        assert_eq!(row["declared_summary"]["resolver"]["address"], resolver);
+        let topology = &row["declared_summary"]["topology"];
+        assert_eq!(
+            topology["registry_path"],
+            json!([{
+                "logical_name_id": logical_name_id,
+                "namespace": "ens",
+                "normalized_name": name,
+                "canonical_display_name": name,
+                "namehash": bigname_lookup::ens_namehash_hex(name)?,
+                "resource_id": resource,
+                "binding_kind": "declared_registry_path"
+            }]),
+            "{arm}: {topology}"
+        );
+        assert_eq!(topology["subregistry_path"], json!([]));
+        assert_eq!(
+            topology["resolver_path"],
+            json!([{
+                "logical_name_id": logical_name_id,
+                "namespace": "ens",
+                "normalized_name": name,
+                "canonical_display_name": name,
+                "resource_id": resource,
+                "chain_id": CHAIN,
+                "address": resolver,
+                "latest_event_kind": "ResolverChanged"
+            }]),
+            "{arm}: {topology}"
+        );
+        assert_eq!(
+            topology["wildcard"],
+            json!({"source": null, "matched_labels": []})
+        );
+        assert_eq!(topology["alias"], json!({"final_target": null, "hops": []}));
+        assert!(
+            topology["transport"]
+                .as_object()
+                .context("transport")?
+                .values()
+                .all(Value::is_null),
+            "{topology}"
+        );
+        let inventory = inventory(&pool, resource).await?;
+        assert_eq!(
+            topology["version_boundaries"]["record_version_boundary"],
+            inventory["record_version_boundary"],
+            "{arm}: the copied boundary must equal record_inventory_current's"
+        );
+        assert_eq!(
+            topology["version_boundaries"]["topology_version_boundary"],
+            inventory["record_version_boundary"]
+        );
+        let parsed: bigname_domain::resolution_topology::ResolutionTopology =
+            serde_json::from_value(topology.clone())?;
+        assert_eq!(
+            parsed.classify(
+                &logical_name_id,
+                bigname_domain::resolution_topology::ResolutionRoutePolicy::Ens
+            ),
+            Ok(bigname_domain::resolution_topology::ResolutionRoute::Direct),
+            "{arm}"
+        );
+    }
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A bound name whose exact resolver is null keeps no topology, so the Universal Resolver
+/// discovery route still classifies it from the absent shape.
+#[tokio::test]
+async fn direct_bound_name_without_a_resolver_keeps_no_topology() -> Result<()> {
+    let fixture = Fixture::declared("direct_topology_null", V1Side::Absent);
+    let (database, pool) = project_direct_fixture(&fixture).await?;
+    let logical_name_id = format!("ens:{}", bigname_lookup::ens_namehash_hex(NAME)?);
+    let row = name_current(&pool, &logical_name_id).await?;
+    assert_eq!(
+        row["provenance"]["authority_selection"]["authority_arm"],
+        "ens_v2"
+    );
+    // The mirror has no ENSv1 side to serve, so its inventory is unsupported and stays
+    // topology-eligible only through its resolver pointer; the topology is still built for it.
+    assert_eq!(row["declared_summary"]["resolver"]["address"], MIRROR);
+    assert!(
+        row["declared_summary"]["topology"].is_object(),
+        "a bound name with a resolver pointer and an inventory row projects a topology: {row}"
+    );
+    let parent_logical_name_id = format!("ens:{}", bigname_lookup::ens_namehash_hex(PARENT_NAME)?);
+    let parent = name_current(&pool, &parent_logical_name_id).await?;
+    assert_eq!(
+        parent["declared_summary"]["resolver"]["address"],
+        Value::Null
+    );
+    assert!(
+        parent["declared_summary"].get("topology").is_none(),
+        "a bound name without a resolver keeps no topology: {parent}"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+async fn project_direct_fixture(fixture: &Fixture) -> Result<(TestDatabase, PgPool)> {
+    let (database, pool) = database(fixture.id).await?;
+    seed(&pool, fixture).await?;
+    // Keep ENSv1 resolver evidence for the mirror without claiming a second current
+    // registry authority for the child in this independent deployment fixture.
+    sqlx::query("DELETE FROM surface_bindings WHERE surface_binding_id = $1::uuid")
+        .bind(V1_BINDING)
+        .execute(&pool)
+        .await?;
+    for family in ["ens_v2_registry_l1", "ens_v2_registrar_l1"] {
+        let manifest_id = manifest(
+            &pool,
+            fixture,
+            family,
+            &json!({
+                "deployment_epoch": "ens_v2_sepolia_hackathon",
+                "capability_flags": {"exact_name_profile": {"status": "supported"}}
+            }),
+        )
+        .await?;
+        sqlx::query("UPDATE manifest_versions SET deployment_label = 'ens_v2_sepolia_hackathon' WHERE manifest_id = $1")
+            .bind(manifest_id).execute(&pool).await?;
+        sqlx::query(
+            "INSERT INTO normalized_events (
+                 event_identity, namespace, event_kind, source_family, manifest_version,
+                 source_manifest_id, chain_id, logical_name_id, resource_id,
+                 block_number, block_hash, derivation_kind,
+                 canonicality_state, after_state
+             ) VALUES ($1, 'ens', $2, $3, 1, $4, $5, $6, $7::uuid,
+                 $8, $9, 'ens_v1_unwrapped_authority', 'canonical', $10)",
+        )
+        .bind(format!("{}:{family}:admission", fixture.id))
+        .bind(if family == "ens_v2_registry_l1" {
+            "SurfaceBound"
+        } else {
+            "RegistrationGranted"
+        })
+        .bind(family)
+        .bind(manifest_id)
+        .bind(CHAIN)
+        .bind(format!("ens:{}", bigname_lookup::ens_namehash_hex(NAME)?))
+        .bind(V2_RESOURCE)
+        .bind(fixture.base)
+        .bind(block_hash(fixture.base))
+        .bind(json!({"expiry": 2_000_000_000, "surface_binding_id": V2_BINDING}))
+        .execute(&pool)
+        .await?;
+    }
+    run(
+        &pool,
+        fixture.target(),
+        0,
+        fixture.target(),
+        None,
+        RunMode::Normal,
+    )
+    .await?;
+    Ok((database, pool))
+}
+
+async fn name_current(pool: &PgPool, logical_name_id: &str) -> Result<Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT to_jsonb(row) - 'last_recomputed_at' - 'inserted_at' \
+         FROM name_current row WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .fetch_one(pool)
+    .await?)
+}
+
 async fn inventory(pool: &PgPool, resource: &str) -> Result<Value> {
     Ok(sqlx::query_scalar(
         "SELECT to_jsonb(row) - 'last_recomputed_at' - 'inserted_at' \

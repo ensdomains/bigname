@@ -5,7 +5,8 @@ use crate::v2::vocab::{MISSING_UNSUPPORTED_REASON, projected_row_product_reason}
 /// declaration does not admit (`docs/manifests.md` § `verified_authority_arms`), or for a
 /// supported row missing its arm. Distinct from an unsupported exact-name projection, which
 /// reports its own reason.
-pub(super) const CLAIM_AUTHORITY_NOT_VERIFIABLE: &str = "exact_name_authority_not_verifiable";
+pub(super) const CLAIM_AUTHORITY_NOT_VERIFIABLE: &str =
+    crate::v2::name_records::EXACT_NAME_AUTHORITY_NOT_VERIFIABLE;
 
 pub(super) enum ForwardGateDecision {
     Admit,
