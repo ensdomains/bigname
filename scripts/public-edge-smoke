@@ -290,7 +290,7 @@ assert_status internal-traversal-status 404 GET "${internal_api_url}${traversal_
 assert_status internal-traversal-lookup 404 POST "${internal_api_url}${traversal_lookup_path}" "$lookup_body"
 assert_status internal-traversal-health 404 GET "${internal_api_url}${traversal_health_path}" ''
 assert_status internal-root 404 GET "${internal_api_url}/" ''
-assert_status internal-docs 404 GET "${internal_api_url}/docs" ''
+assert_status internal-docs 200 GET "${internal_api_url}/docs" ''
 assert_status internal-openapi 404 GET "${internal_api_url}/openapi.json" ''
 assert_status internal-unknown 404 GET "${internal_api_url}${unknown_path}" ''
 request_timeout_secs=10
