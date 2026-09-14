@@ -521,9 +521,9 @@ async fn load_verified_record_lookup_with_persistence(
 
     let _ = record_inventory;
     match execute_resolution_lookup(state, row, records, selected_snapshot).await {
-        Ok(ResolutionLookupOutcome::Executed(response)) => Ok(Some(VerifiedRecordLookup::Found {
-            response: Box::new(response),
-        })),
+        Ok(ResolutionLookupOutcome::Executed(response)) => {
+            Ok(Some(VerifiedRecordLookup::Found { response }))
+        }
         Ok(ResolutionLookupOutcome::NotSupported) => Ok(Some(VerifiedRecordLookup::NotSupported)),
         Ok(ResolutionLookupOutcome::AuthorityArmNotAdmitted) => {
             Ok(Some(VerifiedRecordLookup::AuthorityArmNotAdmitted))
