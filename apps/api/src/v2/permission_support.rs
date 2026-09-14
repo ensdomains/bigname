@@ -9,16 +9,22 @@ use sqlx::types::Uuid;
 use super::{Completeness, Meta};
 
 const PERMISSION_SUPPORT_UNKNOWN_REASON: &str = "permission_support_unknown";
-const WRAPPER_HOLDER_PERMISSIONS_NOT_SUPPORTED_REASON: &str =
-    "wrapper_holder_permissions_not_supported";
-const APPROVAL_AND_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON: &str =
-    "approval_and_delegation_permissions_not_supported";
+const REGISTRAR_RESOLVER_PARTIAL_REASON: &str =
+    "registrar_erc721_approvals_and_resolver_approvals_delegates_not_supported";
+const REGISTRAR_RESOLVER_WRAPPER_PARTIAL_REASON: &str =
+    "registrar_erc721_approvals_resolver_approvals_delegates_and_wrapper_permissions_not_supported";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PermissionRequestScope {
+    ResourceBound,
+    AccountWide,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PermissionSupport {
     Full,
-    ApprovalDelegationPartial,
-    WrapperUnsupported,
+    RegistrarResolverPartial,
+    RegistrarResolverWrapperPartial,
     Unknown,
 }
 
@@ -26,24 +32,20 @@ impl PermissionSupport {
     fn merge(self, other: Self) -> Self {
         match (self, other) {
             (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
-            (Self::ApprovalDelegationPartial, _) | (_, Self::ApprovalDelegationPartial) => {
-                Self::ApprovalDelegationPartial
-            }
-            (Self::WrapperUnsupported, _) | (_, Self::WrapperUnsupported) => {
-                Self::WrapperUnsupported
+            (Self::RegistrarResolverWrapperPartial, _)
+            | (_, Self::RegistrarResolverWrapperPartial) => Self::RegistrarResolverWrapperPartial,
+            (Self::RegistrarResolverPartial, _) | (_, Self::RegistrarResolverPartial) => {
+                Self::RegistrarResolverPartial
             }
             (Self::Full, Self::Full) => Self::Full,
         }
     }
 
-    fn product_reason(self) -> Option<&'static str> {
+    fn product_reason(self) -> &'static str {
         match self {
-            Self::Full => None,
-            Self::ApprovalDelegationPartial => {
-                Some(APPROVAL_AND_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON)
-            }
-            Self::WrapperUnsupported => Some(WRAPPER_HOLDER_PERMISSIONS_NOT_SUPPORTED_REASON),
-            Self::Unknown => Some(PERMISSION_SUPPORT_UNKNOWN_REASON),
+            Self::Full | Self::RegistrarResolverPartial => REGISTRAR_RESOLVER_PARTIAL_REASON,
+            Self::RegistrarResolverWrapperPartial => REGISTRAR_RESOLVER_WRAPPER_PARTIAL_REASON,
+            Self::Unknown => PERMISSION_SUPPORT_UNKNOWN_REASON,
         }
     }
 }
@@ -66,13 +68,13 @@ pub(crate) fn permission_support_for_resources(
                         Some(
                             PermissionCoverageUnsupportedReason::OperatorApprovalSurfacesNotIngested,
                         ),
-                    ) => PermissionSupport::ApprovalDelegationPartial,
+                    ) => PermissionSupport::RegistrarResolverPartial,
                     (
                         PermissionCoverageStatus::Unsupported,
                         Some(
                             PermissionCoverageUnsupportedReason::Ensv1WrapperHolderPermissionsNotProjected,
                         ),
-                    ) => PermissionSupport::WrapperUnsupported,
+                    ) => PermissionSupport::RegistrarResolverWrapperPartial,
                     _ => PermissionSupport::Unknown,
                 },
                 None => PermissionSupport::Unknown,
@@ -84,47 +86,24 @@ pub(crate) fn permission_support_for_resources(
 pub(crate) fn apply_permissions_collection_support_meta(
     meta: &mut Meta,
     support: PermissionSupport,
-    resource_bound: bool,
+    request_scope: PermissionRequestScope,
 ) {
-    let (completeness, reason) = match (resource_bound, support) {
-        (true, PermissionSupport::Full) => return,
-        (true, PermissionSupport::ApprovalDelegationPartial) => (
-            Completeness::Partial,
-            APPROVAL_AND_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON,
-        ),
-        (true, PermissionSupport::WrapperUnsupported) => (
-            Completeness::Unsupported,
-            WRAPPER_HOLDER_PERMISSIONS_NOT_SUPPORTED_REASON,
-        ),
-        (true, PermissionSupport::Unknown) => {
-            (Completeness::Partial, PERMISSION_SUPPORT_UNKNOWN_REASON)
+    let reason = match (request_scope, support) {
+        (_, PermissionSupport::Unknown) => PERMISSION_SUPPORT_UNKNOWN_REASON,
+        (PermissionRequestScope::AccountWide, _)
+        | (_, PermissionSupport::RegistrarResolverWrapperPartial) => {
+            REGISTRAR_RESOLVER_WRAPPER_PARTIAL_REASON
         }
-        (false, PermissionSupport::Unknown) => {
-            (Completeness::Partial, PERMISSION_SUPPORT_UNKNOWN_REASON)
-        }
-        (
-            false,
-            PermissionSupport::Full
-            | PermissionSupport::ApprovalDelegationPartial
-            | PermissionSupport::WrapperUnsupported,
-        ) => (
-            Completeness::Partial,
-            APPROVAL_AND_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON,
-        ),
+        (PermissionRequestScope::ResourceBound, _) => REGISTRAR_RESOLVER_PARTIAL_REASON,
     };
-
-    meta.completeness = Some(completeness);
+    meta.completeness = Some(Completeness::Partial);
     meta.unsupported_reason = Some(reason.to_owned());
 }
 
 pub(crate) fn apply_role_summary_support_meta(meta: &mut Meta, support: PermissionSupport) {
-    let Some(reason) = support.product_reason() else {
-        return;
-    };
-
     meta.completeness = Some(Completeness::Partial);
     meta.unsupported_fields = Some(vec!["role_summary".to_owned()]);
-    meta.unsupported_reason = Some(reason.to_owned());
+    meta.unsupported_reason = Some(support.product_reason().to_owned());
 }
 
 #[cfg(test)]
@@ -156,25 +135,25 @@ mod tests {
         let mut resource_meta = Meta::default();
         apply_permissions_collection_support_meta(
             &mut resource_meta,
-            PermissionSupport::WrapperUnsupported,
-            true,
+            PermissionSupport::RegistrarResolverWrapperPartial,
+            PermissionRequestScope::ResourceBound,
         );
-        assert_eq!(resource_meta.completeness, Some(Completeness::Unsupported));
+        assert_eq!(resource_meta.completeness, Some(Completeness::Partial));
         assert_eq!(
             resource_meta.unsupported_reason.as_deref(),
-            Some(WRAPPER_HOLDER_PERMISSIONS_NOT_SUPPORTED_REASON)
+            Some(REGISTRAR_RESOLVER_WRAPPER_PARTIAL_REASON)
         );
 
         let mut account_meta = Meta::default();
         apply_permissions_collection_support_meta(
             &mut account_meta,
             PermissionSupport::Full,
-            false,
+            PermissionRequestScope::AccountWide,
         );
         assert_eq!(account_meta.completeness, Some(Completeness::Partial));
         assert_eq!(
             account_meta.unsupported_reason.as_deref(),
-            Some(APPROVAL_AND_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON)
+            Some(REGISTRAR_RESOLVER_WRAPPER_PARTIAL_REASON)
         );
     }
 
@@ -214,11 +193,11 @@ mod tests {
         );
         assert_eq!(
             permission_support_for_resources(&[full_id, wrapper_id], &summaries),
-            PermissionSupport::WrapperUnsupported
+            PermissionSupport::RegistrarResolverWrapperPartial
         );
         assert_eq!(
             permission_support_for_resources(&[wrapper_id, partial_id], &summaries),
-            PermissionSupport::ApprovalDelegationPartial
+            PermissionSupport::RegistrarResolverWrapperPartial
         );
         assert_eq!(
             permission_support_for_resources(&[partial_id, missing_id], &summaries),
@@ -229,7 +208,7 @@ mod tests {
     #[test]
     fn role_summary_support_marks_only_the_expansion_non_authoritative() {
         assert_eq!(
-            PermissionSupport::WrapperUnsupported.merge(PermissionSupport::Unknown),
+            PermissionSupport::RegistrarResolverWrapperPartial.merge(PermissionSupport::Unknown),
             PermissionSupport::Unknown
         );
 
