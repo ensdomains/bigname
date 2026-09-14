@@ -199,6 +199,7 @@ request() {
   last_headers="${smoke_tmp}/${label}.headers"
   last_body="${smoke_tmp}/${label}.body"
   local curl_args=(
+    --path-as-is
     --silent
     --show-error
     --max-time "$request_timeout_secs"
