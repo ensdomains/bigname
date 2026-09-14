@@ -181,6 +181,7 @@ authoritative_for = [
 ]
 
 [refs.zigens]
+optional = true
 repo = "https://github.com/ensdomains/zigens"
 commit = "77d106e9a4ba3852da5d21461851f1630868ce0d"
 purpose = "Reference indexer: registry assignment-count and label role-holder-count comparison only."

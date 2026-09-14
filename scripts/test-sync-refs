@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Check required and optional reference selection without network access."""
+import importlib.machinery
+import importlib.util
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+sys.dont_write_bytecode = True
+loader = importlib.machinery.SourceFileLoader("sync_refs", str(Path(__file__).with_name("sync-refs")))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+sync = importlib.util.module_from_spec(spec)
+loader.exec_module(sync)
+
+
+class SyncRefsTests(unittest.TestCase):
+    def test_default_and_explicit_optional_selection_with_both_parsers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "MANIFEST.toml"
+            manifest.write_text('''[refs.required]
+repo = "https://example.invalid/required"
+commit = "abc"
+[refs.comparison]
+repo = "https://example.invalid/comparison"
+commit = "def"
+optional = true
+''')
+            for parser in (sync.tomllib, None):
+                for check in (False, True):
+                    for include in (False, True):
+                        with self.subTest(parser=parser, check=check, include=include):
+                            args = ["sync-refs"]
+                            if check:
+                                args.append("--check")
+                            if include:
+                                args.append("--include-optional")
+                            operation = "check_ref" if check else "sync_ref"
+                            with mock.patch.object(sync, "MANIFEST", manifest), \
+                                 mock.patch.object(sync, "tomllib", parser), \
+                                 mock.patch.object(sys, "argv", args), \
+                                 mock.patch.object(sync, operation, return_value=None) as run:
+                                self.assertEqual(sync.main(), 0)
+                                self.assertEqual([c.args[0] for c in run.call_args_list],
+                                                 ["required", "comparison"] if include else ["required"])
+
+    def test_required_check_failure_is_not_suppressed(self):
+        with mock.patch.object(sys, "argv", ["sync-refs", "--check"]), \
+             mock.patch.object(sync, "load_manifest", return_value={"refs": {"required": {}}}), \
+             mock.patch.object(sync, "check_ref", return_value="missing: required"):
+            self.assertEqual(sync.main(), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

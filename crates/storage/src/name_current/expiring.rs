@@ -73,8 +73,14 @@ pub async fn load_name_current_expiring_page(
         supported_only: true,
         ..NameCurrentListFilter::default()
     };
-    let after_seconds = filter.expires_after.map(unix_seconds);
-    let before_seconds = filter.expires_before.map(unix_seconds);
+    // Keep the index prefilter conservative: rounding a fractional upper bound to f64
+    // can discard a matching expiry. The timestamp predicates below enforce exact bounds.
+    let after_seconds = filter
+        .expires_after
+        .map(|time| time.unix_timestamp() as f64);
+    let before_seconds = filter
+        .expires_before
+        .map(|time| (time.unix_timestamp() + i64::from(time.nanosecond() != 0)) as f64);
 
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_filtered_name_current_cte_with(&mut builder, &list_filter, |builder| {
@@ -138,8 +144,4 @@ pub async fn load_name_current_expiring_page(
         next_cursor,
         total_count: None,
     })
-}
-
-fn unix_seconds(timestamp: OffsetDateTime) -> f64 {
-    timestamp.unix_timestamp() as f64
 }

@@ -1109,8 +1109,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Pagination behavior: standard collection pagination in the requested sort
   and order. Cursors are bound to namespace, parent, `q`, `include_expired`,
   sort, and order; a cursor replayed under different controls returns
-  `400 invalid_input`. Cursors issued before these controls existed name the
-  default page and stay valid for a request that asks for exactly that page.
+  `400 invalid_input`. A cursor must also carry the current publication and
+  expiry evaluation time; older cursors without them return `409 stale` and
+  require restarting without a cursor.
   `page.total_count` is populated with the parent's direct readable subname
   count — the same bounded per-parent aggregate that already annotates the page,
   so it costs no extra scan — when the page admits every child, that is
@@ -1581,8 +1582,8 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   (`60`, or an ENSIP-11 coin type `0x80000000 | chain_id`) the ENSIP-19 default
   EVM address `addr:2147483648` when the resolver declares that read feature
   and no exact entry for the coin type shadows it. Zero-address and cleared
-  records never match. `namespace`, `q`, `sort`, `order`, `dedupe`, and
-  `include=role_summary` apply as for the authority relations.
+  records never match. `namespace`, `authority`, `q`, `sort`, `order`, `dedupe`,
+  and `include=role_summary` apply as for the authority relations.
 - Response shape: `data` is an array of record-shaped rows with `name`,
   `display_name`, `namespace`, `namehash`, `owner`, `registrant`,
   `registration_status`, `registered_at`, `created_at`, and `expires_at`.

@@ -5,6 +5,84 @@ const V2_RESOLVES_TO_OTHER_EVM_COIN: &str = "2147483658";
 const V2_ENSIP19_DEFAULT_COIN: &str = "2147483648";
 
 #[tokio::test]
+async fn v2_get_address_names_resolves_to_filters_authority_before_pagination() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    seed_v2_resolves_to_records(&database).await?;
+    sqlx::query(
+        "UPDATE name_current SET provenance = provenance || \
+         '{\"authority_selection\": {\"authority_arm\": \"ens_v1\"}}'::jsonb",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let empty = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?relation=resolves_to&authority=ens_v2"),
+    )
+    .await?;
+    assert_eq!(empty["data"], json!([]));
+
+    sqlx::query(
+        "UPDATE name_current SET provenance = jsonb_set(\
+         provenance, '{authority_selection,authority_arm}', '\"ens_v2\"') \
+         WHERE raw_name = 'alpha.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+    let filtered = v2_address_names_payload_for_database(
+        &database,
+        &format!(
+            "/v1/addresses/{V2_ADDRESS}/names?relation=resolves_to&authority=ens_v1&page_size=1"
+        ),
+    )
+    .await?;
+    assert_eq!(
+        names(filtered["data"].as_array().expect("filtered names")),
+        vec!["gamma.eth"]
+    );
+    assert_eq!(filtered["data"][0]["authority"], json!("ens_v1"));
+    assert_eq!(filtered["page"]["has_more"], json!(false));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_address_names_resolves_to_role_summary_includes_restrictions() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    seed_v2_resolves_to_records(&database).await?;
+    let mut summary = permission_current_resource_summary(Uuid::from_u128(0xb100), Some("wrapper"));
+    summary.resource_restrictions = Some(json!({
+        "kind": "ens_v1_wrapper",
+        "wrapper_state": "emancipated",
+        "fuses": 65536,
+        "expiry_seconds": 1900000000
+    }));
+    upsert_phase_permissions_current_resource_summary(&database.pool, &summary).await?;
+
+    let owned = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=beta&include=role_summary"),
+    )
+    .await?;
+    let resolved = v2_address_names_payload_for_database(
+        &database,
+        &format!(
+            "/v1/addresses/{V2_ADDRESS}/names?relation=resolves_to&coin_type={V2_RESOLVES_TO_OTHER_EVM_COIN}&q=beta&include=role_summary"
+        ),
+    )
+    .await?;
+    assert!(owned["data"][0]["restrictions"].is_object());
+    assert_eq!(
+        resolved["data"][0]["restrictions"],
+        owned["data"][0]["restrictions"]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_address_names_resolves_to_lists_names_whose_addr_record_points_here() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;
@@ -207,6 +285,9 @@ async fn v2_get_address_names_resolves_to_paginates_and_binds_cursor_to_relation
         ),
         format!("/v1/addresses/{V2_ADDRESS}/names?relation=owner&page_size=1&cursor={cursor}"),
         format!("/v1/addresses/{V2_ADDRESS}/names?page_size=1&cursor={cursor}"),
+        format!(
+            "/v1/addresses/{V2_ADDRESS}/names?relation=resolves_to&authority=ens_v1&page_size=1&cursor={cursor}"
+        ),
     ] {
         let response = v2_address_names_response_for_database(&database, &uri).await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");

@@ -25,6 +25,8 @@ pub use row::NameCurrentRow;
 use row::decode_name_current_row;
 pub use snapshot::load_name_current_for_snapshot;
 
+// Project owns the selected binding. Interpret can close it before the next publication,
+// so read eligibility checks canonicality, not its mutable active_to field.
 pub const DEFAULT_NAME_CURRENT_READ_FILTER: &str = r#"
   AND nc.canonicality_summary ->> 'state' = 'canonical_lineage'
   AND EXISTS (
@@ -70,17 +72,6 @@ pub const DEFAULT_NAME_CURRENT_READ_FILTER: &str = r#"
               'canonical'::bigname_phase.canonicality_state,
               'safe'::bigname_phase.canonicality_state,
               'finalized'::bigname_phase.canonicality_state
-          )
-          AND (
-              binding.active_to IS NULL
-              OR (
-                  nc.provenance #>> '{authority_selection,authority_arm}' = 'ens_v2'
-                  AND nc.provenance #>> '{authority_selection,lifecycle_state}' =
-                      'unregistered'
-              )
-              OR nc.provenance
-                  #>> '{authority_selection,resource_authority_context,released_tombstone}'
-                  = 'ens_v1'
           )
           AND (
               nc.token_lineage_id IS NULL
@@ -181,7 +172,6 @@ pub const DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER: &str = r#"
       'safe'::bigname_phase.canonicality_state,
       'finalized'::bigname_phase.canonicality_state
   )
-  AND membership_binding.active_to IS NULL
   AND (
       anc.token_lineage_id IS NULL
       OR (

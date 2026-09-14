@@ -31,7 +31,7 @@ const FIXTURE: &str =
     include_str!("../../adapters/tests/fixtures/interpreters/v2-expiry-retirement.json");
 const TABLES: &str = "name_current children_current permissions_current \
     permissions_current_resource_summary record_inventory_current resolver_current \
-    address_names_current primary_names_current";
+    address_names_current address_records_current primary_names_current";
 
 fn hash(block: i64) -> &'static str {
     match block {
@@ -938,6 +938,8 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     // Six names publish at block 100: the stale reservation already lapsed by path expiry
     // keeps a released row instead of disappearing.
     assert_eq!(live_state, (6, 1, 1, Some("operator_approval_surfaces_not_ingested".into()), Some("active".into()), Some("registered".into()), Some(OWNER.into()), Some("RegistrationGranted".into()), Some(OWNER.into()), Some("1800000000".into()), Some("ens_v2_registry".into())));
+    let live_relations: Vec<String> = sqlx::query_scalar("SELECT relation FROM address_names_current WHERE logical_name_id = $1 AND address = $2 ORDER BY relation").bind(MAIN).bind(OWNER).fetch_all(&incremental).await?;
+    assert_eq!(live_relations, ["effective_controller", "registrant", "token_holder"]);
     let stale_state: (i64, i64, i64, Option<String>, Option<String>) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM name_current WHERE logical_name_id = $1),
                 (SELECT count(*) FROM permissions_current WHERE resource_id = $2::uuid),
@@ -978,6 +980,8 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     assert_eq!(reservation, (Some("reserved".into()), Some("reserved".into()), Some("RegistrationReserved".into()), Some("1900000000".into())));
     let generic: (Option<String>, Option<String>, Option<String>) = sqlx::query_as("SELECT declared_summary -> 'registration' ->> 'status', declared_summary -> 'control' ->> 'status', declared_summary -> 'resolver' ->> 'address' FROM name_current WHERE logical_name_id = $1").bind(GENERIC).fetch_one(&incremental).await?;
     assert_eq!(generic, (Some("released".into()), Some("unregistered".into()), None));
+    let retired_relations: i64 = sqlx::query_scalar("SELECT count(*) FROM address_names_current WHERE logical_name_id IN ($1, $2)").bind(MAIN).bind(GENERIC).fetch_one(&incremental).await?;
+    assert_eq!(retired_relations, 0, "released identity rows must not retain current address relationships");
     let mixed: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
         "SELECT provenance -> 'authority_selection' ->> 'authority_arm',
                 declared_summary -> 'registration' ->> 'status',
@@ -1011,6 +1015,8 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     .fetch_one(&incremental)
     .await?;
     assert_eq!(revival, (RESOURCE.into(), LINEAGE.into(), 1, 1, 1));
+    let revived_relations: Vec<String> = sqlx::query_scalar("SELECT relation FROM address_names_current WHERE logical_name_id = $1 AND address = $2 ORDER BY relation").bind(MAIN).bind(OWNER).fetch_all(&incremental).await?;
+    assert_eq!(revived_relations, live_relations);
     let version_marker = run(&incremental, 103, Some(revived)).await?;
     let (version_db, version_fresh) = fresh("v2_expiry_version_fresh", 103).await?;
     assert_eq!(snapshot(&incremental).await?, snapshot(&version_fresh).await?);
@@ -1032,6 +1038,8 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     assert_eq!(snapshot(&incremental).await?, snapshot(&terminal_fresh).await?);
     let terminal: (String, Option<String>, Option<String>) = sqlx::query_as("SELECT resource_id::text, declared_summary -> 'registration' ->> 'status', declared_summary -> 'control' ->> 'status' FROM name_current WHERE logical_name_id = $1").bind(MAIN).fetch_one(&incremental).await?;
     assert_eq!(terminal, (VERSION_RESOURCE.into(), Some("released".into()), Some("unregistered".into())));
+    let terminal_relations: i64 = sqlx::query_scalar("SELECT count(*) FROM address_names_current WHERE logical_name_id = $1").bind(MAIN).fetch_one(&incremental).await?;
+    assert_eq!(terminal_relations, 0);
     terminal_db.cleanup().await?; version_db.cleanup().await?; revived_db.cleanup().await?; retired_db.cleanup().await?; incremental_db.cleanup().await?;
     Ok(())
 }

@@ -50,11 +50,10 @@ impl State {
             let completed = self
                 .v1_pending_wrapper_sync_expiries
                 .iter()
-                .filter_map(|(key, (expected_controller, expiry))| {
-                    expected_controller
-                        .eq_ignore_ascii_case(&controller)
-                        .then(|| (key.clone(), *expiry))
+                .filter(|(_, (expected_controller, _))| {
+                    expected_controller.eq_ignore_ascii_case(&controller)
                 })
+                .map(|(key, (_, expiry))| (key.clone(), *expiry))
                 .collect::<Vec<_>>();
             for (key, expiry) in completed {
                 let expiry = self

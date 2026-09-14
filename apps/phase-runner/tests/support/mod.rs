@@ -357,7 +357,7 @@ pub mod chain_double {
             let Some(parent) = current
                 .get("parentHash")
                 .and_then(Value::as_str)
-                .filter(|parent| parent.trim_start_matches("0x").trim_matches('0').len() > 0)
+                .filter(|parent| !parent.trim_start_matches("0x").trim_matches('0').is_empty())
                 .map(str::to_owned)
             else {
                 break;

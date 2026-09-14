@@ -1213,9 +1213,7 @@ fn rpc_response(request: &Value, state: &RpcState) -> Value {
             method,
             &params,
             &[block_receipts(state, 1), block_receipts(state, 2)].concat(),
-            &[0, 1, 2]
-                .map(|number| block(number, true, &block_logs(state, number)))
-                .to_vec(),
+            &[0, 1, 2].map(|number| block(number, true, &block_logs(state, number))),
         ),
     };
     json!({"jsonrpc":"2.0","id":id,"result":result})

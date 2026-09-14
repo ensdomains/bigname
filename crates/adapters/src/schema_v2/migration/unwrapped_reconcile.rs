@@ -337,13 +337,13 @@ fn prove(
                 }
                 resolver.push(raw.log_index);
             }
-        } else if let Some(event) = decode::<NewTTL>(raw).ok()? {
-            if event.node == node_hash {
-                if event.ttl != 0 {
-                    return None;
-                }
-                ttl.push(raw.log_index);
+        } else if let Some(event) = decode::<NewTTL>(raw).ok()?
+            && event.node == node_hash
+        {
+            if event.ttl != 0 {
+                return None;
             }
+            ttl.push(raw.log_index);
         }
     }
     let ([reclaim], [registry_cleanup]) = (reclaim.as_slice(), registry_cleanup.as_slice()) else {
@@ -434,25 +434,25 @@ fn complete_successor(
                     }
                     mints.push(raw.log_index);
                 }
-            } else if let Some(grant) = decode::<EACRolesChanged>(raw).ok()? {
-                if grant.resource == token {
-                    if grant.account != owner
-                        || grant.oldRoleBitmap != U256::ZERO
-                        || grant.newRoleBitmap == U256::ZERO
-                    {
-                        return None;
-                    }
-                    if !output.normalized_events.iter().any(|event| {
-                        event.source_family == "ens_v2_registry_l1"
-                            && event.event_kind == "PermissionChanged"
-                            && event.resource_id == Some(resource)
-                            && same_position(event, raw)
-                    }) {
-                        return None;
-                    }
-                    grants.push(raw.log_index);
-                    break;
+            } else if let Some(grant) = decode::<EACRolesChanged>(raw).ok()?
+                && grant.resource == token
+            {
+                if grant.account != owner
+                    || grant.oldRoleBitmap != U256::ZERO
+                    || grant.newRoleBitmap == U256::ZERO
+                {
+                    return None;
                 }
+                if !output.normalized_events.iter().any(|event| {
+                    event.source_family == "ens_v2_registry_l1"
+                        && event.event_kind == "PermissionChanged"
+                        && event.resource_id == Some(resource)
+                        && same_position(event, raw)
+                }) {
+                    return None;
+                }
+                grants.push(raw.log_index);
+                break;
             }
         }
         let ([mint], [grant]) = (mints.as_slice(), grants.as_slice()) else {

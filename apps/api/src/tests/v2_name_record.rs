@@ -1511,8 +1511,7 @@ async fn v2_get_name_classifies_released_as_released() -> Result<()> {
 async fn storage_name_current_reads_serve_the_released_v1_tombstone_on_its_closed_binding()
 -> Result<()> {
     // A released v1 authority tombstone selects the lapsed lease binding, which is closed.
-    // The read filter admits a closed binding for a released v2 authority already; the v1
-    // tombstone is the same shape and must not read as `not_found`.
+    // Project owns that selection; a later Interpret closure must not hide the row.
     const SURFACE_BINDING_ID: Uuid = Uuid::from_u128(0x9140);
     let database = TestDatabase::new_migrated().await?;
     seed_identity_name(
@@ -1551,8 +1550,8 @@ async fn storage_name_current_reads_serve_the_released_v1_tombstone_on_its_close
             json!({"authority_arm": "ens_v1", "lifecycle_state": "unregistered"}),
         )
         .await?,
-        (false, false),
-        "a closed ens_v1 binding without a tombstone stays unreadable"
+        (true, true),
+        "the published selection remains readable until Project replaces it"
     );
     assert_eq!(
         closed_binding_reads(

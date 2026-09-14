@@ -206,6 +206,7 @@
                jsonb_build_object(
                    'chain_id', $1,
                    'surface_block_number', surface.block_number,
+                   'registrant_event_id', registrant.normalized_event_id,
                    'selected_event_ids', COALESCE(evidence.event_ids, '[]'::jsonb),
                    'raw_fact_refs', COALESCE(evidence.raw_fact_refs, '[]'::jsonb),
                    'manifest_versions', COALESCE(
@@ -373,7 +374,8 @@
             SELECT lower(CASE event.event_kind
                        WHEN 'TokenControlTransferred' THEN event.after_state ->> 'to'
                        ELSE event.after_state ->> 'registrant'
-                   END) AS registrant
+                   END) AS registrant,
+                   event.normalized_event_id
             FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind IN (

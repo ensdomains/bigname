@@ -168,6 +168,9 @@ For a registrar lease first identified by a later readable observation, registra
 read current permission rows and per-resource permission summaries. Canonical
 identity checks exclude rows from an orphaned chain lineage. These routes bind
 pagination to the captured project publication and revalidate it before returning.
+Rows use the binding selected by Project. A later Interpret binding closure does
+not change the published collection's membership or count; the next Project
+publication installs the replacement or removal. Canonicality checks still apply.
 A changed publication, including replacement at the same block, requires a
 pagination restart with `409 stale`. The base address-name collection remains
 available without the expansion.

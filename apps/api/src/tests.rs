@@ -378,3 +378,5 @@ include!("tests/v2_status.rs");
 include!("tests/v2_namespaces_hackathon.rs");
 include!("tests/v2_envelope_conformance.rs");
 include!("tests/api_storage_quick_wins.rs");
+
+include!("tests/v2_publication_bindings.rs");

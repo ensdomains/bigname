@@ -448,6 +448,122 @@ async fn v2_get_registry_labels_pages_held_labels_with_bound_cursor_and_counts()
 }
 
 #[tokio::test]
+async fn v2_lookup_subregistry_stays_at_the_served_publication() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    seed_identity_name(
+        &database,
+        "basenames:mixed.base.eth",
+        "mixed.base.eth",
+        "mixed.base.eth",
+        "namehash:mixed.base.eth",
+        Uuid::from_u128(0xff201),
+        Uuid::from_u128(0xff202),
+        Uuid::from_u128(0xff203),
+        V2_ADDRESS,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        200,
+    )
+    .await?;
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[raw_block(
+            REGISTRY_CHAIN_ID,
+            "0xregistry84",
+            None,
+            84,
+            1_776_384_024,
+        )],
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE chain_heads SET latest_block_number = 84, latest_block_hash = '0xregistry84' \
+         WHERE chain_id = $1",
+    )
+    .bind(REGISTRY_CHAIN_ID)
+    .execute(&database.pool)
+    .await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[registry_event(
+            "unpublished-lookup-subregistry",
+            Some(&registry_logical_name_id("alpha.eth")),
+            "SubregistryChanged",
+            84,
+            ROOT_REGISTRY,
+            json!({"source_event": "SubregistryUpdated", "subregistry": ONE_REGISTRY}),
+        )],
+    )
+    .await?;
+
+    for profile in ["feed", "detail"] {
+        let lookup = v2_lookup_json(
+            &database,
+            json!({"profile": profile, "inputs": [{"name": "alpha.eth"}, {"name": "mixed.base.eth"}]}),
+        )
+        .await?;
+        assert_eq!(lookup["meta"]["as_of"]["1"]["block_number"], json!(83));
+        assert_eq!(lookup["meta"]["as_of"]["8453"]["block_number"], json!(200));
+        assert_eq!(lookup["data"][1]["status"], json!("ok"));
+        assert!(lookup["data"][1]["record"].get("subregistry").is_none());
+        assert_eq!(
+            lookup["data"][0]["record"]["subregistry"]["address"],
+            json!(ALPHA_REGISTRY)
+        );
+    }
+
+    seed_schema_v2_ens_lookup_head(&database.pool, 84, "0xregistry84", "2026-04-17T00:00:24Z")
+        .await?;
+    let published = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"name": "alpha.eth"}]}),
+    )
+    .await?;
+    assert_eq!(
+        published["data"][0]["record"]["subregistry"]["address"],
+        json!(ONE_REGISTRY)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_unsupported_name_omits_subregistry_from_detail_and_lookup() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    sqlx::query(
+        "UPDATE name_current SET support_status = 'unsupported', \
+         unsupported_reason = 'conflicting_current_ens_authority' WHERE raw_name = 'alpha.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let detail = registry_payload(&database, "/v1/names/alpha.eth").await?;
+    assert_eq!(detail["data"]["status"], json!("unsupported"));
+    assert_eq!(
+        detail["data"]["unsupported_reason"],
+        json!("conflicting_current_ens_authority")
+    );
+    assert!(detail["data"].get("subregistry").is_none());
+    for profile in ["feed", "detail"] {
+        let lookup = v2_lookup_json(
+            &database,
+            json!({"profile": profile, "inputs": [{"name": "alpha.eth"}]}),
+        )
+        .await?;
+        let record = &lookup["data"][0]["record"];
+        assert_eq!(record["status"], json!("unsupported"));
+        assert_eq!(
+            record["unsupported_reason"],
+            detail["data"]["unsupported_reason"]
+        );
+        assert!(record.get("subregistry").is_none());
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_name_routes_carry_the_current_subregistry_pointer() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_registry_fixture(&database).await?;

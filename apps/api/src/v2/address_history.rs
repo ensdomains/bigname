@@ -55,6 +55,15 @@ pub(crate) async fn get_address_history(
 ) -> V2Result<Json<Envelope<Vec<Event>>>> {
     let params = params.into_inner();
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
+    if params
+        .relation
+        .as_ref()
+        .is_some_and(RelationSet::is_resolves_to)
+    {
+        return Err(V2Error::invalid_input(
+            "relation=resolves_to is not supported for address history",
+        ));
+    }
     let include = history_include(&params.include)?;
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let namespace = params.namespace.clone().unwrap_or_else(|| "ens".to_owned());

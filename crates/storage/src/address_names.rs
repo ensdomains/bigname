@@ -30,6 +30,8 @@ pub use types::{
     AddressNamesCurrentSummary,
 };
 
+// Project owns the selected binding. Interpret can close it before the next publication,
+// so read eligibility checks canonicality, not its mutable active_to field.
 pub const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
   AND anc.canonicality_summary ->> 'state' = 'canonical_lineage'
   AND EXISTS (
@@ -73,7 +75,6 @@ pub const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
       'safe'::bigname_phase.canonicality_state,
       'finalized'::bigname_phase.canonicality_state
   )
-  AND binding.active_to IS NULL
   AND (
       anc.token_lineage_id IS NULL
       OR (

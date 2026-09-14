@@ -22,6 +22,7 @@ use crate::v2::{
     cursor::{cursor_value, invalid_cursor_error},
     decode, encode,
     permission_support::{apply_role_summary_support_meta, permission_support_for_resources},
+    restrictions::ResourceRestrictions,
     support::parse_primary_name_coin_type,
 };
 
@@ -40,6 +41,7 @@ const RELATION_FILTER_KEY: &str = "relation";
 const COIN_TYPE_FILTER_KEY: &str = "coin_type";
 const DEDUPE_FILTER_KEY: &str = "dedupe";
 const Q_FILTER_KEY: &str = "q";
+const AUTHORITY_FILTER_KEY: &str = "authority";
 const LOGICAL_NAME_ID_CURSOR_KEY: &str = "logical_name_id";
 const RESOURCE_ID_CURSOR_KEY: &str = "resource_id";
 const DEFAULT_COIN_TYPE: &str = "60";
@@ -128,6 +130,7 @@ pub(super) async fn get_address_resolves_to(
         coin_type: &coin_type,
         dedupe: params.dedupe,
         q: normalized_q.as_deref(),
+        authority: params.authority,
         sort: params.sort,
         order,
     };
@@ -155,6 +158,7 @@ pub(super) async fn get_address_resolves_to(
         namespaces.as_deref(),
         dedupe_to_storage(params.dedupe),
         normalized_q.as_deref(),
+        params.authority.map(Authority::as_str),
         sort_to_storage(params.sort),
         order_to_storage(order),
         storage_cursor.as_ref(),
@@ -306,6 +310,13 @@ pub(super) async fn get_address_resolves_to(
             );
             row.relations = vec![Relation::ResolvesTo];
             row.resolution = Some(address_name_resolution(record, numeric_coin_type));
+            if include_role_summary {
+                row.restrictions = permission_summaries
+                    .get(&entry.resource_id)
+                    .map(ResourceRestrictions::from_summary)
+                    .transpose()?
+                    .flatten();
+            }
             Ok(row)
         })
         .collect::<V2Result<Vec<_>>>()?;
@@ -367,6 +378,7 @@ pub(crate) struct ResolvesToCursorBinding<'a> {
     pub(crate) coin_type: &'a str,
     pub(crate) dedupe: AddressNamesDedupe,
     pub(crate) q: Option<&'a str>,
+    pub(crate) authority: Option<Authority>,
     pub(crate) sort: AddressNamesSort,
     pub(crate) order: SortOrder,
 }
@@ -391,6 +403,10 @@ fn cursor_filters(binding: &ResolvesToCursorBinding<'_>) -> BTreeMap<String, Str
             binding.dedupe.as_str().to_owned(),
         ),
         (Q_FILTER_KEY.to_owned(), option_filter(binding.q)),
+        (
+            AUTHORITY_FILTER_KEY.to_owned(),
+            option_filter(binding.authority.map(Authority::as_str)),
+        ),
         (
             ORDER_FILTER_KEY.to_owned(),
             binding.order.as_str().to_owned(),
@@ -448,6 +464,7 @@ mod tests {
             coin_type,
             dedupe: AddressNamesDedupe::Name,
             q: None,
+            authority: None,
             sort: AddressNamesSort::Name,
             order: SortOrder::Asc,
         }
@@ -468,6 +485,28 @@ mod tests {
             cursor
         );
         assert!(resolves_to_storage_cursor(&payload, &binding("2147483658")).is_err());
+        let selected_authority = ResolvesToCursorBinding {
+            authority: Some(Authority::EnsV1),
+            ..binding("60")
+        };
+        assert!(resolves_to_storage_cursor(&payload, &selected_authority).is_err());
+        let selected_payload = resolves_to_cursor_payload(&cursor, &selected_authority);
+        assert_eq!(
+            resolves_to_storage_cursor(&selected_payload, &selected_authority)
+                .expect("same authority must decode"),
+            cursor
+        );
+        assert!(resolves_to_storage_cursor(&selected_payload, &binding("60")).is_err());
+        assert!(
+            resolves_to_storage_cursor(
+                &selected_payload,
+                &ResolvesToCursorBinding {
+                    authority: Some(Authority::EnsV2),
+                    ..binding("60")
+                },
+            )
+            .is_err()
+        );
 
         // An authority-relation cursor for the same address never resumes a resolves_to page.
         let authority = crate::v2::address_names::address_names_cursor_payload(

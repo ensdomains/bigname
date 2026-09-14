@@ -69,6 +69,7 @@ pub(super) async fn build(
             WHERE name.surface_binding_id IS NOT NULL
               AND name.resource_id IS NOT NULL
               AND name.binding_kind IS NOT NULL
+              AND name.declared_summary #>> '{control,status}' IS DISTINCT FROM 'unregistered'
         )
         INSERT INTO project_stage_address_records_current (
             address, coin_type, logical_name_id, namespace, raw_name, namehash,

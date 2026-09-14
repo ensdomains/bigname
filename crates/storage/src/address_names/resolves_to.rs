@@ -79,6 +79,7 @@ pub async fn load_address_records_current_page(
     namespaces: Option<&[String]>,
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<&str>,
+    authority_arm: Option<&str>,
     sort: AddressNamesCurrentSort,
     order: AddressNamesCurrentOrder,
     cursor: Option<&AddressNamesCurrentSortedCursor>,
@@ -100,6 +101,7 @@ pub async fn load_address_records_current_page(
         namespaces,
         dedupe_by,
         q,
+        authority_arm,
     };
 
     if let Some(cursor) = cursor {
@@ -189,6 +191,7 @@ struct AddressRecordsFilter<'a> {
     namespaces: Option<&'a [String]>,
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<&'a str>,
+    authority_arm: Option<&'a str>,
 }
 
 impl AddressRecordsFilter<'_> {
@@ -202,6 +205,9 @@ impl AddressRecordsFilter<'_> {
         }
         if let Some(q) = self.q {
             parts.push(format!("q {q}"));
+        }
+        if let Some(authority_arm) = self.authority_arm {
+            parts.push(format!("authority_arm {authority_arm}"));
         }
         parts.push(format!("dedupe_by {}", self.dedupe_by.as_str()));
         parts.join(" ")
@@ -300,6 +306,17 @@ fn push_entries_cte<'a>(
         builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
         builder.push(" ESCAPE '\\'");
     }
+    if let Some(authority_arm) = filter.authority_arm {
+        builder.push(
+            r#" AND EXISTS (
+                SELECT 1
+                FROM bigname_phase.name_current authority_nc
+                WHERE authority_nc.logical_name_id = arc.logical_name_id
+                  AND authority_nc.provenance #>> '{authority_selection,authority_arm}' = "#,
+        );
+        builder.push_bind(authority_arm);
+        builder.push(")");
+    }
     builder.push(
         r#"
               AND arc.canonicality_summary ->> 'state' = 'canonical_lineage'
@@ -354,7 +371,6 @@ fn push_entries_cte<'a>(
                   'safe'::bigname_phase.canonicality_state,
                   'finalized'::bigname_phase.canonicality_state
               )
-              AND binding.active_to IS NULL
         ),
         entries AS (
             SELECT DISTINCT ON ("#,

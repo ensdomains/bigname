@@ -26,6 +26,11 @@ bigname anchors every ENSv1, ENSv2, Basenames, admitted upstream app-metadata, r
 | `graph_node` | `graphprotocol/graph-node` | `aefe1737` | Reference Graph Node indexer |
 | `reth` | `paradigmxyz/reth` | `88505c7f` | Reference Ethereum execution client |
 
+The `zigens` checkout is optional for builds and tests. Fetch or verify it with
+`scripts/sync-refs --include-optional` (add `--check` to verify), using credentials
+that can access its repository. Its pin and citations remain required when
+changing the associated comparisons.
+
 The `zigens` pin is reference-indexer evidence only, not protocol or deployment
 address authority. Its registry count counts assignment rows across resources,
 while its label count counts distinct accounts on the latest observed resource

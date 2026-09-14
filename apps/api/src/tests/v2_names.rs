@@ -174,7 +174,10 @@ async fn v2_get_names_lists_a_namespace_expiry_window_in_expiry_order() -> Resul
         vec!["gamma.eth", "beta.eth", "alpha.eth"],
         "numeric registration expiries in the window, ascending; string and missing expiries and other namespaces are absent"
     );
-    assert_eq!(payload["data"][0]["expires_at"], json!("2025-12-01T00:00:00Z"));
+    assert_eq!(
+        payload["data"][0]["expires_at"],
+        json!("2025-12-01T00:00:00Z")
+    );
     assert_eq!(payload["data"][0]["namespace"], json!("ens"));
     assert_eq!(payload["data"][0]["display_name"], json!("gamma.eth"));
     assert_eq!(
@@ -227,12 +230,44 @@ async fn v2_get_names_lists_a_namespace_expiry_window_in_expiry_order() -> Resul
     .await?;
     assert_eq!(v2_names_listed(&payload), vec!["beta.eth"]);
 
+    // Fractional bounds still include whole-second expiries before the exclusive upper bound.
+    for before in ["2026-10-01T00:00:00.5Z", "2026-10-01T00:00:00.000001Z"] {
+        let payload = v2_names_payload(
+            &database,
+            &format!(
+                "/v1/names?namespace=ens&expires_after=2026-10-01T00:00:00Z&expires_before={before}"
+            ),
+        )
+        .await?;
+        assert_eq!(v2_names_listed(&payload), vec!["beta.eth"], "{before}");
+    }
+    let payload = v2_names_payload(
+        &database,
+        "/v1/names?namespace=ens&expires_after=2026-10-01T00:00:00.5Z&expires_before=2027-01-01T00:00:00.5Z",
+    )
+    .await?;
+    assert_eq!(v2_names_listed(&payload), vec!["alpha.eth"]);
+
     let payload = v2_names_payload(
         &database,
         "/v1/names?namespace=basenames&expires_after=2025-01-01T00:00:00Z",
     )
     .await?;
     assert_eq!(v2_names_listed(&payload), vec!["alpha.base.eth"]);
+
+    // At large Unix timestamps, f64 rounds a fractional bound back onto the whole-second
+    // expiry. The index prefilter must still leave the exact timestamp comparison to decide.
+    sqlx::query(
+        "UPDATE name_current SET declared_summary = jsonb_set(         declared_summary, '{registration,expiry}', '253402214400'::jsonb)          WHERE raw_name = 'beta.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+    let payload = v2_names_payload(
+        &database,
+        "/v1/names?namespace=ens&expires_after=9999-12-31T00:00:00Z&expires_before=9999-12-31T00:00:00.00001Z",
+    )
+    .await?;
+    assert_eq!(v2_names_listed(&payload), vec!["beta.eth"]);
 
     database.cleanup().await
 }
@@ -241,32 +276,68 @@ async fn v2_get_names_lists_a_namespace_expiry_window_in_expiry_order() -> Resul
 async fn v2_collection_cursor_requires_same_publication_and_bound_evaluation_time() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_names_fixture(&database).await?;
-    seed_schema_v2_ens_lookup_head(&database.pool, 100, "0xcollection-head", "2026-06-10T00:00:00Z").await?;
+    seed_schema_v2_ens_lookup_head(
+        &database.pool,
+        100,
+        "0xcollection-head",
+        "2026-06-10T00:00:00Z",
+    )
+    .await?;
     let base = "/v1/names?namespace=ens&expires_after=2025-01-01T00:00:00Z&page_size=1";
     let first = v2_names_payload(&database, base).await?;
-    let cursor = first["page"]["next_cursor"].as_str().context("first page has continuation")?;
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .context("first page has continuation")?;
     let payload = crate::v2::decode(cursor).expect("issued cursor decodes");
-    assert!(payload.snapshot.as_deref().is_some_and(|token| token.starts_with("publication-")));
+    assert!(
+        payload
+            .snapshot
+            .as_deref()
+            .is_some_and(|token| token.starts_with("publication-"))
+    );
     assert!(payload.evaluated_at.is_some());
     let second = v2_names_payload(&database, &format!("{base}&cursor={cursor}")).await?;
-    let second_cursor = crate::v2::decode(second["page"]["next_cursor"].as_str().context("second continuation")?).expect("issued continuation decodes");
+    let second_cursor = crate::v2::decode(
+        second["page"]["next_cursor"]
+            .as_str()
+            .context("second continuation")?,
+    )
+    .expect("issued continuation decodes");
     assert_eq!(second_cursor.evaluated_at, payload.evaluated_at);
     assert_eq!(second["meta"]["as_of"], first["meta"]["as_of"]);
 
     let mut legacy = payload;
     legacy.snapshot = None;
     legacy.evaluated_at = None;
-    let response = v2_names_response(&database, &format!("{base}&cursor={}", crate::v2::encode(&legacy))).await?;
+    let response = v2_names_response(
+        &database,
+        &format!("{base}&cursor={}", crate::v2::encode(&legacy)),
+    )
+    .await?;
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(read_json::<Value>(response).await?["error"]["code"], "stale");
+    assert_eq!(
+        read_json::<Value>(response).await?["error"]["code"],
+        "stale"
+    );
 
     // Same block and hash, but a new Project publication transaction.
-    seed_schema_v2_ens_lookup_head(&database.pool, 100, "0xcollection-head", "2026-06-10T00:00:00Z").await?;
+    seed_schema_v2_ens_lookup_head(
+        &database.pool,
+        100,
+        "0xcollection-head",
+        "2026-06-10T00:00:00Z",
+    )
+    .await?;
     let response = v2_names_response(&database, &format!("{base}&cursor={cursor}")).await?;
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let stale: Value = read_json(response).await?;
     assert_eq!(stale["error"]["code"], "stale");
-    assert!(stale["error"]["message"].as_str().unwrap().contains("restart"));
+    assert!(
+        stale["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("restart")
+    );
     database.cleanup().await
 }
 
@@ -274,12 +345,33 @@ async fn v2_collection_cursor_requires_same_publication_and_bound_evaluation_tim
 async fn v2_collection_revalidates_publication_after_reads() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_names_fixture(&database).await?;
-    seed_schema_v2_ens_lookup_head(&database.pool, 100, "0xcollection-head", "2026-06-10T00:00:00Z").await?;
+    seed_schema_v2_ens_lookup_head(
+        &database.pool,
+        100,
+        "0xcollection-head",
+        "2026-06-10T00:00:00Z",
+    )
+    .await?;
     let state = database.app_state();
-    let snapshot = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(&state, None, Some("ens")).await.expect("capture ready publication");
+    let snapshot = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+        &state,
+        None,
+        Some("ens"),
+    )
+    .await
+    .expect("capture ready publication");
     assert!(snapshot.finish(&state).await.is_ok());
-    seed_schema_v2_ens_lookup_head(&database.pool, 100, "0xcollection-head", "2026-06-10T00:00:00Z").await?;
-    let error = snapshot.finish(&state).await.expect_err("republished state cannot finish prior read");
+    seed_schema_v2_ens_lookup_head(
+        &database.pool,
+        100,
+        "0xcollection-head",
+        "2026-06-10T00:00:00Z",
+    )
+    .await?;
+    let error = snapshot
+        .finish(&state)
+        .await
+        .expect_err("republished state cannot finish prior read");
     assert_eq!(error.code(), crate::v2::ErrorCode::Stale);
     database.cleanup().await
 }
@@ -303,7 +395,9 @@ async fn v2_get_names_paginates_by_keyset_and_binds_cursors_to_window_and_order(
 
     let second = v2_names_payload(
         &database,
-        &format!("/v1/names?namespace=ens&expires_after=2025-01-01T00:00:00Z&page_size=1&cursor={cursor}"),
+        &format!(
+            "/v1/names?namespace=ens&expires_after=2025-01-01T00:00:00Z&page_size=1&cursor={cursor}"
+        ),
     )
     .await?;
     assert_eq!(v2_names_listed(&second), vec!["beta.eth"]);
@@ -322,10 +416,18 @@ async fn v2_get_names_paginates_by_keyset_and_binds_cursors_to_window_and_order(
     assert_eq!(third["page"]["next_cursor"], Value::Null);
 
     for uri in [
-        format!("/v1/names?namespace=ens&expires_after=2025-01-02T00:00:00Z&page_size=1&cursor={cursor}"),
-        format!("/v1/names?namespace=ens&expires_after=2025-01-01T00:00:00Z&expires_before=2027-06-01T00:00:00Z&page_size=1&cursor={cursor}"),
-        format!("/v1/names?namespace=ens&expires_after=2025-01-01T00:00:00Z&order=desc&page_size=1&cursor={cursor}"),
-        format!("/v1/names?namespace=basenames&expires_after=2025-01-01T00:00:00Z&page_size=1&cursor={cursor}"),
+        format!(
+            "/v1/names?namespace=ens&expires_after=2025-01-02T00:00:00Z&page_size=1&cursor={cursor}"
+        ),
+        format!(
+            "/v1/names?namespace=ens&expires_after=2025-01-01T00:00:00Z&expires_before=2027-06-01T00:00:00Z&page_size=1&cursor={cursor}"
+        ),
+        format!(
+            "/v1/names?namespace=ens&expires_after=2025-01-01T00:00:00Z&order=desc&page_size=1&cursor={cursor}"
+        ),
+        format!(
+            "/v1/names?namespace=basenames&expires_after=2025-01-01T00:00:00Z&page_size=1&cursor={cursor}"
+        ),
         "/v1/names?namespace=ens&expires_after=2025-01-01T00:00:00Z&cursor=not-a-cursor".to_owned(),
     ] {
         let response = v2_names_response(&database, &uri).await?;
@@ -532,15 +634,26 @@ async fn v2_indexed_name_read_carries_weak_etag_and_honours_if_none_match() -> R
 #[tokio::test]
 async fn v2_collection_explicit_namespace_ignores_unavailable_other_namespace() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    database.seed_snapshot_selector_chain_positions(&json!({
-        "ethereum": { "chain_id": "ethereum-mainnet", "block_number": 100,
-            "block_hash": "0xcollection-head", "timestamp": "2026-06-10T00:00:00Z" }
-    })).await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": { "chain_id": "ethereum-mainnet", "block_number": 100,
+                "block_hash": "0xcollection-head", "timestamp": "2026-06-10T00:00:00Z" }
+        }))
+        .await?;
     let state = database.app_state();
-    let ens = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(&state, None, Some("ens"))
-        .await.expect("ENS publication is ready independently");
+    let ens = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+        &state,
+        None,
+        Some("ens"),
+    )
+    .await
+    .expect("ENS publication is ready independently");
     ens.finish(&state).await.expect("ENS still ready");
-    assert!(crate::v2::collection_snapshot::CollectionSnapshot::capture(&state, None).await.is_err(),
-        "aggregate must not silently omit an unavailable namespace");
+    assert!(
+        crate::v2::collection_snapshot::CollectionSnapshot::capture(&state, None)
+            .await
+            .is_err(),
+        "aggregate must not silently omit an unavailable namespace"
+    );
     database.cleanup().await
 }

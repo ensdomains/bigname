@@ -174,8 +174,9 @@ ships before the planned production re-walk from block zero, so it does not
 guess arms for historical rows or perform a historical backfill. Fresh replay
 always supplies the value. The fresh phase baseline has the identical column,
 constraint, and comment. At the offline boundary, operators empty only
-`surface_bindings` and its `name_current` and `address_names_current`
-dependents before applying the schema-migration; raw facts, manifest identities,
+`surface_bindings` and its `name_current`, `address_names_current`, and
+`address_records_current` (when installed) dependents before applying the
+schema-migration; raw facts, manifest identities,
 normalized-event identities, and unrelated phase rows remain in place for the
 mandatory full Interpret and Project redos.
 
@@ -1290,11 +1291,17 @@ references the released resource, but its `serving_resource_id` is null; the
 tombstone's summary nulls resolver state, so inventory attributed to that
 resource stays out of current serving. A [released v1
 authority](glossary.md#released-v1-authority) keeps the same shape on its
-lapsed lease binding. The name-current read filter admits a closed binding
-only for those two tombstones (`authority_selection.lifecycle_state =
-unregistered` with `authority_arm = ens_v2`, or
-`resource_authority_context.released_tombstone = ens_v1`); every other closed
-binding reads as absent. A state-derived ENSv2 expiry release
+lapsed lease binding. Project selects the binding referenced by each published
+name, address-name and address-record row. Serving reads retain that selection
+until Project replaces or removes the row; a later Interpret `active_to` update
+must not hide it under the unchanged publication. Identity and projection
+canonicality checks still reject orphaned rows. Project omits current ownership
+and address-record memberships when its selected name has
+`control.status` set to `unregistered`; the retained name identity remains readable. Ownership uses the
+same registrant and supporting event selected by `name_current`, rather than
+ranking other tokens' registrations again. Released tombstones therefore
+remain readable on their closed bindings without a separate binding-liveness
+exception in the read filter. A state-derived ENSv2 expiry release
 removes the `name_current` row when ENSv2 is the selected authority, or when no
 authority is selected and the row reports `current_authority_not_projected`;
 for a resource-backed binding, the release's `resource_id` must also match the

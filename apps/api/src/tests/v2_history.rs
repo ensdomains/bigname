@@ -1,4 +1,26 @@
 #[tokio::test]
+async fn v2_address_history_rejects_resolves_to_relation() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    let response = v2_history_response_for_database(
+        &database,
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?relation=resolves_to&page_size=20",
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("invalid_input"));
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("resolves_to")
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_history_returns_lean_product_rows_newest_first() -> Result<()> {
     let (database, payload) = v2_history_payload("/v1/names/History.eth/history?page_size=20").await?;
 

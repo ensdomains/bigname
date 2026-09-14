@@ -651,13 +651,15 @@ indexes are additive; rollback may leave them in place.
    `20260814130000_surface_binding_authority_arm.sql`, a populated phase schema
    cannot take the required `NOT NULL` column without the forbidden historical
    arm backfill. Before step 4, empty only the rebuildable binding rows and the
-   two current projections that reference them:
+   current projections that reference them. If the installed schema predates
+   `address_records_current`, omit that table from the statement:
 
    ```sql
    BEGIN;
    TRUNCATE TABLE
        bigname_phase.name_current,
        bigname_phase.address_names_current,
+       bigname_phase.address_records_current,
        bigname_phase.surface_bindings
        CONTINUE IDENTITY RESTRICT;
    COMMIT;

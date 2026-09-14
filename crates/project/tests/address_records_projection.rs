@@ -134,6 +134,68 @@ async fn addr_records_follow_incremental_replacement_clear_and_reset() -> Result
 }
 
 #[tokio::test]
+async fn addr_records_retire_when_the_selected_name_is_released() -> Result<()> {
+    let (database, pool) = migrated_pool("addr_records_released").await?;
+    seed_name(&pool, false).await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET event_kind = 'RegistrationGranted', source_family = 'ens_v1_registrar_l1',
+             after_state = $1
+         WHERE event_identity = 'owner:10:0'",
+    )
+    .bind(json!({
+        "source_event": "NameRegistered", "registrant": OWNER,
+        "authority_kind": "registrar", "status": "registered", "expiry": 1_800_000_012
+    }))
+    .execute(&pool)
+    .await?;
+    seed_writes(&pool, &[write(11, 1, "60", ADDRESS_A)]).await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(1800000012)
+         WHERE surface_binding_id = $1::uuid",
+    )
+    .bind(BINDING)
+    .execute(&pool)
+    .await?;
+    insert_event(
+        &pool,
+        "release",
+        Some(LOGICAL_NAME),
+        Some(RESOURCE),
+        "RegistrationReleased",
+        "ens_v1_registrar_l1",
+        None,
+        12,
+        0,
+        json!({"status": "released", "released_at": 1_800_000_012}),
+        json!({"emitting_address": REGISTRY}),
+    )
+    .await?;
+
+    run(&pool, 11, 0, None, RunMode::Normal).await?;
+    assert_eq!(addresses(&pool, "60").await?, vec![ADDRESS_A]);
+    run(&pool, 12, 12, Some(11), RunMode::Normal).await?;
+    let released: (String, String, String) = sqlx::query_as(
+        "SELECT surface_binding_id::text, resource_id::text,
+                declared_summary #>> '{control,status}'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(LOGICAL_NAME)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        released,
+        (BINDING.into(), RESOURCE.into(), "unregistered".into())
+    );
+    assert!(addresses(&pool, "60").await?.is_empty());
+
+    run(&pool, 12, 0, None, RunMode::Redo).await?;
+    assert!(addresses(&pool, "60").await?.is_empty());
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn addr_records_redo_drops_orphaned_record_writes() -> Result<()> {
     let (database, pool) = migrated_pool("addr_records_redo").await?;
     seed_name(&pool, false).await?;
