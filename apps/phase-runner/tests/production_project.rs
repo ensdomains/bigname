@@ -13216,7 +13216,7 @@ async fn checked_in_sepolia_v1_resolver_logs_flow_through_interpret_and_project(
     scratch.cleanup().await
 }
 
-/// The separately evidenced `sepolia-hackathon` profile declares the hackathon deployment's own
+/// The separately evidenced `sepolia-hackathon` deployment profile declares its own
 /// ENSv1 ReverseRegistrar under `ens_v1_reverse_l1`. A wallet's `setName` on it emits
 /// `ReverseClaimed`, then the registry's `NewOwner`/`NewResolver` for `<addr>.addr.reverse`, then
 /// the default PublicResolver's `NameChanged`
@@ -13224,10 +13224,8 @@ async fn checked_in_sepolia_v1_resolver_logs_flow_through_interpret_and_project(
 /// (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129-L130 @ ens_v1@91c966f).
 /// Interpret must turn the claim into a `ReverseChanged` attributed to that registrar, and Project
 /// must publish the wallet's ENS/60 primary-name tuple keyed by it, pointing at the reverse node's
-/// resolver. The tuple's indexed claim value stays `not_found` on purpose: a PublicResolver
-/// `NameChanged` is retained as an unattributed name-family `RecordChanged` (no
-/// `primary_claim_source`), and current-head hydration admits only the Mainnet event-silent
-/// reverse resolver, so the claim value comes from the verified path.
+/// resolver. Project joins the retained name-family `RecordChanged` to that reverse node
+/// and selected resolver, publishing the indexed claim value without a provider call.
 #[tokio::test]
 async fn checked_in_hackathon_reverse_claim_flows_through_interpret_and_project() -> Result<()> {
     const CHAIN: &str = "ethereum-sepolia";
@@ -13398,8 +13396,11 @@ async fn checked_in_hackathon_reverse_claim_flows_through_interpret_and_project(
     assert_eq!(primary.2["reverse_node"], reverse_node_hex);
     assert_eq!(primary.2["resolver_address"], RESOLVER.to_ascii_lowercase());
     assert_eq!(primary.2["target_block_number"], CLAIM_BLOCK);
-    assert!(primary.2.get("claim_event_id").is_none(), "{}", primary.2);
-    assert_eq!((primary.0.as_str(), primary.1), ("not_found", None));
+    assert!(primary.2["claim_event_id"].is_number(), "{}", primary.2);
+    assert_eq!(
+        (primary.0.as_str(), primary.1.as_deref()),
+        ("success", Some("bigname-verify.eth"))
+    );
     scratch.cleanup().await
 }
 
