@@ -125,15 +125,29 @@
                    'resolver', jsonb_build_object(
                        'chain_id', CASE
                            WHEN resolver.resolver_address IS NOT NULL AND resolver.resolver_address <> '0x0000000000000000000000000000000000000000'
-                            AND NOT (COALESCE(selected_registration.event_kind, '') IN ('RegistrationReleased', 'RegistrationReserved') AND selected_authority.selected_authority_arm = 'ens_v2')
-                            AND NOT COALESCE(selected_authority.released_v1_tombstone, false)
+                            AND (
+                                -- The serving pointer is served as selected, including through a
+                                -- root-registry TLD reservation.
+                                resolver.normalized_event_id = serving.pointer_event_id
+                                OR (
+                                    NOT (COALESCE(selected_registration.event_kind, '') IN ('RegistrationReleased', 'RegistrationReserved') AND selected_authority.selected_authority_arm = 'ens_v2')
+                                    AND NOT COALESCE(selected_authority.released_v1_tombstone, false)
+                                )
+                            )
                                THEN resolver.chain_id
                            ELSE NULL
                        END,
                        'address', CASE
                            WHEN resolver.resolver_address IS NOT NULL AND resolver.resolver_address <> '0x0000000000000000000000000000000000000000'
-                            AND NOT (COALESCE(selected_registration.event_kind, '') IN ('RegistrationReleased', 'RegistrationReserved') AND selected_authority.selected_authority_arm = 'ens_v2')
-                            AND NOT COALESCE(selected_authority.released_v1_tombstone, false)
+                            AND (
+                                -- The serving pointer is served as selected, including through a
+                                -- root-registry TLD reservation.
+                                resolver.normalized_event_id = serving.pointer_event_id
+                                OR (
+                                    NOT (COALESCE(selected_registration.event_kind, '') IN ('RegistrationReleased', 'RegistrationReserved') AND selected_authority.selected_authority_arm = 'ens_v2')
+                                    AND NOT COALESCE(selected_authority.released_v1_tombstone, false)
+                                )
+                            )
                                THEN resolver.resolver_address
                            ELSE NULL
                        END,

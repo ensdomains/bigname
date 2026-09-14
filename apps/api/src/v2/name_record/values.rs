@@ -6,7 +6,7 @@ use crate::v2::support::{
     direct_json_field, record_json_path, record_json_string_at_paths,
     record_network_from_chain_positions,
 };
-use crate::v2::vocab::RegistrationStatus;
+use crate::v2::vocab::{PARTIAL_SERVE_UNSUPPORTED_REASON, RegistrationStatus};
 use crate::v2::{chains::slug_to_numeric, format_timestamp};
 
 pub(in crate::v2) fn has_current_registration(status: RegistrationStatus) -> bool {
@@ -19,7 +19,7 @@ pub(in crate::v2) fn has_current_registration(status: RegistrationStatus) -> boo
 pub(in crate::v2) fn row_has_current_registration(row: &NameCurrentRow) -> bool {
     has_current_registration(
         super::name_registration_fields(Some(row), &row.namespace).registration_status,
-    ) || bigname_storage::name_current_has_event_linked_ownerless_registry_serving(row)
+    ) || bigname_storage::name_current_has_event_linked_registry_serving(row)
 }
 
 pub(in crate::v2) fn identity_row_has_current_registration(
@@ -27,7 +27,26 @@ pub(in crate::v2) fn identity_row_has_current_registration(
 ) -> bool {
     has_current_registration(
         super::identity_name_registration_fields(Some(row), &row.namespace).registration_status,
-    ) || bigname_storage::identity_name_current_has_event_linked_ownerless_registry_serving(row)
+    ) || bigname_storage::identity_name_current_has_event_linked_registry_serving(row)
+}
+
+/// Whether the row's declared resolver is served. A `current_authority_not_projected` row keeps
+/// retained pointer evidence out of the response unless an event-linked registry serving resource
+/// (an ENSv2 TLD's root-registry pointer) selected it.
+pub(in crate::v2) fn row_serves_resolver(row: &NameCurrentRow) -> bool {
+    row_has_current_registration(row)
+        && (string_field(row.coverage.get("unsupported_reason")).as_deref()
+            != Some(PARTIAL_SERVE_UNSUPPORTED_REASON)
+            || bigname_storage::name_current_has_event_linked_registry_serving(row))
+}
+
+pub(in crate::v2) fn identity_row_serves_resolver(
+    row: &bigname_storage::IdentityNameCurrentRow,
+) -> bool {
+    identity_row_has_current_registration(row)
+        && (string_field(row.coverage.get("unsupported_reason")).as_deref()
+            != Some(PARTIAL_SERVE_UNSUPPORTED_REASON)
+            || bigname_storage::identity_name_current_has_event_linked_registry_serving(row))
 }
 
 pub(super) fn json_chain_id(value: &Value) -> Option<u64> {

@@ -20,10 +20,7 @@ use super::{
     StrictQueryParams, V2Error, V2Result, api_error_to_v2_for_resource, load_subregistry_refs,
     name_chain_id, resolve_v2_snapshot_for, snapshot_block_for_chain, snapshot_meta,
     v2_exact_name_snapshot_scope_with_resolution_auxiliary,
-    vocab::{
-        Authority, PARTIAL_SERVE_UNSUPPORTED_REASON, RegistrationStatus, Resolver, Source, Status,
-        WrapperFuses, WrapperState,
-    },
+    vocab::{Authority, RegistrationStatus, Resolver, Source, Status, WrapperFuses, WrapperState},
 };
 
 #[path = "name_record/inventory.rs"]
@@ -38,8 +35,9 @@ mod wrapper;
 use inventory::load_name_record_inventory;
 pub(super) use values::{
     chain_id_from_positions, declared_token_id, identity_declared_token_id,
-    identity_row_has_current_registration, json_string_at_paths, network_from_parts,
-    row_has_current_registration, string_field, value_to_string,
+    identity_row_has_current_registration, identity_row_serves_resolver, json_string_at_paths,
+    network_from_parts, row_has_current_registration, row_serves_resolver, string_field,
+    value_to_string,
 };
 use values::{
     has_name_binding, json_address_at_paths, json_chain_id, json_timestamp_at_paths,
@@ -344,11 +342,9 @@ pub(crate) fn build_name_record(
         .flatten();
     let (wrapper_state, wrapper_fuses) = wrapper_metadata(&row.declared_summary)?
         .map_or((None, None), |(state, fuses)| (Some(state), Some(fuses)));
-    let resolver = (has_current_registration
-        && string_field(row.coverage.get("unsupported_reason")).as_deref()
-            != Some(PARTIAL_SERVE_UNSUPPORTED_REASON))
-    .then(|| resolver(&row.declared_summary))
-    .flatten();
+    let resolver = row_serves_resolver(row)
+        .then(|| resolver(&row.declared_summary))
+        .flatten();
 
     Ok(NameRecord {
         registration_id: (registration.registration_status != RegistrationStatus::Unregistered)

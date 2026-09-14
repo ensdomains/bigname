@@ -559,6 +559,50 @@ async fn v2_get_resolver_omits_names_without_projected_authority() -> Result<()>
 }
 
 #[tokio::test]
+async fn v2_get_resolver_lists_a_root_registry_pointer_without_projected_authority() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture(&database).await?;
+    // An ENSv2 TLD whose root-registry token has a resolver pointer but no observed registration.
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET support_status = 'unsupported',
+             unsupported_reason = 'current_authority_not_projected',
+             serving_resource_id = resource_id,
+             resource_id = NULL,
+             surface_binding_id = NULL,
+             token_lineage_id = NULL,
+             binding_kind = NULL,
+             provenance = provenance || jsonb_build_object(
+                 'read_reachability', jsonb_build_object(
+                     'basis', 'root_registry_resolver_pointer'))
+         WHERE raw_name = 'alpha.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+    upsert_test_resolver_current_rows(
+        &database,
+        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
+    )
+    .await?;
+
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+    )
+    .await?;
+    let names = payload["data"]["bound_names"]["data"]
+        .as_array()
+        .expect("bound names must be an array")
+        .iter()
+        .map(|row| row["name"].as_str().expect("bound name must be text"))
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["alpha.eth", "beta.eth"], "{payload}");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_resolver_omits_ownerless_reservations_from_bound_names() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;

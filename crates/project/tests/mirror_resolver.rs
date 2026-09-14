@@ -68,6 +68,26 @@ struct Fixture {
     ancestor: Ancestor,
     /// The name whose ENSv2 pointer targets the mirror: `NAME` or the single-label `PARENT_NAME`.
     queried: &'static str,
+    /// Whether the queried name carries a surface binding of any arm. A root-registry TLD token
+    /// whose registration was never observed has a resource and a pointer but no binding.
+    queried_bound: bool,
+    /// Root-registry lifecycle facts on the ENSv2 resource, in addition to its pointer.
+    v2_lifecycle: V2Lifecycle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum V2Lifecycle {
+    None,
+    /// The staging shape: the label is reserved (owner zero, infinite expiry) with the pointer
+    /// supplied at reservation in the same block, and a label preimage is observed later.
+    Reserved,
+    /// The token was released at `base + 2` through a state-derived release that names the
+    /// resource but no logical name, with no pointer clear.
+    ReleasedOnly,
+    /// The reserved token's path expired at `base + 2`: the interpreter releases the reservation
+    /// and clears the pointer through state-derived events that name the resource but no logical
+    /// name.
+    Expired,
 }
 
 impl Fixture {
@@ -80,6 +100,8 @@ impl Fixture {
             v1_side,
             ancestor: Ancestor::None,
             queried: NAME,
+            queried_bound: true,
+            v2_lifecycle: V2Lifecycle::None,
         }
     }
     fn with_ancestor(mut self, ancestor: Ancestor) -> Self {
@@ -88,6 +110,14 @@ impl Fixture {
     }
     fn single_label(mut self) -> Self {
         self.queried = PARENT_NAME;
+        self
+    }
+    fn unbound(mut self) -> Self {
+        self.queried_bound = false;
+        self
+    }
+    fn with_v2_lifecycle(mut self, lifecycle: V2Lifecycle) -> Self {
+        self.v2_lifecycle = lifecycle;
         self
     }
     fn parent_pointer_block(&self) -> Option<i64> {
@@ -518,6 +548,188 @@ async fn single_label_root_name_with_a_node_only_ensv1_pointer_records_the_walk(
 }
 
 #[tokio::test]
+async fn root_registry_tld_without_a_registration_serves_its_pointer() -> Result<()> {
+    // A root-registry TLD token has a resource and a resolver pointer but no observed registration,
+    // so no surface binding and no selected authority. The pointer still reaches `name_current`
+    // as the TLD's serving resource; the inventory keeps classifying through the mirror walk.
+    let node = bigname_lookup::ens_namehash_hex(PARENT_NAME)?;
+    let logical_name_id = format!("ens:{node}");
+    for (id, resolver, expected_support, lifecycle) in [
+        (
+            "tld_root_declared",
+            V1_RESOLVER,
+            "supported",
+            V2Lifecycle::None,
+        ),
+        (
+            "tld_root_undeclared",
+            UNDECLARED_RESOLVER,
+            "unsupported",
+            V2Lifecycle::None,
+        ),
+        // The staging TLDs: reserved with the pointer in the same block. The reservation is
+        // reported but does not withdraw the pointer.
+        (
+            "tld_root_reserved",
+            UNDECLARED_RESOLVER,
+            "unsupported",
+            V2Lifecycle::Reserved,
+        ),
+    ] {
+        let fixture = Fixture::declared(
+            id,
+            V1Side::NodeOnly {
+                resolver,
+                pointer_block_offset: 0,
+            },
+        )
+        .single_label()
+        .unbound()
+        .with_v2_lifecycle(lifecycle);
+        let mut previous: Option<Value> = None;
+        for execution in [
+            Execution::FromZero,
+            Execution::PerBlock,
+            Execution::RedoLastBlock,
+        ] {
+            let (database, pool) = project(&fixture, fixture.target(), execution).await?;
+            let name = name_current(&pool, &logical_name_id)
+                .await?
+                .with_context(|| format!("{id} {execution:?}: TLD row"))?;
+            assert_eq!(
+                name["resource_id"],
+                Value::Null,
+                "{id} {execution:?}: {name}"
+            );
+            assert_eq!(name["surface_binding_id"], Value::Null);
+            assert_eq!(name["binding_kind"], Value::Null);
+            assert_eq!(name["serving_resource_id"], V2_RESOURCE, "{name}");
+            assert_eq!(name["support_status"], "unsupported");
+            assert_eq!(
+                name["unsupported_reason"],
+                "current_authority_not_projected"
+            );
+            let summary = &name["declared_summary"];
+            assert_eq!(summary["resolver"]["address"], MIRROR, "{summary}");
+            assert_eq!(summary["resolver"]["chain_id"], CHAIN);
+            let expected_registration = if lifecycle == V2Lifecycle::Reserved {
+                json!("reserved")
+            } else {
+                Value::Null
+            };
+            assert_eq!(summary["registration"]["status"], expected_registration);
+            assert_eq!(summary["registration"]["authority_kind"], Value::Null);
+            assert_eq!(summary["registration"]["registrant"], Value::Null);
+            assert_eq!(
+                summary["coverage"]["enumeration_basis"],
+                "event_linked_registry_resolver"
+            );
+            assert_eq!(summary["topology"]["resolver_path"][0]["address"], MIRROR);
+            assert_eq!(
+                summary["topology"]["resolver_path"][0]["resource_id"],
+                V2_RESOURCE
+            );
+            let provenance = &name["provenance"];
+            assert_eq!(
+                provenance["authority_selection"].get("authority_arm"),
+                None,
+                "{provenance}"
+            );
+            assert_eq!(
+                provenance["read_reachability"]["basis"],
+                "root_registry_resolver_pointer"
+            );
+            assert_eq!(
+                provenance["read_reachability"]["serving_resource_id"],
+                V2_RESOURCE
+            );
+            assert!(provenance["read_reachability"]["pointer_event_id"].is_number());
+            assert_eq!(
+                provenance["resolver_pointer_source_family"],
+                "ens_v2_root_l1"
+            );
+
+            let v2 = inventory(&pool, V2_RESOURCE).await?;
+            assert_eq!(v2["support_status"], expected_support, "{v2}");
+            assert_eq!(v2["provenance"]["mirror"]["ancestor_depth"], 0);
+            assert_eq!(
+                v2["provenance"]["mirror"]["mirrored_resolver_address"],
+                resolver
+            );
+            if expected_support == "supported" {
+                assert_eq!(v2["entries"][0]["record_key"], "text:url");
+            } else {
+                assert_eq!(v2["unsupported_reason"], "mirrored_resolver_not_projected");
+            }
+            // Rows carry the Project target of the batch that last published them.
+            let mut name = name;
+            let row = name.as_object_mut().context("row")?;
+            row.remove("chain_positions");
+            row.remove("canonicality_summary");
+            if let Some(previous) = &previous {
+                assert_eq!(&name, previous, "{id} {execution:?} drifted");
+            }
+            previous = Some(name);
+            database.cleanup().await?;
+        }
+    }
+
+    // The rule is scoped to `current_authority_not_projected`: a TLD bound under both arms is a
+    // mixed-history overlap and gets neither the pointer nor a serving resource.
+    let fixture = Fixture::declared(
+        "tld_root_bound",
+        V1Side::NodeOnly {
+            resolver: V1_RESOLVER,
+            pointer_block_offset: 0,
+        },
+    )
+    .single_label();
+    let (database, pool) = project(&fixture, fixture.target(), Execution::FromZero).await?;
+    let name = name_current(&pool, &logical_name_id)
+        .await?
+        .context("bound TLD row")?;
+    assert_eq!(
+        name["unsupported_reason"], "independent_ens_deployments_overlap",
+        "{name}"
+    );
+    assert_eq!(name["serving_resource_id"], Value::Null);
+    assert_eq!(name["declared_summary"]["resolver"]["address"], Value::Null);
+    assert_eq!(name["provenance"]["read_reachability"], json!({}));
+    database.cleanup().await?;
+
+    // A release on the token resource at or after the pointer withdraws it, with or without the
+    // pointer clear the interpreter derives alongside an expiry; both name the resource but no
+    // logical name.
+    for (id, lifecycle) in [
+        ("tld_root_released", V2Lifecycle::ReleasedOnly),
+        ("tld_root_expired", V2Lifecycle::Expired),
+    ] {
+        let fixture = Fixture::declared(
+            id,
+            V1Side::NodeOnly {
+                resolver: V1_RESOLVER,
+                pointer_block_offset: 0,
+            },
+        )
+        .single_label()
+        .unbound()
+        .with_v2_lifecycle(lifecycle);
+        let (database, pool) = project(&fixture, fixture.target(), Execution::FromZero).await?;
+        if let Some(name) = name_current(&pool, &logical_name_id).await? {
+            assert_eq!(name["serving_resource_id"], Value::Null, "{id}: {name}");
+            assert_eq!(
+                name["declared_summary"]["resolver"]["address"],
+                Value::Null,
+                "{id}: {name}"
+            );
+            assert_eq!(name["provenance"]["read_reachability"], json!({}), "{id}");
+        }
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn mirror_does_not_derive_through_an_extended_ancestor_resolver() -> Result<()> {
     let fixture = Fixture::declared("mirror_extended_ancestor", V1Side::Absent)
         .with_ancestor(Ancestor::Extended);
@@ -683,6 +895,8 @@ async fn hackathon_manifest_declares_the_mirror_and_classifies_it() -> Result<()
         v1_side: V1Side::Projected,
         ancestor: Ancestor::None,
         queried: NAME,
+        queried_bound: true,
+        v2_lifecycle: V2Lifecycle::None,
     };
     let (database, pool) = project(&fixture, fixture.target(), Execution::FromZero).await?;
     let resolver = resolver_current(&pool, address).await?;
@@ -717,6 +931,8 @@ async fn hackathon_manifest_declares_the_mirror_and_classifies_it() -> Result<()
         v1_side: V1Side::Projected,
         ancestor: Ancestor::None,
         queried: NAME,
+        queried_bound: true,
+        v2_lifecycle: V2Lifecycle::None,
     };
     let (database, pool) = project(&fixture, fixture.target(), Execution::FromZero).await?;
     let resolver = resolver_current(&pool, second).await?;
@@ -761,6 +977,16 @@ async fn inventory(pool: &PgPool, resource: &str) -> Result<Value> {
     )
     .bind(resource)
     .fetch_one(pool)
+    .await?)
+}
+
+async fn name_current(pool: &PgPool, logical_name_id: &str) -> Result<Option<Value>> {
+    Ok(sqlx::query_scalar(
+        "SELECT to_jsonb(row) - 'last_recomputed_at' - 'inserted_at' \
+         FROM name_current row WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .fetch_optional(pool)
     .await?)
 }
 
@@ -962,6 +1188,9 @@ async fn seed(pool: &PgPool, fixture: &Fixture) -> Result<()> {
     ] {
         sqlx::query("INSERT INTO resources (resource_id,chain_id,block_hash,block_number,canonicality_state) VALUES ($1::uuid,$2,$3,$4,'canonical')")
             .bind(resource).bind(CHAIN).bind(block_hash(base)).bind(base).execute(pool).await?;
+        if !fixture.queried_bound && logical == &queried_logical_name_id {
+            continue;
+        }
         sqlx::query("INSERT INTO surface_bindings (surface_binding_id,logical_name_id,resource_id,binding_kind,authority_arm,active_from,chain_id,block_hash,block_number,canonicality_state) VALUES ($1::uuid,$2,$3::uuid,'declared_registry_path',$4,to_timestamp($5),$6,$7,$8,'canonical')")
             .bind(binding).bind(logical).bind(resource).bind(arm)
             .bind(1_800_000_000 + base).bind(CHAIN).bind(block_hash(base)).bind(base).execute(pool).await?;
@@ -979,6 +1208,85 @@ async fn seed(pool: &PgPool, fixture: &Fixture) -> Result<()> {
         emitter: V1_REGISTRY,
         after_state: json!({"node": queried_node, "resolver": fixture.mirror}),
     }];
+    match fixture.v2_lifecycle {
+        V2Lifecycle::None => {}
+        V2Lifecycle::Reserved | V2Lifecycle::Expired => {
+            let expiry = if fixture.v2_lifecycle == V2Lifecycle::Reserved {
+                json!(u64::MAX)
+            } else {
+                json!(1_800_000_011)
+            };
+            events.push(Event {
+                identity: "v2-reserved",
+                logical_name_id: Some(queried_logical_name_id.clone()),
+                resource_id: Some(V2_RESOURCE),
+                kind: "RegistrationReserved",
+                source_family: "ens_v2_root_l1",
+                manifest_id: Some(root_manifest),
+                block: base,
+                log_index: 1,
+                emitter: V1_REGISTRY,
+                after_state: json!({"source_event": "LabelReserved", "status": "reserved",
+                                    "expiry": expiry}),
+            });
+            events.push(Event {
+                identity: "v2-preimage",
+                logical_name_id: Some(queried_logical_name_id.clone()),
+                resource_id: None,
+                kind: "PreimageObserved",
+                source_family: "ens_v2_root_l1",
+                manifest_id: Some(root_manifest),
+                block: base + 1,
+                log_index: 7,
+                emitter: V1_REGISTRY,
+                after_state: json!({"label": fixture.queried}),
+            });
+        }
+        V2Lifecycle::ReleasedOnly => {}
+    }
+    if matches!(
+        fixture.v2_lifecycle,
+        V2Lifecycle::ReleasedOnly | V2Lifecycle::Expired
+    ) {
+        {
+            let expired = json!({
+                "source_event": "RegistryPathExpired", "derived_from": "interpreter_state",
+                "terminal_reason": "registry_name_binding_expired", "expiry": 1_800_000_011
+            });
+            let mut transitions = vec![(
+                "v2-expiry-release",
+                "RegistrationReleased",
+                0,
+                "status",
+                json!("released"),
+            )];
+            if fixture.v2_lifecycle == V2Lifecycle::Expired {
+                transitions.push((
+                    "v2-expiry-pointer",
+                    "ResolverChanged",
+                    1,
+                    "resolver",
+                    Value::Null,
+                ));
+            }
+            for (identity, kind, log_index, field, value) in transitions {
+                let mut after_state = expired.clone();
+                after_state[field] = value;
+                events.push(Event {
+                    identity,
+                    logical_name_id: None,
+                    resource_id: Some(V2_RESOURCE),
+                    kind,
+                    source_family: "ens_v2_root_l1",
+                    manifest_id: Some(root_manifest),
+                    block: base + 2,
+                    log_index,
+                    emitter: V1_REGISTRY,
+                    after_state,
+                });
+            }
+        }
+    }
     if let V1Side::NodeOnly {
         resolver,
         pointer_block_offset,

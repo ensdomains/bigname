@@ -603,18 +603,25 @@ Rows classified as `registration_status=unregistered`, including ownerless
 ENSv2 reservations, have no current registration, so product name detail and
 batch lookup always omit `registration_id`. Resolver and record fields are also
 omitted, the records route exposes no resolver, record values, or audit-only
-inventory, and resolver `bound_names` omits the row unless it is
-an ownerless ENSv1 or Basenames registry row whose current registry resolver
-pointer is retained (a [serving resource](glossary.md#serving-resource)). That
-retained pointer permits resolver and record reads without acquiring registration
-identity or control. Indexed records require retained, supported inventory;
+inventory, and resolver `bound_names` omits the row unless it carries an
+event-linked registry resolver pointer (a
+[serving resource](glossary.md#serving-resource)): an ownerless ENSv1 or
+Basenames registry row whose current registry resolver pointer is retained, or
+an ENSv2 TLD whose current
+[root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
+survives while the TLD's authority is not projected. That pointer permits
+resolver and record reads without acquiring registration identity or control;
+the TLD row keeps `current_authority_not_projected` wherever a route reports
+its coverage. Indexed records require retained, supported inventory;
 routes with source selection let verified and auto records follow the ordinary
 lookup capability, and resolver `bound_names` remains subject to the resolver
 family's binding-enumeration capability.
 See [registration status](#status-vocabulary) for the upstream basis.
 The ENSv2 rule is an intentional product
 narrowing: ENSv2 stores a nonzero resolver supplied for an ownerless
-reservation and returns it until expiry. (upstream:
+reservation and returns it until expiry. A root-registry TLD reservation is the
+one exception: its pointer is served as a
+[root-registry resolver pointer](glossary.md#root-registry-resolver-pointer). (upstream:
 .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @
 ens_v2@a971bd64) (upstream:
 .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @
@@ -872,6 +879,16 @@ an ownerless ENSv1 or Basenames registry row whose current registry resolver
 pointer is retained (a [serving resource](glossary.md#serving-resource)). It
 serves indexed records when retained inventory exists; routes with source
 selection can also serve verified records under the ordinary lookup capability.
+An ENSv2 TLD whose root-registry token is reserved or whose registration is
+not projected serves the same way from its current
+[root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
+while it stays `current_authority_not_projected` and
+`registration_status=unregistered`: the root registry stores the pointer per
+token and returns it while the label is unexpired, and bigname serves that
+pointer without inventing the TLD's registration or authority.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L150-L155 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L476-L478 @ ens_v2@a971bd64)
 The current ENSv1 registry and the Basenames registry emit the supplied owner
 from `setOwner`.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L68 @ ens_v1@91c966f)

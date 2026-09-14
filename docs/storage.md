@@ -1110,7 +1110,11 @@ resource-less. This does not restore a current binding. Registry-only ENSv1 and
 Basenames names are different when a current nonzero resolver pointer remains
 event-linked: `name_current.resource_id` stays null while the
 [`serving_resource_id`](glossary.md#serving-resource) joins resolver and
-inventory reads without creating control. An explicitly released ENSv2 name
+inventory reads without creating control. An ENSv2 TLD whose root-registry
+token has a current [root-registry resolver
+pointer](glossary.md#root-registry-resolver-pointer) but no observed
+registration takes the same shape while its row stays
+`current_authority_not_projected`. An explicitly released ENSv2 name
 instead keeps a row for a [released v2
 authority](glossary.md#released-v2-authority) whose `resource_id` still
 references the released resource, but its `serving_resource_id` is null; the
@@ -1130,7 +1134,9 @@ If a different ENSv2 reservation survives that expiry, the row's lifecycle
 summary follows the reservation, but `surface_binding_id`, `resource_id`,
 `serving_resource_id`, `token_lineage_id`, and `binding_kind` are all null: a
 reservation does not write a surface binding, and the expired registration's
-identity and record inventory are not current name data. This is an intentional serving narrowing:
+identity and record inventory are not current name data. This is an intentional serving narrowing
+(a root-registry TLD reservation is the exception, served through its
+[root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)):
 ENSv2 stores a nonzero resolver supplied for an ownerless reservation and
 returns it until expiry. (upstream:
 .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @

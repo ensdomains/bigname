@@ -554,6 +554,53 @@ async fn v2_lookup_withholds_resolver_without_projected_authority() -> Result<()
 }
 
 #[tokio::test]
+async fn v2_lookup_serves_a_root_registry_pointer_without_projected_authority() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    // An ENSv2 TLD whose root-registry token has a resolver pointer but no observed registration.
+    sqlx::query(
+        "UPDATE name_current
+         SET support_status = 'unsupported',
+             unsupported_reason = 'current_authority_not_projected',
+             serving_resource_id = resource_id,
+             resource_id = NULL,
+             surface_binding_id = NULL,
+             token_lineage_id = NULL,
+             binding_kind = NULL,
+             provenance = provenance || jsonb_build_object(
+                 'read_reachability', jsonb_build_object(
+                     'basis', 'root_registry_resolver_pointer'))
+         WHERE raw_name = 'alice.eth'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let forward = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"name": "alice.eth"}]}),
+    )
+    .await?;
+    let record = &forward["data"][0]["record"];
+    assert_eq!(record["status"], json!("unsupported"), "{record}");
+    assert_eq!(
+        record["unsupported_reason"],
+        json!("current_authority_not_projected")
+    );
+    assert_eq!(
+        record["resolver"],
+        json!({"chain_id": 1, "address": address}),
+        "{record}"
+    );
+    assert_eq!(record["registration_status"], json!("unregistered"));
+    assert!(record.get("registration_id").is_none(), "{record}");
+    assert!(record.get("authority").is_none_or(Value::is_null), "{record}");
+    assert_eq!(record["addresses"]["60"], json!(address));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_lookup_withholds_retained_inventory_for_released_tombstone() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_identity_name(

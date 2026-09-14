@@ -422,7 +422,7 @@ $ curl -s -X POST /v1/lookup -H 'content-type: application/json' \\
     ]) },
     { h: 'Lifecycle', id: 'lifecycle', html: `<dl class="fields">
 <dt>released</dt><dd>The registration has ended, for example through an explicit ENSv2 unregister. The profile still answers 200 with identity and history, but owner, resolver, and records are omitted.</dd>
-<dt>unregistered</dt><dd>There is no current registration or control, and <code>registration_id</code> is omitted. An ownerless ENSv1 or Basenames registry row may still keep a resolver pointer that permits record reads. An ownerless ENSv2 reservation does not.</dd>
+<dt>unregistered</dt><dd>There is no current registration or control, and <code>registration_id</code> is omitted. An ownerless ENSv1 or Basenames registry row, or an ENSv2 TLD whose root-registry pointer survives without a projected registration, may still keep a resolver pointer that permits record reads. An ownerless ENSv2 reservation does not, except a root-registry TLD reservation.</dd>
 </dl>` + D('When the current authority cannot be established', `<p>Name reads use the selected current authority rather than the newest event. When ENSv1 and ENSv2 overlap without a proven migration boundary, the profile reports <code>status: "unsupported"</code> with identity fields only and a reason such as <code>conflicting_current_ens_authority</code> on Mainnet or <code>independent_ens_deployments_overlap</code> on Sepolia. The reason <code>current_authority_not_projected</code> is handled differently: the route serves an indexed partial profile with identity and registration fields, <code>status: "ok"</code>, and no resolver.</p>`) },
     { h: 'NameWrapper', id: 'wrapper', html: `<p><code>wrapper_state</code>, which is <code>wrapped</code>, <code>emancipated</code>, or <code>locked</code>, and <code>wrapper_fuses</code> appear together or not at all. They show up on the name profile, on the <code>bound_names</code> rows of a resolver overview, and on permission rows.</p>
 <pre class="block"><code>${K(`{ "fuses": 196609, "cannot_unwrap": true, "cannot_burn_fuses": false, "cannot_transfer": false,
@@ -559,7 +559,7 @@ const ROUTES = [
       ['registration_id, token_id, owner, manager, registrant', 'The current registration. <code>manager</code> is omitted when there is none.'],
       ['registered_at, created_at, expires_at, registration_status', 'The registration lifecycle. See <a href="#vocabulary/lifecycle">vocab(7)</a>.'],
       ['wrapper_state, wrapper_fuses', 'The ENSv1 NameWrapper pair. See <a href="#vocabulary/wrapper">vocab(7)</a>.'],
-      ['resolver', '<code>{chain_id, address}</code>. Omitted for unregistered names unless an ownerless ENSv1 or Basenames registry row still carries a resolver pointer.'],
+      ['resolver', '<code>{chain_id, address}</code>. Omitted for unregistered names unless an ownerless ENSv1 or Basenames registry row, or an ENSv2 TLD with a current root-registry pointer and no projected authority, still carries a resolver pointer.'],
       ['addresses, text_records, content_hash, primary_name, primary_address', 'Convenience records. A map the index knows to be empty is <code>{}</code>.'],
       ['status, unsupported_reason, failure_reason, unsupported_fields', 'How the read went.'],
     ],
