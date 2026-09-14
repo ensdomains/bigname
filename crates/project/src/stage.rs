@@ -447,7 +447,9 @@ async fn create_scoped_event_ids(
         JOIN normalized_events resolver
           ON resolver.chain_id = $1
          AND resolver.block_number <= $2
-         AND resolver.event_kind = 'ResolverChanged'
+         AND (resolver.event_kind IN ('ResolverChanged', 'RecordVersionChanged')
+              OR (resolver.event_kind = 'RecordChanged'
+                  AND resolver.after_state ->> 'source_event' = 'NameChanged'))
          AND resolver.canonicality_state IN ('canonical', 'safe', 'finalized')
          AND lower(resolver.after_state ->> 'node') =
              lower(reverse.after_state ->> 'reverse_node')

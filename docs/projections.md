@@ -1016,6 +1016,31 @@ claim and whether its bytes already equal the normalized claim. The internal
 selection columns are not claim fields and readers never select them. Project
 does not persist a verified-primary result or trace identity.
 
+For a retained `ReverseClaimed` tuple, Project joins its `reverse_node` to
+node-keyed `NameChanged` records on the current registry resolver. No forward
+name surface or resource attribution is needed. Resolver records written before
+the tuple or before a resolver pointer change remain eligible when that resolver
+is current. Changing the reverse node's owner alone does not clear its stored
+name (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L170 @ ens_v1@91c966fe).
+The reverse registrar emits the tuple before assigning the registry
+resolver, then writes the name through that resolver
+(upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83 @ ens_v1@91c966fe)
+(upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966fe).
+
+Project selects the last canonical name write or record-version reset for that
+node and resolver at the projection head, ordered by block, transaction, log,
+and normalized-event ID. A version reset or blank name yields `not_found`;
+Names retained only as bytes yield `unsupported`. Changing away from a resolver stops
+using its name; changing back exposes that resolver's retained current-version
+name. This follows the resolver's version-keyed storage and reset behavior
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L17 @ ens_v1@91c966fe)
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L28 @ ens_v1@91c966fe)
+(upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L21 @ ens_v1@91c966fe).
+Scoped rebuilds retain this node history and invalidate the tuple on name,
+version, or resolver changes. Explicit `NameForAddrChanged` tuple claims retain
+their existing event path. These are declared claims; forward verification
+remains request-scoped.
+
 Current-head hydration for an admitted event-silent ENSv1 reverse resolver may
 refresh an existing ENS/60 claim tuple at the exact published Ethereum head. It
 does not create a normalized event or verified result. Provider failure restores

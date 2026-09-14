@@ -85,15 +85,16 @@ pub(super) async fn build(
                    )
                ))
         FROM latest_reverse reverse
-        LEFT JOIN latest_claim claim
-          ON claim.claim_address = lower(reverse.address)
-         AND claim.claim_coin_type = reverse.coin_type
-         AND claim.claim_namespace = reverse.claim_namespace
+        LEFT JOIN latest_claim direct_claim
+          ON direct_claim.claim_address = lower(reverse.address)
+         AND direct_claim.claim_coin_type = reverse.coin_type
+         AND direct_claim.claim_namespace = reverse.claim_namespace
         LEFT JOIN LATERAL (
             SELECT event.normalized_event_id,
                    lower(event.after_state ->> 'resolver') AS resolver_address
             FROM project_events event
             WHERE event.event_kind = 'ResolverChanged'
+              AND event.namespace = reverse.namespace
               AND lower(event.after_state ->> 'node') =
                   lower(reverse.after_state ->> 'reverse_node')
             ORDER BY event.block_number DESC NULLS LAST,
@@ -102,6 +103,31 @@ pub(super) async fn build(
                      event.normalized_event_id DESC
             LIMIT 1
         ) resolver ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT event.normalized_event_id, event.after_state
+            FROM project_events event
+            WHERE reverse.after_state ->> 'source_event' = 'ReverseClaimed'
+              AND event.namespace = reverse.namespace
+              AND lower(event.after_state ->> 'node') =
+                  lower(reverse.after_state ->> 'reverse_node')
+              AND lower(event.after_state ->> 'resolver') = resolver.resolver_address
+              AND (event.event_kind = 'RecordVersionChanged'
+                   OR (event.event_kind = 'RecordChanged'
+                       AND event.after_state ->> 'source_event' = 'NameChanged'
+                       AND event.after_state ->> 'record_key' = 'name'))
+            ORDER BY event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST,
+                     event.log_index DESC NULLS LAST,
+                     event.normalized_event_id DESC
+            LIMIT 1
+        ) node_claim ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT node_claim.normalized_event_id, node_claim.after_state
+            WHERE reverse.after_state ->> 'source_event' = 'ReverseClaimed'
+            UNION ALL
+            SELECT direct_claim.normalized_event_id, direct_claim.after_state
+            WHERE reverse.after_state ->> 'source_event' IS DISTINCT FROM 'ReverseClaimed'
+        ) claim ON TRUE
         LEFT JOIN project_primary_claim_normalization normalized
           ON normalized.normalized_event_id = claim.normalized_event_id
         ORDER BY lower(reverse.address), reverse.coin_type, reverse.claim_namespace
@@ -134,11 +160,24 @@ async fn stage_claim_normalization(transaction: &mut Transaction<'_, Postgres>) 
 
     let claims = sqlx::query(
         "SELECT normalized_event_id,
-                after_state ->> 'raw_name' AS raw_name,
-                after_state ? 'raw_name_bytes' AS has_raw_name_bytes
-         FROM project_events
-         WHERE event_kind = 'RecordChanged'
-           AND after_state ? 'primary_claim_source'",
+                CASE WHEN jsonb_typeof(after_state -> 'raw_name') = 'string'
+                     THEN after_state ->> 'raw_name' END AS raw_name,
+                (after_state ? 'raw_name_bytes'
+                 OR COALESCE(jsonb_typeof(after_state -> 'raw_name') = 'object', false))
+                    AS has_raw_name_bytes
+         FROM project_events event
+         WHERE event.event_kind = 'RecordChanged'
+           AND (event.after_state ? 'primary_claim_source'
+                OR (event.after_state ->> 'source_event' = 'NameChanged'
+                    AND event.after_state ->> 'record_key' = 'name'
+                    AND EXISTS (
+                        SELECT 1 FROM project_events reverse
+                        WHERE reverse.event_kind = 'ReverseChanged'
+                          AND reverse.after_state ->> 'source_event' = 'ReverseClaimed'
+                          AND reverse.namespace = event.namespace
+                          AND lower(reverse.after_state ->> 'reverse_node') =
+                              lower(event.after_state ->> 'node')
+                    )))",
     )
     .fetch_all(&mut **transaction)
     .await
