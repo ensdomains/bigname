@@ -1070,7 +1070,9 @@ async fn direct_bound_names_of_both_arms_project_a_direct_topology() -> Result<(
         (NAME, "ens_v2", V2_RESOURCE, MIRROR, V2_BINDING),
     ] {
         let logical_name_id = format!("ens:{}", bigname_lookup::ens_namehash_hex(name)?);
-        let row = name_current(&pool, &logical_name_id).await?;
+        let row = name_current(&pool, &logical_name_id)
+            .await?
+            .context("direct name row")?;
         assert_eq!(row["support_status"], "supported", "{row}");
         assert_eq!(
             row["provenance"]["authority_selection"]["authority_arm"], arm,
@@ -1152,7 +1154,9 @@ async fn direct_bound_name_without_a_resolver_keeps_no_topology() -> Result<()> 
     let fixture = Fixture::declared("direct_topology_null", V1Side::Absent);
     let (database, pool) = project_direct_fixture(&fixture).await?;
     let logical_name_id = format!("ens:{}", bigname_lookup::ens_namehash_hex(NAME)?);
-    let row = name_current(&pool, &logical_name_id).await?;
+    let row = name_current(&pool, &logical_name_id)
+        .await?
+        .context("direct name row")?;
     assert_eq!(
         row["provenance"]["authority_selection"]["authority_arm"],
         "ens_v2"
@@ -1165,7 +1169,9 @@ async fn direct_bound_name_without_a_resolver_keeps_no_topology() -> Result<()> 
         "a bound name with a resolver pointer and an inventory row projects a topology: {row}"
     );
     let parent_logical_name_id = format!("ens:{}", bigname_lookup::ens_namehash_hex(PARENT_NAME)?);
-    let parent = name_current(&pool, &parent_logical_name_id).await?;
+    let parent = name_current(&pool, &parent_logical_name_id)
+        .await?
+        .context("direct parent row")?;
     assert_eq!(
         parent["declared_summary"]["resolver"]["address"],
         Value::Null
@@ -1236,16 +1242,6 @@ async fn project_direct_fixture(fixture: &Fixture) -> Result<(TestDatabase, PgPo
     )
     .await?;
     Ok((database, pool))
-}
-
-async fn name_current(pool: &PgPool, logical_name_id: &str) -> Result<Value> {
-    Ok(sqlx::query_scalar(
-        "SELECT to_jsonb(row) - 'last_recomputed_at' - 'inserted_at' \
-         FROM name_current row WHERE logical_name_id = $1",
-    )
-    .bind(logical_name_id)
-    .fetch_one(pool)
-    .await?)
 }
 
 async fn inventory(pool: &PgPool, resource: &str) -> Result<Value> {
