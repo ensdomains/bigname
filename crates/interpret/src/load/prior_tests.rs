@@ -40,7 +40,10 @@ async fn same_block_restore_replays_normalized_emission_order() -> TestResult {
         vec![admission()],
         StateCacheCapacity::Unlimited,
     )?;
-    let mut connection = database.pool().acquire().await?;
+    let mut connection = database.pool().begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *connection)
+        .await?;
     assert_eq!(
         restore_events(&mut connection, CHAIN, 2, &mut restore).await?,
         3

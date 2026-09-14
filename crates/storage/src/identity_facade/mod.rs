@@ -2,7 +2,7 @@ mod types;
 
 /// Reusable row predicates for active reverse-identity pagination and count queries.
 pub const READABLE_REVERSE_IDENTITY_CTES: &str = r#"
-readable_names AS (
+readable_names AS NOT MATERIALIZED (
     SELECT nc.logical_name_id, nc.raw_name, nc.namespace, nc.namehash
     FROM bigname_phase.name_current nc
     JOIN bigname_phase.name_surfaces surface

@@ -3,6 +3,7 @@ use std::{sync::LazyLock, time::Duration};
 use alloy_primitives::Bytes;
 use alloy_sol_types::{SolCall, SolError, SolValue, sol};
 use anyhow::{Context, Result, bail};
+use futures_util::{StreamExt, stream};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
@@ -11,16 +12,34 @@ use crate::abi::{hex_string, hex_to_bytes};
 
 const LOCAL_BATCH_GATEWAY_URL: &str = "x-batch-gateway:true";
 const MAX_GATEWAY_URLS: usize = 4;
+/// A batch the Universal Resolver builds carries one lookup per call it was
+/// asked to make: one for a plain resolver call, one per entry of a
+/// `multicall()` (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L98-L122 @ ens_v1@91c966f;
+/// upstream: .refs/ens_v1/contracts/ccipRead/CCIPBatcher.sol:L42-L53 @ ens_v1@91c966f),
+/// and bigname asks for one record per call. The batch calldata is still
+/// contract-chosen revert data, so its length is capped before any request is
+/// launched, the fan-out runs a few requests at a time, and the decoded inner
+/// responses share the single-answer byte cap below.
+const MAX_BATCH_GATEWAY_REQUESTS: usize = 8;
+const MAX_BATCH_GATEWAY_CONCURRENCY: usize = 4;
 #[cfg(not(test))]
 const GATEWAY_CONNECT_TIMEOUT: Duration = Duration::from_millis(1000);
 #[cfg(test)]
 const GATEWAY_CONNECT_TIMEOUT: Duration = Duration::from_millis(100);
 const GATEWAY_TIMEOUT: Duration = Duration::from_millis(1500);
+/// A CCIP-Read answer is one ABI-encoded resolver result. Cap the read so a
+/// gateway URL decoded from revert data cannot stream unbounded bytes into the
+/// serving path within the request timeout.
+const MAX_GATEWAY_RESPONSE_BYTES: usize = 1 << 20;
 
 static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .connect_timeout(GATEWAY_CONNECT_TIMEOUT)
         .timeout(GATEWAY_TIMEOUT)
+        // A gateway answers in one hop. Following redirects would let a URL that
+        // passed any origin check bounce the request to an unrelated host, so a
+        // 3xx is surfaced as an ordinary unsuccessful gateway status instead.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("CCIP gateway HTTP client configuration must be valid")
 });
@@ -80,45 +99,73 @@ async fn fetch_inner(lookup: &OffchainLookup) -> Result<Vec<u8>> {
         .iter()
         .any(|url| url.eq_ignore_ascii_case(LOCAL_BATCH_GATEWAY_URL))
     {
-        let requests = decode_batch_query(&lookup.call_data)?;
-        let results =
-            futures_util::future::join_all(requests.into_iter().map(|request| async move {
-                fetch_standard(&request.sender, &request.urls, &request.data).await
-            }))
-            .await;
-        let mut failures = Vec::with_capacity(results.len());
-        let mut responses = Vec::with_capacity(results.len());
-        let mut transport_error = None;
-        for result in results {
-            match result {
-                Ok(response) => {
-                    failures.push(false);
-                    responses.push(response);
-                }
-                Err(error) => match retain_transport_error(&mut transport_error, error) {
-                    Ok(()) => {}
-                    Err(error) => {
-                        failures.push(true);
-                        responses.push(
-                            alloy_sol_types::Revert::from(format!(
-                                "CCIP gateway request failed: {error}"
-                            ))
-                            .abi_encode(),
-                        );
-                    }
-                },
-            }
-        }
-        if let Some((_, error)) = transport_error {
-            return Err(error);
-        }
-        let responses = responses
-            .iter()
-            .map(|response| Bytes::copy_from_slice(response))
-            .collect::<Vec<_>>();
-        return Ok((failures, responses).abi_encode_params());
+        return fetch_batch(decode_batch_query(&lookup.call_data)?).await;
     }
     fetch_standard(&lookup.sender, &lookup.urls, &lookup.call_data).await
+}
+
+async fn fetch_batch(requests: Vec<BatchRequest>) -> Result<Vec<u8>> {
+    if requests.len() > MAX_BATCH_GATEWAY_REQUESTS {
+        bail!(
+            "CCIP batch gateway query carries {} requests; at most {MAX_BATCH_GATEWAY_REQUESTS} are followed",
+            requests.len()
+        );
+    }
+    let mut results = stream::iter(requests)
+        .map(|request| async move {
+            fetch_standard(&request.sender, &request.urls, &request.data).await
+        })
+        .buffered(MAX_BATCH_GATEWAY_CONCURRENCY);
+    let mut failures = Vec::new();
+    let mut responses = Vec::new();
+    let mut transport_error = None;
+    let mut total_bytes = 0_usize;
+    while let Some(result) = results.next().await {
+        let response = match result {
+            Ok(response) => {
+                failures.push(false);
+                response
+            }
+            Err(error) => match retain_transport_error(&mut transport_error, error) {
+                Ok(()) => continue,
+                Err(error) => {
+                    failures.push(true);
+                    alloy_sol_types::Revert::from(format!("CCIP gateway request failed: {error}"))
+                        .abi_encode()
+                }
+            },
+        };
+        total_bytes += response.len();
+        if total_bytes > MAX_GATEWAY_RESPONSE_BYTES {
+            bail!(
+                "CCIP batch gateway responses exceeded {MAX_GATEWAY_RESPONSE_BYTES} bytes in total"
+            );
+        }
+        responses.push(response);
+    }
+    if let Some((_, error)) = transport_error {
+        return Err(error);
+    }
+    let responses = responses
+        .iter()
+        .map(|response| Bytes::copy_from_slice(response))
+        .collect::<Vec<_>>();
+    Ok((failures, responses).abi_encode_params())
+}
+
+#[cfg(test)]
+pub(crate) fn encode_batch_query_for_test(
+    requests: Vec<(alloy_primitives::Address, Vec<String>, Vec<u8>)>,
+) -> Vec<u8> {
+    let requests = requests
+        .into_iter()
+        .map(|(sender, urls, data)| contracts::Request {
+            sender,
+            urls,
+            data: Bytes::from(data),
+        })
+        .collect();
+    contracts::queryCall { requests }.abi_encode()
 }
 
 struct BatchRequest {
@@ -180,8 +227,15 @@ async fn fetch_standard(sender: &str, urls: &[String], call_data: &[u8]) -> Resu
 
 async fn fetch_one(template: &str, sender: &str, data: &str) -> Result<Vec<u8>> {
     let url = template.replace("{sender}", sender);
-    let response = if url.contains("{data}") {
-        HTTP_CLIENT.get(url.replace("{data}", data)).send().await
+    let use_get = url.contains("{data}");
+    let url = if use_get {
+        url.replace("{data}", data)
+    } else {
+        url
+    };
+    ensure_fetchable_scheme(&url)?;
+    let response = if use_get {
+        HTTP_CLIENT.get(&url).send().await
     } else {
         HTTP_CLIENT
             .post(&url)
@@ -191,14 +245,43 @@ async fn fetch_one(template: &str, sender: &str, data: &str) -> Result<Vec<u8>> 
     }
     .with_context(|| format!("failed to send CCIP gateway request to {url}"))?;
     let status = response.status();
-    let body = response
-        .bytes()
+    let body = read_capped_body(response)
         .await
         .with_context(|| format!("failed to read CCIP gateway response from {url}"))?;
     if !status.is_success() {
         return Err(GatewayStatusError { status }.into());
     }
     decode_body(&body).with_context(|| format!("failed to decode CCIP gateway response from {url}"))
+}
+
+/// The URL list is a field of the `OffchainLookup` error the reverting contract
+/// raises (upstream: .refs/ens_v1/contracts/ccipRead/EIP3668.sol:L6-L12 @ ens_v1@91c966f),
+/// filled from that contract's own state — the Basenames L1 resolver copies its
+/// `url` storage into it (upstream: .refs/basenames/src/L1/L1Resolver.sol:L171-L173 @ basenames@1809bbc)
+/// — so `lookup.urls` is contract-chosen input decoded from revert data.
+/// Restrict it to the two schemes a gateway is defined over before the client
+/// is handed the string.
+fn ensure_fetchable_scheme(url: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(url)
+        .with_context(|| format!("CCIP gateway URL is not a valid absolute URL: {url}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        bail!(
+            "CCIP gateway URL scheme `{}` is not supported: {url}",
+            parsed.scheme()
+        );
+    }
+    Ok(())
+}
+
+async fn read_capped_body(mut response: reqwest::Response) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len() + chunk.len() > MAX_GATEWAY_RESPONSE_BYTES {
+            bail!("CCIP gateway response exceeded {MAX_GATEWAY_RESPONSE_BYTES} bytes");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn decode_body(body: &[u8]) -> Result<Vec<u8>> {
@@ -275,6 +358,27 @@ impl std::error::Error for GatewayStatusError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_http_schemes_reach_the_gateway_client() {
+        for url in ["http://gateway.invalid/q", "https://gateway.invalid/q"] {
+            assert!(ensure_fetchable_scheme(url).is_ok(), "rejected {url}");
+        }
+        // `lookup.urls` is decoded from the reverting contract's `OffchainLookup`
+        // data (upstream: .refs/ens_v1/contracts/ccipRead/EIP3668.sol:L6-L12 @ ens_v1@91c966f),
+        // so a non-HTTP scheme and a relative reference must both fail before
+        // the client sees them.
+        for url in [
+            "file:///etc/passwd",
+            "ftp://gateway.invalid/q",
+            "gopher://gateway.invalid/",
+            "data:text/plain,payload",
+            "/etc/passwd",
+            "",
+        ] {
+            assert!(ensure_fetchable_scheme(url).is_err(), "accepted {url}");
+        }
+    }
 
     #[test]
     fn portable_gateway_response_shapes_match_legacy_execution() -> Result<()> {

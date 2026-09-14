@@ -428,10 +428,123 @@ never duplicates, suppresses, or reclassifies the independently admitted event.
 The event identity is a plain value rather than a foreign key. A redo deletes
 normalized events in its range before replay, but retains association rows whose
 lineage is already orphaned as fork evidence; such a row may therefore have no
-normalized-event parent. Replay re-creates the canonical-path event under the
-same identity. Project and product history readers ignore event-association rows;
+normalized-event parent. Replay of the same block re-creates that event under
+the same identity; a block replaced by a competing fork does not, because every
+event identity carries the block hash, so a row retained from the replaced fork
+stays parentless. Project and product history readers ignore event-association rows;
 diagnostic readers treat the normalized-event join as optional and can read a
 retained association from its own position and `chain_lineage` anchor.
+
+**The correlation tables' own `canonicality_state` is not maintained by
+canonicality changes.** All four
+ENSv1→ENSv2 correlation tables — `migration_event_associations`,
+`migration_discovery_associations`, `migration_candidate_identity_effects`, and
+`migration_candidate_discovery_effects` — copy `canonicality_state` from the
+parent event when Interpret writes them, and no canonicality change touches it
+afterwards: head publication orphans and re-promotes `chain_lineage` only,
+Interpret redo orphaning covers identity, discovery, and binding rows but never
+names these tables, and `clear_redo_range` deletes only rows whose anchor is
+still readable so that losing-fork rows survive as evidence. The only later
+write to a retained row is Interpret's own idempotent upsert
+(`crates/interpret/src/write/migration.rs`): when Interpret derives the same
+key again, in a repeated batch or a redo replay, with every stored column but
+the stamps unchanged (position, kind, and evidence set, plus the registry,
+manifest, and proposed effect on the discovery and candidate-effect tables),
+`ON CONFLICT ... DO UPDATE` re-stamps `canonicality_state` from the re-derived
+parent event, `consumer_visibility`, and the writing session's content hash.
+Only three of the four tables can see that visibility change: completed-group
+activation raises it on normalized events and the two association tables
+(`crates/adapters/src/schema_v2/migration/activation.rs`), while both
+candidate-effect tables stay `candidate` and a schema `CHECK` rejects any other
+value, so their re-stamp never moves that column. A same-key row that differs in
+any of those columns is refused: the Interpret write fails with a
+data-integrity error and the batch rolls back. The re-stamp is a re-derivation
+on the same block, never lineage maintenance. A retained losing-fork row
+therefore reads `canonical` on an `orphaned` anchor: the column records what
+was true when the row was last derived, not a current fact. Every event
+identity these rows carry is fork-distinct: ordinary event identities embed
+the block hash
+(`crates/adapters/src/schema_v2/normalized.rs`), and a `MigrationApplied`
+identity, `ens_v2_migration:{manifest}:{chain}:{correlation id}:MigrationApplied`,
+is fork-distinct through its correlation id — a keccak over the serialized
+evidence set, every entry of which carries the block hash, transaction hash,
+and log index of the log it came from (`crates/adapters/src/schema_v2/migration/support.rs`,
+`observation_evidence`, `event_evidence`, `correlation_id`). A losing-fork
+association and the canonical event replayed after a reorg therefore never
+share an `event_identity`. Each row also copies its position and stamp from the
+very event whose identity it carries (`associate_event`), and the writer refuses
+to move a row to a different position or evidence set, so a row's own anchor is
+always the block of its named event. Two consequences follow. A lineage-checked
+join to `normalized_events` on `event_identity` does establish the row's
+readability whenever it finds a row, because a same-identity event can only
+exist on the same block. What the join cannot do is find retained rows at all:
+a redo deletes every normalized event in its range but keeps association rows
+whose block is no longer readable, so a losing-fork row has no normalized-event
+parent and still reads `canonical`. Any reader that reaches these rows without
+that join, or treats one as current, must anchor the row's own
+`(chain_id, block_number, block_hash)` on `chain_lineage` with a readable-state
+predicate. The readers that treat these rows as current — the children builder,
+the name-authority child proof, the Interpret admission loader, and Project
+scoping — all anchor on `chain_lineage` today; two scope-widening reads —
+`include_topology_dependents` in `crates/project/src/scope/authority.rs` and
+`capture_child_registration_history` in `crates/interpret/src/write/redo.rs` —
+do not, which can only enlarge a rebuild's scope, never publish a row.
+
+In today's two publishing readers the association-lineage predicate cannot be
+the reason a row is withheld, so no test isolates it. Both the children builder
+(`crates/project/src/builders/children.rs`) and the name-authority child proof
+(`crates/project/src/builders/name_authority.rs`) reach a correlation row only
+through rows that sit at or after its block, and that ordering is bigname's own
+invariant rather than a claim about ENSv2. A migration boundary's `evidence`
+array is built from the raw-log observations the interpreter had already decoded
+when it derived the boundary
+(`crates/adapters/src/schema_v2/migration/support.rs`, `observation_evidence`),
+and the children builder matches a correlation row only when that array contains
+the row's `evidence_refs` (`crates/project/src/builders/children.rs`). A matched
+row therefore sits at or before the boundary that reads it, and the child
+registration follows the boundary. A reorg that orphans the association's block
+orphans every later block with it, so those rows fail their own lineage checks
+in the same pass, and no reorg can orphan the row while leaving the rows that
+read it readable. Both readers also require the `registry_announcement` edge,
+joined on the association's own
+`(block_number, block_hash)`, and an edge pinned to that block is orphaned by
+the same Interpret redo. Deleting the lineage anchor from the children builder
+therefore leaves the reorg test below green, both after the redo cascade and in
+the window head publication opens before Interpret runs. Nor can a
+runner-driven run see the checks disagree: head publication orphans the lineage
+and stamps the required Interpret redo in one transaction, and Project cannot
+start until Interpret has completed. What
+`reorg_retains_a_migration_association_that_still_reads_canonical_and_publishes_nothing_from_it`
+in `apps/phase-runner/tests/production_project.rs` pins is that runner-level
+outcome, not the predicate: after a real head publication and redo cascade the
+retained row still reads `canonical` on an orphaned anchor, the edge is
+orphaned, and no child is published from it. The anchor rule above still governs
+any reader that reaches these rows without an edge join, which is where it is
+the only guard.
+
+The one place the identity-only attach is used is raw diagnostics, and it
+never surfaces an orphaned row. `GET /v2/diagnostics/events` reads with the
+canonical-only predicate (`apps/api/src/v2/diag_events.rs`,
+`crates/storage/src/history/source.rs`): a normalized event is returned only
+while its own `canonicality_state` and the `chain_lineage` row for its block
+hash are both readable, so an event on a block that head publication has
+orphaned leaves the route at once, before Interpret's redo deletes it. The
+attach then adds every `migration_event_associations` row sharing the returned
+event's `event_identity` with no lineage predicate of its own
+(`crates/storage/src/history/paging.rs`). Because the identity is
+fork-distinct, those rows sit on the returned event's readable block, and a
+retained losing-fork row, whose event no longer exists, attaches to nothing.
+What the response does not assert is current correlation: the only
+per-association field it carries is `consumer_visibility`, which, like the
+row's stored `canonicality_state`, is what Interpret recorded when it last
+derived the row, and the route contract in `api-v2-routes.md` says so. The route behavior is pinned by
+`diagnostics_hide_an_event_on_an_orphaned_lineage_with_its_still_canonical_association`
+in `apps/api/src/tests/v2_history.rs`.
+The position indexes on these
+tables (`migration_event_associations_position_idx` and the two
+`*_candidate_*_effects_position_idx` in `schema-v2/baseline/05_normalized_events.sql`)
+exist for `clear_redo_range` and range-scoped selection, both of which resolve
+readability through `chain_lineage`; they are not an alternative to that anchor.
 
 Slice 1 applies the same precedence to identity and discovery, with one explicit
 intake carveout. A migration-created registry's independently admitted
@@ -623,6 +736,33 @@ row's recorded hash. A rejected candidate leaves no trace beyond the import's
 logged counters. Collapsing the split would put unverified claims into the
 verified store, so it stays.
 
+**Load the dump into `bigname_phase`, not `public`.** The upstream generator
+emits SQL that clears `search_path` and then creates and fills
+`public.ens_names`
+(upstream: .refs/ens_rainbow/src/main.rs:L26 @ ens_rainbow@bc44492)
+(upstream: .refs/ens_rainbow/src/main.rs:L36 @ ens_rainbow@bc44492)
+(upstream: .refs/ens_rainbow/src/main.rs:L46 @ ens_rainbow@bc44492).
+bigname declares its own `ens_names` inside the phase schema
+(`schema-v2/baseline/07_labels.sql`), and the runner connects with
+`search_path = bigname_phase` and no `public` fallback, so the import reads
+`bigname_phase.ens_names` only. Applying the upstream dump unmodified therefore
+fills a table the importer never reads, and the run reports zero scanned rows
+rather than failing — the phase table exists, it is just empty. Load the dump's
+rows into `bigname_phase.ens_names` without letting the rest of the dump run
+against that table: `\copy` the data section, or extract the dump's `COPY`
+statement and retarget only that. Do not rewrite the dump's schema
+qualification globally, because the same rewrite also redirects the dump's
+`DROP TABLE`
+(upstream: .refs/ens_rainbow/src/main.rs:L33 @ ens_rainbow@bc44492)
+and `CREATE TABLE`
+(upstream: .refs/ens_rainbow/src/main.rs:L36 @ ens_rainbow@bc44492)
+at the phase table. That drops it along with any rows already imported and
+rebuilds it from upstream's two-column `character varying` definition, losing
+the baseline's `text` types, both `CHECK` constraints, its comments, and the
+`bigname_verify` SELECT grant, which is not restored by default privileges.
+Then run the import and check the logged scanned-row counter against the dump's
+row count.
+
 `phase-runner label-preimages import-ens-rainbow` walks `ens_names` in
 hash-keyset batches, proof-checks every row, and inserts the survivors with
 `source_kind = 'ens_rainbow_import'` at priority 10 — below the interpreter's
@@ -666,6 +806,30 @@ Every fact-derived row that can be invalidated by a reorg carries chain,
 number, hash, and canonicality evidence. `chain_lineage` is the authority for
 parentage and readable block identity. Serving paths never join the deleted
 `public.chain_lineage` table.
+
+**At most one readable block per height, enforced by the schema.** A partial
+unique index makes a second readable row at the same height impossible to
+insert:
+
+```sql
+CREATE UNIQUE INDEX chain_lineage_readable_height_idx
+    ON chain_lineage (chain_id, block_number)
+    WHERE canonicality_state IN ('canonical', 'safe', 'finalized');
+```
+
+`chain_lineage` holds every competing branch it has observed, but only one row
+per `(chain_id, block_number)` may be readable at a time, so "the block at
+height N" is a total function on the readable set rather than a choice among
+candidates. Head publication must therefore orphan a displaced branch in the
+same transaction that promotes its replacement — that ordering is not a
+convention, it is what keeps the index satisfiable.
+
+Two consequences for readers. A height lookup on readable rows needs no
+tie-break, ordering, or `LIMIT 1` to be deterministic; adding one hides a
+constraint violation rather than resolving an ambiguity. And a presence check
+that treats an ambiguous readable height as a fatal error — see the interpret
+range checks below — is asserting an invariant the database already guarantees,
+not handling a reachable state.
 
 Head publication walks by block hash, marks the orphaned suffix explicitly,
 publishes the replacement readable head, and records downstream redo in one
@@ -1029,7 +1193,12 @@ preserves one logical before/after stream and the clear needed to invalidate
 older token-version pointers. Restore rebuilds the adapter's protocol state
 while admitting at most
 the configured number of `after_state` values to the cache; it does not first
-materialize every retained JSON value in one process allocation. If the chain
+materialize every retained JSON value in one process allocation. The restore query
+ranks and orders event identifiers before retrieving their payloads in the same
+read snapshot. Plan validation must keep full payloads out of history-wide sorts
+and materialization. This reduces the data carried by those operations; it does
+not bound temporary storage, individual row size, or the protocol state retained
+by the adapter. If the chain
 [lineage orphaning epoch](glossary.md#lineage-orphaning-epoch) changes, the
 process discards the whole interpreter session and rebuilds it from readable
 rows. It retains only the block anchors added since the last validation while
@@ -1289,6 +1458,32 @@ Projection rows carry:
 - the [Project-owned maintenance fields](glossary.md#projection) defined for
   that family. `primary_names_current` carries rolling hydration-selection
   fields rather than a last-recomputation time.
+
+`primary_names_current` is the exception and does not follow this shape. It has
+no `manifest_version`, no `canonicality_summary`, no `support_status`, and no
+last-recomputation column; `reverse_hydration_attempted_block_*` records a
+hydration attempt, not a publication target. Its publication target lives inside
+the untyped `claim_provenance` object, and the serving predicate joins lineage on
+`claim_provenance ->> 'chain_id'` and `claim_provenance ->> 'target_block_hash'`
+while the only constraint on that column is
+`CHECK (jsonb_typeof(claim_provenance) = 'object')`. Nothing requires either key
+to be present.
+
+Two consequences worth knowing before writing against this table. A builder that
+omits one of those keys produces a row that silently drops out of reads rather
+than failing — the lineage join yields no match, and the row is simply not
+served. And a reader cannot filter or group these rows by manifest version,
+support, or canonicality the way it can for the projection families that carry
+those columns; compare `name_current`, which carries all five as typed columns.
+That set is not every family: `support_status` and `unsupported_reason` exist on
+`name_current`, `address_names_current`, `record_inventory_current`,
+`resolver_current`, and `permissions_current_resource_summary`;
+`primary_names_current` carries `claim_status` instead; and `children_current`,
+`permissions_current`, and `account_permission_state_current` carry no status
+column at all, so a filter written against one family is not portable to
+another. Constraining
+the two required keys is the obvious hardening, but it is a schema change to a
+populated table and needs its own change.
 
 An unchanged row may retain an earlier publication target when a later Project
 run does not affect its scope. Serving admission therefore accepts targets at
