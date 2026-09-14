@@ -58,7 +58,9 @@ suite cannot satisfy CI.
 4. Provider-fault and intake-path parity scenarios execute the real JSON-RPC
    ingest redo path.
    Truncated JSON, transient errors, delayed responses, omitted logs, and
-   partial receipts pass through the production provider implementation.
+   partial receipts pass through the production provider implementation. A
+   temporarily missing selected receipt must be refetched by the same redo;
+   the test observes the retry and checks the retained receipt before a clean redo.
    The silent-log case explicitly pins pre-existing defect #154: a valid but
    incomplete response is accepted and published, and only the scenario's
    explicit clean redo repairs it. Its green result is evidence of that known
@@ -141,8 +143,9 @@ four ENSv1 [source families](../../docs/glossary.md#source-family) except
 reverse, the four ordinary ENSv2 source families, and `ens_v2_migration_l1`. It
 mirrors every shipped `v*.toml` into a scenario
 `TempDir`, then separately substitutes ENSv1, ENSv2, and ENSv1→ENSv2 migration
-targets and the ENSv1→ENSv2 migration family's local `NameWrapper` and
-`BaseRegistrar` correlation addresses. The ordinary Sepolia generator remains
+targets, the ENSv1→ENSv2 migration family's local `NameWrapper` and
+`BaseRegistrar` correlation addresses, and the ENSv2 resolver family's local
+ENSv1 registry correlation address. The ordinary Sepolia generator remains
 ENSv2-only and substitutes only roots and contracts. Checked-in `manifests/` is
 unchanged.
 Of the ENSv1→ENSv2 migration family's eight roles, `ens_v1_renewal_bridge`,
@@ -378,11 +381,11 @@ explicitly with issue #314.
   `resolver_records::resolver_changes_follow_registry_and_zero_releases`;
   `resolver_records::shared_resolver_keeps_per_name_records_and_projection_marks_fan_in_unsupported`;
   `reverse_primary::reverse_claim_invalid_name_surfaces_raw_claim`;
-  `reverse_primary::generic_name_record_set_changed_then_cleared_stays_unadmitted`;
-  `reverse_primary_claims::authorised_third_party_generic_name_record_does_not_key_claim`;
+  `reverse_primary::reverse_node_name_set_changed_then_cleared_updates_declared_claim`;
+  `reverse_primary_claims::authorised_third_party_name_record_keys_claimed_address`;
   `reverse_primary_claims::claim_without_name_record_keeps_candidate_absent`;
-  `reverse_primary_claims::forward_mismatch_keeps_generic_name_record_unadmitted`;
-  `reverse_primary_claims::unadmitted_reverse_resolver_keeps_candidate_absent`.
+  `reverse_primary_claims::forward_mismatch_preserves_the_declared_reverse_claim`;
+  `reverse_primary_claims::undeclared_reverse_resolver_record_populates_declared_claim`.
 - Authority and wrapping:
   `unadmitted_controller::unadmitted_controller_registration_derives_registry_side_only`;
   `wrapper::wrapper_wrap_fuses_subnames_and_unwrap_restore_identity`;

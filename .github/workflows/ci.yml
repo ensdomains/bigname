@@ -272,7 +272,9 @@ jobs:
           POSTGRES_DB: bigname
           POSTGRES_USER: bigname
           POSTGRES_PASSWORD: bigname
-          POSTGRES_INITDB_ARGS: "--set=max_connections=300"
+          # These small correctness fixtures trigger expensive JIT compilation;
+          # production and the separate benchmark gates retain their own settings.
+          POSTGRES_INITDB_ARGS: "--set=max_connections=300 --set=jit=off"
         ports:
           - 5432:5432
         options: >-
@@ -388,7 +390,9 @@ jobs:
           POSTGRES_DB: bigname
           POSTGRES_USER: bigname
           POSTGRES_PASSWORD: bigname
-          POSTGRES_INITDB_ARGS: "--set=max_connections=300"
+          # These small correctness fixtures trigger expensive JIT compilation;
+          # production and the separate benchmark gates retain their own settings.
+          POSTGRES_INITDB_ARGS: "--set=max_connections=300 --set=jit=off"
         ports:
           - 5432:5432
         options: >-
@@ -490,7 +494,9 @@ jobs:
           POSTGRES_DB: bigname
           POSTGRES_USER: bigname
           POSTGRES_PASSWORD: bigname
-          POSTGRES_INITDB_ARGS: "--set=max_connections=300"
+          # These small correctness fixtures trigger expensive JIT compilation;
+          # production and the separate benchmark gates retain their own settings.
+          POSTGRES_INITDB_ARGS: "--set=max_connections=300 --set=jit=off"
         ports:
           - 5432:5432
         options: >-

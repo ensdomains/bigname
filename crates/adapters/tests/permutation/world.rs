@@ -34,6 +34,7 @@ pub struct RoleSlot {
 
 pub struct World {
     pub label: &'static str,
+    pub manifest_root: &'static str,
     pub namespace: &'static str,
     pub chain_id: &'static str,
     pub deployment_epoch: &'static str,
@@ -44,6 +45,7 @@ pub struct World {
 
 pub const ENS_V1_MAINNET: World = World {
     label: "ens_v1_mainnet",
+    manifest_root: "mainnet",
     namespace: "ens",
     chain_id: "ethereum-mainnet",
     deployment_epoch: "ens_v1",
@@ -108,6 +110,7 @@ pub const ENS_V1_MAINNET: World = World {
 
 pub const ENS_V1_SEPOLIA: World = World {
     label: "ens_v1_sepolia",
+    manifest_root: "sepolia",
     namespace: "ens",
     chain_id: "ethereum-sepolia",
     deployment_epoch: "ens_v1",
@@ -152,6 +155,7 @@ pub const ENS_V1_SEPOLIA: World = World {
 
 pub const ENS_V2_SEPOLIA: World = World {
     label: "ens_v2_sepolia",
+    manifest_root: "sepolia",
     namespace: "ens",
     chain_id: "ethereum-sepolia",
     deployment_epoch: "ens_v2_sepolia_post_audit",
@@ -192,6 +196,106 @@ pub const ENS_V2_SEPOLIA: World = World {
             role: "resolver",
         },
     ],
+};
+
+pub const ENS_V1_SEPOLIA_HACKATHON: World = World {
+    label: "ens_v1_sepolia_hackathon",
+    manifest_root: "sepolia-hackathon",
+    deployment_epoch: "ens_v1_sepolia_hackathon",
+    address_base: 0x0004_0000,
+    sources: &[
+        SourceSlot {
+            family: "ens_v1_registry_l1",
+            version_file: "v1.toml",
+        },
+        SourceSlot {
+            family: "ens_v1_registrar_l1",
+            version_file: "v1.toml",
+        },
+        SourceSlot {
+            family: "ens_v1_wrapper_l1",
+            version_file: "v1.toml",
+        },
+        SourceSlot {
+            family: "ens_v1_resolver_l1",
+            version_file: "v1.toml",
+        },
+        SourceSlot {
+            family: "ens_v1_reverse_l1",
+            version_file: "v1.toml",
+        },
+    ],
+    roles: &[
+        RoleSlot {
+            family: "ens_v1_registry_l1",
+            role: "registry",
+        },
+        RoleSlot {
+            family: "ens_v1_registrar_l1",
+            role: "registrar",
+        },
+        RoleSlot {
+            family: "ens_v1_wrapper_l1",
+            role: "name_wrapper",
+        },
+        RoleSlot {
+            family: "ens_v1_resolver_l1",
+            role: "public_resolver",
+        },
+        RoleSlot {
+            family: "ens_v1_reverse_l1",
+            role: "reverse_registrar",
+        },
+    ],
+    ..ENS_V1_SEPOLIA
+};
+
+pub const ENS_V2_SEPOLIA_HACKATHON: World = World {
+    label: "ens_v2_sepolia_hackathon",
+    manifest_root: "sepolia-hackathon",
+    deployment_epoch: "ens_v2_sepolia_hackathon",
+    address_base: 0x0005_0000,
+    sources: &[
+        SourceSlot {
+            family: "ens_v2_root_l1",
+            version_file: "v1.toml",
+        },
+        SourceSlot {
+            family: "ens_v2_registry_l1",
+            version_file: "v1.toml",
+        },
+        SourceSlot {
+            family: "ens_v2_registrar_l1",
+            version_file: "v1.toml",
+        },
+        SourceSlot {
+            family: "ens_v2_resolver_l1",
+            version_file: "v1.toml",
+        },
+    ],
+    roles: &[
+        RoleSlot {
+            family: "ens_v2_root_l1",
+            role: "root_registry",
+        },
+        RoleSlot {
+            family: "ens_v2_registry_l1",
+            role: "registry",
+        },
+        RoleSlot {
+            family: "ens_v2_registrar_l1",
+            role: "registrar",
+        },
+        RoleSlot {
+            family: "ens_v2_resolver_l1",
+            role: "resolver",
+        },
+        RoleSlot {
+            family: "ens_v2_resolver_l1",
+            role: "public_resolver_v2",
+        },
+    ],
+    ..ENS_V2_SEPOLIA
 };
 
 /// Active families whose event space is exercised by a dedicated corpus instead of the generic
@@ -285,6 +389,10 @@ impl Wiring {
         self.addresses
             .get(&(family, role))
             .unwrap_or_else(|| panic!("world has no admitted {family}/{role} address"))
+    }
+
+    pub fn optional_address(&self, family: &'static str, role: &'static str) -> Option<&str> {
+        self.addresses.get(&(family, role)).map(String::as_str)
     }
 
     /// Contract identities the manifest already declares; discovery edges may point out of them
@@ -393,7 +501,8 @@ fn admitted<'a>(
     checked_in: &'a [LoadedManifest],
 ) -> impl Iterator<Item = &'a LoadedManifest> {
     checked_in.iter().filter(move |loaded| {
-        loaded.manifest.namespace == world.namespace
+        loaded.relative_path.starts_with(world.manifest_root)
+            && loaded.manifest.namespace == world.namespace
             && loaded.manifest.source_family == slot.family
             && loaded.manifest.chain == world.chain_id
             && loaded.manifest.deployment_epoch == world.deployment_epoch
@@ -410,16 +519,16 @@ fn admitted<'a>(
 /// highest version number, because a family may also carry a `draft` or `shadow` version that
 /// production does not run. `docs/manifests.md` allows at most one active version per namespace,
 /// family, and chain *within one deployment-profile root*, and allows a family to have none; this
-/// lane loads every root and is stricter — a family it pins with no active version, or with more
-/// than one, leaves the pin unjustifiable, so both fail here. Two roots carrying an active version
-/// of the same family on the same chain is legal by that doc and would fail this check; the lane
-/// would need to learn which root each world belongs to before it could allow that. The pinned
+/// lane checks each world's root separately, so independent deployments on the same chain do
+/// not invalidate each other's pins. A family with no active version, or with more than one in
+/// that root, still leaves the pin unjustifiable and fails. The pinned
 /// direction looks across epochs so that a rollout which retires this world's epoch reports where
 /// it went.
 pub fn assert_pins_are_current(world: &World, checked_in: &[LoadedManifest]) -> Result<()> {
     let mut active: BTreeMap<&str, Vec<&LoadedManifest>> = BTreeMap::new();
     for loaded in checked_in {
-        if loaded.manifest.namespace == world.namespace
+        if loaded.relative_path.starts_with(world.manifest_root)
+            && loaded.manifest.namespace == world.namespace
             && loaded.manifest.chain == world.chain_id
             && loaded.manifest.rollout_status == RolloutStatus::Active
         {
@@ -437,10 +546,8 @@ pub fn assert_pins_are_current(world: &World, checked_in: &[LoadedManifest]) -> 
                 slot.family, slot.version_file
             )),
             Some([_, _, ..]) => drift.push(format!(
-                "{} has more than one active version, so a pin cannot be checked against it — if \
-                 they are in different deployment-profile roots that is legal, and this check is \
-                 what needs to change",
-                slot.family
+                "{} has more than one active version in {}",
+                slot.family, world.manifest_root
             )),
             Some([current]) => {
                 let file = version_file(current).unwrap_or_default();
@@ -490,7 +597,7 @@ pub fn assert_pins_are_current(world: &World, checked_in: &[LoadedManifest]) -> 
 /// filtering silently keeps the check below able to report a namespace that appears later.
 const UNMODELLED_NAMESPACES: &[&str] = &["basenames"];
 
-/// Single deployments the lane defers, keyed `namespace/chain/deployment_epoch`. Deferring one
+/// Single deployments the lane defers, keyed `root/namespace/chain/deployment_epoch`. Deferring one
 /// deployment needs this list rather than `UNMODELLED_NAMESPACES`: every ENS deployment shares the
 /// `ens` namespace, so naming a namespace to excuse one of them would stop checking the others too.
 ///
@@ -507,8 +614,8 @@ pub fn assert_worlds_cover_deployments(
         .iter()
         .map(|world| {
             format!(
-                "{}/{}/{}",
-                world.namespace, world.chain_id, world.deployment_epoch
+                "{}/{}/{}/{}",
+                world.manifest_root, world.namespace, world.chain_id, world.deployment_epoch
             )
         })
         .collect::<BTreeSet<_>>();
@@ -523,8 +630,16 @@ pub fn assert_worlds_cover_deployments(
             continue;
         }
         let deployment = format!(
-            "{}/{}/{}",
-            source.namespace, source.chain, source.deployment_epoch
+            "{}/{}/{}/{}",
+            loaded
+                .relative_path
+                .iter()
+                .next()
+                .context("manifest has no profile root")?
+                .to_string_lossy(),
+            source.namespace,
+            source.chain,
+            source.deployment_epoch
         );
         if modelled.contains(&deployment) {
             continue;
@@ -634,7 +749,14 @@ pub fn checked_in_manifests() -> Result<Vec<LoadedManifest>> {
     }
     let mut manifests = Vec::new();
     for profile in profiles {
-        manifests.extend(load_repository(profile)?.manifests().iter().cloned());
+        let profile_name = profile
+            .file_name()
+            .context("manifest profile has no name")?;
+        for loaded in load_repository(&profile)?.manifests() {
+            let mut loaded = loaded.clone();
+            loaded.relative_path = Path::new(profile_name).join(&loaded.relative_path);
+            manifests.push(loaded);
+        }
     }
     Ok(manifests)
 }

@@ -264,14 +264,24 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
         wrapper_subject_grants >= 1,
         "the NameWrapper contract should hold the registrar-anchor resource_control grant"
     );
-    let locked_wrapper_permissions: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM permissions_current WHERE resource_id = $1")
+    let locked_wrapper_permissions: Vec<(String, Vec<String>)> =
+        sqlx::query_as("SELECT subject, ARRAY(SELECT jsonb_array_elements_text(effective_powers) ORDER BY 1) FROM permissions_current WHERE resource_id = $1 AND scope = 'resource' ORDER BY subject")
             .bind(locked_wrapper_resource)
-            .fetch_one(&wrapped.db.pool)
+            .fetch_all(&wrapped.db.pool)
             .await?;
     assert_eq!(
-        locked_wrapper_permissions, 0,
-        "wrapper resources without subject-grant events must not invent holder grants"
+        locked_wrapper_permissions,
+        vec![(
+            format!("{bob:#x}"),
+            vec![
+                "approve".into(),
+                "burn_fuses".into(),
+                "create_subnames".into(),
+                "extend_subname_expiry".into(),
+                "set_ttl".into(),
+            ]
+        )],
+        "the holder grant must retain only powers allowed by the locked name's fuses"
     );
     let locked_holder_rows: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM address_names_current \
@@ -325,14 +335,28 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
         kid_resource, locked_wrapper_resource,
         "wrapped child should have its own resource_id"
     );
-    let kid_permissions: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM permissions_current WHERE resource_id = $1")
+    let kid_permissions: Vec<(String, Vec<String>)> =
+        sqlx::query_as("SELECT subject, ARRAY(SELECT jsonb_array_elements_text(effective_powers) ORDER BY 1) FROM permissions_current WHERE resource_id = $1 AND scope = 'resource' ORDER BY subject")
             .bind(kid_resource)
-            .fetch_one(&wrapped.db.pool)
+            .fetch_all(&wrapped.db.pool)
             .await?;
     assert_eq!(
-        kid_permissions, 0,
-        "PARENT_CANNOT_CONTROL wrapper children must not publish parent or holder grants"
+        kid_permissions,
+        vec![(
+            format!("{carol:#x}"),
+            vec![
+                "approve".into(),
+                "burn_fuses".into(),
+                "create_subnames".into(),
+                "extend_subname_expiry".into(),
+                "resource_control".into(),
+                "set_resolver".into(),
+                "set_ttl".into(),
+                "transfer".into(),
+                "unwrap".into(),
+            ]
+        )],
+        "the emancipated child's permissions must belong to its holder, not its parent"
     );
 
     let record_body = exact_name(&wrapped.api, "ens", "record.locked.eth").await?;

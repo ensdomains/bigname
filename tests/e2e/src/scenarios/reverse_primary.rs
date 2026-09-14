@@ -9,7 +9,29 @@ fn assert_declared_not_found(body: &Value) {
     assert_eq!(
         pointer(body, "/declared_state/claimed_primary_name/status"),
         "not_found",
-        "a generic resolver NameChanged record is not an admitted primary-name claim; body: {body}"
+        "a cleared reverse-node name must remove the declared claim; body: {body}"
+    );
+    assert!(
+        body.pointer("/declared_state/claimed_primary_name/name")
+            .is_none()
+    );
+}
+
+fn assert_declared_name(body: &Value, expected_name: &str) {
+    assert_eq!(
+        pointer(body, "/declared_state/claimed_primary_name/status"),
+        "success"
+    );
+    assert_eq!(
+        pointer(body, "/declared_state/claimed_primary_name/name"),
+        expected_name
+    );
+    assert_eq!(
+        pointer(
+            body,
+            "/declared_state/claimed_primary_name/claim_name_is_normalized"
+        ),
+        true
     );
 }
 
@@ -25,15 +47,15 @@ async fn assert_generic_name_record(run: &support::PipelineRun, raw_name: &str) 
     assert_eq!(state["raw_name"], raw_name);
     assert!(
         state.get("primary_claim_source").is_none(),
-        "generic resolver record must remain separate from primary-name admission: {state}"
+        "the resolver record stays node-keyed; Project joins it to the reverse tuple: {state}"
     );
     Ok(())
 }
 
-/// Generic resolver name records remain separate from admitted primary-name
-/// claims across set, change, and clear operations.
+/// Project follows the current reverse-node resolver across name set, change,
+/// and clear operations, without rewriting node records into tuple-keyed events.
 #[tokio::test]
-async fn generic_name_record_set_changed_then_cleared_stays_unadmitted() -> Result<()> {
+async fn reverse_node_name_set_changed_then_cleared_updates_declared_claim() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
 
@@ -58,7 +80,7 @@ async fn generic_name_record_set_changed_then_cleared_stays_unadmitted() -> Resu
     .await?;
     assert_generic_name_record(&first, "alice.eth").await?;
     let declared = primary_name(&first.api, "ens", 60, &alice_path, "declared").await?;
-    assert_declared_not_found(&declared);
+    assert_declared_name(&declared, "alice.eth");
     first.db.cleanup().await?;
 
     ens_v1::set_reverse_name(&rpc, &deployment, alice, "bob.eth").await?;
@@ -78,7 +100,7 @@ async fn generic_name_record_set_changed_then_cleared_stays_unadmitted() -> Resu
     .await?;
     assert_generic_name_record(&changed, "bob.eth").await?;
     let changed_body = primary_name(&changed.api, "ens", 60, &alice_path, "declared").await?;
-    assert_declared_not_found(&changed_body);
+    assert_declared_name(&changed_body, "bob.eth");
     changed.db.cleanup().await?;
 
     ens_v1::set_reverse_name(&rpc, &deployment, alice, "").await?;
@@ -134,7 +156,25 @@ async fn reverse_claim_invalid_name_surfaces_raw_claim() -> Result<()> {
 
     assert_generic_name_record(&run, invalid_claim).await?;
     let body = primary_name(&run.api, "ens", 60, &alice_path, "declared").await?;
-    assert_declared_not_found(&body);
+    assert_eq!(
+        pointer(&body, "/declared_state/claimed_primary_name/status"),
+        "invalid_name"
+    );
+    assert_eq!(
+        pointer(&body, "/declared_state/claimed_primary_name/raw_claim_name"),
+        invalid_claim
+    );
+    assert_eq!(
+        pointer(
+            &body,
+            "/declared_state/claimed_primary_name/claim_name_is_normalized"
+        ),
+        false
+    );
+    assert!(
+        body.pointer("/declared_state/claimed_primary_name/name")
+            .is_none()
+    );
 
     run.db.cleanup().await?;
     Ok(())

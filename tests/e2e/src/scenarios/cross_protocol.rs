@@ -33,6 +33,11 @@ fn strip_corpus_minted(value: &mut Value) {
             for key in VOLATILE {
                 map.remove(*key);
             }
+            if let Some(value) = map.get_mut("registrant_event_id")
+                && value.is_number()
+            {
+                *value = Value::String("<normalized_event_id>".to_owned());
+            }
             // authority_key's third segment is the corpus-minted contract
             // instance ordinal; everything else in it is chain-derived.
             if let Some(Value::String(key)) = map.get_mut("authority_key") {
@@ -518,7 +523,7 @@ async fn composed_mainnet_profile_serves_both_protocols_without_leakage() -> Res
     // Row 4: primary claims remain namespace-scoped. The generic ENSv1
     // resolver emits `NameChanged`
     // (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L18 @ ens_v1@91c966f);
-    // schema-v2 preserves it but does not admit it as a primary-name claim.
+    // Project joins it through the current reverse-node resolver to the retained tuple.
     // The Basenames reverse registrar remains admitted for its deployment's
     // coin type 2147492101
     // (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L8 @ ens_v1@91c966f)
@@ -531,7 +536,11 @@ async fn composed_mainnet_profile_serves_both_protocols_without_leakage() -> Res
     assert_eq!(status, 200, "ens primary failed: {ens_primary}");
     assert_eq!(
         pointer(&ens_primary, "/declared_state/claimed_primary_name/status"),
-        "not_found"
+        "success"
+    );
+    assert_eq!(
+        pointer(&ens_primary, "/declared_state/claimed_primary_name/name"),
+        "alice.eth"
     );
     let (status, base_primary) = body(
         &composed,

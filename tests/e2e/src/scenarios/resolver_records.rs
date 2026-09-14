@@ -1387,6 +1387,8 @@ fn assert_zero_name_shape(record: &Value, namespace: &str, name: &str, verified:
     ];
     if namespace == "ens" {
         keys.push("token_id");
+        keys.push("authority");
+        assert_eq!(record["authority"], "ens_v1");
     }
     if verified {
         keys.push("unsupported_fields");

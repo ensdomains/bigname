@@ -173,8 +173,10 @@ fn normalize_primary_route_contract_instance_ids(
                         anyhow!("primary-name route references unknown contract instance {id}")
                     })?;
                     *value = Value::String(format!("<contract:{stable_key}>"));
-                } else if matches!(key.as_str(), "reverse_event_id" | "claim_event_id")
-                    && !value.is_null()
+                } else if matches!(
+                    key.as_str(),
+                    "reverse_event_id" | "claim_event_id" | "resolver_event_id"
+                ) && !value.is_null()
                 {
                     *value = Value::String("<normalized_event_id>".to_owned());
                 } else {
@@ -278,8 +280,12 @@ async fn wrapper_reverse_route_snapshots(
         primary
             .pointer("/declared_state/claimed_primary_name/status")
             .and_then(Value::as_str)
-            == Some("not_found"),
-        "{claimant} route snapshot must keep the generic resolver NameChanged claim raw-only: {primary}"
+            == Some("success")
+            && primary
+                .pointer("/declared_state/claimed_primary_name/name")
+                .and_then(Value::as_str)
+                == Some(RESTORED_NAME),
+        "{claimant} route snapshot must expose the name stored by its current reverse resolver: {primary}"
     );
     let contract_instances = perturb::contract_instance_stable_keys(&run.db.pool).await?;
     normalize_primary_route_snapshot(&mut primary, &contract_instances)?;
