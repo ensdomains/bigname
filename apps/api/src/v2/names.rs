@@ -15,14 +15,15 @@ use bigname_storage::{
 };
 use sqlx::types::time::OffsetDateTime;
 
+use super::collection_snapshot::CollectionSnapshot;
 use crate::AppState;
 
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::search::{SearchName, build_search_name};
 use super::support::ensure_public_namespace;
 use super::{
-    CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, SortOrder, StrictQueryParams,
-    V2Error, V2Result, api_error_to_v2, decode, encode, format_timestamp,
+    CursorPayload, Envelope, Page, QueryParamAllowlist, SortOrder, StrictQueryParams, V2Error,
+    V2Result, api_error_to_v2, decode, encode, format_timestamp,
     validate_latest_collection_selectors,
 };
 
@@ -110,6 +111,13 @@ pub(crate) async fn get_names(
         })
         .transpose()?;
 
+    let snapshot = CollectionSnapshot::capture_for_namespace(
+        &state,
+        params.cursor.as_deref(),
+        Some(&namespace),
+    )
+    .await?;
+
     let filter = NameCurrentExpiringFilter {
         namespace: namespace.clone(),
         expires_after: params.expires_after,
@@ -128,7 +136,10 @@ pub(crate) async fn get_names(
     let next_cursor = storage_page
         .next_cursor
         .as_ref()
-        .map(|cursor| names_cursor_payload(cursor, &binding).map(|payload| encode(&payload)))
+        .map(|cursor| {
+            names_cursor_payload(cursor, &binding)
+                .map(|payload| encode(&snapshot.bind_cursor(payload)))
+        })
         .transpose()?;
     let has_more = next_cursor.is_some();
     let data = storage_page.rows.iter().map(build_search_name).collect();
@@ -142,7 +153,7 @@ pub(crate) async fn get_names(
             total_count: None,
             has_more,
         }),
-        meta: Meta::default(),
+        meta: snapshot.finish(&state).await?,
     }))
 }
 

@@ -40,24 +40,30 @@ with no claim, unsupported verification, or mismatched verification return
 All collection routes use the standard `page` object: `cursor`,
 `next_cursor`, `page_size`, nullable `total_count`, and `has_more`.
 
-The top-level latest-state collections are `GET /v1/names`,
-`GET /v1/names/{name}/subnames`,
-`GET /v1/names/{name}/history`, `GET /v1/permissions`,
-`GET /v1/addresses/{address}/names`,
-`GET /v1/addresses/{address}/history`, `GET /v1/search`, `GET /v1/events`, and
-`GET /v1/diagnostics/events`. They omit `meta.as_of` and
-`meta.as_of_token`, except that search reports request-scoped `meta.as_of` and
-`meta.as_of_completeness` for staleness and suppression disclosure while still
-omitting `meta.as_of_token`. Their cursors bind the collection anchor, namespace,
-filters, and sort without claiming a frozen snapshot. Newly issued cursors
-carry no snapshot token; a legacy cursor's snapshot component is ignored. They
-accept omitted or explicit `finality=latest`. An `at` selector returns `400 invalid_input` with
-`at is not supported because collection routes read latest state`;
-`finality=safe` or `finality=finalized` returns `400 invalid_input` with
-`finality must be latest because collection routes read latest state`.
-Issue #188 option 1 remains the storage follow-up: revision-bound cursors with
-explicit cursor-expired semantics. These restrictions lift when that storage
-contract exists.
+The product collections `GET /v1/names`, subnames, name/address history,
+address names, permissions, and `/v1/events` read current state. Their cursors
+bind anchors, filters, sorting, the served project publication (including
+same-height replacement) and manifest revisions. Counts and rows use the same
+filters; time-dependent expiry filtering retains the first page's evaluation
+time. These reads revalidate the publication before returning and disclose
+`meta.as_of`. A changed or unavailable publication, or an older unbound cursor,
+returns `409 stale` and requires restarting without a cursor. No historical
+projection is retained by a pagination token. The binding conservatively covers
+the requested namespace, or all active public namespaces when none is selected.
+A count spanning namespaces requires readable publications for all of them;
+otherwise it returns `409 stale` rather than a misleading partial total. Registry and resolver collections use the same publication fence
+in addition to their documented selected-chain position.
+
+These current-state collections still reject `at`, `finality=safe`, and
+`finality=finalized` with `400 invalid_input`; omitted or explicit
+`finality=latest` is accepted. `meta.as_of_token` is omitted because these
+collection publications cannot be replayed through `at`.
+
+Search and diagnostic-event cursors retain their existing latest-state behavior
+without a publication-validity claim. Search discloses request-scope `meta.as_of`
+and `meta.as_of_completeness`; diagnostic events omit snapshot metadata. The
+per-input `POST /v1/lookup` cursor contract is documented separately. Historical
+collection replay remains deferred.
 
 At the planned ENSv1→ENSv2 [re-derivation
 boundary](glossary.md#re-derivation-boundary), slices 1 and 2 deploy
@@ -489,9 +495,10 @@ collection route carry neither header.
 - Pagination behavior: standard collection pagination by `expires_at` in the
   requested order, ties broken by namespace, name, and namehash. Cursors are
   bound to namespace, both bounds, and order. `page.total_count` is `null`.
-- Snapshot behavior: rows come from current state. The response omits
-  `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
-  validity claim.
+- Snapshot behavior: the page and its counts use the captured current
+  publication. The response discloses `meta.as_of`; continuation cursors bind
+  the publication and return `409 stale` requiring a restart when it changes.
+  Historical replay through `at` is not supported.
 - Status semantics: an empty window returns `200` with empty `data`.
 
 ### `GET /v1/names/{name}`
@@ -512,6 +519,10 @@ collection route carry neither header.
   precomputed per-name event total, and counting history rows on the request
   path would be an unbounded scan, so the expansion does not offer one. Any
   other `include` value returns `400 invalid_input`.
+  Counts require the current publication on the name's chain. A historical
+  selection at another position, or a publication change during the read,
+  returns `409 stale`; historical profiles without counts retain their existing behavior.
+
 - Response shape: `data` is one flat record object using dictionary fields.
   The registration summary is not nested; it is represented by
   `registration_id`, `token_id`, `owner`, `manager`, `registrant`,
@@ -1102,13 +1113,14 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   default page and stay valid for a request that asks for exactly that page.
   `page.total_count` is populated with the parent's direct readable subname
   count — the same bounded per-parent aggregate that already annotates the page,
-  so it costs no extra scan — only when the page admits every child, that is
+  so it costs no extra scan — when the page admits every child, that is
   when `q` is absent and `include_expired` is not `false`. A narrowed page
-  reports `total_count: null` rather than a count it did not compute.
-- Snapshot behavior: the parent and subname rows are selected from current
-  state. The response omits `meta.as_of` and `meta.as_of_token`, and its cursor
-  carries no snapshot validity claim. True as-of child enumeration is deferred
-  to the revision-bound storage follow-up.
+  reports the exact filtered total, computed with the same child-name and expiry
+  predicates as its list, before the cursor.
+- Snapshot behavior: the parent, child rows and filtered count use one
+  revalidated publication, disclosed in `meta.as_of`. Continuations retain its
+  identity and expiry evaluation time. A changed publication returns `409 stale`
+  requiring a restart. Historical child enumeration is not supported.
 - Status semantics: no direct subnames returns `200` with empty `data`.
   Missing parent names return `404 not_found`. Each child appears at most once,
   from the relation its own selected authority names. ENSv1 relations that are
@@ -1176,6 +1188,10 @@ their route-specific anchors:
   greater than `to_timestamp`, or a value that is not RFC 3339, returns `400
   invalid_input`. On `/v1/events` the resolved window intersects an explicit
   `from_block`/`to_block` range.
+- History anchor expansion is bounded to the captured publication too:
+  later name/resource bindings and historical ownership matches cannot introduce
+  older events into an unchanged page. Bindings and ownership before
+  `from_timestamp` remain valid anchors; the timestamp window filters event rows.
 - Cursors bind the order and every filter above. The cursor `sort` token
   encodes the direction, and its filters carry the canonical `type` set and
   the canonical UTC spelling of each timestamp bound, so a cursor issued by one
@@ -1189,16 +1205,20 @@ their route-specific anchors:
   block and timestamp windows, product visibility, and duplicate suppression),
   so it agrees with what paging would enumerate. It is capped: counting stops
   after 10,000 product-visible rows and a larger result reports
-  `total_count=null`. Unanchored `/v1/events` reads (namespace, type, and block
+  `total_count=null`. With `include=total_count`, anchored history reads instead
+  run an exact, uncapped count in the same read transaction and return that total.
+  Clients needing a name event counter can request its history with
+  `page_size=1&include=total_count`; no event rows need to be enumerated. This
+  option may cost more on names with a long history. Unanchored `/v1/events` reads (namespace, type, and block
   or timestamp windows only) never count and always report `total_count=null`.
 
 ### History event payloads (`include=data`, `include=raw`)
 
-The same three collections accept two independent `include` flags, alone or
-together in any order (`include=data`, `include=raw`, `include=data,raw`).
-`include` on these routes accepts only those two values; any other value
-returns `400 invalid_input`. Without either flag, rows keep their lean shape
-and carry none of the fields below.
+The same three collections accept independent payload flags `include=data`
+and `include=raw`, alongside the exact count flag `include=total_count`.
+They can be combined in any order. Other values return `400 invalid_input`.
+Without either payload flag, rows keep their lean shape and carry none of the
+fields below; requesting an exact total does not expand event rows.
 
 `include=data` adds two fields to every returned row:
 
@@ -1271,7 +1291,7 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 - Purpose: name history.
 - Request parameters: path `name`; query `namespace`,
   `scope=name|registration|both`, `type`, `order=asc|desc`, `from_timestamp`,
-  `to_timestamp`, `include=data|raw`, `cursor`, `page_size`, and optional
+  `to_timestamp`, `include=data|raw|total_count`, `cursor`, `page_size`, and optional
   `finality=latest`. `at` and historical `finality` values are rejected by the
   shared latest-state collection rule. `type`, `order`, and the timestamp
   window follow the [history collection filters](#history-collection-filters);
@@ -1323,7 +1343,7 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   product-visible events. A nonterminal page contains `page_size` rows; only
   the terminal page may be shorter. `page.total_count` is the capped anchored
   count described under the shared history filters: exact up to 10,000 rows,
-  `null` beyond.
+  `null` beyond, unless `include=total_count` requests an uncapped exact total.
 - Scope behavior: `scope=name` reads name-surface events only,
   `scope=registration` reads registration-resource events associated with the
   requested name, and `scope=both` reads both sets. `scope` defaults to `both`.
@@ -1339,10 +1359,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   reachable through `GET /v1/diagnostics/events` via the registry resource
   recorded internally at
   `name_current.provenance.read_reachability.serving_resource_id`.
-- Snapshot behavior: the parent anchor and history rows are selected from
-  current state. The response omits `meta.as_of` and `meta.as_of_token`, and
-  its cursor carries no snapshot validity claim. True as-of history
-  enumeration is deferred to the revision-bound storage follow-up.
+- Snapshot behavior: the page and its counts use the captured current
+  publication. The response discloses `meta.as_of`; continuation cursors bind
+  the publication and return `409 stale` requiring a restart when it changes.
+  Historical replay through `at` is not supported.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Missing names return `404
   not_found`. Request and cursor-binding validation precede the first
@@ -1418,11 +1438,11 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   `{resolver: {chain_id, address}}` for `resolver` with numeric `chain_id`;
   and `{chain_id, manager}` for `record_manager`.
 - Pagination behavior: standard collection pagination.
-- Snapshot behavior: a `name` filter resolves its current registration anchor,
-  and permission rows come from current state. The response omits `meta.as_of`
-  and `meta.as_of_token`; completeness metadata remains available. Its cursor
-  carries no snapshot validity claim. True as-of permission enumeration is
-  deferred to the revision-bound storage follow-up.
+- Snapshot behavior: a `name` filter resolves its current registration anchor
+  and permission rows under the same revalidated publication, disclosed in
+  `meta.as_of`. Completeness metadata remains available. Continuations bind the
+  publication; a change returns `409 stale` requiring a restart. Historical
+  permission enumeration is not supported.
 - Status semantics: no matching permission rows returns `200` with empty
   `data`, including when a `name` filter has no registration anchor in the
   current state. Unsupported filter combinations return `422 unsupported`;
@@ -1518,6 +1538,17 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   arm; it is a primary-key probe of the name row per candidate relation row.
   Any other value returns `400 invalid_input`. Rows with no selected arm
   (Basenames) match neither value.
+  `is_migrated=true|false` optionally selects whether the current name has the
+  same proven ENSv1→ENSv2 transition used by `migrated_at`: an ENSv2 authority
+  selected by a migration proof with a retained event and block timestamp.
+  Native ENSv2 registrations do not satisfy `is_migrated=true`. It combines
+  with the other filters and is rejected with `relation=resolves_to`.
+  The ownership collection always returns an exact `page.total_count` before
+  applying its cursor, with the same relations, prefix, authority, migration
+  predicate and deduplication as the rows. For registration counts use
+  `relation=registrant&dedupe=registration`; a name count uses `dedupe=name`.
+  This GET route supplies exact totals even for single relations whose
+  `POST /v1/lookup` result count remains unknown.
   `q` applies prefix matching to the dictionary `name` field. The API treats
   the complete `q` value as an ENSIP-15 name prefix and normalizes it with the
   same normalizer used for indexed names before comparing it directly with the
@@ -1593,19 +1624,18 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   given on `GET /v1/names/{name}`. Any other `include` value returns
   `400 invalid_input`.
 - Pagination behavior: standard collection pagination. Cursors are bound to
-  address, optional namespace filter, normalized relation set, `authority`,
+  address, optional namespace filter, normalized relation set, `authority`, `is_migrated`,
   `q`, dedupe mode, sort, and order; a `resolves_to` cursor additionally binds
   the coin type, and a cursor minted for one relation set never resumes another.
-- Snapshot behavior: address-name rows come from current state. The response
-  omits `meta.as_of` and `meta.as_of_token`; completeness metadata for
-  `include=role_summary` remains available. Its cursor carries no snapshot
-  validity claim. True as-of address-name enumeration is deferred to the
-  revision-bound storage follow-up.
+- Snapshot behavior: the page and its counts use the captured current
+  publication. The response discloses `meta.as_of`; continuation cursors bind
+  the publication and return `409 stale` requiring a restart when it changes.
+  Historical replay through `at` is not supported.
 - Status semantics: no related names returns `200` with empty `data`.
   Malformed addresses return `400 invalid_input`. Unsupported public namespaces
   return `404 not_found`. `include=role_summary`
-  does not claim a request-wide immutable projection generation, and current-state
-  generation changes do not produce `409 stale`. The expansion batch-loads
+  uses the same publication fence as the base collection, and current-state
+  publication changes produce `409 stale`. The expansion batch-loads
   projection-owned permission summaries for every
   registration on the served page. If all are independently proven full, no
   completeness metadata is added. A non-wrapper approval/delegation limitation
@@ -1844,7 +1874,7 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 - Purpose: address activity history.
 - Request parameters: path `address`; query `namespace`, `relation`,
   `scope=name|registration|both`, `type`, `order=asc|desc`, `from_timestamp`,
-  `to_timestamp`, `include=data|raw`, `cursor`, `page_size`, and optional
+  `to_timestamp`, `include=data|raw|total_count`, `cursor`, `page_size`, and optional
   `finality=latest`. `at`
   and historical `finality` values are rejected by the shared latest-state
   collection rule. `type`, `order`, and the timestamp window follow the
@@ -1872,18 +1902,18 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   both. Without a distinct control resource, the sole registry-resource row
   remains visible.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
-- Snapshot behavior: address-history rows come from current state. The response
-  omits `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
-  validity claim. True as-of/finality row-bounding is deferred to the
-  revision-bound storage follow-up.
+- Snapshot behavior: the page and its counts use the captured current
+  publication. The response discloses `meta.as_of`; continuation cursors bind
+  the publication and return `409 stale` requiring a restart when it changes.
+  Historical replay through `at` is not supported.
 - Pagination behavior: product event-type filtering, including an explicit
   `type` set, runs before keyset page construction (newest first unless
   `order=asc`), so `page_size`, `next_cursor`, and `has_more` describe
   product-visible events. The cursor is bound to the address, namespace,
   relation set, scope, direction, `type` set, and timestamp window. A
   nonterminal page contains `page_size` rows; only the terminal page may be
-  shorter. `page.total_count` is the capped anchored count described under
-  the shared history filters.
+  shorter. `page.total_count` follows the shared anchored-count contract:
+  capped by default, exact and uncapped with `include=total_count`.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Address, namespace, and
   cursor-binding validation precede the first `redo_in_progress` check, so
@@ -1980,7 +2010,7 @@ For a registrar lease first identified by a later readable observation, registra
   resolver, type, and block filters.
 - Request parameters: query `namespace`, `name`, `address`, `resolver`,
   `contract_address`, `registration_id`, `type`, `from_block`, `to_block`, `from_timestamp`,
-  `to_timestamp`, `order=asc|desc`, `include=data|raw`, `cursor`, `page_size`,
+  `to_timestamp`, `order=asc|desc`, `include=data|raw|total_count`, `cursor`, `page_size`,
   and optional `finality=latest`. `at` and historical `finality` values are rejected by the
   shared latest-state collection rule. When `name` is present and `namespace`
   is omitted, namespace is inferred from the name; `namespace` defaults to
@@ -2067,12 +2097,12 @@ For a registrar lease first identified by a later readable observation, registra
   the timestamp window. A nonterminal page contains `page_size` rows; only the
   terminal page may be shorter. `page.total_count` follows the shared history
   rule: populated (exact up to 10,000 rows, `null` beyond) when `name`,
-  `registration_id`, `address`, or `resolver` anchors the read, and always
-  `null` for unanchored reads.
-- Snapshot behavior: event rows come from current state. The response omits
-  `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
-  validity claim. True as-of/finality row-bounding is deferred to the
-  revision-bound storage follow-up.
+  `registration_id`, `address`, or `resolver` anchors the read; opting into
+  `include=total_count` removes that cap. It is always `null` for unanchored reads.
+- Snapshot behavior: the page and its counts use the captured current
+  publication. The response discloses `meta.as_of`; continuation cursors bind
+  the publication and return `409 stale` requiring a restart when it changes.
+  Historical replay through `at` is not supported.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Filter and cursor-binding
   validation precede the first `redo_in_progress` check, so malformed requests
@@ -2138,9 +2168,8 @@ For a registrar lease first identified by a later readable observation, registra
   count greater than the returned array length means that sample is truncated;
   omitted binding rows remain available through paginated name-side routes,
   and omitted permission rows remain available through permission routes.
-  Resolver alias-event mappings have no exhaustive product collection: when
-  their sample is truncated, the total count reports the omitted mappings but
-  clients cannot page through them on this route. Binding samples sort by name
+  Complete alias mappings and per-registration permission rows are available
+  through the `/aliases` and `/roles` collections below. Binding samples sort by name
   and stable identity, alias samples place current binding aliases before
   current alias-event rows and preserve each group’s stable order, and
   role-holder samples sort by address.
@@ -2217,6 +2246,45 @@ For a registrar lease first identified by a later readable observation, registra
 - Replaces (v1): `GET /v1/resolvers/{chain_id}/{resolver_address}/overview`
   and the `GET /v1/names?resolver=...` filter.
 
+### `GET /v1/resolvers/{chain_id}/{address}/aliases` and `/roles`
+
+- Tier: product read. These collections make the supported resolver overview
+  tables fully pageable without enlarging its bounded previews.
+- Parameters: numeric `chain_id`, resolver `address`; `at`, `finality`, `cursor`,
+  `page_size` (default 50, maximum 200). Other query parameters are rejected.
+- `/aliases` returns the same two row shapes as the overview aliases: current
+  alias bindings followed by current active alias-event mappings. The binding
+  group sorts by stable name identity; the event group sorts by stable alias
+  identity, so equal display names cannot skip or duplicate entries. Counts
+  cover both groups. This is a complete enumeration of the supported indexed
+  mappings, not a claim to discover arbitrary custom resolver behavior.
+- `/roles` returns one `{address, registration_id, name?, powers, grant_event?}` row
+  for each current resolver-scoped permission row with at least one power.
+  Rows sort by address and registration ID; multiple registrations for one
+  holder remain separate. `name` is present when the registration has a current
+  readable name. `grant_event` follows the overview provenance shape,
+  but is selected only from that individual registration's permission row.
+  Revoked/empty grants, unrelated resolver scopes, and noncanonical resources
+  are excluded. `page.total_count` counts these rows, whereas the overview's
+  `counts.role_holders` counts distinct addresses.
+- Both routes use the normal `{data, page, meta}` envelope. Supported reads
+  report an exact `page.total_count`, including zero, from the same database
+  statement and predicates as the page. Unsupported enumeration returns an
+  empty page with `total_count: null`, explicit unsupported completeness, and
+  a reason; it never claims that a resolver has no mappings or holders.
+- Pagination is bound to the resolver, chain, collection, selected snapshot,
+  and completed projection generation. A cursor automatically selects its
+  snapshot when `at` is omitted. A different route or explicit snapshot is
+  `400 invalid_input`; a generation no longer available is `409 stale` and the
+  client must restart. These routes read current projections, so they do not
+  synthesize historical permission/binding tables. A same-height rebuild also
+  invalidates prior cursors. The generation is checked again after reading.
+- Alias events come from activated canonical normalized events bounded to the
+  selected height; bindings and permissions come from current projections
+  using their existing canonical-lineage predicates. Resolver classification
+  and enumeration support remain the authority for whether either collection
+  can make an indexed completeness claim. No manifest coverage is widened.
+
 ### `GET /v1/registries/{chain_id}/{address}`
 
 - Method/path: `GET /v1/registries/{chain_id}/{address}`
@@ -2247,25 +2315,38 @@ For a registrar lease first identified by a later readable observation, registra
   with no observed creation, whose `created_block_number` is its configured
   start block, `created_at` is that block's timestamp when the block is known,
   and `created_transaction_hash` is `null`. `counts.labels` is the exact
-  number of labels the registry holds (the rows of the labels route below);
-  it is `0` when `name` is `null`. `counts.events` is present only with
+  number of labels the registry currently holds (the rows of the labels route
+  below); for a current selection it is `0` when `name` is `null`. `counts.events` is present only with
   `include=counts` and counts the product-visible events emitted by the
   contract — the same rows `GET /v1/events?contract_address=` serves — because
-  it reads every event of the contract rather than a projected total. There is
-  no `counts.roles`: bigname projects permissions per registration, not per
-  registry contract, so a per-registry role-holder count is not served.
+  it reads every event of the contract rather than a projected total.
+  `counts.roles`, also present with `include=counts`, is the exact number of
+  observed nonzero declared role assignments across the registry's root and
+  label resources. One account on two resources counts twice; several role bits
+  on one account/resource count once. Counts fold canonical `EACRolesChanged`
+  observations through the selected block, remove revoked assignments and
+  exclude older observed resource versions for the same label. These are
+  declared assignments, not a claim about currently exercisable permissions.
+  This preserves the reference indexer's assignment-versus-holder distinction.
+  (upstream: .refs/zigens/src/api/resolvers/admin.zig:L1150 @ zigens@77d106e9)
+  (upstream: .refs/zigens/src/storage/roles.zig:L171 @ zigens@77d106e9)
+  (upstream: .refs/zigens/src/storage/roles.zig:L505 @ zigens@77d106e9)
   `referenced_by` is a nested `{data, page}` collection of every name whose
   current subregistry pointer targets this contract, each `{name,
   display_name, namespace, namehash}`, sorted by display name. It usually
   holds exactly the served `name`; it is empty when `name` is `null`.
 - Pagination behavior: standard collection pagination applies to the nested
   `referenced_by.page` object; its cursor binds the chain and registry. The
-  top-level response has no `page`.
+  top-level response has no `page`. Continuations bind both the selected block
+  and the current publication; a publication change returns `409 stale` and
+  requires restarting without a cursor.
 - Snapshot behavior: the route selects the chain's served position like the
   resolver overview and reports `meta.as_of` and `meta.as_of_token`. The
   creation, pointer, and event-count evidence is bounded to that position, so
   an `at` or `finality` selector shows the registry as it stood then.
-  `counts.labels` reads the current child collection.
+  `counts.labels` reads the current child collection and is `null` for a
+  historical selection that differs from the current published position.
+  Current reads revalidate their publication before returning.
 - Status semantics: an unknown registry returns `404 not_found` at every
   selector, because the bounded read proves absence at the selected position.
   Malformed `chain_id` or `address` and an `include` value other than `counts`
@@ -2280,9 +2361,18 @@ For a registrar lease first identified by a later readable observation, registra
 - Request parameters: path `chain_id`, `address`; query `include=counts`,
   `cursor`, `page_size`, and optional `finality=latest`. `at` and historical
   `finality` values are rejected by the shared latest-state collection rule.
-- Response shape: `data` is an array of rows in exactly the `GET
+- Response shape: `data` is an array of rows using the `GET
   /v1/names/{name}/subnames` shape, including `subregistry` and the
-  `include=counts` `subname_count`. A label is a direct subname of the name
+  `include=counts` `subname_count`, plus `role_holder_count` with `include=counts`.
+  The latter is the exact number of distinct accounts with a nonzero declared
+  assignment on the label's current registration resource in this registry;
+  root roles, resolver roles, older resource versions and revoked assignments
+  are excluded. Several role bits on one account count once. A label without
+  any observed matching assignment has a count of zero. The total describes
+  indexed declared assignments, not inherited effective permissions.
+  (upstream: .refs/zigens/src/api/builders/impl.zig:L2042 @ zigens@77d106e9)
+  (upstream: .refs/zigens/src/storage/roles.zig:L567 @ zigens@77d106e9)
+  A label is a direct subname of the name
   the registry serves whose ENSv2 registration the registry itself emitted;
   a child of that name registered by another contract is not a label of this
   registry. A registry that serves no name — the root registry, or one never
@@ -2293,8 +2383,9 @@ For a registrar lease first identified by a later readable observation, registra
   ascending. `page.total_count` is the exact label count, the same number as
   `counts.labels` on the registry route. The cursor binds the chain and
   registry.
-- Snapshot behavior: rows come from current state; the response omits
-  `meta.as_of` and `meta.as_of_token`.
+- Snapshot behavior: rows and totals come from one revalidated current
+  publication, reported in `meta.as_of`. Cursors bind that publication; if it
+  changes, return `409 stale` and restart pagination.
 - Status semantics: an unknown registry returns `404 not_found`; a known
   registry with no labels returns `200` with empty `data`. Malformed
   `chain_id`, `address`, `include`, or cursor values return `400 invalid_input`.

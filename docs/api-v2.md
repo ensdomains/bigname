@@ -166,10 +166,11 @@ For a registrar lease first identified by a later readable observation, registra
 
 `GET /v1/permissions` and `GET /v1/addresses/{address}/names?include=role_summary`
 read current permission rows and per-resource permission summaries. Canonical
-identity checks exclude rows from an orphaned chain lineage. These routes do
-not claim a request-wide immutable projection generation, and their cursors carry
-no snapshot-validity claim. The base v2 address-name collection remains available
-without the expansion.
+identity checks exclude rows from an orphaned chain lineage. These routes bind
+pagination to the captured project publication and revalidate it before returning.
+A changed publication, including replacement at the same block, requires a
+pagination restart with `409 stale`. The base address-name collection remains
+available without the expansion.
 
 Permission-backed v2 reads also classify the served resources from the typed
 projection-owned per-resource permission summary. For a resource-bound
@@ -518,23 +519,31 @@ Rules:
 - `total_count` is nullable. Reverse address results from `POST /v1/lookup`
   populate it by counting the same readable current name/address rows used by
   the page query when the requested relation set maps directly to a stored role
-  group. Relation sets that require post-filtering retain `total_count=null`.
+  group. Relation sets that require post-filtering retain `total_count=null`;
+  use the address-name GET collection for an exact single-relation count.
+  Address-name ownership collections return the exact count of their filtered,
+  deduplicated entries before the cursor.
   Anchored history collections (name history, address history, and
   `/v1/events` with a `name`, `registration_id`, `address`, or `resolver`
   anchor) populate
   it with a capped count over the page's exact filters: exact up to 10,000
-  product-visible rows, `null` beyond, and always `null` for unanchored event
+  product-visible rows and `null` beyond by default; `include=total_count`
+  requests an exact uncapped count on anchored history. It is always `null` for unanchored event
   reads. `GET /v1/names/{name}/subnames` populates it with the parent's direct
-  readable subname count, an aggregate bounded by that one parent's children.
+  readable subname count, applying the same optional prefix and expiry filters
+  as the page before its cursor.
   Other routes populate it only where a precomputed count makes it
   cheap or where they explicitly document `include=total_count`; they must not
   otherwise run unconditional full counts on the request path.
 - `meta` is always present. Single-resource routes that read chain-derived state
   include `meta.as_of` and `meta.as_of_token` when they can attribute at least
-  one served snapshot-pinned chain position. Top-level collection routes omit
-  both because their mutable latest-state rows are not bound to one snapshot,
-  except that `/v1/search` reports request-scoped `meta.as_of` positions as
-  human-readable staleness attribution and still omits `meta.as_of_token`.
+  one served snapshot-pinned chain position. Product name, subname, ownership,
+  permission and history collections disclose `meta.as_of` and bind cursors to
+  the current publication; they omit `meta.as_of_token` because old publications
+  are not retained for collection replay. A changed publication returns `409 stale`
+  requiring a restart. `/v1/search` reports request-scoped `meta.as_of` as
+  staleness attribution without a publication-bound cursor. Diagnostic event
+  collections retain their separately documented latest-state behavior.
   Control-plane routes (`/v1/status`, `/v1/namespaces/{namespace}`) omit both.
   Verified name and record responses keep the same metadata shape as their
   indexed peers. The authoritative position identifies the projection snapshot

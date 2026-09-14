@@ -8,6 +8,7 @@ use sqlx::types::Uuid;
 
 use crate::AppState;
 
+use super::collection_snapshot::CollectionSnapshot;
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::name_record::wrapper_metadata;
 use super::permission_support::{
@@ -105,6 +106,16 @@ pub(crate) async fn get_permissions(
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let include_lineage = permissions_include_lineage(&params.include)?;
     let filter_inputs = permissions_filter_inputs(&params)?;
+    let snapshot = CollectionSnapshot::capture_for_namespace(
+        &state,
+        params.cursor.as_deref(),
+        filter_inputs
+            .name_filter
+            .as_ref()
+            .map(|name| name.namespace.as_str())
+            .or(params.namespace.as_deref()),
+    )
+    .await?;
 
     let resolved =
         resolve_permissions_filter(&state, &params, include_lineage, &filter_inputs).await?;
@@ -118,7 +129,11 @@ pub(crate) async fn get_permissions(
         .transpose()?;
 
     if let Some(selection) = resolved.empty_selection {
-        return Ok(empty_permissions_response(&params, selection));
+        return Ok(empty_permissions_response(
+            &params,
+            selection,
+            snapshot.finish(&state).await?,
+        ));
     }
 
     let storage_page = bigname_storage::load_permissions_current_account_resource_page(
@@ -154,10 +169,7 @@ pub(crate) async fn get_permissions(
             .await
             .map_err(|_| V2Error::internal_error("failed to load permission names"))?;
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
-        encode(&permissions_cursor_payload(
-            cursor,
-            &resolved.cursor_filters,
-        ))
+        encode(&snapshot.bind_cursor(permissions_cursor_payload(cursor, &resolved.cursor_filters)))
     });
     let has_more = next_cursor.is_some();
     let data = storage_page
@@ -174,7 +186,7 @@ pub(crate) async fn get_permissions(
             )
         })
         .collect::<V2Result<Vec<_>>>()?;
-    let mut meta = Meta::default();
+    let mut meta = snapshot.finish(&state).await?;
     let permission_support =
         permission_support_for_resources(&support_resource_ids, &permission_summaries);
     apply_permissions_collection_support_meta(
@@ -208,9 +220,8 @@ pub(crate) async fn get_permissions(
 fn empty_permissions_response(
     params: &QueryParams,
     selection: EmptyPermissionsSelection,
+    mut meta: Meta,
 ) -> Json<PermissionsResponse> {
-    let mut meta = Meta::default();
-
     match selection {
         EmptyPermissionsSelection::MissingOrUnsupportedNameAnchor => {
             apply_permissions_collection_support_meta(&mut meta, PermissionSupport::Unknown, false);

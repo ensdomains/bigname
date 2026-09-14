@@ -288,7 +288,7 @@ async fn v2_get_permissions_maps_rows_and_lineage() -> Result<()> {
     assert_eq!(payload["page"]["page_size"], json!(10));
     assert_eq!(payload["page"]["total_count"], Value::Null);
     assert_eq!(payload["page"]["has_more"], json!(false));
-    assert!(payload["meta"].get("as_of").is_none());
+    assert!(payload["meta"].get("as_of").is_some());
     assert!(payload["meta"].get("as_of_token").is_none());
     assert_eq!(payload["meta"]["completeness"], json!("partial"));
     assert_eq!(
@@ -538,7 +538,7 @@ async fn v2_name_and_name_filtered_permissions_select_the_same_live_registration
 }
 
 #[tokio::test]
-async fn v2_get_permissions_non_name_filters_do_not_require_snapshot_metadata() -> Result<()> {
+async fn v2_get_permissions_non_name_filters_carry_publication_metadata() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_permissions_fixture(&database).await?;
 
@@ -553,7 +553,7 @@ async fn v2_get_permissions_non_name_filters_do_not_require_snapshot_metadata() 
         assert_eq!(response.status(), StatusCode::OK, "{uri}");
         let payload: Value = read_json(response).await?;
         assert!(!payload["data"].as_array().unwrap().is_empty(), "{uri}");
-        assert!(payload["meta"].get("as_of").is_none(), "{uri}");
+        assert!(payload["meta"].get("as_of").is_some(), "{uri}");
         assert!(payload["meta"].get("as_of_token").is_none(), "{uri}");
     }
 
@@ -561,7 +561,7 @@ async fn v2_get_permissions_non_name_filters_do_not_require_snapshot_metadata() 
 }
 
 #[tokio::test]
-async fn v2_get_permissions_name_filter_uses_current_registration_without_snapshot_meta() -> Result<()> {
+async fn v2_get_permissions_name_filter_uses_current_registration_with_publication_meta() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_permissions_fixture(&database).await?;
     let current_resource_id = v2_permissions_current_resource_id();
@@ -577,7 +577,7 @@ async fn v2_get_permissions_name_filter_uses_current_registration_without_snapsh
             .iter()
             .all(|row| row["registration_id"] == json!(current_resource_id.to_string()))
     );
-    assert!(payload["meta"].get("as_of").is_none());
+    assert!(payload["meta"].get("as_of").is_some());
     assert!(payload["meta"].get("as_of_token").is_none());
 
     database.cleanup().await?;
@@ -613,7 +613,7 @@ async fn v2_get_permissions_name_filter_uses_current_sepolia_anchor_on_mixed_pha
     )
     .await?;
     assert_eq!(payload["data"][0]["registration_id"], json!(resource_id));
-    assert!(payload["meta"].get("as_of").is_none());
+    assert!(payload["meta"].get("as_of").is_some());
     assert!(payload["meta"].get("as_of_token").is_none());
 
     database.cleanup().await
@@ -1014,7 +1014,7 @@ async fn v2_permissions_response_for_database(
     database: &TestDatabase,
     uri: &str,
 ) -> Result<Response> {
-    app_router(database.app_state())
+    app_router(database.app_state_with_public_namespaces(&["ens"]))
         .oneshot(
             Request::builder()
                 .uri(uri)
@@ -1156,6 +1156,9 @@ async fn seed_v2_permissions_fixture(database: &TestDatabase) -> Result<()> {
         .await?;
     }
 
+    let block_hash: String = sqlx::query_scalar("SELECT block_hash FROM bigname_phase.chain_lineage WHERE chain_id = 'ethereum-mainnet' AND block_number = 130 AND canonicality_state IN ('canonical', 'safe', 'finalized')")
+        .fetch_one(&database.pool).await?;
+    seed_schema_v2_ens_lookup_head(&database.pool, 130, &block_hash, "2026-06-10T00:00:00Z").await?;
     Ok(())
 }
 

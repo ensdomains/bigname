@@ -17,6 +17,7 @@ bigname anchors every ENSv1, ENSv2, Basenames, admitted upstream app-metadata, r
 | `ens_v2_sepolia_20260629` | `ensdomains/contracts-v2` | `ccaeb58b` | Historical implementation evidence for the admitted 2026-06-29 old-model Sepolia deployment only |
 | `ens_v2_sepolia_dev` | `ensdomains/contracts-v2` | `554c309b` | Historical evidence cited by deprecated pre-audit `sepolia-dev` manifests only |
 | `basenames` | `base-org/basenames` | `1809bbc9` | Canonical Basenames Solidity |
+| `zigens` | `ensdomains/zigens` | `77d106e9` | Reference indexer registry assignment counts and label holder counts only |
 | `ens_subgraph` | `ensdomains/ens-subgraph` | `723f1b6a` | Reference ENSv1 indexer |
 | `ens_rainbow` | `graphprotocol/ens-rainbow` | `bc44492` | Graph Protocol ENS rainbow-table tooling |
 | `ensnode` | `namehash/ensnode` | `2017ae62` | Alternative ENS indexer |
@@ -24,6 +25,14 @@ bigname anchors every ENSv1, ENSv2, Basenames, admitted upstream app-metadata, r
 | `ponder` | `ponder-sh/ponder` | `c8f6935f` | Reference EVM indexer framework |
 | `graph_node` | `graphprotocol/graph-node` | `aefe1737` | Reference Graph Node indexer |
 | `reth` | `paradigmxyz/reth` | `88505c7f` | Reference Ethereum execution client |
+
+The `zigens` pin is reference-indexer evidence only, not protocol or deployment
+address authority. Its registry count counts assignment rows across resources,
+while its label count counts distinct accounts on the latest observed resource
+version and excludes empty bitmaps and root roles.
+(upstream: .refs/zigens/src/api/resolvers/admin.zig:L1150 @ zigens@77d106e9)
+(upstream: .refs/zigens/src/storage/roles.zig:L505 @ zigens@77d106e9)
+(upstream: .refs/zigens/src/storage/roles.zig:L567 @ zigens@77d106e9)
 
 Full pin records (including per-ref `authoritative_for` lists) live in `.refs/MANIFEST.toml`. Sync with `scripts/sync-refs`.
 
@@ -106,6 +115,18 @@ only then deploy the matching API as required by the
 [deployment order](deployment.md#replacing-an-initialized-phase-schema).
 
 ## Known divergences
+
+> **Registry count comparison after full revocation of a newer resource version** —
+> the reference indexer deletes fully revoked assignment rows and determines the
+> newest observed version from remaining rows.
+> **Reference**: (upstream: .refs/zigens/src/indexer/v2/handlers_registry.zig:L1142 @ zigens@77d106e9)
+> (upstream: .refs/zigens/src/storage/roles.zig:L171 @ zigens@77d106e9)
+> **Our rule / why**: registry counts retain zero transitions while finding the
+> newest observed resource version, then exclude zero assignments. Revocation
+> cannot restore counts from an older version. Label counts additionally select
+> the current registration resource. This preserves assignment-versus-holder
+> meaning without using a deleted row as evidence that an old version is current.
+> **Since**: `2026-09-14`
 
 > **Numeric ENSv1 expiry representation** — admitted BaseRegistrar numeric registration and renewal retain expiry above the signed timestamp range as `i64::MAX`. Grace overflow does not release that retained lease; raw logs keep the original word. This does not narrow the on-chain event or change the exact Graveyard cleanup predicate.
 > **Upstream**: BaseRegistrar emits and stores uint256 registration and renewal expiry. (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f)

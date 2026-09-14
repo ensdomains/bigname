@@ -11,45 +11,14 @@ wiring_allowlist_required_loc = 500
 wiring_files = ["lib.rs", "main.rs"]
 
 [[files]]
-path = "apps/api/src/v2/events.rs"
-loc = 774
-justification = "History ergonomics (order, type sets, timestamp windows, include=data|raw, resolver filter) and the registry-route `contract_address` emitter filter keep the /v1/events handler, its cursor binding, and its filter parser adjacent; split the filter parser out on the next substantive touch."
-
-[[files]]
-path = "apps/api/src/v2/history.rs"
-loc = 714
-justification = "Name-history handler, the shared history read helpers (order, block window, capped total_count, cursor filter keys) and its cursor binding grew together; move the shared helpers into a sibling module on the next substantive touch."
-
-[[files]]
 path = "apps/api/src/v2/lookup/mod.rs"
 loc = 609
 justification = "Batch lookup keeps request parsing, name and address rendering, and served-head validation together; the registry-route subregistry pointer and the name-list authority/migrated_at fields land beside each other. Split on the next substantive touch."
 
 [[files]]
-path = "apps/api/src/v2/name_record.rs"
-loc = 631
-justification = "Name record read gained authority/migrated_at (F3), include=counts (F5), and the registry-route subregistry pointer in one handler; move the auxiliary loaders into a sibling module on the next substantive touch."
-
-[[files]]
 path = "apps/api/src/v2/namespaces.rs"
 loc = 792
 justification = "Namespace overview grew the per-chain verified-read capability report (F12) beside the existing overview assembly; split the capability report into a sibling module on the next substantive touch."
-
-[[files]]
-path = "apps/api/src/v2/params.rs"
-loc = 902
-justification = "Shared query-parameter grammar gained timestamp bounds, type sets, and the resolver selector (history ergonomics), contract_address (registry route), and expires_after/expires_before, sort_wire, and include_expired (name-list ergonomics) in parallel branches; split per-parameter parsers into a submodule now that the branches have landed."
-review_justification = "Staging merge union of four parallel branches pushed the shared parameter grammar just past 900 LOC; accepted for the merge with the per-parameter parser split scheduled as the first follow-up."
-
-[[files]]
-path = "apps/api/src/v2/resolvers.rs"
-loc = 610
-justification = "Resolver overview route: snapshot selection, bound-name paging, support meta, and the overview assembly (including the declared ENSv1 mirror field); grant_event provenance now lives in resolvers/role_grants.rs."
-
-[[files]]
-path = "apps/api/src/v2/subnames.rs"
-loc = 667
-justification = "Subnames listing gained q/sort/order/include_expired (F7) and the registry-route subregistry pointer together with its cursor binding; split the cursor binding out on the next substantive touch."
 
 [[files]]
 path = "apps/api/src/v2/vocab.rs"
@@ -103,7 +72,7 @@ justification = "The record inventory build stays one SQL derivation (pointer el
 
 [[files]]
 path = "crates/storage/src/history.rs"
-loc = 691
+loc = 660
 justification = "History read facade gained HistoryOrder, HistoryBlockWindow, HistoryPageOptions, the resolver filter, and the registry-route `contract_address` emitter filter while keeping every loader signature in one place; move the option types into a sibling module on the next substantive touch."
 
 [[files]]

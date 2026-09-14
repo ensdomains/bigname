@@ -2,6 +2,7 @@ mod address_history;
 mod address_names;
 mod cache_headers;
 mod chains;
+pub(crate) mod collection_snapshot;
 mod cursor;
 mod diag_events;
 mod diag_namespace_manifests;
@@ -100,7 +101,10 @@ pub(crate) use resolvers::{
     BoundNames, BoundNamesCursorBinding, bound_names_cursor_payload, bound_names_storage_cursor,
     build_resolver_overview, resolver_overview_include,
 };
-pub(crate) use resolvers::{get_resolver, parse_numeric_chain_id, resolver_snapshot_scope};
+pub(crate) use resolvers::{
+    get_resolver, get_resolver_aliases, get_resolver_roles, parse_numeric_chain_id,
+    resolver_snapshot_scope,
+};
 pub(crate) use search::get_search;
 #[cfg(test)]
 pub(crate) use search::public_namespace_read_test_hooks as search_public_namespace_read_test_hooks;
