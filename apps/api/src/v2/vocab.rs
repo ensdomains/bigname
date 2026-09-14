@@ -206,6 +206,7 @@ impl HistoryEventTypeSet {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn as_slice(&self) -> &[HistoryEventType] {
         &self.event_types
     }

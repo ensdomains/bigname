@@ -37,6 +37,7 @@ pub(crate) struct HistoryInclude {
     pub(crate) raw: bool,
 }
 
+#[cfg(test)]
 impl HistoryInclude {
     pub(crate) const DATA: Self = Self {
         data: true,

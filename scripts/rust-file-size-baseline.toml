@@ -53,7 +53,7 @@ justification = "Subnames listing gained q/sort/order/include_expired (F7) and t
 
 [[files]]
 path = "apps/api/src/v2/vocab.rs"
-loc = 746
+loc = 747
 justification = "Product vocabulary gained HistoryEventTypeSet canonicalization (history ergonomics), Authority (name-list ergonomics), and the resolves_to relation in parallel branches; split history vocabulary into a submodule now that the branches have landed."
 
 [[files]]
@@ -153,3 +153,18 @@ review_justification = "Reviewed as non-serving release tooling: the file is bel
 path = "tools/benchmark-gate/src/indexing.rs"
 loc = 723
 justification = "Index timing, rebuild, throughput, memory measurement, and red-report construction remain one release-gate operation with its budget and false-green regression tests."
+
+[[files]]
+path = "apps/phase-runner/src/heads.rs"
+loc = 616
+justification = "Head-marker validation, retained provider finality, and publication checks share this module; database persistence is already split into heads/persist.rs. Preserve that boundary for this integration."
+
+[[files]]
+path = "crates/ingest/src/engine.rs"
+loc = 636
+justification = "Batch request types and orchestration share the ingestion entry point; live-follow, prefetch, query, redo, and source-floor logic already live in child modules. Preserve the existing orchestration boundary for this integration."
+
+[[files]]
+path = "crates/project/src/scope/topology.rs"
+loc = 663
+justification = "The topology closure keeps frontier setup and ancestor/descendant SQL together so their scope rules can be reviewed as one algorithm. This integration records the existing size without extending the algorithm."
