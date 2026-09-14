@@ -1644,7 +1644,7 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   neither a legacy trace/outcome nor a divergence row. When `source` is omitted,
   the indexed claim is read from `bigname_phase.primary_names_current` and
   returned beside the verified answer only when the current `chain_heads`
-  position and exact completed `project` publication generation match the
+  position and captured `project` publication generation match the
   lookup before verified execution and remain unchanged after the indexed
   read; otherwise the request returns `409 stale`. Live results never change
   the indexed answer. Basenames verified primary-name lookup is unsupported;

@@ -1060,19 +1060,84 @@ async fn lookup_is_stale_while_project_cursor_lags_the_head_beyond_tolerance() -
 }
 
 #[tokio::test]
-async fn lookup_proceeds_while_project_cursor_lags_the_head_within_tolerance() -> AnyResult<()> {
-    // Live-follow stores the head before Project publishes for it; a publication one block
-    // behind is served rather than reported stale. The provider here is unreachable, so the
-    // lookup fails later, but not on the project fence.
+async fn lookup_completes_with_a_lagging_publication() -> AnyResult<()> {
+    for running in [false, true] {
+        let (rpc_url, rpc_handle) =
+            spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+        let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+        advance_head(fixture.pool()).await?;
+        if running {
+            mark_project_running(fixture.pool()).await?;
+        }
+        let response = run_lookup(&fixture, &rpc_url).await?;
+        assert_eq!(response.records[0].ledger_action, LedgerAction::Written);
+        assert_eq!(response.records[0].value, Some(json!(LIVE_VALUE)));
+        assert_eq!(ledger_count(fixture.pool()).await?, 1);
+        fixture.cleanup().await?;
+        assert_hash_pinned(&join_rpc(rpc_handle).await?, ETHEREUM_LATER_HASH);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn lookup_rejects_a_republished_lagging_generation() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
     advance_head(fixture.pool()).await?;
-
-    let error = lookup_engine(fixture.pool(), "http://127.0.0.1:1")?
-        .lookup(lookup_request(&fixture.logical_name_id)?)
-        .await
-        .expect_err("the provider is unreachable");
-    assert_ne!(error.kind(), ErrorKind::Stale, "{error}");
+    mark_project_running(fixture.pool()).await?;
+    let pool = fixture.pool().clone();
+    let update_pool = pool.clone();
+    let result = lookup_engine(&pool, &rpc_url)?
+        .lookup_with_before_persist(lookup_request(&fixture.logical_name_id)?, move || async move {
+            // Even the same height and content hash must retain its publication generation.
+            sqlx::query("UPDATE chain_phase_state SET current_block_number = current_block_number WHERE phase_name = 'project'")
+                .execute(&update_pool).await.expect("republish the same position");
+        }).await;
+    assert_eq!(
+        result.expect_err("new generation must be refused").kind(),
+        ErrorKind::ConcurrentState
+    );
+    assert_eq!(ledger_count(&pool).await?, 0);
     fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn lookup_publication_migration_preserves_guard_and_privileges() -> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let before: (String, Option<String>) = sqlx::query_as(
+        "SELECT pg_get_functiondef(oid), proacl::text FROM pg_proc WHERE oid =
+         'revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)'::regprocedure"
+    ).fetch_one(fixture.pool()).await?;
+    raw_sql(include_str!(
+        "../../../migrations/20260914120000_lookup_publication_revalidation.sql"
+    ))
+    .execute(fixture.pool())
+    .await?;
+    let after: (String, Option<String>) = sqlx::query_as(
+        "SELECT pg_get_functiondef(oid), proacl::text FROM pg_proc WHERE oid =
+         'revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)'::regprocedure"
+    ).fetch_one(fixture.pool()).await?;
+    assert_eq!(
+        before, after,
+        "fresh and migrated guards must have identical definitions and grants"
+    );
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+async fn mark_project_running(pool: &PgPool) -> AnyResult<()> {
+    sqlx::query(
+        "UPDATE chain_phase_state SET phase_status = 'running', finished_at = NULL,
+             target_block_number = 11, target_block_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(ETHEREUM)
+    .bind(ETHEREUM_LATER_HASH)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -3120,6 +3185,39 @@ async fn primary_name_lookup_uses_manifest_entrypoints_and_readable_head() -> An
     assert_eq!(requests[1]["params"][0]["to"], reverse_resolver);
     assert_eq!(requests[2]["params"][0]["to"], UNIVERSAL_RESOLVER);
     assert_hash_pinned(&requests, ETHEREUM_HASH);
+    Ok(())
+}
+
+#[tokio::test]
+async fn primary_name_completes_with_a_running_lagging_publication() -> AnyResult<()> {
+    let target = "0x8e8db5ccef88cca9d624701db544989c996e3216";
+    let reverse_resolver = "0xa2c122be93b0074270ebee7f6b7292c7deb45047";
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Result(Value::String(hex_string(
+            &Address::from_str(reverse_resolver)?.abi_encode(),
+        ))),
+        RpcResponse::Result(Value::String(hex_string(&"alice.eth".abi_encode()))),
+        RpcResponse::Result(encoded_address_result(target)?),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    seed_manifest(
+        fixture.pool(),
+        ENS_NAMESPACE,
+        "ens_v1_registry_l1",
+        "registry",
+        ENS_REGISTRY,
+        "00000000-0000-0000-0000-000000000104",
+    )
+    .await?;
+    advance_head(fixture.pool()).await?;
+    mark_project_running(fixture.pool()).await?;
+    let result = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup_ens_primary_name(ETHEREUM, target)
+        .await?;
+    assert_eq!(result.forward_address.as_deref(), Some(target));
+    fixture.cleanup().await?;
+    assert_hash_pinned(&join_rpc(rpc_handle).await?, ETHEREUM_LATER_HASH);
     Ok(())
 }
 

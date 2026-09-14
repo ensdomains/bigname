@@ -35,6 +35,18 @@ head, mismatched hash, future publication, missing canonical lineage, or
 interpreter-content-hash mismatch returns `409 stale`; it does not fall back to
 an answer at another position.
 
+Lookup captures the Project publication's block number, block hash, interpreter
+content hash, and row generation (`xmin`) before calling providers. A publication
+may be `completed` or `running` and trail the stored execution head by one block,
+matching `PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS`. Revalidation locks that
+captured publication and its canonical lineage, rather than requiring Project to
+have completed the execution head. Provider calls remain pinned to the captured
+execution head; the indexed comparison retains its own projected position.
+A changed publication row still refuses the response, including a same-height
+republish or a phase-status transition during the provider call. This tolerance
+does not eliminate concurrent-state `409` responses or relax route-level checks
+that indexed and verified answers share one reported position.
+
 Provider calls use the selected block identity rather than `latest`. Missing
 provider configuration, unsupported topology, and unsupported selectors are
 reported through the route's explicit unsupported or failed result shapes.
