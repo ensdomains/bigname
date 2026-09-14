@@ -16,7 +16,7 @@ use crate::AppState;
 use crate::v2::support::{
     ResolutionLookupError, ResolutionRecordKey, load_name_current_for_selected_snapshot,
     load_record_inventory_for_source, map_internal_api_error, normalize_inferred_route_name,
-    parse_resolution_record_key, snapshot_selection_api_error,
+    snapshot_selection_api_error,
 };
 
 use super::support::{ResolutionLookupOutcome, execute_resolution_lookup};
@@ -26,16 +26,18 @@ use super::{
     SnapshotReadResource, Source, Status, StrictQueryParams, V2Error, V2Result,
     api_error_to_v2_for_resource, default_requested_records,
     name_records_inventory::RecordInventory, resolve_v2_snapshot_for, snapshot_meta,
-    v2_exact_name_snapshot_scope_with_resolution_auxiliary, validate_product_record,
+    v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 
 mod build;
+mod keys;
 pub(crate) use build::{
     EXACT_NAME_AUTHORITY_NOT_VERIFIABLE, VERIFIED_NOT_SUPPORTED_REASON,
     build_authority_unsupported_name_records, build_auto_name_records, build_indexed_name_records,
     build_verified_name_records, ens_universal_resolver_discovery_candidate,
     indexed_records_requiring_verified_fallback,
 };
+pub(crate) use keys::parse_record_keys;
 
 pub(crate) const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
 const VERIFIED_ANSWER_STALE_FOR_SNAPSHOT_REASON: &str = "verified_answer_stale_for_snapshot";
@@ -538,42 +540,6 @@ async fn load_verified_record_lookup_with_persistence(
             resource,
         )),
     }
-}
-
-pub(crate) fn parse_record_keys(keys: Option<&str>) -> V2Result<Option<Vec<ResolutionRecordKey>>> {
-    let Some(keys) = keys.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(None);
-    };
-
-    let mut parsed = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    for key in keys.split(',').map(str::trim) {
-        if parsed.len() >= MAX_RECORD_KEYS {
-            return Err(V2Error::invalid_input(format!(
-                "keys must contain at most {MAX_RECORD_KEYS} record keys"
-            )));
-        }
-        if key.is_empty() {
-            return Err(V2Error::invalid_input(
-                "keys must be a comma-separated record-key list",
-            ));
-        }
-        let record = parse_resolution_record_key(key)
-            .and_then(validate_product_record)
-            .ok_or_else(|| {
-                V2Error::invalid_input(
-                    "keys must contain only addr:<coin_type>, text:<key>, avatar, or contenthash",
-                )
-            })?;
-        if !seen.insert(record.record_key.clone()) {
-            return Err(V2Error::invalid_input(
-                "keys must not contain duplicate record keys",
-            ));
-        }
-        parsed.push(record);
-    }
-
-    Ok(Some(parsed))
 }
 
 fn records_include_inventory(include: &[String]) -> V2Result<bool> {

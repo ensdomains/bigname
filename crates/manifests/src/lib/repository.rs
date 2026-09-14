@@ -13,16 +13,19 @@ use bigname_domain::{
 use crate::attribution::validate_block_derived_preimage_attribution;
 use crate::model::RawSourceManifest;
 use crate::{
-    DEFAULT_VERIFIED_AUTHORITY_ARMS, ENSV1_MIRROR_RESOLVER_ROLE, LoadedManifest, ManifestAbi,
-    ManifestLoadStatus, ManifestLoadSummary, VERIFIED_AUTHORITY_ARMS,
+    ENSV1_MIRROR_RESOLVER_ROLE, LoadedManifest, ManifestAbi, ManifestLoadStatus,
+    ManifestLoadSummary,
 };
 use crate::{ManifestRepository, SourceManifest, event_allows_empty_emitter_roles};
 
+#[path = "repository/metadata.rs"]
+mod metadata;
 #[path = "repository/mirror.rs"]
 mod mirror;
 #[path = "repository/read_features.rs"]
 mod read_features;
 
+use metadata::{validate_start_block_fits_i64, validate_verified_authority_arms};
 use mirror::validate_mirror_declarations;
 use read_features::validate_read_features;
 
@@ -424,64 +427,10 @@ fn validate_manifest_metadata(
     Ok(())
 }
 
-fn validate_verified_authority_arms(manifest: &SourceManifest, path: &Path) -> Result<()> {
-    let Some(arms) = &manifest.verified_authority_arms else {
-        return Ok(());
-    };
-    if manifest.source_family != "ens_execution" {
-        bail!(
-            "manifest {} declares verified_authority_arms, which only source family ens_execution may declare",
-            path.display()
-        );
-    }
-    if arms.is_empty() {
-        bail!(
-            "manifest {} declares empty verified_authority_arms; omit the field to admit the default {:?}",
-            path.display(),
-            DEFAULT_VERIFIED_AUTHORITY_ARMS
-        );
-    }
-    let mut seen = BTreeSet::new();
-    for arm in arms {
-        if !VERIFIED_AUTHORITY_ARMS.contains(&arm.as_str()) {
-            bail!(
-                "manifest {} declares unknown verified authority arm {arm:?}; expected one of {:?}",
-                path.display(),
-                VERIFIED_AUTHORITY_ARMS
-            );
-        }
-        if !seen.insert(arm.as_str()) {
-            bail!(
-                "manifest {} duplicates verified authority arm {arm:?}",
-                path.display()
-            );
-        }
-    }
-    Ok(())
-}
-
 fn manifest_chain_combo(chain: &str) -> &str {
     chain
         .split_once('-')
         .map_or(chain, |(chain_combo, _)| chain_combo)
-}
-
-fn validate_start_block_fits_i64(
-    start_block: Option<u64>,
-    declaration_kind: &str,
-    declaration_name: &str,
-    path: &Path,
-) -> Result<()> {
-    if let Some(start_block) = start_block
-        && i64::try_from(start_block).is_err()
-    {
-        bail!(
-            "manifest {declaration_kind} {declaration_name} in {} has start_block {start_block} that does not fit into BIGINT",
-            path.display()
-        );
-    }
-
-    Ok(())
 }
 
 fn validate_manifest_abi(manifest: &SourceManifest, path: &Path) -> Result<()> {
