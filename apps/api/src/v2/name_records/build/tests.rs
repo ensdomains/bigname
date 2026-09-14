@@ -199,6 +199,88 @@ fn auto_null_resolver_falls_through_only_for_the_ens_mainnet_discovery_shape() {
 }
 
 #[test]
+fn sepolia_null_resolver_admission_matches_executed_discovery_and_rejects_route_changes() {
+    use super::super::{ZERO_ADDRESS, ensure_executed_route_matches_admission};
+
+    let record = parse_resolution_record_key("addr:60").expect("test selector must parse");
+    let mut row = null_resolver_discovery_row();
+    row.chain_positions = json!({"ethereum-sepolia":{"chain_id":"ethereum-sepolia"}});
+    row.provenance = json!({"authority_selection":{"authority_arm":"ens_v2"}});
+    row.declared_summary["topology"] = json!({
+        "registry_path": [], "subregistry_path": [],
+        "resolver_path": [{"logical_name_id":row.logical_name_id,
+            "chain_id":"ethereum-sepolia", "address":null}],
+        "wildcard":{"source":null,"matched_labels":[]},
+        "alias":{"final_target":null,"hops":[]}, "version_boundaries":{},
+        "transport":{"source_chain_id":null,"target_chain_id":null,
+            "contract_address":null,"latest_event_kind":null}
+    });
+    for candidate in [row.clone(), {
+        let mut absent = row.clone();
+        absent
+            .declared_summary
+            .as_object_mut()
+            .unwrap()
+            .remove("topology");
+        absent
+    }] {
+        let admitted = ens_universal_resolver_discovery_candidate(&candidate);
+        assert!(admitted, "Sepolia direct-null shape must agree with Lookup");
+        assert!(ensure_executed_route_matches_admission(ZERO_ADDRESS, admitted).is_ok());
+        assert!(
+            ensure_executed_route_matches_admission(
+                "0x1000000000000000000000000000000000000001",
+                admitted
+            )
+            .is_err(),
+            "a discovery-to-direct route change must remain stale"
+        );
+        assert!(
+            indexed_satisfying_record_answer(&candidate, None, &record, true)
+                .expect("candidate must evaluate")
+                .is_none()
+        );
+        let (_, unavailable) = build_auto_name_records(
+            &candidate,
+            None,
+            std::slice::from_ref(&record),
+            Some(VerifiedRecordLookup::NotSupported),
+            false,
+            true,
+        )
+        .expect("unadmitted execution must remain explicit");
+        assert_eq!(
+            unavailable.records.unwrap()["addr:60"].status,
+            Status::Unsupported
+        );
+    }
+
+    let mut rejected = Vec::new();
+    let mut wrong_hop = row.clone();
+    wrong_hop.declared_summary["topology"]["resolver_path"][0]["chain_id"] =
+        json!("ethereum-mainnet");
+    rejected.push(wrong_hop);
+    let mut wrong_slot = row.clone();
+    wrong_slot.chain_positions = json!({"ethereum":{"chain_id":"ethereum-sepolia"}});
+    rejected.push(wrong_slot);
+    let mut alias = row.clone();
+    alias.declared_summary["topology"]["alias"] = json!({
+        "final_target":{"logical_name_id":"ens:other"},"hops":[{"logical_name_id":"ens:other"}]
+    });
+    rejected.push(alias);
+    let mut malformed = row.clone();
+    malformed.declared_summary["topology"]["resolver_path"] = json!([]);
+    rejected.push(malformed);
+    let mut unsupported = row;
+    unsupported.declared_summary["resolver"]["status"] = json!("unsupported");
+    rejected.push(unsupported);
+    for candidate in rejected {
+        assert!(!ens_universal_resolver_discovery_candidate(&candidate));
+        assert!(ensure_executed_route_matches_admission(ZERO_ADDRESS, false).is_err());
+    }
+}
+
+#[test]
 fn null_resolver_discovery_keeps_avatar_stale_without_a_record_boundary() {
     let record = parse_resolution_record_key("avatar").expect("test selector must parse");
     let (_, records) = build_auto_name_records(

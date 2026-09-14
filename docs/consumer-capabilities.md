@@ -110,12 +110,14 @@ The admitted archived-Sepolia implementation exposes the same two getter shapes
 | Default source unavailable or inventory non-authoritative | Explicit `unsupported` | Request-scoped verified fallback | Chain result |
 | Ineligible coin type or unflagged resolver generation | Exact-key behavior; no derivation | Existing exact-key fallback policy | Chain result |
 
-The auto column's exact-answer rule has one exception: for an Ethereum Mainnet
+The auto column's exact-answer rule has one exception: for an Ethereum Mainnet or Sepolia
 ENS name whose projected exact resolver is null and whose ordinary direct row
 admits [Universal Resolver ancestor
 discovery](glossary.md#universal-resolver-ancestor-discovery), all requested
 keys execute through verified lookup. Retained exact inventory predates the
-resolver-clear boundary and does not satisfy auto for that route.
+resolver-clear boundary and does not satisfy auto for that route. The selected
+execution manifest must still admit the name's authority arm; discovery does not
+bypass deployment-profile or topology restrictions.
 
 The verified column is additionally scoped by [authority
 arm](glossary.md#authority-epoch): a bound ENS name of either arm with a
