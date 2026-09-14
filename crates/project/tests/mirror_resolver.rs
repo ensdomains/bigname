@@ -730,6 +730,84 @@ async fn root_registry_tld_without_a_registration_serves_its_pointer() -> Result
 }
 
 #[tokio::test]
+async fn released_direct_tld_pointer_stays_withdrawn_after_a_name_only_update() -> Result<()> {
+    let logical_name_id = format!("ens:{}", bigname_lookup::ens_namehash_hex(PARENT_NAME)?);
+    let mut fixture = Fixture::declared("direct_tld_release_rescope", V1Side::Absent)
+        .single_label()
+        .unbound()
+        .with_v2_lifecycle(V2Lifecycle::Expired);
+    fixture.mirror = V1_RESOLVER;
+    fixture.v2_payload = Some(json!({"deployment_epoch": "fixture", "contracts": []}));
+
+    for incremental in [false, true] {
+        let (database, pool) = database(&format!("direct_tld_rescope_{incremental}")).await?;
+        seed(&pool, &fixture).await?;
+        sqlx::query("UPDATE normalized_events SET block_number = $1, block_hash = $2 WHERE event_kind = 'PreimageObserved'")
+            .bind(fixture.target()).bind(block_hash(fixture.target())).execute(&pool).await?;
+        if incremental {
+            run(&pool, fixture.base, 0, fixture.base, None, RunMode::Normal).await?;
+            let live = name_current(&pool, &logical_name_id)
+                .await?
+                .context("live TLD")?;
+            assert_eq!(live["serving_resource_id"], V2_RESOURCE, "{live}");
+            assert_eq!(live["declared_summary"]["resolver"]["address"], V1_RESOLVER);
+            for block in fixture.base + 1..=fixture.target() {
+                run(&pool, block, block, block, Some(block - 1), RunMode::Normal).await?;
+                if block >= fixture.base + 2 {
+                    let name = name_current(&pool, &logical_name_id)
+                        .await?
+                        .context("released TLD")?;
+                    assert_eq!(
+                        name["serving_resource_id"],
+                        Value::Null,
+                        "block {block}: {name}"
+                    );
+                    assert_eq!(
+                        name["declared_summary"]["resolver"]["address"],
+                        Value::Null,
+                        "block {block}: {name}"
+                    );
+                }
+            }
+        } else {
+            run(
+                &pool,
+                fixture.target(),
+                0,
+                fixture.target(),
+                None,
+                RunMode::Normal,
+            )
+            .await?;
+            let name = name_current(&pool, &logical_name_id)
+                .await?
+                .context("rebuilt TLD")?;
+            assert_eq!(name["serving_resource_id"], Value::Null, "{name}");
+            assert_eq!(
+                name["declared_summary"]["resolver"]["address"],
+                Value::Null,
+                "{name}"
+            );
+        }
+        run(
+            &pool,
+            fixture.target(),
+            fixture.target(),
+            fixture.target(),
+            Some(fixture.target()),
+            RunMode::Redo,
+        )
+        .await?;
+        let name = name_current(&pool, &logical_name_id)
+            .await?
+            .context("redo TLD")?;
+        assert_eq!(name["serving_resource_id"], Value::Null, "{name}");
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn mirror_does_not_derive_through_an_extended_ancestor_resolver() -> Result<()> {
     let fixture = Fixture::declared("mirror_extended_ancestor", V1Side::Absent)
         .with_ancestor(Ancestor::Extended);

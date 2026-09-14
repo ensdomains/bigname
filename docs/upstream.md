@@ -183,6 +183,11 @@ to the applicable entries below.
 > reservation resolver facts for diagnostics, but product name, record, batch
 > lookup, and resolver-listing routes classify an ownerless reservation as no
 > current registration and do not serve that resolver or its record inventory.
+> An unbound TLD with an observed ENSv2 root-registry resolver pointer is the
+> exception: these routes serve its pointer and eligible records through the
+> [serving resource](glossary.md#serving-resource), while its current authority
+> remains null. A reservation keeps that pointer; a later release, expiry, or
+> zero/null resolver update withdraws it.
 > **Upstream**: `PermissionedRegistry` stores the supplied resolver before its
 > owner-zero reservation branch and emits `ResolverUpdated` for a nonzero value
 > `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)`;
@@ -191,9 +196,10 @@ to the applicable entries below.
 > **Our rule**: `docs/api-v2.md` § Field Budgets,
 > `docs/api-v2-routes.md` name and resolver routes, and `docs/storage.md` §
 > Projection storage rules.
-> **Why**: product routes use current-registration ownership as their serving
-> boundary. Diagnostics preserve the retained facts for comparison without
-> presenting them as current name data.
+> **Why**: ordinary reservation records remain outside the serving boundary.
+> The root-registry TLD exception exposes observed resolution without inventing
+> registration ownership. Diagnostics retain the other reservation facts for
+> comparison without presenting them as current name data.
 > **Since**: `2026-09-02`
 
 > **Graph Node directive repeatability is declared but not resolved** — deployment `QmcE8RpWtsiN5hkJKdfCXGfTDoTgPEjMbQwnjLPfThT7kZ` at block 23,000,000 resolved `__Directive.isRepeatable` as null for each of its five directives, producing five non-null-field errors and null data. The same introspection without that field returned 113 types and no errors.

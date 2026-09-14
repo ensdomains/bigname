@@ -296,7 +296,9 @@ row keeps `current_authority_not_projected`: the pointer is followed from the na
 root-registry `ResolverChanged` to its token resource, the latest pointer on that resource
 wins (a state-derived expiry clear names the resource but no logical name), and a
 `RegistrationReleased` on the resource at or after the pointer withdraws it. A reservation does
-not withdraw it, and the row's lifecycle summary still reports the reservation. The root
+not withdraw it, and the row's lifecycle summary still reports the reservation. A rebuild
+triggered only by a name event also stages the root token resource's history, so earlier
+resource-only releases and resolver clears still withdraw the pointer. The root
 registry stores the pointer per token, for reservations too, and returns it while the label is
 unexpired; a finite reservation expiry withdraws through the interpreter's derived expiry
 release and pointer clear, an infinite one never does.
