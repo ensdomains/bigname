@@ -2,7 +2,7 @@
 async fn v2_history_routes_refuse_while_interpret_redo_is_in_progress() -> Result<()> {
     const ADDRESS: &str = "0x00000000000000000000000000000000000000cc";
     const MESSAGE: &str =
-        "history is temporarily unavailable while Interpret redo is in progress";
+        "collection publication is not available; retry after indexing is ready";
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
     let routes = [
@@ -114,7 +114,7 @@ async fn v2_history_routes_refuse_when_redo_finishes_after_anchor_resolution() -
                 bigname_storage::history_anchor_read_test_hooks::HistoryReadHookPoint::AfterAnchors,
             )
             .await?;
-        let state = database.app_state();
+        let state = database.app_state_with_public_namespaces(&["ens"]);
         let request_task = tokio::spawn(async move {
             app_router(state)
                 .oneshot(
@@ -126,7 +126,8 @@ async fn v2_history_routes_refuse_when_redo_finishes_after_anchor_resolution() -
                 .await
         });
 
-        control.wait_until_reached().await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), control.wait_until_reached()).await
+            .context("history request did not reach its read hook")?;
         database
             .simulate_interpret_redo_begin("ethereum-mainnet", "recompute_flags")
             .await?;
@@ -165,7 +166,7 @@ async fn v2_event_and_address_history_refuse_redo_before_name_enrichment() -> Re
                 bigname_storage::history_anchor_read_test_hooks::HistoryReadHookPoint::AfterPage,
             )
             .await?;
-        let state = database.app_state();
+        let state = database.app_state_with_public_namespaces(&["ens"]);
         let request_task = tokio::spawn(async move {
             app_router(state)
                 .oneshot(
@@ -177,7 +178,8 @@ async fn v2_event_and_address_history_refuse_redo_before_name_enrichment() -> Re
                 .await
         });
 
-        control.wait_until_reached().await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), control.wait_until_reached()).await
+            .context("history request did not reach its read hook")?;
         database
             .simulate_interpret_redo_begin("ethereum-mainnet", "recompute_flags")
             .await?;

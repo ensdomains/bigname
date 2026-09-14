@@ -49,16 +49,17 @@ impl HistoryInclude {
     };
 }
 
-/// `include` on the history collections accepts only `data` and `raw`.
+/// Validate history expansions; `total_count` controls the query, not event payload fields.
 pub(crate) fn history_include(include: &[String]) -> V2Result<HistoryInclude> {
     let mut parsed = HistoryInclude::default();
     for value in include {
         match value.as_str() {
             "data" => parsed.data = true,
             "raw" => parsed.raw = true,
+            "total_count" => {}
             _ => {
                 return Err(V2Error::invalid_input(
-                    "include must contain only data or raw",
+                    "include must contain only data, raw, or total_count",
                 ));
             }
         }

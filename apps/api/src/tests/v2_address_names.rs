@@ -78,9 +78,9 @@ async fn v2_get_address_names_returns_record_rows_with_relations_and_primary_fla
         v2_address_names_payload(&format!("/v1/addresses/{V2_ADDRESS}/names")).await?;
 
     assert_eq!(payload["page"]["page_size"], json!(50));
-    assert_eq!(payload["page"]["total_count"], Value::Null);
+    assert_eq!(payload["page"]["total_count"], json!(5));
     assert_eq!(payload["page"]["has_more"], json!(false));
-    assert_eq!(payload["meta"], json!({}));
+    assert_eq!(payload["meta"]["as_of"]["1"]["block_number"], json!(105));
 
     let data = payload["data"]
         .as_array()
@@ -1025,6 +1025,8 @@ async fn v2_get_address_names_empty_returns_200_empty_page() -> Result<()> {
         .seed_default_ens_snapshot_selector_position()
         .await?;
 
+    seed_v2_address_name_storage(&database, &[]).await?;
+
     let payload = v2_address_names_payload_for_database(
         &database,
         &format!("/v1/addresses/{V2_ADDRESS}/names"),
@@ -1032,6 +1034,7 @@ async fn v2_get_address_names_empty_returns_200_empty_page() -> Result<()> {
     .await?;
 
     assert_eq!(payload["data"], json!([]));
+    assert_eq!(payload["page"]["total_count"], json!(0));
     assert_eq!(payload["page"]["has_more"], json!(false));
     assert_eq!(payload["page"]["next_cursor"], Value::Null);
 
@@ -1357,8 +1360,10 @@ async fn v2_address_names_payload_for_database(
     uri: &str,
 ) -> Result<Value> {
     let response = v2_address_names_response_for_database(database, uri).await?;
-    assert_eq!(response.status(), StatusCode::OK);
-    read_json(response).await
+    let status = response.status();
+    let payload = read_json::<Value>(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload}");
+    Ok(payload)
 }
 
 async fn v2_address_names_response_for_database(
@@ -1414,6 +1419,15 @@ async fn seed_v2_address_name_storage(
     database: &TestDatabase,
     specs: &[V2AddressNameSpec],
 ) -> Result<()> {
+    // This fixture advertises both public namespaces; the empty Base index is also published.
+    database.seed_snapshot_selector_chain_positions(&json!({
+        "base": {
+            "chain_id": "base-mainnet",
+            "block_number": 1,
+            "block_hash": "0xcount-base-empty",
+            "timestamp": "2024-01-01T00:00:00Z"
+        }
+    })).await?;
     let surfaces = specs
         .iter()
         .map(|spec| {
@@ -1879,6 +1893,27 @@ async fn v2_get_address_names_filters_by_authority_and_reports_migration() -> Re
         vec!["beta.eth"]
     );
 
+    // Native ENSv2 authority alone does not prove migration.
+    sqlx::query(r#"UPDATE bigname_phase.name_current SET provenance = provenance || jsonb_build_object('authority_selection', '{"authority_arm":"ens_v2","proof_kind":"direct_registration"}'::jsonb) WHERE raw_name = 'beta.eth'"#)
+        .execute(&database.pool).await?;
+    for (filter, expected) in [
+        ("is_migrated=true", vec!["alpha.eth"]),
+        (
+            "is_migrated=false",
+            vec!["beta.eth", "gamma.eth", "shared-one.eth", "shared-two.eth"],
+        ),
+        ("authority=ens_v2", vec!["alpha.eth", "beta.eth"]),
+        ("is_migrated=true&q=beta", vec![]),
+    ] {
+        let payload = v2_address_names_payload_for_database(
+            &database,
+            &format!("/v1/addresses/{V2_ADDRESS}/names?{filter}"),
+        )
+        .await?;
+        assert_eq!(names(payload["data"].as_array().unwrap()), expected);
+        assert_eq!(payload["page"]["total_count"], json!(expected.len()));
+    }
+
     let invalid = v2_address_names_response_for_database(
         &database,
         &format!("/v1/addresses/{V2_ADDRESS}/names?authority=basenames"),
@@ -1950,4 +1985,51 @@ async fn v2_get_address_names_include_counts_adds_subname_and_record_counts() ->
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn v2_address_name_totals_match_filtered_deduplicated_pages() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    for filter in [
+        "relation=owner",
+        "relation=registrant&dedupe=registration",
+        "relation=owner,registrant",
+        "dedupe=registration",
+        "q=shared",
+        "q=missing",
+    ] {
+        let base = format!("/v1/addresses/{V2_ADDRESS}/names?{filter}");
+        let all = v2_address_names_payload_for_database(&database, &base).await?;
+        let expected = all["data"].as_array().unwrap().len();
+        assert_eq!(all["page"]["total_count"], json!(expected), "{filter}");
+        let mut seen = Vec::new();
+        let mut uri = format!("{base}&page_size=1");
+        loop {
+            let page = v2_address_names_payload_for_database(&database, &uri).await?;
+            assert_eq!(page["page"]["total_count"], json!(expected), "{filter}");
+            seen.extend(
+                page["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| row["name"].clone()),
+            );
+            let Some(cursor) = page["page"]["next_cursor"].as_str() else {
+                break;
+            };
+            uri = format!("{base}&page_size=1&cursor={cursor}");
+        }
+        assert_eq!(seen.len(), expected);
+        assert_eq!(
+            seen,
+            all["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["name"].clone())
+                .collect::<Vec<_>>()
+        );
+    }
+    database.cleanup().await
 }

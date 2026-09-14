@@ -12,7 +12,7 @@ use super::address_names::relation_set_to_storage;
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::support::{ensure_public_namespace, parse_evm_address};
 use super::{
-    CursorPayload, Envelope, Event, HISTORY_TOTAL_COUNT_CAP, HistoryScope, Meta, Page,
+    CursorPayload, Envelope, Event, HISTORY_TOTAL_COUNT_CAP, HistoryScope, Page,
     QueryParamAllowlist, QueryParams, RelationSet, StrictQueryParams, V2Error, V2Result,
     api_error_to_v2, build_event, decode, encode, history_include, history_page_options,
     history_sort_token, history_storage_order, history_storage_scope, history_total_count,
@@ -75,16 +75,28 @@ pub(crate) async fn get_address_history(
         order: history_storage_order(params.order),
         params: Some(&params),
     };
+    let snapshot = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+        &state,
+        params.cursor.as_deref(),
+        Some(&namespace),
+    )
+    .await?;
     let storage_cursor = params
         .cursor
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
-            address_history_storage_cursor(&payload, &cursor_binding)
+            let cursor = address_history_storage_cursor(&payload, &cursor_binding)?;
+            snapshot.validate_cursor(&payload)?;
+            Ok(cursor)
         })
         .transpose()?;
-    let block_window = resolve_history_block_window(&state.pool, &params).await?;
-    let options = history_page_options(&params, block_window);
+    let block_window = Some(super::history::bound_history_block_window(
+        resolve_history_block_window(&state.pool, &params).await?,
+        &snapshot.block_bounds(),
+    ));
+    let mut options = history_page_options(&params, block_window);
+    options.publication_block_bounds = Some(snapshot.block_bounds());
 
     let storage_page = bigname_storage::load_address_history_page_for_relations(
         &state.pool,
@@ -95,7 +107,11 @@ pub(crate) async fn get_address_history(
         true,
         storage_cursor.as_ref(),
         params.page_size,
-        HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP),
+        if params.include.iter().any(|v| v == "total_count") {
+            HistorySummaryMode::Count
+        } else {
+            HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP)
+        },
         &options,
         true,
     )
@@ -110,12 +126,15 @@ pub(crate) async fn get_address_history(
     .await
     .map_err(|_| V2Error::internal_error("failed to run history read test hook"))?;
 
-    let next_cursor = storage_page
-        .next_cursor
-        .as_ref()
-        .map(|cursor| encode(&address_history_cursor_payload(cursor, &cursor_binding)));
+    let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
+        encode(&snapshot.bind_cursor(address_history_cursor_payload(cursor, &cursor_binding)))
+    });
     let has_more = next_cursor.is_some();
-    let total_count = history_total_count(storage_page.summary.as_ref());
+    let total_count = if params.include.iter().any(|v| v == "total_count") {
+        storage_page.summary.as_ref().map(|s| s.total_count)
+    } else {
+        history_total_count(storage_page.summary.as_ref())
+    };
     let logical_name_ids = storage_page
         .rows
         .iter()
@@ -158,7 +177,7 @@ pub(crate) async fn get_address_history(
             total_count,
             has_more,
         }),
-        meta: Meta::default(),
+        meta: snapshot.finish(&state).await?,
     }))
 }
 

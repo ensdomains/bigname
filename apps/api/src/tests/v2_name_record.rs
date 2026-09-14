@@ -4078,7 +4078,7 @@ async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> R
     assert_eq!(payload["page"]["page_size"], json!(3));
     assert_eq!(payload["page"]["total_count"], json!(3));
     assert_eq!(payload["page"]["has_more"], json!(false));
-    assert_eq!(payload["meta"], json!({}));
+    assert!(payload["meta"]["as_of"].is_object());
 
     let data = payload["data"]
         .as_array()
@@ -4223,45 +4223,35 @@ async fn v2_get_subnames_paginates_with_opaque_cursor_without_overlap() -> Resul
 async fn v2_get_subnames_uses_current_sepolia_anchor_on_mixed_phase_heads() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_mixed_phase_head_names(&database).await?;
-    let child_logical_name_id = format!("ens:child.{V2_SEPOLIA_SNAPSHOT_NAME}");
-    seed_v2_subnames_bound_child(
-        &database,
-        &child_logical_name_id,
-        "Child.Sepolia-Pin.eth",
-        "namehash:child.sepolia-pin.eth",
-        91,
-        Uuid::from_u128(0x7e23),
-        Uuid::from_u128(0x7e24),
-        Uuid::from_u128(0x7e25),
-        json!({
-            "registration": {
-                "status": "active",
-                "authority_kind": "ens_v2_registry"
-            }
-        }),
-    )
-    .await?;
-    upsert_phase_children_current_rows(
-        &database.pool,
-        &[v2_subnames_declared_child_row(
-            &format!("ens:{V2_SEPOLIA_SNAPSHOT_NAME}"),
-            &child_logical_name_id,
-            "Child.Sepolia-Pin.eth",
-            "namehash:child.sepolia-pin.eth",
-            905,
-            91,
-        )],
-    )
-    .await?;
-
-    let payload = v2_subnames_payload_for_database(
-        &database,
-        &format!("/v1/names/{V2_SEPOLIA_SNAPSHOT_NAME}/subnames"),
-    )
-    .await?;
-    assert_eq!(payload["meta"], json!({}));
-    assert_eq!(payload["data"][0]["name"], json!("child.sepolia-pin.eth"));
-
+    let child_name = format!("child.{V2_SEPOLIA_SNAPSHOT_NAME}");
+    let child_logical_name_id = format!("ens:{child_name}");
+    seed_v2_snapshot_profile_name(&database, &child_name, "Child.Sepolia-Pin.eth",
+        "namehash:child.sepolia-pin.eth", Uuid::from_u128(0x7e23),
+        Uuid::from_u128(0x7e24), Uuid::from_u128(0x7e25),
+        "ethereum-sepolia", "ethereum-sepolia", V2_SEPOLIA_SNAPSHOT_BLOCK,
+        V2_SEPOLIA_SNAPSHOT_HASH, V2_SEPOLIA_SNAPSHOT_TIMESTAMP).await?;
+    let mut child = v2_subnames_declared_child_row(
+        &format!("ens:{V2_SEPOLIA_SNAPSHOT_NAME}"), &child_logical_name_id,
+        "Child.Sepolia-Pin.eth", "namehash:child.sepolia-pin.eth", 905, 10);
+    child.chain_positions = json!({"ethereum-sepolia": {
+        "chain_id": "ethereum-sepolia", "block_number": V2_SEPOLIA_SNAPSHOT_BLOCK,
+        "block_hash": V2_SEPOLIA_SNAPSHOT_HASH, "timestamp": V2_SEPOLIA_SNAPSHOT_TIMESTAMP
+    }});
+    child.canonicality_summary = json!({"state":"canonical_lineage"});
+    upsert_phase_children_current_rows(&database.pool, &[child]).await?;
+    database.insert_manifest("ens", "ens_v2_registry_l1", "ethereum-sepolia",
+        "ens_v2_sepolia_post_audit", 1, "active", "ensip15@ens-normalize-0.1.1").await?;
+    let state = AppState::new_with_rpc_urls(database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default());
+    let response = app_router(state).oneshot(Request::builder()
+        .uri(format!("/v1/names/{V2_SEPOLIA_SNAPSHOT_NAME}/subnames"))
+        .body(Body::empty()).expect("request must build")).await?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload}");
+    assert_eq!(payload["meta"]["as_of"]["11155111"]["block_number"], json!(V2_SEPOLIA_SNAPSHOT_BLOCK));
+    assert!(payload["meta"]["as_of"].get("1").is_none());
+    assert_eq!(payload["data"][0]["name"], json!(child_name));
     database.cleanup().await
 }
 
@@ -5049,7 +5039,7 @@ async fn v2_get_subnames_rejects_malformed_cursor() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_get_subnames_rejects_wrong_sort_but_ignores_legacy_snapshot_component() -> Result<()> {
+async fn v2_get_subnames_requires_restart_for_unbound_legacy_cursors() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_subnames_fixture(&database).await?;
 
@@ -5079,7 +5069,7 @@ async fn v2_get_subnames_rejects_wrong_sort_but_ignores_legacy_snapshot_componen
         )
         .await
         .context("v2 wrong-sort subnames cursor request failed")?;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 
     let legacy_snapshot = crate::v2::encode(&crate::v2::CursorPayload::new(
         "display_name_asc",
@@ -5110,10 +5100,9 @@ async fn v2_get_subnames_rejects_wrong_sort_but_ignores_legacy_snapshot_componen
         )
         .await
         .context("v2 legacy-snapshot subnames cursor request failed")?;
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
     let payload: Value = read_json(response).await?;
-    assert_eq!(payload["data"][0]["name"], json!("beta.parent.eth"));
-    assert_eq!(payload["meta"], json!({}));
+    assert_eq!(payload["error"]["code"], json!("stale"));
 
     database.cleanup().await?;
     Ok(())
@@ -6060,8 +6049,8 @@ async fn v2_get_subnames_q_filters_by_normalized_label_prefix() -> Result<()> {
     assert_eq!(v2_subname_names(&payload), vec!["alpha.parent.eth"]);
     assert_eq!(
         payload["page"]["total_count"],
-        Value::Null,
-        "a filtered page must not report the unfiltered parent total"
+        json!(1),
+        "a filtered page reports its exact total"
     );
     assert_eq!(payload["page"]["has_more"], json!(false));
 
@@ -6280,7 +6269,7 @@ async fn v2_get_subnames_include_expired_false_omits_released_and_past_expiry_ro
         vec!["alpha.parent.eth", "gamma.parent.eth"],
         "released rows and rows whose expires_at has passed are omitted; unregistered rows stay"
     );
-    assert_eq!(payload["page"]["total_count"], Value::Null);
+    assert_eq!(payload["page"]["total_count"], json!(2));
 
     let payload = v2_subnames_payload_for_database(
         &database,
@@ -7152,4 +7141,136 @@ async fn v2_get_name_records_serves_inventory_mirrored_from_ensv1() -> Result<()
     assert!(known.contains(&json!("addr:60")) && known.contains(&json!("text:description")));
     assert!(payload["data"].get("mirror").is_none());
     Ok(())
+}
+
+#[tokio::test]
+async fn v2_subname_filtered_totals_match_every_page_and_fixed_expiry_time() -> Result<()> {
+    let (database, _) = v2_subnames_payload("/v1/names/parent.eth/subnames").await?;
+    for filter in [
+        "q=a",
+        "q=missing",
+        "include_expired=false",
+        "q=b&include_expired=false",
+    ] {
+        let base = format!("/v1/names/parent.eth/subnames?{filter}");
+        let all = v2_subnames_payload_for_database(&database, &base).await?;
+        let expected = all["data"].as_array().unwrap().len();
+        let mut seen = Vec::new();
+        let mut uri = format!("{base}&page_size=1");
+        loop {
+            let page = v2_subnames_payload_for_database(&database, &uri).await?;
+            assert_eq!(page["page"]["total_count"], json!(expected));
+            seen.extend(v2_subname_names(&page));
+            let Some(cursor) = page["page"]["next_cursor"].as_str() else {
+                break;
+            };
+            uri = format!("{base}&page_size=1&cursor={cursor}");
+        }
+        assert_eq!(seen.len(), expected);
+    }
+    let at = bigname_storage::parse_rfc3339_utc_timestamp("2026-01-01T00:00:00Z")?;
+    let filter = bigname_storage::ChildrenCurrentPageFilter {
+        include_expired: false,
+        evaluated_at: Some(at),
+        ..Default::default()
+    };
+    let first = bigname_storage::load_children_current_page_filtered(
+        &database.pool,
+        "ens:parent.eth",
+        &filter,
+        None,
+        1,
+    )
+    .await?;
+    let next = bigname_storage::load_children_current_page_filtered(
+        &database.pool,
+        "ens:parent.eth",
+        &filter,
+        first.next_cursor.as_ref(),
+        1,
+    )
+    .await?;
+    assert_eq!(first.total_count, next.total_count);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_name_include_counts_rejects_same_height_republication() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_alice_name_record_fixture(&database, |_| {}, |_, _, _| {}).await?;
+    let baseline = v2_name_record_payload_for_database(&database, "/v1/names/alice.eth").await?;
+    let position = &baseline["meta"]["as_of"]["1"];
+    let block = position["block_number"].as_i64().expect("block number");
+    let hash = position["block_hash"].as_str().expect("block hash");
+    let time = position["timestamp"].as_str().expect("timestamp");
+    let (_guard, control) =
+        crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
+    let state = database.app_state();
+    let request = tokio::spawn(async move {
+        app_router(state).oneshot(Request::builder()
+            .uri("/v1/names/alice.eth?include=counts")
+            .body(Body::empty()).expect("request must build")).await
+    });
+    control.wait_until_reached().await;
+    seed_schema_v2_ens_lookup_head(&database.pool, block, hash, time).await?;
+    control.resume().await;
+    let response = request.await??;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], "stale");
+    assert!(payload.get("data").is_none());
+    let fresh = v2_name_record_payload_for_database(&database,
+        "/v1/names/alice.eth?include=counts").await?;
+    assert_eq!(fresh["data"]["record_count"], json!(4));
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_name_include_counts_rejects_historical_count_mismatch() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_alice_name_record_fixture(&database, |_| {}, |_, _, _| {}).await?;
+    let baseline = v2_name_record_payload_for_database(&database, "/v1/names/alice.eth").await?;
+    let token = baseline["meta"]["as_of_token"].as_str().expect("snapshot token");
+    let position = &baseline["meta"]["as_of"]["1"];
+    let block = position["block_number"].as_i64().expect("block number");
+    let time = bigname_storage::parse_rfc3339_utc_timestamp(
+        position["timestamp"].as_str().expect("timestamp"))?;
+    let later = crate::v2::format_timestamp(time + std::time::Duration::from_secs(1));
+    seed_schema_v2_ens_lookup_head(&database.pool, block + 1, "0xcounts-new-publication", &later).await?;
+    let old = v2_name_record_payload_for_database(&database,
+        &format!("/v1/names/alice.eth?at={token}")).await?;
+    assert_eq!(old["data"]["name"], "alice.eth");
+    let response = app_router(database.app_state()).oneshot(Request::builder()
+        .uri(format!("/v1/names/alice.eth?at={token}&include=counts"))
+        .body(Body::empty()).expect("request must build")).await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], "stale");
+    assert!(payload["error"]["message"].as_str().expect("message").contains("counts"));
+    assert!(payload.get("data").is_none());
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_subname_continuation_excludes_unpublished_subregistry_pointer() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    let first = v2_subnames_payload_for_database(&database, "/v1/names/alpha.eth/subnames?page_size=1").await?;
+    let cursor = first["page"]["next_cursor"].as_str().unwrap();
+    upsert_phase_raw_blocks(&database.pool, &[raw_block(REGISTRY_CHAIN_ID,
+        "0xregistry84", None, 84, 1_700_000_084)]).await?;
+    let event = registry_event("unpublished-child-pointer", Some(&registry_logical_name_id("two.alpha.eth")),
+        "SubregistryChanged", 84, ALPHA_REGISTRY,
+        json!({"source_event":"SubregistryUpdated", "subregistry":ONE_REGISTRY}));
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    let next = v2_subnames_payload_for_database(&database,
+        &format!("/v1/names/alpha.eth/subnames?page_size=1&cursor={cursor}")).await?;
+    assert_eq!(next["data"][0]["name"], json!("two.alpha.eth"));
+    assert!(next["data"][0].get("subregistry").is_none());
+    assert_eq!(next["page"]["total_count"], first["page"]["total_count"]);
+    seed_schema_v2_ens_lookup_head(&database.pool, 84, "0xregistry84", "2023-11-14T22:14:44Z").await?;
+    let published = v2_subnames_payload_for_database(&database,
+        "/v1/names/alpha.eth/subnames?q=two").await?;
+    assert_eq!(published["data"][0]["subregistry"]["address"], json!(ONE_REGISTRY));
+    database.cleanup().await
 }

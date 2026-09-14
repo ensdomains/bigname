@@ -77,6 +77,11 @@ async fn v2_history_routes_treat_internal_only_matches_as_no_product_matches() -
 async fn v2_events_rejects_foreign_kind_anchor_for_explicit_type() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
+    let state = database.app_state_with_public_namespaces(&["ens"]);
+    let snapshot = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+        &state, None, Some("ens"),
+    ).await.expect("fixture publication must be ready");
+    let encode = |payload| crate::v2::encode(&snapshot.bind_cursor(payload));
     let anchor = bigname_storage::HistoryCursor {
         normalized_event_id: sqlx::query_scalar(
             "SELECT normalized_event_id FROM bigname_phase.normalized_events WHERE event_identity = 'history-renewal'",
@@ -85,7 +90,7 @@ async fn v2_events_rejects_foreign_kind_anchor_for_explicit_type() -> Result<()>
         .await?,
         event_identity: "history-renewal".to_owned(),
     };
-    let cursor = crate::v2::encode(&crate::v2::events_cursor_payload(
+    let cursor = encode(crate::v2::events_cursor_payload(
         &anchor,
         &std::collections::BTreeMap::from([
             ("name".to_owned(), bigname_storage::logical_name_id_for_name("ens", "history.eth")),
@@ -105,11 +110,16 @@ async fn v2_events_rejects_foreign_kind_anchor_for_explicit_type() -> Result<()>
 }
 
 #[tokio::test]
-async fn v2_history_routes_continue_from_legacy_non_product_cursor() -> Result<()> {
+async fn v2_history_routes_continue_from_bound_non_product_cursor() -> Result<()> {
     const ADDRESS: &str = "0x00000000000000000000000000000000000000cc";
     const EVENT: &str = "history-surface-bound";
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
+    let state = database.app_state_with_public_namespaces(&["ens"]);
+    let snapshot = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+        &state, None, Some("ens"),
+    ).await.expect("fixture publication must be ready");
+    let encode = |payload| crate::v2::encode(&snapshot.bind_cursor(payload));
     let logical_name_id = bigname_storage::logical_name_id_for_name("ens", "history.eth");
     let anchor = bigname_storage::HistoryCursor {
         normalized_event_id: sqlx::query_scalar(
@@ -140,7 +150,7 @@ async fn v2_history_routes_continue_from_legacy_non_product_cursor() -> Result<(
     let routes = [
         (
             "/v1/events?name=history.eth&page_size=2",
-            crate::v2::encode(&crate::v2::events_cursor_payload(
+            encode(crate::v2::events_cursor_payload(
                 &anchor,
                 &std::collections::BTreeMap::from([
                     ("name".to_owned(), logical_name_id.clone()),
@@ -152,7 +162,7 @@ async fn v2_history_routes_continue_from_legacy_non_product_cursor() -> Result<(
         ),
         (
             "/v1/names/history.eth/history?page_size=2",
-            crate::v2::encode(&crate::v2::history_cursor_payload(
+            encode(crate::v2::history_cursor_payload(
                 &anchor,
                 &history_binding,
             )),
@@ -160,7 +170,7 @@ async fn v2_history_routes_continue_from_legacy_non_product_cursor() -> Result<(
         ),
         (
             "/v1/addresses/0x00000000000000000000000000000000000000cc/history?page_size=2",
-            crate::v2::encode(&crate::v2::address_history_cursor_payload(
+            encode(crate::v2::address_history_cursor_payload(
                 &anchor,
                 &address_binding,
             )),
@@ -182,7 +192,7 @@ async fn v2_history_routes_continue_from_legacy_non_product_cursor() -> Result<(
         continued
             .iter()
             .all(|(_, status, _, _)| *status == StatusCode::OK),
-        "legacy cursor continuation: {continued:#?}"
+        "bound non-product cursor continuation: {continued:#?}"
     );
     for (_, _, expected, payload) in &continued {
         assert_eq!(

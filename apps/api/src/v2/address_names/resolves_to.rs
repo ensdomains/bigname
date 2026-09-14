@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::v2::{
-    AddressNamesDedupe, AddressNamesSort, CursorPayload, Envelope, Meta, Page, QueryParams,
-    Relation, SortOrder, V2Error, V2Result, api_error_to_v2,
+    AddressNamesDedupe, AddressNamesSort, CursorPayload, Envelope, Page, QueryParams, Relation,
+    SortOrder, V2Error, V2Result, api_error_to_v2,
     cursor::{cursor_value, invalid_cursor_error},
     decode, encode,
     permission_support::{apply_role_summary_support_meta, permission_support_for_resources},
@@ -104,6 +104,11 @@ pub(super) async fn get_address_resolves_to(
     params: &QueryParams,
 ) -> V2Result<Json<Envelope<Vec<AddressName>>>> {
     let (coin_type, numeric_coin_type) = parse_resolves_to_coin_type(params.coin_type.as_deref())?;
+    if params.is_migrated.is_some() {
+        return Err(V2Error::invalid_input(
+            "is_migrated requires an ownership relation",
+        ));
+    }
     let include = address_names_include(&params.include)?;
     let include_role_summary = include.role_summary;
     let normalized_q = params
@@ -126,12 +131,20 @@ pub(super) async fn get_address_resolves_to(
         sort: params.sort,
         order,
     };
+    let snapshot = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+        state,
+        params.cursor.as_deref(),
+        params.namespace.as_deref(),
+    )
+    .await?;
     let storage_cursor = params
         .cursor
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
-            resolves_to_storage_cursor(&payload, &cursor_binding)
+            let cursor = resolves_to_storage_cursor(&payload, &cursor_binding)?;
+            snapshot.validate_cursor(&payload)?;
+            Ok(cursor)
         })
         .transpose()?;
 
@@ -256,10 +269,9 @@ pub(super) async fn get_address_resolves_to(
         BTreeMap::new()
     };
 
-    let next_cursor = storage_page
-        .next_cursor
-        .as_ref()
-        .map(|cursor| encode(&resolves_to_cursor_payload(cursor, &cursor_binding)));
+    let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
+        encode(&snapshot.bind_cursor(resolves_to_cursor_payload(cursor, &cursor_binding)))
+    });
     let has_more = next_cursor.is_some();
     let data = storage_page
         .entries
@@ -297,7 +309,7 @@ pub(super) async fn get_address_resolves_to(
             Ok(row)
         })
         .collect::<V2Result<Vec<_>>>()?;
-    let mut meta = Meta::default();
+    let mut meta = snapshot.finish(state).await?;
     if let Some(resource_ids) = role_resource_ids.as_deref() {
         let permission_support =
             permission_support_for_resources(resource_ids, &permission_summaries);
@@ -467,6 +479,7 @@ mod tests {
                 dedupe: AddressNamesDedupe::Name,
                 q: None,
                 authority: None,
+                is_migrated: None,
                 sort: AddressNamesSort::Name,
                 order: SortOrder::Asc,
             },

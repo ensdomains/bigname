@@ -19,9 +19,9 @@ use super::support::{
 };
 use super::{
     AtSelector, CursorPayload, Envelope, EventDetail, HistoryEventType, HistoryInclude,
-    HistoryScope, Meta, Page, QueryParamAllowlist, QueryParams, SortOrder, StrictQueryParams,
-    V2Error, V2Result, all_chain_slugs, api_error_to_v2, build_event_detail, decode,
-    decode_at_token, encode, history_include, raw_event_kind, validate_latest_collection_selectors,
+    HistoryScope, Page, QueryParamAllowlist, QueryParams, SortOrder, StrictQueryParams, V2Error,
+    V2Result, all_chain_slugs, api_error_to_v2, build_event_detail, decode, decode_at_token,
+    encode, history_include, raw_event_kind, validate_latest_collection_selectors,
 };
 
 const HISTORY_SORT_DESC: &str = "chain_position_desc";
@@ -102,15 +102,26 @@ pub(crate) async fn get_history(
         order: history_storage_order(params.order),
         params: &params,
     };
+    let snapshot = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+        &state,
+        params.cursor.as_deref(),
+        Some(&namespace),
+    )
+    .await?;
     let storage_cursor = params
         .cursor
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
-            history_storage_cursor(&payload, &cursor_binding)
+            let cursor = history_storage_cursor(&payload, &cursor_binding)?;
+            snapshot.validate_cursor(&payload)?;
+            Ok(cursor)
         })
         .transpose()?;
-    let block_window = resolve_history_block_window(&state.pool, &params).await?;
+    let block_window = Some(bound_history_block_window(
+        resolve_history_block_window(&state.pool, &params).await?,
+        &snapshot.block_bounds(),
+    ));
     let interpret_redo_fence = bigname_storage::capture_interpret_redo_fence(&state.pool)
         .await
         .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
@@ -159,13 +170,20 @@ pub(crate) async fn get_history(
             ))
         })?
         .into_iter()
+        .filter(|binding| {
+            snapshot
+                .block_bounds()
+                .get(&binding.chain_id)
+                .is_some_and(|block| binding.block_number <= *block)
+        })
         .map(|binding| binding.resource_id)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
     };
     let storage_scope = history_storage_scope(params.scope);
-    let options = history_page_options(&params, block_window);
+    let mut options = history_page_options(&params, block_window);
+    options.publication_block_bounds = Some(snapshot.block_bounds());
 
     let storage_page = bigname_storage::load_name_history_page(
         &state.pool,
@@ -175,19 +193,26 @@ pub(crate) async fn get_history(
         true,
         storage_cursor.as_ref(),
         params.page_size,
-        HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP),
+        if params.include.iter().any(|v| v == "total_count") {
+            HistorySummaryMode::Count
+        } else {
+            HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP)
+        },
         &options,
         Some(&interpret_redo_fence),
     )
     .await
     .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
 
-    let next_cursor = storage_page
-        .next_cursor
-        .as_ref()
-        .map(|cursor| encode(&history_cursor_payload(cursor, &cursor_binding)));
+    let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
+        encode(&snapshot.bind_cursor(history_cursor_payload(cursor, &cursor_binding)))
+    });
     let has_more = next_cursor.is_some();
-    let total_count = history_total_count(storage_page.summary.as_ref());
+    let total_count = if params.include.iter().any(|v| v == "total_count") {
+        storage_page.summary.as_ref().map(|s| s.total_count)
+    } else {
+        history_total_count(storage_page.summary.as_ref())
+    };
     let data = storage_page
         .rows
         .iter()
@@ -202,7 +227,7 @@ pub(crate) async fn get_history(
             total_count,
             has_more,
         }),
-        meta: Meta::default(),
+        meta: snapshot.finish(&state).await?,
     }))
 }
 
@@ -241,6 +266,34 @@ pub(crate) fn insert_history_filter_keys(
     }
 }
 
+/// Intersect the caller's time window with the publication's readable per-chain positions.
+/// Forward Interpret work beyond Project's served blocks never changes a continued history.
+pub(crate) fn bound_history_block_window(
+    requested: Option<HistoryBlockWindow>,
+    published: &BTreeMap<String, i64>,
+) -> HistoryBlockWindow {
+    let ranges = match requested {
+        Some(window) => window
+            .ranges
+            .into_iter()
+            .filter_map(|mut range| {
+                let published = *published.get(&range.chain_id)?;
+                range.to_block = Some(range.to_block.map_or(published, |to| to.min(published)));
+                (range.from_block.is_none_or(|from| from <= published)).then_some(range)
+            })
+            .collect(),
+        None => published
+            .iter()
+            .map(|(chain_id, block)| bigname_storage::ChainBlockRange {
+                chain_id: chain_id.clone(),
+                from_block: None,
+                to_block: Some(*block),
+            })
+            .collect(),
+    };
+    HistoryBlockWindow { ranges }
+}
+
 /// Map `from_timestamp`/`to_timestamp` to per-chain block ranges from readable
 /// lineage rows. `None` when no timestamp bound was requested.
 pub(crate) async fn resolve_history_block_window(
@@ -271,6 +324,7 @@ pub(crate) fn history_page_options(
     block_window: Option<HistoryBlockWindow>,
 ) -> HistoryPageOptions {
     HistoryPageOptions {
+        publication_block_bounds: None,
         order: history_storage_order(params.order),
         event_kinds: params
             .event_types
@@ -502,213 +556,4 @@ pub(crate) fn format_timestamp(value: OffsetDateTime) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::v2::RawQueryParams;
-
-    fn sample_cursor() -> HistoryCursor {
-        HistoryCursor {
-            normalized_event_id: 42,
-            event_identity: "event:42".to_owned(),
-        }
-    }
-
-    fn params(raw: RawQueryParams) -> QueryParams {
-        QueryParams::try_from(raw).expect("params must parse")
-    }
-
-    fn binding<'a>(params: &'a QueryParams, scope: HistoryScope) -> HistoryCursorBinding<'a> {
-        HistoryCursorBinding {
-            namespace: "ens",
-            parent_logical_name_id: "ens:parent.eth",
-            scope,
-            order: history_storage_order(params.order),
-            params,
-        }
-    }
-
-    #[test]
-    fn history_cursor_payload_round_trips_storage_cursor() {
-        let cursor = sample_cursor();
-        let params = params(RawQueryParams::default());
-        let binding = binding(&params, HistoryScope::Both);
-        let payload = history_cursor_payload(&cursor, &binding);
-
-        assert_eq!(payload.sort, "chain_position_desc");
-        assert_eq!(
-            payload.filters,
-            BTreeMap::from([
-                ("namespace".to_owned(), "ens".to_owned()),
-                ("name".to_owned(), "ens:parent.eth".to_owned()),
-                ("scope".to_owned(), "both".to_owned()),
-            ])
-        );
-
-        assert_eq!(
-            history_storage_cursor(&payload, &binding).expect("cursor must decode"),
-            cursor
-        );
-        assert!(payload.snapshot.is_none());
-    }
-
-    #[test]
-    fn history_cursor_binds_order_type_set_and_timestamp_window() {
-        let cursor = sample_cursor();
-        let filtered = params(RawQueryParams {
-            order: Some("asc".to_owned()),
-            event_type: Some("renewal,registration".to_owned()),
-            from_timestamp: Some("2023-11-14T23:15:04+01:00".to_owned()),
-            to_timestamp: Some("2023-11-14T22:15:07Z".to_owned()),
-            ..RawQueryParams::default()
-        });
-        let filtered_binding = binding(&filtered, HistoryScope::Both);
-        let payload = history_cursor_payload(&cursor, &filtered_binding);
-
-        assert_eq!(payload.sort, "chain_position_asc");
-        assert_eq!(
-            payload.filters,
-            BTreeMap::from([
-                ("namespace".to_owned(), "ens".to_owned()),
-                ("name".to_owned(), "ens:parent.eth".to_owned()),
-                ("scope".to_owned(), "both".to_owned()),
-                ("type".to_owned(), "registration,renewal".to_owned()),
-                (
-                    "from_timestamp".to_owned(),
-                    "2023-11-14T22:15:04Z".to_owned()
-                ),
-                ("to_timestamp".to_owned(), "2023-11-14T22:15:07Z".to_owned()),
-            ])
-        );
-        assert_eq!(
-            history_storage_cursor(&payload, &filtered_binding).expect("cursor must decode"),
-            cursor
-        );
-
-        let unfiltered = params(RawQueryParams::default());
-        assert!(
-            history_storage_cursor(&payload, &binding(&unfiltered, HistoryScope::Both)).is_err()
-        );
-        let other_order = params(RawQueryParams {
-            event_type: Some("renewal,registration".to_owned()),
-            from_timestamp: Some("2023-11-14T22:15:04Z".to_owned()),
-            to_timestamp: Some("2023-11-14T22:15:07Z".to_owned()),
-            ..RawQueryParams::default()
-        });
-        assert!(
-            history_storage_cursor(&payload, &binding(&other_order, HistoryScope::Both)).is_err()
-        );
-        let other_types = params(RawQueryParams {
-            order: Some("asc".to_owned()),
-            event_type: Some("renewal".to_owned()),
-            from_timestamp: Some("2023-11-14T22:15:04Z".to_owned()),
-            to_timestamp: Some("2023-11-14T22:15:07Z".to_owned()),
-            ..RawQueryParams::default()
-        });
-        assert!(
-            history_storage_cursor(&payload, &binding(&other_types, HistoryScope::Both)).is_err()
-        );
-    }
-
-    #[test]
-    fn history_cursor_rejects_wrong_sort_filter_or_scope() {
-        let cursor = sample_cursor();
-        let params = params(RawQueryParams::default());
-        let both = binding(&params, HistoryScope::Both);
-
-        let mut payload = history_cursor_payload(&cursor, &both);
-        payload.sort = "wrong".to_owned();
-        assert!(history_storage_cursor(&payload, &both).is_err());
-
-        let mut payload = history_cursor_payload(&cursor, &both);
-        payload
-            .filters
-            .insert("name".to_owned(), "ens:other.eth".to_owned());
-        assert!(history_storage_cursor(&payload, &both).is_err());
-
-        let payload = history_cursor_payload(&cursor, &binding(&params, HistoryScope::Name));
-        assert!(history_storage_cursor(&payload, &both).is_err());
-    }
-
-    #[test]
-    fn history_cursor_ignores_legacy_snapshot_component() {
-        let cursor = sample_cursor();
-        let params = params(RawQueryParams::default());
-        let both = binding(&params, HistoryScope::Both);
-        let mut payload = history_cursor_payload(&cursor, &both);
-        payload.snapshot = Some("legacy-snapshot".to_owned());
-
-        assert_eq!(
-            history_storage_cursor(&payload, &both)
-                .expect("legacy snapshot component must not bind a latest-state cursor"),
-            cursor
-        );
-    }
-
-    #[test]
-    fn history_page_options_follow_type_set_and_order() {
-        let defaulted = history_page_options(&params(RawQueryParams::default()), None);
-        assert_eq!(defaulted.order, HistoryOrder::Desc);
-        assert_eq!(defaulted.event_kinds, product_history_event_kinds());
-        assert!(!defaulted.bind_cursor_anchor_to_event_kinds);
-        assert!(defaulted.block_window.is_none());
-
-        let filtered = history_page_options(
-            &params(RawQueryParams {
-                order: Some("asc".to_owned()),
-                event_type: Some("renewal".to_owned()),
-                ..RawQueryParams::default()
-            }),
-            Some(HistoryBlockWindow::default()),
-        );
-        assert_eq!(filtered.order, HistoryOrder::Asc);
-        assert_eq!(filtered.event_kinds, vec!["RegistrationRenewed".to_owned()]);
-        assert!(filtered.bind_cursor_anchor_to_event_kinds);
-        assert!(filtered.block_window.is_some());
-    }
-
-    #[test]
-    fn history_total_count_applies_the_cap() {
-        let summary = |total_count: u64| HistorySummary {
-            total_count,
-            normalized_event_ids: Vec::new(),
-            raw_fact_refs: Vec::new(),
-            manifest_versions: Vec::new(),
-            chain_position_samples: Vec::new(),
-            last_updated: None,
-        };
-        assert_eq!(history_total_count(None), None);
-        assert_eq!(history_total_count(Some(&summary(0))), Some(0));
-        assert_eq!(
-            history_total_count(Some(&summary(HISTORY_TOTAL_COUNT_CAP))),
-            Some(HISTORY_TOTAL_COUNT_CAP)
-        );
-        assert_eq!(
-            history_total_count(Some(&summary(HISTORY_TOTAL_COUNT_CAP + 1))),
-            None
-        );
-    }
-
-    #[test]
-    fn history_event_type_filters_non_product_kinds() {
-        assert_eq!(
-            history_event_type("RegistrationRenewed"),
-            Some(HistoryEventType::Renewal)
-        );
-        assert_eq!(
-            history_event_type("RegistrationReleased"),
-            Some(HistoryEventType::Release)
-        );
-        assert_eq!(
-            history_event_type("ExpiryChanged"),
-            Some(HistoryEventType::Expiry)
-        );
-        assert_eq!(
-            history_event_type("AuthorityEpochChanged"),
-            Some(HistoryEventType::Authority)
-        );
-        assert_eq!(history_event_type("SurfaceBound"), None);
-        assert_eq!(history_event_type("PreimageObserved"), None);
-        assert_eq!(history_event_type("MigrationApplied"), None);
-        assert_eq!(history_event_type("ContractDiscovered"), None);
-    }
-}
+mod tests;

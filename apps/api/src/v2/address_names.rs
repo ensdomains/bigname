@@ -20,7 +20,7 @@ use super::permission_support::{
 };
 use super::support::{ensure_public_namespace, parse_evm_address};
 use super::{
-    AddressNamesDedupe, AddressNamesSort, Authority, Envelope, Meta, Page, QueryParamAllowlist,
+    AddressNamesDedupe, AddressNamesSort, Authority, Envelope, Page, QueryParamAllowlist,
     RegistrationStatus, Relation, RelationSet, SortOrder, StrictQueryParams, V2Error, V2Result,
     api_error_to_v2, decode, encode,
     name_record::{load_migrated_at, name_registration_fields},
@@ -54,6 +54,7 @@ impl QueryParamAllowlist for AddressNamesQueryParams {
         "relation",
         "coin_type",
         "authority",
+        "is_migrated",
         "q",
         "sort",
         "order",
@@ -162,19 +163,28 @@ pub(crate) async fn get_address_names(
         dedupe: params.dedupe,
         q: normalized_q.as_deref(),
         authority: params.authority,
+        is_migrated: params.is_migrated,
         sort: params.sort,
         order,
     };
+    let snapshot = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+        &state,
+        params.cursor.as_deref(),
+        params.namespace.as_deref(),
+    )
+    .await?;
     let storage_cursor = params
         .cursor
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
-            address_names_storage_cursor(&payload, &cursor_binding)
+            let cursor = address_names_storage_cursor(&payload, &cursor_binding)?;
+            snapshot.validate_cursor(&payload)?;
+            Ok(cursor)
         })
         .transpose()?;
 
-    let storage_page = bigname_storage::load_address_names_current_page_sorted_for_relations(
+    let storage_page = bigname_storage::load_address_names_current_page_filtered(
         &state.pool,
         &normalized_address,
         namespace_filter.as_deref(),
@@ -182,6 +192,7 @@ pub(crate) async fn get_address_names(
         storage_dedupe,
         normalized_q.as_deref(),
         params.authority.map(Authority::as_str),
+        params.is_migrated,
         storage_sort,
         storage_order,
         storage_cursor.as_ref(),
@@ -293,10 +304,9 @@ pub(crate) async fn get_address_names(
         BTreeMap::new()
     };
 
-    let next_cursor = storage_page
-        .next_cursor
-        .as_ref()
-        .map(|cursor| encode(&address_names_cursor_payload(cursor, &cursor_binding)));
+    let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
+        encode(&snapshot.bind_cursor(address_names_cursor_payload(cursor, &cursor_binding)))
+    });
     let has_more = next_cursor.is_some();
     let data = storage_page
         .entries
@@ -338,7 +348,7 @@ pub(crate) async fn get_address_names(
             Ok(row)
         })
         .collect::<V2Result<Vec<_>>>()?;
-    let mut meta = Meta::default();
+    let mut meta = snapshot.finish(&state).await?;
     if let Some(resource_ids) = role_resource_ids.as_deref() {
         let permission_support =
             permission_support_for_resources(resource_ids, &permission_summaries);
@@ -351,7 +361,7 @@ pub(crate) async fn get_address_names(
             cursor: params.cursor.clone(),
             next_cursor,
             page_size: params.page_size,
-            total_count: None,
+            total_count: Some(storage_page.summary.grouped_entry_count),
             has_more,
         }),
         meta,

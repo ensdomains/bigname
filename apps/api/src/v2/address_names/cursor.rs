@@ -34,6 +34,7 @@ pub(crate) struct AddressNamesCursorBinding<'a> {
     pub(crate) dedupe: AddressNamesDedupe,
     pub(crate) q: Option<&'a str>,
     pub(crate) authority: Option<Authority>,
+    pub(crate) is_migrated: Option<bool>,
     pub(crate) sort: AddressNamesSort,
     pub(crate) order: SortOrder,
 }
@@ -60,6 +61,13 @@ pub(crate) fn address_names_cursor_payload(
             ),
             (Q_FILTER_KEY.to_owned(), option_filter(binding.q)),
             (
+                "is_migrated".to_owned(),
+                binding
+                    .is_migrated
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            ),
+            (
                 AUTHORITY_FILTER_KEY.to_owned(),
                 option_filter(binding.authority.map(Authority::as_str)),
             ),
@@ -80,7 +88,14 @@ pub(crate) fn address_names_storage_cursor(
     if payload.sort != binding.sort.as_str() {
         return Err(invalid_cursor_error());
     }
-    if payload.filters.len() != 7
+    if payload.filters.len() != 8
+        || payload.filters.get("is_migrated")
+            != Some(
+                &binding
+                    .is_migrated
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            )
         || payload.filters.get(ADDRESS_FILTER_KEY).map(String::as_str) != Some(binding.address)
         || payload
             .filters

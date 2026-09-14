@@ -46,11 +46,13 @@ pub enum ChildrenCurrentOrder {
 /// Page-narrowing controls for declared direct child page reads. `q` is a caller-normalized
 /// prefix compared byte-wise against the served child name; `include_expired=false` omits
 /// children whose current registration is released or whose expiry is earlier than the
-/// database's transaction time.
+/// supplied fixed evaluation time (or the database's transaction time when omitted).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChildrenCurrentPageFilter<'a> {
     pub q: Option<&'a str>,
     pub include_expired: bool,
+    /// Fixed evaluation time for expiry filtering across count and continuation requests.
+    pub evaluated_at: Option<OffsetDateTime>,
     pub sort: ChildrenCurrentSort,
     pub order: ChildrenCurrentOrder,
 }
@@ -60,6 +62,7 @@ impl Default for ChildrenCurrentPageFilter<'_> {
         Self {
             q: None,
             include_expired: true,
+            evaluated_at: None,
             sort: ChildrenCurrentSort::Name,
             order: ChildrenCurrentOrder::Asc,
         }
@@ -114,6 +117,8 @@ pub struct ChildrenCurrentSummary {
 /// Bounded declared direct child page plus full-filter summary metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChildrenCurrentPage {
+    /// Exact number of children admitted by the page filters, before its cursor.
+    pub total_count: u64,
     pub rows: Vec<ChildrenCurrentRow>,
     pub next_cursor: Option<ChildrenCurrentKeysetCursor>,
     pub summary: ChildrenCurrentSummary,

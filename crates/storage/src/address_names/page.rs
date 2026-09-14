@@ -76,6 +76,38 @@ pub async fn load_address_names_current_page_sorted_for_relations(
     cursor: Option<&AddressNamesCurrentSortedCursor>,
     page_size: u64,
 ) -> Result<AddressNamesCurrentSortedPage> {
+    load_address_names_current_page_filtered(
+        pool,
+        address,
+        namespace,
+        relations,
+        dedupe_by,
+        q,
+        authority_arm,
+        None,
+        sort,
+        order,
+        cursor,
+        page_size,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn load_address_names_current_page_filtered(
+    pool: &PgPool,
+    address: &str,
+    namespace: Option<&str>,
+    relations: Option<&[AddressNameRelation]>,
+    dedupe_by: AddressNamesCurrentDedupe,
+    q: Option<&str>,
+    authority_arm: Option<&str>,
+    is_migrated: Option<bool>,
+    sort: AddressNamesCurrentSort,
+    order: AddressNamesCurrentOrder,
+    cursor: Option<&AddressNamesCurrentSortedCursor>,
+    page_size: u64,
+) -> Result<AddressNamesCurrentSortedPage> {
     let page_size = checked_page_size_usize(
         page_size,
         "address_names_current page_size must be positive",
@@ -95,6 +127,7 @@ pub async fn load_address_names_current_page_sorted_for_relations(
         dedupe_by,
         q,
         authority_arm,
+        is_migrated,
     )
     .await?;
 
@@ -108,6 +141,7 @@ pub async fn load_address_names_current_page_sorted_for_relations(
             dedupe_by,
             q,
             authority_arm,
+            is_migrated,
             sort,
             cursor,
         )
@@ -123,6 +157,7 @@ pub async fn load_address_names_current_page_sorted_for_relations(
         dedupe_by,
         q,
         authority_arm,
+        is_migrated,
     );
     push_address_names_current_sortable_entries_cte(&mut builder, sort);
     builder.push(
@@ -225,6 +260,7 @@ fn load_context_parts(
     parts
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn load_address_names_current_summary(
     pool: &PgPool,
     address: &str,
@@ -233,6 +269,7 @@ async fn load_address_names_current_summary(
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<&str>,
     authority_arm: Option<&str>,
+    is_migrated: Option<bool>,
 ) -> Result<AddressNamesCurrentSummary> {
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_address_names_current_grouped_entries_cte(
@@ -243,6 +280,7 @@ async fn load_address_names_current_summary(
         dedupe_by,
         q,
         authority_arm,
+        is_migrated,
     );
     builder.push(
         r#",
@@ -398,6 +436,7 @@ async fn ensure_address_names_current_cursor_exists(
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<&str>,
     authority_arm: Option<&str>,
+    is_migrated: Option<bool>,
     sort: AddressNamesCurrentSort,
     cursor: &AddressNamesCurrentSortedCursor,
 ) -> Result<()> {
@@ -410,6 +449,7 @@ async fn ensure_address_names_current_cursor_exists(
         dedupe_by,
         q,
         authority_arm,
+        is_migrated,
     );
     push_address_names_current_sortable_entries_cte(&mut builder, sort);
     builder.push(

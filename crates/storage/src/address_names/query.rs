@@ -9,6 +9,7 @@ use super::{
     DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
 };
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     address: &'a str,
@@ -17,6 +18,7 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<&'a str>,
     authority_arm: Option<&'a str>,
+    is_migrated: Option<bool>,
 ) {
     builder.push(
         r#"
@@ -87,6 +89,28 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                   AND authority_nc.provenance #>> '{authority_selection,authority_arm}' = "#,
         );
         builder.push_bind(authority_arm);
+        builder.push(")");
+    }
+    if let Some(is_migrated) = is_migrated {
+        if is_migrated {
+            builder.push(" AND ");
+        } else {
+            builder.push(" AND NOT ");
+        }
+        // Use the same proof and timestamp join as load_name_migration_transition_timestamps.
+        builder.push(r#"EXISTS (
+            SELECT 1 FROM bigname_phase.name_current migration_nc
+            JOIN bigname_phase.normalized_events proof
+              ON proof.normalized_event_id = CASE
+                WHEN migration_nc.provenance #>> '{authority_selection,proof_event_id}' ~ '^[0-9]+$'
+                THEN (migration_nc.provenance #>> '{authority_selection,proof_event_id}')::bigint END
+            JOIN bigname_phase.chain_lineage migration_lineage
+              ON migration_lineage.chain_id = proof.chain_id
+             AND migration_lineage.block_hash = proof.block_hash
+            WHERE migration_nc.logical_name_id = anc.logical_name_id
+              AND migration_nc.provenance #>> '{authority_selection,authority_arm}' = 'ens_v2'
+              AND migration_nc.provenance #>> '{authority_selection,proof_kind}' = "#);
+        builder.push_bind(crate::MIGRATION_AUTHORITY_TRANSITION_PROOF_KIND);
         builder.push(")");
     }
     builder.push(DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER);

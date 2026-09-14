@@ -40,7 +40,7 @@ const CHILD_NAME_CURRENT_JOIN: &str = r#"
 /// Load a bounded page of declared direct children narrowed and ordered by `filter`.
 ///
 /// `summary` on the returned page is always the unfiltered per-parent aggregate: callers that
-/// narrowed the page must not present it as the page's total. `cursor` must have been issued for
+/// narrowed the page use the separately computed `total_count`. `cursor` must have been issued for
 /// the same `sort` and `order`; a cursor whose sort value kind does not match the sort is
 /// rejected here rather than silently re-anchored.
 pub async fn load_children_current_page_filtered(
@@ -95,7 +95,17 @@ pub async fn load_children_current_page_filtered(
     });
     let rows = rows.into_iter().map(|row| row.row).collect();
     let summary = load_children_current_summary(pool, parent_logical_name_id).await?;
+    let total_count = if filter.admits_every_child() {
+        u64::try_from(summary.child_count).context("negative child count")?
+    } else {
+        let mut count = QueryBuilder::<Postgres>::new("WITH children AS (");
+        push_children_cte(&mut count, parent_logical_name_id, filter);
+        count.push(") SELECT COUNT(*)::BIGINT FROM children");
+        u64::try_from(count.build_query_scalar::<i64>().fetch_one(pool).await?)
+            .context("negative filtered child count")?
+    };
     Ok(ChildrenCurrentPage {
+        total_count,
         rows,
         next_cursor,
         summary,
@@ -150,7 +160,13 @@ fn push_children_cte<'a>(
             " AND COALESCE(nc.declared_summary #>> '{registration,status}', '') <> 'released' AND COALESCE(",
         );
         push_expires_at_timestamp_expr(builder);
-        builder.push(" >= NOW(), TRUE)");
+        builder.push(" >= ");
+        if let Some(evaluated_at) = filter.evaluated_at {
+            builder.push_bind(evaluated_at);
+        } else {
+            builder.push("NOW()");
+        }
+        builder.push(", TRUE)");
     }
 }
 

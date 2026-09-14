@@ -5,7 +5,7 @@ async fn v2_get_history_returns_lean_product_rows_newest_first() -> Result<()> {
     assert_eq!(payload["page"]["page_size"], json!(20));
     assert_eq!(payload["page"]["total_count"], json!(10));
     assert_eq!(payload["page"]["has_more"], json!(false));
-    assert_eq!(payload["meta"], json!({}));
+    assert!(payload["meta"]["as_of"].is_object());
 
     let data = payload["data"]
         .as_array()
@@ -1352,7 +1352,7 @@ async fn v2_get_history_empty_and_missing_name_semantics() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_get_history_uses_current_sepolia_anchor_on_mixed_phase_heads() -> Result<()> {
+async fn v2_get_history_excludes_unpublished_sepolia_events_on_mixed_phase_heads() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_mixed_phase_head_names(&database).await?;
     seed_v2_mixed_phase_head_history(&database).await?;
@@ -1362,10 +1362,10 @@ async fn v2_get_history_uses_current_sepolia_anchor_on_mixed_phase_heads() -> Re
         &format!("/v1/names/{V2_SEPOLIA_SNAPSHOT_NAME}/history"),
     )
     .await?;
-    assert_eq!(payload["meta"], json!({}));
+    assert!(payload["meta"]["as_of"].is_object());
     assert_eq!(
         history_types(payload["data"].as_array().expect("history data")),
-        vec!["registration"]
+        Vec::<String>::new()
     );
 
     database.cleanup().await
@@ -1390,7 +1390,7 @@ async fn v2_history_response_for_database(
     database: &TestDatabase,
     uri: &str,
 ) -> Result<Response> {
-    app_router(database.app_state())
+    app_router(database.app_state_with_public_namespaces(&["ens"]))
         .oneshot(
             Request::builder()
                 .uri(uri)
@@ -1502,6 +1502,7 @@ async fn seed_v2_history_fixture(database: &TestDatabase) -> Result<()> {
     .await
     .context("failed to upsert v2 history fixture events")?;
 
+    database.seed_default_ens_primary_name_fallback_context().await?;
     Ok(())
 }
 
@@ -1580,13 +1581,15 @@ async fn seed_v2_history_name(
             }
         }),
     )
-    .await
+    .await?;
+    database.seed_default_ens_snapshot_selector_position().await
 }
 
 async fn seed_v2_history_blocks(
     database: &TestDatabase,
     range: std::ops::RangeInclusive<i64>,
 ) -> Result<()> {
+    let end = *range.end();
     let blocks = range
         .map(|block_number| {
             raw_block(
@@ -1599,6 +1602,13 @@ async fn seed_v2_history_blocks(
         })
         .collect::<Vec<_>>();
     upsert_phase_raw_blocks(&database.pool, &blocks).await?;
+    let current: Option<i64> = sqlx::query_scalar("SELECT latest_block_number FROM chain_heads WHERE chain_id = 'ethereum-mainnet'")
+        .fetch_optional(&database.pool).await?;
+    if !blocks.is_empty() && current.is_none_or(|head| head < end) {
+        let timestamp = sqlx::types::time::OffsetDateTime::from_unix_timestamp(1_700_000_000 + end)?;
+        seed_schema_v2_ens_lookup_head(&database.pool, end, &format!("0xhistory{end}"),
+            &crate::v2::format_timestamp(timestamp)).await?;
+    }
     Ok(())
 }
 
@@ -2262,5 +2272,119 @@ async fn v2_events_resolver_filter_lists_rows_for_one_resolver_contract() -> Res
         );
     }
 
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_history_requested_exact_count_exceeds_default_cap() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    let extra = (0..10_001)
+        .map(|n| {
+            v2_history_event(
+                &format!("exact-count-{n}"),
+                Some("ens:history.eth"),
+                None,
+                "RecordChanged",
+                101,
+            )
+        })
+        .collect::<Vec<_>>();
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &extra).await?;
+    let base = "/v1/names/history.eth/history?scope=name&type=record&page_size=1";
+    let capped = v2_history_payload_for_database(&database, base).await?;
+    assert_eq!(capped["page"]["total_count"], Value::Null);
+    let exact =
+        v2_history_payload_for_database(&database, &format!("{base}&include=total_count")).await?;
+    assert!(exact["page"]["total_count"].as_u64().unwrap() > 10_000);
+    let cursor = exact["page"]["next_cursor"].as_str().unwrap();
+    let next = v2_history_payload_for_database(
+        &database,
+        &format!("{base}&include=total_count&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(next["page"]["total_count"], exact["page"]["total_count"]);
+    let events = v2_history_payload_for_database(
+        &database,
+        "/v1/events?name=history.eth&type=record&page_size=1&include=total_count",
+    )
+    .await?;
+    assert_eq!(events["page"]["total_count"], exact["page"]["total_count"]);
+    let unanchored = v2_history_payload_for_database(
+        &database,
+        "/v1/events?namespace=ens&page_size=1&include=total_count",
+    )
+    .await?;
+    assert_eq!(unanchored["page"]["total_count"], Value::Null);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_history_continuation_excludes_unpublished_interpret_events() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    let base = "/v1/names/history.eth/history?page_size=1&include=total_count";
+    let first = v2_history_payload_for_database(&database, base).await?;
+    let cursor = first["page"]["next_cursor"].as_str().unwrap();
+    // Interpret can append this block while Project still publishes the previous block.
+    upsert_phase_raw_blocks(&database.pool, &[raw_block("ethereum-mainnet",
+        "0xhistory21000004", None, 21_000_004, 1_776_384_004)]).await?;
+    let next_event = v2_history_event("unpublished-history", Some("ens:history.eth"), None,
+        "RecordChanged", 21_000_004);
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[next_event]).await?;
+    let next = v2_history_payload_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
+    assert_eq!(next["page"]["total_count"], first["page"]["total_count"]);
+    assert!(history_blocks(&next).iter().all(|block| *block <= 21_000_003));
+    database.seed_snapshot_selector_chain_positions(&json!({"ethereum": {
+        "chain_id": "ethereum-mainnet", "block_number": 21_000_004,
+        "block_hash": "0xhistory21000004", "timestamp": "2026-04-17T00:00:04Z"
+    }})).await?;
+    let response = v2_history_response_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let failure: Value = read_json(response).await?;
+    assert_eq!(failure["error"]["code"], json!("stale"));
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_history_ignores_unpublished_binding_and_address_anchor_expansion() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    let resource = Uuid::from_u128(0xf7100);
+    let token_lineage = Uuid::from_u128(0xf8100);
+    upsert_test_token_lineages(&database.pool,
+        &[address_name_token_lineage(token_lineage, "0xhistory101", 101)]).await?;
+    upsert_test_resources(&database.pool, &[address_name_resource(resource, Some(token_lineage), "0xhistory101", 101)]).await?;
+    let old_record = v2_history_event("old-unlinked-resource", None, Some(resource), "RecordChanged", 106);
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[old_record]).await?;
+    let first = v2_history_payload_for_database(&database,
+        "/v1/names/history.eth/history?page_size=1&include=total_count").await?;
+    upsert_phase_raw_blocks(&database.pool, &[raw_block("ethereum-mainnet", "0xfuture-binding",
+        None, 21_000_004, 1_776_384_004)]).await?;
+    let mut future_binding = address_name_surface_binding(Uuid::from_u128(0xf9100),
+        "ens:history.eth", resource, "0xfuture-binding", 21_000_004, 1_776_384_004);
+    future_binding.authority_arm = "ens_v2".to_owned();
+    future_binding.active_to = Some(bigname_storage::parse_rfc3339_utc_timestamp("2027-01-01T00:00:00Z")?);
+    upsert_test_surface_bindings(&database.pool, &[future_binding]).await?;
+    let mut future_owner = v2_history_event("future-owner-anchor", None, Some(resource), "RegistrationGranted", 21_000_004);
+    future_owner.block_hash = Some("0xfuture-binding".to_owned());
+    future_owner.after_state = json!({"registrant":"0x0000000000000000000000000000000000000f99"});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[future_owner]).await?;
+    for route in ["/v1/names/history.eth/history?page_size=1&include=total_count",
+        "/v1/events?name=history.eth&page_size=1&include=total_count"] {
+        let page = v2_history_payload_for_database(&database, route).await?;
+        assert_eq!(page["page"]["total_count"], first["page"]["total_count"]);
+    }
+    for route in ["/v1/addresses/0x0000000000000000000000000000000000000f99/history?include=total_count",
+        "/v1/events?address=0x0000000000000000000000000000000000000f99&include=total_count"] {
+        let page = v2_history_payload_for_database(&database, route).await?;
+        assert_eq!(page["page"]["total_count"], json!(0));
+    }
+    let mut prior_owner = v2_history_event("prior-owner-anchor", None, Some(resource), "RegistrationGranted", 101);
+    prior_owner.after_state = json!({"registrant":"0x0000000000000000000000000000000000000f98"});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[prior_owner]).await?;
+    let narrowed = v2_history_payload_for_database(&database,
+        "/v1/addresses/0x0000000000000000000000000000000000000f98/history?type=record&from_timestamp=2023-11-14T22%3A15%3A06Z&include=total_count").await?;
+    assert_eq!(narrowed["page"]["total_count"], json!(1), "an ownership anchor before the requested event window still applies");
     database.cleanup().await
 }

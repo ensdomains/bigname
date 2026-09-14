@@ -1,3 +1,7 @@
+mod binding_anchors;
+use binding_anchors::{
+    load_logical_name_ids_for_resource_id, load_resource_ids_for_logical_name_id,
+};
 mod address_matches;
 mod block_window;
 mod decoders;
@@ -11,8 +15,6 @@ mod registration_identity;
 mod selectors;
 mod source;
 mod summary;
-
-use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -91,6 +93,8 @@ pub struct HistoryPageOptions {
     pub event_kinds: Vec<String>,
     pub bind_cursor_anchor_to_event_kinds: bool,
     pub block_window: Option<HistoryBlockWindow>,
+    /// Publication upper bounds for expanding bindings and historical ownership anchors.
+    pub publication_block_bounds: Option<std::collections::BTreeMap<String, i64>>,
 }
 
 /// Replay-stable normalized event exposed to history readers.
@@ -208,6 +212,8 @@ pub struct EventHistoryFilter {
     pub to_block: Option<i64>,
     pub order: HistoryOrder,
     pub block_window: Option<HistoryBlockWindow>,
+    /// Publication upper bounds for expanding bindings and historical ownership anchors.
+    pub publication_block_bounds: Option<std::collections::BTreeMap<String, i64>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -423,6 +429,7 @@ pub async fn load_address_history_for_relations(
         scope,
         canonical_only,
         false,
+        None,
     )
     .await?;
 
@@ -504,6 +511,7 @@ pub async fn load_address_history_page_for_relations(
         scope,
         canonical_only,
         false,
+        options.publication_block_bounds.as_ref(),
     )
     .await?;
 
@@ -555,7 +563,7 @@ async fn event_history_read_filter(
 
     if let Some(logical_name_id) = filter.logical_name_id.as_deref() {
         let resource_ids =
-            load_resource_ids_for_logical_name_id(pool, logical_name_id, canonical_only)
+            load_resource_ids_for_logical_name_id(pool, logical_name_id, canonical_only, filter.publication_block_bounds.as_ref())
                 .await
                 .with_context(|| {
                     format!(
@@ -570,14 +578,16 @@ async fn event_history_read_filter(
     }
 
     if let Some(resource_id) = filter.resource_id {
-        let logical_name_ids =
-            load_logical_name_ids_for_resource_id(pool, resource_id, canonical_only)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to load event history surface anchors for resource_id {resource_id}"
-                    )
-                })?;
+        let logical_name_ids = load_logical_name_ids_for_resource_id(
+            pool,
+            resource_id,
+            canonical_only,
+            filter.publication_block_bounds.as_ref(),
+        )
+        .await
+        .with_context(|| {
+            format!("failed to load event history surface anchors for resource_id {resource_id}")
+        })?;
         selectors.push(resource_history_selector(
             resource_id,
             &logical_name_ids,
@@ -598,6 +608,7 @@ async fn event_history_read_filter(
                 HistoryScope::Both,
                 canonical_only,
                 include_candidates,
+                filter.publication_block_bounds.as_ref(),
             )
             .await
             .with_context(|| {
@@ -646,46 +657,4 @@ pub async fn load_history_events_by_ids(pool: &PgPool, ids: &[i64]) -> Result<Ve
     paging::load_history_events_by_ids(pool, ids)
         .await
         .context("failed to load normalized events by id")
-}
-
-async fn load_resource_ids_for_logical_name_id(
-    pool: &PgPool,
-    logical_name_id: &str,
-    canonical_only: bool,
-) -> Result<Vec<Uuid>> {
-    let bindings = if canonical_only {
-        crate::load_surface_bindings_by_logical_name_id(pool, logical_name_id).await
-    } else {
-        crate::load_surface_bindings_by_logical_name_id_including_noncanonical(
-            pool,
-            logical_name_id,
-        )
-        .await
-    }?;
-
-    Ok(bindings
-        .into_iter()
-        .map(|binding| binding.resource_id)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect())
-}
-
-async fn load_logical_name_ids_for_resource_id(
-    pool: &PgPool,
-    resource_id: Uuid,
-    canonical_only: bool,
-) -> Result<Vec<String>> {
-    let bindings = if canonical_only {
-        crate::load_surface_bindings_by_resource_id(pool, resource_id).await
-    } else {
-        crate::load_surface_bindings_by_resource_id_including_noncanonical(pool, resource_id).await
-    }?;
-
-    Ok(bindings
-        .into_iter()
-        .map(|binding| binding.logical_name_id)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect())
 }
