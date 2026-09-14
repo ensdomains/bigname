@@ -761,7 +761,7 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
 
     let address_names = v2_address_names_payload_for_database(
         &database,
-        &format!("/v1/addresses/{address}/names"),
+        &format!("/v1/addresses/{address}/names?namespace=ens"),
     )
     .await?;
     let address_name_row = data_row_named(&address_names, "case.eth", "address-names");
