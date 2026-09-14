@@ -55,16 +55,7 @@ async fn main() -> Result<()> {
             hydration_rpc_urls,
         } => {
             let (manifest_repository, manifest_profile) =
-                load_hashed_manifest_repository(&manifests_root)?;
-            phase_runner::config::bind_profile_start(
-                Arc::make_mut(&mut runtime.chains),
-                &manifest_repository,
-                manifest_profile,
-            )?;
-            validate_deployment_table_set(
-                &runtime.chains,
-                COMPILED_CHAIN_NAMESPACES.iter().copied(),
-            )?;
+                prepare_runtime_manifests(&manifests_root, Arc::make_mut(&mut runtime.chains))?;
             let connections = u32::try_from(runtime.chains.len())
                 .unwrap_or(u32::MAX)
                 .saturating_mul(2)
@@ -138,7 +129,7 @@ async fn main() -> Result<()> {
             hydration_rpc_urls,
         } => {
             let database = RunnerDatabase::connect(&database_url, 4).await?;
-            let chains = match chains {
+            let mut chains = match chains {
                 RedoChains::Explicit(chains) => chains,
                 RedoChains::All { sources } => {
                     resolve_all_redo_chains(
@@ -149,8 +140,15 @@ async fn main() -> Result<()> {
                     .await?
                 }
             };
-            validate_deployment_table_set(&chains, COMPILED_CHAIN_NAMESPACES.iter().copied())?;
-            sync_manifests(database.pool(), &manifests_root).await?;
+            let (manifest_repository, manifest_profile) =
+                prepare_runtime_manifests(&manifests_root, &mut chains)?;
+            sync_loaded_manifests(
+                database.pool(),
+                &manifests_root,
+                &manifest_repository,
+                manifest_profile,
+            )
+            .await?;
             validate_redo_attestation_chains(&watch_set_coverage_attestations, &chains)?;
             let (loop_heartbeat, phase_progress) = start_metrics(
                 metrics_bind_addr,
@@ -280,9 +278,14 @@ async fn start_metrics<'a>(
     Ok((loop_heartbeat, phase_progress))
 }
 
-async fn sync_manifests(pool: &sqlx::PgPool, root: &std::path::Path) -> Result<()> {
+fn prepare_runtime_manifests(
+    root: &std::path::Path,
+    chains: &mut [phase_runner::config::ChainConfig],
+) -> Result<(bigname_manifests::ManifestRepository, &'static str)> {
     let (repository, profile) = load_hashed_manifest_repository(root)?;
-    sync_loaded_manifests(pool, root, &repository, profile).await
+    phase_runner::config::bind_profile_start(chains, &repository, profile)?;
+    validate_deployment_table_set(chains, COMPILED_CHAIN_NAMESPACES.iter().copied())?;
+    Ok((repository, profile))
 }
 
 fn load_hashed_manifest_repository(
@@ -331,6 +334,10 @@ fn require_clean_supervisor_exit(report: SupervisorReport) -> Result<()> {
         report.stopped_chains.len()
     )
 }
+
+#[cfg(test)]
+#[path = "main/startup_tests.rs"]
+mod startup_tests;
 
 #[cfg(test)]
 mod tests {
