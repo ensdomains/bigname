@@ -112,7 +112,7 @@ pub(super) async fn load_role_grant_events(
     Ok(grant_events)
 }
 
-fn role_grant_event_value(event: &StorageHistoryEvent) -> Value {
+pub(super) fn role_grant_event_value(event: &StorageHistoryEvent) -> Value {
     let mut object = serde_json::Map::new();
     object.insert("block_number".to_owned(), json!(event.block_number));
     if let Some(timestamp) = event.block_timestamp {

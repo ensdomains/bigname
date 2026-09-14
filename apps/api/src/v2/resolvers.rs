@@ -1,12 +1,16 @@
 use std::collections::BTreeMap;
 
+#[path = "resolvers/collections.rs"]
+mod collections;
+pub(crate) use collections::{get_resolver_aliases, get_resolver_roles};
+
 use axum::{
     Json,
     extract::{Path, State},
 };
 use bigname_storage::{
-    ChainPositions, NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListRow,
-    ResolverCurrentRow, SelectedSnapshot, SnapshotPositionRequirement, SnapshotSelectionScope,
+    NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListRow, ResolverCurrentRow,
+    SelectedSnapshot, SnapshotPositionRequirement, SnapshotSelectionScope,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,6 +32,10 @@ use overview_items::{projected_section_items, summary_is_supported};
 #[path = "resolvers/role_grants.rs"]
 mod role_grants;
 use role_grants::{attach_role_grant_events, load_role_grant_events};
+
+#[path = "resolvers/snapshot_checks.rs"]
+mod snapshot_checks;
+use snapshot_checks::{require_phase_name_snapshot, require_phase_target_snapshot};
 
 use super::{
     Envelope, Finality, Meta, NameRecord, PRODUCT_PIPELINE_TERMS, Page, QueryParamAllowlist,
@@ -131,6 +139,12 @@ pub(crate) async fn get_resolver(
     let (numeric_chain_id, chain_id_slug) = parse_numeric_chain_id(&chain_id)?;
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let include = resolver_overview_include(&params.include)?;
+    let publication = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+        &state,
+        None,
+        Some(resolver_namespace(chain_id_slug)?),
+    )
+    .await?;
 
     let scope = resolver_snapshot_scope(chain_id_slug)?;
     let require_selected_head = params.at.is_none() && params.finality == Finality::Latest;
@@ -179,6 +193,8 @@ pub(crate) async fn get_resolver(
     };
     require_phase_target_snapshot(&row.chain_positions, &row.chain_id, &selected_snapshot)?;
     let snapshot_token = encode_at_token(&selected_snapshot);
+    let resolver_generation =
+        serde_json::to_string(&project_generations).expect("resolver generation map serializes");
     let cursor_binding = BoundNamesCursorBinding {
         chain_id: numeric_chain_id,
         resolver_address: &normalized_address,
@@ -191,7 +207,21 @@ pub(crate) async fn get_resolver(
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
-            bound_names_storage_cursor(&payload, &cursor_binding)
+            let mut storage_payload = payload.clone();
+            storage_payload.last_item.remove("publication");
+            storage_payload.last_item.remove("resolver_generation");
+            let mut structural_payload = storage_payload.clone();
+            if payload.last_item.contains_key("publication") {
+                structural_payload.snapshot = Some(snapshot_token.clone());
+            }
+            bound_names_storage_cursor(&structural_payload, &cursor_binding)?;
+            collections::validate_publication(&publication, &payload)?;
+            if payload.last_item.get("resolver_generation") != Some(&resolver_generation) {
+                return Err(V2Error::stale(
+                    "resolver publication changed; restart pagination",
+                ));
+            }
+            bound_names_storage_cursor(&storage_payload, &cursor_binding)
         })
         .transpose()?;
 
@@ -222,9 +252,14 @@ pub(crate) async fn get_resolver(
         ));
     }
 
-    let next_cursor = storage_next_cursor
-        .as_ref()
-        .map(|cursor| encode(&bound_names_cursor_payload(cursor, &cursor_binding)));
+    let next_cursor = storage_next_cursor.as_ref().map(|cursor| {
+        let mut cursor = bound_names_cursor_payload(cursor, &cursor_binding);
+        cursor.last_item.insert(
+            "resolver_generation".to_owned(),
+            resolver_generation.clone(),
+        );
+        encode(&collections::bind_publication(&publication, cursor))
+    });
     let has_more = next_cursor.is_some();
     let bound_name_records = bound_name_rows
         .iter()
@@ -244,6 +279,7 @@ pub(crate) async fn get_resolver(
     apply_resolver_support_meta(&mut meta, &row, include)?;
     let mut data = build_resolver_overview(row, numeric_chain_id, include, bound_names)?;
     attach_role_grant_events(data.roles.as_mut(), &role_grant_events);
+    publication.finish(&state).await?;
 
     Ok(Json(Envelope {
         data,
@@ -471,6 +507,14 @@ pub(crate) fn parse_numeric_chain_id(value: &str) -> V2Result<(u64, &'static str
     Ok((chain_id, slug))
 }
 
+fn resolver_namespace(chain_id_slug: &str) -> V2Result<&'static str> {
+    match chain_id_slug {
+        "ethereum-mainnet" | "ethereum-sepolia" => Ok("ens"),
+        "base-mainnet" | "base-sepolia" => Ok("basenames"),
+        _ => Err(invalid_chain_id()),
+    }
+}
+
 fn invalid_chain_id() -> V2Error {
     V2Error::invalid_input("chain_id must be a supported numeric EVM chain id")
 }
@@ -542,69 +586,4 @@ fn product_resolver_reason(reason: &str) -> V2Result<String> {
 fn bound_name_row_matches_chain(row: &NameCurrentListRow, chain_id: u64) -> bool {
     name_record::resolver(&row.row.declared_summary)
         .is_some_and(|resolver| resolver.chain_id == chain_id)
-}
-
-fn require_phase_name_snapshot(
-    row: &NameCurrentListRow,
-    selected_snapshot: &SelectedSnapshot,
-) -> V2Result<()> {
-    let projected = ChainPositions::from_value(&row.row.chain_positions)
-        .map_err(|_| V2Error::stale("resolver data is unavailable at the selected snapshot"))?;
-    let slot = match row.row.namespace.as_str() {
-        "ens" if projected.get("ethereum-sepolia").is_some() => "ethereum-sepolia",
-        "ens" => "ethereum",
-        "basenames" => "base",
-        _ => {
-            return Err(V2Error::stale(
-                "resolver data is unavailable at the selected snapshot",
-            ));
-        }
-    };
-    let projected = projected
-        .get(slot)
-        .ok_or_else(|| V2Error::stale("resolver data is unavailable at the selected snapshot"))?;
-    let selected = selected_snapshot
-        .chain_positions
-        .get(slot)
-        .ok_or_else(|| V2Error::stale("resolver data is unavailable at the selected snapshot"))?;
-    if projected.chain_id == selected.chain_id
-        && projected.block_number <= selected.block_number
-        && (projected.block_number != selected.block_number
-            || projected.block_hash == selected.block_hash)
-    {
-        Ok(())
-    } else {
-        Err(V2Error::stale(
-            "resolver data is unavailable at the selected snapshot",
-        ))
-    }
-}
-
-fn require_phase_target_snapshot(
-    chain_positions: &Value,
-    chain_id: &str,
-    selected_snapshot: &SelectedSnapshot,
-) -> V2Result<()> {
-    let number = chain_positions
-        .get("target_block_number")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| V2Error::stale("resolver data is unavailable at the selected snapshot"))?;
-    let hash = chain_positions
-        .get("target_block_hash")
-        .and_then(Value::as_str)
-        .ok_or_else(|| V2Error::stale("resolver data is unavailable at the selected snapshot"))?;
-    let selected = selected_snapshot
-        .chain_positions
-        .as_map()
-        .values()
-        .find(|position| position.chain_id == chain_id)
-        .ok_or_else(|| V2Error::stale("resolver data is unavailable at the selected snapshot"))?;
-    if number > selected.block_number
-        || (number == selected.block_number && hash != selected.block_hash)
-    {
-        return Err(V2Error::stale(
-            "resolver data is unavailable at the selected snapshot",
-        ));
-    }
-    Ok(())
 }
