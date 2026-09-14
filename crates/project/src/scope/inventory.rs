@@ -99,6 +99,14 @@ pub(super) async fn include_changed_record_consumers(
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
+    // Temporary tables have no autovacuum statistics; replay windows can contain many records.
+    sqlx::query("ANALYZE project_changed_events")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to analyze changed project inputs", error)
+        })?;
+
     // ENSv1 resolver writes may carry only the node and resolver emitter: the record events
     // identify the name solely by its node hash, with the resolver as the emitting address.
     // (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L5-L10 @ ens_v1@91c966f)
@@ -106,19 +114,24 @@ pub(super) async fn include_changed_record_consumers(
     // Match those facts to
     // the previously published inventory's exact name surface so a record-only live window
     // rebuilds the consuming name and resource without expanding every name on a shared resolver.
+    // Materialize both resolver keys so replay can hash-join instead of comparing every
+    // changed event with every inventory row. DISTINCT below also removes equal mirror keys.
     sqlx::query(
-        "WITH matched AS MATERIALIZED (
+        "WITH inventory_resolvers AS MATERIALIZED (
+             SELECT inventory.resource_id, inventory.provenance, resolver.address
+             FROM record_inventory_current inventory
+             CROSS JOIN LATERAL (VALUES
+                 (lower(inventory.provenance ->> 'resolver_address')),
+                 (lower(inventory.provenance #>> '{mirror,mirrored_resolver_address}'))
+             ) resolver(address)
+             WHERE inventory.provenance ->> 'chain_id' = $1
+               AND resolver.address IS NOT NULL
+         ), matched AS MATERIALIZED (
              SELECT DISTINCT inventory.resource_id,
                     inventory.provenance ->> 'logical_name_id' AS logical_name_id
              FROM project_changed_events event
-             JOIN record_inventory_current inventory
-               ON inventory.provenance ->> 'chain_id' = $1
-              AND lower(event.raw_fact_ref ->> 'emitting_address') IN (
-                  -- A mirrored row serves the writes of the ENSv1 resolver it was derived
-                  -- from (builders/record_inventory/mirror.rs), not of the mirror itself.
-                  lower(inventory.provenance ->> 'resolver_address'),
-                  lower(inventory.provenance #>> '{mirror,mirrored_resolver_address}')
-              )
+             JOIN inventory_resolvers inventory
+               ON lower(event.raw_fact_ref ->> 'emitting_address') = inventory.address
              JOIN name_surfaces surface
                ON surface.logical_name_id =
                   inventory.provenance ->> 'logical_name_id'
@@ -387,3 +400,7 @@ async fn include_mirror_pairs(
     .map_err(|error| ProjectError::database("failed to scope mirror resolver pairs", error))?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "inventory_tests.rs"]
+mod tests;
