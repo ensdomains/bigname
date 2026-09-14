@@ -89,7 +89,15 @@ impl CollectionSnapshot {
     }
 
     pub(crate) fn validate_cursor(&self, cursor: &CursorPayload) -> V2Result<()> {
-        if cursor.snapshot.as_deref() != Some(self.token.as_str()) {
+        self.validate_token(cursor.snapshot.as_deref())
+    }
+
+    pub(crate) fn token(&self) -> &str {
+        &self.token
+    }
+
+    pub(crate) fn validate_token(&self, token: Option<&str>) -> V2Result<()> {
+        if token != Some(self.token()) {
             return Err(restart_required());
         }
         Ok(())

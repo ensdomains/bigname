@@ -215,7 +215,7 @@ pub(crate) async fn get_resolver(
                 structural_payload.snapshot = Some(snapshot_token.clone());
             }
             bound_names_storage_cursor(&structural_payload, &cursor_binding)?;
-            collections::validate_publication(&publication, &payload)?;
+            publication.validate_token(payload.last_item.get("publication").map(String::as_str))?;
             if payload.last_item.get("resolver_generation") != Some(&resolver_generation) {
                 return Err(V2Error::stale(
                     "resolver publication changed; restart pagination",

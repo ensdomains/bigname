@@ -2,7 +2,7 @@
 use std::collections::BTreeMap;
 
 use super::{
-    overview_items::{projected_section_items, summary_is_supported},
+    overview_items::{compact_resolver_binding_item, summary_is_supported},
     parse_numeric_chain_id, product_resolver_reason, require_phase_target_snapshot,
     resolver_snapshot_scope,
 };
@@ -18,7 +18,7 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 
 #[path = "collections/reads.rs"]
 mod reads;
@@ -74,7 +74,7 @@ async fn collection(
     )
     .await?;
     if let Some(cursor) = &cursor {
-        validate_publication(&publication, cursor)?;
+        publication.validate_token(cursor.last_item.get("publication").map(String::as_str))?;
     }
     let cursor_at = cursor
         .as_ref()
@@ -192,10 +192,7 @@ async fn collection(
             item["powers"] = permission_powers_value(&item["powers"])?;
             data.push(item);
         } else {
-            let mapped =
-                projected_section_items(&json!({"status":"supported", "items":[item]}), "aliases")?
-                    .ok_or_else(read_error)?;
-            data.extend(mapped.as_array().ok_or_else(read_error)?.iter().cloned());
+            data.push(compact_resolver_binding_item(&item)?);
         }
     }
     if crate::v2::lookup::head::load_selected_project_generations(&state.pool, &selected).await?
@@ -232,19 +229,9 @@ pub(super) fn bind_publication(
     snapshot: &crate::v2::collection_snapshot::CollectionSnapshot,
     mut cursor: CursorPayload,
 ) -> CursorPayload {
-    let bound = snapshot.bind_cursor(cursor.clone());
-    cursor.last_item.insert(
-        "publication".to_owned(),
-        bound.snapshot.expect("bound snapshot"),
-    );
-    cursor.evaluated_at = bound.evaluated_at;
     cursor
-}
-pub(super) fn validate_publication(
-    snapshot: &crate::v2::collection_snapshot::CollectionSnapshot,
-    cursor: &CursorPayload,
-) -> V2Result<()> {
-    let mut cursor = cursor.clone();
-    cursor.snapshot = cursor.last_item.remove("publication");
-    snapshot.validate_cursor(&cursor)
+        .last_item
+        .insert("publication".to_owned(), snapshot.token().to_owned());
+    cursor.evaluated_at = Some(crate::v2::format_timestamp(snapshot.evaluated_at()));
+    cursor
 }

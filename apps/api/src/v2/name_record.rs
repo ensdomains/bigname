@@ -205,15 +205,15 @@ pub(crate) async fn get_name_record(
     .await?;
     let as_of_block = name_chain_id(&row)
         .and_then(|chain_id| snapshot_block_for_chain(&selected_snapshot, &chain_id));
-    record.record.subregistry = load_subregistry_refs(
+    record.subregistry = load_subregistry_refs(
         &state.pool,
         std::slice::from_ref(&row.logical_name_id),
         as_of_block,
     )
     .await?
     .remove(&row.logical_name_id);
-    if record.record.authority == Some(Authority::EnsV2) {
-        record.record.migrated_at =
+    if record.authority == Some(Authority::EnsV2) {
+        record.migrated_at =
             load_migrated_at(&state.pool, std::slice::from_ref(&row.logical_name_id))
                 .await?
                 .remove(&row.logical_name_id);
@@ -223,14 +223,14 @@ pub(crate) async fn get_name_record(
         &row,
         &selected_snapshot,
         count_snapshot.as_ref(),
-        &mut record.record,
+        &mut record,
     )
     .await?;
     let mut meta = snapshot_meta(&selected_snapshot)?;
     meta.source = Some(route_source);
 
     Ok(Json(Envelope {
-        data: record.record,
+        data: record,
         page: None,
         meta,
     }))

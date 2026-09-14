@@ -235,7 +235,6 @@ pub(crate) async fn get_name_records(
                 let verified_lookup = load_verified_record_lookup(
                     &state,
                     &row,
-                    record_inventory.as_ref(),
                     requested_records.unwrap_or_default(),
                     &mut selected_snapshot,
                 )
@@ -319,7 +318,6 @@ pub(crate) async fn get_name_records(
                     let verified_lookup = load_verified_record_lookup(
                         &state,
                         &row,
-                        record_inventory.as_ref(),
                         &fallback_records,
                         &mut selected_snapshot,
                     )
@@ -452,14 +450,12 @@ pub(crate) fn ensure_verified_record_limit(records: &[ResolutionRecordKey]) -> V
 pub(crate) async fn load_verified_record_lookup(
     state: &AppState,
     row: &bigname_storage::NameCurrentRow,
-    record_inventory: Option<&RecordInventoryCurrentRow>,
     records: &[ResolutionRecordKey],
     selected_snapshot: &mut SelectedSnapshot,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
     load_verified_record_lookup_for_resource(
         state,
         row,
-        record_inventory,
         records,
         selected_snapshot,
         SnapshotReadResource::NameRecords,
@@ -470,7 +466,6 @@ pub(crate) async fn load_verified_record_lookup(
 pub(crate) async fn load_verified_record_lookup_for_resource(
     state: &AppState,
     row: &bigname_storage::NameCurrentRow,
-    record_inventory: Option<&RecordInventoryCurrentRow>,
     records: &[ResolutionRecordKey],
     selected_snapshot: &mut SelectedSnapshot,
     resource: SnapshotReadResource,
@@ -478,28 +473,18 @@ pub(crate) async fn load_verified_record_lookup_for_resource(
     if !super::name_record::row_has_current_registration(row) {
         return Ok(Some(VerifiedRecordLookup::NotSupported));
     }
-    load_verified_record_lookup_with_persistence(
-        state,
-        row,
-        record_inventory,
-        records,
-        selected_snapshot,
-        resource,
-    )
-    .await
+    execute_verified_record_lookup(state, row, records, selected_snapshot, resource).await
 }
 
 pub(crate) async fn load_ephemeral_verified_record_lookup(
     state: &AppState,
     row: &bigname_storage::NameCurrentRow,
-    record_inventory: Option<&RecordInventoryCurrentRow>,
     records: &[ResolutionRecordKey],
     selected_snapshot: &mut SelectedSnapshot,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
-    load_verified_record_lookup_with_persistence(
+    execute_verified_record_lookup(
         state,
         row,
-        record_inventory,
         records,
         selected_snapshot,
         SnapshotReadResource::NameRecords,
@@ -507,10 +492,9 @@ pub(crate) async fn load_ephemeral_verified_record_lookup(
     .await
 }
 
-async fn load_verified_record_lookup_with_persistence(
+async fn execute_verified_record_lookup(
     state: &AppState,
     row: &bigname_storage::NameCurrentRow,
-    record_inventory: Option<&RecordInventoryCurrentRow>,
     records: &[ResolutionRecordKey],
     selected_snapshot: &mut SelectedSnapshot,
     resource: SnapshotReadResource,
@@ -519,7 +503,6 @@ async fn load_verified_record_lookup_with_persistence(
         return Ok(None);
     }
 
-    let _ = record_inventory;
     match execute_resolution_lookup(state, row, records, selected_snapshot).await {
         Ok(ResolutionLookupOutcome::Executed(response)) => {
             Ok(Some(VerifiedRecordLookup::Found { response }))

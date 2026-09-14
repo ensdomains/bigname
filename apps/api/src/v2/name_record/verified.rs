@@ -19,10 +19,6 @@ use super::super::{
 };
 use super::{NameRecord, build_name_record, row_has_current_registration, string_field};
 
-pub(super) struct VerifiedNameRecord {
-    pub(super) record: NameRecord,
-}
-
 pub(super) async fn build_name_record_for_source(
     state: &AppState,
     row: &NameCurrentRow,
@@ -30,14 +26,12 @@ pub(super) async fn build_name_record_for_source(
     chain_id: Option<u64>,
     selected_snapshot: &mut SelectedSnapshot,
     source: Source,
-) -> V2Result<VerifiedNameRecord> {
+) -> V2Result<NameRecord> {
     if let Some(record) = unsupported_name_record(row)? {
-        return Ok(VerifiedNameRecord { record });
+        return Ok(record);
     }
     match source {
-        Source::Indexed => Ok(VerifiedNameRecord {
-            record: build_name_record(row, record_inventory, chain_id, Status::Ok)?,
-        }),
+        Source::Indexed => build_name_record(row, record_inventory, chain_id, Status::Ok),
         Source::Verified => {
             build_verified_name_record(state, row, record_inventory, chain_id, selected_snapshot)
                 .await
@@ -102,7 +96,7 @@ async fn build_verified_name_record(
     record_inventory: Option<&RecordInventoryCurrentRow>,
     chain_id: Option<u64>,
     selected_snapshot: &mut SelectedSnapshot,
-) -> V2Result<VerifiedNameRecord> {
+) -> V2Result<NameRecord> {
     // Mirror build_name_record's serving guard before deriving requested records: only a
     // current registration or classified ownerless registry read path may steer lookup.
     let record_inventory = record_inventory.filter(|_| row_has_current_registration(row));
@@ -110,7 +104,6 @@ async fn build_verified_name_record(
     let verified_lookup = load_verified_record_lookup_for_resource(
         state,
         row,
-        record_inventory,
         &requested_records,
         selected_snapshot,
         SnapshotReadResource::Name,
@@ -163,7 +156,7 @@ async fn build_verified_name_record(
     record.unsupported_reason = verified_profile_unsupported_reason(answers, status);
     record.failure_reason = verified_profile_failure_reason(answers, status);
     record.unsupported_fields = unsupported_fields;
-    Ok(VerifiedNameRecord { record })
+    Ok(record)
 }
 
 fn profile_verified_requested_records(
