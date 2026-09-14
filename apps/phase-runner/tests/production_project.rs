@@ -11974,7 +11974,7 @@ async fn authority_classifier_covers_every_ens_binding_event_arm_combination() -
 #[tokio::test]
 async fn sepolia_live_v1_plus_new_v2_reservation_selects_v1() -> Result<()> {
     let scratch = ScratchDatabase::create("project_authority_new_reservation").await?;
-    let chain = "project-authority-new-reservation";
+    let chain = CHAIN;
     let source_family = "ens_v2_registry_l1";
     let (logical_name_id, _) =
         seed_raw_v2_reservation_fixture(scratch.pool(), chain, source_family).await?;
@@ -12005,7 +12005,7 @@ async fn sepolia_live_v1_plus_reserved_expiry_resync_selects_v1() -> Result<()> 
         let chain = if source_family == "ens_v2_root_l1" {
             "ethereum-sepolia".to_owned()
         } else {
-            format!("project-authority-reservation-resync-{fixture}")
+            CHAIN.to_owned()
         };
         let (logical_name_id, token_id) =
             seed_raw_v2_reservation_fixture(scratch.pool(), &chain, source_family).await?;
@@ -12069,7 +12069,7 @@ async fn sepolia_live_v1_plus_reserved_expiry_resync_selects_v1() -> Result<()> 
 #[tokio::test]
 async fn sepolia_live_v1_plus_released_v2_reservation_selects_v1() -> Result<()> {
     let scratch = ScratchDatabase::create("project_authority_reservation_release").await?;
-    let chain = "project-authority-reservation-release";
+    let chain = CHAIN;
     let source_family = "ens_v2_registry_l1";
     let (logical_name_id, token_id) =
         seed_raw_v2_reservation_fixture(scratch.pool(), chain, source_family).await?;
@@ -12449,7 +12449,7 @@ async fn reservation_release_event_vote_requires_a_preexisting_binding() -> Resu
 async fn reservation_era_selection_incremental_matches_fresh() -> Result<()> {
     let incremental = ScratchDatabase::create("project_reservation_incremental").await?;
     let fresh = ScratchDatabase::create("project_reservation_fresh").await?;
-    let chain = "project-reservation-convergence";
+    let chain = CHAIN;
     let (incremental_name, incremental_token) =
         seed_raw_v2_reservation_fixture(incremental.pool(), chain, "ens_v2_registry_l1").await?;
     let (fresh_name, fresh_token) =
@@ -12932,7 +12932,7 @@ async fn bindingless_resolver_summary_ignores_selected_head_resource_shape() -> 
 #[tokio::test]
 async fn raw_ingest_fixture_flows_through_interpret_then_project() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_raw_flow").await?;
-    let chain = "project-raw-flow";
+    let chain = CHAIN;
     seed_raw_registration_fixture(scratch.pool(), chain).await?;
     InterpretEngine::new(scratch.pool().clone())
         .run_batch(InterpretRequest {
@@ -13218,8 +13218,6 @@ async fn checked_in_sepolia_v1_resolver_logs_flow_through_interpret_and_project(
 #[tokio::test]
 async fn declared_v1_shared_resolver_reclassifies_both_v2_pointer_origins_and_converges()
 -> Result<()> {
-    const CHAIN: &str = "project-declared-v1-shared";
-
     let incremental = ScratchDatabase::create("project_declared_v1_shared_incremental").await?;
     let fresh = ScratchDatabase::create("project_declared_v1_shared_fresh").await?;
     let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
@@ -13363,7 +13361,6 @@ async fn declared_v1_node_only_unrelated_record_preserves_inventory_clock() -> R
 
 #[tokio::test]
 async fn declared_v1_node_only_update_rebuilds_retained_pointer_resource() -> Result<()> {
-    const CHAIN: &str = "project-declared-v1-retained-pointer-resource";
     const REPLACEMENT_RESOURCE: &str = "00000000-0000-0000-0000-000000000d03";
     const ALIAS_BINDING: &str = "00000000-0000-0000-0000-000000000d13";
     const REPLACEMENT_BINDING: &str = "00000000-0000-0000-0000-000000000d14";
@@ -13571,8 +13568,6 @@ async fn declared_v1_node_only_update_rebuilds_retained_pointer_resource() -> Re
 
 #[tokio::test]
 async fn foreign_namespace_v2_pointer_matches_fresh_declared_v1_attribution() -> Result<()> {
-    const CHAIN: &str = "project-declared-v1-foreign-pointer";
-
     let incremental = ScratchDatabase::create("project_declared_v1_foreign_incremental").await?;
     let fresh = ScratchDatabase::create("project_declared_v1_foreign_fresh").await?;
     let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
@@ -13642,8 +13637,6 @@ async fn foreign_namespace_v2_pointer_matches_fresh_declared_v1_attribution() ->
 
 #[tokio::test]
 async fn cross_namespace_declared_resolver_collapse_is_deterministic_and_converges() -> Result<()> {
-    const CHAIN: &str = "project-declared-v1-cross-namespace";
-
     let incremental = ScratchDatabase::create("project_declared_v1_cross_ns_incremental").await?;
     let fresh = ScratchDatabase::create("project_declared_v1_cross_ns_fresh").await?;
     let ens_manifests =
@@ -13760,8 +13753,6 @@ async fn cross_namespace_declared_resolver_collapse_is_deterministic_and_converg
 
 #[tokio::test]
 async fn declaration_winner_requires_same_namespace_admission_after_close() -> Result<()> {
-    const CHAIN: &str = "project-declared-v1-same-namespace-close";
-
     let incremental = ScratchDatabase::create("project_declared_v1_same_ns_incremental").await?;
     let fresh = ScratchDatabase::create("project_declared_v1_same_ns_fresh").await?;
     let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
@@ -13889,13 +13880,14 @@ async fn same_namespace_declared_resolver_uses_later_equal_start_role() -> Resul
 }
 
 async fn assert_same_namespace_declared_resolver_role(
-    chain: &str,
+    fixture: &str,
     first_role: (&str, i64),
     second_role: (&str, i64),
     expected_role: &str,
 ) -> Result<()> {
-    let first = ScratchDatabase::create(&format!("{chain}_first")).await?;
-    let second = ScratchDatabase::create(&format!("{chain}_second")).await?;
+    let first = ScratchDatabase::create(&format!("{fixture}_first")).await?;
+    let second = ScratchDatabase::create(&format!("{fixture}_second")).await?;
+    let chain = CHAIN;
     let manifests = seed_declared_v1_shared_pair(first.pool(), second.pool(), chain).await?;
 
     for (pool, manifest_id) in [(first.pool(), manifests.0), (second.pool(), manifests.1)] {
@@ -14009,8 +14001,6 @@ async fn declared_resolver_last_discovery_close_matches_fresh_rebuild() -> Resul
 
 #[tokio::test]
 async fn root_origin_declared_resolver_noop_preserves_clocks_and_converges() -> Result<()> {
-    const CHAIN: &str = "project-declared-v1-root-origin";
-
     let incremental = ScratchDatabase::create("project_declared_v1_root_incremental").await?;
     let fresh = ScratchDatabase::create("project_declared_v1_root_fresh").await?;
     let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
@@ -14576,7 +14566,7 @@ async fn resolver_permission_summary(pool: &PgPool, chain: &str) -> Result<Value
 #[tokio::test]
 async fn interpret_data_repair_redo_cascades_to_project_without_an_operator_step() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_interpret_redo_cascade").await?;
-    let chain = "project-interpret-redo-cascade";
+    let chain = CHAIN;
     seed_raw_registration_fixture(scratch.pool(), chain).await?;
     InterpretEngine::new(scratch.pool().clone())
         .run_batch(InterpretRequest {
@@ -14634,7 +14624,7 @@ async fn interpret_data_repair_redo_cascades_to_project_without_an_operator_step
 #[tokio::test]
 async fn reorg_below_interpret_cursor_rederives_winning_fork_through_project() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_reorg_cascade").await?;
-    let chain = "project-reorg-cascade";
+    let chain = CHAIN;
     seed_raw_registration_fixture(scratch.pool(), chain).await?;
     let alice_node = raw_namehash(&[b"alice", b"eth"]);
     let losing_record = TextChanged {
@@ -17825,7 +17815,7 @@ async fn surviving_reservation_drives_summary_after_other_resource_expires() -> 
     const RESERVED_LINEAGE: &str = "00000000-0000-0000-0000-0000000008a4";
     const BINDING: &str = "00000000-0000-0000-0000-0000000008a3";
     let scratch = ScratchDatabase::create("project_registration_reservation_lifecycle").await?;
-    let chain = "project-registration-reservation-lifecycle";
+    let chain = CHAIN;
     let logical_name_id = "ens:0x8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a";
     seed_lineage(scratch.pool(), chain, 3).await?;
     sqlx::query(
@@ -18040,7 +18030,7 @@ async fn state_derived_expiry_for_another_resource_does_not_delete_the_current_b
     const EXPIRED_RESOURCE: &str = "00000000-0000-0000-0000-0000000008b2";
     const CURRENT_BINDING: &str = "00000000-0000-0000-0000-0000000008b3";
     let scratch = ScratchDatabase::create("project_expiry_other_resource_guard").await?;
-    let chain = "project-expiry-other-resource-guard";
+    let chain = CHAIN;
     let logical_name_id = "ens:0x8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b";
     seed_lineage(scratch.pool(), chain, 2).await?;
     sqlx::query(
@@ -22726,11 +22716,12 @@ enum DeclaredV1NodeOnlyDelta {
 }
 
 async fn assert_declared_v1_node_only_delta(
-    chain: &str,
+    fixture: &str,
     delta: DeclaredV1NodeOnlyDelta,
 ) -> Result<()> {
-    let incremental = ScratchDatabase::create(&format!("{chain}-incremental")).await?;
-    let fresh = ScratchDatabase::create(&format!("{chain}-fresh")).await?;
+    let incremental = ScratchDatabase::create(&format!("{fixture}-incremental")).await?;
+    let fresh = ScratchDatabase::create(&format!("{fixture}-fresh")).await?;
+    let chain = CHAIN;
     let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), chain).await?;
     let alice_node = format!("{:#x}", raw_namehash(&[b"alice", b"eth"]));
 
