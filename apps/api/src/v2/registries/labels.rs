@@ -5,12 +5,13 @@ use axum::{
     extract::{Path, State},
 };
 use bigname_storage::{ChildrenCurrentKeysetCursor, ChildrenCurrentSortValue};
+use serde::Serialize;
 
 use super::super::cursor::{cursor_value, invalid_cursor_error};
 use super::super::subnames::{Subname, build_subname};
 use super::super::support::parse_evm_address;
 use super::super::{
-    CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, StrictQueryParams, V2Error, V2Result,
+    CursorPayload, Envelope, Page, QueryParamAllowlist, StrictQueryParams, V2Error, V2Result,
     api_error_to_v2, decode, encode, parse_numeric_chain_id, validate_latest_collection_selectors,
 };
 use super::load_subregistry_refs;
@@ -29,37 +30,65 @@ impl QueryParamAllowlist for RegistryLabelsQueryParams {
 
 pub(crate) type RegistryLabelsQuery = StrictQueryParams<RegistryLabelsQueryParams>;
 
+#[derive(Serialize)]
+pub(crate) struct RegistryLabel {
+    #[serde(flatten)]
+    name: Subname,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role_holder_count: Option<u64>,
+}
+
 /// The labels one ENSv2 registry currently holds: the direct subnames of the name it serves
 /// whose registration that registry emitted, in the subname row shape.
 pub(crate) async fn get_registry_labels(
     Path((chain_id, address)): Path<(String, String)>,
     params: RegistryLabelsQuery,
     State(state): State<AppState>,
-) -> V2Result<Json<Envelope<Vec<Subname>>>> {
+) -> V2Result<Json<Envelope<Vec<RegistryLabel>>>> {
     let params = params.into_inner();
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let (numeric_chain_id, chain_id_slug) = parse_numeric_chain_id(&chain_id)?;
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let include_counts = labels_include_counts(&params.include)?;
+    let collection = super::super::collection_snapshot::CollectionSnapshot::capture(
+        &state,
+        params.cursor.as_deref(),
+    )
+    .await?;
+    let selected = super::super::resolve_v2_snapshot_for(
+        &state.pool,
+        &super::super::resolver_snapshot_scope(chain_id_slug)?,
+        None,
+        params.finality,
+        super::super::SnapshotReadResource::Registry,
+    )
+    .await?;
+    let as_of_block = super::snapshot_block_for_chain(&selected, chain_id_slug);
     let internal_error = || {
         V2Error::internal_error(format!(
             "failed to load labels for registry {normalized_address} on chain {chain_id_slug}"
         ))
     };
 
-    bigname_storage::load_registry_contract(&state.pool, chain_id_slug, &normalized_address, None)
-        .await
-        .map_err(|_| internal_error())?
-        .ok_or_else(|| {
-            V2Error::not_found(format!(
-                "registry {normalized_address} was not found on chain {numeric_chain_id}"
-            ))
-        })?;
+    bigname_storage::load_registry_contract(
+        &state.pool,
+        chain_id_slug,
+        &normalized_address,
+        as_of_block,
+    )
+    .await
+    .map_err(|_| internal_error())?
+    .ok_or_else(|| {
+        V2Error::not_found(format!(
+            "registry {normalized_address} was not found on chain {numeric_chain_id}"
+        ))
+    })?;
     let storage_cursor = params
         .cursor
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
+            collection.validate_cursor(&payload)?;
             labels_storage_cursor(&payload, numeric_chain_id, &normalized_address)
         })
         .transpose()?;
@@ -67,7 +96,7 @@ pub(crate) async fn get_registry_labels(
         &state.pool,
         chain_id_slug,
         &normalized_address,
-        None,
+        as_of_block,
     )
     .await
     .map_err(|_| internal_error())?;
@@ -81,7 +110,7 @@ pub(crate) async fn get_registry_labels(
                 total_count: Some(0),
                 has_more: false,
             }),
-            meta: Meta::default(),
+            meta: collection.finish(&state).await?,
         }));
     };
 
@@ -113,14 +142,30 @@ pub(crate) async fn get_registry_labels(
     } else {
         BTreeMap::new()
     };
-    let mut subregistries = load_subregistry_refs(&state.pool, &child_ids, None).await?;
+    let role_counts = if include_counts {
+        let resources = child_name_rows
+            .values()
+            .filter_map(|row| row.resource_id)
+            .collect::<Vec<_>>();
+        super::role_counts::label_role_counts(
+            &state.pool,
+            chain_id_slug,
+            &normalized_address,
+            &resources,
+            as_of_block,
+        )
+        .await?
+    } else {
+        BTreeMap::new()
+    };
+    let mut subregistries = load_subregistry_refs(&state.pool, &child_ids, as_of_block).await?;
 
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
-        encode(&labels_cursor_payload(
+        encode(&collection.bind_cursor(labels_cursor_payload(
             cursor,
             numeric_chain_id,
             &normalized_address,
-        ))
+        )))
     });
     let data = storage_page
         .rows
@@ -133,7 +178,17 @@ pub(crate) async fn get_registry_labels(
                 include_counts,
             );
             subname.subregistry = subregistries.remove(&row.child_logical_name_id);
-            subname
+            let role_holder_count = include_counts.then(|| {
+                child_name_rows
+                    .get(&row.child_logical_name_id)
+                    .and_then(|name| name.resource_id)
+                    .and_then(|resource| role_counts.get(&resource).copied())
+                    .unwrap_or_default()
+            });
+            RegistryLabel {
+                name: subname,
+                role_holder_count,
+            }
         })
         .collect();
     Ok(Json(Envelope {
@@ -145,7 +200,7 @@ pub(crate) async fn get_registry_labels(
             total_count: u64::try_from(storage_page.label_count).ok(),
             has_more: next_cursor.is_some(),
         }),
-        meta: Meta::default(),
+        meta: collection.finish(&state).await?,
     }))
 }
 

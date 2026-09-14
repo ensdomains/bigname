@@ -22,6 +22,8 @@ use crate::AppState;
 
 #[path = "registries/labels.rs"]
 mod labels;
+#[path = "registries/role_counts.rs"]
+mod role_counts;
 pub(crate) use labels::get_registry_labels;
 
 const REFERENCED_BY_SORT: &str = "display_name_asc";
@@ -56,7 +58,9 @@ pub(crate) struct RegistryName {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct RegistryCounts {
-    pub(crate) labels: u64,
+    pub(crate) labels: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) roles: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) events: Option<u64>,
 }
@@ -90,6 +94,9 @@ pub(crate) async fn get_registry(
     let (numeric_chain_id, chain_id_slug) = parse_numeric_chain_id(&chain_id)?;
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let include_event_count = registry_include_counts(&params.include)?;
+    let collection =
+        super::collection_snapshot::CollectionSnapshot::capture(&state, params.cursor.as_deref())
+            .await?;
 
     let scope = resolver_snapshot_scope(chain_id_slug)?;
     let selected_snapshot = resolve_v2_snapshot_for(
@@ -101,6 +108,7 @@ pub(crate) async fn get_registry(
     )
     .await?;
     let as_of_block = snapshot_block_for_chain(&selected_snapshot, chain_id_slug);
+    let selected_token = super::encode_at_token(&selected_snapshot);
 
     let registry = bigname_storage::load_registry_contract(
         &state.pool,
@@ -128,7 +136,11 @@ pub(crate) async fn get_registry(
         .cursor
         .as_deref()
         .map(|cursor| {
-            let payload = decode(cursor)?;
+            let mut payload = decode(cursor)?;
+            collection.validate_cursor(&payload)?;
+            if payload.filters.remove("at").as_deref() != Some(selected_token.as_str()) {
+                return Err(invalid_cursor_error());
+            }
             referenced_by_storage_cursor(&payload, numeric_chain_id, &normalized_address)
         })
         .transpose()?;
@@ -153,6 +165,19 @@ pub(crate) async fn get_registry(
         .map_err(|_| internal_error(chain_id_slug, &normalized_address))?,
         None => 0,
     };
+    let roles = if include_event_count {
+        Some(
+            role_counts::registry_role_count(
+                &state.pool,
+                chain_id_slug,
+                &normalized_address,
+                as_of_block,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let events = if include_event_count {
         Some(
             bigname_storage::count_contract_events(
@@ -170,11 +195,12 @@ pub(crate) async fn get_registry(
     };
 
     let next_cursor = references.next_cursor.as_ref().map(|cursor| {
-        encode(&referenced_by_cursor_payload(
-            cursor,
-            numeric_chain_id,
-            &normalized_address,
-        ))
+        let mut payload =
+            referenced_by_cursor_payload(cursor, numeric_chain_id, &normalized_address);
+        payload
+            .filters
+            .insert("at".to_owned(), selected_token.clone());
+        encode(&collection.bind_cursor(payload))
     });
     let referenced_by = ReferencedBy {
         page: Page {
@@ -186,7 +212,17 @@ pub(crate) async fn get_registry(
         },
         data: references.rows.iter().map(registry_name).collect(),
     };
-    let data = build_registry_overview(
+    let current_meta = collection.finish(&state).await?;
+    let selected_meta = snapshot_meta(&selected_snapshot)?;
+    let is_current = current_meta
+        .as_of
+        .as_ref()
+        .and_then(|positions| positions.get(&numeric_chain_id.to_string()))
+        == selected_meta
+            .as_of
+            .as_ref()
+            .and_then(|positions| positions.get(&numeric_chain_id.to_string()));
+    let mut data = build_registry_overview(
         registry,
         numeric_chain_id,
         serving.as_ref(),
@@ -194,10 +230,14 @@ pub(crate) async fn get_registry(
         events,
         referenced_by,
     );
+    data.counts.roles = roles;
+    if !is_current {
+        data.counts.labels = None;
+    }
     Ok(Json(Envelope {
         data,
         page: None,
-        meta: snapshot_meta(&selected_snapshot)?,
+        meta: selected_meta,
     }))
 }
 
@@ -225,7 +265,8 @@ fn build_registry_overview(
         created_transaction_hash: created.transaction_hash,
         created_basis: created_basis(created.basis).to_owned(),
         counts: RegistryCounts {
-            labels: u64::try_from(labels).unwrap_or_default(),
+            labels: u64::try_from(labels).ok(),
+            roles: None,
             events: events.map(|count| u64::try_from(count).unwrap_or_default()),
         },
         referenced_by,

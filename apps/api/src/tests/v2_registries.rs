@@ -214,7 +214,11 @@ async fn registry_payload(database: &TestDatabase, uri: &str) -> Result<Value> {
     let response = registry_response(database, uri).await?;
     let status = response.status();
     let payload = read_json(response).await?;
-    assert_eq!(status, StatusCode::OK, "unexpected response for {uri}: {payload}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unexpected response for {uri}: {payload}"
+    );
     Ok(payload)
 }
 
@@ -238,7 +242,10 @@ async fn v2_get_registry_serves_name_parent_creation_counts_and_references() -> 
 
     let payload = registry_payload(
         &database,
-        &format!("/v1/registries/1/{}", ALPHA_REGISTRY.to_uppercase().replace("0X", "0x")),
+        &format!(
+            "/v1/registries/1/{}",
+            ALPHA_REGISTRY.to_uppercase().replace("0X", "0x")
+        ),
     )
     .await?;
     let data = &payload["data"];
@@ -284,7 +291,7 @@ async fn v2_get_registry_serves_name_parent_creation_counts_and_references() -> 
     .await?;
     assert_eq!(
         counted["data"]["counts"],
-        json!({ "labels": 2, "events": 3 })
+        json!({ "labels": 2, "events": 3, "roles": 0 })
     );
 
     let child = registry_payload(&database, &format!("/v1/registries/1/{ONE_REGISTRY}")).await?;
@@ -315,13 +322,13 @@ async fn v2_get_registry_root_has_no_name_or_parent_and_declared_registries_reso
     assert_eq!(root["data"]["created_block_number"], json!(60));
     assert_eq!(root["data"]["counts"], json!({ "labels": 0 }));
     assert_eq!(root["data"]["referenced_by"]["data"], json!([]));
-    assert_eq!(root["data"]["referenced_by"]["page"]["has_more"], json!(false));
+    assert_eq!(
+        root["data"]["referenced_by"]["page"]["has_more"],
+        json!(false)
+    );
 
-    let declared = registry_payload(
-        &database,
-        &format!("/v1/registries/1/{DECLARED_REGISTRY}"),
-    )
-    .await?;
+    let declared =
+        registry_payload(&database, &format!("/v1/registries/1/{DECLARED_REGISTRY}")).await?;
     assert_eq!(declared["data"]["created_basis"], json!("declared"));
     assert_eq!(declared["data"]["created_block_number"], json!(55));
     assert_eq!(declared["data"]["created_transaction_hash"], Value::Null);
@@ -392,7 +399,7 @@ async fn v2_get_registry_labels_pages_held_labels_with_bound_cursor_and_counts()
     assert_eq!(first["page"]["page_size"], json!(1));
     assert_eq!(first["page"]["total_count"], json!(2));
     assert_eq!(first["page"]["has_more"], json!(true));
-    assert_eq!(first["meta"], json!({}));
+    assert!(first["meta"]["as_of"].is_object());
     assert_no_banned_v1_spellings(&first);
     let next_cursor = first["page"]["next_cursor"]
         .as_str()
@@ -555,5 +562,177 @@ async fn v2_get_events_filters_by_contract_address_and_binds_cursor() -> Result<
     .await?;
     assert_eq!(mixed["data"].as_array().expect("events data").len(), 1);
 
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_registry_role_counts_fold_assignments_and_current_label_holders() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    let blocks = (65..=70)
+        .chain([90])
+        .map(|block| {
+            raw_block(
+                REGISTRY_CHAIN_ID,
+                &format!("0xregistry{block}"),
+                None,
+                block,
+                1_700_000_000 + block,
+            )
+        })
+        .collect::<Vec<_>>();
+    upsert_phase_raw_blocks(&database.pool, &blocks).await?;
+    let current = Uuid::from_u128(0xA100);
+    let previous = Uuid::from_u128(0xA200);
+    let root = Uuid::from_u128(0xA300);
+    let future = Uuid::from_u128(0xA400);
+    for id in [previous, root, future] {
+        upsert_test_resources(
+            &database.pool,
+            &[address_name_resource(id, None, "0xregistry65", 65)],
+        )
+        .await?;
+    }
+    let role_event =
+        |id: &str, resource: Uuid, upstream: u64, account: u8, bitmap: u64, block: i64| {
+            let mut event = registry_event(
+                id,
+                None,
+                if upstream == 0 {
+                    "RootPermissionChanged"
+                } else {
+                    "PermissionChanged"
+                },
+                block,
+                ALPHA_REGISTRY,
+                json!({
+                    "source_event": "EACRolesChanged",
+                    "subject": format!("0x{account:040x}"),
+                    "upstream_resource": format!("0x{upstream:064x}"),
+                    "role_bitmap": format!("0x{bitmap:064x}"),
+                }),
+            );
+            event.resource_id = Some(resource);
+            event
+        };
+    let mut other_registry = role_event("other-registry-holder", current, 0x100000001, 4, 1, 69);
+    other_registry.raw_fact_ref["emitting_address"] = json!(OTHER_EMITTER);
+    let mut orphan = role_event("orphan-holder", current, 0x100000001, 5, 1, 69);
+    orphan.canonicality_state = CanonicalityState::Orphaned;
+    let events = vec![
+        role_event(
+            "previous-generation-holder",
+            previous,
+            0x100000000,
+            9,
+            1,
+            65,
+        ),
+        role_event("registry-root-holder", root, 0, 1, 1, 65),
+        role_event("current-holder-grant", current, 0x100000001, 1, 0x11, 66),
+        role_event(
+            "current-holder-more-bits",
+            current,
+            0x100000001,
+            1,
+            0x101,
+            67,
+        ),
+        role_event("second-holder-grant", current, 0x100000001, 2, 1, 67),
+        role_event("second-holder-revoke", current, 0x100000001, 2, 0, 68),
+        role_event("orphan-lineage-holder", current, 0x100000001, 7, 1, 70),
+        role_event(
+            "unpublished-future-generation",
+            future,
+            0x100000002,
+            6,
+            1,
+            90,
+        ),
+        other_registry,
+        orphan,
+    ];
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    sqlx::query("UPDATE bigname_phase.chain_lineage SET canonicality_state = 'orphaned' WHERE chain_id = $1 AND block_hash = '0xregistry70'")
+        .bind(REGISTRY_CHAIN_ID).execute(&database.pool).await?;
+
+    let overview = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts"),
+    )
+    .await?;
+    assert_eq!(overview["data"]["counts"]["roles"], json!(2), "{overview}");
+    let labels = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ALPHA_REGISTRY}/labels?include=counts"),
+    )
+    .await?;
+    assert_eq!(labels["data"][0]["role_holder_count"], json!(1), "{labels}");
+    assert_eq!(labels["data"][1]["role_holder_count"], json!(0), "{labels}");
+    let without_counts = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ALPHA_REGISTRY}/labels"),
+    )
+    .await?;
+    assert!(without_counts["data"][0].get("role_holder_count").is_none());
+
+    let historical = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts&at=2023-11-14T22:14:27Z"),
+    )
+    .await?;
+    assert_eq!(
+        historical["data"]["counts"]["roles"],
+        json!(3),
+        "{historical}"
+    );
+    assert_eq!(historical["data"]["counts"]["labels"], Value::Null);
+
+    // A losing-fork revocation must not erase the surviving canonical grant.
+    sqlx::query("UPDATE bigname_phase.normalized_events SET canonicality_state = 'orphaned' WHERE event_identity = 'second-holder-revoke'")
+        .execute(&database.pool).await?;
+    let replayed = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts"),
+    )
+    .await?;
+    assert_eq!(replayed["data"]["counts"]["roles"], json!(3));
+    let labels = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ALPHA_REGISTRY}/labels?include=counts"),
+    )
+    .await?;
+    assert_eq!(labels["data"][0]["role_holder_count"], json!(2));
+
+    sqlx::query("UPDATE bigname_phase.normalized_events SET canonicality_state = 'canonical' WHERE event_identity = 'second-holder-revoke'")
+        .execute(&database.pool).await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[role_event(
+            "last-label-holder-revoke",
+            current,
+            0x100000001,
+            1,
+            0,
+            69,
+        )],
+    )
+    .await?;
+    let empty_label = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts"),
+    )
+    .await?;
+    assert_eq!(
+        empty_label["data"]["counts"]["roles"],
+        json!(1),
+        "revoking the new generation must not restore the older generation"
+    );
+    let labels = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ALPHA_REGISTRY}/labels?include=counts"),
+    )
+    .await?;
+    assert_eq!(labels["data"][0]["role_holder_count"], json!(0));
     database.cleanup().await
 }

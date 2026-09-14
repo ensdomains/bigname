@@ -179,3 +179,11 @@ authoritative_for = [
   "cross-check scope for block-hash-first intake and RPC block selection in docs/chain-intake.md",
   "comparison source for execution-client storage and canonical head behavior",
 ]
+
+[refs.zigens]
+repo = "https://github.com/ensdomains/zigens"
+commit = "77d106e9a4ba3852da5d21461851f1630868ce0d"
+purpose = "Reference indexer: registry assignment-count and label role-holder-count comparison only."
+authoritative_for = [
+  "Reference-indexer registry role count and per-label holder count comparison",
+]
