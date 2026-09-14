@@ -983,7 +983,7 @@ async fn diagnostics_hide_an_event_on_an_orphaned_lineage_with_its_still_canonic
     )
     .execute(&database.pool)
     .await?;
-    let route = "/v2/diagnostics/events?name=history.eth&page_size=20";
+    let route = "/v1/diagnostics/events?name=history.eth&page_size=20";
 
     let before = v2_history_payload_for_database(&database, route).await?;
     let renewal = before["data"]
