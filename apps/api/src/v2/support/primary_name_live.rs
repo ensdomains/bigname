@@ -104,10 +104,10 @@ pub(crate) async fn load_v2_primary_name_route_read(
         });
     }
 
-    // Forward verification resolves the claimed name through the declared ENSv1 universal
-    // resolver. When the projected claim names a name that resolver cannot speak for, the route
-    // answers in band from projected state instead of dispatching a call whose answer would come
-    // from a superseded authority.
+    // Forward verification resolves the claimed name through the declared Universal Resolver,
+    // whose manifest states which authority arms it can speak for. When the projected claim names
+    // a name outside that declaration, the route answers in band from projected state instead of
+    // dispatching a call whose answer would come from a superseded authority.
     //
     // The publication is captured before the gate reads anything, so every row the decision rests
     // on sits inside the fence the comparison below closes. It stays unresolved until the gate
@@ -230,7 +230,10 @@ pub(crate) async fn load_v2_primary_name_route_read(
 /// The Ethereum L1 this deployment's ENS projection publishes on -- Mainnet under the `mainnet`
 /// profile, Sepolia under the `sepolia` profile -- which is the chain live ENS primary-name
 /// verification executes against. The same rules apply on both; only the chain differs.
-async fn ens_primary_name_lookup_chain(phase_pool: &PgPool, namespace: &str) -> ApiResult<String> {
+pub(super) async fn ens_primary_name_lookup_chain(
+    phase_pool: &PgPool,
+    namespace: &str,
+) -> ApiResult<String> {
     let scope = exact_name_snapshot_scope(
         phase_pool,
         namespace,

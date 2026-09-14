@@ -617,6 +617,133 @@ async fn v2_get_name_verified_source_reports_unsupported_without_verified_bounda
     Ok(())
 }
 
+/// A name the projection selected under the ENSv2 arm is refused by an execution manifest that
+/// declares no `verified_authority_arms` (the Mainnet and Sepolia default, `ens_v1` only), with
+/// its own public reason and without a provider call; the same declaration widened to `ens_v2`
+/// executes the direct route through the declared Universal Resolver.
+#[tokio::test]
+async fn v2_verified_reads_follow_the_declared_authority_arms_for_an_ens_v2_name() -> Result<()> {
+    for admits_ens_v2 in [false, true] {
+        let database = TestDatabase::new_with_schemas(false, true).await?;
+        let execution_block_hash =
+            "0x1111111111111111111111111111111111111111111111111111111111111111";
+        let lookup_pool = database.lookup_pool().await?;
+        seed_schema_v2_ens_lookup_head(
+            &lookup_pool,
+            21_000_003,
+            execution_block_hash,
+            "2026-04-17T00:00:03Z",
+        )
+        .await?;
+        let namehash = bigname_lookup::ens_namehash_hex("alice.eth")?;
+        seed_v2_alice_name_record_fixture(
+            &database,
+            |row| {
+                row.namehash = namehash;
+                row.provenance["authority_selection"] = json!({"authority_arm": "ens_v2"});
+                row.chain_positions = json!({
+                    "ethereum": {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": 21_000_003,
+                        "block_hash": execution_block_hash,
+                        "timestamp": "2026-04-17T00:00:03Z"
+                    }
+                });
+            },
+            |_, _, inventory| {
+                inventory.record_version_boundary["chain_position"]["block_hash"] =
+                    json!(execution_block_hash);
+                inventory.chain_positions = json!({
+                    "ethereum-mainnet": {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": 21_000_003,
+                        "block_hash": execution_block_hash,
+                        "timestamp": "2026-04-17T00:00:03Z"
+                    }
+                });
+            },
+        )
+        .await?;
+        if admits_ens_v2 {
+            sqlx::query(
+                "UPDATE bigname_phase.manifest_versions
+                 SET manifest_payload = manifest_payload
+                     || '{\"verified_authority_arms\": [\"ens_v1\", \"ens_v2\"]}'::jsonb
+                 WHERE source_family = 'ens_execution'",
+            )
+            .execute(&database.pool)
+            .await?;
+        }
+        let executed_address = "0x0000000000000000000000000000000000000e0e";
+        let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(if admits_ens_v2 {
+            vec![resolution_universal_resolver_addr60_response(
+                executed_address,
+            )]
+        } else {
+            Vec::new()
+        })
+        .await?;
+        let chain_rpc_urls =
+            bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+        let state = database
+            .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+            .await?;
+
+        let response = app_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/names/Alice.eth/records?source=verified&keys=addr:60")
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .context("ens_v2-arm verified records request failed")?;
+        let status = response.status();
+        let payload: Value = read_json(response).await?;
+        assert_eq!(status, StatusCode::OK, "unexpected response: {payload}");
+        assert_eq!(payload["meta"]["source"], json!("verified"));
+        if admits_ens_v2 {
+            assert_eq!(
+                payload["data"]["records"]["addr:60"],
+                json!({"status": "ok", "value": executed_address}),
+                "{payload}"
+            );
+            assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 1);
+        } else {
+            assert_eq!(
+                payload["data"]["records"]["addr:60"],
+                json!({
+                    "status": "unsupported",
+                    "unsupported_reason": "exact_name_authority_not_verifiable"
+                }),
+                "{payload}"
+            );
+            // Name detail shares the refusal and its reason.
+            let detail = app_router(state)
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/names/Alice.eth?source=verified")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ens_v2-arm verified name detail request failed")?;
+            let detail: Value = read_json(detail).await?;
+            assert_eq!(detail["data"]["status"], json!("unsupported"), "{detail}");
+            assert_eq!(
+                detail["data"]["unsupported_reason"],
+                json!("exact_name_authority_not_verifiable"),
+                "{detail}"
+            );
+            assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 0);
+        }
+
+        lookup_pool.close().await;
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_get_name_verified_source_accepts_event_linked_ownerless_registry_serving() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
@@ -2897,6 +3024,10 @@ async fn v2_get_name_records_inventory_absence_is_unknown_not_unsupported() -> R
     Ok(())
 }
 
+/// A row the projection left without a topology (no admitted absent-topology route either) is
+/// outside every verified class and reports `verified_records_not_supported`; the arm refusal
+/// `exact_name_authority_not_verifiable` is reserved for a topology-bearing row whose selected
+/// arm the execution declaration does not admit.
 #[tokio::test]
 async fn v2_get_name_records_source_verified_reports_unsupported_without_lookup_topology(
 ) -> Result<()> {

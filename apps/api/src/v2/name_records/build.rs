@@ -33,6 +33,10 @@ use discovery::terminal_no_declared_resolver;
 
 const INDEXED_INVENTORY_UNAVAILABLE_REASON: &str = "inventory_not_available";
 pub(crate) const VERIFIED_NOT_SUPPORTED_REASON: &str = "verified_records_not_supported";
+/// The name's selected authority arm is outside the `verified_authority_arms` the selected
+/// `ens_execution` manifest declares; the same public reason the primary-name route serves for
+/// a claim it cannot verify (`docs/api-v2-routes.md`).
+pub(crate) const EXACT_NAME_AUTHORITY_NOT_VERIFIABLE: &str = "exact_name_authority_not_verifiable";
 
 pub(crate) fn build_authority_unsupported_name_records(
     row: &NameCurrentRow,
@@ -441,6 +445,15 @@ fn verified_record_answers(
                 })
                 .collect()
         }
+        Some(VerifiedRecordLookup::AuthorityArmNotAdmitted) => records
+            .iter()
+            .map(|record| {
+                Ok((
+                    record.record_key.clone(),
+                    unsupported_answer(EXACT_NAME_AUTHORITY_NOT_VERIFIABLE)?,
+                ))
+            })
+            .collect(),
         Some(VerifiedRecordLookup::NotSupported) | None => records
             .iter()
             .map(|record| {

@@ -49,9 +49,33 @@ entrypoint on the deployment profile's Ethereum L1: Mainnet under
 Both profiles apply the same route classes, gates, hash pinning, and provider
 limits; the profile only selects the chain and therefore the
 `BIGNAME_API_CHAIN_RPC_URLS` entry the API needs (`ethereum-mainnet=` or
-`ethereum-sepolia=`). The supported topology classes are:
+`ethereum-sepolia=`). Every ENS class below is additionally gated by the selected
+[authority arm](glossary.md#authority-epoch): the selected `ens_execution`
+manifest's `verified_authority_arms` (`manifests.md` §
+`verified_authority_arms`; absent means `["ens_v1"]`) must list the name's
+projected arm, or the engine refuses before any provider call and the API
+reports `exact_name_authority_not_verifiable` for every requested key. A row
+whose authority selection records no arm (a registry-only serving row) is not
+arm-scoped. The supported topology classes are:
 
-- exact-surface direct resolution;
+- exact-surface direct resolution: a name bound through its selected
+  `declared_registry_path` binding, on either arm, whose projected exact
+  resolver is non-null. Project writes this topology for bound ENS names whose
+  binding resource has a record inventory row, copying that row's record
+  boundary (`projections.md` § Exact-name projection); a bound row without an
+  inventory row has no topology and is `unsupported` with
+  `verified_records_not_supported`. On the Mainnet and Sepolia profiles the
+  arm gate admits only `ens_v1` names; the `sepolia-hackathon` profile admits
+  `ens_v2` names too, and its UniversalResolverV2 resolves them by walking
+  root→leaf through `getSubregistry`, keeping the deepest nonzero
+  `getResolver`, and accepting an ancestor-selected resolver only when it
+  implements ENSIP-10
+  `(upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L21-L45 @ ens_v2@a971bd64)`
+  `(upstream: .refs/ens_v2/contracts/src/universalResolver/UniversalResolverV2.sol:L73-L80 @ ens_v2@a971bd64)`
+  `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L73-L88 @ ens_v1@91c966f)`.
+  A declared ENSv1 mirror resolver stays the exact resolver in the topology:
+  that is the address the Universal Resolver reports and the divergence
+  comparison is keyed on;
 - exact-surface alias resolution with a declared non-empty alias path; and
 - exact-surface wildcard-derived resolution with a declared wildcard source
   and matched labels; and
@@ -105,8 +129,13 @@ performs a fresh reverse lookup at the selected Ethereum position; a projected
 `primary_names_current` claim is not required. When a projected claim exists,
 the route consults it before live execution so unsupported exact-name coverage
 or an unverifiable selected [authority arm](glossary.md#authority-epoch) can
-refuse the forward call. After the reverse leg, the same exact-name gate applies
-to the live claim. An absent readable exact-name row admits the forward call.
+refuse the forward call. An arm is verifiable when the selected `ens_execution`
+manifest lists it in `verified_authority_arms` (`manifests.md` §
+`verified_authority_arms`; absent means `["ens_v1"]`, the Mainnet and Sepolia
+declaration; the `sepolia-hackathon` manifest lists `ens_v2` as well because its
+proxy is a UniversalResolverV2). After the reverse leg, the same exact-name
+gate applies to the live claim. An absent readable exact-name row admits the
+forward call.
 The live reverse claim must already be byte-normalized, and the route accepts it
 only when the forward address matches the requested address. A reverse claim
 alone is not proof of a primary name.[^v1-aur-l217][^v1-aur-l263][^v1-aur-l269]

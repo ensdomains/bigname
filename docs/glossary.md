@@ -69,7 +69,11 @@ authority lives in the registry/registrar/resolver system on Base
 and has no ENSv1/ENSv2 era split. `surface_bindings.authority_arm` is the sole
 arm vocabulary and stores the closed value `ens_v1`, `ens_v2`, or `basenames`
 on each binding. It makes ordinary interval conflicts arm-specific and is
-supplied by adapters, never inferred in SQL. Project stages the selected arm,
+supplied by adapters, never inferred in SQL. Verified reads consult the selected
+arm against the `verified_authority_arms` the deployment profile's
+`ens_execution` manifest declares (`manifests.md` § `verified_authority_arms`):
+an arm outside that list is refused in band rather than resolved through an
+entrypoint the selection has ruled out. Project stages the selected arm,
 binding, resource, start position, lifecycle state, and proof together; field
 selection cannot rank events from different arms or combine them in one
 `name_current` row. The exact [shared ENS

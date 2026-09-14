@@ -952,10 +952,26 @@ async fn v2_get_primary_name_rejects_malformed_address() -> Result<()> {
 // Forward verification consults the claimed name's selected exact-name authority before it
 // dispatches anything. The RPC endpoint here is dead, so reaching a provider at all would fail the
 // whole request with 500: a successful in-band unsupported answer is the proof no call went out.
+/// Widens the seeded `ens_execution` manifest to admit the ENSv2 arm, as the sepolia-hackathon
+/// profile declares (`docs/manifests.md` § `verified_authority_arms`). The seeded default admits
+/// only `ens_v1`.
+async fn admit_ens_v2_arm_on_execution_entrypoint(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        "UPDATE bigname_phase.manifest_versions
+         SET manifest_payload = manifest_payload
+             || '{\"verified_authority_arms\": [\"ens_v1\", \"ens_v2\"]}'::jsonb
+         WHERE source_family = 'ens_execution'",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 // The other half of the gate: a claim the projection fully supports, whose selected authority is
-// the ENSv2 arm. No manifest declares an ENSv2 execution entrypoint, so the route must decline
-// rather than resolve the name through the ENSv1 entrypoint whose answer the selection ruled out.
-// The reason differs from the unsupported-projection branch even though the shape matches.
+// the ENSv2 arm. The seeded execution manifest declares no `verified_authority_arms`, so it admits
+// only the ENSv1 arm and the route must decline rather than resolve the name through an entrypoint
+// whose answer the selection ruled out. The reason differs from the unsupported-projection branch
+// even though the shape matches.
 #[tokio::test]
 async fn v2_get_primary_name_refuses_a_supported_ens_v2_arm_claim_without_provider_dispatch()
 -> Result<()> {
@@ -1031,6 +1047,99 @@ async fn v2_get_primary_name_refuses_a_supported_ens_v2_arm_claim_without_provid
         "{payload}"
     );
     assert!(payload["data"].get("verification").is_none(), "{payload}");
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// The same projected ENSv2-arm claim is admitted when the selected execution manifest declares
+/// the arm: the forward call dispatches through the declared Universal Resolver and the verified
+/// answer is served. Only the manifest declaration differs from the refusing test above.
+#[tokio::test]
+async fn v2_get_primary_name_verifies_a_supported_ens_v2_arm_claim_through_an_admitting_entrypoint()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority(
+        &lookup_pool,
+        21_000_003,
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+    )
+    .await?;
+    admit_ens_v2_arm_on_execution_entrypoint(&lookup_pool).await?;
+    seed_phase_primary_name_snapshot(
+        &database,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        "ens",
+        "60",
+        bigname_storage::PrimaryNameClaimStatus::Success,
+        Some("taytems.eth"),
+        true,
+    )
+    .await?;
+    seed_schema_v2_claimed_name(&lookup_pool, "ens", "taytems.eth", None, "ens_v2").await?;
+    let live_name_arm: String = sqlx::query_scalar(
+        "SELECT provenance #>> '{authority_selection,authority_arm}' \
+         FROM bigname_phase.name_current WHERE lower(raw_name) = 'taytems.eth'",
+    )
+    .fetch_one(&lookup_pool)
+    .await?;
+    assert_eq!(live_name_arm, "ens_v2");
+
+    // Reverse leg plus the admitted forward call.
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+        primary_name_universal_resolver_addr60_response(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 admitted ens_v2-arm primary-name request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload}");
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([{
+            "source": "verified",
+            "status": "ok",
+            "name": "taytems.eth"
+        }]),
+        "{payload}"
+    );
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(
+        rpc_requests.len(),
+        3,
+        "an admitted ENSv2-arm claim dispatches the forward call: {rpc_requests:?}"
+    );
+    assert_eq!(
+        rpc_requests[2]["params"][0]["to"],
+        json!("0xeeeeeeee14d718c2b47d9923deab1335e144eeee"),
+        "the forward call executes through the declared Universal Resolver"
+    );
 
     lookup_pool.close().await;
     database.cleanup().await?;
@@ -1494,7 +1603,8 @@ async fn seed_v2_basenames_primary_name_claim(
 /// The arm gate must not depend on a projected claim existing. An address with no indexed claim
 /// still reaches the live reverse leg, and that leg can name an ENSv2-armed name just as a
 /// projected claim can. The refusal belongs to the name being resolved, not to how we learned it,
-/// so it has to fire before the forward call goes out.
+/// so it has to fire before the forward call goes out. The seeded execution manifest admits only
+/// the ENSv1 arm; the admitting counterpart follows this test.
 #[tokio::test]
 async fn v2_get_primary_name_refuses_a_live_ens_v2_arm_claim_without_forward_dispatch() -> Result<()>
 {
@@ -1583,9 +1693,88 @@ async fn v2_get_primary_name_refuses_a_live_ens_v2_arm_claim_without_forward_dis
     Ok(())
 }
 
+/// A live reverse claim naming an ENSv2-arm name is admitted to the forward call when the selected
+/// execution manifest declares the arm; the gate fires after the reverse leg with the same
+/// declaration the projected-claim gate reads.
+#[tokio::test]
+async fn v2_get_primary_name_forwards_a_live_ens_v2_arm_claim_through_an_admitting_entrypoint()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority(
+        &lookup_pool,
+        21_000_003,
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+    )
+    .await?;
+    admit_ens_v2_arm_on_execution_entrypoint(&lookup_pool).await?;
+    // No projected claim for this address: only the live leg names the ENSv2-arm name.
+    seed_schema_v2_claimed_name(&lookup_pool, "ens", "taytems.eth", None, "ens_v2").await?;
+    let projected_claims: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bigname_phase.primary_names_current WHERE lower(address) = $1",
+    )
+    .bind(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS.to_lowercase())
+    .fetch_one(&lookup_pool)
+    .await?;
+    assert_eq!(projected_claims, 0);
+
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+        primary_name_universal_resolver_addr60_response(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 admitted live ens_v2-arm primary-name request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload}");
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([{
+            "source": "verified",
+            "status": "ok",
+            "name": "taytems.eth"
+        }]),
+        "{payload}"
+    );
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(
+        rpc_requests.len(),
+        3,
+        "the admitted live claim must reach the forward call: {rpc_requests:?}"
+    );
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
 /// A projected tuple does not constrain the name returned by the live reverse leg. If that leg
-/// names a different name whose selected authority cannot be verified, the refusal remains the
-/// verified outcome and metric; the stored tuple supplies only the independent indexed answer.
+/// names a different name whose selected authority cannot be verified under the seeded
+/// ENSv1-only execution declaration, the refusal remains the verified outcome and metric; the
+/// stored tuple supplies only the independent indexed answer.
 #[tokio::test]
 async fn a_live_authority_refusal_overrides_a_different_projected_tuple_for_response_and_metrics()
 -> Result<()> {

@@ -19,7 +19,7 @@ use crate::v2::support::{
     parse_resolution_record_key, snapshot_selection_api_error,
 };
 
-use super::support::execute_resolution_lookup;
+use super::support::{ResolutionLookupOutcome, execute_resolution_lookup};
 
 use super::{
     AtSelector, Envelope, Finality, MAX_PAGE_SIZE, QueryParamAllowlist, RequestSource, Resolver,
@@ -31,9 +31,10 @@ use super::{
 
 mod build;
 pub(crate) use build::{
-    VERIFIED_NOT_SUPPORTED_REASON, build_authority_unsupported_name_records,
-    build_auto_name_records, build_indexed_name_records, build_verified_name_records,
-    ens_universal_resolver_discovery_candidate, indexed_records_requiring_verified_fallback,
+    EXACT_NAME_AUTHORITY_NOT_VERIFIABLE, VERIFIED_NOT_SUPPORTED_REASON,
+    build_authority_unsupported_name_records, build_auto_name_records, build_indexed_name_records,
+    build_verified_name_records, ens_universal_resolver_discovery_candidate,
+    indexed_records_requiring_verified_fallback,
 };
 
 pub(crate) const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
@@ -155,6 +156,9 @@ pub(crate) enum VerifiedRecordLookup {
     },
     Stale(String),
     NotSupported,
+    /// The name's selected authority arm is not admitted by this profile's execution
+    /// declaration; every requested key reports `exact_name_authority_not_verifiable`.
+    AuthorityArmNotAdmitted,
 }
 
 pub(crate) async fn get_name_records(
@@ -515,10 +519,13 @@ async fn load_verified_record_lookup_with_persistence(
 
     let _ = record_inventory;
     match execute_resolution_lookup(state, row, records, selected_snapshot).await {
-        Ok(Some(response)) => Ok(Some(VerifiedRecordLookup::Found {
+        Ok(ResolutionLookupOutcome::Executed(response)) => Ok(Some(VerifiedRecordLookup::Found {
             response: Box::new(response),
         })),
-        Ok(None) => Ok(Some(VerifiedRecordLookup::NotSupported)),
+        Ok(ResolutionLookupOutcome::NotSupported) => Ok(Some(VerifiedRecordLookup::NotSupported)),
+        Ok(ResolutionLookupOutcome::AuthorityArmNotAdmitted) => {
+            Ok(Some(VerifiedRecordLookup::AuthorityArmNotAdmitted))
+        }
         Err(ResolutionLookupError::Snapshot(error))
             if error.kind() == SnapshotSelectionErrorKind::Stale =>
         {

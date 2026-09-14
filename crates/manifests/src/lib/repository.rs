@@ -13,8 +13,8 @@ use bigname_domain::{
 use crate::attribution::validate_block_derived_preimage_attribution;
 use crate::model::RawSourceManifest;
 use crate::{
-    ENSV1_MIRROR_RESOLVER_ROLE, LoadedManifest, ManifestAbi, ManifestLoadStatus,
-    ManifestLoadSummary,
+    DEFAULT_VERIFIED_AUTHORITY_ARMS, ENSV1_MIRROR_RESOLVER_ROLE, LoadedManifest, ManifestAbi,
+    ManifestLoadStatus, ManifestLoadSummary, VERIFIED_AUTHORITY_ARMS,
 };
 use crate::{ManifestRepository, SourceManifest, event_allows_empty_emitter_roles};
 
@@ -419,7 +419,44 @@ fn validate_manifest_metadata(
     }
 
     validate_manifest_abi(manifest, path)?;
+    validate_verified_authority_arms(manifest, path)?;
 
+    Ok(())
+}
+
+fn validate_verified_authority_arms(manifest: &SourceManifest, path: &Path) -> Result<()> {
+    let Some(arms) = &manifest.verified_authority_arms else {
+        return Ok(());
+    };
+    if manifest.source_family != "ens_execution" {
+        bail!(
+            "manifest {} declares verified_authority_arms, which only source family ens_execution may declare",
+            path.display()
+        );
+    }
+    if arms.is_empty() {
+        bail!(
+            "manifest {} declares empty verified_authority_arms; omit the field to admit the default {:?}",
+            path.display(),
+            DEFAULT_VERIFIED_AUTHORITY_ARMS
+        );
+    }
+    let mut seen = BTreeSet::new();
+    for arm in arms {
+        if !VERIFIED_AUTHORITY_ARMS.contains(&arm.as_str()) {
+            bail!(
+                "manifest {} declares unknown verified authority arm {arm:?}; expected one of {:?}",
+                path.display(),
+                VERIFIED_AUTHORITY_ARMS
+            );
+        }
+        if !seen.insert(arm.as_str()) {
+            bail!(
+                "manifest {} duplicates verified authority arm {arm:?}",
+                path.display()
+            );
+        }
+    }
     Ok(())
 }
 

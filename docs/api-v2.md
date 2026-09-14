@@ -692,7 +692,12 @@ detail, it belongs on a diagnostics route instead.
 `GET /v1/names/{name}/records` with a verified source execute through the
 schema-v2 lookup engine on every request. Response fields and per-record status
 meaning stay unchanged, but there is no reusable outcome, durable execution
-trace, or execution-cache readback. A direct live answer that disagrees
+trace, or execution-cache readback. The engine refuses a name whose selected
+[authority arm](glossary.md#authority-epoch) is outside the
+`verified_authority_arms` the selected `ens_execution` manifest declares
+(`manifests.md` § `verified_authority_arms`); the routes report that refusal as
+`exact_name_authority_not_verifiable`, distinct from the
+`verified_records_not_supported` a row without an admitted topology reports. A direct live answer that disagrees
 with the indexed exact entry or manifest-authorized derived read used for
 comparison writes the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger).

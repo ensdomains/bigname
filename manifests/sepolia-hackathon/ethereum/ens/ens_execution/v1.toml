@@ -17,6 +17,15 @@
 # (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L55 @ ens_v1@91c966f),
 # with the pinned ENSv1 Sepolia UniversalResolver deployment as the ABI anchor, as on Sepolia
 # (upstream: .refs/ens_v1/deployments/sepolia/UniversalResolver.json:L2 @ ens_v1@91c966f).
+# The declared proxy is a UniversalResolverV2 whose `resolve(bytes,bytes)` walks the hackathon
+# root registry, so this profile admits verified reads for names whose selected authority is the
+# ENSv2 arm as well as the ENSv1 arm: `verified_authority_arms` below widens the default
+# `["ens_v1"]` that the Mainnet and Sepolia `ens_execution` manifests keep. The v2 walk descends
+# root->leaf through `getSubregistry`, keeps the deepest nonzero `getResolver`, and admits an
+# ancestor-selected resolver only when it is an IExtendedResolver
+# (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L21-L45 @ ens_v2@a971bd64)
+# (upstream: .refs/ens_v2/contracts/src/universalResolver/UniversalResolverV2.sol:L73-L80 @ ens_v2@a971bd64)
+# (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L73-L88 @ ens_v1@91c966f).
 manifest_version = 1
 namespace = "ens"
 source_family = "ens_execution"
@@ -26,6 +35,7 @@ rollout_status = "shadow"
 normalizer_version = "ensip15@ens-normalize-0.1.1"
 roots = []
 discovery_rules = []
+verified_authority_arms = ["ens_v1", "ens_v2"]
 
 [capability_flags]
 verified_resolution = { status = "shadow", notes = "shadow execution ownership on the separately evidenced sepolia-hackathon deployment profile; verified records and verified ENS/60 primary-name lookup execute through the hackathon deployment's own Universal Resolver under the same rules as Mainnet and Sepolia" }

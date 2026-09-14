@@ -789,7 +789,22 @@ collection route carry neither header.
   answer. The ENSIP-19 default-address rule below is one such rule.
   `source=auto` blends per key: indexed answers are used where they satisfy the
   requested key, and only the remaining supported keys fall back to verified
-  lookup. [Universal Resolver ancestor
+  lookup. A verified read has two closed refusal reasons of its own, reported
+  per key on this route and as `data.unsupported_reason` on the verified
+  exact-name detail route: `verified_records_not_supported` when the projected
+  row carries no topology the engine admits (a bound name without a record
+  inventory row, a null-resolver row outside the discovery shape below, an
+  out-of-class shape, or no admitted execution entrypoint), and
+  `exact_name_authority_not_verifiable` when the row's selected
+  [authority arm](glossary.md#authority-epoch) is outside the
+  `verified_authority_arms` the selected `ens_execution` manifest declares
+  (`manifests.md` § `verified_authority_arms`; absent means `["ens_v1"]`, so
+  an `ens_v2`-selected name is refused on the Mainnet and Sepolia profiles and
+  admitted on `sepolia-hackathon`). Neither refusal dispatches a provider call.
+  Bound ENS names of either arm with a non-null exact resolver carry a
+  projected direct topology (`execution.md` § Resolver-record lookup), so an
+  admitted arm executes the direct route and compares against the indexed
+  inventory like any other direct route. [Universal Resolver ancestor
   discovery](glossary.md#universal-resolver-ancestor-discovery) applies when a
   readable ENS name on the deployment profile's Ethereum L1 (Mainnet under
   `manifests/mainnet`, Sepolia under `manifests/sepolia`) has a null projected
@@ -1681,10 +1696,13 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   source reports for it, rather than failing, since neither source can speak for
   a projection that is not deployed.
 - Verifiable authority: forward verification is refused for a name whose selected
-  authority is an arm this deployment declares no execution entrypoint for. The
+  [authority arm](glossary.md#authority-epoch) is outside the
+  `verified_authority_arms` the selected `ens_execution` manifest declares
+  (`manifests.md` § `verified_authority_arms`; absent means `["ens_v1"]`). The
   refusal is an in-band `verified` entry with `status=unsupported` and
   `unsupported_reason=exact_name_authority_not_verifiable`, and no forward
-  resolver call is dispatched. The refusal follows the name, not the source that
+  resolver call is dispatched. The same reason is served when no admitted
+  execution entrypoint is declared for the chain at all. The refusal follows the name, not the source that
   named it: it applies both to a projected claim and to a name the live reverse
   leg returns, and in the live case the check runs after the reverse leg and
   before the forward call, so a refused name costs no forward dispatch and no
@@ -1707,8 +1725,15 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   registry declarations, with the same reverse leg, the same pre-forward
   authority gate, the same hash pinning to the readable Sepolia head, and the
   same provider limits. On Sepolia the gate does real work: the profile admits
-  ENSv2 registries, so a claimed name whose selected authority is an `ens_v2`
-  arm is refused before the forward call exactly as described above. The
+  ENSv2 registries while its `ens_execution` manifest admits only the `ens_v1`
+  arm, so a claimed name whose selected authority is an `ens_v2` arm is refused
+  before the forward call exactly as described above. Under the
+  `sepolia-hackathon` profile, whose `ens_execution` manifest declares
+  `verified_authority_arms = ["ens_v1", "ens_v2"]` because its proxy is a
+  UniversalResolverV2 walking the hackathon root registry
+  `(upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L21-L45 @ ens_v2@a971bd64)`,
+  an `ens_v2`-selected claim is admitted and the forward call executes through
+  that proxy; `ens_v1`-selected names stay admitted there too. The
   Sepolia evidence below explains the projected authority and the ENSv1-path
   behavior that route relies on. An
   unwrapped ENSv1→ENSv2 migration clears the migrated node's ENSv1 resolver
@@ -1796,12 +1821,15 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   that projection's own public reason, the same reason name detail serves for
   the row. A present supported row with no selected authority arm is a projection
   anomaly and returns `exact_name_authority_not_verifiable`. A claim the
-  projection supports whose selected authority is the ENSv2 arm returns that
-  same reason: no manifest declares an ENSv2 execution entrypoint, so this route
-  has no ENSv2 forward-resolution path and declines rather than resolving the
-  name through the ENSv1 universal resolver its own authority selection has
-  already ruled out. The ENSv2 case needs a deployment profile that can support
-  an ENSv2 selection at all; where the deployment profile shadows the ENSv2 arm,
+  projection supports whose selected authority arm is not listed in the
+  selected `ens_execution` manifest's `verified_authority_arms` returns that
+  same reason: on the Mainnet and Sepolia profiles that manifest admits only
+  `ens_v1`, so an `ens_v2`-selected claim has no forward-resolution path there
+  and the route declines rather than resolving the name through a Universal
+  Resolver its own authority selection has already ruled out. A profile whose
+  manifest lists `ens_v2` (the `sepolia-hackathon` profile) admits that claim
+  instead. The refusal case needs a deployment profile that can support an
+  ENSv2 selection at all; where the deployment profile shadows the ENSv2 arm,
   the name is already unsupported and takes the first case instead. None of the
   three cases dispatches a forward resolver call. A live reverse claim has
   already used its two reverse-leg provider calls before the name-level refusal

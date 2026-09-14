@@ -116,6 +116,16 @@ discovery](glossary.md#universal-resolver-ancestor-discovery), all requested
 keys execute through verified lookup. Retained exact inventory predates the
 resolver-clear boundary and does not satisfy auto for that route.
 
+The verified column is additionally scoped by [authority
+arm](glossary.md#authority-epoch): a bound ENS name of either arm with a
+non-null exact resolver carries a direct topology, and the verified read
+executes only when the deployment profile's `ens_execution` manifest lists the
+name's selected arm in `verified_authority_arms` (`manifests.md` §
+`verified_authority_arms`). Mainnet and Sepolia admit `ens_v1` only, so an
+`ens_v2`-selected name there reports `exact_name_authority_not_verifiable`
+under `source=verified` (and its indexed answer under `source=auto`); the
+`sepolia-hackathon` profile admits both arms.
+
 The flagged deployments are the current ENS PublicResolver on mainnet, the
 current Sepolia PublicResolver at `0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5`,
 and the admitted archived-Sepolia ENSv2 `PermissionedResolver` implementation. The

@@ -106,6 +106,12 @@ pub const ENSV1_MIRROR_RESOLVER_ROLE: &str = "ensv1_mirror_resolver";
 /// `correlation_addresses` key naming the ENSv1 registry a declared mirror resolver reads.
 pub const ENSV1_MIRROR_REGISTRY_CORRELATION_KEY: &str = "ens_v1_registry";
 
+/// ENS [authority arms](../../../docs/glossary.md#authority-epoch) an `ens_execution` manifest may
+/// name in `verified_authority_arms`; Basenames has no arm split and no such declaration.
+pub const VERIFIED_AUTHORITY_ARMS: &[&str] = &["ens_v1", "ens_v2"];
+/// Arms an `ens_execution` manifest admits when it declares no `verified_authority_arms`.
+pub const DEFAULT_VERIFIED_AUTHORITY_ARMS: &[&str] = &["ens_v1"];
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SourceManifest {
     pub manifest_version: u64,
@@ -125,6 +131,23 @@ pub struct SourceManifest {
     pub discovery_rules: Vec<DiscoveryRule>,
     #[serde(default, skip_serializing_if = "ManifestAbi::is_empty")]
     pub abi: ManifestAbi,
+    /// `ens_execution` only: the ENS authority arms whose names the declared Universal Resolver may
+    /// verify (`docs/manifests.md` § `verified_authority_arms`). Absent means
+    /// [`DEFAULT_VERIFIED_AUTHORITY_ARMS`]; the payload keeps the field absent so existing
+    /// manifests serialize unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_authority_arms: Option<Vec<String>>,
+}
+
+impl SourceManifest {
+    /// The arms a verified read may execute for through this manifest's entrypoint, declared or
+    /// defaulted.
+    pub fn verified_authority_arms(&self) -> Vec<&str> {
+        match &self.verified_authority_arms {
+            Some(arms) => arms.iter().map(String::as_str).collect(),
+            None => DEFAULT_VERIFIED_AUTHORITY_ARMS.to_vec(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -286,6 +309,8 @@ pub(crate) struct RawSourceManifest {
     discovery_rules: Vec<DiscoveryRule>,
     #[serde(default)]
     abi: ManifestAbi,
+    #[serde(default)]
+    verified_authority_arms: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -325,6 +350,7 @@ impl From<RawSourceManifest> for SourceManifest {
             contracts: value.contracts,
             discovery_rules: value.discovery_rules,
             abi: value.abi,
+            verified_authority_arms: value.verified_authority_arms,
         }
     }
 }
