@@ -4711,6 +4711,53 @@ fn role_insensitivity_metadata_scans_selected_bearing_sibling_helpers() {
 }
 
 #[test]
+fn role_insensitivity_metadata_does_not_follow_string_only_helpers() -> anyhow::Result<()> {
+    let workspace_root = std::path::Path::new("/workspace");
+    let routed_path = workspace_root.join("schema_v2/protocol/resolver.rs");
+    let helper_path = workspace_root.join("schema_v2/protocol/helper.rs");
+    let entries = [bigname_manifests::RoleInsensitiveEvent {
+        source_family: "role_independent_family",
+        event: "SharedEvent",
+        justification: "test fixture",
+        adapter_file: "schema_v2/protocol/resolver.rs",
+    }];
+    let routes = std::collections::BTreeMap::from([(
+        "role_independent_family".to_owned(),
+        std::collections::BTreeSet::from([routed_path.clone()]),
+    )]);
+    let sources = std::collections::BTreeMap::from([
+        (
+            routed_path,
+            r#"
+                use super::helper::consume_namespace;
+                fn interpret(selected: &Selected) {
+                    let namespace = &selected.source.namespace;
+                    match selected.event.name.as_str() {
+                        "SharedEvent" => {
+                            consume_namespace(&selected.source.namespace);
+                            consume_namespace(namespace);
+                        }
+                        _ => {}
+                    }
+                }
+            "#
+            .to_owned(),
+        ),
+        (
+            helper_path,
+            r#"
+                fn consume_namespace(namespace: &str) {}
+                fn unrelated_role_reader(selected: &Selected) {
+                    consume(selected.emitter_role.as_deref());
+                }
+            "#
+            .to_owned(),
+        ),
+    ]);
+    validate_role_insensitivity_metadata(workspace_root, &entries, &routes, &sources)
+}
+
+#[test]
 fn role_insensitivity_metadata_scans_glob_imported_selected_helpers() {
     let workspace_root = std::path::Path::new("/workspace");
     let routed_path = workspace_root.join("schema_v2/protocol/resolver.rs");
@@ -17796,32 +17843,31 @@ fn discovery_draft_aliases_by_source(
             };
             syn::visit::Visit::visit_file(&mut collector, file);
             for import in imports {
-                if !import.glob {
-                    if let (Some(local), Some(exporter_path)) = (
+                if !import.glob
+                    && let (Some(local), Some(exporter_path)) = (
                         import.local.clone(),
                         resolve_local_module_source(path, &import.path, files.keys()),
-                    ) {
-                        if let Some(exported) = aliases.get(&exporter_path) {
-                            qualified_additions.push((
-                                path.clone(),
-                                exported
-                                    .draft_types
-                                    .iter()
-                                    .map(|draft| (local.clone(), draft.clone()))
-                                    .collect::<std::collections::BTreeSet<_>>(),
-                                exported
-                                    .edge_variants
-                                    .iter()
-                                    .map(|variant| (local.clone(), variant.clone()))
-                                    .collect::<std::collections::BTreeSet<_>>(),
-                                exported
-                                    .announcement_variants
-                                    .iter()
-                                    .map(|variant| (local.clone(), variant.clone()))
-                                    .collect::<std::collections::BTreeSet<_>>(),
-                            ));
-                        }
-                    }
+                    )
+                    && let Some(exported) = aliases.get(&exporter_path)
+                {
+                    qualified_additions.push((
+                        path.clone(),
+                        exported
+                            .draft_types
+                            .iter()
+                            .map(|draft| (local.clone(), draft.clone()))
+                            .collect::<std::collections::BTreeSet<_>>(),
+                        exported
+                            .edge_variants
+                            .iter()
+                            .map(|variant| (local.clone(), variant.clone()))
+                            .collect::<std::collections::BTreeSet<_>>(),
+                        exported
+                            .announcement_variants
+                            .iter()
+                            .map(|variant| (local.clone(), variant.clone()))
+                            .collect::<std::collections::BTreeSet<_>>(),
+                    ));
                 }
                 let (module, imported_name) = if import.glob {
                     (import.path.as_slice(), None)
@@ -17913,39 +17959,34 @@ fn discovery_draft_aliases_by_source(
                 if owner_path.is_empty() {
                     continue;
                 }
-                if matches!(variant.as_str(), "Edge" | "RegistryAnnouncement") {
-                    if let Some(exporter_path) =
+                if matches!(variant.as_str(), "Edge" | "RegistryAnnouncement")
+                    && let Some(exporter_path) =
                         resolve_local_module_source(path, owner_path, files.keys())
+                    && let Some(exported) = aliases.get(&exporter_path)
+                {
+                    let module = owner_path
+                        .last()
+                        .expect("resolved module path has a final segment")
+                        .clone();
+                    let edge_variants =
+                        if variant == "Edge" && exported.edge_variants.contains(variant) {
+                            std::collections::BTreeSet::from([(module.clone(), variant.clone())])
+                        } else {
+                            std::collections::BTreeSet::new()
+                        };
+                    let announcement_variants = if variant == "RegistryAnnouncement"
+                        && exported.announcement_variants.contains(variant)
                     {
-                        if let Some(exported) = aliases.get(&exporter_path) {
-                            let module = owner_path
-                                .last()
-                                .expect("resolved module path has a final segment")
-                                .clone();
-                            let edge_variants =
-                                if variant == "Edge" && exported.edge_variants.contains(variant) {
-                                    std::collections::BTreeSet::from([(
-                                        module.clone(),
-                                        variant.clone(),
-                                    )])
-                                } else {
-                                    std::collections::BTreeSet::new()
-                                };
-                            let announcement_variants = if variant == "RegistryAnnouncement"
-                                && exported.announcement_variants.contains(variant)
-                            {
-                                std::collections::BTreeSet::from([(module, variant.clone())])
-                            } else {
-                                std::collections::BTreeSet::new()
-                            };
-                            qualified_additions.push((
-                                path.clone(),
-                                std::collections::BTreeSet::new(),
-                                edge_variants,
-                                announcement_variants,
-                            ));
-                        }
-                    }
+                        std::collections::BTreeSet::from([(module, variant.clone())])
+                    } else {
+                        std::collections::BTreeSet::new()
+                    };
+                    qualified_additions.push((
+                        path.clone(),
+                        std::collections::BTreeSet::new(),
+                        edge_variants,
+                        announcement_variants,
+                    ));
                 }
                 if owner_path.len() < 2 {
                     continue;
@@ -18055,10 +18096,9 @@ fn discovery_draft_aliases(file: &syn::File) -> DiscoveryDraftAliases {
             .path
             .last()
             .is_some_and(|name| name == "DiscoveryDraft")
+            && let Some(local) = &import.local
         {
-            if let Some(local) = &import.local {
-                aliases.draft_types.insert(local.clone());
-            }
+            aliases.draft_types.insert(local.clone());
         }
     }
     let mut type_aliases = Vec::new();
@@ -19224,11 +19264,10 @@ struct SelectedArgumentCallVisitor<'a> {
 impl<'ast> syn::visit::Visit<'ast> for SelectedArgumentCallVisitor<'_> {
     fn visit_local(&mut self, local: &'ast syn::Local) {
         if local.init.as_ref().is_some_and(|initializer| {
-            expression_references_any_name(&initializer.expr, &self.selected_names)
-        }) {
-            if let Some(local_name) = local_pattern_name(&local.pat) {
-                self.selected_names.insert(local_name);
-            }
+            expression_carries_selected(&initializer.expr, &self.selected_names)
+        }) && let Some(local_name) = local_pattern_name(&local.pat)
+        {
+            self.selected_names.insert(local_name);
         }
         syn::visit::visit_local(self, local);
     }
@@ -19237,18 +19276,16 @@ impl<'ast> syn::visit::Visit<'ast> for SelectedArgumentCallVisitor<'_> {
         let carries_selected = call
             .args
             .iter()
-            .any(|argument| expression_references_any_name(argument, &self.selected_names));
-        if carries_selected {
-            if let syn::Expr::Path(function) = call.func.as_ref() {
-                self.calls.push(
-                    function
-                        .path
-                        .segments
-                        .iter()
-                        .map(|segment| segment.ident.to_string())
-                        .collect(),
-                );
-            }
+            .any(|argument| expression_carries_selected(argument, &self.selected_names));
+        if carries_selected && let syn::Expr::Path(function) = call.func.as_ref() {
+            self.calls.push(
+                function
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect(),
+            );
         }
         syn::visit::visit_expr_call(self, call);
     }
@@ -19263,11 +19300,11 @@ fn local_pattern_name(pattern: &syn::Pat) -> Option<String> {
     }
 }
 
-fn expression_references_any_name(
+fn expression_carries_selected(
     expression: &syn::Expr,
     names: &std::collections::BTreeSet<String>,
 ) -> bool {
-    let mut visitor = NamedExpressionVisitor {
+    let mut visitor = SelectedValueVisitor {
         names,
         found: false,
     };
@@ -19275,12 +19312,16 @@ fn expression_references_any_name(
     visitor.found
 }
 
-struct NamedExpressionVisitor<'a> {
+struct SelectedValueVisitor<'a> {
     names: &'a std::collections::BTreeSet<String>,
     found: bool,
 }
 
-impl<'ast> syn::visit::Visit<'ast> for NamedExpressionVisitor<'_> {
+impl<'ast> syn::visit::Visit<'ast> for SelectedValueVisitor<'_> {
+    fn visit_expr_field(&mut self, _: &'ast syn::ExprField) {
+        // Passing a field such as selected.source.namespace does not pass Selected itself.
+    }
+
     fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
         if expression
             .path
@@ -19401,6 +19442,48 @@ fn role_scope_keeps_mixed_wildcard_arms() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn role_scope_respects_short_circuit_family_guards() -> anyhow::Result<()> {
+    for expression in [
+        r#"selected.source.source_family == "ens_v1_registrar_l1" && selected.emitter_role.is_some()"#,
+        r#"selected.source.source_family.as_str() != "ens_v1_resolver_l1" && selected.emitter_role.is_some()"#,
+        r#""ens_v1_resolver_l1" == selected.source.source_family || selected.emitter_role.is_some()"#,
+        r#"!(selected.source.source_family == "ens_v1_registrar_l1") || selected.emitter_role.is_some()"#,
+        r#"(selected.source.source_family == "ens_v1_registrar_l1" && unknown()) && selected.emitter_role.is_some()"#,
+        r#"selected.event.name.as_str() == "NameRegistered" && selected.emitter_role.is_some()"#,
+    ] {
+        let source = format!("fn interpret(selected: &Selected) {{ let _ = {expression}; }}");
+        assert!(
+            !scoped_source_reads_role(&source, "ens_v1_resolver_l1", "ABIChanged")?,
+            "role read must be short-circuited: {expression}"
+        );
+        assert!(
+            scoped_source_reads_role(&source, "ens_v1_registrar_l1", "NameRegistered")?,
+            "role read remains reachable for the matching registrar event: {expression}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn role_scope_keeps_reads_before_or_without_a_decisive_guard() -> anyhow::Result<()> {
+    for expression in [
+        r#"selected.emitter_role.is_some() && selected.source.source_family == "other""#,
+        r#"selected.emitter_role.is_some() || selected.source.source_family == "ens_v1_resolver_l1""#,
+        "unknown() && selected.emitter_role.is_some()",
+        "unknown() || selected.emitter_role.is_some()",
+        r#"selected.source.namespace == "other" && selected.emitter_role.is_some()"#,
+        r#"(selected.source.source_family == "other" || unknown()) && selected.emitter_role.is_some()"#,
+    ] {
+        let source = format!("fn interpret(selected: &Selected) {{ let _ = {expression}; }}");
+        assert!(
+            scoped_source_reads_role(&source, "ens_v1_resolver_l1", "ABIChanged")?,
+            "reachable or undecidable role read must remain checked: {expression}"
+        );
+    }
+    Ok(())
+}
+
 fn scoped_source_reads_role(source: &str, family: &str, event: &str) -> anyhow::Result<bool> {
     let file = syn::parse_file(source)?;
     let mut visitor = EmitterRoleReadVisitor {
@@ -19411,6 +19494,55 @@ fn scoped_source_reads_role(source: &str, family: &str, event: &str) -> anyhow::
     Ok(visitor.found)
 }
 
+fn role_scope_boolean(expression: &syn::Expr, family: &str, event: &str) -> Option<bool> {
+    match expression {
+        syn::Expr::Binary(binary) => match binary.op {
+            syn::BinOp::And(_) => match role_scope_boolean(&binary.left, family, event)? {
+                false => Some(false),
+                true => role_scope_boolean(&binary.right, family, event),
+            },
+            syn::BinOp::Or(_) => match role_scope_boolean(&binary.left, family, event)? {
+                true => Some(true),
+                false => role_scope_boolean(&binary.right, family, event),
+            },
+            syn::BinOp::Eq(_) | syn::BinOp::Ne(_) => {
+                let equal = role_scope_string(&binary.left, family, event)?
+                    == role_scope_string(&binary.right, family, event)?;
+                Some(if matches!(binary.op, syn::BinOp::Eq(_)) {
+                    equal
+                } else {
+                    !equal
+                })
+            }
+            _ => None,
+        },
+        syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Not(_)) => {
+            role_scope_boolean(&unary.expr, family, event).map(|value| !value)
+        }
+        syn::Expr::Group(group) => role_scope_boolean(&group.expr, family, event),
+        syn::Expr::Paren(paren) => role_scope_boolean(&paren.expr, family, event),
+        _ => None,
+    }
+}
+
+fn role_scope_string(expression: &syn::Expr, family: &str, event: &str) -> Option<String> {
+    if selected_source_family_expression(expression) || source_family_match_expression(expression) {
+        return Some(family.to_owned());
+    }
+    if selected_event_name_match_expression(expression) {
+        return Some(event.to_owned());
+    }
+    match expression {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(value),
+            ..
+        }) => Some(value.value()),
+        syn::Expr::Group(group) => role_scope_string(&group.expr, family, event),
+        syn::Expr::Paren(paren) => role_scope_string(&paren.expr, family, event),
+        _ => None,
+    }
+}
+
 #[derive(Default)]
 struct EmitterRoleReadVisitor {
     found: bool,
@@ -19418,6 +19550,23 @@ struct EmitterRoleReadVisitor {
 }
 
 impl<'ast> syn::visit::Visit<'ast> for EmitterRoleReadVisitor {
+    fn visit_expr_binary(&mut self, expression: &'ast syn::ExprBinary) {
+        if let Some((family, event)) = &self.event_scope
+            && matches!(expression.op, syn::BinOp::And(_) | syn::BinOp::Or(_))
+        {
+            let left = role_scope_boolean(&expression.left, family, event);
+            self.visit_expr(&expression.left);
+            if !matches!(
+                (&expression.op, left),
+                (syn::BinOp::And(_), Some(false)) | (syn::BinOp::Or(_), Some(true))
+            ) {
+                self.visit_expr(&expression.right);
+            }
+            return;
+        }
+        syn::visit::visit_expr_binary(self, expression);
+    }
+
     fn visit_expr_match(&mut self, expression: &'ast syn::ExprMatch) {
         if let (Some((family, event)), syn::Expr::Tuple(tuple)) =
             (&self.event_scope, expression.expr.as_ref())

@@ -3,15 +3,15 @@ set -uo pipefail
 
 # Keep the inventory counts and assignments together. Test-list changes should
 # require edits only in this block; the checks below reject every other drift.
-expected_total=95
-expected_runnable=92
+expected_total=96
+expected_runnable=93
 expected_ignored=3
 expected_shard_1_runnable=46
 expected_shard_1_ignored=2
-expected_shard_1_filtered=47
-# Main historical forecasts exclude the zero-address scenarios and this lane's added test; they are not timings of the combined suite.
+expected_shard_1_filtered=48
+# Main historical forecasts exclude the zero-address scenarios, the API shutdown test and the eleven-log migration test; they are not timings of the combined suite.
 expected_shard_1_predicted_seconds=1288.036
-expected_shard_2_runnable=46
+expected_shard_2_runnable=47
 expected_shard_2_ignored=1
 expected_shard_2_filtered=48
 expected_shard_2_predicted_seconds=1281.353
@@ -92,6 +92,7 @@ shard_2_tests=(
     "scenarios::catchup_equivalence::primary_route_normalization_preserves_contract_instance_identity"
     "scenarios::catchup_equivalence::upfront_facts_match_rpc_ingest_wrapper_reverse_outputs"
     "scenarios::cross_protocol::locked_parent_publishes_only_migratable_ens_v1_children"
+    "scenarios::cross_protocol::plain_unwrapped_eleven_log_migration_publishes_only_v2_authority"
     "scenarios::cross_protocol::unlocked_parent_hides_retained_ens_v1_children"
     "scenarios::ens_v2_lifecycle::renewal_preserves_promoted_coverage_and_registry_edges_follow"
     "scenarios::ens_v2_lifecycle::root_apex_attach_and_root_scope_roles"
