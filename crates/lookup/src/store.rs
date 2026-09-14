@@ -211,7 +211,7 @@ pub(crate) async fn load_snapshot(
         ),
     };
     let resolver_head = load_head(&mut transaction, resolver_chain_id.as_str()).await?;
-    let project_row_xmin =
+    let project_publication =
         positions::ensure_project_at_head(&mut transaction, &resolver_head).await?;
     let resolver_position =
         positions::position_for_chain(&name.chain_positions, resolver_chain_id.as_str())?;
@@ -318,7 +318,7 @@ pub(crate) async fn load_snapshot(
     let revalidation_positions =
         positions::comparison_and_live_positions(&comparison_position, &live_execution_position)?;
     let execution_authority = execution_authority(
-        &project_row_xmin,
+        &project_publication,
         Some((&name.logical_name_id, &name.row_xmin)),
         std::slice::from_ref(&entrypoint_manifest),
     )?;
@@ -417,7 +417,7 @@ pub(crate) async fn load_ens_primary_name_authority(
         .await
         .map_err(database("set primary-name authority read isolation"))?;
     let head = load_head(&mut transaction, chain_id).await?;
-    let project_row_xmin = positions::ensure_project_at_head(&mut transaction, &head).await?;
+    let project_publication = positions::ensure_project_at_head(&mut transaction, &head).await?;
     let registry_manifest = manifests::load_entrypoint(
         &mut transaction,
         manifests::EntrypointQuery {
@@ -462,7 +462,7 @@ pub(crate) async fn load_ens_primary_name_authority(
             timestamp: head.timestamp,
         },
         execution_authority: execution_authority(
-            &project_row_xmin,
+            &project_publication,
             None,
             &[registry_manifest, universal_resolver_manifest],
         )?,
@@ -504,13 +504,14 @@ fn ensure_authority_arm_admitted(
 }
 
 fn execution_authority(
-    project_row_xmin: &str,
+    project_publication: &Value,
     name: Option<(&str, &str)>,
     manifests: &[manifests::ManifestEntry],
 ) -> Result<Value> {
     let (logical_name_id, name_row_xmin) = name.unzip();
     Ok(serde_json::json!({
-        "project_row_xmin": project_row_xmin,
+        "project_publication": project_publication,
+        "project_row_xmin": project_publication["row_xmin"],
         "logical_name_id": logical_name_id,
         "name_row_xmin": name_row_xmin,
         "manifest_authorities": manifests,

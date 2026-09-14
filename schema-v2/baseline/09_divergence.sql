@@ -78,6 +78,7 @@ DECLARE
     position_value jsonb;
     manifest_authority jsonb;
     compared_project_row_xmin text;
+    compared_publication jsonb;
     compared_logical_name_id text;
     compared_name_row_xmin text;
 BEGIN
@@ -102,6 +103,17 @@ BEGIN
         RETURN 'invalid_comparison';
     END IF;
 
+    compared_publication := compared_execution_authority -> 'project_publication';
+    IF compared_publication IS NOT NULL AND (
+        jsonb_typeof(compared_publication) IS DISTINCT FROM 'object'
+        OR compared_publication ->> 'block_number' IS NULL
+        OR compared_publication ->> 'block_hash' IS NULL
+        OR compared_publication ->> 'input_content_hash' IS NULL
+        OR compared_publication ->> 'row_xmin' IS NULL
+    ) THEN
+        RETURN 'invalid_comparison';
+    END IF;
+
     compared_project_row_xmin :=
         compared_execution_authority ->> 'project_row_xmin';
     compared_logical_name_id :=
@@ -115,19 +127,37 @@ BEGIN
         RETURN 'invalid_comparison';
     END IF;
 
-    -- This lock is the projection-publication generation fence. Phase
-    -- transitions change this row before a new projected generation is
-    -- admitted. The advisory lock above separately fences manifest sync,
-    -- including changes to admitted shadow execution declarations.
+    -- Lock the captured publication, including its generation, while a running
+    -- pass may be preparing its successor. Older callers without a publication
+    -- object retain the exact-head fence. Keep the one-block bound aligned with
+    -- PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS in crates/storage.
     PERFORM 1
-    FROM chain_phase_state
-    WHERE chain_id = requested_authoritative_chain_id
-      AND phase_name = 'project'
-      AND phase_status = 'completed'
-      AND current_block_number = requested_authoritative_block_number
-      AND current_block_hash = requested_authoritative_block_hash
-      AND xmin::text = compared_project_row_xmin
-    FOR SHARE;
+    FROM chain_phase_state project
+    JOIN chain_lineage lineage
+      ON lineage.chain_id = project.chain_id
+     AND lineage.block_number = project.current_block_number
+     AND lineage.block_hash = project.current_block_hash
+     AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+    WHERE project.chain_id = requested_authoritative_chain_id
+      AND project.phase_name = 'project'
+      AND project.phase_status IN ('completed', 'running')
+      AND project.current_block_number::text = COALESCE(
+          compared_publication ->> 'block_number',
+          requested_authoritative_block_number::text
+      )
+      AND project.current_block_hash = COALESCE(
+          compared_publication ->> 'block_hash',
+          requested_authoritative_block_hash
+      )
+      AND requested_authoritative_block_number - project.current_block_number BETWEEN 0 AND 1
+      AND (project.current_block_number <> requested_authoritative_block_number
+           OR project.current_block_hash = requested_authoritative_block_hash)
+      AND (compared_publication IS NULL OR (
+          project.input_content_hash = compared_publication ->> 'input_content_hash'
+          AND project.xmin::text = compared_publication ->> 'row_xmin'
+      ))
+      AND project.xmin::text = compared_project_row_xmin
+    FOR SHARE OF project, lineage;
 
     IF NOT FOUND THEN
         RETURN 'project_changed';

@@ -44,13 +44,18 @@ pub(super) fn position_for_chain(positions: &Value, chain_id: &str) -> Result<Pr
 pub(super) async fn ensure_project_at_head(
     transaction: &mut Transaction<'_, Postgres>,
     head: &HeadRow,
-) -> Result<String> {
+) -> Result<Value> {
     // The publication may trail the stored head within the shared lag tolerance (see
     // bigname_storage::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS); it must be on the readable
     // lineage and belong to this build's interpreter generation.
-    let project_row_xmin: Option<String> = sqlx::query_scalar(
+    let publication: Option<Value> = sqlx::query_scalar(
         r#"
-        SELECT project.xmin::text
+        SELECT jsonb_build_object(
+            'row_xmin', project.xmin::text,
+            'block_number', project.current_block_number,
+            'block_hash', project.current_block_hash,
+            'input_content_hash', project.input_content_hash
+        )
         FROM chain_phase_state project
         JOIN chain_lineage lineage
           ON lineage.chain_id = project.chain_id
@@ -73,7 +78,7 @@ pub(super) async fn ensure_project_at_head(
     .fetch_optional(&mut **transaction)
     .await
     .map_err(database("validate project publication head"))?;
-    project_row_xmin.ok_or_else(|| {
+    publication.ok_or_else(|| {
         LookupError::stale(format!(
             "projected state has not reached the newest processed {} block",
             head.chain_id

@@ -1419,7 +1419,16 @@ For guarded direct resolver comparisons, fixed-`search_path`,
 security-definer functions revalidate the selected state and then create,
 refresh, or clear one active divergence observation. The API role receives
 `EXECUTE` on those functions but no direct write access to
-`resolution_divergences`. Ledger rows are durable operational observations;
+`resolution_divergences`. The guard captures and locks the served Project publication's block number,
+block hash, interpreter content hash, and `xmin`, allowing `completed` or `running`
+within the shared one-block publication lag. Its lineage, captured execution head,
+manifest declarations, and compared rows must remain unchanged. An intervening
+phase-row update, including a same-height republish, still refuses the lookup.
+Schema-migration `20260914120000_lookup_publication_revalidation.sql` replaces
+only this function, preserving data and existing grants; fresh schemas receive
+the identical guard from the baseline. Older callers without a captured
+publication object retain the exact-head check.
+Ledger rows are durable operational observations;
 they are not projection input or a response cache.
 When projection publishes an ENS Mainnet exact resolver as null, a projection
 lifecycle trigger retires active observations for the former direct resolver as

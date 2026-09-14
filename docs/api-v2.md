@@ -753,15 +753,17 @@ The post-call guard also revalidates the Ethereum project generation and both
 selected ENS manifest declarations; a concurrent replacement returns `409
 stale` and no verified answer.
 
-The exact-head and post-call generation fences on verified reads fail safe
-under schema-v2 projection lag. If head following or project publication
-remains behind the readable chain head, verified reads degrade to `409 stale`
-instead of executing against mixed generations. Snapshot selection and
-verified lookup now read the same `chain_heads` and `chain_phase_state` project
-row, so this exact-head fence detects only a concurrent head, rewind, or
-project-publication change between their reads. A fast-moving chain can still
-advance during a provider or CCIP round trip, so the post-call generation
-checks remain necessary.
+Verified lookup accepts the Project publication captured before provider execution
+while Project is `completed` or `running`, provided that publication is canonical,
+belongs to the compiled interpreter generation, and trails the stored execution
+head by at most one block. The post-call guard compares its captured block number,
+block hash, content hash, and row generation, alongside the unchanged execution
+head and manifest declarations. A new publication, same-height republish, or any
+phase-row update during a provider or CCIP round trip still returns `409 stale`.
+The tolerance admits an already-running publication; it does not promise that a
+request survives a concurrent phase transition. Routes combining indexed and
+verified answers retain their separate requirement that both answers fit the
+reported `meta.as_of` position.
 
 Indexed snapshot selection serves the project phase's latest publication: the
 project row's current position while the phase is `completed` or `running` (a
