@@ -22,7 +22,7 @@ impl From<SnapshotSelectionError> for ResolutionLookupError {
 /// What a fresh lookup produced when it did not fail: an executed response, or one of the
 /// engine's in-band refusals the route reports under its own public reason.
 pub(crate) enum ResolutionLookupOutcome {
-    Executed(bigname_lookup::LookupResponse),
+    Executed(Box<bigname_lookup::LookupResponse>),
     /// The engine declared the name outside its supported classes.
     NotSupported,
     /// The name's selected authority arm is outside the arms the selected execution manifest
@@ -77,7 +77,7 @@ pub(crate) async fn execute_resolution_lookup(
                 "partial"
             };
             timer.finish(outcome);
-            Ok(ResolutionLookupOutcome::Executed(response))
+            Ok(ResolutionLookupOutcome::Executed(Box::new(response)))
         }
         Err(error) if error.kind() == bigname_lookup::ErrorKind::Unsupported => {
             timer.finish("unsupported");
