@@ -50,9 +50,10 @@ pub(crate) async fn get_registry_labels(
     let (numeric_chain_id, chain_id_slug) = parse_numeric_chain_id(&chain_id)?;
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let include_counts = labels_include_counts(&params.include)?;
-    let collection = super::super::collection_snapshot::CollectionSnapshot::capture(
+    let collection = super::super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
         &state,
         params.cursor.as_deref(),
+        Some("ens"),
     )
     .await?;
     let selected = super::super::resolve_v2_snapshot_for(

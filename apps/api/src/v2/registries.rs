@@ -94,9 +94,12 @@ pub(crate) async fn get_registry(
     let (numeric_chain_id, chain_id_slug) = parse_numeric_chain_id(&chain_id)?;
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let include_event_count = registry_include_counts(&params.include)?;
-    let collection =
-        super::collection_snapshot::CollectionSnapshot::capture(&state, params.cursor.as_deref())
-            .await?;
+    let collection = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+        &state,
+        params.cursor.as_deref(),
+        Some("ens"),
+    )
+    .await?;
 
     let scope = resolver_snapshot_scope(chain_id_slug)?;
     let selected_snapshot = resolve_v2_snapshot_for(
