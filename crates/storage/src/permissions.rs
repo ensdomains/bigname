@@ -19,6 +19,7 @@ pub use reads::{
 };
 pub use resource_summary::{
     load_permissions_current_resource_summaries, load_permissions_current_resource_summary,
+    permission_resource_matches_namespace,
 };
 pub use types::{
     PermissionCoverageExhaustiveness, PermissionCoverageStatus,

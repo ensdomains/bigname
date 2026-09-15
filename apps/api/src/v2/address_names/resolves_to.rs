@@ -10,8 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use axum::Json;
 use bigname_storage::{
-    AddressNameCurrentEntry, AddressNamesCurrentSortedCursor, AddressRecordCurrentEntry,
-    PrimaryNameClaimStatus,
+    AddressNamesCurrentSortedCursor, AddressRecordCurrentEntry, PrimaryNameClaimStatus,
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,8 +29,8 @@ use super::cursor::{
     ADDRESS_FILTER_KEY, ORDER_FILTER_KEY, cursor_last_item, cursor_sort_value, option_filter,
 };
 use super::{
-    AddressName, address_names_include, build_address_name, build_address_name_role_summary,
-    dedupe_to_storage, load_address_name_record_counts, order_to_storage, sort_to_storage,
+    AddressName, address_names_include, build_address_name_role_summary, dedupe_to_storage,
+    load_address_name_record_counts, name_registration_fields, order_to_storage, sort_to_storage,
 };
 use crate::v2::name_record::load_migrated_at;
 use crate::v2::vocab::Authority;
@@ -72,31 +71,6 @@ pub(crate) fn address_name_resolution(
     AddressNameResolution {
         coin_type,
         record_key: entry.record_key.clone(),
-    }
-}
-
-/// View a `resolves_to` row through the shared address-name entry shape so the row builders,
-/// role summaries, and record counts written for `address_names_current` apply unchanged. The
-/// relation facet is supplied by the caller; the projection row has no authority relation.
-pub(crate) fn address_name_entry(entry: &AddressRecordCurrentEntry) -> AddressNameCurrentEntry {
-    AddressNameCurrentEntry {
-        address: entry.address.clone(),
-        logical_name_id: entry.logical_name_id.clone(),
-        namespace: entry.namespace.clone(),
-        canonical_display_name: entry.canonical_display_name.clone(),
-        normalized_name: entry.normalized_name.clone(),
-        namehash: entry.namehash.clone(),
-        surface_binding_id: entry.surface_binding_id,
-        resource_id: entry.resource_id,
-        token_lineage_id: None,
-        binding_kind: entry.binding_kind,
-        relations: Vec::new(),
-        provenance: entry.provenance.clone(),
-        coverage: entry.coverage.clone(),
-        chain_positions: entry.chain_positions.clone(),
-        canonicality_summary: entry.canonicality_summary.clone(),
-        manifest_version: entry.manifest_version,
-        last_recomputed_at: entry.last_recomputed_at,
     }
 }
 
@@ -178,11 +152,7 @@ pub(super) async fn get_address_resolves_to(
         ))
     })?;
 
-    let entries = storage_page
-        .entries
-        .iter()
-        .map(address_name_entry)
-        .collect::<Vec<_>>();
+    let entries = &storage_page.entries;
     let logical_name_ids = entries
         .iter()
         .map(|entry| entry.logical_name_id.clone())
@@ -215,7 +185,7 @@ pub(super) async fn get_address_resolves_to(
     let role_resource_ids = include_role_summary.then(|| {
         entries
             .iter()
-            .map(|entry| entry.resource_id)
+            .filter_map(|entry| entry.resource_id)
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>()
@@ -262,13 +232,17 @@ pub(super) async fn get_address_resolves_to(
         BTreeMap::new()
     };
     let record_counts_by_name = if include_role_summary || include.counts {
-        load_address_name_record_counts(&state.pool, &entries, &name_rows)
-            .await
-            .map_err(|_| {
-                V2Error::internal_error(format!(
-                    "failed to load record counts for names resolving to {normalized_address}"
-                ))
-            })?
+        load_address_name_record_counts(
+            &state.pool,
+            entries.iter().map(|entry| entry.logical_name_id.as_str()),
+            &name_rows,
+        )
+        .await
+        .map_err(|_| {
+            V2Error::internal_error(format!(
+                "failed to load record counts for names resolving to {normalized_address}"
+            ))
+        })?
     } else {
         BTreeMap::new()
     };
@@ -280,39 +254,53 @@ pub(super) async fn get_address_resolves_to(
     let data = storage_page
         .entries
         .iter()
-        .zip(&entries)
-        .map(|(record, entry)| {
+        .map(|entry| {
             let role_summary = if include_role_summary {
                 Some(build_address_name_role_summary(
-                    permissions_by_resource
-                        .get(&entry.resource_id)
+                    entry
+                        .resource_id
+                        .and_then(|id| permissions_by_resource.get(&id))
                         .map(Vec::as_slice)
                         .unwrap_or_default(),
                 )?)
             } else {
                 None
             };
-            let mut row = build_address_name(
-                entry,
-                name_rows.get(&entry.logical_name_id),
-                primary_names_by_namespace
+            let name_row = name_rows.get(&entry.logical_name_id);
+            let registration = name_registration_fields(name_row, &entry.namespace);
+            let mut row = AddressName {
+                name: entry.normalized_name.clone(),
+                display_name: entry.canonical_display_name.clone(),
+                namespace: entry.namespace.clone(),
+                namehash: entry.namehash.clone(),
+                owner: registration.owner,
+                registrant: registration.registrant,
+                registration_status: registration.registration_status,
+                registered_at: registration.registered_at,
+                created_at: registration.created_at,
+                expires_at: registration.expires_at,
+                authority: name_row.and_then(|row| Authority::from_provenance(&row.provenance)),
+                migrated_at: migrated_at_by_name.get(&entry.logical_name_id).cloned(),
+                relations: vec![Relation::ResolvesTo],
+                is_primary: primary_names_by_namespace
                     .get(&entry.namespace)
-                    .and_then(Option::as_deref),
-                migrated_at_by_name.get(&entry.logical_name_id).cloned(),
-                include.counts.then(|| {
+                    .and_then(Option::as_deref)
+                    == Some(entry.normalized_name.as_str()),
+                resolution: Some(address_name_resolution(entry, numeric_coin_type)),
+                subname_count: include.counts.then(|| {
                     subname_counts_by_name
                         .get(&entry.logical_name_id)
                         .copied()
                         .unwrap_or_default()
                 }),
-                record_counts_by_name.get(&entry.logical_name_id).copied(),
+                record_count: record_counts_by_name.get(&entry.logical_name_id).copied(),
                 role_summary,
-            );
-            row.relations = vec![Relation::ResolvesTo];
-            row.resolution = Some(address_name_resolution(record, numeric_coin_type));
+                restrictions: None,
+            };
             if include_role_summary {
-                row.restrictions = permission_summaries
-                    .get(&entry.resource_id)
+                row.restrictions = entry
+                    .resource_id
+                    .and_then(|id| permission_summaries.get(&id))
                     .map(ResourceRestrictions::from_summary)
                     .transpose()?
                     .flatten();

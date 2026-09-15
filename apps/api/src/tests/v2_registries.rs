@@ -852,3 +852,29 @@ async fn v2_get_registry_role_counts_fold_assignments_and_current_label_holders(
     assert_eq!(labels["data"][0]["role_holder_count"], json!(0));
     database.cleanup().await
 }
+
+#[tokio::test]
+async fn declared_registry_reads_honor_start_retirement_and_retraction() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_declared_registry(&database).await?;
+    for (block, expected) in [(54, false), (55, true), (60, true)] {
+        let row = bigname_storage::load_registry_contract(
+            &database.pool, REGISTRY_CHAIN_ID, DECLARED_REGISTRY, Some(block),
+        ).await?;
+        assert_eq!(row.is_some(), expected, "open declaration at block {block}");
+    }
+    sqlx::query("UPDATE bigname_phase.contract_instance_addresses SET active_to_block_number = 60, deactivated_at = now() WHERE address = $1")
+        .bind(DECLARED_REGISTRY).execute(&database.pool).await?;
+    for (block, expected) in [(54, false), (55, true), (60, true), (61, false)] {
+        let row = bigname_storage::load_registry_contract(
+            &database.pool, REGISTRY_CHAIN_ID, DECLARED_REGISTRY, Some(block),
+        ).await?;
+        assert_eq!(row.is_some(), expected, "retired declaration at block {block}");
+    }
+    sqlx::query("UPDATE bigname_phase.contract_instance_addresses SET active_to_block_number = NULL WHERE address = $1")
+        .bind(DECLARED_REGISTRY).execute(&database.pool).await?;
+    assert!(bigname_storage::load_registry_contract(
+        &database.pool, REGISTRY_CHAIN_ID, DECLARED_REGISTRY, Some(55),
+    ).await?.is_none(), "retracted declaration must not become historical evidence");
+    database.cleanup().await
+}

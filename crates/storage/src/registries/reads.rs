@@ -49,7 +49,7 @@ const POINTER_SELECT: &str = r#"
 /// Loads one known registry contract with its first-observation evidence. A registry is known
 /// when it announced itself with `RegistryCreated`, was ever the target of an ENSv2
 /// `SubregistryUpdated` pointer, or is a manifest-declared `root_registry`/`registry` contract.
-/// `as_of_block` bounds the event-derived evidence to a served position.
+/// `as_of_block` bounds events and inclusive declaration intervals to a served position.
 pub async fn load_registry_contract(
     pool: &PgPool,
     chain_id: &str,
@@ -109,7 +109,10 @@ pub async fn load_registry_contract(
              AND manifest.chain_id = declaration.chain_id
             WHERE address.chain_id = $1
               AND lower(address.address) = $2
-              AND address.deactivated_at IS NULL
+              AND (address.deactivated_at IS NULL OR address.active_to_block_number IS NOT NULL)
+              AND ($3::bigint IS NULL AND address.deactivated_at IS NULL OR $3 IS NOT NULL
+                   AND (address.active_from_block_number IS NULL OR address.active_from_block_number <= $3)
+                   AND (address.active_to_block_number IS NULL OR address.active_to_block_number >= $3))
               AND declaration.role IN ('root_registry', 'registry')
               AND manifest.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
             ORDER BY address.active_from_block_number NULLS FIRST

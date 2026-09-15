@@ -1200,3 +1200,60 @@ fn v2_permissions_current_resource_id() -> Uuid {
 fn v2_permissions_stale_resource_id() -> Uuid {
     Uuid::from_u128(0xe200)
 }
+
+#[tokio::test]
+async fn v2_permissions_namespace_filters_audit_rows_before_paging_and_counting() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    // The lower-sorting registration belongs to another namespace. The matching ENS
+    // registration has no current name and must remain readable through its audit identity.
+    let mut events = Vec::new();
+    for (namespace, resource_id, canonicality) in [
+        ("basenames", v2_permissions_current_resource_id(), CanonicalityState::Canonical),
+        ("ens", v2_permissions_stale_resource_id(), CanonicalityState::Canonical),
+        ("ens", v2_permissions_current_resource_id(), CanonicalityState::Orphaned),
+    ] {
+        let mut event = history_event(
+            &format!("permission-namespace-{namespace}-{resource_id}"), None, Some(resource_id),
+            Some("ethereum-mainnet"), Some(99), Some("0xresource"), None, None, canonicality,
+        );
+        event.namespace = namespace.to_owned();
+        event.event_kind = "PermissionChanged".to_owned();
+        events.push(event);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    let unfiltered = v2_permissions_payload_for_database(
+        &database, &format!("/v1/permissions?address={V2_PERMISSIONS_SUBJECT}"),
+    ).await?;
+    assert_eq!(unfiltered["data"].as_array().unwrap().len(), 3);
+    let filtered = v2_permissions_payload_for_database(
+        &database, &format!("/v1/permissions?address={V2_PERMISSIONS_SUBJECT}&namespace=ens&page_size=1"),
+    ).await?;
+    assert_eq!(filtered["data"].as_array().unwrap().len(), 1);
+    assert_eq!(filtered["data"][0]["registration_id"], json!(v2_permissions_stale_resource_id()));
+    let storage_page = bigname_storage::load_permissions_current_account_resource_page(
+        &database.pool, Some(V2_PERMISSIONS_SUBJECT), None, Some("ens"), None, 1,
+    ).await?;
+    assert_eq!(storage_page.summary.row_count, 1);
+    assert_eq!(filtered["page"]["has_more"], json!(false));
+    assert_eq!(filtered["page"]["next_cursor"], Value::Null);
+    let mut summary = permission_current_resource_summary(v2_permissions_current_resource_id(), Some("ens_v2_registry"));
+    summary.resource_restrictions = Some(json!({"kind": "ens_v2_registry", "locked_roles": ["renew"]}));
+    upsert_phase_permissions_current_resource_summary(&database.pool, &summary).await?;
+    let matching = v2_permissions_payload_for_database(
+        &database, &format!("/v1/permissions?registration_id={}&namespace=ens", v2_permissions_stale_resource_id()),
+    ).await?;
+    assert_eq!(matching["data"].as_array().unwrap().len(), 1);
+    let unscoped = v2_permissions_payload_for_database(
+        &database, &format!("/v1/permissions?registration_id={}", v2_permissions_current_resource_id()),
+    ).await?;
+    assert!(unscoped.get("restrictions").is_some());
+    let excluded = v2_permissions_payload_for_database(
+        &database, &format!("/v1/permissions?registration_id={}&namespace=ens", v2_permissions_current_resource_id()),
+    ).await?;
+    assert_eq!(excluded["data"], json!([]));
+    assert!(excluded.get("restrictions").is_none());
+    assert!(excluded["meta"].get("completeness").is_none());
+
+    database.cleanup().await
+}

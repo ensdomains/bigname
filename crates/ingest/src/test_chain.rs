@@ -3,8 +3,7 @@
 //! The ingest fetch path is judged on two things at once: the facts it stores and the
 //! requests it spends getting them. This double serves a small deterministic chain, answers
 //! every method the provider can issue, and counts them by method, so a test can assert
-//! both. Individual faults are injected through [`Tamper`] to prove that each cross-check
-//! actually fires, and with the right severity.
+//! both. [`Tamper`] injects faults to prove each cross-check fires with the right severity.
 
 use std::{
     collections::BTreeMap,
@@ -38,6 +37,7 @@ pub(crate) enum Tamper {
     RangeQueryDropsWatchedLog(i64),
     /// A receipt that claims a block this window did not resolve.
     ReceiptBlockHashMoved(i64),
+    EmptyRangeAfterReorg(i64),
     /// A receipt the provider no longer has.
     NullReceipt(i64),
     /// A transaction the provider no longer has.
@@ -271,7 +271,15 @@ impl TestNode {
             .and_then(parse_quantity);
         number
             .and_then(|number| self.chain.block(number))
-            .map_or(Value::Null, |block| self.header(block, false))
+            .map_or(Value::Null, |block| {
+                let mut header = self.header(block, false);
+                if self.tamper == Tamper::EmptyRangeAfterReorg(block.number)
+                    && self.counts.get("eth_getLogs") > 0
+                {
+                    header["hash"] = json!(hash_of("reorged", block.number));
+                }
+                header
+            })
     }
 
     fn block_by_hash(&self, params: &[Value], full: bool) -> Value {
@@ -462,6 +470,9 @@ impl TestNode {
         let exact_block = filter.get("blockHash").is_some();
         let mut values = Vec::new();
         for block in blocks {
+            if !exact_block && self.tamper == Tamper::EmptyRangeAfterReorg(block.number) {
+                continue;
+            }
             let dropping = self.tamper == Tamper::RangeQueryDropsWatchedLog(block.number);
             for (transaction, log) in block.logs() {
                 let matches = exact_block

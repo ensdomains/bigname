@@ -1394,7 +1394,12 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 - Request parameters: at least one of `name`, `registration_id`, or `address`;
   filters are combinable. Query `namespace`, `include=lineage`, `cursor`,
   `page_size`, and optional `finality=latest`. `at` and historical `finality`
-  values are rejected by the shared latest-state collection rule.
+  values are rejected by the shared latest-state collection rule. An explicit
+  namespace filters rows and their summary evidence before pagination. Resource audit
+  reads establish namespace from canonical activated interpreted events, so an
+  unnamed or superseded registration does not need a current name binding. A
+  registration outside the namespace returns an empty page without its resource
+  restrictions or permission support metadata.
 - Response shape: `data` is an array of permission rows
   `{address, grant_scope, powers, registration_id, name?, authority_context,
   wrapper_state?, wrapper_fuses?}`. The two wrapper fields use the same atomic,
@@ -1584,6 +1589,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   (`60`, or an ENSIP-11 coin type `0x80000000 | chain_id`) the ENSIP-19 default
   EVM address `addr:2147483648` when the resolver declares that read feature
   and no exact entry for the coin type shadows it. Zero-address and cleared
+  records never match. Names with a retained serving resource can match without
+  a current owner or registration; the result does not invent authority for them.
+  For such names, `dedupe=registration` and cursor identity use the serving
+  resource as the grouping key while registration fields remain absent.
   records never match. `namespace`, `authority`, `q`, `sort`, `order`, `dedupe`,
   and `include=role_summary` apply as for the authority relations.
 - Response shape: `data` is an array of record-shaped rows with `name`,
@@ -2321,7 +2330,10 @@ For a registrar lease first identified by a later readable observation, registra
   contract never announced itself; `declared` is a manifest-declared registry
   with no observed creation, whose `created_block_number` is its configured
   start block, `created_at` is that block's timestamp when the block is known,
-  and `created_transaction_hash` is `null`. `counts.labels` is the exact
+  and `created_transaction_hash` is `null`. Declaration evidence applies only
+  within its inclusive configured block interval; finite retirement preserves
+  earlier reads, while a retracted declaration with no retained interval does not.
+  `counts.labels` is the exact
   number of labels the registry currently holds (the rows of the labels route
   below); for a current selection it is `0` when `name` is `null`. `counts.events` is present only with
   `include=counts` and counts the product-visible events emitted by the

@@ -1503,6 +1503,10 @@ Published projection families include:
 - `address_names_current`;
 - `address_records_current` (the reverse index over current `addr:<coin_type>`
   records, derived from `record_inventory_current`);
+  Its authority binding, resource and binding kind are nullable; the record-serving
+  resource is required. The optional-authority schema migration preserves existing
+  rows. Upgrading an indexed database also requires replaying Project for retained
+  history to populate previously omitted names without authority.
 - `children_current`;
 - `permissions_current`, `account_permission_state_current`, and the
   per-resource permission summary;

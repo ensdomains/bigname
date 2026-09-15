@@ -140,6 +140,10 @@ pub(crate) async fn get_permissions(
         &state.pool,
         resolved.subject.as_deref(),
         resolved.resource_id,
+        params
+            .namespace
+            .as_deref()
+            .filter(|_| filter_inputs.name_filter.is_none()),
         storage_cursor.as_ref(),
         params.page_size,
     )
@@ -226,7 +230,8 @@ fn empty_permissions_response(
         EmptyPermissionsSelection::MissingOrUnsupportedNameAnchor => {
             apply_permissions_collection_support_meta(&mut meta, PermissionSupport::Unknown, false);
         }
-        EmptyPermissionsSelection::SupersededNameRegistrationPair => {}
+        EmptyPermissionsSelection::SupersededNameRegistrationPair
+        | EmptyPermissionsSelection::NamespaceRegistrationMismatch => {}
     }
 
     Json(PermissionsResponse {

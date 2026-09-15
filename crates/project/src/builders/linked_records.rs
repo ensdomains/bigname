@@ -1,3 +1,5 @@
+mod history;
+
 use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result};
@@ -21,6 +23,10 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                    event.normalized_event_id AS pointer_event_id,
                    event.block_number AS pointer_block_number,
                    event.block_hash AS pointer_block_hash,
+                   ARRAY[COALESCE(event.block_number, -1),
+                         COALESCE(event.transaction_index, -1),
+                         COALESCE(event.log_index, -1), event.normalized_event_id]
+                       AS pointer_position,
                    lead(COALESCE(event.block_number, -1)) OVER pointer_chain
                        AS next_block_number,
                    lead(COALESCE(event.transaction_index, -1)) OVER pointer_chain
@@ -151,5 +157,5 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                 ProjectError::database("failed to select linked resolver records", error)
             })?;
     }
-    Ok(())
+    history::build(transaction).await
 }

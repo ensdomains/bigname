@@ -38,6 +38,82 @@ fn write(block: i64, log_index: i64, coin: &'static str, value: &'static str) ->
 }
 
 #[tokio::test]
+async fn addr_records_follow_ownerless_serving_records_through_redo() -> Result<()> {
+    let (database, pool) = migrated_pool("addr_records_ownerless").await?;
+    // Simulate an already installed schema, then exercise the additive upgrade.
+    raw_sql(
+        "ALTER TABLE address_records_current ALTER COLUMN surface_binding_id SET NOT NULL,
+        ALTER COLUMN resource_id SET NOT NULL, ALTER COLUMN binding_kind SET NOT NULL",
+    )
+    .execute(&pool)
+    .await?;
+    raw_sql(include_str!(
+        "../../../migrations/20260915120000_address_records_optional_authority.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    seed_name(&pool, false).await?;
+    seed_writes(
+        &pool,
+        &[write(11, 1, "60", ADDRESS_A), write(12, 1, "60", ADDRESS_B)],
+    )
+    .await?;
+    sqlx::query("UPDATE surface_bindings SET active_to = to_timestamp(1800000011)")
+        .execute(&pool)
+        .await?;
+    insert_event(
+        &pool,
+        "ownerless",
+        None,
+        Some(RESOURCE),
+        "AuthorityTransferred",
+        "ens_v1_registry_l1",
+        None,
+        11,
+        0,
+        json!({"node": NODE, "owner": REGISTRY, "owner_getter": ZERO20,
+               "owner_getter_reason": "registry_self", "authority_kind": null}),
+        json!({"emitting_address": REGISTRY}),
+    )
+    .await?;
+    run(&pool, 11, 0, None, RunMode::Normal).await?;
+    let name: Value =
+        sqlx::query_scalar("SELECT to_jsonb(n) FROM name_current n WHERE logical_name_id = $1")
+            .bind(LOGICAL_NAME)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(name["resource_id"], Value::Null, "{name}");
+    assert_eq!(name["serving_resource_id"], RESOURCE, "{name}");
+    let inventory: Value = sqlx::query_scalar(
+        "SELECT entries FROM record_inventory_current WHERE resource_id = $1::uuid",
+    )
+    .bind(RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        inventory[0]["value"], ADDRESS_A,
+        "forward inventory remains readable"
+    );
+    assert_eq!(addresses(&pool, "60").await?, vec![ADDRESS_A]);
+    let row = row_for_coin(&pool, "60").await?;
+    for field in ["resource_id", "surface_binding_id", "binding_kind"] {
+        assert_eq!(row[field], Value::Null, "must not invent authority: {row}");
+    }
+    assert_eq!(row["record_resource_id"], RESOURCE);
+    run(&pool, 12, 12, Some(11), RunMode::Normal).await?;
+    assert_eq!(addresses(&pool, "60").await?, vec![ADDRESS_B]);
+    sqlx::query("UPDATE normalized_events SET canonicality_state = 'orphaned' WHERE block_number = 12 AND event_kind = 'RecordChanged'")
+        .execute(&pool).await?;
+    run(&pool, 12, 12, Some(12), RunMode::Redo).await?;
+    assert_eq!(addresses(&pool, "60").await?, vec![ADDRESS_A]);
+    let repaired = rows(&pool).await?;
+    run(&pool, 12, 0, None, RunMode::Normal).await?;
+    assert_eq!(rows(&pool).await?, repaired);
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn addr_records_publish_one_row_per_address_coin_and_name() -> Result<()> {
     let (database, pool) = migrated_pool("addr_records_publish").await?;
     seed_name(&pool, false).await?;

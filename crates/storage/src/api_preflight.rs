@@ -62,6 +62,7 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
                 ('relation', 'bigname_phase.service_heartbeats'),
                 ('relation', 'bigname_phase.manifest_versions'),
                 ('relation', 'bigname_phase.manifest_contract_instances'),
+                ('relation', 'bigname_phase.contract_instance_addresses'),
                 ('relation', 'bigname_phase.resolution_divergences'),
                 (
                     'function',

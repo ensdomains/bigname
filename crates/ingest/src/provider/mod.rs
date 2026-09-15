@@ -123,7 +123,7 @@ impl ChainProvider {
     /// Range log lookup that does not re-resolve the blocks it touched.
     ///
     /// Returned logs are pinned to the hashes in `resolved`; the caller re-checks the
-    /// union of logged blocks once per window with [`Self::recheck_resolved`].
+    /// whole window once more while loading [`Self::headers`].
     pub(crate) async fn range_logs(
         &self,
         resolved: &[ResolvedBlock],
@@ -172,16 +172,6 @@ impl ChainProvider {
                 .await
                 .map(Some),
             Self::RethDb(_) => Ok(None),
-        }
-    }
-
-    /// Confirms once per window that no logged block's hash moved during the lookups.
-    ///
-    /// The datadir reader pins hashes inside its own log read, so it has nothing to redo.
-    pub(crate) async fn recheck_resolved(&self, resolved: &[ResolvedBlock]) -> Result<()> {
-        match self {
-            Self::JsonRpc(provider) => provider.recheck_resolved(resolved).await,
-            Self::RethDb(_) => Ok(()),
         }
     }
 

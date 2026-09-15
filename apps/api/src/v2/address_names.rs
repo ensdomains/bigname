@@ -293,13 +293,20 @@ pub(crate) async fn get_address_names(
         BTreeMap::new()
     };
     let record_counts_by_name = if include_role_summary || include.counts {
-        load_address_name_record_counts(&state.pool, &storage_page.entries, &name_rows)
-            .await
-            .map_err(|_| {
-                V2Error::internal_error(format!(
-                    "failed to load address-name record counts for {normalized_address}"
-                ))
-            })?
+        load_address_name_record_counts(
+            &state.pool,
+            storage_page
+                .entries
+                .iter()
+                .map(|entry| entry.logical_name_id.as_str()),
+            &name_rows,
+        )
+        .await
+        .map_err(|_| {
+            V2Error::internal_error(format!(
+                "failed to load address-name record counts for {normalized_address}"
+            ))
+        })?
     } else {
         BTreeMap::new()
     };
@@ -396,15 +403,15 @@ async fn load_primary_names_by_namespace<'a>(
     Ok(primary_names)
 }
 
-async fn load_address_name_record_counts(
+async fn load_address_name_record_counts<'a>(
     pool: &sqlx::PgPool,
-    entries: &[AddressNameCurrentEntry],
+    names: impl Iterator<Item = &'a str>,
     name_rows: &BTreeMap<String, NameCurrentRow>,
 ) -> anyhow::Result<BTreeMap<String, u64>> {
     let mut logical_name_ids = Vec::new();
     let mut keys = Vec::new();
-    for entry in entries {
-        let Some(name_row) = name_rows.get(&entry.logical_name_id) else {
+    for logical_name_id in names {
+        let Some(name_row) = name_rows.get(logical_name_id) else {
             continue;
         };
         let Some((resource_id, boundary)) =
@@ -412,7 +419,7 @@ async fn load_address_name_record_counts(
         else {
             continue;
         };
-        logical_name_ids.push(entry.logical_name_id.clone());
+        logical_name_ids.push(logical_name_id.to_owned());
         keys.push((resource_id, boundary));
     }
 

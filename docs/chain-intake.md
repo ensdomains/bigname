@@ -381,12 +381,14 @@ data-integrity failure, not a retry.
 receipt log belongs to the requested transaction and its block, and a receipt
 that reports a status must decode one.
 
-**One hash re-check per window.** Range log lookups for all of a window's
-queries run first, concurrently. A single re-resolve of the union of blocks that
-returned a log runs after the last `eth_getLogs`, comparing against the hashes
-the window resolved; a mismatch fails with `provider block hashes changed during
-range log lookup` and is retried. Previously each query re-resolved its own
-logged blocks, repeating the same lookups once per query.
+**Hash re-check while loading headers.** Range log lookups for all of a window's
+queries run first, concurrently. RPC then loads every window header by block
+number and compares its hash with the initial resolution before storing any
+facts. This includes blocks that returned no logs: a replacement block's empty
+result cannot be paired with an old header fetched by hash. A mismatch fails
+with `provider block hashes changed during range log lookup` and is retried.
+The required header fetch performs this check without separate re-resolve calls.
+The direct datadir reader keeps its hash-pinned local reads.
 
 **Wide-range log prefetch.** The persisted watch filter's queries do not change
 from window to window, so each is read over a wide block range — 10,000 blocks,
@@ -401,13 +403,14 @@ log's block hash equals the hash that window resolved. Anything else drops the
 cache entry and rereads the window's own range. Prefetching is limited to normal
 historical batches and to blocks at or below the finalized head: a block that
 can still reorg might gain a log after the prefetch read it, and nothing later
-would notice, because the re-check only covers blocks that already returned a
-log. Redo windows and live-follow windows therefore always read their own range.
+would notice: a later header re-check cannot detect a log omitted by an earlier
+cache entry whose empty block had no recorded hash. Redo windows and live-follow
+windows therefore always read their own range.
 Supplemental discovery queries — the ones that admit registry-announced
 addresses part-way through a window — are never prefetched, for the same reason.
 
-**Concurrency.** The batched block-hash lookups (`resolve`), the batched header
-lookups (`headers`), the per-window range log queries, and the per-transaction
+**Concurrency.** The initial batched block-hash lookups (`resolve`), the subsequent batched
+header lookups (`headers`), the per-window range log queries, and the per-transaction
 receipt and transaction fetches all run with the same bounded parallelism,
 preserving output order. Nothing about window boundaries, markers, cursor pins,
 or what a window stores changes.

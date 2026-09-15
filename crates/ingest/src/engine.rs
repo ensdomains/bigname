@@ -15,9 +15,7 @@ use crate::{
         BASE_COINBASE_SEAM_BLOCK, effective_redo_start, primary_source, publishable_heads,
         redo_source_target, sort_sources, target_number, validate_request,
     },
-    provider::{
-        ChainProvider, ProviderKind, ResolvedBlock, SharedProvider, normalized_kind, provider_error,
-    },
+    provider::{ChainProvider, ProviderKind, SharedProvider, normalized_kind, provider_error},
 };
 
 mod live;
@@ -486,14 +484,6 @@ impl Engine {
             query::fetch_into(&context, &supplemental, &mut selected_by_identity).await?;
             queries.extend(supplemental);
         }
-        // One hash re-check per window, after the last range log lookup, over the union of
-        // blocks that returned a log.
-        if !coinbase {
-            let logged = logged_blocks(&resolved, selected_by_identity.values());
-            provider.recheck_resolved(&logged).await.map_err(|error| {
-                provider_error("failed to re-resolve ingest blocks after log lookup", error)
-            })?;
-        }
         let mut selected = selected_by_identity.into_values().collect::<Vec<_>>();
         selected.retain(|log| filter.includes_log(&log.address, &log.topics, log.block_number));
         let facts = fetch_selected_facts(&provider, &resolved, selected.clone(), &filter).await?;
@@ -596,22 +586,6 @@ impl Engine {
 /// Identifies a configured provider, for caches that must never mix endpoints.
 fn provider_key(chain_id: &str, source: &SourceDescriptor) -> String {
     format!("{chain_id}\0{}\0{}", source.kind, source.endpoint)
-}
-
-/// The resolved blocks that returned at least one log, in window order.
-pub(crate) fn logged_blocks<'a>(
-    resolved: &[ResolvedBlock],
-    logs: impl IntoIterator<Item = &'a crate::provider::Log>,
-) -> Vec<ResolvedBlock> {
-    let numbers = logs
-        .into_iter()
-        .map(|log| log.block_number)
-        .collect::<BTreeSet<_>>();
-    resolved
-        .iter()
-        .filter(|block| numbers.contains(&block.number))
-        .cloned()
-        .collect()
 }
 
 struct NormalSourceState<'a> {

@@ -62,8 +62,8 @@ justification = "Manifest state, address-epoch persistence, and derived-phase in
 
 [[files]]
 path = "crates/project/src/builders/record_inventory.rs"
-loc = 849
-justification = "The record inventory build stays one SQL derivation (pointer eligibility, node-keyed attribution, value selection, cleared-pointer history rows); the mirror-resolver pass lives in record_inventory/mirror.rs and this file only swaps mirror pointers for the substituted ENSv1 pointers and calls it."
+loc = 720
+justification = "The inventory build retains pointer eligibility, value selection, and cleared-pointer rows; historical attribution and mirror substitution are separate modules."
 
 [[files]]
 path = "crates/storage/src/history.rs"
@@ -125,7 +125,7 @@ justification = "Head-marker validation, retained provider finality, and publica
 
 [[files]]
 path = "crates/ingest/src/engine.rs"
-loc = 636
+loc = 610
 justification = "Batch request types and orchestration share the ingestion entry point; live-follow, prefetch, query, redo, and source-floor logic already live in child modules. Preserve the existing orchestration boundary for this integration."
 
 [[files]]

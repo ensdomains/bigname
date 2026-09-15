@@ -304,7 +304,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=7
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=29
+expected_predecessor_shape_proof_count=30
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -391,7 +391,8 @@ for migration_file in \
     "$ROOT/migrations/20260913130000_permissions_resource_restrictions.sql" \
     "$ROOT/migrations/20260913130100_account_permission_state_wrapper_operators.sql" \
     "$ROOT/migrations/20260914120000_lookup_publication_revalidation.sql" \
-    "$ROOT/migrations/20260914120100_address_records_current_comments.sql"
+    "$ROOT/migrations/20260914120100_address_records_current_comments.sql" \
+    "$ROOT/migrations/20260915120000_address_records_optional_authority.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -689,6 +690,42 @@ $$;
 DROP TABLE expected_address_record_comments;
 SQL
 } | run_psql
+# The reverse index previously required authority identity even when a name had
+# a readable serving resource. Prove that exact predecessor upgrades and that
+# repeat application preserves the required record-resource identity.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+ALTER TABLE address_records_current
+    ALTER COLUMN surface_binding_id SET NOT NULL,
+    ALTER COLUMN resource_id SET NOT NULL,
+    ALTER COLUMN binding_kind SET NOT NULL;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" preceding-shape
+    emit_phase_migration "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" baseline-first
+    emit_phase_migration "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = 'address_records_current'::regclass
+          AND attname IN ('surface_binding_id', 'resource_id', 'binding_kind')
+          AND attnotnull
+    ) OR NOT EXISTS (
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = 'address_records_current'::regclass
+          AND attname = 'record_resource_id' AND attnotnull
+    ) THEN
+        RAISE EXCEPTION 'reverse-index upgrade did not preserve optional authority and required serving identity';
+    END IF;
+END
+$$;
+SQL
+} | run_psql
+assert_migration_context_count "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" empty-schema 1
+assert_migration_context_count "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" preceding-shape 1
+assert_migration_context_count "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" baseline-first 2
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor
 # shape, then validate the additive tuple invariant independently. Both files
 # must remain idempotent after the upgrade completes.

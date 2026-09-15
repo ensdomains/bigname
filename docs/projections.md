@@ -385,11 +385,13 @@ default unit; resource deduplication is explicit.
 
 `address_records_current` is the reverse index over current `addr:<coin_type>`
 resolver records: one row per (lower-cased address the record resolves to, coin
-type, current bound name). It is derived from the published record inventory of
+type, current name). It is derived from the published record inventory of
 the name's record-serving resource (`name_current.serving_resource_id`, else
 `resource_id`), never from record events directly, so a row exists exactly when
 the forward indexed read of that record answers `success` with a 20-byte
-non-zero EVM address. Zero-address values and cleared (`not_found`) entries
+non-zero EVM address, including names that have a serving resource but no current
+authority. Their `surface_binding_id`, `resource_id`, and `binding_kind` stay null;
+`record_resource_id` remains required. Zero-address values and cleared (`not_found`) entries
 produce no row; non-EVM-shaped payloads produce no row. `record_key` names the
 entry the row came from. The ENSIP-19 default EVM address (`addr:2147483648`)
 publishes one row under its own coin type; when the serving resolver declares
@@ -721,6 +723,19 @@ not discard values written before the link, and an explicit empty value cannot
 fall back to a previous link or to a different record. The latest link selection
 and value event both contribute provenance. No unknown name acquires a serving
 row solely because its resolver emitted a link.
+
+Name history retains shared-record writes after an exact link, default link, or
+resolver pointer changes. Project reconstructs the effective exact/default record
+selection within each retained resolver-pointer interval. Each selected record
+contributes writes before that selection ends, including writes made before the
+link; writes made only after the name stopped selecting that record are excluded.
+Current record values still use only the latest selection. Historical attribution
+and its selecting link IDs remain in `provenance.attributed_event_ids`, so removing
+a link or write during redo rebuilds its former consumers. Link IDs are rebuild
+dependencies; they do not add a new public history event type. Exact links and
+the zero-node fallback select persistent record storage.
+(upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/PermissionedResolver.sol:L363 @ ens_v2_sepolia_20260903@5da83f6a)
+(upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/PermissionedResolver.sol:L381 @ ens_v2_sepolia_20260903@5da83f6a)
 
 A change or retraction to a link or shared-record update rebuilds all current
 name and resource consumers of that resolver. Incremental staging includes the

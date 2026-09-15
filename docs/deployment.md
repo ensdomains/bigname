@@ -615,7 +615,8 @@ GRANT SELECT ON TABLE
     bigname_phase.record_inventory_current,
     bigname_phase.primary_names_current,
     bigname_phase.manifest_versions,
-    bigname_phase.manifest_contract_instances
+    bigname_phase.manifest_contract_instances,
+    bigname_phase.contract_instance_addresses
 TO bigname_api;
 GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state(
     text, bigint, text, jsonb, jsonb, uuid, text, text
@@ -626,14 +627,18 @@ GRANT EXECUTE ON FUNCTION bigname_phase.write_resolution_divergence(
 ) TO bigname_api;
 ```
 
-This role cannot read raw facts, discovery state, the divergence table, or
-unrelated operational tables directly. Reapply these explicit relation and
-function grants after a reviewed phase-schema replacement; do not use ownership
+This role cannot read raw facts, the divergence table, or unrelated operational
+tables directly. Its only direct discovery-state read is
+`contract_instance_addresses`: the registry overview and labels routes use
+declared address intervals to recognize registry contracts at the selected
+block. The grant is SELECT-only and does not admit discovery writes.
+Reapply these explicit relation and function grants after a reviewed
+phase-schema replacement; do not use ownership
 or schema-wide write grants as a shortcut.
 
 `migration_event_associations` is on the list because
-`GET /v2/diagnostics/events` selects the ENSv1→ENSv2 migration correlation rows
-for its candidate payload; the public `GET /v2/events` path shares the same
+`GET /v1/diagnostics/events` selects the ENSv1→ENSv2 migration correlation rows
+for its candidate payload; the public `GET /v1/events` path shares the same
 loader but does not select from that table. The row set is Interpret
 coordination state rather than a projection, so the grant is deliberately
 read-only and does not widen the API's write boundary. A database provisioned

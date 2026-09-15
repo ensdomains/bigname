@@ -3,7 +3,7 @@ use sqlx::{Postgres, Transaction};
 use crate::{Marker, ProjectError, Result};
 
 /// Reverse index over current `addr:<coin_type>` records: one row per (address the record
-/// resolves to, coin type, current bound name). It re-reads the staged record inventory rather
+/// resolves to, coin type, current name). It re-reads the staged record inventory rather
 /// than the record events, so a row exists exactly when the forward read of that record on the
 /// name's record-serving resource answers `success` with a 20-byte non-zero EVM address.
 ///
@@ -66,10 +66,11 @@ pub(super) async fn build(
                    name.manifest_version,
                    COALESCE(name.serving_resource_id, name.resource_id) AS record_resource_id
             FROM project_stage_name_current name
-            WHERE name.surface_binding_id IS NOT NULL
-              AND name.resource_id IS NOT NULL
-              AND name.binding_kind IS NOT NULL
-              AND name.declared_summary #>> '{control,status}' IS DISTINCT FROM 'unregistered'
+            WHERE name.serving_resource_id IS NOT NULL
+               OR (name.surface_binding_id IS NOT NULL
+                   AND name.resource_id IS NOT NULL
+                   AND name.binding_kind IS NOT NULL
+                   AND name.declared_summary #>> '{control,status}' IS DISTINCT FROM 'unregistered')
         )
         INSERT INTO project_stage_address_records_current (
             address, coin_type, logical_name_id, namespace, raw_name, namehash,

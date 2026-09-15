@@ -70,11 +70,6 @@ async fn run_window(
     };
     let mut selected_by_identity = BTreeMap::new();
     query::fetch_into(&context, &queries, &mut selected_by_identity).await?;
-    let logged = crate::engine::logged_blocks(&resolved, selected_by_identity.values());
-    provider
-        .recheck_resolved(&logged)
-        .await
-        .map_err(|error| crate::provider::provider_error("re-resolve failed", error))?;
     let selected = selected_by_identity.into_values().collect::<Vec<_>>();
     fetch_selected_facts(provider, &resolved, selected, &filter).await
 }
@@ -151,7 +146,26 @@ async fn a_window_never_asks_for_a_block_body_receipts_or_exact_block_logs() -> 
 }
 
 #[tokio::test]
-async fn a_window_re_resolves_its_logged_blocks_exactly_once() -> AnyResult<()> {
+async fn an_empty_range_reorg_is_retried_before_storing_old_headers() -> AnyResult<()> {
+    let endpoint = serve(
+        TestChain::synthetic(FIRST_BLOCK, 1, 1),
+        Tamper::EmptyRangeAfterReorg(FIRST_BLOCK),
+    )
+    .await?;
+    let provider = shared(endpoint.provider);
+    let cache = Mutex::new(RangeLogCache::default());
+    let result = run_window(&provider, &cache, FIRST_BLOCK, FIRST_BLOCK, None).await;
+    assert!(
+        result.is_err(),
+        "old block with missing watched logs must not be accepted"
+    );
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::Transient);
+    assert_eq!(endpoint.counts.get("eth_getLogs"), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_window_rechecks_every_block_while_loading_its_headers() -> AnyResult<()> {
     let chain = TestChain::synthetic(FIRST_BLOCK, WINDOW_BLOCKS, 4);
     let endpoint = serve(chain, Tamper::None).await?;
     let provider = shared(endpoint.provider);
@@ -160,17 +174,13 @@ async fn a_window_re_resolves_its_logged_blocks_exactly_once() -> AnyResult<()> 
 
     run_window(&provider, &cache, FIRST_BLOCK, to, None).await?;
 
-    let logged = WINDOW_BLOCKS / 4;
     assert_eq!(
         endpoint.counts.get("eth_getBlockByNumber"),
-        (WINDOW_BLOCKS + logged) as usize,
-        "one resolve of the window plus exactly one re-resolve of its logged blocks"
+        (WINDOW_BLOCKS * 2) as usize,
+        "one initial resolve plus one header lookup per block; no separate recheck"
     );
     assert_eq!(endpoint.counts.get("eth_getLogs"), 1);
-    assert_eq!(
-        endpoint.counts.get("eth_getBlockByHash"),
-        WINDOW_BLOCKS as usize
-    );
+    assert_eq!(endpoint.counts.get("eth_getBlockByHash"), 0);
     Ok(())
 }
 
@@ -388,8 +398,13 @@ async fn the_block_bundle_window_request_profile_is_recorded() -> AnyResult<()> 
             &query.topic1s,
         )
         .await?;
-    let logged = crate::engine::logged_blocks(&resolved, logs.iter());
-    provider.recheck_resolved(&logged).await?;
+    let logged = logs
+        .iter()
+        .map(|log| log.block_number)
+        .collect::<std::collections::BTreeSet<_>>();
+    provider
+        .resolve(&logged.into_iter().collect::<Vec<_>>())
+        .await?;
     let blocks = provider.headers(&resolved).await?;
     let reference = fetch_selected_bundles(&provider, &resolved, logs)
         .await?

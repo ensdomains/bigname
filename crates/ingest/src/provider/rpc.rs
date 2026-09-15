@@ -93,47 +93,36 @@ impl JsonRpcProvider {
         Ok(resolved)
     }
 
+    /// Rechecks every resolved block while loading its header after the range log queries.
+    /// Reading by number detects reorgs even when the replacement returned no watched logs.
     pub async fn headers(&self, resolved: &[ResolvedBlock]) -> Result<Vec<Block>> {
         let calls = resolved
             .iter()
-            .map(|block| BatchCall {
-                method: "eth_getBlockByHash",
-                params: vec![Value::String(block.hash.clone()), Value::Bool(false)],
+            .map(|block| {
+                Ok(BatchCall {
+                    method: "eth_getBlockByNumber",
+                    params: vec![block_number_parameter(block.number)?, Value::Bool(false)],
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         let mut headers = Vec::with_capacity(resolved.len());
         for (expected, value) in resolved.iter().zip(self.parallel_batches(calls).await?) {
             let block = value
-                .with_context(|| format!("provider omitted block {}", expected.hash))
+                .with_context(|| format!("provider omitted block {}", expected.number))
                 .and_then(Block::from_value)?;
+            if block.hash != normalize_hash(&expected.hash) {
+                bail!("provider block hashes changed during range log lookup");
+            }
             validate_block(expected, &block)?;
             headers.push(block);
         }
         Ok(headers)
     }
 
-    /// Re-resolves `resolved` by number and fails when any hash moved underneath ingest.
-    ///
-    /// A window runs this once, after the last range log lookup, over the union of blocks
-    /// that returned a log.
-    pub async fn recheck_resolved(&self, resolved: &[ResolvedBlock]) -> Result<()> {
-        if resolved.is_empty() {
-            return Ok(());
-        }
-        let numbers = resolved
-            .iter()
-            .map(|block| block.number)
-            .collect::<Vec<_>>();
-        if self.resolve(&numbers).await? != resolved {
-            bail!("provider block hashes changed during range log lookup");
-        }
-        Ok(())
-    }
-
     /// Range log lookup over `from..=to` with no hash re-check of its own.
     ///
     /// Logs come back carrying the block hash the provider reported. The caller pins them
-    /// against the hashes the window resolved and calls [`Self::recheck_resolved`] once.
+    /// against the hashes the window resolved and checks them again when loading [`Self::headers`].
     pub async fn range_logs(
         &self,
         from: i64,

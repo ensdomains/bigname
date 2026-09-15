@@ -26,10 +26,12 @@ async fn healthz_reports_phase_runner_health_from_the_phase_schema() -> Result<(
 }
 
 #[tokio::test]
-async fn healthz_identity_works_with_read_only_api_role_privileges() -> Result<()> {
+async fn health_and_registry_routes_work_with_documented_api_role_privileges() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_expected_phase_chains(&database, &["1"]).await?;
     seed_phase_runner_heartbeat(&database, "1", "now()").await?;
+    seed_registry_fixture(&database).await?;
+    seed_declared_registry(&database).await?;
     let role = format!(
         "bigname_api_reader_{}_{}",
         std::process::id(),
@@ -41,11 +43,18 @@ async fn healthz_identity_works_with_read_only_api_role_privileges() -> Result<(
     sqlx::query(&format!("GRANT USAGE ON SCHEMA bigname_phase TO {role}"))
         .execute(&database.lookup_pool)
         .await?;
-    sqlx::query(&format!(
-        "GRANT SELECT ON ALL TABLES IN SCHEMA bigname_phase TO {role}"
-    ))
-    .execute(&database.lookup_pool)
-    .await?;
+    // Exercise the published allowlist itself: schema-wide grants hide missing dependencies.
+    let deployment = include_str!("../../../docs/deployment.md");
+    let grants = deployment
+        .split_once("GRANT SELECT ON TABLE\n")
+        .context("deployment docs must contain the API SELECT grant")?
+        .1
+        .split_once("TO bigname_api;")
+        .context("deployment docs must terminate the API SELECT grant")?
+        .0;
+    sqlx::query(&format!("GRANT SELECT ON TABLE {grants} TO {role}"))
+        .execute(&database.lookup_pool)
+        .await?;
 
     let config = database.database_config(2)?;
     let options = PgConnectOptions::from_str(
@@ -72,7 +81,9 @@ async fn healthz_identity_works_with_read_only_api_role_privileges() -> Result<(
         bigname_lookup::ChainRpcUrls::default(),
     )
     .with_public_namespaces_for_test(["ens", "basenames"]);
-    let response = app_router(state)
+    let app = app_router(state);
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/healthz")
@@ -82,6 +93,17 @@ async fn healthz_identity_works_with_read_only_api_role_privileges() -> Result<(
         .await?;
     let status = response.status();
     let payload: Value = read_json(response).await?;
+    let mut registry_results = Vec::new();
+    for address in [ROOT_REGISTRY, DECLARED_REGISTRY] {
+        for suffix in ["", "/labels"] {
+            let uri = format!("/v1/registries/1/{address}{suffix}");
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(&uri).body(Body::empty())?)
+                .await?;
+            registry_results.push((uri, response.status(), read_json::<Value>(response).await?));
+        }
+    }
     restricted_pool.close().await;
     sqlx::query(&format!("DROP OWNED BY {role}"))
         .execute(&database.lookup_pool)
@@ -91,6 +113,9 @@ async fn healthz_identity_works_with_read_only_api_role_privileges() -> Result<(
         .await?;
 
     assert_eq!(status, StatusCode::OK);
+    for (uri, status, payload) in registry_results {
+        assert_eq!(status, StatusCode::OK, "{uri}: {payload}");
+    }
     assert!(
         payload["database"]["identity"]
             .as_str()

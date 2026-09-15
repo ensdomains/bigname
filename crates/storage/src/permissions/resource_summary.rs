@@ -101,3 +101,27 @@ pub async fn load_permissions_current_resource_summaries(
     })?;
     Ok(rows.into_iter().map(|row| (row.resource_id, row)).collect())
 }
+
+/// Namespace membership for resource audit reads, including registrations with no current name.
+pub async fn permission_resource_matches_namespace(
+    pool: &PgPool,
+    resource_id: Uuid,
+    namespace: &str,
+) -> Result<bool> {
+    sqlx::query_scalar(
+        r#"SELECT EXISTS (
+            SELECT 1 FROM bigname_phase.normalized_events ne
+            JOIN bigname_phase.chain_lineage lineage
+              ON lineage.chain_id = ne.chain_id AND lineage.block_hash = ne.block_hash
+            WHERE ne.resource_id = $1 AND ne.namespace = $2
+              AND ne.consumer_visibility = 'activated'
+              AND ne.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+        )"#,
+    )
+    .bind(resource_id)
+    .bind(namespace)
+    .fetch_one(pool)
+    .await
+    .context("failed to check permission resource namespace")
+}

@@ -132,9 +132,8 @@ pub(super) async fn render_resolves_to_lookup_results(
 
         let mut entries: Vec<(ReverseIdentityRecordRow, AddressNameResolution)> = Vec::new();
         for entry in &page.entries {
-            // Reverse lookup answers which supported names resolve here: a name whose current
-            // row is unreadable or unsupported at this snapshot is absent rather than listed
-            // with a reason, exactly as the authority relations behave.
+            // A root pointer can serve records while authority remains unprojected. Keep that
+            // same serving exception here; unrelated unsupported name rows stay excluded.
             let Some(name_record) = name_records.get(&entry.logical_name_id) else {
                 continue;
             };
@@ -144,6 +143,15 @@ pub(super) async fn render_resolves_to_lookup_results(
                 .get("status")
                 .and_then(|value| value.as_str())
                 == Some("unsupported")
+                && !(name_record
+                    .row
+                    .coverage
+                    .get("unsupported_reason")
+                    .and_then(|value| value.as_str())
+                    == Some(crate::v2::vocab::PARTIAL_SERVE_UNSUPPORTED_REASON)
+                    && bigname_storage::identity_name_current_has_event_linked_registry_serving(
+                        &name_record.row,
+                    ))
             {
                 continue;
             }

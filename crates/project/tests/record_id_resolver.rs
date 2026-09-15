@@ -95,6 +95,135 @@ async fn deleted_link_and_default_changes_rebuild_every_consumer() -> Result<()>
     Ok(())
 }
 
+#[tokio::test]
+async fn record_history_survives_relinks_and_excludes_later_unselected_writes() -> Result<()> {
+    let (db, pool) = database("record_id_history").await?;
+    seed(&pool).await?;
+    text(&pool, "unselected-later", 16, 4, 1, "unrelated").await?;
+    run(&pool, 13, None, RunMode::Normal).await?;
+    assert_history(&pool, 2, &["record-one", "shared-update"], &[]).await?;
+    run(&pool, 14, Some(13), RunMode::Normal).await?;
+    assert_history(
+        &pool,
+        2,
+        &["record-one", "shared-update", "record-two"],
+        &[],
+    )
+    .await?;
+    run(&pool, 18, Some(14), RunMode::Normal).await?;
+    let expected = ["record-one", "shared-update", "record-two", "empty-text"];
+    assert_history(&pool, 2, &expected, &["unselected-later", "record-three"]).await?;
+    assert_text(&pool, 2, "").await?;
+    assert_history(
+        &pool,
+        1,
+        &["record-one", "shared-update", "record-two", "record-three"],
+        &["unselected-later", "empty-text"],
+    )
+    .await?;
+    assert_history(
+        &pool,
+        3,
+        &["record-two", "record-three"],
+        &["record-one", "empty-text"],
+    )
+    .await?;
+    let incremental = snapshot(&pool).await?;
+    run(&pool, 18, None, RunMode::Normal).await?;
+    assert_eq!(
+        snapshot(&pool).await?,
+        incremental,
+        "history full rebuild drift"
+    );
+    run(&pool, 18, Some(18), RunMode::Redo).await?;
+    assert_eq!(snapshot(&pool).await?, incremental, "history redo drift");
+    sqlx::query("DELETE FROM normalized_events WHERE event_identity = 'link-b-two'")
+        .execute(&pool)
+        .await?;
+    run(&pool, 18, Some(18), RunMode::Redo).await?;
+    assert_history(
+        &pool,
+        2,
+        &["record-one", "shared-update", "unselected-later"],
+        &["record-two", "empty-text"],
+    )
+    .await?;
+    let replay = snapshot(&pool).await?;
+    run(&pool, 18, None, RunMode::Normal).await?;
+    assert_eq!(
+        snapshot(&pool).await?,
+        replay,
+        "history retraction rebuild drift"
+    );
+    event(
+        &pool,
+        "clear-pointer",
+        18,
+        5,
+        "ResolverChanged",
+        Some(1),
+        json!({"resolver":"0x0000000000000000000000000000000000000000"}),
+    )
+    .await?;
+    text(&pool, "after-clear", 18, 6, 3, "unrelated").await?;
+    run(&pool, 18, Some(18), RunMode::Normal).await?;
+    assert_history(
+        &pool,
+        1,
+        &["record-one", "shared-update", "record-two", "record-three"],
+        &["after-clear", "unselected-later", "empty-text"],
+    )
+    .await?;
+    assert_eq!(inventory(&pool, 1).await?["support"], "unsupported");
+    let cleared = snapshot(&pool).await?;
+    run(&pool, 18, None, RunMode::Normal).await?;
+    assert_eq!(
+        snapshot(&pool).await?,
+        cleared,
+        "cleared history rebuild drift"
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+async fn assert_history(pool: &PgPool, id: i64, present: &[&str], absent: &[&str]) -> Result<()> {
+    let page = bigname_storage::load_name_history_page(
+        pool,
+        &format!("ens:{}", node(id)),
+        &[resource(id).parse()?],
+        bigname_storage::HistoryScope::Both,
+        true,
+        None,
+        100,
+        bigname_storage::HistorySummaryMode::None,
+        &bigname_storage::HistoryPageOptions {
+            event_kinds: vec!["RecordChanged".into()],
+            ..Default::default()
+        },
+        None,
+    )
+    .await?;
+    let identities: Vec<_> = page
+        .rows
+        .iter()
+        .map(|event| event.event_identity.as_str())
+        .collect();
+    for identity in present {
+        assert_eq!(
+            identities.iter().filter(|value| *value == identity).count(),
+            1,
+            "expected exactly one {identity}: {identities:?}"
+        );
+    }
+    for identity in absent {
+        assert!(
+            !identities.contains(identity),
+            "unexpected {identity}: {identities:?}"
+        );
+    }
+    Ok(())
+}
+
 async fn run(pool: &PgPool, target: i64, previous: Option<i64>, mode: RunMode) -> Result<()> {
     Engine::new(pool.clone())
         .run_batch(BatchRequest {

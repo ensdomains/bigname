@@ -532,7 +532,7 @@ CREATE INDEX IF NOT EXISTS address_names_current_name_idx
     ON address_names_current (logical_name_id, relation, lower(address));
 
 -- Reverse index over current `addr:<coin_type>` resolver records: one row per (address the
--- record resolves to, coin type, current bound name). Rows are derived from the published
+-- record resolves to, coin type, current name). Rows are derived from the published
 -- record inventory of the name's record-serving resource; they answer "which names resolve to
 -- this address" without re-deciding forward record values.
 CREATE TABLE IF NOT EXISTS address_records_current (
@@ -543,13 +543,13 @@ CREATE TABLE IF NOT EXISTS address_records_current (
     namespace text NOT NULL,
     raw_name text NOT NULL,
     namehash text NOT NULL,
-    surface_binding_id uuid NOT NULL
+    surface_binding_id uuid
         REFERENCES surface_bindings (surface_binding_id),
-    resource_id uuid NOT NULL
+    resource_id uuid
         REFERENCES resources (resource_id),
     record_resource_id uuid NOT NULL
         REFERENCES resources (resource_id),
-    binding_kind text NOT NULL,
+    binding_kind text,
     record_key text NOT NULL,
     support_status text NOT NULL,
     unsupported_reason text,
@@ -595,7 +595,7 @@ CREATE INDEX IF NOT EXISTS address_records_current_record_resource_idx
     ON address_records_current (record_resource_id);
 
 COMMENT ON TABLE address_records_current IS
-    'Project-owned reverse index over current addr:<coin_type> resolver records: one row per address a record resolves to, coin type, and current bound name. Rebuilt from record_inventory_current; not serving truth for forward record values.';
+    'Project-owned reverse index over current addr:<coin_type> resolver records: one row per address a record resolves to, coin type, and current name. Rebuilt from record_inventory_current; not serving truth for forward record values.';
 COMMENT ON COLUMN address_records_current.address IS
     'Lowercase EVM address stored by the selected address record.';
 COMMENT ON COLUMN address_records_current.coin_type IS
@@ -609,13 +609,13 @@ COMMENT ON COLUMN address_records_current.raw_name IS
 COMMENT ON COLUMN address_records_current.namehash IS
     'Namehash of the selected logical name.';
 COMMENT ON COLUMN address_records_current.surface_binding_id IS
-    'Binding selected by Project for the current name.';
+    'Binding selected by Project, absent when only a serving resource is known.';
 COMMENT ON COLUMN address_records_current.resource_id IS
-    'Registration resource referenced by the selected name binding.';
+    'Registration resource referenced by the selected name binding, absent without authority.';
 COMMENT ON COLUMN address_records_current.record_resource_id IS
     'Resource whose resolver record inventory supplies the address value.';
 COMMENT ON COLUMN address_records_current.binding_kind IS
-    'Kind of the selected name binding.';
+    'Kind of the selected name binding, absent without authority.';
 COMMENT ON COLUMN address_records_current.record_key IS
     'Address record inventory key, including the default EVM key when used as a fallback.';
 COMMENT ON COLUMN address_records_current.support_status IS

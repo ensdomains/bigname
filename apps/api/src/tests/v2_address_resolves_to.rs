@@ -5,6 +5,115 @@ const V2_RESOLVES_TO_OTHER_EVM_COIN: &str = "2147483658";
 const V2_ENSIP19_DEFAULT_COIN: &str = "2147483648";
 
 #[tokio::test]
+async fn v2_lookup_resolves_to_includes_root_pointer_without_authority() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    seed_v2_lookup_resolves_to_records(&database, address).await?;
+    sqlx::query(r#"UPDATE name_current SET serving_resource_id = resource_id,
+        resource_id = NULL, surface_binding_id = NULL, binding_kind = NULL,
+        token_lineage_id = NULL, support_status = 'unsupported',
+        unsupported_reason = 'current_authority_not_projected',
+        declared_summary = declared_summary || '{"registration":{"status":null},"control":{"status":null}}'::jsonb,
+        provenance = (provenance - 'authority_selection') ||
+          '{"read_reachability":{"basis":"root_registry_resolver_pointer"}}'::jsonb
+        WHERE raw_name = 'alice.eth'"#)
+        .execute(&database.pool).await?;
+    sqlx::query(
+        "UPDATE address_records_current SET resource_id = NULL,
+        surface_binding_id = NULL, binding_kind = NULL WHERE raw_name = 'alice.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+    for profile in ["feed", "detail"] {
+        let request =
+            json!({"profile":profile,"inputs":[{"address":address,"relation":"resolves_to"}]});
+        let payload = v2_lookup_json(&database, request).await?;
+        let records = payload["data"][0]["records"]
+            .as_array()
+            .expect("root pointer records");
+        assert_eq!(names(records), vec!["alice.eth"], "{payload}");
+        assert_eq!(records[0]["relations"], json!(["resolves_to"]));
+        for field in ["owner", "registration_id", "authority"] {
+            assert!(
+                records[0].get(field).is_none_or(Value::is_null),
+                "{field}: {payload}"
+            );
+        }
+    }
+    sqlx::query("UPDATE name_current SET unsupported_reason = 'resolver_not_projected' WHERE raw_name = 'alice.eth'")
+        .execute(&database.pool).await?;
+    let payload = v2_lookup_json(
+        &database,
+        json!({"profile":"detail","inputs":[{"address":address,"relation":"resolves_to"}]}),
+    )
+    .await?;
+    assert_eq!(
+        payload["data"][0]["records"],
+        json!([]),
+        "other unsupported states stay excluded"
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_resolves_to_pages_names_without_authority_or_registration() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    seed_v2_resolves_to_records(&database).await?;
+    sqlx::query(
+        r#"UPDATE name_current SET serving_resource_id = resource_id,
+        resource_id = NULL, surface_binding_id = NULL, binding_kind = NULL,
+        token_lineage_id = NULL, declared_summary = declared_summary ||
+        '{"registration":{"status":"unregistered"},"control":{"status":"unregistered"}}'::jsonb,
+        provenance = provenance - 'authority_selection'
+        WHERE raw_name IN ('alpha.eth', 'gamma.eth')"#,
+    )
+    .execute(&database.pool)
+    .await?;
+    sqlx::query("UPDATE address_records_current SET resource_id = NULL,
+        surface_binding_id = NULL, binding_kind = NULL WHERE raw_name IN ('alpha.eth', 'gamma.eth')")
+        .execute(&database.pool).await?;
+    for (dedupe, sort) in [
+        ("name", "name"),
+        ("registration", "name"),
+        ("name", "expires_at"),
+    ] {
+        let uri = format!(
+            "/v1/addresses/{V2_ADDRESS}/names?relation=resolves_to&dedupe={dedupe}&sort={sort}&page_size=1&include=role_summary"
+        );
+        let first = v2_address_names_payload_for_database(&database, &uri).await?;
+        // Null timestamp ties use logical-name identity, whose order differs from name text.
+        let expected = if sort == "name" {
+            ["alpha.eth", "gamma.eth"]
+        } else {
+            ["gamma.eth", "alpha.eth"]
+        };
+        assert_eq!(first["data"][0]["name"], expected[0], "{first}");
+        assert_eq!(
+            first["data"][0]["registration_status"], "unregistered",
+            "{first}"
+        );
+        for field in ["owner", "registrant", "authority"] {
+            assert!(
+                first["data"][0].get(field).is_none_or(Value::is_null),
+                "{field}: {first}"
+            );
+        }
+        assert_eq!(first["data"][0]["role_summary"], json!([]), "{first}");
+        let cursor = first["page"]["next_cursor"]
+            .as_str()
+            .expect("ownerless cursor");
+        let second =
+            v2_address_names_payload_for_database(&database, &format!("{uri}&cursor={cursor}"))
+                .await?;
+        assert_eq!(second["data"][0]["name"], expected[1], "{second}");
+        assert_eq!(second["page"]["has_more"], false);
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_address_names_resolves_to_filters_authority_before_pagination() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
@@ -205,8 +314,8 @@ async fn v2_get_address_names_resolves_to_lists_names_whose_addr_record_points_h
 }
 
 #[tokio::test]
-async fn v2_get_address_names_resolves_to_rejects_mixed_relations_and_stray_coin_type()
--> Result<()> {
+async fn v2_get_address_names_resolves_to_rejects_mixed_relations_and_stray_coin_type() -> Result<()>
+{
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
 
@@ -261,7 +370,10 @@ async fn v2_get_address_names_resolves_to_paginates_and_binds_cursor_to_relation
         &format!("/v1/addresses/{V2_ADDRESS}/names?relation=resolves_to&page_size=1"),
     )
     .await?;
-    assert_eq!(names(first["data"].as_array().expect("first page")), vec!["alpha.eth"]);
+    assert_eq!(
+        names(first["data"].as_array().expect("first page")),
+        vec!["alpha.eth"]
+    );
     assert_eq!(first["page"]["has_more"], json!(true));
     let cursor = first["page"]["next_cursor"]
         .as_str()
@@ -275,7 +387,10 @@ async fn v2_get_address_names_resolves_to_paginates_and_binds_cursor_to_relation
         ),
     )
     .await?;
-    assert_eq!(names(second["data"].as_array().expect("second page")), vec!["gamma.eth"]);
+    assert_eq!(
+        names(second["data"].as_array().expect("second page")),
+        vec!["gamma.eth"]
+    );
     assert_eq!(second["page"]["has_more"], json!(false));
     assert_eq!(second["page"]["cursor"], json!(cursor));
 
@@ -363,7 +478,10 @@ async fn v2_lookup_reverse_resolves_to_returns_records_with_resolution() -> Resu
     assert_eq!(payload["data"][0]["page"]["total_count"], Value::Null);
     assert_eq!(payload["data"][0]["page"]["has_more"], json!(false));
 
-    assert_eq!(payload["data"][1]["input"]["coin_type"], json!(2_147_483_658_u64));
+    assert_eq!(
+        payload["data"][1]["input"]["coin_type"],
+        json!(2_147_483_658_u64)
+    );
     let other_records = payload["data"][1]["records"]
         .as_array()
         .expect("other records must be an array");
@@ -379,7 +497,11 @@ async fn v2_lookup_reverse_resolves_to_returns_records_with_resolution() -> Resu
         .as_array()
         .expect("any records must be an array");
     assert_eq!(names(any_records), vec!["alice.eth", "bob.eth"]);
-    assert!(any_records.iter().all(|record| record.get("resolution").is_none()));
+    assert!(
+        any_records
+            .iter()
+            .all(|record| record.get("resolution").is_none())
+    );
     assert_eq!(any_records[0]["relations"], json!(["owner"]));
     assert!(payload["meta"]["as_of"].is_object());
 
@@ -392,7 +514,10 @@ async fn v2_lookup_reverse_resolves_to_returns_records_with_resolution() -> Resu
         }),
     )
     .await?;
-    assert_eq!(feed["data"][0]["records"][0]["relations"], json!(["resolves_to"]));
+    assert_eq!(
+        feed["data"][0]["records"][0]["relations"],
+        json!(["resolves_to"])
+    );
     assert_eq!(
         feed["data"][0]["records"][0]["resolution"],
         json!({"coin_type": 60, "record_key": "addr:60"})
@@ -448,7 +573,9 @@ async fn v2_lookup_reverse_resolves_to_paginates_with_a_bound_cursor() -> Result
         }),
     )
     .await?;
-    let second_records = second["data"][0]["records"].as_array().expect("second page");
+    let second_records = second["data"][0]["records"]
+        .as_array()
+        .expect("second page");
     assert_eq!(names(second_records), vec!["bob.eth"]);
     assert_eq!(second["data"][0]["page"]["has_more"], json!(false));
     assert_eq!(second["data"][0]["page"]["cursor"], json!(cursor));
@@ -596,8 +723,7 @@ async fn upsert_phase_address_records_current_row(
         "logical_name_id": logical_name_id,
         "coverage": {"status": "projected", "exhaustiveness": "not_asserted"},
     });
-    if let (Some(base), Some(extra)) = (provenance.as_object_mut(), provenance_extra.as_object())
-    {
+    if let (Some(base), Some(extra)) = (provenance.as_object_mut(), provenance_extra.as_object()) {
         for (key, value) in extra {
             base.insert(key.clone(), value.clone());
         }

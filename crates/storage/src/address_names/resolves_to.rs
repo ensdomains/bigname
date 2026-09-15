@@ -44,10 +44,11 @@ pub struct AddressRecordCurrentEntry {
     pub canonical_display_name: String,
     pub normalized_name: String,
     pub namehash: String,
-    pub surface_binding_id: Uuid,
-    pub resource_id: Uuid,
+    /// Authority identity stays absent when the name only has a record-serving resource.
+    pub surface_binding_id: Option<Uuid>,
+    pub resource_id: Option<Uuid>,
     pub record_resource_id: Uuid,
-    pub binding_kind: SurfaceBindingKind,
+    pub binding_kind: Option<SurfaceBindingKind>,
     /// The requested coin type, not the stored row's coin type.
     pub coin_type: String,
     pub record_key: String,
@@ -122,6 +123,7 @@ pub async fn load_address_records_current_page(
             normalized_name,
             namehash,
             surface_binding_id,
+            authority_resource_id,
             resource_id,
             record_resource_id,
             binding_kind,
@@ -176,7 +178,10 @@ pub async fn load_address_records_current_page(
                 }
             },
             logical_name_id: row.entry.logical_name_id.clone(),
-            resource_id: row.entry.resource_id,
+            resource_id: row
+                .entry
+                .resource_id
+                .unwrap_or(row.entry.record_resource_id),
         });
 
     Ok(AddressRecordsCurrentPage {
@@ -238,7 +243,10 @@ fn push_entries_cte<'a>(
                 arc.raw_name AS normalized_name,
                 arc.namehash,
                 arc.surface_binding_id,
-                arc.resource_id,
+                -- Sorting and dedupe need a stable key even when authority is absent; keep
+                -- that key separate from the optional authority returned to callers.
+                arc.resource_id AS authority_resource_id,
+                COALESCE(arc.resource_id, arc.record_resource_id) AS resource_id,
                 arc.record_resource_id,
                 arc.binding_kind,
                 arc.record_key,
@@ -261,22 +269,22 @@ fn push_entries_cte<'a>(
             FROM bigname_phase.address_records_current arc
             JOIN bigname_phase.name_surfaces surface
               ON surface.logical_name_id = arc.logical_name_id
-            JOIN bigname_phase.resources resource
+            LEFT JOIN bigname_phase.resources resource
               ON resource.resource_id = arc.resource_id
             JOIN bigname_phase.resources record_resource
               ON record_resource.resource_id = arc.record_resource_id
-            JOIN bigname_phase.surface_bindings binding
+            LEFT JOIN bigname_phase.surface_bindings binding
               ON binding.surface_binding_id = arc.surface_binding_id
             JOIN bigname_phase.chain_lineage surface_lineage
               ON surface_lineage.chain_id = surface.chain_id
              AND surface_lineage.block_hash = surface.block_hash
-            JOIN bigname_phase.chain_lineage resource_lineage
+            LEFT JOIN bigname_phase.chain_lineage resource_lineage
               ON resource_lineage.chain_id = resource.chain_id
              AND resource_lineage.block_hash = resource.block_hash
             JOIN bigname_phase.chain_lineage record_resource_lineage
               ON record_resource_lineage.chain_id = record_resource.chain_id
              AND record_resource_lineage.block_hash = record_resource.block_hash
-            JOIN bigname_phase.chain_lineage binding_lineage
+            LEFT JOIN bigname_phase.chain_lineage binding_lineage
               ON binding_lineage.chain_id = binding.chain_id
              AND binding_lineage.block_hash = binding.block_hash
             WHERE arc.address = "#,
@@ -341,7 +349,7 @@ fn push_entries_cte<'a>(
                   'safe'::bigname_phase.canonicality_state,
                   'finalized'::bigname_phase.canonicality_state
               )
-              AND resource.canonicality_state IN (
+              AND (arc.resource_id IS NULL OR (resource.canonicality_state IN (
                   'canonical'::bigname_phase.canonicality_state,
                   'safe'::bigname_phase.canonicality_state,
                   'finalized'::bigname_phase.canonicality_state
@@ -351,6 +359,7 @@ fn push_entries_cte<'a>(
                   'safe'::bigname_phase.canonicality_state,
                   'finalized'::bigname_phase.canonicality_state
               )
+              ))
               AND record_resource.canonicality_state IN (
                   'canonical'::bigname_phase.canonicality_state,
                   'safe'::bigname_phase.canonicality_state,
@@ -361,7 +370,7 @@ fn push_entries_cte<'a>(
                   'safe'::bigname_phase.canonicality_state,
                   'finalized'::bigname_phase.canonicality_state
               )
-              AND binding.canonicality_state IN (
+              AND (arc.surface_binding_id IS NULL OR (binding.canonicality_state IN (
                   'canonical'::bigname_phase.canonicality_state,
                   'safe'::bigname_phase.canonicality_state,
                   'finalized'::bigname_phase.canonicality_state
@@ -371,6 +380,7 @@ fn push_entries_cte<'a>(
                   'safe'::bigname_phase.canonicality_state,
                   'finalized'::bigname_phase.canonicality_state
               )
+              ))
         ),
         entries AS (
             SELECT DISTINCT ON ("#,
@@ -389,6 +399,7 @@ fn push_entries_cte<'a>(
                 normalized_name,
                 namehash,
                 surface_binding_id,
+                authority_resource_id,
                 resource_id,
                 record_resource_id,
                 binding_kind,
@@ -485,7 +496,7 @@ fn decode_sorted_entry(
         normalized_name: crate::sql_row::get(&row, "normalized_name")?,
         namehash: crate::sql_row::get(&row, "namehash")?,
         surface_binding_id: crate::sql_row::get(&row, "surface_binding_id")?,
-        resource_id: crate::sql_row::get(&row, "resource_id")?,
+        resource_id: crate::sql_row::get(&row, "authority_resource_id")?,
         record_resource_id: crate::sql_row::get(&row, "record_resource_id")?,
         binding_kind,
         coin_type: coin_type.to_owned(),
