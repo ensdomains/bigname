@@ -431,9 +431,18 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
         state.restore_v1_registration_release(&event.namespace, namehash);
         return;
     }
-    let (Some(logical_name_id), Some(resource_id)) =
-        (event.logical_name_id.as_ref(), event.resource_id)
-    else {
+    // A registrar fallback fact serves no name link until a label is known, but
+    // its internal identity is the namehash it carries, and the registrar state
+    // has to restore from it or the next block's reconciliation drops it.
+    let fallback_name_id = (event.after_state.get("controller_admitted")
+        == Some(&Value::Bool(false)))
+    .then(|| event.after_state.get("namehash").and_then(Value::as_str))
+    .flatten()
+    .map(|namehash| format!("{}:{namehash}", event.namespace));
+    let (Some(logical_name_id), Some(resource_id)) = (
+        event.logical_name_id.as_ref().or(fallback_name_id.as_ref()),
+        event.resource_id,
+    ) else {
         return;
     };
     let lineage = event

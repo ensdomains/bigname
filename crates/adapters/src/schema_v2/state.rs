@@ -14,9 +14,15 @@ mod incremental;
 #[path = "state_tests.rs"]
 mod tests;
 
+#[path = "state_registrar_fallback.rs"]
+mod registrar_fallback;
+#[path = "state_releases.rs"]
+mod releases;
 #[path = "state_wrapper.rs"]
 mod wrapper;
 
+#[path = "state_materialization.rs"]
+mod materialization;
 #[path = "state_surfaces.rs"]
 mod surfaces;
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -71,7 +77,7 @@ mod v2_pointers;
 #[path = "state_v2_tests.rs"]
 mod v2_tests;
 
-pub(in crate::schema_v2) use self::surfaces::V1SurfaceMaterialization;
+pub(in crate::schema_v2) use self::materialization::V1SurfaceMaterialization;
 pub(in crate::schema_v2) use self::topology::v2_expiry_is_live;
 pub(super) use self::v2::{V2NameState, V2NameTransition, V2RawNameState, V2TokenState};
 #[cfg(test)]
@@ -83,6 +89,7 @@ pub(super) use self::v2_refresh::{reset_v2_refresh_visits, v2_refresh_visits};
 pub(super) struct V1Release {
     pub namehash: String,
     pub registrar: V1NameState,
+    pub label_less: bool,
     pub release_was_active: bool,
     pub previous_authority: Option<V1NameState>,
     pub next_authority: Option<V1NameState>,
@@ -98,10 +105,12 @@ pub(super) struct State {
     v1_pending_unwraps: OrdMap<String, (String, i64)>,
     v1_registrar_controller_transaction: Option<String>,
     v1_registrar_controllers: OrdSet<String>,
+    v1_registrar_controllers_announced: OrdSet<String>,
     v1_pending_wrapper_sync_expiries: OrdMap<String, (String, u64)>,
     v1_correlated_wrapper_expiries: OrdMap<String, u64>,
     v1_registrars: OrdMap<String, V1NameState>,
     v1_expiries: OrdSet<(i64, String)>,
+    v1_pending_registrar_logs: OrdMap<(String, String, i64), super::model::RawLogInput>,
     v1_registry_authorities: OrdMap<String, V1NameState>,
     v1_registry_owners: OrdMap<String, String>,
     v1_registry_owner_words: OrdMap<String, String>,
@@ -114,6 +123,9 @@ pub(super) struct State {
     restore_error: Option<String>,
     v1_migrated_nodes: OrdSet<String>,
     v1_materialized_surfaces: OrdSet<String>,
+    /// Registrar authorities the fallback observed with no label: their facts
+    /// serve no name link until a label-bearing event names the surface.
+    v1_label_less_registrars: OrdSet<String>,
     known_surfaces: OrdSet<String>,
     restored_surface_sources: OrdMap<String, OrdSet<String>>,
     restored_surface_counts: OrdMap<String, usize>,
@@ -232,6 +244,19 @@ impl State {
         self.update_v1_expiry_index(&key, previous_expiry, expiry);
         if make_current {
             self.v1_names.insert(key, value);
+        }
+    }
+    pub(super) fn set_v1_registrar_label_less(
+        &mut self,
+        namespace: &str,
+        namehash: &str,
+        label_less: bool,
+    ) {
+        let key = v1_key(namespace, namehash);
+        if label_less {
+            self.v1_label_less_registrars.insert(key);
+        } else {
+            self.v1_label_less_registrars.remove(&key);
         }
     }
     pub(super) fn v1_name(&self, namespace: &str, namehash: &str) -> Option<V1NameState> {
@@ -525,53 +550,6 @@ impl State {
         }
     }
 
-    pub(super) fn settle_v1_releases(&mut self, at_unix_timestamp: i64) -> Vec<V1Release> {
-        let mut due = Vec::new();
-        while let Some((expiry, _)) = self.v1_expiries.get_max() {
-            if expiry.checked_add(ENS_GRACE_PERIOD_SECS).is_some() {
-                break;
-            }
-            due.push(self.v1_expiries.remove_max().unwrap().1);
-        }
-        while let Some((expiry, _)) = self.v1_expiries.get_min() {
-            if v1_registration_is_live(Some(*expiry), at_unix_timestamp) {
-                break;
-            }
-            due.push(self.v1_expiries.remove_min().unwrap().1);
-        }
-        // Preserve the prior OrdMap registrar-key order for deterministic, output-identical releases.
-        due.sort();
-        let mut releases = Vec::new();
-        for key in due {
-            let Some(registrar) = self.v1_registrars.remove(&key) else {
-                continue;
-            };
-            let previous_authority = self.v1_names.get(&key).cloned();
-            let release_is_active = previous_authority.as_ref().is_some_and(|active| {
-                active.resource_id == registrar.resource_id
-                    || active.authority_source_family == "ens_v1_wrapper_l1"
-            });
-            let Some((namespace, namehash)) = key.split_once(':') else {
-                continue;
-            };
-            let next_authority = if release_is_active {
-                let next = self.v1_registry_authority_if_authentic(&key);
-                self.activate_v1_authority(namespace, namehash, next.clone());
-                next
-            } else {
-                previous_authority.clone()
-            };
-            releases.push(V1Release {
-                namehash: namehash.to_owned(),
-                resolver: self.v1_resolvers.get(&key).cloned(),
-                registrar,
-                release_was_active: release_is_active,
-                previous_authority,
-                next_authority,
-            });
-        }
-        releases
-    }
     fn update_v1_expiry_index(
         &mut self,
         registrar_key: &str,

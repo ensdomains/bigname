@@ -68,7 +68,7 @@ shard_1_tests=(
     "scenarios::reverse_primary_claims::forward_mismatch_keeps_generic_name_record_unadmitted"
     "scenarios::service_shutdown::api_signals_drain_accepted_indexed_name_read"
     "scenarios::support::tests::temp_dirs_created_concurrently_are_distinct"
-    "scenarios::unadmitted_controller::unadmitted_controller_registration_derives_registry_side_only"
+    "scenarios::unadmitted_controller::unadmitted_controller_registration_derives_flagged_registrar_facts_without_a_surface"
     "scenarios::wrapper_registration::parent_burns_pcc_then_extends_existing_child_expiry"
     "scenarios::wrapper_renewal_and_transfers::wrapped_erc1155_single_and_batch_transfers_preserve_identity"
 )

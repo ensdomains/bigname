@@ -36,11 +36,6 @@ loc = 638
 justification = "Registry event decoding and its atomic control/read transition remain together while shared owner classification and authority emission live in the bounded authority-transition sibling; the file remains below the review threshold."
 
 [[files]]
-path = "crates/adapters/src/schema_v2/state.rs"
-loc = 606
-justification = "The V1 interpreter keeps control state, literal registry owner history, and the resource retained for resolver reads together because restore and incremental interpretation must update them atomically; the file remains below the review threshold."
-
-[[files]]
 path = "crates/project/src/builders/name_authority.rs"
 loc = 683
 justification = "The exact-name authority selector keeps proof, released-state, source deployment period, and proven-zero-owner registry rules in one auditable query so known-absent authority cannot be confused with selector failure; the file remains below the review threshold."

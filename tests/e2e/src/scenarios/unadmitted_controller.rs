@@ -9,12 +9,14 @@ const YEAR: u64 = 365 * 24 * 60 * 60;
 /// An owner-added controller registers directly on the registrar
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L79 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L110 @ ens_v1@91c966f).
-/// The registrar-level uint256 events are outside every active manifest ABI,
-/// so the pipeline sees only the registry-side normalized event. With no
-/// routeable `.eth` parent surface, no child projection, lease facts, or
-/// exact-name surface materializes.
+/// No admitted controller event carries the label, so the registrar's own
+/// uint256-id `NameRegistered` is the source of the registration and expiry
+/// facts, flagged `controller_admitted = false` and carried by the resource
+/// rather than a name. With no label and no routeable `.eth` parent surface,
+/// no child projection or exact-name surface materializes.
 #[tokio::test]
-async fn unadmitted_controller_registration_derives_registry_side_only() -> Result<()> {
+async fn unadmitted_controller_registration_derives_flagged_registrar_facts_without_a_surface()
+-> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
 
@@ -63,48 +65,76 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
         "expected registrar mint + NameRegistered raw logs, saw {registrar_raw_logs}"
     );
 
-    // Nothing lease-bearing derives. Schema-v2 expands the registry-side
-    // child edge into its authority and permission facets, but all three
-    // remain registry-family facts.
+    // The registry-side child edge expands into its authority and permission
+    // facets; the registrar's own NameRegistered supplies the lease facts.
     let derived_kinds: Vec<(String, String)> = sqlx::query_as(
         "SELECT event_kind, source_family FROM normalized_events \
-         WHERE transaction_hash = $1 AND canonicality_state = 'canonical'",
+         WHERE transaction_hash = $1 AND canonicality_state = 'canonical' \
+         ORDER BY normalized_event_id",
     )
     .bind(&register_tx)
     .fetch_all(&run.db.pool)
     .await?;
+    let owned = |kind: &str, family: &str| (kind.to_owned(), family.to_owned());
     assert_eq!(
         derived_kinds,
         vec![
-            (
-                "SubregistryChanged".to_owned(),
-                "ens_v1_registry_l1".to_owned(),
-            ),
-            (
-                "AuthorityTransferred".to_owned(),
-                "ens_v1_registry_l1".to_owned(),
-            ),
-            (
-                "PermissionChanged".to_owned(),
-                "ens_v1_registry_l1".to_owned(),
-            ),
+            owned("SubregistryChanged", "ens_v1_registry_l1"),
+            owned("AuthorityTransferred", "ens_v1_registry_l1"),
+            owned("PermissionChanged", "ens_v1_registry_l1"),
+            owned("RegistrationGranted", "ens_v1_registrar_l1"),
+            owned("ExpiryChanged", "ens_v1_registrar_l1"),
+            owned("PermissionChanged", "ens_v1_registrar_l1"),
+            owned("AuthorityEpochChanged", "ens_v1_registrar_l1"),
         ],
-        "unadmitted-controller registration must derive only registry-side facets"
+        "unadmitted-controller registration derives registry facets plus flagged registrar facts"
     );
-    let lease_events: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM normalized_events \
+    // The lease facts are flagged, label-less, and carried by the resource:
+    // nothing links them to a name identity.
+    let lease_facts: Vec<(String, Option<String>, Value)> = sqlx::query_as(
+        "SELECT event_kind, logical_name_id, after_state FROM normalized_events \
          WHERE event_kind IN ('RegistrationGranted', 'TokenControlTransferred', \
                               'ExpiryChanged', 'RegistrationRenewed') \
          AND (after_state->>'labelhash' = $1 \
               OR after_state->>'child_node' = $2 \
               OR logical_name_id = 'ens:0x71912a92f1d7b9f48a8ccc1e1a7bcc3ed43e88c682cb276692e6618bb96437ae') \
-         AND canonicality_state = 'canonical'",
+         AND canonicality_state = 'canonical' \
+         ORDER BY normalized_event_id",
     )
     .bind(&shadow_labelhash)
     .bind(&shadow_node)
-    .fetch_one(&run.db.pool)
+    .fetch_all(&run.db.pool)
     .await?;
-    assert_eq!(lease_events, 0, "no lease facts may derive for shadow.eth");
+    assert_eq!(
+        lease_facts
+            .iter()
+            .map(|(kind, _, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        ["RegistrationGranted", "ExpiryChanged"],
+        "{lease_facts:?}"
+    );
+    for (kind, logical_name_id, after_state) in &lease_facts {
+        assert_eq!(
+            logical_name_id.as_deref(),
+            None,
+            "{kind} must not name a surface"
+        );
+        assert_eq!(
+            after_state["controller_admitted"], false,
+            "{kind}: {after_state}"
+        );
+        assert_eq!(after_state["surface_known"], false, "{kind}: {after_state}");
+        assert_eq!(
+            after_state["labelhash"], shadow_labelhash,
+            "{kind}: {after_state}"
+        );
+        assert_eq!(
+            after_state["registrant"],
+            format!("{registrant:#x}"),
+            "{kind}: {after_state}"
+        );
+        assert!(after_state["expiry"].is_i64(), "{kind}: {after_state}");
+    }
 
     // `children_current` is keyed by a routeable parent surface. The harness
     // has no `.eth` parent surface, so the registry fact remains normalized
@@ -116,7 +146,7 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
             .await?;
     assert_eq!(
         child_rows, 0,
-        "unadmitted registration must not invent a child without a parent surface"
+        "a label-less registration must not invent a child without a parent surface"
     );
     let surfaces: i64 =
         sqlx::query_scalar("SELECT count(*) FROM name_surfaces WHERE logical_name_id = $1")
@@ -144,7 +174,7 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
         .unwrap_or_default();
     assert!(
         entries.is_empty(),
-        "an unadmitted-controller lease must not appear as a registration: {entries:?}"
+        "a label-less lease has no name to appear under: {entries:?}"
     );
 
     run.db.cleanup().await?;

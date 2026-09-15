@@ -37,10 +37,12 @@ impl State {
             v1_pending_unwraps: OrdMap::new(),
             v1_registrar_controller_transaction: None,
             v1_registrar_controllers: OrdSet::new(),
+            v1_registrar_controllers_announced: OrdSet::new(),
             v1_pending_wrapper_sync_expiries: OrdMap::new(),
             v1_correlated_wrapper_expiries: OrdMap::new(),
             v1_registrars: OrdMap::new(),
             v1_expiries: OrdSet::new(),
+            v1_pending_registrar_logs: OrdMap::new(),
             v1_registry_authorities: OrdMap::new(),
             v1_registry_owners: OrdMap::new(),
             v1_registry_owner_words: OrdMap::new(),
@@ -53,6 +55,7 @@ impl State {
             restore_error: None,
             v1_migrated_nodes: OrdSet::new(),
             v1_materialized_surfaces: OrdSet::new(),
+            v1_label_less_registrars: OrdSet::new(),
             known_surfaces: OrdSet::new(),
             restored_surface_sources: OrdMap::new(),
             restored_surface_counts: OrdMap::new(),
@@ -124,6 +127,7 @@ impl State {
         self.v1_resolver_linked_resources = replayed.v1_resolver_linked_resources;
         self.v1_migrated_nodes = replayed.v1_migrated_nodes;
         self.v1_materialized_surfaces = replayed.v1_materialized_surfaces;
+        self.v1_label_less_registrars = replayed.v1_label_less_registrars;
     }
 
     pub(in crate::schema_v2) fn commit_v2_batch_boundary(&mut self, at_unix_timestamp: i64) {

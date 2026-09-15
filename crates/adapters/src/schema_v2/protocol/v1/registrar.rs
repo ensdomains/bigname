@@ -21,17 +21,19 @@ use crate::schema_v2::{
 mod identity;
 use identity::{new_registrar_identity, registrar_namehash};
 
+mod fallback;
+pub(in crate::schema_v2::protocol) use fallback::interpret_held;
+use fallback::{decode_registrar_controller, decode_registrar_lifecycle};
+mod transfer_event;
+use transfer_event::transfer;
+
 mod decode;
 mod transfer_permissions;
 mod wrapper_renewal;
 use transfer_permissions::append_transfer_permissions;
 
-mod transfer {
-    use super::*;
-    sol! { event Transfer(address indexed from, address indexed to, uint256 indexed tokenId); }
-}
-
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+const GRAVEYARD_CLEANUP_EXPIRY: u64 = 18_446_744_073_701_775_615;
 pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
@@ -39,6 +41,52 @@ pub(super) fn interpret(
     migration_enabled: bool,
 ) -> anyhow::Result<Interpreted> {
     match selected.event.signature.as_str() {
+        "NameRegistered(uint256,address,uint256)" | "NameRenewed(uint256,uint256)"
+            if selected.source.source_family == "ens_v1_registrar_l1" =>
+        {
+            // Held until the block ends: an admitted controller event for the same
+            // label in this transaction owns the fact, and only a log still held
+            // then is interpreted as the fallback source (`interpret_held`).
+            // A manifest authorizes the fallback by declaring `RegistrationGranted` on
+            // the registrar's own event; one that declares only migration output
+            // keeps its numeric events out of it, as the Sepolia profile does.
+            let fallback_declared = selected
+                .event
+                .normalized_events
+                .iter()
+                .any(|kind| kind == "RegistrationGranted");
+            // A transaction that announces its own controller is `syncWrapper`, which
+            // only the migration correlation reads; without it, an announcement in
+            // the same transaction is no claim on the fact.
+            let announced_for_migration =
+                migration_enabled && state.v1_registrar_controller_announced(raw);
+            if fallback_declared && !announced_for_migration {
+                let (labelhash, _, after) = decode_registrar_lifecycle(selected, raw)?;
+                // The ENSv1→ENSv2 Graveyard cleanup registers with a sentinel expiry no
+                // controller can produce from `block.timestamp + duration`; that is
+                // migration evidence, whoever the owner is, never a fallback fact.
+                if after.get("expiry").and_then(Value::as_u64) != Some(GRAVEYARD_CLEANUP_EXPIRY) {
+                    let namehash = registrar_namehash(selected, labelhash);
+                    state.hold_v1_registrar_log(&selected.source.namespace, &namehash, raw);
+                }
+            }
+            return if migration_enabled {
+                super::super::migration::interpret_base_registrar(selected, raw, state)
+            } else {
+                Ok(Interpreted::new())
+            };
+        }
+        signature @ ("ControllerAdded(address)" | "ControllerRemoved(address)")
+            if selected.source.source_family == "ens_v1_registrar_l1" && !migration_enabled =>
+        {
+            // The migration path records this itself; without it the announcement
+            // still has to be known, so a registrar event in the same transaction
+            // is not mistaken for a controller the manifest failed to admit.
+            let approved = signature == "ControllerAdded(address)";
+            let controller = decode_registrar_controller(raw, approved)?;
+            state.set_v1_registrar_controller(&controller, approved, raw);
+            return Ok(Interpreted::new());
+        }
         "ControllerAdded(address)"
         | "ControllerRemoved(address)"
         | "NameRegistered(uint256,address,uint256)"
@@ -72,197 +120,70 @@ pub(super) fn interpret(
     }
 }
 
-fn transfer(
-    selected: &Selected,
-    raw: &RawLogInput,
-    state: &mut State,
-) -> anyhow::Result<Interpreted> {
-    ensure_declared(selected, &["TokenControlTransferred"])?;
-    let event = decode_event_log::<transfer::Transfer>(
-        &raw.topics,
-        &raw.data,
-        "registrar Transfer log is malformed",
-    )?;
-    let from = address_hex(event.from);
-    let to = address_hex(event.to);
-    if from == ZERO_ADDRESS || to == ZERO_ADDRESS {
-        return Ok(Interpreted::new());
-    }
-    let labelhash = B256::from(event.tokenId.to_be_bytes::<32>());
-    let raw_namehash = registrar_namehash(selected, labelhash);
-    let previous_active = state.v1_name(&selected.source.namespace, &raw_namehash);
-    let mut wrapper_fallback = false;
-    let mut fallback_active_from = None;
-    if state
-        .v1_registrar(&selected.source.namespace, &raw_namehash)
-        .is_none()
-        && state.v1_surface_materialized(&selected.source.namespace, &raw_namehash)
-        && let Some(unwrapped_at) =
-            state.matching_v1_unwrap_time(&selected.source.namespace, &raw_namehash, &from, raw)
-        && let Some(expiry) =
-            state.v1_registrar_expiry_from_wrapper(&selected.source.namespace, &raw_namehash)
-    {
-        let (token_lineage_id, resource_id, authority_key) =
-            new_registrar_identity(selected, raw, &format!("{labelhash:#x}"));
-        state.observe_v1_registrar(
-            &selected.source.namespace,
-            &raw_namehash,
-            format!("{}:{raw_namehash}", selected.source.namespace),
-            true,
-            resource_id,
-            token_lineage_id,
-            selected.source.source_family.clone(),
-            Some(selected.source.manifest_id),
-            Some(format!("{labelhash:#x}")),
-            Some(expiry),
-            Some(from.clone()),
-            authority_key,
-            true,
-            false,
-        );
-        wrapper_fallback = true;
-        fallback_active_from = Some(unwrapped_at);
-    }
-    let Some((_, linked)) =
-        state.transfer_v1_registrar_owner(&selected.source.namespace, &raw_namehash, to.clone())
-    else {
-        return Ok(Interpreted::new());
-    };
-    let mut active_after = state.converge_v1_registrar_transfer(
-        &selected.source.namespace,
-        &raw_namehash,
-        raw.block_timestamp.unix_timestamp(),
-    );
-    if active_after.is_none()
-        && state
-            .v1_registry_owner(&selected.source.namespace, &raw_namehash)
-            .is_some_and(|owner| !owner.eq_ignore_ascii_case(ZERO_ADDRESS))
-    {
-        let registry_owner = state
-            .v1_registry_owner(&selected.source.namespace, &raw_namehash)
-            .expect("checked registry owner");
-        let authority = V1NameState {
-            logical_name_id: linked.logical_name_id.clone(),
-            surface_known: linked.surface_known,
-            resource_id: stable_uuid(&format!(
-                "resource:registry-only:{}:{raw_namehash}",
-                raw.chain_id
-            )),
-            token_lineage_id: None,
-            authority_source_family: if selected.source.source_family == "basenames_base_registrar"
-            {
-                "basenames_base_registry"
-            } else {
-                "ens_v1_registry_l1"
-            }
-            .to_owned(),
-            source_manifest_id: None,
-            labelhash: Some(format!("{labelhash:#x}")),
-            expiry: None,
-            owner: Some(registry_owner),
-            registry_contract: None,
-            authority_key: Some(format!("registry-only:{}:{raw_namehash}", raw.chain_id)),
-            wrapper_fallback: false,
-        };
-        state.remember_v1_registry_authority(
-            &selected.source.namespace,
-            &raw_namehash,
-            authority.clone(),
-        );
-        state.activate_v1_authority(
-            &selected.source.namespace,
-            &raw_namehash,
-            Some(authority.clone()),
-        );
-        active_after = Some(authority);
-    }
-    let mut after = json!({
-        "source_event": "Transfer",
-        "to": to,
-        "token_id": u256_word_hex(event.tokenId),
-        "namehash": raw_namehash,
-        "token_lineage_id": linked.token_lineage_id.map(|id| id.to_string()),
-    });
-    // A fallback-created registrar identity must be recoverable from the latest transfer row
-    // alone. Until a label-bearing registrar-controller registration or renewal replaces it,
-    // every transfer repeats the marker and uses that transfer's sender as the restore-time owner.
-    if wrapper_fallback || linked.wrapper_fallback {
-        after["fallback_from_wrapper"] = json!(true);
-        after["fallback_from"] = json!(from);
-        after["surface_known"] = json!(linked.surface_known);
-        after["labelhash"] = json!(linked.labelhash);
-        after["expiry"] = json!(linked.expiry);
-        after["authority_key"] = json!(linked.authority_key);
-        after["authority_source_manifest_id"] = json!(linked.source_manifest_id);
-    }
-    let mut output = single_event(
-        "TokenControlTransferred",
-        Some(linked.logical_name_id.clone()),
-        Some(linked.resource_id),
-        after,
-    );
-    output.events[0].explicit_before = Some(json!({"from": from}));
-    output.resources.push(ResourceDraft {
-        resource_id: linked.resource_id,
-        token_lineage_id: linked.token_lineage_id,
-    });
-    append_transfer_permissions(
-        &mut output,
-        &from,
-        &linked,
-        previous_active.as_ref(),
-        active_after.as_ref(),
-        state.v1_resolver(&selected.source.namespace, &raw_namehash),
-        &raw.chain_id,
-    );
-    let linked_resolver = state.v1_resolver_for_activation(
-        &selected.source.namespace,
-        &raw_namehash,
-        active_after.as_ref(),
-    );
-    append_authority_transition(
-        &mut output,
-        super::authority_arm(&selected.source.namespace),
-        previous_active.as_ref(),
-        active_after.as_ref(),
-        state.v1_registry_binding(&selected.source.namespace, &raw_namehash),
-        raw,
-        &json!({"source_event":"Transfer"}),
-        linked_resolver,
-        fallback_active_from,
-    );
-    Ok(output)
-}
-
 fn name_event(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
     registration: bool,
 ) -> anyhow::Result<Interpreted> {
-    let (raw_label, explicit_labelhash, mut after) = decode::name(selected, raw)?;
+    let (raw_label, explicit_labelhash, after) = decode::name(selected, raw)?;
     if keccak256(&raw_label) != explicit_labelhash {
         bail!(
             "{} label does not hash to its indexed label",
             selected.event.name
         );
     }
+    if selected.source.source_family == "ens_v1_registrar_l1" {
+        let namehash = registrar_namehash(selected, explicit_labelhash);
+        state.release_v1_registrar_log(&selected.source.namespace, &namehash, raw);
+    }
+    name_fact(
+        selected,
+        raw,
+        state,
+        Some(raw_label),
+        explicit_labelhash,
+        after,
+        registration,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn name_fact(
+    selected: &Selected,
+    raw: &RawLogInput,
+    state: &mut State,
+    raw_label: Option<Vec<u8>>,
+    explicit_labelhash: B256,
+    mut after: Value,
+    registration: bool,
+) -> anyhow::Result<Interpreted> {
     let suffix = if selected.source.source_family == "basenames_base_registrar" {
         vec!["base".to_owned(), "eth".to_owned()]
     } else {
         vec!["eth".to_owned()]
     };
     let raw_namehash = registrar_namehash(selected, explicit_labelhash);
-    let decoded_label = decoded_label(&raw_label);
-    let label = admitted_label(&raw_label);
+    let decoded_label = raw_label.as_deref().and_then(decoded_label);
+    let label = raw_label.as_deref().and_then(admitted_label);
     let labels = label.map(|label| {
         std::iter::once(label)
             .chain(suffix.iter().cloned())
             .collect::<Vec<_>>()
     });
-    let surface_known = labels.is_some();
-    let mut raw_labels = vec![raw_label.clone()];
-    raw_labels.extend(suffix.iter().map(|label| label.as_bytes().to_vec()));
+    // Without a label the surface is whatever this family already knows: a
+    // fallback renewal of a named registration must not turn it nameless.
+    let surface_known = labels.is_some()
+        || (raw_label.is_none()
+            && (state
+                .v1_registrar(&selected.source.namespace, &raw_namehash)
+                .is_some_and(|registrar| registrar.surface_known)
+                || state.v1_surface_materialized(&selected.source.namespace, &raw_namehash)));
+    let raw_labels = raw_label.as_ref().map(|raw_label| {
+        let mut raw_labels = vec![raw_label.clone()];
+        raw_labels.extend(suffix.iter().map(|label| label.as_bytes().to_vec()));
+        raw_labels
+    });
     let logical_name_id = format!("{}:{raw_namehash}", selected.source.namespace);
     let previous_active = state.v1_name(&selected.source.namespace, &raw_namehash);
     let prior_registrar = state.v1_registrar(&selected.source.namespace, &raw_namehash);
@@ -290,7 +211,10 @@ fn name_event(
     // The wrapper registers itself first; the controller's later event names the wrapped user.
     // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L297 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
-    let owner = registration
+    // The registrar's own payload names the token owner; a controller's event
+    // names the registrant, which the registry owner outranks because the wrapper
+    // registers to itself first. The fallback has the payload and nothing else.
+    let owner = (registration && raw_label.is_some())
         .then(|| state.v1_registry_owner(&selected.source.namespace, &raw_namehash))
         .flatten()
         .filter(|owner| !owner.eq_ignore_ascii_case(ZERO_ADDRESS))
@@ -318,6 +242,16 @@ fn name_event(
                 current.authority_source_family != "ens_v1_wrapper_l1"
                     && (registration || same_family)
             }));
+    // A registrar authority the fallback observed without its label is named by
+    // this event: its surface is bound here rather than at the observation, and
+    // the name learns of its registration here, as a synthetic grant, since the
+    // observed grant serves no name link.
+    let names_fallback = surface_known
+        && make_current
+        && prior_registrar
+            .as_ref()
+            .is_some_and(|prior| !prior.surface_known && prior.resource_id == resource_id);
+    let synthetic_grant = synthetic_grant || names_fallback;
     let labelhash = format!("{explicit_labelhash:#x}");
     state.observe_v1_registrar(
         &selected.source.namespace,
@@ -335,6 +269,11 @@ fn name_event(
         false,
         make_current,
     );
+    state.set_v1_registrar_label_less(
+        &selected.source.namespace,
+        &raw_namehash,
+        raw_label.is_none() && !surface_known,
+    );
     if !ens_v1_registrar {
         state.sync_registry_surface_from_registrar(
             &selected.source.namespace,
@@ -344,7 +283,13 @@ fn name_event(
             Some(&labelhash),
         );
     }
-    let surface_materialization = if surface_known && ens_v1_registrar {
+    let surface_materialization = if names_fallback && ens_v1_registrar {
+        Some(state.name_v1_registrar_surface(
+            &selected.source.namespace,
+            &raw_namehash,
+            &logical_name_id,
+        )?)
+    } else if surface_known && ens_v1_registrar {
         Some(state.materialize_or_sync_v1_active_surface(
             &selected.source.namespace,
             &raw_namehash,
@@ -365,10 +310,12 @@ fn name_event(
     let after_object = after.as_object_mut().expect("registrar state is an object");
     after_object.insert("namehash".to_owned(), Value::String(raw_namehash.clone()));
     after_object.insert("surface_known".to_owned(), Value::Bool(surface_known));
-    after_object.insert(
-        "raw_label_hex".to_owned(),
-        Value::String(hex::encode(&raw_label)),
-    );
+    if let Some(raw_label) = raw_label.as_ref() {
+        after_object.insert(
+            "raw_label_hex".to_owned(),
+            Value::String(hex::encode(raw_label)),
+        );
+    }
     after_object.insert(
         "decoded_label".to_owned(),
         decoded_label.map(Value::String).unwrap_or(Value::Null),
@@ -544,11 +491,13 @@ fn name_event(
             preimage_metadata: None,
         });
     } else {
-        output.shadow_names.push(ShadowNameDraft {
-            raw_labels,
-            namehash: raw_namehash,
-            source_kind: format!("{}_name", selected.event.name),
-        });
+        if let Some(raw_labels) = raw_labels {
+            output.shadow_names.push(ShadowNameDraft {
+                raw_labels,
+                namehash: raw_namehash,
+                source_kind: format!("{}_name", selected.event.name),
+            });
+        }
         output.resources.push(ResourceDraft {
             resource_id,
             token_lineage_id: Some(token_lineage_id),

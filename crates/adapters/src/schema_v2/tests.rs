@@ -10,6 +10,8 @@ mod migration;
 
 #[path = "tests/v1_pre_surface_resolver.rs"]
 mod v1_pre_surface_resolver;
+#[path = "tests/v1_registrar_fallback.rs"]
+mod v1_registrar_fallback;
 
 const CHAIN: &str = "adapter-test";
 const CONTRACT: &str = "0x0000000000000000000000000000000000000042";

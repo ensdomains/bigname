@@ -1220,12 +1220,29 @@ fn mainnet_registrar_family_pins_the_base_registrar_event_surface() -> Result<()
         (
             "NameRegistered",
             "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)",
-            &["RegistrationReleased"][..],
+            &[
+                "RegistrationReleased",
+                "RegistrationGranted",
+                "ExpiryChanged",
+                "PermissionChanged",
+                "SurfaceUnbound",
+                "SurfaceBound",
+                "AuthorityEpochChanged",
+                "ResolverChanged",
+            ][..],
         ),
         (
             "NameRenewed",
             "event NameRenewed(uint256 indexed id, uint256 expires)",
-            &["RegistrationRenewed", "ExpiryChanged"][..],
+            &[
+                "RegistrationGranted",
+                "RegistrationRenewed",
+                "ExpiryChanged",
+                "SurfaceUnbound",
+                "SurfaceBound",
+                "AuthorityEpochChanged",
+                "ResolverChanged",
+            ][..],
         ),
     ];
 

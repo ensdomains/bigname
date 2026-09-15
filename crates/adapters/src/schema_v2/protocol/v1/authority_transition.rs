@@ -212,78 +212,33 @@ pub(super) fn append_surface_materialization_for_trigger(
             source_manifest_id,
         } => {
             debug_assert_eq!(previous.resource_id, promoted.resource_id);
-            output.bindings.push(BindingDraft {
-                logical_name_id: promoted.logical_name_id.clone(),
-                resource_id: promoted.resource_id,
-                binding_kind: "declared_registry_path".to_owned(),
-                authority_arm: authority_arm.to_owned(),
-                surface_binding_id: promoted.authority_key.as_ref().map(|authority_key| {
-                    stable_uuid(&format!(
-                        "binding:{authority_key}:{}",
-                        event_time(raw).unix_timestamp_nanos()
-                    ))
-                }),
-                active_from: None,
-            });
-            let node = promoted
-                .logical_name_id
-                .split_once(':')
-                .map(|(_, node)| node)
-                .unwrap_or(&promoted.logical_name_id);
-            let common = json!({
-                "state_derived":true,
-                "surface_materialization":true,
-                "source_event":source_event,
-                "node":node,
-                "authority_kind":"registry_only",
-                "authority_key":promoted.authority_key,
-                "owner":promoted.owner,
-                "owner_getter":promoted.owner,
-                "registry_contract":promoted.registry_contract,
-                "binding_kind":"declared_registry_path",
-                "pointer_reason":"surface_materialization_current_resolver",
-            });
-            let mut events = vec![EventDraft {
-                event_kind: "SurfaceBound".to_owned(),
-                logical_name_id: Some(promoted.logical_name_id.clone()),
-                resource_id: Some(promoted.resource_id),
-                identity_suffix: format!(
-                    "SurfaceBound:surface-materialization:{node}:{}",
-                    promoted.resource_id
+            (
+                *source_manifest_id,
+                bind_materialized_surface(
+                    output,
+                    authority_arm,
+                    promoted,
+                    resolver.as_ref(),
+                    raw,
+                    source_event,
                 ),
-                explicit_before: Some(json!({})),
-                after_state: merge_observation(
-                    &common,
-                    json!({"active_from":raw.block_timestamp.unix_timestamp()}),
-                ),
-                state_scope: format!("surface-materialization:{node}:{}", promoted.resource_id),
-            }];
-            if let Some(resolver) = resolver {
-                let resolver_address = &resolver.resolver_address;
-                events.push(EventDraft {
-                    event_kind: "ResolverChanged".to_owned(),
-                    logical_name_id: Some(promoted.logical_name_id.clone()),
-                    resource_id: Some(promoted.resource_id),
-                    identity_suffix: format!(
-                        "ResolverChanged:surface-materialization:{node}:{}:{resolver_address}",
-                        promoted.resource_id
-                    ),
-                    explicit_before: Some(json!({"resolver":Value::Null})),
-                    after_state: merge_observation(
-                        &common,
-                        json!({
-                            "resolver":resolver_address,
-                            "resolver_source_role":resolver.source_role,
-                        }),
-                    ),
-                    state_scope: format!(
-                        "surface-materialization:{node}:{}:resolver",
-                        promoted.resource_id
-                    ),
-                });
-            }
-            (*source_manifest_id, events)
+            )
         }
+        V1SurfaceMaterialization::RegistrarAuthority {
+            authority,
+            resolver,
+            source_manifest_id,
+        } => (
+            *source_manifest_id,
+            bind_materialized_surface(
+                output,
+                authority_arm,
+                authority,
+                resolver.as_ref(),
+                raw,
+                source_event,
+            ),
+        ),
         V1SurfaceMaterialization::RegistryRead {
             anchor,
             resolver,
@@ -337,6 +292,89 @@ pub(super) fn append_surface_materialization_for_trigger(
             events,
         });
     }
+}
+
+/// Bind a newly named surface to the authority that was current before its
+/// label was known, and replay a resolver set in that window onto it.
+fn bind_materialized_surface(
+    output: &mut Interpreted,
+    authority_arm: &str,
+    authority: &V1NameState,
+    resolver: Option<&V1ResolverLink>,
+    raw: &RawLogInput,
+    source_event: &str,
+) -> Vec<EventDraft> {
+    output.bindings.push(BindingDraft {
+        logical_name_id: authority.logical_name_id.clone(),
+        resource_id: authority.resource_id,
+        binding_kind: "declared_registry_path".to_owned(),
+        authority_arm: authority_arm.to_owned(),
+        surface_binding_id: authority.authority_key.as_ref().map(|authority_key| {
+            stable_uuid(&format!(
+                "binding:{authority_key}:{}",
+                event_time(raw).unix_timestamp_nanos()
+            ))
+        }),
+        active_from: None,
+    });
+    let node = authority
+        .logical_name_id
+        .split_once(':')
+        .map(|(_, node)| node)
+        .unwrap_or(&authority.logical_name_id);
+    let common = json!({
+        "state_derived":true,
+        "surface_materialization":true,
+        "source_event":source_event,
+        "node":node,
+        "authority_kind":authority_kind(authority),
+        "authority_key":authority.authority_key,
+        "owner":authority.owner,
+        "owner_getter":authority.owner,
+        "registry_contract":authority.registry_contract,
+        "binding_kind":"declared_registry_path",
+        "pointer_reason":"surface_materialization_current_resolver",
+    });
+    let mut events = vec![EventDraft {
+        event_kind: "SurfaceBound".to_owned(),
+        logical_name_id: Some(authority.logical_name_id.clone()),
+        resource_id: Some(authority.resource_id),
+        identity_suffix: format!(
+            "SurfaceBound:surface-materialization:{node}:{}",
+            authority.resource_id
+        ),
+        explicit_before: Some(json!({})),
+        after_state: merge_observation(
+            &common,
+            json!({"active_from":raw.block_timestamp.unix_timestamp()}),
+        ),
+        state_scope: format!("surface-materialization:{node}:{}", authority.resource_id),
+    }];
+    if let Some(resolver) = resolver {
+        let resolver_address = &resolver.resolver_address;
+        events.push(EventDraft {
+            event_kind: "ResolverChanged".to_owned(),
+            logical_name_id: Some(authority.logical_name_id.clone()),
+            resource_id: Some(authority.resource_id),
+            identity_suffix: format!(
+                "ResolverChanged:surface-materialization:{node}:{}:{resolver_address}",
+                authority.resource_id
+            ),
+            explicit_before: Some(json!({"resolver":Value::Null})),
+            after_state: merge_observation(
+                &common,
+                json!({
+                    "resolver":resolver_address,
+                    "resolver_source_role":resolver.source_role,
+                }),
+            ),
+            state_scope: format!(
+                "surface-materialization:{node}:{}:resolver",
+                authority.resource_id
+            ),
+        });
+    }
+    events
 }
 
 #[allow(clippy::too_many_arguments)]

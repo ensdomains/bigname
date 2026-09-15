@@ -103,53 +103,39 @@ async fn exercise(ownerless: bool) -> Result<()> {
     .bind(&logical_name_id)
     .fetch_one(&run.db.pool)
     .await?;
-    if ownerless {
-        assert_eq!(
-            name_body["declared_state"]["registration"]["status"],
-            "unregistered"
-        );
-        assert_eq!(
-            name_body["declared_state"]["control"]["status"],
-            "unregistered"
-        );
-        assert_eq!(name_body["data"]["resource_id"], Value::Null);
-        assert_eq!(name_body["data"]["token_lineage_id"], Value::Null);
-        assert_eq!(name_body["data"]["binding_kind"], Value::Null);
-        for field in [
-            "registry_owner",
-            "manager",
-            "registrant",
-            "registration_id",
-            "token_id",
-        ] {
-            assert!(
-                name_body["declared_state"]["registration"]
-                    .get(field)
-                    .is_none_or(Value::is_null)
-                    && name_body["declared_state"]["control"]
-                        .get(field)
-                        .is_none_or(Value::is_null),
-                "ownerless field {field} must be absent: {name_body}"
-            );
-        }
-        assert_eq!(control_bindings, 0);
-    } else {
-        assert_eq!(
-            name_body["declared_state"]["registration"]["status"],
-            "active"
-        );
-        assert_eq!(
-            name_body["declared_state"]["control"]["registry_owner"],
-            format!("{owner:#x}")
-        );
-        assert_eq!(
-            name_body["declared_state"]["control"]["status"],
-            Value::Null
-        );
-        assert!(name_body["data"]["resource_id"].is_string());
-        assert_eq!(name_body["data"]["token_lineage_id"], Value::Null);
-        assert_eq!(control_bindings, 1);
-    }
+    // The registration through the unadmitted controller is a flagged registrar
+    // fact, so the registrar authority is current before anything else happens
+    // to the name, and the admitted renewal names its surface with a synthetic
+    // grant. With the owner zeroed afterwards, that authority remains current
+    // (architecture.md, "explicitly ownerless first-surface case").
+    assert_eq!(
+        name_body["declared_state"]["registration"]["status"], "active",
+        "{name_body}"
+    );
+    assert_eq!(
+        name_body["declared_state"]["registration"]["registrant"],
+        format!("{owner:#x}"),
+        "{name_body}"
+    );
+    assert!(name_body["data"]["resource_id"].is_string(), "{name_body}");
+    assert!(
+        name_body["data"]["token_lineage_id"].is_string(),
+        "{name_body}"
+    );
+    assert_eq!(
+        name_body["declared_state"]["control"]["status"],
+        Value::Null,
+        "{name_body}"
+    );
+    // Registry writes before the surface was named are not name-linked, so like
+    // first-ownership setup they are not projected as a later control transfer;
+    // the zeroed owner is one of them.
+    assert_eq!(
+        name_body["declared_state"]["control"]["registry_owner"],
+        Value::Null,
+        "{name_body}"
+    );
+    assert_eq!(control_bindings, 1, "{name_body}");
 
     run.db.cleanup().await?;
     Ok(())

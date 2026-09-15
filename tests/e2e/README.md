@@ -384,7 +384,7 @@ explicitly with issue #314.
   `reverse_primary_claims::forward_mismatch_keeps_generic_name_record_unadmitted`;
   `reverse_primary_claims::unadmitted_reverse_resolver_keeps_candidate_absent`.
 - Authority and wrapping:
-  `unadmitted_controller::unadmitted_controller_registration_derives_registry_side_only`;
+  `unadmitted_controller::unadmitted_controller_registration_derives_flagged_registrar_facts_without_a_surface`;
   `wrapper::wrapper_wrap_fuses_subnames_and_unwrap_restore_identity`;
   `wrapper_registration::born_wrapped_registration_retains_wrapper_authority`;
   `wrapper_registration::parent_burns_pcc_then_extends_existing_child_expiry`;

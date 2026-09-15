@@ -79,9 +79,11 @@ fn settle_block_boundary(
             .authority_key
             .clone()
             .unwrap_or_else(|| format!("registrar:{}", release.namehash));
+        // A registration the fallback observed without its label serves no name
+        // link from its grant or renewal; its release is detached the same way.
         let mut registration_events = vec![protocol::EventDraft {
             event_kind: "RegistrationReleased".to_owned(),
-            logical_name_id: Some(logical_name_id.clone()),
+            logical_name_id: (!release.label_less).then(|| logical_name_id.clone()),
             resource_id: Some(release.registrar.resource_id),
             identity_suffix: format!("RegistrationReleased:{}:{registrar_key}", release.namehash),
             explicit_before: Some(serde_json::json!({

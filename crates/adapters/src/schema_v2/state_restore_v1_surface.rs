@@ -152,6 +152,13 @@ pub(super) fn restore_registrar(
                 false,
                 make_current,
             );
+            state.set_v1_registrar_label_less(
+                &event.namespace,
+                namehash,
+                event.after_state.get("controller_admitted")
+                    == Some(&serde_json::Value::Bool(false))
+                    && !surface_known,
+            );
             if !event.source_family.starts_with("ens_v1_") {
                 state.sync_registry_surface_from_registrar(
                     &event.namespace,
@@ -243,6 +250,13 @@ pub(super) fn restore_registrar(
                     }),
                 false,
                 make_current,
+            );
+            state.set_v1_registrar_label_less(
+                &event.namespace,
+                namehash,
+                event.after_state.get("controller_admitted")
+                    == Some(&serde_json::Value::Bool(false))
+                    && !surface_known,
             );
             if !event.source_family.starts_with("ens_v1_") {
                 state.sync_registry_surface_from_registrar(
