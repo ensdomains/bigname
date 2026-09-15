@@ -100,7 +100,11 @@ impl PhaseLock {
         loop {
             tokio::select! {
                 biased;
-                _ = checks.tick() => self.check_alive().await?,
+                _ = checks.tick() => {
+                    self.check_alive().await?;
+                    // A slow check must leave time to poll the work before the next check.
+                    checks.reset();
+                }
                 result = &mut future => return result,
             }
         }

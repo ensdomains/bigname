@@ -3900,7 +3900,7 @@ async fn subregistry_topology_edge_does_not_expand_the_watch_plan() -> Result<()
 #[tokio::test]
 async fn root_resolver_discovery_projects_single_label_records_in_normal_and_redo() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_root_resolver_watch").await?;
-    let chain = "interpret-root-resolver-watch";
+    let chain = "ethereum-sepolia";
     seed_root_resolver_watch_fixture(scratch.pool(), chain).await?;
 
     run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Normal).await?;
@@ -4011,7 +4011,7 @@ async fn root_resolver_discovery_projects_single_label_records_in_normal_and_red
 async fn construction_upgraded_before_the_registry_pointer_admits_and_supports_the_resolver()
 -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_announced_resolver").await?;
-    let chain = "interpret-announced-resolver";
+    let chain = "ethereum-sepolia";
     seed_root_resolver_watch_manifests(scratch.pool(), chain).await?;
     seed_root_resolver_watch_logs(scratch.pool(), chain, true).await?;
 
