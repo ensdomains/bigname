@@ -1257,3 +1257,23 @@ async fn v2_permissions_namespace_filters_audit_rows_before_paging_and_counting(
 
     database.cleanup().await
 }
+
+#[tokio::test]
+async fn v2_permissions_rejects_unknown_namespace_before_snapshot_capture() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    // No publication is needed to reject a namespace that this API does not recognize.
+    for selector in [
+        format!("address={V2_PERMISSIONS_SUBJECT}"),
+        format!("registration_id={}", v2_permissions_current_resource_id()),
+        "name=perms.eth".to_owned(),
+    ] {
+        let response = v2_permissions_response_for_database(
+            &database, &format!("/v1/permissions?{selector}&namespace=unknown"),
+        ).await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{selector}");
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["error"]["code"], json!("not_found"));
+        assert_eq!(payload["error"]["message"], json!("namespace unknown is not supported"));
+    }
+    database.cleanup().await
+}

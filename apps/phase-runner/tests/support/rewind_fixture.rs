@@ -3,7 +3,10 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -32,6 +35,7 @@ pub fn save(directory: &Path, name: &str, value: &Value) -> Result<()> {
 }
 
 pub struct Gate {
+    resolved: AtomicBool,
     entries: Mutex<Vec<Instant>>,
     release: CancellationToken,
 }
@@ -105,6 +109,7 @@ impl RpcFixture {
     pub fn arm(&self, name: &'static str) -> Arc<Gate> {
         self.stage(name);
         let gate = Arc::new(Gate {
+            resolved: AtomicBool::new(false),
             entries: Mutex::new(Vec::new()),
             release: CancellationToken::new(),
         });
@@ -159,12 +164,16 @@ async fn rpc(State(state): State<Arc<RpcState>>, Json(request): Json<Value>) -> 
         .unwrap_or_else(|| vec![request.clone()]);
     let mut replies = Vec::with_capacity(calls.len());
     for call in calls {
-        // Header 256 belongs to the second load window. Numeric end probes for 511
-        // must remain available to the first batch, including during redo.
+        // Header 256 belongs to the second load window. Let its initial hash
+        // resolution through, then hold the post-log header recheck. End probes
+        // for 511 remain available to the first batch, including during redo.
         let gate = state.gate.lock().expect("RPC gate poisoned").clone();
-        let held = call["method"] == "eth_getBlockByHash"
-            && call["params"][0].as_str() == Some(hash(CHECKPOINT + 1).as_str());
-        if held && let Some(gate) = gate {
+        let selected = call["method"] == "eth_getBlockByNumber"
+            && call["params"][0].as_str() == Some(format!("0x{:x}", CHECKPOINT + 1).as_str());
+        if selected
+            && let Some(gate) = gate
+            && gate.resolved.swap(true, Ordering::SeqCst)
+        {
             gate.entries
                 .lock()
                 .expect("gate entries poisoned")
@@ -392,17 +401,24 @@ pub async fn no_writer_sessions(pool: &sqlx::PgPool, application: &str) -> Resul
 
 pub fn require_resumed_headers(directory: &std::path::Path) -> Result<()> {
     let mut loaded = std::collections::BTreeSet::new();
+    let mut queried_logs = false;
     for line in fs::read_to_string(directory.join("rpc.jsonl"))?.lines() {
         let event: Value = serde_json::from_str(line)?;
-        if event["stage"] == "repair" && event["request"]["method"] == "eth_getBlockByHash" {
-            let selected = event["request"]["params"][0]
+        if event["stage"] != "repair" {
+            continue;
+        }
+        if event["request"]["method"] == "eth_getLogs" {
+            queried_logs = true;
+        }
+        // The repair has one remaining window. Only requests after its log
+        // queries prove headers were rechecked, rather than initially resolved.
+        if queried_logs
+            && event["request"]["method"] == "eth_getBlockByNumber"
+            && let Some(selected) = event["request"]["params"][0]
                 .as_str()
-                .context("missing repair hash")?;
-            loaded.insert(
-                (0..=HEAD)
-                    .find(|n| hash(*n) == selected)
-                    .context("unknown repair header")?,
-            );
+                .and_then(|selector| selector.strip_prefix("0x"))
+        {
+            loaded.insert(i64::from_str_radix(selected, 16)?);
         }
     }
     ensure!(

@@ -337,10 +337,13 @@ collection route carry neither header.
   emitted normalized and display names, label-derived fields, primary-name
   ordering, the `is_primary` result, and the reverse cursor. A `resolves_to`
   input additionally requires each `address_records_current` row it serves to
-  be published at or before the selected head, and omits a name whose current
-  row is unreadable or unsupported at that snapshot. Public reverse
-  lookup with no explicit namespace derives its snapshot scope from the
-  namespaces served by the deployment, excluding a namespace
+  be published at or before the selected head and omits unreadable current name
+  rows. Unsupported rows are also omitted except for the documented TLD
+  [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
+  case with `current_authority_not_projected`; that case serves resolver records
+  without claiming registration authority. Public reverse lookup with no explicit
+  namespace derives its snapshot scope from the namespaces served by the
+  deployment, excluding a namespace
   while its selected authority chain has Interpret `redo_in_progress=true`,
   regardless of redo mode. A running Interpret redo rewrites previously served
   identity history batch by batch, so a page read during the redo can be
@@ -1465,11 +1468,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   name has no permission rows. By contrast, a resolved current name paired with
   an explicitly different `registration_id` is a supported, proven-empty
   selection, so its empty page has no `completeness` or `unsupported_reason`.
-  The route reads current permission rows and summaries without claiming a
-  request-wide immutable projection generation; current-state generation changes
-  do not produce `409 stale`. When `name` or `registration_id` binds the read to a
-  registration, the projection-owned
-  per-registration permission summary classifies the result. Independently
+  An unrecognized namespace returns `404 not_found`. A publication change
+  during the read returns `409 stale`, as described above.
+  When `name` or `registration_id` binds the read to a registration, the
+  projection-owned per-registration permission summary classifies the result. Independently
   proven full support adds no completeness metadata. A non-wrapper resource
   whose standard operator, token-approval, or resolver-delegation paths are not
   fully served returns `meta.completeness=partial` with

@@ -14,9 +14,10 @@ use super::name_record::wrapper_metadata;
 use super::permission_support::{
     PermissionSupport, apply_permissions_collection_support_meta, permission_support_for_resources,
 };
+use super::support::ensure_public_namespace;
 use super::{
     AddressNameGrant, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, QueryParams,
-    StrictQueryParams, V2Error, V2Result, decode, encode, permission_powers_value,
+    StrictQueryParams, V2Error, V2Result, api_error_to_v2, decode, encode, permission_powers_value,
     permission_scope_value,
     restrictions::ResourceRestrictions,
     validate_latest_collection_selectors,
@@ -106,16 +107,17 @@ pub(crate) async fn get_permissions(
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let include_lineage = permissions_include_lineage(&params.include)?;
     let filter_inputs = permissions_filter_inputs(&params)?;
-    let snapshot = CollectionSnapshot::capture_for_namespace(
-        &state,
-        params.cursor.as_deref(),
-        filter_inputs
-            .name_filter
-            .as_ref()
-            .map(|name| name.namespace.as_str())
-            .or(params.namespace.as_deref()),
-    )
-    .await?;
+    let namespace = filter_inputs
+        .name_filter
+        .as_ref()
+        .map(|name| name.namespace.as_str())
+        .or(params.namespace.as_deref());
+    if let Some(namespace) = namespace {
+        ensure_public_namespace(namespace).map_err(api_error_to_v2)?;
+    }
+    let snapshot =
+        CollectionSnapshot::capture_for_namespace(&state, params.cursor.as_deref(), namespace)
+            .await?;
 
     let resolved =
         resolve_permissions_filter(&state, &params, include_lineage, &filter_inputs).await?;
