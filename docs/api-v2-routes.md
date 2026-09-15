@@ -1172,6 +1172,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 `GET /v1/events` share one filter and pagination vocabulary in addition to
 their route-specific anchors:
 
+An unrecognized namespace returns `404 not_found` before publication selection.
+A recognized namespace with no available publication returns retryable `409 stale`.
+
 - `order=asc|desc` selects the keyset direction over the shared chain-position
   sort. `desc` (newest first) is the default; `asc` is the exact reverse of the
   same total order, so the two directions enumerate identical row sets and an

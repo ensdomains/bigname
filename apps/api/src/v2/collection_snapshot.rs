@@ -2,7 +2,7 @@ use crate::AppState;
 use sqlx::types::time::OffsetDateTime;
 
 use super::support::{
-    PublicNamespaceSet, derive_public_namespace_set, request_scope_meta,
+    PublicNamespaceSet, derive_public_namespace_set, ensure_public_namespace, request_scope_meta,
     revalidate_collection_namespace_set,
 };
 use super::{CursorPayload, Meta, V2Error, V2Result, api_error_to_v2};
@@ -26,6 +26,9 @@ impl CollectionSnapshot {
         cursor: Option<&str>,
         namespace: Option<&str>,
     ) -> V2Result<Self> {
+        if let Some(namespace) = namespace {
+            ensure_public_namespace(namespace).map_err(api_error_to_v2)?;
+        }
         let cursor = cursor.map(super::decode).transpose()?;
         let namespaces = derive_public_namespace_set(state)
             .await

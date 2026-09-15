@@ -2477,3 +2477,27 @@ async fn v2_history_ignores_unpublished_binding_and_address_anchor_expansion() -
     assert_eq!(narrowed["page"]["total_count"], json!(1), "an ownership anchor before the requested event window still applies");
     database.cleanup().await
 }
+
+#[tokio::test]
+async fn v2_collection_routes_reject_unknown_namespace_before_publication_capture() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    for uri in [
+        "/v1/events?namespace=en",
+        "/v1/events?namespace=en&name=history.eth",
+        "/v1/names/history.eth/history?namespace=en",
+        "/v1/names/history.eth/subnames?namespace=en",
+        "/v1/names/history.eth?namespace=en&include=counts",
+    ] {
+        let response = v2_history_response_for_database(&database, uri).await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["error"]["code"], json!("not_found"));
+        assert_eq!(payload["error"]["message"], json!("namespace en is not supported"));
+    }
+    // A recognized namespace without a publication is a temporary availability failure.
+    let response = v2_history_response_for_database(&database, "/v1/events?namespace=ens").await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("stale"));
+    database.cleanup().await
+}

@@ -466,15 +466,22 @@ const P = {
   pageSize: { name: 'page_size', in: 'query', type: 'integer', default: '50', desc: 'Between 1 and 200.' },
   relation: { name: 'relation', in: 'query', type: 'set', desc: 'A comma-separated set of <code>owner</code>, <code>manager</code>, and <code>registrant</code>. A row matches on any of them. <code>any</code> means all three.' },
   scope: { name: 'scope', in: 'query', type: 'enum', values: ['name', 'registration', 'both'], default: 'both', desc: 'Events on the name surface, events on the registrations and resources behind it, or both.' },
-  eventType: { name: 'type', in: 'query', type: 'enum', values: ['registration', 'renewal', 'release', 'expiry', 'transfer', 'authority', 'resolver', 'record', 'primary_name', 'permission'], desc: 'Restricts rows to one product event category.' },
+  eventType: { name: 'type', in: 'query', type: 'set', desc: 'One or a comma-separated set of product event categories: <code>registration</code>, <code>renewal</code>, <code>release</code>, <code>expiry</code>, <code>transfer</code>, <code>authority</code>, <code>resolver</code>, <code>record</code>, <code>primary_name</code>, or <code>permission</code>.' },
+  fromTimestamp: { name: 'from_timestamp', in: 'query', desc: 'Inclusive RFC 3339 lower timestamp bound, resolved from indexed block timestamps. Intersects any block range.' },
+  toTimestamp: { name: 'to_timestamp', in: 'query', desc: 'Inclusive RFC 3339 upper timestamp bound. A window outside indexed history returns an empty page.' },
+  historyOrder: { name: 'order', in: 'query', type: 'enum', values: ['desc', 'asc'], default: 'desc', desc: 'Newest first or oldest first over the same chain-position order. Bound into the cursor.' },
+  historyInclude: { name: 'include', in: 'query', type: 'set', desc: 'Comma-separated <code>data</code>, <code>raw</code>, and <code>total_count</code>. The payload flags add fields described below; <code>total_count</code> requests an exact uncapped count for an anchored read. Unanchored events never count.' },
   fromBlock: { name: 'from_block', in: 'query', type: 'integer', desc: 'The lowest block to include.' },
   toBlock: { name: 'to_block', in: 'query', type: 'integer', desc: 'The highest block to include.' },
 };
 const EVENT_FIELDS = [
-  ['type', 'The product event category: <code>registration</code>, <code>renewal</code>, <code>release</code>, <code>expiry</code>, <code>transfer</code>, <code>authority</code>, <code>resolver</code>, <code>record</code>, <code>primary_name</code>, or <code>permission</code>. Raw upstream event kinds are only visible on the diagnostics routes.'],
+  ['type', 'The product event category: <code>registration</code>, <code>renewal</code>, <code>release</code>, <code>expiry</code>, <code>transfer</code>, <code>authority</code>, <code>resolver</code>, <code>record</code>, <code>primary_name</code>, or <code>permission</code>.'],
   ['name, namespace', 'The name the row belongs to.'],
   ['registration_id', 'The registration lifecycle the event belongs to, or <code>null</code> when it is not attached to one.'],
-  ['block_number, timestamp, transaction_hash, log_index', 'Where the event sits on chain. Product rows carry no before or after state and no payload; <a href="#diag-events">diag-events(2)</a> does.'],
+  ['block_number, timestamp, transaction_hash, log_index', 'Where the event sits on chain.'],
+  ['contract_address, data', 'With <code>include=data</code>: the lowercase emitting contract address (null for state-derived rows) and a friendly event payload. Only retained fields are present, so <code>data</code> may be <code>{}</code>. Full stored before/after state remains on <a href="#diag-events">diag-events(2)</a>.'],
+  ['kind', 'With <code>include=raw</code>: the raw storage event kind behind the friendly type, such as <code>RecordChanged</code>. Independent of <code>include=data</code>; combine both to receive all three optional fields.'],
+  ['page.total_count', 'For name, address, registration, or resolver anchored reads, the count across all matching pages; null above 10,000 unless <code>include=total_count</code> requests an exact count. Unanchored events return null.'],
 ];
 const AS_OF = { as_of: { '1': { block_number: 23400118, block_hash: '0x…', timestamp: '2026-09-11T00:00:00Z' } }, as_of_token: '…' };
 const EVENT_SAMPLE = { data: [ { type: 'transfer', name: 'taytems.eth', namespace: 'ens', registration_id: '…', block_number: 23399000, timestamp: '2026-09-10T20:11:47Z', transaction_hash: '0x…', log_index: 42 } ], page: { cursor: null, next_cursor: 'opaque-token', page_size: 50, total_count: null, has_more: true }, meta: { as_of: AS_OF.as_of } };
@@ -678,7 +685,7 @@ const ROUTES = [
   summary: 'Lists events across every name and registration an address is related to, newest first.',
   keywords: ['events', 'activity', 'scope', 'relation'],
   sample: { address: '0x8e8Db5CcEF88cca9d624701Db544989C996E3216' },
-  params: [P.address, P.namespaceEns, P.relation, P.scope, P.cursor, P.pageSize, P.finalityLatest],
+  params: [P.address, P.namespaceEns, P.relation, P.scope, P.eventType, P.fromTimestamp, P.toTimestamp, P.historyOrder, P.historyInclude, P.cursor, P.pageSize, P.finalityLatest],
   response: { fields: EVENT_FIELDS, sample: EVENT_SAMPLE },
   outcomes: [['200', 'The events, or an empty page.'], ['400 invalid_input', 'The address is malformed, the cursor is bad, a parameter is unknown, or a snapshot selector was given.'], ['404 not_found', 'The namespace is not served.'], ['409 stale', 'An Interpret redo is active on some chain.']],
   notes: [REDO],
@@ -689,7 +696,7 @@ const ROUTES = [
   summary: 'Lists the events for a name and every registration it has had, newest first. History survives release, so a name that is no longer registered still has one.',
   keywords: ['events', 'scope', 'lifecycle', 'timeline'],
   sample: { name: 'taytems.eth' },
-  params: [P.name, P.namespace, P.scope, P.cursor, P.pageSize, P.finalityLatest],
+  params: [P.name, P.namespace, P.scope, P.eventType, P.fromTimestamp, P.toTimestamp, P.historyOrder, P.historyInclude, P.cursor, P.pageSize, P.finalityLatest],
   response: { fields: EVENT_FIELDS, sample: { data: [ { type: 'renewal', name: 'taytems.eth', namespace: 'ens', registration_id: '…', block_number: 21100310, timestamp: '2025-01-03T14:20:59Z', transaction_hash: '0x…', log_index: 118 }, { type: 'registration', name: 'taytems.eth', namespace: 'ens', registration_id: '…', block_number: 13556001, timestamp: '2021-11-04T09:31:19Z', transaction_hash: '0x…', log_index: 260 } ], page: { cursor: null, next_cursor: null, page_size: 50, total_count: null, has_more: false }, meta: {} } },
   outcomes: [['200', 'The events, or an empty page.'], ['400 invalid_input', 'The name is invalid, the cursor is bad, a parameter is unknown, or a snapshot selector was given.'], ['404 not_found', 'The name is unknown and no redo is interfering.'], ['409 stale', 'An Interpret redo is active on some chain.']],
   notes: [
@@ -704,12 +711,12 @@ const ROUTES = [
 },
 {
   id: 'events', method: 'GET', path: '/v1/events', title: 'Events',
-  summary: 'Searches product events by name, address, registration, event type, and block range. At least one filter is expected; the filters combine.',
-  keywords: ['filter', 'registration_id', 'type', 'from_block', 'to_block'],
+  summary: 'Searches product events by name, address, registration, resolver, emitting contract, event type, and block or timestamp range. Filters combine.',
+  keywords: ['filter', 'registration_id', 'resolver', 'contract_address', 'type', 'from_block', 'to_block', 'from_timestamp', 'to_timestamp', 'order', 'include', 'data', 'raw', 'total_count'],
   sample: { name: 'taytems.eth', type: 'transfer' },
-  params: [{ name: 'name', in: 'query', desc: 'Events for this name. The namespace is inferred from it when <code>namespace</code> is omitted.' }, { name: 'address', in: 'query', desc: 'Events for names related to this address.' }, { name: 'registration_id', in: 'query', desc: 'Events for one registration. Ownerless ENSv1 rows attached only to the registry resource are excluded.' }, { name: 'namespace', in: 'query', type: 'enum', values: ['ens', 'basenames'], desc: 'Defaults to <code>ens</code> only when <code>name</code> is absent.' }, P.eventType, P.fromBlock, P.toBlock, P.cursor, P.pageSize, P.finalityLatest],
+  params: [{ name: 'name', in: 'query', desc: 'Events for this name. The namespace is inferred from it when <code>namespace</code> is omitted.' }, { name: 'address', in: 'query', desc: 'Events for names related to this address.' }, { name: 'resolver', in: 'query', desc: '<code>&lt;numeric_chain_id&gt;:&lt;address&gt;</code>, for example <code>1:0x…</code>. Matches events emitted by that resolver and pointer changes to or from it. A bare address is invalid.' }, { name: 'contract_address', in: 'query', desc: 'EVM address of the emitting contract, compared case-insensitively. Combines with <code>resolver</code> as AND.' }, { name: 'registration_id', in: 'query', desc: 'Events for one registration. Ownerless ENSv1 rows attached only to the registry resource are excluded.' }, { name: 'namespace', in: 'query', type: 'enum', values: ['ens', 'basenames'], desc: 'Inferred from <code>name</code> when present; otherwise defaults to <code>ens</code>, except a bare <code>resolver</code> filter spans all served namespaces.' }, P.eventType, P.fromBlock, P.toBlock, P.fromTimestamp, P.toTimestamp, P.historyOrder, P.historyInclude, P.cursor, P.pageSize, P.finalityLatest],
   response: { fields: EVENT_FIELDS, sample: EVENT_SAMPLE },
-  outcomes: [['200', 'The events, or an empty page.'], ['400 invalid_input', 'A filter is bad, the cursor is bad, a parameter is unknown, or a snapshot selector was given.'], ['409 stale', 'An Interpret redo is active on some chain.']],
+  outcomes: [['200', 'The events, or an empty page.'], ['400 invalid_input', 'A filter is bad, the cursor is bad, a parameter is unknown, or a snapshot selector was given.'], ['404 not_found', 'The namespace is unrecognized.'], ['409 stale', 'A recognized namespace has no publication, the publication changed, or an Interpret redo is active.']],
   notes: [
     { h: 'How the type filter interacts with cursors', html: `<p>Type filtering runs before keyset paging. Without an explicit <code>type</code>, a cursor whose anchor row still exists but is not a product event continues from the next visible row. With an explicit <code>type</code>, the type becomes part of anchor validation. When migration consumers are activated, a synchronized renewal produces two <code>renewal</code> rows and two <code>expiry</code> rows, one per lifecycle.</p>` },
     REDO,

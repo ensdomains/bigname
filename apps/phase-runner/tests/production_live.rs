@@ -2793,7 +2793,7 @@ async fn lagging_same_fork_snapshot_does_not_publish_or_stamp() -> Result<()> {
     let scratch = ScratchDatabase::create("production_live_lagging_same_fork").await?;
     let chain = "live-lagging-same-fork";
     seed_branch(scratch.pool(), chain, 1, 3, None).await?;
-    publish(scratch.pool(), chain, 1, 3, 0, 0).await?;
+    publish(scratch.pool(), chain, 1, 3, 3, 0).await?;
     seed_completed_spine(scratch.pool(), chain, 3, &block_hash(1, 3)).await?;
     seed_empty_watch_manifest(scratch.pool(), chain).await?;
     let fixture = RpcFixture::spawn(1, 2).await?;
@@ -2825,7 +2825,7 @@ async fn lagging_same_fork_snapshot_does_not_publish_or_stamp() -> Result<()> {
     .bind(block_hash(1, 3))
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(suffix_state, "canonical");
+    assert_eq!(suffix_state, "safe");
     let stamps: Vec<(String, bool)> = sqlx::query_as(
         "SELECT phase_name, redo_in_progress
          FROM chain_phase_state
