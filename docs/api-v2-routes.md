@@ -187,10 +187,12 @@ Field ownership:
 `GET /v1/addresses/{address}/primary-name` answer an indexed read with two
 HTTP caching headers derived from the response itself:
 
-- `ETag: W/"<meta.as_of_token>"` — a weak validator equal to the snapshot
-  token the body already carries, so the validator changes exactly when the
-  served snapshot does and is the same for a latest-state read and an `at`
-  read pinned to that snapshot.
+- `ETag: W/"<response-body-hash>"` — a weak validator derived from the complete
+  serialized JSON response body using Keccak-256. It changes when the served
+  representation changes, including after a projection rebuild or API change
+  at the same chain positions. Identical bodies share a validator whether read
+  at latest state or pinned with `at`. The validator is opaque to clients and
+  is separate from `meta.as_of_token`, which remains the snapshot selector.
 - `Cache-Control: public, max-age=12, stale-while-revalidate=48` — one
   Ethereum slot of freshness, after which a browser or edge revalidates with
   `If-None-Match`; an edge may keep serving the held body for four more slots

@@ -108,7 +108,7 @@ mod tests {
         let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
         post(
             &base,
-            &["v2", "lookup"],
+            &["v1", "lookup"],
             json!({"inputs": [
                 {"id": "forward", "name": "known.eth"},
                 {"id": "reverse", "address": "0x0000000000000000000000000000000000000001"}
@@ -131,7 +131,7 @@ mod tests {
         );
 
         let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
-        let name = super::super::workload::get(&base, &["v2", "names", "known.eth"], &[]).unwrap();
+        let name = super::super::workload::get(&base, &["v1", "names", "known.eth"], &[]).unwrap();
         assert!(
             validate_timed_response("name", &name, br#"{"data":{"status":"unsupported"}}"#,)
                 .is_some()

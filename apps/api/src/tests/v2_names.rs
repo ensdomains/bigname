@@ -548,7 +548,8 @@ async fn v2_indexed_name_read_carries_weak_etag_and_honours_if_none_match() -> R
     let token = payload["meta"]["as_of_token"]
         .as_str()
         .expect("indexed name read must carry meta.as_of_token");
-    assert_eq!(etag, format!("W/\"{token}\""));
+    assert!(etag.starts_with("W/\""));
+    assert_ne!(etag, format!("W/\"{token}\""));
 
     let response = app_router(database.app_state())
         .oneshot(

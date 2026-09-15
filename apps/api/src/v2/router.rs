@@ -18,7 +18,7 @@ use super::{
 
 pub(super) fn router() -> Router<AppState> {
     // Indexed single-resource reads carry the snapshot they were read at as `meta.as_of_token`;
-    // only these routes get the weak-ETag / Cache-Control layer (see `cache_headers`).
+    // only these routes get body-derived weak ETags and Cache-Control (see `cache_headers`).
     let indexed_single_resource_reads = Router::new()
         .route("/v1/names/{name}", get(get_name_record))
         .route("/v1/names/{name}/records", get(get_name_records))

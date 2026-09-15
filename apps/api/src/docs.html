@@ -259,7 +259,7 @@ $ curl -s -X POST /v1/lookup -H 'content-type: application/json' \\
     "source": "indexed"
   }
 }`)}</code></pre>
-<p>Only <code>data</code> and <code>meta</code> are always present; every other field appears when it applies. Two routes nest their paging inside <code>data</code> instead of using the top-level <code>page</code>: <a href="#lookup">lookup(2)</a> pages each address input separately, and <a href="#resolver">resolvers(2)</a> pages its <code>bound_names</code> list.</p>` },
+<p>Only <code>data</code> and <code>meta</code> are always present; every other field appears when it applies. Three routes nest their paging inside <code>data</code> instead of using the top-level <code>page</code>: <a href="#lookup">lookup(2)</a> pages each address input separately, <a href="#resolver">resolvers(2)</a> pages <code>bound_names</code>, and <a href="#registry">registries(2)</a> pages <code>referenced_by</code>.</p>` },
     { h: 'Meta fields', id: 'meta', html: `<dl class="fields">
 <dt>as_of</dt><dd>The chain position the answer was served from, keyed by the chain ID as a string. It is there for attribution and is not an input to anything.</dd>
 <dt>as_of_token</dt><dd>An opaque token naming those exact positions. Pass it back as <code>at</code> on a compatible route to read the same snapshot again. It cannot be assembled from <code>as_of</code>.</dd>
@@ -324,9 +324,10 @@ $ curl -s -X POST /v1/lookup -H 'content-type: application/json' \\
   keywords: ['at', 'finality', 'source', 'latest', 'safe', 'finalized', 'indexed', 'verified', 'auto', 'replay', 'as_of_token'],
   sections: [
     { h: 'Which routes accept what', id: 'which', html: `<dl class="fields prose">
-<dt><a href="#name">names(2)</a>, <a href="#records">names-records(2)</a>, <a href="#resolver">resolvers(2)</a>, and the exact-name diagnostics</dt><dd><code>at</code> yes. <code>finality</code> latest, safe, or finalized. The answer carries <code>as_of</code> and a token.</dd>
+<dt><a href="#name">names(2)</a>, <a href="#records">names-records(2)</a>, <a href="#resolver">resolvers(2)</a>, <a href="#registry">registries(2)</a>, and the exact-name diagnostics</dt><dd><code>at</code> yes. <code>finality</code> latest, safe, or finalized. The answer carries <code>as_of</code> and a token.</dd>
 <dt><a href="#lookup">lookup(2)</a> and <a href="#primary-name">addresses-primary(2)</a></dt><dd>Neither. The answer carries the current positions, with a token when one is available.</dd>
-<dt>Product collections: names, subnames, history, address names, permissions, search, events</dt><dd><code>at</code> is rejected with 400. <code>finality</code> latest only. Each page reports <code>as_of</code>. Continuations must restart with <code>409 stale</code> when the published state changes.</dd>
+<dt><a href="#resolver-aliases">Resolver aliases</a> and <a href="#resolver-roles">resolver roles</a></dt><dd><code>at</code> and all three finality values are accepted, subject to current projection availability. Cursors bind the selected snapshot and completed projection generation. These collections do not reconstruct historical binding or permission tables.</dd>
+<dt>Latest-state product collections: names, subnames, history, address names, permissions, search, events, registry labels</dt><dd><code>at</code> is rejected with 400. <code>finality</code> latest only. Each page reports <code>as_of</code>. Continuations must restart with <code>409 stale</code> when the published state changes.</dd>
 <dt><a href="#status">status(2)</a>, <a href="#namespace">namespaces(2)</a>, <a href="#diag-manifests">diag-manifests(2)</a></dt><dd>Neither, and no snapshot fields.</dd>
 </dl>` },
     { h: 'Selectors', id: 'selectors', html: `<dl class="fields">
@@ -334,7 +335,7 @@ $ curl -s -X POST /v1/lookup -H 'content-type: application/json' \\
 <dt>finality</dt><dd><code>latest</code>, <code>safe</code>, or <code>finalized</code>. The default is <code>latest</code>. It is a floor that the selected position must satisfy.</dd>
 </dl>
 <p>The selected position must exist in the readable lineage, otherwise the route answers <code>409 conflict</code>. A read also needs compatible published data at most one block behind the stored head, even when <code>at</code> points into the past; without it the route answers <code>409 stale</code>. A completed publication remains readable while Project computes its replacement. <code>as_of</code> reports the position actually served.</p>
-<p>Lists accept only an omitted <code>finality</code> or <code>finality=latest</code>. An <code>at</code> on a list is rejected with 400 and the message "at is not supported because collection routes read latest state". A <code>safe</code> or <code>finalized</code> finality on a list is rejected with 400 and the message "finality must be latest because collection routes read latest state".</p>` },
+<p>The latest-state collections listed above accept only an omitted <code>finality</code> or <code>finality=latest</code>. An <code>at</code> on one of these collections is rejected with 400 and the message "at is not supported because collection routes read latest state". A <code>safe</code> or <code>finalized</code> finality on one of these collections is rejected with 400 and the message "finality must be latest because collection routes read latest state".</p>` },
     { h: 'Sources', id: 'sources', html: `<dl class="fields">
 <dt>indexed</dt><dd>The published projection. This is the default everywhere.</dd>
 <dt>verified</dt><dd>Fresh resolver calls on every request. Nothing is cached and nothing is written back. On <a href="#name">names(2)</a> only <code>addresses</code>, <code>text_records</code>, <code>content_hash</code>, and <code>primary_address</code> come from the live call.</dd>
@@ -548,6 +549,20 @@ const ROUTES = [
   related: ['healthz', 'namespace'],
 },
 {
+  id: 'names', method: 'GET', path: '/v1/names', title: 'Names by expiry',
+  summary: 'Lists current names in one namespace whose registration expires within a requested time window. At least one expiry bound is required.',
+  keywords: ['expiry', 'expires_after', 'expires_before', 'expires_at', 'sort', 'order'],
+  sample: { namespace: 'ens', expires_after: '2031-01-01T00:00:00Z', expires_before: '2032-01-01T00:00:00Z' },
+  params: [{ ...P.namespace, required: true, desc: 'The namespace to list. This route cannot infer it.' }, { name: 'expires_after', in: 'query', desc: 'Inclusive lower bound, as an RFC 3339 UTC timestamp. Required unless <code>expires_before</code> is supplied.' }, { name: 'expires_before', in: 'query', desc: 'Exclusive upper bound, as an RFC 3339 UTC timestamp. Must be later than <code>expires_after</code> when both are supplied.' }, { name: 'sort', in: 'query', type: 'enum', values: ['expires_at'], default: 'expires_at', desc: 'Sorts by registration expiry, with stable name identity breaking ties.' }, { name: 'order', in: 'query', type: 'enum', values: ['asc', 'desc'], default: 'asc', desc: 'The sort direction.' }, P.cursor, P.pageSize, P.finalityLatest],
+  response: {
+    fields: [['name, display_name, namespace, namehash', 'The same name identity fields as <a href="#search">search(2)</a>.'], ['owner, registrant, registration_status, registered_at, created_at, expires_at', 'Current registration fields, when known. Every row has an <code>expires_at</code> within the requested window.'], ['page.total_count', '<code>null</code>; the listing does not compute an exact total.']],
+    sample: { data: [{ name: 'taytems.eth', display_name: 'taytems.eth', namespace: 'ens', namehash: '0x…', owner: '0x8e8d…3216', registration_status: 'active', expires_at: '2031-11-04T09:31:19Z' }], page: { cursor: null, next_cursor: null, page_size: 50, total_count: null, has_more: false }, meta: { as_of: AS_OF.as_of } },
+  },
+  outcomes: [['200', 'The matching names, or an empty page.'], ['400 invalid_input', 'The namespace or both bounds are missing, the bounds are malformed or inverted, or a parameter or snapshot selector is unsupported.'], ['404 not_found', 'The namespace is not served.'], ['409 stale', 'The current publication changed; restart without the cursor.']],
+  notes: [{ h: 'Which expiries are listed', html: '<p>This listing covers projected numeric registration lease expiries. Names with only a control expiry, no expiry, or unsupported current authority are omitted. An exact <a href="#name">name profile</a> can still expose an expiry outside this listing. Cursors bind the namespace, bounds, order, and current publication.</p>' }],
+  related: ['name', 'search', 'subnames'],
+},
+{
   id: 'name', method: 'GET', path: '/v1/names/{name}', title: 'Name profile',
   summary: 'Returns one flat record for a name: its identity, its current registration, its NameWrapper state, its resolver, and the most commonly wanted resolver records. A name whose registration has ended still answers, with the fields that no longer apply left out.',
   keywords: ['profile', 'owner', 'registrant', 'manager', 'expires_at', 'wrapper_state', 'wrapper_fuses', 'resolver', 'addresses', 'text_records', 'content_hash', 'primary_name', 'primary_address'],
@@ -758,9 +773,65 @@ const ROUTES = [
   },
   outcomes: [['200', 'The overview, possibly with an empty nested list.'], ['400 invalid_input', 'The chain ID or address is malformed, or a parameter is unknown.'], ['404 not_found', 'There is no overview for this resolver at latest.'], ['409 stale', 'The generation changed, rows are ahead of the selected position, or a historical selector was given with no current projection.']],
   notes: [
-    { h: 'Reading at an older position', html: `<p><code>bound_names</code> always reads the current projections, even with <code>at</code>, so a name that was bound at that time but has since been unbound is absent. There is no exhaustive collection of alias events, so a truncated alias sample cannot be paged. A read at latest also checks for an Interpret redo; a historical read keeps only the generation check.</p>` },
+    { h: 'Reading at an older position', html: `<p><code>bound_names</code> always reads the current projections, even with <code>at</code>, so a name that was bound at that time but has since been unbound is absent. The <a href="#resolver-aliases">aliases</a> and <a href="#resolver-roles">roles</a> collections page the supported indexed tables beyond these samples. They do not reconstruct historical bindings or permissions. A read at latest also checks for an Interpret redo; a historical read keeps only the generation check.</p>` },
   ],
-  related: ['records', 'name', 'permissions'],
+  related: ['resolver-aliases', 'resolver-roles', 'records', 'name', 'permissions'],
+},
+{
+  id: 'resolver-aliases', method: 'GET', path: '/v1/resolvers/{chain_id}/{address}/aliases', title: 'Resolver aliases',
+  summary: 'Pages the supported indexed alias mappings for a resolver, including current binding aliases and active alias-event mappings.',
+  keywords: ['aliases', 'bindings', 'from_name', 'to_name', 'total_count'],
+  sample: { chain_id: '1', address: '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63' },
+  params: [{ name: 'chain_id', in: 'path', type: 'integer', required: true, desc: 'The numeric EVM chain ID.' }, P.address, P.at, P.finality, P.cursor, P.pageSize],
+  response: {
+    fields: [['data', 'Binding aliases are <code>{namespace, name, display_name, namehash}</code>. Active alias-event mappings are <code>{namespace, from_name, to_name, state, resolver, to_registration_id?}</code>.'], ['page.total_count', 'The exact number of supported mappings across both groups, including zero. Unsupported enumeration instead returns an empty page with a null total and explicit <code>meta.completeness</code> and <code>meta.unsupported_reason</code>.']],
+    sample: { data: [{ namespace: 'ens', name: 'alias.eth', display_name: 'alias.eth', namehash: '0x…' }], page: { cursor: null, next_cursor: null, page_size: 50, total_count: 1, has_more: false }, meta: AS_OF },
+  },
+  outcomes: [['200', 'The page, including an explicitly unsupported empty page when enumeration is unsupported.'], ['400 invalid_input', 'The chain, address, parameter, or cursor is invalid, or a cursor belongs to another route or snapshot.'], ['404 not_found', 'The resolver is unknown.'], ['409 stale', 'The selected projection is unavailable or changed; restart without the cursor.']],
+  notes: [{ h: 'Ordering and snapshots', html: '<p>Current binding aliases sort first by stable name identity, then active alias-event mappings by stable alias identity. Cursors bind the chain, resolver, collection, selected snapshot, and completed projection generation. A cursor selects its snapshot when <code>at</code> is omitted. Alias events are bounded to the selected block, while bindings use current projections; this does not reconstruct historical tables or discover arbitrary custom resolver behavior.</p>' }],
+  related: ['resolver', 'resolver-roles'],
+},
+{
+  id: 'resolver-roles', method: 'GET', path: '/v1/resolvers/{chain_id}/{address}/roles', title: 'Resolver roles',
+  summary: 'Pages current resolver-scoped permission rows. Each holder and registration pair is a separate row, so one holder can appear more than once.',
+  keywords: ['roles', 'permissions', 'powers', 'registration_id', 'grant_event', 'total_count'],
+  sample: { chain_id: '1', address: '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63' },
+  params: [{ name: 'chain_id', in: 'path', type: 'integer', required: true, desc: 'The numeric EVM chain ID.' }, P.address, P.at, P.finality, P.cursor, P.pageSize],
+  response: {
+    fields: [['address, registration_id, powers', 'The holder, registration, and its nonempty set of current resolver-scoped powers. Revoked grants and unrelated scopes are excluded.'], ['name', 'Present when the registration has a current readable name.'], ['grant_event', 'Optional provenance from this registration\'s permission row: <code>{block_number, timestamp?, transaction_hash?, log_index?}</code>.'], ['page.total_count', 'Exact permission-row count, including zero, rather than the overview\'s distinct <code>counts.role_holders</code>. Unsupported enumeration returns an empty page with a null total and explicit <code>meta.completeness</code> and <code>meta.unsupported_reason</code>.']],
+    sample: { data: [{ address: '0x8e8d…3216', registration_id: '…', name: 'taytems.eth', powers: ['set_records'] }], page: { cursor: null, next_cursor: null, page_size: 50, total_count: 1, has_more: false }, meta: AS_OF },
+  },
+  outcomes: [['200', 'The page, including an explicitly unsupported empty page when enumeration is unsupported.'], ['400 invalid_input', 'The chain, address, parameter, or cursor is invalid, or a cursor belongs to another route or snapshot.'], ['404 not_found', 'The resolver is unknown.'], ['409 stale', 'The selected projection is unavailable or changed; restart without the cursor.']],
+  notes: [{ h: 'Ordering and snapshots', html: '<p>Rows sort by address and registration ID. Cursors bind the chain, resolver, collection, selected snapshot, and completed projection generation, including rebuilds at the same block height. A cursor selects its snapshot when <code>at</code> is omitted. These reads use current permissions and do not reconstruct historical permission tables.</p>' }],
+  related: ['resolver', 'resolver-aliases', 'permissions'],
+},
+{
+  id: 'registry', method: 'GET', path: '/v1/registries/{chain_id}/{address}', title: 'Registry overview',
+  summary: 'Describes one indexed ENSv2 registry: its served name, parent registry, first observation, current label count, and names that point at it. ENSv1 and Basenames registries are outside this route.',
+  keywords: ['registry', 'parent_registry', 'created_basis', 'counts', 'referenced_by'],
+  sample: { chain_id: '11155111', address: '0x0000000000000000000000000000000000000001' },
+  params: [{ name: 'chain_id', in: 'path', type: 'integer', required: true, desc: 'The numeric EVM chain ID.' }, P.address, { name: 'include', in: 'query', type: 'enum', values: ['counts'], desc: 'Adds exact declared role-assignment and product-visible event counts.' }, P.at, P.finality, { ...P.cursor, desc: 'Pages the nested <code>referenced_by</code> collection.' }, { ...P.pageSize, desc: 'Sizes the nested <code>referenced_by</code> collection.' }],
+  response: {
+    fields: [['chain_id, address', 'The registry identity, with a lowercase address.'], ['name, parent_registry', '<code>name</code> is <code>{name, display_name, namespace, namehash}</code> for the earliest name currently pointing at the registry; <code>parent_registry</code> is <code>{chain_id, address}</code>. Both are null when no name points at it.'], ['created_block_number, created_at, created_transaction_hash, created_basis', 'First-observation evidence. <code>created_basis</code> is <code>registry_created</code>, <code>subregistry_pointer</code>, or <code>declared</code>. A declared registry with no creation event uses its configured start block and a null transaction hash.'], ['counts.labels', 'Exact current label count; zero when no name points at the registry, and null for a historical selection different from the current publication.'], ['counts.roles, counts.events', 'With <code>include=counts</code>: nonzero declared account/resource assignments and product-visible emitted events through the selected block. Several role bits count once per account/resource; this is not an effective-permission count.'], ['referenced_by', 'Nested <code>{data, page}</code> of name identity rows, sorted by display name. Its <code>page.total_count</code> is null. There is no top-level page.']],
+    sample: { data: { chain_id: 11155111, address: '0x0000000000000000000000000000000000000001', name: null, parent_registry: null, created_block_number: 100, created_at: null, created_transaction_hash: null, created_basis: 'declared', counts: { labels: 0 }, referenced_by: { data: [], page: { cursor: null, next_cursor: null, page_size: 50, total_count: null, has_more: false } } }, meta: { as_of: { '11155111': { block_number: 200, block_hash: '0x…', timestamp: '2026-09-11T00:00:00Z' } }, as_of_token: '…' } },
+  },
+  outcomes: [['200', 'The registry, possibly without a served name or labels.'], ['400 invalid_input', 'The chain, address, include value, or cursor is invalid.'], ['404 not_found', 'The registry is unknown at the selected position.'], ['409 stale', 'The publication changed; restart without the cursor.']],
+  notes: [{ h: 'Selectors and examples', html: '<p>Creation, pointer, role-assignment, and event evidence is bounded to the selected block. Label totals describe the current published child collection only. Continuation cursors bind both the selected block and current publication. The example address and creation evidence are illustrative; use an indexed ENSv2 registry address for a live request.</p>' }],
+  related: ['registry-labels', 'subnames', 'events'],
+},
+{
+  id: 'registry-labels', method: 'GET', path: '/v1/registries/{chain_id}/{address}/labels', title: 'Registry labels',
+  summary: 'Lists the current labels of one ENSv2 registry, sorted by display name. Only direct children whose selected ENSv2 registration was emitted by this registry are included.',
+  keywords: ['labels', 'subregistry', 'subname_count', 'role_holder_count', 'counts'],
+  sample: { chain_id: '11155111', address: '0x0000000000000000000000000000000000000001' },
+  params: [{ name: 'chain_id', in: 'path', type: 'integer', required: true, desc: 'The numeric EVM chain ID.' }, P.address, { name: 'include', in: 'query', type: 'enum', values: ['counts'], desc: 'Adds each label\'s <code>subname_count</code> and <code>role_holder_count</code>.' }, P.cursor, P.pageSize, P.finalityLatest],
+  response: {
+    fields: [['name, display_name, namespace, namehash, labelhash', 'The label\'s name identity, using the <a href="#subnames">subnames</a> row shape.'], ['owner, registrant, registration_status, registered_at, created_at, expires_at, subregistry', 'Current registration fields and optional <code>subregistry: {chain_id, address}</code>, when known.'], ['subname_count, role_holder_count', 'With <code>include=counts</code>: direct child count and distinct accounts with nonzero declared assignments on the label\'s current registration resource. Root roles, resolver roles, revoked grants, and older resource versions are excluded; inherited effective permissions are not counted.'], ['page.total_count', 'Exact current label count, matching <code>counts.labels</code> on the registry overview.']],
+    sample: { data: [], page: { cursor: null, next_cursor: null, page_size: 50, total_count: 0, has_more: false }, meta: { as_of: { '11155111': { block_number: 200, block_hash: '0x…', timestamp: '2026-09-11T00:00:00Z' } } } },
+  },
+  outcomes: [['200', 'The labels, or an empty page for a known registry with no served labels.'], ['400 invalid_input', 'The chain, address, include value, cursor, or snapshot selector is invalid.'], ['404 not_found', 'The registry is unknown.'], ['409 stale', 'The current publication changed; restart without the cursor.']],
+  notes: [{ h: 'Registries without a served name', html: '<p>A root registry or a registry with no current name pointing at it returns an empty page: labels are projected under a parent name. Rows and totals use the same current publication, and cursors bind it together with the chain and registry. The example address is illustrative.</p>' }],
+  related: ['registry', 'subnames'],
 },
 {
   id: 'namespace', method: 'GET', path: '/v1/namespaces/{namespace}', title: 'Namespace',
@@ -902,9 +973,11 @@ const ROUTES = [
 
   // ---- the index ------------------------------------------------------
   const GROUPS = [
-    ['names', ['name', 'records', 'subnames', 'history', 'permissions']],
+    ['names', ['names', 'name', 'records', 'subnames', 'history', 'permissions']],
     ['addresses', ['address-names', 'primary-name', 'address-history']],
-    ['index', ['lookup', 'search', 'events', 'resolver', 'namespace']],
+    ['index', ['lookup', 'search', 'events', 'namespace']],
+    ['resolvers', ['resolver', 'resolver-aliases', 'resolver-roles']],
+    ['registries', ['registry', 'registry-labels']],
     ['health', ['status', 'healthz', 'diag-coverage', 'diag-binding', 'diag-authority', 'diag-records', 'diag-manifests', 'diag-events']],
   ];
   const GUIDE_ORDER = ['overview', 'envelope', 'errors', 'snapshots', 'pagination', 'inputs', 'record-keys', 'vocabulary'];

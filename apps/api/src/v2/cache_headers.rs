@@ -1,9 +1,9 @@
 //! `Cache-Control` and weak `ETag` for indexed single-resource reads.
 //!
-//! An indexed single-resource response is a function of the snapshot it was read at, and the
-//! response already names that snapshot: `meta.as_of_token`. The layer below turns that token into
-//! a weak validator so browsers and an edge cache can revalidate with `If-None-Match` and receive
-//! `304 Not Modified` while the snapshot has not moved. It applies only to the routes it is mounted
+//! The snapshot token identifies chain positions, but rebuilt projections or response logic can
+//! change the representation at those same positions. Hash the serialized response body for the
+//! weak validator, so conditional reads return `304 Not Modified` only for an unchanged body.
+//! It applies only to the routes it is mounted
 //! on (name detail, name records, resolver overview, primary name), only to `200` responses whose
 //! body carries `meta.as_of_token`, and only when the request is an indexed read: a `source` of
 //! `verified` or `auto` executes against a provider and is never cached, and the primary-name route
@@ -48,9 +48,10 @@ pub(crate) async fn indexed_read_cache_headers(request: Request, next: Next) -> 
             return V2Error::internal_error("failed to read indexed response body").into_response();
         }
     };
-    let Some(token) = as_of_token(&bytes) else {
+    if as_of_token(&bytes).is_none() {
         return Response::from_parts(parts, Body::from(bytes));
-    };
+    }
+    let token = alloy_primitives::keccak256(&bytes).to_string();
     let Ok(etag) = HeaderValue::from_str(&format!("W/\"{token}\"")) else {
         return Response::from_parts(parts, Body::from(bytes));
     };
@@ -146,10 +147,17 @@ mod tests {
     use super::*;
 
     fn router() -> Router {
+        router_with_data(json!({}))
+    }
+
+    fn router_with_data(data: Value) -> Router {
         Router::new()
             .route(
                 "/v1/names/{name}",
-                get(|| async { Json(json!({"data": {}, "meta": {"as_of_token": "abc123"}})) }),
+                get(move || {
+                    let data = data.clone();
+                    async move { Json(json!({"data": data, "meta": {"as_of_token": "abc123"}})) }
+                }),
             )
             .route(
                 "/v1/names/{name}/records",
@@ -171,6 +179,12 @@ mod tests {
             .route_layer(middleware::from_fn(indexed_read_cache_headers))
     }
 
+    fn default_etag() -> String {
+        let bytes =
+            serde_json::to_vec(&json!({"data": {}, "meta": {"as_of_token": "abc123"}})).unwrap();
+        format!("W/\"{}\"", alloy_primitives::keccak256(bytes))
+    }
+
     async fn send(uri: &str, if_none_match: Option<&str>) -> Response {
         let mut request = Request::builder().uri(uri);
         if let Some(value) = if_none_match {
@@ -183,7 +197,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn indexed_read_carries_weak_etag_and_cache_control_from_as_of_token() {
+    async fn indexed_read_carries_weak_etag_and_cache_control_from_body() {
         let response = send("/v1/names/alice.eth", None).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
@@ -191,7 +205,7 @@ mod tests {
                 .headers()
                 .get(header::ETAG)
                 .and_then(|v| v.to_str().ok()),
-            Some("W/\"abc123\"")
+            Some(default_etag().as_str())
         );
         assert_eq!(
             response
@@ -211,20 +225,21 @@ mod tests {
 
     #[tokio::test]
     async fn matching_if_none_match_returns_not_modified_without_a_body() {
+        let etag = default_etag();
         for candidate in [
-            "W/\"abc123\"",
-            "\"abc123\"",
-            "W/\"other\", W/\"abc123\"",
-            "*",
+            etag.clone(),
+            etag.strip_prefix("W/").unwrap().to_owned(),
+            format!("W/\"other\", {etag}"),
+            "*".to_owned(),
         ] {
-            let response = send("/v1/names/alice.eth", Some(candidate)).await;
+            let response = send("/v1/names/alice.eth", Some(&candidate)).await;
             assert_eq!(response.status(), StatusCode::NOT_MODIFIED, "{candidate}");
             assert_eq!(
                 response
                     .headers()
                     .get(header::ETAG)
                     .and_then(|v| v.to_str().ok()),
-                Some("W/\"abc123\"")
+                Some(default_etag().as_str())
             );
             assert!(response.headers().contains_key(header::CACHE_CONTROL));
             let body = to_bytes(response.into_body(), usize::MAX)
@@ -235,6 +250,30 @@ mod tests {
 
         let response = send("/v1/names/alice.eth", Some("W/\"stale\"")).await;
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn changed_representation_at_same_snapshot_invalidates_cached_response() {
+        for uri in ["/v1/names/alice.eth", "/v1/names/alice.eth?at=abc123"] {
+            let old = send(uri, None).await;
+            let old_etag = old.headers()[header::ETAG].clone();
+            let corrected = router_with_data(json!({"owner": "corrected"}))
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::IF_NONE_MATCH, old_etag.clone())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(corrected.status(), StatusCode::OK);
+            assert_ne!(corrected.headers()[header::ETAG], old_etag);
+            let body = to_bytes(corrected.into_body(), usize::MAX).await.unwrap();
+            let payload: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["data"]["owner"], "corrected");
+            assert_eq!(payload["meta"]["as_of_token"], "abc123");
+        }
     }
 
     #[tokio::test]
@@ -266,7 +305,7 @@ mod tests {
                 .headers()
                 .get(header::ETAG)
                 .and_then(|v| v.to_str().ok()),
-            Some("W/\"abc123\"")
+            Some(default_etag().as_str())
         );
         let response = send("/v1/names/alice.eth?source=indexed", None).await;
         assert!(response.headers().contains_key(header::ETAG));
