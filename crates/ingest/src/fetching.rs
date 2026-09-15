@@ -93,15 +93,35 @@ pub async fn fetch_selected_facts(
             ..FetchedBatch::default()
         });
     }
-    if provider.fetches_transactions() {
-        fetch_selected_transactions(provider, resolved, &blocks, selected_logs, filter)
-            .await
-            .map(|facts| facts.into_batch(blocks))
-    } else {
-        fetch_selected_bundles(provider, resolved, selected_logs)
-            .await
-            .map(|facts| facts.into_batch(blocks))
+    let payloads = provider
+        .transaction_payloads(resolved, &selected_logs)
+        .await
+        .map_err(|error| {
+            super::provider::provider_error("failed to fetch selected transactions", error)
+        })?;
+    let bundle_hashes = payloads
+        .bundle_blocks
+        .iter()
+        .map(|block| block.hash.as_str())
+        .collect::<BTreeSet<_>>();
+    let (dense_logs, sparse_logs): (Vec<_>, Vec<_>) = selected_logs
+        .into_iter()
+        .partition(|log| bundle_hashes.contains(log.block_hash.as_str()));
+    let mut facts = validate_selected_transactions(
+        resolved,
+        &blocks,
+        sparse_logs,
+        payloads.transactions,
+        filter,
+    )?;
+    if !dense_logs.is_empty() {
+        let dense = fetch_selected_bundles(provider, &payloads.bundle_blocks, dense_logs).await?;
+        // These maps are disjoint by block hash: each block uses exactly one read strategy.
+        facts.transactions.extend(dense.transactions);
+        facts.receipts.extend(dense.receipts);
+        facts.logs.extend(dense.logs);
     }
+    Ok(facts.into_batch(blocks))
 }
 
 /// Fetches exactly the transactions the range queries selected, and nothing else.
@@ -111,11 +131,11 @@ pub async fn fetch_selected_facts(
 /// transaction sit in the block this window resolved, the range-query log reappears
 /// unchanged inside the receipt, each stored log is admitted by its own header's bloom,
 /// and the receipt carries no filter-matching log the range query missed.
-async fn fetch_selected_transactions(
-    provider: &ChainProvider,
+fn validate_selected_transactions(
     resolved: &[ResolvedBlock],
     blocks: &[Block],
     selected_logs: Vec<Log>,
+    payloads: Vec<TransactionPayload>,
     filter: &WatchFilter,
 ) -> Result<SelectedFacts> {
     let mut selected_by_transaction = BTreeMap::<String, Vec<Log>>::new();
@@ -131,12 +151,6 @@ async fn fetch_selected_transactions(
         .map(|log| (log.block_hash.as_str(), log.log_index))
         .collect::<BTreeSet<_>>();
     let hashes = selected_by_transaction.keys().cloned().collect::<Vec<_>>();
-    let payloads = provider
-        .transaction_payloads(&hashes)
-        .await
-        .map_err(|error| {
-            super::provider::provider_error("failed to fetch selected transactions", error)
-        })?;
     if payloads.len() != hashes.len() {
         return Err(IngestError::data_integrity(format!(
             "provider returned {} payloads for {} selected transactions",

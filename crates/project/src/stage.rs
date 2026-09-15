@@ -50,6 +50,12 @@ pub(crate) async fn inputs(
 ) -> Result<()> {
     create_events(transaction, chain_id, target.number, full_rebuild).await?;
     linked_records::include(transaction, chain_id, target.number, full_rebuild).await?;
+    // Collect statistics after all history is staged so builders can plan joins
+    // against the actual event mix, including linked resolver records.
+    sqlx::query("ANALYZE project_events")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to analyze staged events", error))?;
     create_identity_views(transaction, chain_id, target, full_rebuild).await?;
     Ok(())
 }

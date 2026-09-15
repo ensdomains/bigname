@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 
-use crate::provider::{Block, BlockBundle, HeadSnapshot, Log, ResolvedBlock};
+use crate::provider::{Block, BlockBundle, HeadSnapshot, Log, ResolvedBlock, SelectedPayloads};
 
 #[derive(Clone)]
 pub struct RethDbProvider;
@@ -33,6 +33,14 @@ impl RethDbProvider {
         _topics: &[String],
         _topic1s: &[String],
     ) -> Result<Vec<Log>> {
+        bail!("Reth DB support was not compiled")
+    }
+
+    pub(crate) async fn transaction_payloads(
+        &self,
+        _blocks: &[ResolvedBlock],
+        _logs: &[Log],
+    ) -> Result<SelectedPayloads> {
         bail!("Reth DB support was not compiled")
     }
 

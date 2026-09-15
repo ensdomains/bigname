@@ -43,6 +43,12 @@ pub enum ChainProvider {
     RethDb(RethDbProvider),
 }
 
+/// Payload reads already selected by block density, with whole-block work left for fetching.
+pub(crate) struct SelectedPayloads {
+    pub transactions: Vec<TransactionPayload>,
+    pub bundle_blocks: Vec<ResolvedBlock>,
+}
+
 #[derive(Clone)]
 pub struct JsonRpcProvider {
     endpoint: Url,
@@ -112,14 +118,6 @@ impl ChainProvider {
         }
     }
 
-    /// Whether ingest fetches the selected transactions one by one instead of whole blocks.
-    ///
-    /// Only the remote JSON-RPC provider pays for a block body it discards. The datadir
-    /// reader already has the block in hand, so it keeps the bundle path.
-    pub(crate) const fn fetches_transactions(&self) -> bool {
-        matches!(self, Self::JsonRpc(_))
-    }
-
     /// Range log lookup that does not re-resolve the blocks it touched.
     ///
     /// Returned logs are pinned to the hashes in `resolved`; the caller re-checks the
@@ -175,15 +173,29 @@ impl ChainProvider {
         }
     }
 
+    /// Returns sparse payloads and the dense blocks that should retain bundle assembly.
     pub(crate) async fn transaction_payloads(
         &self,
-        hashes: &[String],
-    ) -> Result<Vec<TransactionPayload>> {
+        resolved: &[ResolvedBlock],
+        logs: &[Log],
+    ) -> Result<SelectedPayloads> {
         match self {
-            Self::JsonRpc(provider) => provider.transaction_payloads(hashes).await,
-            Self::RethDb(_) => {
-                bail!("the Reth datadir provider fetches whole blocks, not single transactions")
+            Self::JsonRpc(provider) => {
+                let hashes = logs
+                    .iter()
+                    .map(|log| log.transaction_hash.clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                provider
+                    .transaction_payloads(&hashes)
+                    .await
+                    .map(|transactions| SelectedPayloads {
+                        transactions,
+                        bundle_blocks: Vec::new(),
+                    })
             }
+            Self::RethDb(provider) => provider.transaction_payloads(resolved, logs).await,
         }
     }
 
