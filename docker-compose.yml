@@ -29,12 +29,18 @@ services:
       - effective_io_concurrency=${POSTGRES_EFFECTIVE_IO_CONCURRENCY:-256}
       - -c
       - random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-100}
+      - -c
+      - superuser_reserved_connections=${POSTGRES_SUPERUSER_RESERVED_CONNECTIONS:-3}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-bigname}
       POSTGRES_USER: ${POSTGRES_USER:-bigname}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bigname}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      # Loopback by default: this file ships a default password, so publishing on
+      # every interface would expose the database to the network on `up`.
+      - "${POSTGRES_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:

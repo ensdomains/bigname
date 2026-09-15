@@ -1,8 +1,7 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
-use phase_runner::manifest_startup::sync_loaded_manifests;
 use phase_runner::{
     capacity::CapacityGuard,
     cli::{
@@ -19,22 +18,18 @@ use phase_runner::{
     verify_phase::VerifyPhase,
 };
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::EnvFilter;
+
+#[path = "main_manifests.rs"]
+mod manifests;
+#[cfg(test)]
+use manifests::load_hashed_manifest_repository;
+use manifests::{hash_manifests_off_runtime, sync_manifests};
+use phase_runner::manifest_startup::sync_loaded_manifests;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .json()
-        .init();
+    phase_runner::logging::init();
     let command = Cli::parse().resolve()?;
-    let cancellation = CancellationToken::new();
-    let signal_cancellation = cancellation.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            signal_cancellation.cancel();
-        }
-    });
 
     match command {
         ResolvedCommand::InitSchema { database_url } => {
@@ -54,66 +49,79 @@ async fn main() -> Result<()> {
             runtime,
             hydration_rpc_urls,
         } => {
-            let (manifest_repository, manifest_profile) =
-                load_hashed_manifest_repository(&manifests_root)?;
-            validate_deployment_table_set(
-                &runtime.chains,
-                COMPILED_CHAIN_NAMESPACES.iter().copied(),
-            )?;
-            let connections = u32::try_from(runtime.chains.len())
-                .unwrap_or(u32::MAX)
-                .saturating_mul(2)
-                .max(4);
-            let database = RunnerDatabase::connect(&database_url, connections).await?;
-            sync_loaded_manifests(
-                database.pool(),
-                &manifests_root,
-                &manifest_repository,
-                manifest_profile,
-            )
-            .await?;
-            let (loop_heartbeat, phase_progress) = start_metrics(
-                metrics_bind_addr,
-                &database,
-                &cancellation,
-                heartbeat_stale_after_secs,
-                runtime.chains.iter().map(|chain| chain.chain_id.as_str()),
-                true,
-            )
-            .await?;
-            let verification_database = VerificationDatabase::connect(
-                &verification_database_url,
-                &database,
-                u32::try_from(runtime.chains.len())
+            // Only the supervised run and an explicit redo poll the token; the
+            // one-shot commands keep the default SIGTERM disposition.
+            let cancellation = CancellationToken::new();
+            phase_runner::shutdown::cancel_on_signal(&cancellation)
+                .context("register the stop signals before starting")?;
+            let startup = async {
+                let (manifest_repository, manifest_profile) =
+                    hash_manifests_off_runtime(manifests_root.clone()).await??;
+                validate_deployment_table_set(
+                    &runtime.chains,
+                    COMPILED_CHAIN_NAMESPACES.iter().copied(),
+                )?;
+                let connections = u32::try_from(runtime.chains.len())
                     .unwrap_or(u32::MAX)
-                    .max(1),
-            )
-            .await?;
-            let ingest_engine = Arc::new(bigname_ingest::Engine::new(database.pool().clone()));
-            let phases = PhaseSet::with_ingest_interpret_project_and_live(
-                Arc::new(IngestPhase::with_engine(Arc::clone(&ingest_engine))),
-                Arc::new(InterpretPhase::with_state_cache_capacity(
-                    database.pool().clone(),
-                    runtime.capacity.interpreter_state_cache_entries,
-                )),
-                Arc::new(ProjectPhase::with_hydration(
-                    database.pool().clone(),
-                    hydration_rpc_urls,
-                )),
-                Arc::new(VerifyPhase::new(verification_database)),
-                Arc::new(LivePhase::with_engine(ingest_engine)),
-            )?;
-            let runner = Arc::new(
-                PhaseRunner::new(
-                    database,
-                    phases,
-                    CapacityGuard::system(runtime.capacity.clone()),
-                    runtime.instance_id.clone(),
-                    runtime.timing.clone(),
-                )?
-                .with_loop_heartbeat(loop_heartbeat)
-                .with_phase_progress(phase_progress),
-            );
+                    .saturating_mul(2)
+                    .max(4);
+                let database = RunnerDatabase::connect(&database_url, connections).await?;
+                sync_loaded_manifests(
+                    database.pool(),
+                    &manifests_root,
+                    &manifest_repository,
+                    manifest_profile,
+                )
+                .await?;
+                let (loop_heartbeat, phase_progress) = start_metrics(
+                    metrics_bind_addr,
+                    &database,
+                    &cancellation,
+                    heartbeat_stale_after_secs,
+                    runtime.chains.iter().map(|chain| chain.chain_id.as_str()),
+                    true,
+                )
+                .await?;
+                let verification_database = VerificationDatabase::connect(
+                    &verification_database_url,
+                    &database,
+                    u32::try_from(runtime.chains.len())
+                        .unwrap_or(u32::MAX)
+                        .max(1),
+                )
+                .await?;
+                let ingest_engine = Arc::new(bigname_ingest::Engine::new(database.pool().clone()));
+                let phases = PhaseSet::with_ingest_interpret_project_and_live(
+                    Arc::new(IngestPhase::with_engine(Arc::clone(&ingest_engine))),
+                    Arc::new(InterpretPhase::with_state_cache_capacity(
+                        database.pool().clone(),
+                        runtime.capacity.interpreter_state_cache_entries,
+                    )),
+                    Arc::new(ProjectPhase::with_hydration(
+                        database.pool().clone(),
+                        hydration_rpc_urls,
+                    )),
+                    Arc::new(VerifyPhase::new(verification_database)),
+                    Arc::new(LivePhase::with_engine(ingest_engine)),
+                )?;
+                anyhow::Ok(Arc::new(
+                    PhaseRunner::new(
+                        database,
+                        phases,
+                        CapacityGuard::system(runtime.capacity.clone()),
+                        runtime.instance_id.clone(),
+                        runtime.timing.clone(),
+                    )?
+                    .with_loop_heartbeat(loop_heartbeat)
+                    .with_phase_progress(phase_progress),
+                ))
+            };
+            let Some(runner) =
+                phase_runner::shutdown::until_cancelled(&cancellation, startup).await?
+            else {
+                tracing::info!("stop requested during start-up; the runner never started");
+                return Ok(());
+            };
             let report = runner.run(&runtime, cancellation).await?;
             require_clean_supervisor_exit(report)?;
         }
@@ -132,68 +140,109 @@ async fn main() -> Result<()> {
             watch_set_coverage_attestations,
             hydration_rpc_urls,
         } => {
-            let database = RunnerDatabase::connect(&database_url, 4).await?;
-            let chains = match chains {
-                RedoChains::Explicit(chains) => chains,
-                RedoChains::All { sources } => {
-                    resolve_all_redo_chains(
-                        database.pool(),
-                        sources,
-                        phase.requires_intake_sources(),
-                    )
-                    .await?
-                }
+            let cancellation = CancellationToken::new();
+            phase_runner::shutdown::cancel_on_signal(&cancellation)
+                .context("register the stop signals before starting")?;
+            let startup = async {
+                let database = RunnerDatabase::connect(&database_url, 4).await?;
+                let chains = match chains {
+                    RedoChains::Explicit(chains) => chains,
+                    RedoChains::All { sources } => {
+                        resolve_all_redo_chains(
+                            database.pool(),
+                            sources,
+                            phase.requires_intake_sources(),
+                        )
+                        .await?
+                    }
+                };
+                validate_deployment_table_set(&chains, COMPILED_CHAIN_NAMESPACES.iter().copied())?;
+                anyhow::Ok((database, chains))
             };
-            validate_deployment_table_set(&chains, COMPILED_CHAIN_NAMESPACES.iter().copied())?;
-            sync_manifests(database.pool(), &manifests_root).await?;
-            validate_redo_attestation_chains(&watch_set_coverage_attestations, &chains)?;
-            let (loop_heartbeat, phase_progress) = start_metrics(
-                metrics_bind_addr,
-                &database,
+            // Nothing durable happens before this point, so a stop here is a redo
+            // that never started. Manifest synchronization is the first commit: a
+            // changed manifest can retire hashes or install required Ingest work,
+            // so a stop from here on is reported as something to rerun, never as a
+            // no-op, whether or not the commit made it.
+            let Some((database, chains)) =
+                phase_runner::shutdown::until_cancelled(&cancellation, startup).await?
+            else {
+                tracing::info!("stop requested during start-up; the redo never started");
+                return Ok(());
+            };
+            let synchronized = phase_runner::shutdown::until_cancelled(
                 &cancellation,
-                heartbeat_stale_after_secs,
-                chains.iter().map(|chain| chain.chain_id.as_str()),
-                false,
+                sync_manifests(database.pool(), &manifests_root),
             )
             .await?;
-            let ingest_engine = Arc::new(bigname_ingest::Engine::new(database.pool().clone()));
-            let ingest = Arc::new(IngestPhase::with_engine(ingest_engine));
-            let interpret = Arc::new(InterpretPhase::with_state_cache_capacity(
-                database.pool().clone(),
-                capacity.interpreter_state_cache_entries,
-            ));
-            let project = Arc::new(ProjectPhase::with_hydration(
-                database.pool().clone(),
-                hydration_rpc_urls,
-            ));
-            let phases = if phase.requires_verify() {
-                let verification_database_url =
-                    verification_database_url.as_deref().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "verify redo requires a SELECT-only verification database URL"
-                        )
-                    })?;
-                let verification_database =
-                    VerificationDatabase::connect(verification_database_url, &database, 1).await?;
-                PhaseSet::with_ingest_interpret_project_and_verify(
-                    ingest,
-                    interpret,
-                    project,
-                    Arc::new(VerifyPhase::new(verification_database)),
-                )?
-            } else {
-                PhaseSet::with_ingest_interpret_and_project(ingest, interpret, project)?
+            if synchronized.is_none() {
+                bail!(
+                    "stop requested during manifest synchronization; whether the manifest change \
+                     committed is not known, so this redo must be run again"
+                );
+            }
+            let startup = async {
+                validate_redo_attestation_chains(&watch_set_coverage_attestations, &chains)?;
+                let (loop_heartbeat, phase_progress) = start_metrics(
+                    metrics_bind_addr,
+                    &database,
+                    &cancellation,
+                    heartbeat_stale_after_secs,
+                    chains.iter().map(|chain| chain.chain_id.as_str()),
+                    false,
+                )
+                .await?;
+                let ingest_engine = Arc::new(bigname_ingest::Engine::new(database.pool().clone()));
+                let ingest = Arc::new(IngestPhase::with_engine(ingest_engine));
+                let interpret = Arc::new(InterpretPhase::with_state_cache_capacity(
+                    database.pool().clone(),
+                    capacity.interpreter_state_cache_entries,
+                ));
+                let project = Arc::new(ProjectPhase::with_hydration(
+                    database.pool().clone(),
+                    hydration_rpc_urls,
+                ));
+                let phases = if phase.requires_verify() {
+                    let verification_database_url =
+                        verification_database_url.as_deref().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "verify redo requires a SELECT-only verification database URL"
+                            )
+                        })?;
+                    let verification_database =
+                        VerificationDatabase::connect(verification_database_url, &database, 1)
+                            .await?;
+                    PhaseSet::with_ingest_interpret_project_and_verify(
+                        ingest,
+                        interpret,
+                        project,
+                        Arc::new(VerifyPhase::new(verification_database)),
+                    )?
+                } else {
+                    PhaseSet::with_ingest_interpret_and_project(ingest, interpret, project)?
+                };
+                anyhow::Ok(
+                    PhaseRunner::new(
+                        database,
+                        phases,
+                        CapacityGuard::system(capacity),
+                        instance_id,
+                        timing,
+                    )?
+                    .with_watch_set_coverage_attestations(watch_set_coverage_attestations)
+                    .with_loop_heartbeat(loop_heartbeat)
+                    .with_phase_progress(phase_progress),
+                )
             };
-            let runner = PhaseRunner::new(
-                database,
-                phases,
-                CapacityGuard::system(capacity),
-                instance_id,
-                timing,
-            )?
-            .with_watch_set_coverage_attestations(watch_set_coverage_attestations)
-            .with_loop_heartbeat(loop_heartbeat)
-            .with_phase_progress(phase_progress);
+            let Some(runner) =
+                phase_runner::shutdown::until_cancelled(&cancellation, startup).await?
+            else {
+                bail!(
+                    "stop requested after the manifests were synchronized and before the redo \
+                     started; required work that synchronization installed is durable, so this \
+                     redo must be run again"
+                );
+            };
             let report = runner
                 .redo_chains(&chains, phase, range, cancellation)
                 .await?;
@@ -273,42 +322,6 @@ async fn start_metrics<'a>(
         "phase-runner metrics listener started"
     );
     Ok((loop_heartbeat, phase_progress))
-}
-
-async fn sync_manifests(pool: &sqlx::PgPool, root: &std::path::Path) -> Result<()> {
-    let (repository, profile) = load_hashed_manifest_repository(root)?;
-    sync_loaded_manifests(pool, root, &repository, profile).await
-}
-
-fn load_hashed_manifest_repository(
-    root: &std::path::Path,
-) -> Result<(bigname_manifests::ManifestRepository, &'static str)> {
-    let before = bigname_content_hash::manifest_profile_hash(root)
-        .with_context(|| format!("failed to fingerprint manifest profile {}", root.display()))?;
-    let Some((profile, _)) = bigname_content_hash::HASHED_MANIFEST_PROFILES
-        .iter()
-        .find(|(_, expected)| *expected == before)
-    else {
-        bail!(
-            "runtime manifest profile {} has fingerprint {before}, which is not covered by this binary's interpreter content hash {}",
-            root.display(),
-            bigname_content_hash::INTERPRETER_CONTENT_HASH
-        );
-    };
-
-    let repository = bigname_manifests::load_repository(root)?;
-    let after = bigname_content_hash::manifest_profile_hash(root).with_context(|| {
-        format!(
-            "failed to re-fingerprint manifest profile {}",
-            root.display()
-        )
-    })?;
-    ensure!(
-        before == after,
-        "runtime manifest profile {} changed while it was being loaded",
-        root.display()
-    );
-    Ok((repository, profile))
 }
 
 fn require_clean_supervisor_exit(report: SupervisorReport) -> Result<()> {
