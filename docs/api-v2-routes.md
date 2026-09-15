@@ -2335,6 +2335,11 @@ For a registrar lease first identified by a later readable observation, registra
   and `created_transaction_hash` is `null`. Declaration evidence applies only
   within its inclusive configured block interval; finite retirement preserves
   earlier reads, while a retracted declaration with no retained interval does not.
+  Replacing a manifest's current declaration children does not erase that evidence:
+  finite retired intervals use the source manifest's retained active
+  `SourceManifestUpdated` payloads recorded during that admission to establish the
+  registry role. The retained declaration identity and address must match; later re-admission neither changes
+  an older interval's role nor fills the gap between admissions.
   `counts.labels` is the exact
   number of labels the registry currently holds (the rows of the labels route
   below); for a current selection it is `0` when `name` is `null`. `counts.events` is present only with

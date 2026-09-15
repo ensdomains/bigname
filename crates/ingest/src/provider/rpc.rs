@@ -108,7 +108,12 @@ impl JsonRpcProvider {
         let mut headers = Vec::with_capacity(resolved.len());
         for (expected, value) in resolved.iter().zip(self.parallel_batches(calls).await?) {
             let block = value
-                .with_context(|| format!("provider omitted block {}", expected.number))
+                .with_context(|| {
+                    format!(
+                        "provider block disappeared during range log lookup: {}",
+                        expected.number
+                    )
+                })
                 .and_then(Block::from_value)?;
             if block.hash != normalize_hash(&expected.hash) {
                 bail!("provider block hashes changed during range log lookup");

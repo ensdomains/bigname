@@ -1683,6 +1683,11 @@ exclusion applies.
 Live also checks that a suffix loaded after ancestry discovery still descends
 from the selected common ancestor. A provider reorg between those reads is a
 retryable snapshot change, not a terminal lineage failure.
+The required header fetch also rechecks every initially resolved height after
+the range-log queries. A changed hash or a now-missing height invalidates the
+window before facts are stored; Live retries from fresh provider heads.
+Missing blocks during initial resolution and malformed headers retain their
+existing data-integrity classification.
 
 The `phase-runner rewind` command is a thin head-publication operation. It takes
 the ingest, interpret, project, and live advisory locks so it cannot race a head

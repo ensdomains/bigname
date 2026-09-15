@@ -393,6 +393,7 @@ include!("tests/v2_permissions.rs");
 include!("tests/v2_resolvers.rs");
 include!("tests/v2_resolver_collections.rs");
 include!("tests/v2_registries.rs");
+include!("tests/v2_registries_manifest_history.rs");
 include!("tests/v2_interpret_redo_loaders.rs");
 include!("tests/v2_primary_name.rs");
 include!("tests/v2_lookup.rs");

@@ -197,6 +197,7 @@ pub(super) fn retryable(error: &anyhow::Error) -> bool {
             "connection reset",
             "connection closed",
             "provider block hashes changed during range log lookup",
+            "provider block disappeared during range log lookup",
             "provider returned log outside resolved block",
             "provider omitted receipt for selected transaction",
             "provider omitted transaction for selected log",
@@ -251,10 +252,18 @@ mod tests {
     fn mid_fetch_reorg_races_are_retryable() {
         for message in [
             "provider block hashes changed during range log lookup",
+            "provider block disappeared during range log lookup: 10",
             "provider returned log outside resolved block 10 0xabc",
             "Reth DB block hashes changed during log lookup",
         ] {
             assert!(retryable(&anyhow::anyhow!(message)), "{message}");
+        }
+    }
+
+    #[test]
+    fn missing_initial_blocks_and_malformed_headers_are_not_retryable() {
+        for message in ["provider omitted block 10", "block number is missing"] {
+            assert!(!retryable(&anyhow::anyhow!(message)), "{message}");
         }
     }
 

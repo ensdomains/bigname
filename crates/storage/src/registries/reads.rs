@@ -101,20 +101,66 @@ pub async fn load_registry_contract(
                        LIMIT 1
                    ) AS block_timestamp
             FROM bigname_phase.contract_instance_addresses address
-            JOIN bigname_phase.manifest_contract_instances declaration
-              ON declaration.chain_id = address.chain_id
-             AND declaration.contract_instance_id = address.contract_instance_id
-            JOIN bigname_phase.manifest_versions manifest
-              ON manifest.manifest_id = declaration.manifest_id
-             AND manifest.chain_id = declaration.chain_id
             WHERE address.chain_id = $1
               AND lower(address.address) = $2
               AND (address.deactivated_at IS NULL OR address.active_to_block_number IS NOT NULL)
               AND ($3::bigint IS NULL AND address.deactivated_at IS NULL OR $3 IS NOT NULL
                    AND (address.active_from_block_number IS NULL OR address.active_from_block_number <= $3)
                    AND (address.active_to_block_number IS NULL OR address.active_to_block_number >= $3))
-              AND declaration.role IN ('root_registry', 'registry')
-              AND manifest.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+              AND (
+                  EXISTS (
+                      SELECT 1
+                      FROM bigname_phase.manifest_contract_instances declaration
+                      JOIN bigname_phase.manifest_versions manifest
+                        ON manifest.manifest_id = declaration.manifest_id
+                       AND manifest.chain_id = declaration.chain_id
+                      WHERE declaration.chain_id = address.chain_id
+                        AND declaration.contract_instance_id = address.contract_instance_id
+                        AND lower(declaration.declared_address) = lower(address.address)
+                        AND (address.source_manifest_id IS NULL OR
+                             address.source_manifest_id = declaration.manifest_id)
+                        AND (address.deactivated_at IS NULL OR address.source_manifest_id IS NULL)
+                        AND declaration.role IN ('root_registry', 'registry')
+                        AND manifest.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+                  ) OR EXISTS (
+                      -- Sync replaces current declaration children. Its retained active payloads
+                      -- classify finite retired intervals without letting a later re-admission
+                      -- assign its role to an older interval of the same address.
+                      SELECT 1
+                      FROM bigname_phase.normalized_events event
+                      CROSS JOIN LATERAL (VALUES (event.before_state), (event.after_state)) state(value)
+                      CROSS JOIN LATERAL jsonb_array_elements(
+                          state.value -> 'manifest_payload' -> 'contracts'
+                      ) contract(value)
+                      WHERE address.deactivated_at IS NOT NULL
+                        AND address.provenance ->> 'source' = 'manifest_declaration'
+                        AND lower(address.provenance ->> 'declared_address') = lower(address.address)
+                        AND event.source_manifest_id = address.source_manifest_id
+                        AND event.chain_id = address.chain_id
+                        AND event.observed_at BETWEEN address.admitted_at AND address.deactivated_at
+                        AND event.event_kind = 'SourceManifestUpdated'
+                        AND event.derivation_kind = 'manifest_sync'
+                        AND event.consumer_visibility = 'activated'
+                        AND event.canonicality_state IN {READABLE_STATES}
+                        AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+                        AND state.value ->> 'rollout_status' = 'active'
+                        AND state.value -> 'manifest_payload' ->> 'chain' = address.chain_id
+                        AND state.value -> 'manifest_payload' ->> 'source_family' = event.source_family
+                        AND lower(contract.value ->> 'address') = lower(address.address)
+                        AND contract.value ->> 'role' IN ('root_registry', 'registry')
+                        AND (
+                            (address.provenance ->> 'declaration_kind' = 'contract'
+                             AND address.provenance ->> 'declaration_name' = contract.value ->> 'role')
+                            OR (address.provenance ->> 'declaration_kind' = 'root' AND EXISTS (
+                                SELECT 1 FROM jsonb_array_elements(
+                                    state.value -> 'manifest_payload' -> 'roots'
+                                ) root(value)
+                                WHERE root.value ->> 'name' = address.provenance ->> 'declaration_name'
+                                  AND lower(root.value ->> 'address') = lower(address.address)
+                            ))
+                        )
+                  )
+              )
             ORDER BY address.active_from_block_number NULLS FIRST
             LIMIT 1
         )

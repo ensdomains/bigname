@@ -2585,6 +2585,47 @@ async fn live_retries_when_the_provider_reorgs_between_ancestry_and_suffix_reads
 }
 
 #[tokio::test]
+async fn live_retries_when_a_resolved_height_disappears_after_empty_logs() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_missing_recheck").await?;
+    let chain = "live-missing-recheck";
+    seed_branch(scratch.pool(), chain, 1, 3, None).await?;
+    publish(scratch.pool(), chain, 1, 3, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 3, &block_hash(1, 3)).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    let fixture = RpcFixture::spawn(1, 4).await?;
+    fixture.state.write().await.reorg_after_logs = Some((2, 2, 3));
+    let engine = Engine::new(scratch.pool().clone());
+    let request = || live_request(chain, &fixture.endpoint, 3, block_hash(1, 3));
+    let before = rewind_snapshot(scratch.pool(), chain).await?;
+
+    let error = engine.run_live_batch(request()).await.expect_err(
+        "a formerly resolved height missing after the log query must invalidate the window",
+    );
+    assert_eq!(error.kind(), bigname_ingest::ErrorKind::Transient);
+    assert_eq!(rewind_snapshot(scratch.pool(), chain).await?, before);
+    {
+        let state = fixture.state.read().await;
+        assert!(
+            state.reorg_after_logs.is_none(),
+            "empty log query triggered the race"
+        );
+        assert!(
+            state.blocks.contains_key(&block_hash(1, 4)),
+            "old hash remains available"
+        );
+        assert_eq!(state.canonical.len(), 4, "height four disappeared");
+    }
+
+    let recovered = engine.run_live_batch(request()).await?;
+    assert!(recovered.caught_up);
+    assert_eq!(recovered.current.number, 3);
+    assert_eq!(recovered.current.hash, block_hash(2, 3));
+    publish_ingest_heads(scratch.pool(), chain, recovered.heads).await?;
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn restart_after_an_unpublished_live_window_republishes_and_advances_the_spine() -> Result<()>
 {
     let scratch = ScratchDatabase::create("production_live_restart_unpublished_window").await?;
@@ -5172,6 +5213,7 @@ struct RpcChain {
     blocks: BTreeMap<String, Value>,
     logs: Vec<Value>,
     reorg_after_number_batch: Option<(u64, i64, i64)>,
+    reorg_after_logs: Option<(u64, i64, i64)>,
     requests: usize,
 }
 
@@ -5264,6 +5306,7 @@ fn rpc_chain(branch: u64, through: i64) -> RpcChain {
         blocks,
         logs: Vec::new(),
         reorg_after_number_batch: None,
+        reorg_after_logs: None,
         requests: 0,
     }
 }
@@ -5296,6 +5339,15 @@ async fn chain_rpc(
     if is_number_batch
         && let Some((branch, ancestor, through)) = state.reorg_after_number_batch.take()
     {
+        apply_fixture_reorg(&mut state, branch, ancestor, through);
+    }
+    let queried_logs = request["method"] == "eth_getLogs"
+        || request.as_array().is_some_and(|requests| {
+            requests
+                .iter()
+                .any(|request| request["method"] == "eth_getLogs")
+        });
+    if queried_logs && let Some((branch, ancestor, through)) = state.reorg_after_logs.take() {
         apply_fixture_reorg(&mut state, branch, ancestor, through);
     }
     Json(response)
