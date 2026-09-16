@@ -94,8 +94,8 @@ the default-entry fallback only when that rule returns a positive chain ID
 `(upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)`
 `(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)`
 `(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)`.
-The admitted archived-Sepolia implementation exposes the same two getter shapes
-`(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L685-L697 @ ens_v2_sepolia_20260629@ccaeb58)`.
+The official Sepolia resolvers share this fallback through `AbstractRecordResolver`
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractRecordResolver.sol:L168-L177 @ ens_v2_sepolia_20260916@366de741).
 
 | Address read | Indexed | Auto | Verified |
 | --- | --- | --- | --- |

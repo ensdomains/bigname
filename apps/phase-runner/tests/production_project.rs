@@ -4909,9 +4909,9 @@ fn interpreted_direct_v2_release_after_state() -> Result<Value> {
         .find(|loaded| {
             loaded.manifest.chain == ADAPTER_CHAIN
                 && loaded.manifest.source_family == "ens_v2_registry_l1"
-                && loaded.version_tag == "v2"
+                && loaded.version_tag == "v1"
         })
-        .expect("the checked-in post-audit ENSv2 registry manifest must exist");
+        .expect("the checked-in official ENSv2 registry manifest must exist");
     let mut payload = serde_json::to_value(&loaded.manifest)?;
     payload["manifest_version"] = Value::from(1);
     let manifest = ManifestInput {
