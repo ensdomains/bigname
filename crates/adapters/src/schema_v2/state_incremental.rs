@@ -300,9 +300,9 @@ impl State {
         let Some(surfaces) = self.restored_surface_sources.remove(state_key) else {
             return;
         };
-        for surface in surfaces {
-            decrement_count(&mut self.restored_surface_counts, &surface);
-            self.surface_removal_candidates.insert(surface);
+        for surface in surfaces.iter() {
+            decrement_count(&mut self.restored_surface_counts, surface);
+            self.surface_removal_candidates.insert(surface.clone());
         }
     }
 
@@ -311,13 +311,13 @@ impl State {
         let Some(state_key) = self.restoring_state_key.clone() else {
             return;
         };
-        if self
-            .restored_surface_sources
-            .entry(state_key)
-            .or_default()
-            .insert(logical_name_id.clone())
-            .is_none()
-        {
+        // Most retained event keys name one surface. A sorted list avoids a full B-tree
+        // leaf per key, while sharing keeps speculative state branches inexpensive.
+        let surfaces = self.restored_surface_sources.entry(state_key).or_default();
+        if let Err(index) = surfaces.binary_search(&logical_name_id) {
+            let mut updated = surfaces.to_vec();
+            updated.insert(index, logical_name_id.clone());
+            *surfaces = updated.into();
             increment_count(&mut self.restored_surface_counts, logical_name_id);
         }
     }
@@ -419,3 +419,7 @@ fn decrement_count(counts: &mut OrdMap<String, usize>, key: &str) {
         counts.insert(key.to_owned(), previous - 1);
     }
 }
+
+#[cfg(test)]
+#[path = "state_incremental_tests.rs"]
+mod tests;

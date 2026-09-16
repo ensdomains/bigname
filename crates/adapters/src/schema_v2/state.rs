@@ -124,7 +124,7 @@ pub(super) struct State {
     v1_migrated_nodes: OrdSet<String>,
     v1_materialized_surfaces: OrdSet<String>,
     known_surfaces: OrdSet<String>,
-    restored_surface_sources: OrdMap<String, OrdSet<String>>,
+    restored_surface_sources: OrdMap<String, std::sync::Arc<[String]>>,
     restored_surface_counts: OrdMap<String, usize>,
     v2_current_surface_counts: OrdMap<String, usize>,
     surface_removal_candidates: OrdSet<String>,
