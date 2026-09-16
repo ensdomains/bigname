@@ -20,6 +20,7 @@ serde.workspace = true
 serde_json = { version = "1.0.145", features = ["raw_value"] }
 time = { version = "0.3.47", features = ["serde"] }
 uuid.workspace = true
+zstd = { version = "0.13.3", default-features = false }
 
 [dev-dependencies]
 syn = { version = "2.0.117", features = ["full", "visit"] }
