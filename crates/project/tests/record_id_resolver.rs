@@ -496,7 +496,7 @@ async fn hackathon_direct_resolver_projects_ensip19_default_for_missing_eth_addr
         .unwrap()
         .parent()
         .unwrap();
-    let repository = bigname_manifests::load_repository(root.join("manifests/sepolia-hackathon"))?;
+    let repository = bigname_manifests::load_repository(root.join("manifests/sepolia"))?;
     let manifest = &repository
         .manifests()
         .iter()

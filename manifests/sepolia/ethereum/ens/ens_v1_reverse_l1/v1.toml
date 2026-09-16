@@ -1,0 +1,28 @@
+# Bootstrap seed for the canonical ENS reverse registrar on Ethereum Sepolia.
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v1_reverse_l1"
+chain = "ethereum-sepolia"
+deployment_epoch = "ens_v1"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+discovery_rules = []
+
+[capability_flags]
+
+[[contracts]]
+role = "reverse_registrar"
+address = "0xA0a1AbcDAe1a2a4A2EF8e9113Ff0e02DD81DC0C6"
+proxy_kind = "none"
+# Start block follows the Sepolia deployment transaction.
+# (upstream: .refs/ens_v1/deployments/sepolia/ReverseRegistrar.json:L352 @ ens_v1@91c966f).
+start_block = 3789411
+
+# The reverse registrar emits the claimed address and reverse node together:
+# (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L23 @ ens_v1@91c966f).
+[[abi.events]]
+name = "ReverseClaimed"
+fragment = "event ReverseClaimed(address indexed addr, bytes32 indexed node)"
+emitter_roles = ["reverse_registrar"]
+normalized_events = ["ReverseChanged"]

@@ -550,7 +550,7 @@
                            SELECT 1 FROM project_manifests manifest
                            WHERE manifest.namespace = 'ens'
                              AND manifest.deployment_label IN (
-                                 'ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon'
+                                 'ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon', 'ens_v2_sepolia_20260915'
                              )
                        ) THEN 'sepolia'
                        ELSE 'mainnet'

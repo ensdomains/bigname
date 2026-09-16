@@ -1,94 +1,136 @@
-# ENSv2 sepolia-dev PermissionedResolver source-family admission for the alternate profile.
-# PermissionedResolverImpl is implementation metadata for discovered or explicitly
-# admitted resolver instances, not an initial watched root or contract address:
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/deployments/sepolia-dev/PermissionedResolverImpl.json:L2 @ ens_v2_sepolia_dev@554c309)
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L38 @ ens_v2_sepolia_dev@554c309)
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L70 @ ens_v2_sepolia_dev@554c309)
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2_sepolia_dev@554c309).
+# Official 2026-09-15 Sepolia deployment; replaces the old Sepolia and hackathon corpora.
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/.deployment.json:L4 @ ens_v2_sepolia_20260916@366de741)
 manifest_version = 1
 namespace = "ens"
 source_family = "ens_v2_resolver_l1"
 chain = "ethereum-sepolia"
-deployment_epoch = "ens_v2_sepolia_dev"
-rollout_status = "deprecated"
+deployment_epoch = "ens_v2_sepolia_20260915"
+rollout_status = "active"
 normalizer_version = "ensip15@ens-normalize-0.1.1"
-# Historical pre-audit implementation metadata and inherited ERC-1967 event:
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/deployments/sepolia-dev/PermissionedResolverImpl.json:L2 @ ens_v2_sepolia_dev@554c309)
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L85 @ ens_v2_sepolia_dev@554c309)
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L88 @ ens_v2_sepolia_dev@554c309)
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/deployments/sepolia-dev/PermissionedResolverImpl.json:L580 @ ens_v2_sepolia_dev@554c309).
-resolver_implementations = [
-  { role = "permissioned_resolver", address = "0xe566a1fbaf30ff7c39828fe99f955fc55544cb9c" },
-]
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2 @ ens_v2_sepolia_20260916@366de741)
+resolver_implementations = [ { role = "permissioned_resolver", address = "0x14f09fd05d4585759e54844dc9b00147131cf243", read_features = [ "ensip19_default_address" ] } ]
 roots = []
-contracts = []
 discovery_rules = []
+
+[correlation_addresses]
+ens_v1_registry = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e"
 
 [capability_flags]
 
-# Resolver event ABI fragments consumed by ENSv2 resolver and permissions adapters.
-# PermissionedResolver imports ENS resolver profile interfaces:
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L5 @ ens_v2_sepolia_dev@554c309)
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L7 @ ens_v2_sepolia_dev@554c309)
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L9 @ ens_v2_sepolia_dev@554c309)
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L10 @ ens_v2_sepolia_dev@554c309)
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L14 @ ens_v2_sepolia_dev@554c309).
-# AddressChanged: (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L6 @ ens_v1@91c966f).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ENSV1Resolver.json:L2 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ENSV1Resolver.json:L757 @ ens_v2_sepolia_20260916@366de741)
+[[contracts]]
+role = "ensv1_mirror_resolver"
+address = "0xb2bf4a9a86d29661ea93223582b9945943931e42"
+proxy_kind = "none"
+start_block = 11708986
+
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PublicResolverV2.json:L2 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PublicResolverV2.json:L2157 @ ens_v2_sepolia_20260916@366de741)
+[[contracts]]
+role = "public_resolver_v2"
+address = "0xd7e590ad0e92a6ac1d81f4483a9b951d3585a50f"
+proxy_kind = "none"
+start_block = 11709089
+read_features = ["ensip19_default_address"]
+
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L436 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
-name = "AddressChanged"
-fragment = "event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress)"
+name = "Linked"
+fragment = "event Linked(uint256 indexed recordId, bytes32 indexed node, bytes name)"
+normalized_events = ["ResolverRecordLinked", "PreimageObserved"]
+
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L279 @ ens_v2_sepolia_20260916@366de741)
+[[abi.events]]
+name = "AddressUpdated"
+fragment = "event AddressUpdated(uint256 indexed recordId, uint256 coinType, bytes addressBytes)"
 normalized_events = ["RecordChanged"]
 
-# TextChanged: (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L5 @ ens_v1@91c966f).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L311 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
-name = "TextChanged"
-fragment = "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)"
+name = "ContenthashUpdated"
+fragment = "event ContenthashUpdated(uint256 indexed recordId, bytes hash)"
 normalized_events = ["RecordChanged"]
 
-# ContenthashChanged: (upstream: .refs/ens_v1/contracts/resolvers/profiles/IContentHashResolver.sol:L5 @ ens_v1@91c966f).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L254 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
-name = "ContenthashChanged"
-fragment = "event ContenthashChanged(bytes32 indexed node, bytes hash)"
+name = "ABIUpdated"
+fragment = "event ABIUpdated(uint256 indexed recordId, uint256 indexed contentType)"
 normalized_events = ["RecordChanged"]
 
-# NameChanged: (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L5 @ ens_v1@91c966f).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L411 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
-name = "NameChanged"
-fragment = "event NameChanged(bytes32 indexed node, string name)"
+name = "InterfaceUpdated"
+fragment = "event InterfaceUpdated(uint256 indexed recordId, bytes4 indexed interfaceId, address implementer)"
 normalized_events = ["RecordChanged"]
 
-# VersionChanged: (upstream: .refs/ens_v1/contracts/resolvers/profiles/IVersionableResolver.sol:L5 @ ens_v1@91c966f).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L511 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
-name = "VersionChanged"
-fragment = "event VersionChanged(bytes32 indexed node, uint64 newVersion)"
-normalized_events = ["RecordVersionChanged"]
+name = "TextUpdated"
+fragment = "event TextUpdated(uint256 indexed recordId, string indexed keyHash, string key, string value)"
+normalized_events = ["RecordChanged"]
 
-# AliasChanged: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L19 @ ens_v2_sepolia_dev@554c309).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L342 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
-name = "AliasChanged"
-fragment = "event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)"
-normalized_events = ["AliasChanged", "PreimageObserved"]
+name = "DataUpdated"
+fragment = "event DataUpdated(uint256 indexed recordId, string indexed keyHash, string key, bytes value)"
+normalized_events = ["RecordChanged"]
 
-# NamedResource: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L135 @ ens_v2_sepolia_dev@554c309).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L455 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
-name = "NamedResource"
-fragment = "event NamedResource(uint256 indexed resource, bytes name)"
-normalized_events = ["PreimageObserved"]
+name = "NameUpdated"
+fragment = "event NameUpdated(uint256 indexed recordId, string primaryName)"
+normalized_events = ["RecordChanged", "PreimageObserved"]
 
-# NamedTextResource: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L142 @ ens_v2_sepolia_dev@554c309).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L480 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
-name = "NamedTextResource"
-fragment = "event NamedTextResource(uint256 indexed resource, bytes name, bytes32 indexed keyHash, string key)"
-normalized_events = ["PreimageObserved"]
+name = "ResourceArgument"
+fragment = "event ResourceArgument(uint256 indexed resource, bytes arg)"
+normalized_events = ["ResolverPermissionArgument"]
 
-# NamedAddrResource: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L153 @ ens_v2_sepolia_dev@554c309).
-[[abi.events]]
-name = "NamedAddrResource"
-fragment = "event NamedAddrResource(uint256 indexed resource, bytes name, uint256 indexed coinType)"
-normalized_events = ["PreimageObserved"]
-
-# EACRolesChanged: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L24 @ ens_v2_sepolia_dev@554c309).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L373 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
 name = "EACRolesChanged"
 fragment = "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)"
 normalized_events = ["PermissionChanged"]
+
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L524 @ ens_v2_sepolia_20260916@366de741)
+[[abi.events]]
+name = "Upgraded"
+fragment = "event Upgraded(address indexed implementation)"
+normalized_events = ["Upgraded"]
+
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PublicResolverV2.json:L98 @ ens_v2_sepolia_20260916@366de741)
+[[abi.events]]
+name = "AddrChanged"
+fragment = "event AddrChanged(bytes32 indexed node, address a)"
+normalized_events = ["RecordChanged"]
+emitter_roles = ["public_resolver_v2"]
+
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PublicResolverV2.json:L123 @ ens_v2_sepolia_20260916@366de741)
+[[abi.events]]
+name = "AddressChanged"
+fragment = "event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress)"
+normalized_events = ["RecordChanged"]
+emitter_roles = ["public_resolver_v2"]
+
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PublicResolverV2.json:L410 @ ens_v2_sepolia_20260916@366de741)
+[[abi.events]]
+name = "TextChanged"
+fragment = "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)"
+normalized_events = ["RecordChanged"]
+emitter_roles = ["public_resolver_v2"]
+
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PublicResolverV2.json:L198 @ ens_v2_sepolia_20260916@366de741)
+[[abi.events]]
+name = "ContenthashChanged"
+fragment = "event ContenthashChanged(bytes32 indexed node, bytes hash)"
+normalized_events = ["RecordChanged"]
+emitter_roles = ["public_resolver_v2"]
+
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PublicResolverV2.json:L429 @ ens_v2_sepolia_20260916@366de741)
+[[abi.events]]
+name = "VersionChanged"
+fragment = "event VersionChanged(bytes32 indexed node, uint64 newVersion)"
+normalized_events = ["RecordVersionChanged"]
+emitter_roles = ["public_resolver_v2"]

@@ -49,8 +49,7 @@ source pin or successful decode alone is not replacement evidence.
 
 ## Direct PublicResolverV2 record support
 
-For an owned local chain or the separately evidenced `sepolia-hackathon`
-candidate, the exact `public_resolver_v2` declaration described in
+For an owned local chain or the [official Sepolia deployment](sepolia-deployment.md), the exact `public_resolver_v2` declaration described in
 [`manifests.md`](manifests.md#direct-publicresolverv2-declarations-on-an-owned-local-chain)
 permits the existing record reads to use canonical address, text, and contenthash
 observations plus node record-version boundaries. Attribution requires the
@@ -73,7 +72,7 @@ increments that version and emits `VersionChanged`.
 Later writes contribute only within the current version; old-version values do
 not return after a reset. Contract source establishes reachability, not runtime
 acceptance of these reads or transactions. The source support alone does not establish public-chain deployment
-provenance; the hackathon candidate uses its separate manifest evidence. Zero pointers, undeclared/custom resolver addresses,
+provenance; the official Sepolia declaration uses its pinned deployment artifact. Zero pointers, undeclared/custom resolver addresses,
 and unsupported roles preserve their explicit unsupported behavior. Existing
 ENSv1 resolver support and PermissionedResolver proxy classification stay intact.
 
@@ -124,14 +123,13 @@ arm](glossary.md#authority-epoch): a bound ENS name of either arm with a
 non-null exact resolver carries a direct topology, and the verified read
 executes only when the deployment profile's `ens_execution` manifest lists the
 name's selected arm in `verified_authority_arms` (`manifests.md` §
-`verified_authority_arms`). Mainnet and Sepolia admit `ens_v1` only, so an
-`ens_v2`-selected name there reports `exact_name_authority_not_verifiable`
-under `source=verified` (and its indexed answer under `source=auto`); the
-`sepolia-hackathon` profile admits both arms.
+`verified_authority_arms`). Mainnet admits `ens_v1` only; an unlisted arm reports
+`exact_name_authority_not_verifiable` under `source=verified` (and its indexed
+answer under `source=auto`). The official `sepolia` profile admits both arms.
 
 The flagged deployments are the current ENS PublicResolver on mainnet, the
 current Sepolia PublicResolver at `0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5`,
-and the admitted archived-Sepolia ENSv2 `PermissionedResolver` implementation. The
+and the official Sepolia ENSv2 `PermissionedResolver` implementation, plus its directly declared `PublicResolverV2`. The
 admitted Basenames address is the legacy resolver and remains unflagged; its
 vendored coin-type getter reads exact storage, while the fallback-bearing
 upgradeable resolver proxy is not admitted in this change.

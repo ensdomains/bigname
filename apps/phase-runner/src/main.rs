@@ -283,7 +283,15 @@ fn prepare_runtime_manifests(
     chains: &mut [phase_runner::config::ChainConfig],
 ) -> Result<(bigname_manifests::ManifestRepository, &'static str)> {
     let (repository, profile) = load_hashed_manifest_repository(root)?;
-    phase_runner::config::bind_profile_start(chains, &repository, profile)?;
+    if chains.iter().any(|chain| {
+        chain.chain_id == "ethereum-sepolia"
+            && chain
+                .sources
+                .iter()
+                .any(|source| source.start_block_number != 0)
+    }) {
+        anyhow::bail!("Sepolia intake must start at block zero");
+    }
     validate_deployment_table_set(chains, COMPILED_CHAIN_NAMESPACES.iter().copied())?;
     Ok((repository, profile))
 }

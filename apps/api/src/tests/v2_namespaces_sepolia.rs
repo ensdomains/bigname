@@ -1,14 +1,12 @@
-/// The separately evidenced `sepolia-hackathon` deployment profile declares its own ENS
-/// execution entrypoint (the hackathon deployment's Universal Resolver, shadow rollout) and an
-/// active ENSv1 registry on `ethereum-sepolia`, so both verified capabilities stop reporting
-/// `execution_entrypoint_not_declared` and turn on the moment a Sepolia provider is configured.
+/// Official Sepolia execution declarations report provider readiness independently
+/// of indexed capability completeness.
 #[tokio::test]
-async fn v2_namespace_ens_reports_verified_capabilities_under_the_hackathon_profile() -> Result<()>
+async fn v2_namespace_ens_reports_verified_capabilities_under_the_official_sepolia_profile() -> Result<()>
 {
     let database = TestDatabase::new(true).await?;
     let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("manifests/sepolia-hackathon");
+        .join("manifests/sepolia");
     let repository = bigname_manifests::load_repository(manifest_root)?;
     bigname_manifests::sync_schema_v2_repository(&database.lookup_pool, &repository).await?;
 

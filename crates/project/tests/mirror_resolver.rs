@@ -918,18 +918,18 @@ async fn undeclared_ensv2_resolver_without_upgrade_history_is_unchanged() -> Res
 }
 
 #[tokio::test]
-async fn hackathon_manifest_declares_the_mirror_and_classifies_it() -> Result<()> {
+async fn official_manifest_declares_the_mirror_and_classifies_it() -> Result<()> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .parent()
         .unwrap();
-    let repository = bigname_manifests::load_repository(root.join("manifests/sepolia-hackathon"))?;
+    let repository = bigname_manifests::load_repository(root.join("manifests/sepolia"))?;
     let manifest = &repository
         .manifests()
         .iter()
         .find(|loaded| loaded.manifest.source_family == "ens_v2_resolver_l1")
-        .context("hackathon ens_v2_resolver_l1 manifest")?
+        .context("official Sepolia ens_v2_resolver_l1 manifest")?
         .manifest;
     let mirrors: Vec<_> = manifest
         .contracts
@@ -939,30 +939,24 @@ async fn hackathon_manifest_declares_the_mirror_and_classifies_it() -> Result<()
     assert_eq!(
         mirrors
             .iter()
-            .map(|contract| (contract.address.to_ascii_lowercase(), contract.start_block))
+            .map(|c| (c.address.to_ascii_lowercase(), c.start_block))
             .collect::<Vec<_>>(),
-        [
-            (
-                "0x10107255fda20ab6c37a0efca1e9465f25066a00".to_owned(),
-                Some(11_626_641)
-            ),
-            (
-                "0x1f11e5b8bca2ccfe13bd8431853db159c4e9849c".to_owned(),
-                Some(11_626_628)
-            ),
-        ]
+        [(
+            "0xb2bf4a9a86d29661ea93223582b9945943931e42".to_owned(),
+            Some(11_708_986)
+        )]
     );
     let mirror = mirrors[0];
     assert_eq!(
         mirror.address.to_ascii_lowercase(),
-        "0x10107255fda20ab6c37a0efca1e9465f25066a00"
+        "0xb2bf4a9a86d29661ea93223582b9945943931e42"
     );
-    assert_eq!(mirror.start_block, Some(11_626_641));
+    assert_eq!(mirror.start_block, Some(11_708_986));
     assert_eq!(mirror.proxy_kind, "none");
     let registry = manifest.correlation_addresses
         [bigname_manifests::ENSV1_MIRROR_REGISTRY_CORRELATION_KEY]
         .to_ascii_lowercase();
-    assert_eq!(registry, "0x82080cc8ca78597bde586a003d0a080c79a1814b");
+    assert_eq!(registry, "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e");
 
     let address: &'static str = Box::leak(mirror.address.to_ascii_lowercase().into_boxed_str());
     let fixture = Fixture {
@@ -999,30 +993,6 @@ async fn hackathon_manifest_declares_the_mirror_and_classifies_it() -> Result<()
     );
     database.cleanup().await?;
 
-    // The second declared instance classifies and serves the same way once a name points at it.
-    let second: &'static str = Box::leak(mirrors[1].address.to_ascii_lowercase().into_boxed_str());
-    let fixture = Fixture {
-        id: "mirror_hackathon_second",
-        base: i64::try_from(mirrors[1].start_block.unwrap())? + 1,
-        mirror: second,
-        v2_payload: Some(serde_json::to_value(manifest)?),
-        v1_side: V1Side::Projected,
-        ancestor: Ancestor::None,
-        queried: NAME,
-        queried_bound: true,
-        v2_lifecycle: V2Lifecycle::None,
-    };
-    let (database, pool) = project(&fixture, fixture.target(), Execution::FromZero).await?;
-    let resolver = resolver_current(&pool, second).await?;
-    assert_eq!(resolver["support_status"], "supported", "{resolver}");
-    assert_eq!(
-        resolver["declared_summary"]["classification"]["role"],
-        "ensv1_mirror_resolver"
-    );
-    let v2 = inventory(&pool, V2_RESOURCE).await?;
-    assert_eq!(v2["support_status"], "supported", "{v2}");
-    assert_eq!(v2["provenance"]["resolver_address"], second);
-    database.cleanup().await?;
     Ok(())
 }
 
@@ -1199,12 +1169,12 @@ async fn project_direct_fixture(fixture: &Fixture) -> Result<(TestDatabase, PgPo
             fixture,
             family,
             &json!({
-                "deployment_epoch": "ens_v2_sepolia_hackathon",
+                "deployment_epoch": "ens_v2_sepolia_20260915",
                 "capability_flags": {"exact_name_profile": {"status": "supported"}}
             }),
         )
         .await?;
-        sqlx::query("UPDATE manifest_versions SET deployment_label = 'ens_v2_sepolia_hackathon' WHERE manifest_id = $1")
+        sqlx::query("UPDATE manifest_versions SET deployment_label = 'ens_v2_sepolia_20260915' WHERE manifest_id = $1")
             .bind(manifest_id).execute(&pool).await?;
         sqlx::query(
             "INSERT INTO normalized_events (

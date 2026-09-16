@@ -5633,19 +5633,16 @@ status = "supported"
     scratch.cleanup().await
 }
 
-fn checked_in_hackathon_root() -> std::path::PathBuf {
+fn checked_in_official_sepolia_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("manifests/sepolia-hackathon")
+        .join("manifests/sepolia")
 }
 
 #[tokio::test]
-async fn checked_in_hackathon_mirror_instances_sync_under_per_instance_declaration_names()
--> Result<()> {
-    // Two `ensv1_mirror_resolver` instances share one role; persistence keys declarations by
-    // `(manifest_id, declaration_kind, declaration_name)`, so each instance carries its own name.
-    let scratch = ScratchDatabase::create("production_manifest_hackathon_mirror_pair").await?;
-    let repository = load_repository(checked_in_hackathon_root())?;
+async fn official_sepolia_mirror_and_direct_resolver_sync_idempotently() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_official_mirror").await?;
+    let repository = load_repository(checked_in_official_sepolia_root())?;
     sync_schema_v2_repository(scratch.pool(), &repository).await?;
 
     let mirrors: Vec<(String, String, String, Option<i64>)> = sqlx::query_as(
@@ -5664,20 +5661,12 @@ async fn checked_in_hackathon_mirror_instances_sync_under_per_instance_declarati
     .await?;
     assert_eq!(
         mirrors,
-        vec![
-            (
-                "ensv1_mirror_resolver@0x10107255fda20ab6c37a0efca1e9465f25066a00".into(),
-                "ensv1_mirror_resolver".into(),
-                "0x10107255fda20ab6c37a0efca1e9465f25066a00".into(),
-                Some(11_626_641)
-            ),
-            (
-                "ensv1_mirror_resolver@0x1f11e5b8bca2ccfe13bd8431853db159c4e9849c".into(),
-                "ensv1_mirror_resolver".into(),
-                "0x1f11e5b8bca2ccfe13bd8431853db159c4e9849c".into(),
-                Some(11_626_628)
-            ),
-        ]
+        vec![(
+            "ensv1_mirror_resolver@0xb2bf4a9a86d29661ea93223582b9945943931e42".into(),
+            "ensv1_mirror_resolver".into(),
+            "0xb2bf4a9a86d29661ea93223582b9945943931e42".into(),
+            Some(11_708_986)
+        )]
     );
     // Singleton roles keep the role as their declaration name.
     let direct: Option<String> = sqlx::query_scalar(
@@ -5694,14 +5683,14 @@ async fn checked_in_hackathon_mirror_instances_sync_under_per_instance_declarati
     .await?;
     assert_eq!(direct.as_deref(), Some("public_resolver_v2"));
 
-    // A resync is idempotent for both instances.
+    // A resync is idempotent.
     sync_schema_v2_repository(scratch.pool(), &repository).await?;
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM manifest_contract_instances WHERE role = 'ensv1_mirror_resolver'",
     )
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(count, 2);
+    assert_eq!(count, 1);
     scratch.cleanup().await?;
     Ok(())
 }

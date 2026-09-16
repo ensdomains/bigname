@@ -109,6 +109,13 @@ async fn seed_alias_corpus(pool: &PgPool) -> TestResult {
         .join("../..")
         .join("manifests/sepolia");
     sync_schema_v2_repository(pool, &load_repository(manifest_root)?).await?;
+    // This replay regression exercises the supported node-keyed decoder with an
+    // ABI-only synthetic fixture; it does not retain a historical deployment.
+    let events: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../adapters/tests/fixtures/node-resolver-abi.json"
+    ))?;
+    sqlx::query("UPDATE manifest_versions SET manifest_payload = jsonb_set(manifest_payload, '{abi,events}', $1) WHERE source_family = 'ens_v2_resolver_l1'")
+        .bind(events).execute(pool).await?;
     seed_lineage(pool).await?;
     let manifest_id: i64 = sqlx::query_scalar(
         "SELECT manifest_id FROM manifest_versions

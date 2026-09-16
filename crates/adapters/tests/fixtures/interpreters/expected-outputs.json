@@ -1272,9 +1272,7 @@
             "resolver_contract_instance_id": "00000000-0000-0000-0000-000000000001",
             "selector_key": "com.twitter",
             "source_event": "TextChanged",
-            "text_key": "com.twitter",
             "value": "@alice",
-            "value_length": 6,
             "value_retained": true
           }
         }

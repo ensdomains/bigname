@@ -1,28 +1,20 @@
-# Shadow-scoped bootstrap for the canonical ENS execution entrypoint on Ethereum Sepolia.
-# This is the Sepolia deployment profile's counterpart of
-# manifests/mainnet/ethereum/ens/ens_execution/v1.toml: the same Universal Resolver
-# proxy address, the same role, the same shadow-scoped verified-resolution ownership.
-# The proxy address is pinned by the admitted 2026-06-29 Sepolia deployment artifact,
-# which deploys the ENS Universal Resolver proxy at this address
-# (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/UpgradableUniversalResolverProxy.json:L2 @ ens_v2@a971bd64);
-# the later non-admitted redeploy keeps the same proxy address
-# (upstream: .refs/ens_v2/contracts/deployments/sepolia/UpgradableUniversalResolverProxy.json:L2 @ ens_v2@a971bd64).
-# The pinned ENSv1 Sepolia UniversalResolver deployment is the implementation/ABI
-# anchor, as on Mainnet; the lookup entry is the proxy address
-# (upstream: .refs/ens_v1/deployments/sepolia/UniversalResolver.json:L2 @ ens_v1@91c966f).
+# Official 2026-09-15 Sepolia deployment; replaces the old Sepolia and hackathon corpora.
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/.deployment.json:L4 @ ens_v2_sepolia_20260916@366de741)
 manifest_version = 1
 namespace = "ens"
 source_family = "ens_execution"
 chain = "ethereum-sepolia"
-deployment_epoch = "ens_v1"
+deployment_epoch = "ens_v2_sepolia_20260915"
 rollout_status = "shadow"
 normalizer_version = "ensip15@ens-normalize-0.1.1"
 roots = []
 discovery_rules = []
+verified_authority_arms = ["ens_v1", "ens_v2"]
 
 [capability_flags]
-verified_resolution = { status = "shadow", notes = "shadow execution ownership on the Sepolia deployment profile; verified records and verified ENS/60 primary-name lookup execute through this entrypoint under the same rules as Mainnet" }
+verified_resolution = { status = "shadow", notes = "verified resolution through the official Sepolia Universal Resolver for both ENSv1 and ENSv2 authority" }
 
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/UpgradableUniversalResolverProxy.json:L2 @ ens_v2_sepolia_20260916@366de741)
 [[contracts]]
 role = "universal_resolver"
 address = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"

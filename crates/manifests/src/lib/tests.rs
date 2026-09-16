@@ -796,7 +796,7 @@ fn checked_in_manifest_trees_pass_repository_validation() -> Result<()> {
     for profile_root in [
         "manifests/mainnet",
         "manifests/sepolia",
-        "manifests/sepolia-hackathon",
+        "manifests/sepolia",
     ] {
         let repository = load_repository(checked_in_manifest_root(profile_root))?;
         assert_eq!(
@@ -808,214 +808,29 @@ fn checked_in_manifest_trees_pass_repository_validation() -> Result<()> {
     Ok(())
 }
 
-/// The separately evidenced hackathon deployment profile declares its own ENS execution
-/// entrypoint: the hackathon deployment's Universal Resolver proxy, not the canonical Sepolia
-/// proxy, in the shape the lookup engine admits (`ens_execution` on `ethereum-sepolia`, role
-/// `universal_resolver`, shadow rollout with a shadow `verified_resolution` flag) and with a
-/// declared start so the profile's intake floor binding still sees a start on every contract.
 #[test]
-fn checked_in_hackathon_profile_declares_its_own_ens_execution_entrypoint() -> Result<()> {
-    let repository = load_repository(checked_in_manifest_root("manifests/sepolia-hackathon"))?;
+fn mainnet_execution_manifest_defaults_to_ensv1() -> Result<()> {
+    let profile = "manifests/mainnet";
+    let repository = load_repository(checked_in_manifest_root(profile))?;
     let execution = repository
         .manifests()
         .iter()
         .filter(|loaded| loaded.manifest.source_family == "ens_execution")
         .collect::<Vec<_>>();
-    assert_eq!(execution.len(), 1, "one hackathon ens_execution manifest");
+    assert_eq!(execution.len(), 1, "{profile}: one ens_execution manifest");
     let manifest = &execution[0].manifest;
+    assert_eq!(manifest.verified_authority_arms, None, "{profile}");
     assert_eq!(
-        execution[0].relative_path,
-        std::path::Path::new("ethereum/ens/ens_execution/v1.toml")
+        manifest.verified_authority_arms(),
+        DEFAULT_VERIFIED_AUTHORITY_ARMS,
+        "{profile}"
     );
-    assert_eq!(manifest.namespace, "ens");
-    assert_eq!(manifest.chain, "ethereum-sepolia");
-    assert_eq!(manifest.deployment_epoch, "ens_v2_sepolia_hackathon");
-    assert_eq!(manifest.rollout_status, RolloutStatus::Shadow);
-    assert!(matches!(
-        manifest.capability_flags.get("verified_resolution"),
-        Some(flag) if flag.status == CapabilitySupportStatus::Shadow
-    ));
-    assert!(manifest.roots.is_empty());
-    assert!(manifest.discovery_rules.is_empty());
-    assert!(manifest.abi.events.is_empty());
-    assert_eq!(manifest.contracts.len(), 1);
-    let entrypoint = &manifest.contracts[0];
-    assert_eq!(entrypoint.role, "universal_resolver");
-    assert_eq!(
-        entrypoint.address.to_ascii_lowercase(),
-        "0xd26f2040d083af1cd2962ba303f4bea0c4faf142"
+    assert_eq!(manifest.verified_authority_arms(), ["ens_v1"], "{profile}");
+    let payload = serde_json::to_value(manifest)?;
+    assert!(
+        payload.get("verified_authority_arms").is_none(),
+        "{profile}: an absent declaration must not appear in the synced payload"
     );
-    assert_ne!(
-        entrypoint.address.to_ascii_lowercase(),
-        "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
-        "the canonical Sepolia proxy does not embed the hackathon root registry"
-    );
-    assert_eq!(entrypoint.proxy_kind, "none");
-    assert_eq!(entrypoint.implementation, None);
-    assert_eq!(entrypoint.start_block, Some(11_626_766));
-    assert_eq!(
-        manifest.verified_authority_arms.as_deref(),
-        Some(&["ens_v1".to_owned(), "ens_v2".to_owned()][..]),
-        "the hackathon UniversalResolverV2 admits both ENS arms"
-    );
-    assert_eq!(manifest.verified_authority_arms(), ["ens_v1", "ens_v2"]);
-
-    let earliest_start = repository
-        .manifests()
-        .iter()
-        .flat_map(|loaded| {
-            let manifest = &loaded.manifest;
-            manifest.roots.iter().map(|root| root.start_block).chain(
-                manifest
-                    .contracts
-                    .iter()
-                    .map(|contract| contract.start_block),
-            )
-        })
-        .map(|start| start.expect("every hackathon declaration carries a start block"))
-        .min();
-    assert_eq!(earliest_start, Some(11_626_442));
-    Ok(())
-}
-
-/// The hackathon deployment's own ENSv1 ReverseRegistrar is declared under `ens_v1_reverse_l1`
-/// in the same shape as the Mainnet family: one direct `reverse_registrar` contract, one
-/// `ReverseClaimed` event mapped to `ReverseChanged`, no roots, discovery rules, or capability
-/// flags. It is what keys ENS/60 primary-name tuples for wallets that `setName` on this
-/// deployment. Its start is the contract's creation block, later than the registry it writes
-/// through (the default resolver is configured after construction), so the profile's intake
-/// floor is unchanged.
-#[test]
-fn checked_in_hackathon_profile_declares_the_reverse_registrar() -> Result<()> {
-    let repository = load_repository(checked_in_manifest_root("manifests/sepolia-hackathon"))?;
-    let reverse = repository
-        .manifests()
-        .iter()
-        .filter(|loaded| loaded.manifest.source_family == "ens_v1_reverse_l1")
-        .collect::<Vec<_>>();
-    assert_eq!(reverse.len(), 1, "one hackathon ens_v1_reverse_l1 manifest");
-    let manifest = &reverse[0].manifest;
-    assert_eq!(
-        reverse[0].relative_path,
-        std::path::Path::new("ethereum/ens/ens_v1_reverse_l1/v1.toml")
-    );
-    assert_eq!(manifest.namespace, "ens");
-    assert_eq!(manifest.chain, "ethereum-sepolia");
-    assert_eq!(manifest.deployment_epoch, "ens_v1_sepolia_hackathon");
-    assert_eq!(manifest.rollout_status, RolloutStatus::Active);
-    assert!(manifest.capability_flags.is_empty());
-    assert!(manifest.roots.is_empty());
-    assert!(manifest.discovery_rules.is_empty());
-    assert!(manifest.resolver_implementations.is_empty());
-    assert!(manifest.correlation_addresses.is_empty());
-
-    assert_eq!(manifest.contracts.len(), 1);
-    let registrar = &manifest.contracts[0];
-    assert_eq!(registrar.role, "reverse_registrar");
-    assert_eq!(
-        normalize_address(&registrar.address),
-        "0x060d5a54a8751eec63b756e32ef66f5eef418e60"
-    );
-    assert_eq!(registrar.proxy_kind, "none");
-    assert_eq!(registrar.implementation, None);
-    assert_eq!(registrar.start_block, Some(11_626_578));
-
-    let event_surface = |manifest: &SourceManifest| {
-        manifest
-            .abi
-            .events
-            .iter()
-            .map(|event| {
-                (
-                    event.name.clone(),
-                    event.fragment.clone(),
-                    event.emitter_roles.clone(),
-                    event.normalized_events.clone(),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        event_surface(manifest),
-        vec![(
-            "ReverseClaimed".to_owned(),
-            "event ReverseClaimed(address indexed addr, bytes32 indexed node)".to_owned(),
-            vec!["reverse_registrar".to_owned()],
-            vec!["ReverseChanged".to_owned()],
-        )]
-    );
-    let mainnet = load_repository(checked_in_manifest_root("manifests/mainnet"))?;
-    let mainnet_reverse = mainnet
-        .manifests()
-        .iter()
-        .find(|loaded| loaded.manifest.source_family == "ens_v1_reverse_l1")
-        .expect("mainnet ens_v1_reverse_l1 manifest");
-    assert_eq!(
-        event_surface(manifest),
-        event_surface(&mainnet_reverse.manifest),
-        "the hackathon reverse family declares the Mainnet event surface"
-    );
-    assert_eq!(
-        mainnet_reverse.manifest.contracts[0].role, registrar.role,
-        "the hackathon reverse family declares the Mainnet contract role"
-    );
-
-    // The registrar's constructor takes the hackathon registry, so the registry is created first;
-    // the default resolver is set after construction and may be created later. The profile's
-    // earliest declared start therefore stays the legacy registry's.
-    let start_of = |family: &str, role: &str| {
-        repository
-            .manifests()
-            .iter()
-            .filter(|loaded| loaded.manifest.source_family == family)
-            .flat_map(|loaded| loaded.manifest.contracts.iter())
-            .find(|contract| contract.role == role)
-            .and_then(|contract| contract.start_block)
-            .unwrap_or_else(|| panic!("hackathon {family} {role} start block"))
-    };
-    assert!(start_of("ens_v1_registry_l1", "registry") < 11_626_578);
-    let earliest_start = repository
-        .manifests()
-        .iter()
-        .flat_map(|loaded| {
-            let manifest = &loaded.manifest;
-            manifest.roots.iter().map(|root| root.start_block).chain(
-                manifest
-                    .contracts
-                    .iter()
-                    .map(|contract| contract.start_block),
-            )
-        })
-        .map(|start| start.expect("every hackathon declaration carries a start block"))
-        .min();
-    assert_eq!(earliest_start, Some(11_626_442));
-    Ok(())
-}
-
-#[test]
-fn checked_in_l1_execution_manifests_admit_only_the_ensv1_arm_by_default() -> Result<()> {
-    for profile in ["manifests/mainnet", "manifests/sepolia"] {
-        let repository = load_repository(checked_in_manifest_root(profile))?;
-        let execution = repository
-            .manifests()
-            .iter()
-            .filter(|loaded| loaded.manifest.source_family == "ens_execution")
-            .collect::<Vec<_>>();
-        assert_eq!(execution.len(), 1, "{profile}: one ens_execution manifest");
-        let manifest = &execution[0].manifest;
-        assert_eq!(manifest.verified_authority_arms, None, "{profile}");
-        assert_eq!(
-            manifest.verified_authority_arms(),
-            DEFAULT_VERIFIED_AUTHORITY_ARMS,
-            "{profile}"
-        );
-        assert_eq!(manifest.verified_authority_arms(), ["ens_v1"], "{profile}");
-        let payload = serde_json::to_value(manifest)?;
-        assert!(
-            payload.get("verified_authority_arms").is_none(),
-            "{profile}: an absent declaration must not appear in the synced payload"
-        );
-    }
     Ok(())
 }
 
@@ -1405,24 +1220,6 @@ fn checked_in_resolver_read_features_are_generation_scoped() -> Result<()> {
 }
 
 #[test]
-fn checked_in_archived_sepolia_permissioned_resolver_has_ensip19_fallback() -> Result<()> {
-    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
-    let resolver = repository
-        .manifests()
-        .iter()
-        .find(|loaded| {
-            loaded.manifest.source_family == "ens_v2_resolver_l1"
-                && loaded.manifest.deployment_epoch == "ens_v2_sepolia_post_audit"
-        })
-        .expect("active archived-Sepolia ENSv2 resolver manifest");
-    assert_eq!(
-        resolver.manifest.resolver_implementations[0].read_features,
-        vec![ResolverReadFeature::Ensip19DefaultAddress]
-    );
-    Ok(())
-}
-
-#[test]
 fn repository_rejects_invalid_resolver_read_feature_declarations() -> Result<()> {
     let direct_resolver = manifest_contents()
         .replace("role = \"registry\"", "role = \"resolver\"")
@@ -1477,42 +1274,6 @@ fn repository_rejects_invalid_resolver_read_feature_declarations() -> Result<()>
         format!("{error:#}").contains("same address"),
         "unexpected error: {error:#}"
     );
-    Ok(())
-}
-
-#[test]
-fn sepolia_ensv1_to_ensv2_migration_family_has_the_ratified_launch_bounded_inputs() -> Result<()> {
-    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
-    let migration = repository
-        .manifests()
-        .iter()
-        .find(|loaded| loaded.manifest.source_family == "ens_v2_migration_l1")
-        .expect("Sepolia ENSv1→ENSv2 migration family");
-    let roles = migration
-        .manifest
-        .contracts
-        .iter()
-        .map(|contract| (contract.role.as_str(), contract.start_block))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(roles.len(), 8);
-    assert_eq!(roles["unlocked_migration_controller"], Some(11_163_401));
-    assert_eq!(roles["locked_migration_controller"], Some(11_163_413));
-    assert_eq!(roles["graveyard"], Some(11_163_400));
-    assert_eq!(roles["ens_v1_renewal_bridge"], Some(11_163_404));
-    assert_eq!(roles["verifiable_factory"], Some(11_163_324));
-    assert_eq!(roles["batch_registrar"], Some(11_163_411));
-    assert_eq!(roles["migration_helper"], Some(11_163_415));
-    assert_eq!(roles["wrapper_registry_implementation"], Some(11_163_410));
-    assert_eq!(
-        migration.manifest.correlation_addresses["ens_v1_name_wrapper"],
-        "0x0635513f179d50a207757e05759cbd106d7dfce8"
-    );
-    assert_eq!(
-        migration.manifest.correlation_addresses["ens_v1_base_registrar"],
-        "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85"
-    );
-    assert!(migration.manifest.capability_flags.is_empty());
-    assert!(migration.manifest.discovery_rules.is_empty());
     Ok(())
 }
 
@@ -1968,66 +1729,6 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
             .all(|event| event.emitter_roles.is_empty() && event.status.is_none())
     );
 
-    let v1_addresses = resolver
-        .contracts
-        .iter()
-        .map(|contract| normalize_address(&contract.address))
-        .collect::<std::collections::BTreeSet<_>>();
-    let v2 = repository
-        .manifests()
-        .iter()
-        .filter(|loaded| loaded.manifest.source_family == "ens_v2_resolver_l1")
-        .max_by_key(|loaded| loaded.manifest.manifest_version)
-        .map(|loaded| &loaded.manifest)
-        .expect("selected Sepolia ENSv2 resolver family");
-    let v2_addresses = v2
-        .contracts
-        .iter()
-        .map(|contract| normalize_address(&contract.address))
-        .chain(v2.roots.iter().map(|root| normalize_address(&root.address)))
-        .chain(
-            v2.resolver_implementations
-                .iter()
-                .map(|implementation| normalize_address(&implementation.address)),
-        )
-        .collect::<std::collections::BTreeSet<_>>();
-    assert!(v1_addresses.is_disjoint(&v2_addresses));
-    assert_eq!(
-        v2.resolver_implementations
-            .iter()
-            .map(|implementation| {
-                (
-                    implementation.role.as_str(),
-                    normalize_address(&implementation.address),
-                )
-            })
-            .collect::<Vec<_>>(),
-        [(
-            "permissioned_resolver",
-            "0x7e4b2d59938930168024201752ee5503df402303".to_owned(),
-        )]
-    );
-    assert_eq!(
-        v2.contracts
-            .iter()
-            .map(|contract| {
-                (
-                    contract.role.as_str(),
-                    normalize_address(&contract.address),
-                    contract.start_block,
-                )
-            })
-            .collect::<Vec<_>>(),
-        [(
-            ENSV1_MIRROR_RESOLVER_ROLE,
-            "0x5339161a7896ca9841ecc034a49edca40f7b9491".to_owned(),
-            Some(11_163_316),
-        )]
-    );
-    assert_eq!(
-        normalize_address(&v2.correlation_addresses[ENSV1_MIRROR_REGISTRY_CORRELATION_KEY]),
-        "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e"
-    );
     Ok(())
 }
 

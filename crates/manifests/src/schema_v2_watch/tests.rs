@@ -3,8 +3,7 @@ use super::*;
 #[test]
 fn declared_resolver_implementations_compile_topic1_narrowed_upgraded_watches() -> Result<()> {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let repository =
-        crate::load_repository(workspace_root.join("manifests").join("sepolia-hackathon"))?;
+    let repository = crate::load_repository(workspace_root.join("manifests/sepolia"))?;
     let resolver = repository
         .manifests()
         .iter()
