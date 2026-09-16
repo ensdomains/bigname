@@ -33,6 +33,8 @@ pub(crate) enum Tamper {
     BloomOmitsWatchedAddress(i64),
     /// A receipt whose copy of the watched log carries different data.
     ReceiptLogDiffers(i64),
+    /// Wrong range-log indices for the first N queries, with correct receipt logs.
+    RangeLogIndexDiffers(usize),
     /// A receipt log the range query never reported, though the filter admits it.
     RangeQueryDropsWatchedLog(i64),
     /// A receipt that claims a block this window did not resolve.
@@ -423,6 +425,22 @@ impl TestNode {
     }
 
     fn logs(&self, filter: &Value) -> Value {
+        if let (Some(from), Some(to)) = (
+            filter
+                .get("fromBlock")
+                .and_then(Value::as_str)
+                .and_then(parse_quantity),
+            filter
+                .get("toBlock")
+                .and_then(Value::as_str)
+                .and_then(parse_quantity),
+        ) {
+            self.counts.record(if to - from >= 256 {
+                "wide_logs"
+            } else {
+                "window_logs"
+            });
+        }
         let addresses = filter
             .get("address")
             .and_then(Value::as_array)
@@ -486,7 +504,14 @@ impl TestNode {
                 // selected and its receipt still exposes the gap.
                 let dropped = dropping && !exact_block && log.log_index == 3;
                 if matches && !dropped {
-                    values.push(self.log_value(block, transaction, log));
+                    let mut value = self.log_value(block, transaction, log);
+                    if !exact_block
+                        && matches!(self.tamper, Tamper::RangeLogIndexDiffers(attempts)
+                            if self.counts.get("eth_getLogs") <= attempts)
+                    {
+                        value["logIndex"] = json!(format!("0x{:x}", log.log_index + 10_000));
+                    }
+                    values.push(value);
                 }
             }
         }
