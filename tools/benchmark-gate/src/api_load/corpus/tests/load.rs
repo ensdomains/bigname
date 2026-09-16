@@ -501,7 +501,7 @@ async fn ens_v2_implementation_upgrade_derives_the_resolver_corpus() {
     .unwrap();
     tests::install_name_visibility_schema(database.pool()).await;
     let manifest =
-        checked_in_resolver_manifest("manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml");
+        checked_in_resolver_manifest("manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v1.toml");
     insert_project_head(database.pool(), &manifest.chain_id, 1_000).await;
     insert_resolver_manifest(database.pool(), &manifest).await;
     let implementation = manifest.payload["resolver_implementations"][0]["address"]
@@ -550,7 +550,7 @@ async fn ens_v2_coverage_binds_the_upgrade_anchor() {
         .unwrap();
         tests::install_name_visibility_schema(database.pool()).await;
         let manifest = checked_in_resolver_manifest(
-            "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml",
+            "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v1.toml",
         );
         insert_project_head(database.pool(), &manifest.chain_id, 1_000).await;
         insert_resolver_manifest(database.pool(), &manifest).await;
@@ -743,7 +743,7 @@ async fn every_active_resolver_family_must_contribute_a_workload_target() {
         addresses: vec!["0x0000000000000000000000000000000000000100".to_owned()],
     };
     let ens_v2 =
-        checked_in_resolver_manifest("manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml");
+        checked_in_resolver_manifest("manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v1.toml");
     insert_resolver_manifest(database.pool(), &ens_v1).await;
     insert_resolver_manifest(database.pool(), &ens_v2).await;
     insert_resolver_row(
