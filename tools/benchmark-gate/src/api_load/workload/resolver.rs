@@ -41,7 +41,7 @@ fn record_resolver_request_construction(
         let expected = get(
             base,
             &[
-                "v2",
+                "v1",
                 "resolvers",
                 numeric_chain_id(&target.chain_id)?,
                 &target.resolver_address,

@@ -7,6 +7,9 @@ pub(super) fn push_product_history_duplicate_filter<'a>(
     filter: &'a EventHistoryReadFilter,
     canonical_only: bool,
 ) {
+    // A named registrar snapshot describes retained state, not another on-chain action.
+    // Filter before keyset pagination; diagnostics bypasses this product-only filter.
+    builder.push(" AND NOT (ne.after_state @> '{\"state_derived\":true,\"registrar_surface_snapshot\":true}'::jsonb)");
     // Registry read copies retain the original control-resource representation.
     builder.push(" AND strpos(ne.event_identity, ':ResolverChanged:registry-read:') = 0");
     // Handoffs have no separate original. Pick one matching copy, retaining the

@@ -4129,6 +4129,47 @@
             "fuses": 65663,
             "wrapper_state": "locked"
           }
+        },
+        {
+          "namespace": "ens",
+          "logical_name_id": "ens:wrapped.xyz",
+          "resource_id": "d8e91e79-2955-5d4a-880c-555a1a7de209",
+          "event_kind": "PermissionChanged",
+          "source_family": "ens_v1_wrapper_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 140,
+          "block_hash": "0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+          "transaction_hash": "0xb4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4",
+          "raw_fact_ref": {
+            "block_hash": "0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+            "block_number": 140,
+            "chain_id": "ethereum-mainnet"
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {
+            "effective_powers": [],
+            "grant_source": null,
+            "scope": {"kind": "resource"},
+            "subject": "0x0000000000000000000000000000000000002611"
+          },
+          "after_state": {
+            "effective_powers": ["resource_control", "set_resolver", "set_ttl", "create_subnames", "transfer", "unwrap", "burn_fuses", "approve", "extend_subname_expiry", "extend_expiry"],
+            "grant_source": {
+              "authority_contract": "0x00000000000000000000000000000000000026aa",
+              "authority_kind": "wrapper",
+              "kind": "ens_v1_authority",
+              "node": "0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c",
+              "relation_kind": "holder",
+              "source_event_kind": "NameWrapped"
+            },
+            "revocation_source": null,
+            "scope": {"kind": "resource"},
+            "subject": "0x0000000000000000000000000000000000002611",
+            "transfer_behavior": "replace_on_authority_change"
+          }
         }
       ],
       "name_surfaces": [
@@ -5548,6 +5589,40 @@
           "chain_id": "ethereum-mainnet",
           "derivation_kind": "ens_v1_unwrapped_authority",
           "event_kind": "AuthorityEpochChanged",
+          "logical_name_id": "ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
+          "manifest_version": 1,
+          "namespace": "ens",
+          "raw_fact_ref": {
+            "block_hash": "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+            "block_number": 181,
+            "chain_id": "ethereum-mainnet"
+          },
+          "resource_id": "3b139fd5-0b40-50df-9099-f5cfa8888f57",
+          "source_family": "ens_v1_wrapper_l1",
+          "source_manifest_id": 3
+        },
+        {
+          "after_state": {
+            "effective_powers": ["resource_control", "set_resolver", "set_ttl", "create_subnames", "transfer", "unwrap", "burn_fuses", "approve", "extend_subname_expiry", "extend_expiry"],
+            "grant_source": {
+              "authority_contract": "0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401",
+              "authority_kind": "wrapper",
+              "kind": "ens_v1_authority",
+              "node": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
+              "relation_kind": "holder",
+              "source_event_kind": "NameWrapped"
+            },
+            "revocation_source": null,
+            "scope": {"kind": "resource"},
+            "subject": "0x0000000000000000000000000000000000004033",
+            "transfer_behavior": "replace_on_authority_change"
+          },
+          "before_state": {"effective_powers": [], "grant_source": null},
+          "block_number": 181,
+          "canonicality_state": "canonical",
+          "chain_id": "ethereum-mainnet",
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "event_kind": "PermissionChanged",
           "logical_name_id": "ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
           "manifest_version": 1,
           "namespace": "ens",

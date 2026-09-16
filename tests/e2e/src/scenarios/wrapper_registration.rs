@@ -637,8 +637,8 @@ async fn parent_burns_pcc_then_extends_existing_child_expiry() -> Result<()> {
     );
     assert_eq!(
         pointer(&body, "/declared_state/registration/expiry"),
-        serde_json::Value::Null,
-        "a wrapper-only subname has no registrar lease expiry"
+        rewrapped.expiry,
+        "a wrapped subname without a registrar lease serves its NameWrapper entry expiry"
     );
     assert_eq!(
         pointer(&body, "/declared_state/wrapper_state"),

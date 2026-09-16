@@ -1363,22 +1363,26 @@ async fn resolver_declarations_require_a_current_project_head() {
 
 #[tokio::test]
 async fn resolver_coverage_requires_a_current_project_publication() {
-    for (case, mutation) in [
+    for (case, mutation, publication_is_current) in [
         (
             "running",
             "UPDATE chain_phase_state SET phase_status = 'running'",
+            true,
         ),
         (
             "stale_number",
             "UPDATE chain_heads SET latest_block_number = latest_block_number + 1",
+            false,
         ),
         (
             "stale_hash",
             "UPDATE chain_heads SET latest_block_hash = 'different-head'",
+            false,
         ),
         (
             "invalidated_input",
             "UPDATE chain_phase_state SET input_content_hash = 'different-generation'",
+            false,
         ),
     ] {
         let database = TestDatabase::create(
@@ -1402,15 +1406,24 @@ async fn resolver_coverage_requires_a_current_project_publication() {
             },
         )
         .await;
-        insert_project_head(database.pool(), "ethereum-mainnet", 100).await;
+        insert_project_head(database.pool(), "ethereum-mainnet", 101).await;
         insert_resolver_row(
             database.pool(),
             "ethereum-mainnet",
             resolver,
             "supported",
-            200,
+            100,
         )
         .await;
+        let initial = super::resolver_coverage::load(database.pool())
+            .await
+            .unwrap();
+        assert!(
+            initial.failures.is_empty(),
+            "{case}: {:?}",
+            initial.failures
+        );
+        assert_eq!(initial.resolvers.len(), 1, "{case}");
         sqlx::query(mutation)
             .execute(database.pool())
             .await
@@ -1420,13 +1433,23 @@ async fn resolver_coverage_requires_a_current_project_publication() {
             .await
             .unwrap();
 
-        assert!(
-            coverage.failures.iter().any(|failure| failure.contains(
-                "chain \"ethereum-mainnet\" in family \"ens_v1_resolver_l1\" has concrete declarations but no current Project head"
-            )),
-            "{case}: {:?}",
-            coverage.failures
-        );
+        if publication_is_current {
+            assert!(
+                coverage.failures.is_empty(),
+                "{case}: {:?}",
+                coverage.failures
+            );
+            assert_eq!(coverage.resolvers.len(), 1, "{case}");
+        } else {
+            assert!(coverage.resolvers.is_empty(), "{case}");
+            assert!(
+                coverage.failures.iter().any(|failure| failure.contains(
+                    "chain \"ethereum-mainnet\" in family \"ens_v1_resolver_l1\" has concrete declarations but no current Project head"
+                )),
+                "{case}: {:?}",
+                coverage.failures
+            );
+        }
         database.cleanup().await.unwrap();
     }
 }

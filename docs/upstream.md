@@ -12,9 +12,12 @@ bigname anchors every ENSv1, ENSv2, Basenames, admitted upstream app-metadata, r
 | `ens_v1_sepolia_ac32490` | `ensdomains/ens-contracts` | `ac324904` | Historical deployment ABI for the admitted `0x8FADE66…` Sepolia PublicResolver only |
 | `ens_v1_lll` | `ensdomains/ens` | `7e377df8` | Historical evidence for the 2017 LLL registry only |
 | `ens_v2` | `ensdomains/contracts-v2` | `a971bd64` | Post-audit ENSv2 contracts and pinned Sepolia deployment evidence |
+| `ens_v2_sepolia_20260903` | `ensdomains/contracts-v2` | `5da83f6a` | Record-ID PermissionedResolver and direct PublicResolverV2 source evidence; not deployment-address authority |
+| `ens_v1_publicresolver_5141a2a` | `ensdomains/ens-contracts` | `5141a2ac` | Inherited PublicResolverV2 node-record source evidence only |
 | `ens_v2_sepolia_20260629` | `ensdomains/contracts-v2` | `ccaeb58b` | Historical implementation evidence for the admitted 2026-06-29 old-model Sepolia deployment only |
 | `ens_v2_sepolia_dev` | `ensdomains/contracts-v2` | `554c309b` | Historical evidence cited by deprecated pre-audit `sepolia-dev` manifests only |
 | `basenames` | `base-org/basenames` | `1809bbc9` | Canonical Basenames Solidity |
+| `zigens` | `ensdomains/zigens` | `77d106e9` | Reference indexer registry assignment counts and label holder counts only |
 | `ens_subgraph` | `ensdomains/ens-subgraph` | `723f1b6a` | Reference ENSv1 indexer |
 | `ens_rainbow` | `graphprotocol/ens-rainbow` | `bc44492` | Graph Protocol ENS rainbow-table tooling |
 | `ensnode` | `namehash/ensnode` | `2017ae62` | Alternative ENS indexer |
@@ -23,10 +26,35 @@ bigname anchors every ENSv1, ENSv2, Basenames, admitted upstream app-metadata, r
 | `graph_node` | `graphprotocol/graph-node` | `aefe1737` | Reference Graph Node indexer |
 | `reth` | `paradigmxyz/reth` | `88505c7f` | Reference Ethereum execution client |
 
+The `zigens` checkout is optional for builds and tests. Fetch or verify it with
+`scripts/sync-refs --include-optional` (add `--check` to verify), using credentials
+that can access its repository. Its pin and citations remain required when
+changing the associated comparisons.
+
+The `zigens` pin is reference-indexer evidence only, not protocol or deployment
+address authority. Its registry count counts assignment rows across resources,
+while its label count counts distinct accounts on the latest observed resource
+version and excludes empty bitmaps and root roles.
+(upstream: .refs/zigens/src/api/resolvers/admin.zig:L1150 @ zigens@77d106e9)
+(upstream: .refs/zigens/src/storage/roles.zig:L505 @ zigens@77d106e9)
+(upstream: .refs/zigens/src/storage/roles.zig:L567 @ zigens@77d106e9)
+
 Full pin records (including per-ref `authoritative_for` lists) live in `.refs/MANIFEST.toml`. Sync with `scripts/sync-refs`.
 
-`ens_v2` is the sole current ENSv2 semantic and deployment authority. The
-`ens_v2_sepolia_20260629` checkout retains implementation evidence for the
+`ens_v2` remains the general ENSv2 semantic and deployment authority. The
+`ens_v2_sepolia_20260903` pin supplies the record-ID resolver's matching
+`PermissionedResolver`, `AbstractRecordResolver`, resolver interfaces and
+`PermissionedResolverLib` sources. It does not establish correspondence of the
+entire checkout to a deployed build; in particular its EnhancedAccessControl
+dependency must not substitute for exact deployment compiler input. Its record
+selection is defined by the resolver's `_record` implementation
+(upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/PermissionedResolver.sol:L381 @ ens_v2_sepolia_20260903@5da83f6a).
+The same pin also supplies direct PublicResolverV2 composition and authorization
+source evidence. `ens_v1_publicresolver_5141a2a` supplies its inherited node-record
+behavior from the pinned ENS submodule. These sources do not establish a
+public-chain deployment or rotate either canonical authority; the separately
+selected hackathon corpus uses the explicit external-evidence exception below.
+The `ens_v2_sepolia_20260629` checkout retains implementation evidence for the
 admitted 2026-06-29 old-model Sepolia families only where the archived ABI does
 not prove the claim; it is not authority for a future deployment or current
 ENSv2 source semantics. The `ens_v2_sepolia_dev` checkout is retained only so deprecated manifest versions
@@ -93,6 +121,54 @@ only then deploy the matching API as required by the
 
 ## Known divergences
 
+> **Registry count comparison after full revocation of a newer resource version** —
+> the reference indexer deletes fully revoked assignment rows and determines the
+> newest observed version from remaining rows.
+> **Reference**: (upstream: .refs/zigens/src/indexer/v2/handlers_registry.zig:L1142 @ zigens@77d106e9)
+> (upstream: .refs/zigens/src/storage/roles.zig:L171 @ zigens@77d106e9)
+> **Our rule / why**: registry counts retain zero transitions while finding the
+> newest observed resource version, then exclude zero assignments. Revocation
+> cannot restore counts from an older version. Label counts additionally select
+> the current registration resource. This preserves assignment-versus-holder
+> meaning without using a deleted row as evidence that an old version is current.
+> **Since**: `2026-09-14`
+
+> **Numeric ENSv1 expiry representation** — admitted BaseRegistrar numeric registration and renewal retain expiry above the signed timestamp range as `i64::MAX`. Grace overflow does not release that retained lease; raw logs keep the original word. This does not narrow the on-chain event or change the exact Graveyard cleanup predicate.
+> **Upstream**: BaseRegistrar emits and stores uint256 registration and renewal expiry. (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f)
+> **Our rule / why**: See [storage semantics](storage.md). The adapter keeps its signed timestamp representation without failing an otherwise valid numeric lifecycle observation. No controller string-decoder width change is included in this composition.
+> **Since**: `2026-09-10`
+
+> **NameWrapper `safeTransferFrom` self-transfer clears the token approval without a log** —
+> `ERC1155Fuse._transfer` runs `_beforeTransfer`, which deletes the per-token
+> approval unless `CANNOT_APPROVE` is burnt, and then returns before emitting
+> `TransferSingle` when the token's owner is also the recipient. bigname derives
+> the delegate's `PermissionChanged` revocation from observed transfer logs, so
+> after such a self-transfer it keeps the approved delegate's row until the next
+> observed `Approval`, transfer, burn, or unwrap of that name. The batch path
+> has no early return: `safeBatchTransferFrom` still emits `TransferBatch` for a
+> self-transfer, which the interpreter observes and handles (no holder change,
+> approval revoked unless `CANNOT_APPROVE` is burnt).
+> **Upstream**: (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L281-L306 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L155-L197 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L815-L840 @ ens_v1@91c966f)
+> **Our rule / why**: there is no raw fact to attribute the clear to; inventing
+> a state-derived revocation would require calling `getApproved`, which the
+> interpreter does not do. The delegate row is served as still granted.
+> **Since**: `2026-09-13`
+
+> **Sepolia hackathon external deployment provenance** — The separately selected
+> `sepolia-hackathon` corpus uses the address, creation-inclusion and fixed-block
+> runtime evidence recorded in `docs/manifests.md` § Sepolia hackathon deployment
+> evidence. This is an explicit exception to requiring a pinned upstream
+> deployment artifact for addresses. Canonical June/July deployment artifacts
+> do not establish these addresses; source citations retain their narrower ABI
+> and behavior scope. Four partial source reproductions retain their metadata
+> qualifications, and implementation creation does not admit a proxy interval.
+> **Why**: deliver the separately evidenced cohort without inventing address
+> provenance or weakening discovery and implementation-history requirements.
+> **Since**: `2026-09-09`
+
+
 Intentional differences between our docs/manifests and upstream. Every divergence lives here so that citations reading "differently than upstream" are legible instead of looking like bugs. If a divergence is not in this list, it should be treated as drift and closed — either by updating our doc or by adding the entry.
 
 The API contract's [public record-field completeness
@@ -133,6 +209,11 @@ to the applicable entries below.
 > reservation resolver facts for diagnostics, but product name, record, batch
 > lookup, and resolver-listing routes classify an ownerless reservation as no
 > current registration and do not serve that resolver or its record inventory.
+> An unbound TLD with an observed ENSv2 root-registry resolver pointer is the
+> exception: these routes serve its pointer and eligible records through the
+> [serving resource](glossary.md#serving-resource), while its current authority
+> remains null. A reservation keeps that pointer; a later release, expiry, or
+> zero/null resolver update withdraws it.
 > **Upstream**: `PermissionedRegistry` stores the supplied resolver before its
 > owner-zero reservation branch and emits `ResolverUpdated` for a nonzero value
 > `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)`;
@@ -141,9 +222,10 @@ to the applicable entries below.
 > **Our rule**: `docs/api-v2.md` § Field Budgets,
 > `docs/api-v2-routes.md` name and resolver routes, and `docs/storage.md` §
 > Projection storage rules.
-> **Why**: product routes use current-registration ownership as their serving
-> boundary. Diagnostics preserve the retained facts for comparison without
-> presenting them as current name data.
+> **Why**: ordinary reservation records remain outside the serving boundary.
+> The root-registry TLD exception exposes observed resolution without inventing
+> registration ownership. Diagnostics retain the other reservation facts for
+> comparison without presenting them as current name data.
 > **Since**: `2026-09-02`
 
 > **Graph Node directive repeatability is declared but not resolved** — deployment `QmcE8RpWtsiN5hkJKdfCXGfTDoTgPEjMbQwnjLPfThT7kZ` at block 23,000,000 resolved `__Directive.isRepeatable` as null for each of its five directives, producing five non-null-field errors and null data. The same introspection without that field returned 113 types and no errors.
@@ -429,13 +511,13 @@ to the applicable entries below.
 
 > **ENS and Basenames reverse-claim normalization narrowing** — bigname reports verified primary-name success for admitted ENS and Basenames tuples only when the untrimmed declared reverse claim already byte-equals its ENSIP-15 normalized form. The ENS Universal Resolver instead forward-resolves the literal claim without normalizing it, and the ENSv1 Base reverse registrar used for Basenames claim intake stores the supplied string unchanged.
 > **Upstream**: The ENS reverse callback decodes the reverse resolver's string result `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L222 @ ens_v1@91c966f)` and passes it directly to `NameCoder.encode` for the forward lookup `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L226 @ ens_v1@91c966f)`. `NameCoder.encode` takes the string's literal byte length `(upstream: .refs/ens_v1/contracts/utils/NameCoder.sol:L258 @ ens_v1@91c966f)` and copies those bytes directly into the DNS buffer `(upstream: .refs/ens_v1/contracts/utils/NameCoder.sol:L265 @ ens_v1@91c966f)` before the reverse callback rejects only a resolved-address mismatch `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L270 @ ens_v1@91c966f)`. On Base, `L2ReverseRegistrar.setName` accepts the supplied string `(upstream: .refs/ens_v1/contracts/reverseRegistrar/L2ReverseRegistrar.sol:L61 @ ens_v1@91c966f)`, and `StandaloneReverseRegistrar._setName` stores and emits that string unchanged `(upstream: .refs/ens_v1/contracts/reverseRegistrar/StandaloneReverseRegistrar.sol:L28 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/reverseRegistrar/StandaloneReverseRegistrar.sol:L30 @ ens_v1@91c966f)`.
-> **Our rule**: `docs/architecture.md` § Primary and reverse names, `docs/api-v2.md` § Result status vocabulary, `docs/api-v2-routes.md` § `GET /v2/addresses/{address}/primary-name`, `docs/projections.md` § Primary names, `docs/execution.md` § Primary-name verification, and `docs/storage.md` § Projection storage rules.
+> **Our rule**: `docs/architecture.md` § Primary and reverse names, `docs/api-v2.md` § Result status vocabulary, `docs/api-v2-routes.md` § `GET /v1/addresses/{address}/primary-name`, `docs/projections.md` § Primary names, `docs/execution.md` § Primary-name verification, and `docs/storage.md` § Projection storage rules.
 > **Why**: make ENS verified successes a strict subset of Universal Resolver successes and apply the same public invariant to Basenames claims even though Base claim intake preserves arbitrary string spelling. The Universal Resolver can verify a non-normalized ENS claim when records exist at its literal node, while bigname returns `claim_not_normalized` without attempting that lookup.
 > **Since**: `2026-07-21`
 
 > **ENSv2 primary-name-only authority verification narrowing** — bigname refuses live primary-name forward verification when a readable exact-name projection selects the `ens_v2` [authority arm](glossary.md#authority-epoch), even though the Sepolia ENSv1 Universal Resolver can reach the ENSv2-backed wildcard resolver and serve live ENSv2 state. A name with no readable exact-name projection row remains admitted because the projection has no authority statement for it. The records route is not part of this narrowing: on Ethereum Mainnet, a readable ENS name with a null exact resolver and no other projected resolution shape executes the manifest-admitted Universal Resolver, which performs the ancestor walk itself.
 > **Upstream**: The ENSv2 deployment script installs `ENSV2Resolver` at the ENSv1 `eth` node, and that resolver is backed by ENSv2 `(upstream: .refs/ens_v2/contracts/deploy/00_ENSV2Resolver.ts:L60-L81 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/src/resolver/ENSV2Resolver.sol:L13-L14 @ ens_v2@a971bd64)`. The ENSv1 Universal Resolver walks up to an ancestor resolver and accepts an ENSIP-10 extended resolver `(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L63-L87 @ ens_v1@91c966f)`. Locked ENSv1→ENSv2 migration with `CANNOT_SET_RESOLVER` burned retains the ENSv1 resolver entry and passes the replacement PublicResolver into ENSv2 registration when the retained resolver is listed `(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L137-L175 @ ens_v2@a971bd64)`.
-> **Our rule**: `docs/api-v2-routes.md` § `GET /v2/addresses/{address}/primary-name` and § `GET /v2/names/{name}/records`.
+> **Our rule**: `docs/api-v2-routes.md` § `GET /v1/addresses/{address}/primary-name` and § `GET /v1/names/{name}/records`.
 > **Why**: current ENS/60 primary-name verification has only a Mainnet `ens_execution` entrypoint. Exact-name authority therefore fails closed after a readable projection selects ENSv2 instead of silently treating the ENSv1 entrypoint as authority for that arm. The records route separately admits [Universal Resolver ancestor discovery](glossary.md#universal-resolver-ancestor-discovery) and lets the Universal Resolver enforce the ancestor's ENSIP-10 support. The locked-name `CANNOT_SET_RESOLVER` case is not reachable through the primary-name path; if a deployment with the Sepolia redirect gains a verified route entrypoint, the admitted live path outside indexed coverage could expose it until the exact-name projection publishes the ENSv2 selection. The route contracts state those conditional limitations explicitly.
 > **Since**: `2026-08-20`
 
@@ -449,30 +531,30 @@ to the applicable entries below.
 <a id="verified-resolution-addr-coin-type-selector-narrowing"></a>
 > **Verified-resolution addr coin-type selector narrowing** — bigname's public `addr:<coin_type>` record selectors accept only digit text that fits unsigned 64-bit decimal form and canonicalize it before selector dedupe and request-scoped lookup. Declared projection storage may still retain upstream-width resolver facts; selectors outside the public grammar are not requestable through verified lookup until a wider representation is designed. Upstream resolver contracts use `uint256 coinType`.
 > **Upstream**: ENSv1's multicoin address resolver emits and reads `uint256 coinType` `(upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L8 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L14 @ ens_v1@91c966f)`. Basenames' Base resolver also reads `uint256 coinType` and stores by `uint256 coinType` `(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L93 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L94 @ basenames@1809bbc)`.
-> **Our rule**: `docs/api-v2.md` § Record-key grammar, `docs/api-v2-routes.md` § `GET /v2/names/{name}/records`, and `docs/execution.md` § Resolver-record lookup.
+> **Our rule**: `docs/api-v2.md` § Record-key grammar, `docs/api-v2-routes.md` § `GET /v1/names/{name}/records`, and `docs/execution.md` § Resolver-record lookup.
 > **Why**: bigname's API and lookup path use textual selector keys across route parsing and sort/dedupe. The `u64` boundary keeps that selector identity canonical and fail-closed until a wider coin-type representation is deliberately designed.
 > **Since**: `2026-06-12`
 
 <a id="ens-verified-resolution-ccip-read-non-following"></a>
 > **ENS verified-resolution CCIP-Read non-following** — for ENS record resolution, bigname does not follow EIP-3668 `OffchainLookup` continuations through the records route / resolver-record lookup. The affected selector is returned as explicit `unsupported` with reason `offchain_lookup_required`; no gateway request is made. The forward check in ENS/60 primary-name verification is outside this divergence because it follows the resolver-supplied gateway URLs from the EIP-3668 `OffchainLookup` `urls` field; see `docs/api-v2.md` § Error Model.
 > **Upstream**: ENSv1's Universal Resolver passes configured batch gateways into a forward-resolution path whose caller is expected to enable EIP-3668 `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L81-L110 @ ens_v1@91c966f)`. Its CCIP reader propagates resolver `OffchainLookup` data, including the supplied URLs and callback data `(upstream: .refs/ens_v1/contracts/ccipRead/CCIPReader.sol:L44-L88 @ ens_v1@91c966f)`, and the batch path routes outstanding offchain requests through its gateway set `(upstream: .refs/ens_v1/contracts/ccipRead/CCIPBatcher.sol:L70-L125 @ ens_v1@91c966f)`.
-> **Our rule**: `docs/execution.md` § Resolver-record lookup and `docs/api-v2-routes.md` § `GET /v2/names/{name}/records`.
+> **Our rule**: `docs/execution.md` § Resolver-record lookup and `docs/api-v2-routes.md` § `GET /v1/names/{name}/records`.
 > **Why**: the admitted ENS verified record-resolution path is fail-closed over direct/on-chain execution. Gateway continuation is outside that record support slice, so bigname reports the explicit unsupported reason instead of following transport or treating the outcome as a missing record.
 > **Since**: `2026-04-18`
 
 > **Basenames verified/explain public support narrowing** — bigname narrows the upstream Basenames L1Resolver and CCIP entrypoint into one first public support class instead of publishing every upstream-reachable non-`base.eth` path immediately.
 > **Upstream**: `(upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc)` `(upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)` `(upstream: .refs/basenames/README.md:L71 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc)`
-> **Our rule**: `docs/api-v2-routes.md` § `GET /v2/names/{name}/records`; mirrored in `docs/execution.md` § Resolver-record lookup and `docs/manifests.md` § Basenames source-family ownership.
+> **Our rule**: `docs/api-v2-routes.md` § `GET /v1/names/{name}/records`; mirrored in `docs/execution.md` § Resolver-record lookup and `docs/manifests.md` § Basenames source-family ownership.
 > **Why**: freeze the first Basenames consumer-replacement slice on the declared Base-authority plus L1-transport boundary before widening alias-participating, wildcard-derived, linked-subregistry, transport-free, or offchain-gateway path classes.
 > **Since**: `2026-04-19`
 
 > **Basenames declared primary-name value authority narrowing** — bigname treats ENSv1's Base `L2ReverseRegistrar` as the declared Basenames primary-name value authority for Base coin type `2147492101`, even though pinned upstream Basenames also ships a `ReverseRegistrar` that writes network-specific primary records.
 > **Upstream**: Basenames describes its `ReverseRegistrar` as allowing registrants to establish a primary record and implements `claimForBaseAddr` / `setNameForAddr` on that contract `(upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L150 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L193 @ basenames@1809bbc)`. ENSv1's Base deployment records `L2ReverseRegistrar` at `0x0000000000D8e504002cC26E3Ec46D81971C1664`, emits `NameForAddrChanged(address,string)`, exposes `nameForAddr(address)`, and carries constructor coin type `2147492101` `(upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L2 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L98 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L154 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L391 @ ens_v1@91c966f)`.
-> **Our rule**: `docs/manifests.md` § Basenames mainnet, `docs/api-v2-routes.md` § `GET /v2/addresses/{address}/primary-name`, `docs/projections.md` § Primary names, and `docs/storage.md` § Replay / rebuild safety classification.
+> **Our rule**: `docs/manifests.md` § Basenames mainnet, `docs/api-v2-routes.md` § `GET /v1/addresses/{address}/primary-name`, `docs/projections.md` § Primary names, and `docs/storage.md` § Replay / rebuild safety classification.
 > **Why**: keep declared Basenames primary-name values aligned with the ENSv1 Base L2 primary-name path while preserving the Basenames Base registry/registrar/resolver families as the declared exact-name, address-name, children, and record authority.
 > **Since**: `2026-06-04`
 
-> **Permission enumeration with partially indexed approval paths** — the manifest-scoped ENSv1 and Basenames registry `ApprovalForAll` logs from admitted Solidity registries are normalized into [account permission state](glossary.md#account-permission-state), and Project records their applicability through current registry ownership. App-facing synthesis and request-relative reason narrowing are deferred to a follow-up change. Registrar token/operator, resolver operator/delegate, and NameWrapper approval logs remain retained [raw facts](glossary.md#raw-fact) without permission output; the uncaptured Mainnet LLL registry and ENSv2 registry operator approvals also remain outside this slice. Permission summaries retain `operator_approval_surfaces_not_ingested` and remain request-relative partial rather than full or authoritative. NameWrapper holder enumeration remains a separate unsupported class.
+> **Permission enumeration with partially indexed approval paths** — the manifest-scoped ENSv1 and Basenames registry `ApprovalForAll` logs from admitted Solidity registries are normalized into [account permission state](glossary.md#account-permission-state), and Project records their applicability through current registry ownership. App-facing synthesis and request-relative reason narrowing are deferred to a follow-up change. NameWrapper `ApprovalForAll` logs are normalized into account permission state and fanned out per wrapped name, and NameWrapper `Approval` logs become per-token delegate rows; registrar token/operator and resolver operator/delegate approval logs remain retained [raw facts](glossary.md#raw-fact) without permission output, and the uncaptured Mainnet LLL registry and ENSv2 registry operator approvals also remain outside this slice. Permission summaries retain `operator_approval_surfaces_not_ingested` and remain request-relative partial rather than full or authoritative. NameWrapper resources are partial under `wrapper_parent_and_resolver_delegation_not_projected` because parent control of a wrapped subname is not enumerated as rows.
 > **Upstream**: ENSv1 registry ownership checks include approved operators and `setApprovalForAll` persists that authority `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L20 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)`. BaseRegistrar accepts both per-token approvees and owner-wide operators for `reclaim` `(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)`. PublicResolver accepts owner-wide operators and node delegates `(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L114-L129 @ ens_v1@91c966f)`. Basenames has equivalent registry operator and resolver operator/delegate paths, while its registrar delegates authorization to ERC-721 approval checks `(upstream: .refs/basenames/src/L2/Registry.sol:L46-L52 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/Registry.sol:L148-L158 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L319-L329 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L448-L465 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/L2Resolver.sol:L141-L166 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/L2Resolver.sol:L180-L198 @ basenames@1809bbc)`. ENSv2's ERC-1155 base exposes owner-wide approval and `PermissionedRegistry` inherits approved-owner roles for non-root resources `(upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L70-L84 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)`. NameWrapper separately exposes token approval and owner/operator mutation paths `(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L124-L135 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L210-L221 @ ens_v1@91c966f)`.
 > **Our rule**: `docs/projections.md` § Permissions and `docs/storage.md` § Projection publication.
 > **Why**: account state represents future and current registry-owned names without per-name fan-out. Remaining approval paths keep the projection partial; the serving contract is deferred to a follow-up change.
@@ -486,7 +568,7 @@ to the applicable entries below.
 
 > **ENSIP-19 resolver-generation narrowing** — bigname derives an eligible requested EVM coin-type address from the projected default coin-type entry only when the selected direct resolver or current proxy implementation has the manifest-declared [`ensip19_default_address` resolver read feature](glossary.md#resolver-read-feature). The current Mainnet ENS PublicResolver, the Sepolia PublicResolver at `0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5`, and the admitted archived-Sepolia ENSv2 `PermissionedResolver` implementation are flagged. Admitted legacy ENS resolver generations and the admitted legacy Basenames resolver remain unflagged. The fallback-bearing Basenames upgradeable resolver proxy is not admitted and is deferred to a follow-up admission decision. This is an authority narrowing, not a claim that every unflagged bytecode generation lacks fallback behavior. Coin type `2147483648` is the source key and is never a target.
 > **Upstream**: `(upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L85 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20-L31 @ ens_v1@91c966f)` `(upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L32-L40 @ ens_app_v3@7175858)` `(upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L151-L166 @ ens_app_v3@7175858)` `(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L2 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L2398 @ ens_v2@a971bd64)` `(upstream: .refs/basenames/test/Fork/BaseMainnetConstants.sol:L9-L14 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/L2Resolver.sol:L4-L32 @ basenames@1809bbc)` `(upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L35-L61 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/UpgradeableL2Resolver.sol:L11-L40 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L84-L99 @ basenames@1809bbc)`.
-> **Our rule**: `docs/manifests.md` § Required fields, `docs/projections.md` § Resolver and records, and `docs/api-v2-routes.md` § `GET /v2/names/{name}/records`.
+> **Our rule**: `docs/manifests.md` § Required fields, `docs/projections.md` § Resolver and records, and `docs/api-v2-routes.md` § `GET /v1/names/{name}/records`.
 > **Why**: read derivation is admitted per resolver generation or active implementation. Event retention, source-family membership, and runtime code hashes do not authorize the getter behavior.
 > **Since**: `2026-08-27`
 
@@ -539,6 +621,12 @@ to the applicable entries below.
 > **Our rule**: `docs/architecture.md` § Normalized Event Taxonomy.
 > **Why**: expose the audited upstream vocabulary without changing the shape of already-persisted historical renewal events or dropping their published `base` key.
 > **Since**: `2026-07-10`
+
+> **Direct PublicResolverV2 record admission narrowing** — an owned-chain manifest or the separately evidenced `sepolia-hackathon` candidate can declare an exact `public_resolver_v2` address with `proxy_kind = "none"` in `ens_v2_resolver_l1`. Its admitted node-event set is limited to `AddrChanged`, `AddressChanged`, value-bearing `TextChanged`, `ContenthashChanged`, and `VersionChanged`. Reusing the node decoder does not classify it as ENSv1 or attach a stale ENSv1 resource. Current ENSv2 pointer, namespace, and emitter matching govern Project inventory attribution.
+> **Upstream**: PublicResolverV2 composes address, contenthash, and text profiles (upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/PublicResolverV2.sol:L23-L35 @ ens_v2_sepolia_20260903@5da83f6). Authorization resolves a NameWrapper-known node through current exact ENSv2 ownership or owner approvals (upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/PublicResolverV2.sol:L174-L184 @ ens_v2_sepolia_20260903@5da83f6) (upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/PublicResolverV2.sol:L192-L194 @ ens_v2_sepolia_20260903@5da83f6). The inherited address setter emits `AddressChanged` and additionally `AddrChanged` for coin type 60, preserving bytes in versioned storage (upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/AddrResolver.sol:L47-L65 @ ens_v1_publicresolver_5141a2a@5141a2a). Text and contenthash setters preserve their values, including empty values (upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/TextResolver.sol:L15-L21 @ ens_v1_publicresolver_5141a2a@5141a2a) (upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/ContentHashResolver.sol:L14-L19 @ ens_v1_publicresolver_5141a2a@5141a2a). `clearRecords` increments the node version and emits `VersionChanged` (upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/ResolverBase.sol:L20-L22 @ ens_v1_publicresolver_5141a2a@5141a2a).
+> **Our rule**: `docs/manifests.md` § Direct PublicResolverV2 declarations on an owned local chain; `docs/consumer-capabilities.md` § Direct PublicResolverV2 record support; `docs/storage.md` § Interpret process memory. These supplementary pins prove source semantics only. Exact local deployment address/start/provenance and runtime acceptance require separate evidence. PermissionedResolver proxies retain canonical upgrade-history checks, and the existing `sepolia` profile retains its admission rule below. The `sepolia-hackathon` candidate has the separate external deployment-provenance exception above. This direct node-record path establishes no exhaustive binding, alias, permission, or selector enumeration and adds no schema, REST, or record-ID vocabulary.
+> **Why**: admit only the demonstrated node-record family under exact manifest authority without treating compatible events or source availability as deployment admission or runtime success.
+> **Since**: `2026-09-09`
 
 <a id="ensv2-data-event-admission-narrowing"></a>
 > **ENSv2 post-audit Sepolia source-, event-, and resolver-classification narrowing** — bigname admits `ens_v2_root_l1`, `ens_v2_registry_l1`, `ens_v2_registrar_l1`, `ens_v2_resolver_l1`, and the migration-aware `ens_v2_migration_l1` ENSv1→ENSv2 migration source family from the admitted post-audit Sepolia deployment of 2026-06-29. That migration family activates only [complete correlation groups](glossary.md#complete-group); refused and incomplete groups remain candidate. Registry `RegistryCreated` is matched across all emitters, announces the new registry, normalizes as `RegistryCreated`, and starts address-scoped intake at that event position; parent linkage decides authority separately. ERC-1967 `Upgraded` logs on manifest-declared and event-announced contracts are retained as normalized contract history instead of being inferred from code-hash drift. The widened match-all sets do not retroactively supply history: the mandatory one-time historical fetch for pre-widening `RegistryCreated` and `Upgraded` logs remains a separate ingest operation. Registry `URIUpdated` and resolver `DataChanged` / `NamedDataResource` remain outside normalized-event admission. The separately deployed `ETHRenewerV1` is admitted only as an ENSv1→ENSv2 migration-family correlation and event input, not as an `ens_v2_registrar_l1` emitter. For a resolver proxy, the project phase classifies the latest canonical `Upgraded` implementation against the active resolver manifest's declared implementation list; no runtime code hash participates. `PublicResolverV2` can become a discovery-watched contract instance for configured generic record observations, but it remains unsupported unless that canonical upgrade history matches a declared implementation. Current record visibility remains limited to the current resolver emitter. A resolver manifest admission event causes inline scoped reclassification without a journal or queue. The `RegistryCreated` widening and declared-history classification are maintainer-ratified.

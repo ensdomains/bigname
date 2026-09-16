@@ -286,7 +286,7 @@ pub(super) async fn load_reverse_identity_page_rows(
         .collect()
 }
 
-async fn load_primary_names(
+pub(super) async fn load_primary_names(
     pool: &PgPool,
     inputs: &[ReverseIdentityStorageInput],
     public_namespaces: &[String],
@@ -420,7 +420,7 @@ async fn load_primary_names(
     Ok(by_input.into_iter().map(Value::Object).collect())
 }
 
-fn decode_primary_name(value: Value) -> Result<IdentityPrimaryNameSnapshot> {
+pub(super) fn decode_primary_name(value: Value) -> Result<IdentityPrimaryNameSnapshot> {
     let object = value
         .as_object()
         .context("reverse candidate primary-name metadata must be an object")?;

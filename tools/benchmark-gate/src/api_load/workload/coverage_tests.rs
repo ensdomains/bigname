@@ -358,3 +358,35 @@ async fn ordinary_api_userinfo_is_stripped_from_transport_errors() {
     assert!(!rendered.contains("operator"));
     assert!(!rendered.contains("ordinary-secret"));
 }
+
+#[test]
+fn every_workload_targets_the_served_v1_api() {
+    let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
+    let corpus = corpus_with_address_names();
+    for endpoint in [
+        "lookup",
+        "status",
+        "name",
+        "records",
+        "subnames",
+        "name_history",
+        "permissions",
+        "address_names",
+        "primary_name",
+        "address_history",
+        "search",
+        "events",
+        "resolver",
+        "namespace",
+    ] {
+        let requests = request_variants(&base, &corpus, endpoint).unwrap();
+        assert!(!requests.is_empty(), "{endpoint}");
+        for request in requests {
+            assert!(
+                request.url.path().starts_with("/v1/"),
+                "{endpoint}: {}",
+                request.url
+            );
+        }
+    }
+}

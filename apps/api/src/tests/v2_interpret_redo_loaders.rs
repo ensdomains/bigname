@@ -16,7 +16,7 @@ async fn v2_lookup_returns_stale_when_interpret_redo_begins_before_served_head_r
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v2/lookup")
+                    .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"inputs":[{"name":"alice.eth"}]}"#))
                     .expect("lookup request must build"),
@@ -48,7 +48,7 @@ async fn v2_get_resolver_latest_refuses_while_interpret_redo_is_in_progress() ->
 
     let response = v2_resolver_response_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"),
     )
     .await?;
     assert_eq!(response.status(), StatusCode::CONFLICT);

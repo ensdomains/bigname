@@ -273,7 +273,7 @@ achieved throughput, success rate, and p50, p95, and p99 for each route.
 Diagnostics, GraphQL compatibility, health, and documentation routes are
 outside this traffic gate; they retain their ordinary functional checks.
 
-`POST /v2/lookup` keeps the latency-sensitive 5/10/25 ms p50/p95/p99 limits.
+`POST /v1/lookup` keeps the latency-sensitive 5/10/25 ms p50/p95/p99 limits.
 Point reads use either 10/25/50 ms or 25/75/150 ms limits. List reads use
 25/75/150 ms or 50/150/300 ms limits, depending on query shape. The budgets
 file is authoritative for the exact route mapping.

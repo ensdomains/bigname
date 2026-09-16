@@ -44,7 +44,7 @@ pub fn resolution_record_inventory_lookup_key(row: &NameCurrentRow) -> Option<(U
 pub fn resolution_record_inventory_lookup_key_any_chain(
     row: &NameCurrentRow,
 ) -> Option<(Uuid, Value)> {
-    let binding_supported = name_current_has_event_linked_ownerless_registry_serving(row)
+    let binding_supported = name_current_has_event_linked_registry_serving(row)
         || match row.namespace.as_str() {
             ENS_NAMESPACE => matches!(
                 row.binding_kind,
@@ -307,7 +307,7 @@ fn build_legacy_basenames_verified_support_boundary(
 fn can_derive_legacy_basenames_direct_topology(row: &NameCurrentRow) -> bool {
     if row.namespace != BASENAMES_NAMESPACE
         || !(row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath)
-            || name_current_has_event_linked_ownerless_registry_serving(row))
+            || name_current_has_event_linked_registry_serving(row))
         || row.record_serving_resource_id().is_none()
         || !row_has_basenames_execution_v2_manifest(row)
     {
@@ -353,7 +353,7 @@ fn build_supported_resolution_verified_boundary(row: &NameCurrentRow) -> Option<
         || !(matches!(
             row.binding_kind,
             Some(SurfaceBindingKind::DeclaredRegistryPath | SurfaceBindingKind::ResolverAliasPath)
-        ) || name_current_has_event_linked_ownerless_registry_serving(row))
+        ) || name_current_has_event_linked_registry_serving(row))
         || row.record_serving_resource_id().is_none()
     {
         return None;
@@ -368,7 +368,7 @@ fn build_supported_resolution_verified_boundary(row: &NameCurrentRow) -> Option<
 }
 
 fn build_supported_resolution_declared_boundary(row: &NameCurrentRow) -> Option<Value> {
-    let binding_supported = name_current_has_event_linked_ownerless_registry_serving(row)
+    let binding_supported = name_current_has_event_linked_registry_serving(row)
         || match row.namespace.as_str() {
             ENS_NAMESPACE => matches!(
                 row.binding_kind,
@@ -399,7 +399,7 @@ fn build_supported_resolution_declared_boundary(row: &NameCurrentRow) -> Option<
 fn build_supported_resolution_declared_boundary_for_revalidation(
     row: &NameCurrentRow,
 ) -> Option<Value> {
-    let binding_supported = name_current_has_event_linked_ownerless_registry_serving(row)
+    let binding_supported = name_current_has_event_linked_registry_serving(row)
         || match row.namespace.as_str() {
             ENS_NAMESPACE => matches!(
                 row.binding_kind,
@@ -476,32 +476,40 @@ fn build_resolution_version_boundary(
     Value::Object(boundary)
 }
 
-pub fn name_current_has_event_linked_ownerless_registry_serving(row: &NameCurrentRow) -> bool {
+/// `name_current.provenance.read_reachability.basis` values that select a serving resource from
+/// an event-linked registry resolver pointer: the retained pointer of an ownerless ENSv1 or
+/// Basenames registry name, and the root-registry pointer of an ENSv2 TLD with no projected
+/// authority (`docs/projections.md`).
+pub const EVENT_LINKED_REGISTRY_SERVING_BASES: [&str; 2] = [
+    "retained_registry_resolver_pointer",
+    "root_registry_resolver_pointer",
+];
+
+pub fn name_current_has_event_linked_registry_serving(row: &NameCurrentRow) -> bool {
     row.resource_id.is_none()
         && row.surface_binding_id.is_none()
         && row.binding_kind.is_none()
         && row.serving_resource_id.is_some()
-        && has_event_linked_ownerless_registry_provenance(&row.namespace, &row.provenance)
+        && has_event_linked_registry_serving_provenance(&row.namespace, &row.provenance)
 }
 
-pub fn identity_name_current_has_event_linked_ownerless_registry_serving(
+pub fn identity_name_current_has_event_linked_registry_serving(
     row: &IdentityNameCurrentRow,
 ) -> bool {
     row.resource_id.is_none()
         && row.surface_binding_id.is_none()
         && row.binding_kind.is_none()
         && row.serving_resource_id.is_some()
-        && has_event_linked_ownerless_registry_provenance(&row.namespace, &row.provenance)
+        && has_event_linked_registry_serving_provenance(&row.namespace, &row.provenance)
 }
 
-fn has_event_linked_ownerless_registry_provenance(namespace: &str, provenance: &Value) -> bool {
+fn has_event_linked_registry_serving_provenance(namespace: &str, provenance: &Value) -> bool {
     matches!(namespace, ENS_NAMESPACE | BASENAMES_NAMESPACE)
         && json_string_field(
             json_field(provenance, "read_reachability")
                 .and_then(|value| json_field(value, "basis")),
         )
-        .as_deref()
-            == Some("retained_registry_resolver_pointer")
+        .is_some_and(|basis| EVENT_LINKED_REGISTRY_SERVING_BASES.contains(&basis.as_str()))
 }
 
 fn boundary_chain_id_matches(boundary: &Value, expected_chain_id: &str) -> bool {

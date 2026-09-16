@@ -5,7 +5,7 @@ use crate::{
     heads::{BlockMarker, HeadMarkers},
 };
 
-type StoredFinality = (Option<i64>, Option<String>, Option<i64>, Option<String>);
+pub(crate) type StoredFinality = (Option<i64>, Option<String>, Option<i64>, Option<String>);
 
 pub(crate) async fn require_monotonic(
     transaction: &mut Transaction<'_, Postgres>,

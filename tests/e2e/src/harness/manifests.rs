@@ -258,6 +258,11 @@ pub fn generate_local_sepolia_migration_profile(
         namespace_group: "ens",
         family,
     };
+    let mut correlations = correlation_addresses.clone();
+    let (registry, _) = ens_v1_targets
+        .get("registry")
+        .context("migration profile requires the local ENSv1 registry")?;
+    correlations.insert("ens_v1_registry", *registry);
     let profile = generate_profile_from_families(
         scratch_dir,
         "manifests-sepolia",
@@ -274,7 +279,7 @@ pub fn generate_local_sepolia_migration_profile(
         "manifests-sepolia",
         repo_root,
         ens_v2_targets,
-        None,
+        Some(&correlations),
         ENS_V2_SEPOLIA_FAMILIES.iter().copied().map(family),
     )?;
     generate_profile_from_families(
@@ -282,7 +287,7 @@ pub fn generate_local_sepolia_migration_profile(
         "manifests-sepolia",
         repo_root,
         migration_targets,
-        Some(correlation_addresses),
+        Some(&correlations),
         std::iter::once(family("ens_v2_migration_l1")),
     )?;
     Ok(profile)
@@ -328,6 +333,18 @@ fn generate_profile_from_families(
                 let correlations = correlation_addresses.context(
                     "ens_v2_migration_l1 requires local correlation-address substitutions",
                 )?;
+                for required in ["ens_v1_name_wrapper", "ens_v1_base_registrar"] {
+                    anyhow::ensure!(
+                        correlations.contains_key(required),
+                        "missing required migration correlation address {required}"
+                    );
+                }
+                anyhow::ensure!(
+                    doc.get("correlation_addresses").is_some(),
+                    "migration manifest is missing [correlation_addresses]"
+                );
+            }
+            if let Some(correlations) = correlation_addresses {
                 patch_correlation_addresses(&mut doc, correlations)?;
             }
             std::fs::write(out_dir.join(file_name), toml::to_string(&doc)?)?;
@@ -346,21 +363,17 @@ fn patch_correlation_addresses(
     doc: &mut Value,
     substitutions: &HashMap<&str, Address>,
 ) -> Result<()> {
-    for required in ["ens_v1_name_wrapper", "ens_v1_base_registrar"] {
-        anyhow::ensure!(
-            substitutions.contains_key(required),
-            "missing required migration correlation address {required}"
-        );
-    }
-    let table = doc
-        .get_mut("correlation_addresses")
-        .context("migration manifest is missing [correlation_addresses]")?
+    let Some(correlations) = doc.get_mut("correlation_addresses") else {
+        return Ok(());
+    };
+    let table = correlations
         .as_table_mut()
-        .context("migration manifest [correlation_addresses] is not a table")?;
-    for (key, address) in substitutions {
-        if table.contains_key(*key) {
-            table.insert((*key).to_owned(), Value::String(format!("{address:#x}")));
-        }
+        .context("manifest [correlation_addresses] is not a table")?;
+    for (key, value) in table {
+        let address = substitutions
+            .get(key.as_str())
+            .with_context(|| format!("missing local correlation address {key}"))?;
+        *value = Value::String(format!("{address:#x}"));
     }
     Ok(())
 }

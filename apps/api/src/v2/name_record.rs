@@ -7,23 +7,25 @@ use bigname_storage::{BASENAMES_NAMESPACE, NameCurrentRow, RecordInventoryCurren
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::collection_snapshot::CollectionSnapshot;
 use crate::AppState;
 
 use super::support::{
     V2_RECORD_UNSUPPORTED_FIELD_NAMES, direct_json_field, load_name_current_for_selected_snapshot,
     map_internal_api_error, normalize_inferred_route_name, record_addresses_from_entries,
     record_content_hash_from_entries, record_text_records_from_entries, record_unsupported_fields,
-    snapshot_selection_api_error,
+    serving_record_inventory, snapshot_selection_api_error,
 };
 use super::{
-    Envelope, QueryParamAllowlist, RequestSource, SnapshotReadResource, StrictQueryParams, V2Error,
-    V2Result, api_error_to_v2_for_resource, resolve_v2_snapshot_for, snapshot_meta,
+    Envelope, QueryParamAllowlist, RegistryRef, RequestSource, SnapshotReadResource,
+    StrictQueryParams, V2Error, V2Result, api_error_to_v2_for_resource, load_subregistry_refs,
+    name_chain_id, resolve_v2_snapshot_for, snapshot_block_for_chain, snapshot_meta,
     v2_exact_name_snapshot_scope_with_resolution_auxiliary,
-    vocab::{
-        PARTIAL_SERVE_UNSUPPORTED_REASON, RegistrationStatus, Resolver, Source, Status,
-        WrapperFuses, WrapperState,
-    },
+    vocab::{Authority, RegistrationStatus, Resolver, Source, Status, WrapperFuses, WrapperState},
 };
+
+#[path = "name_record/counts.rs"]
+mod counts;
 
 #[path = "name_record/inventory.rs"]
 mod inventory;
@@ -37,17 +39,18 @@ mod wrapper;
 use inventory::load_name_record_inventory;
 pub(super) use values::{
     chain_id_from_positions, declared_token_id, identity_declared_token_id,
-    identity_row_has_current_registration, json_string_at_paths, network_from_parts,
-    row_has_current_registration, string_field, value_to_string,
+    identity_row_has_current_registration, identity_row_serves_resolver, json_string_at_paths,
+    network_from_parts, row_has_current_registration, row_serves_resolver, string_field,
+    value_to_string,
 };
 use values::{
     has_name_binding, json_address_at_paths, json_chain_id, json_timestamp_at_paths,
     json_value_present, network, object_field, response_chain_id,
 };
-pub(crate) use wrapper::wrapper_metadata;
+pub(crate) use wrapper::{wrapper_lifecycle_matches_fuses, wrapper_metadata};
 pub(crate) struct NameRecordQueryParams;
 impl QueryParamAllowlist for NameRecordQueryParams {
-    const ALLOWED: &'static [&'static str] = &["namespace", "at", "finality", "source"];
+    const ALLOWED: &'static [&'static str] = &["namespace", "at", "finality", "source", "include"];
 }
 
 pub(crate) type NameRecordQuery = StrictQueryParams<NameRecordQueryParams>;
@@ -76,12 +79,18 @@ pub(crate) struct NameRecord {
     pub(crate) wrapper_state: Option<WrapperState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) wrapper_fuses: Option<WrapperFuses>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) authority: Option<Authority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) migrated_at: Option<String>,
     pub(crate) name: String,
     pub(crate) display_name: String,
     pub(crate) namespace: String,
     pub(crate) namehash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resolver: Option<Resolver>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subregistry: Option<RegistryRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) addresses: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,6 +105,10 @@ pub(crate) struct NameRecord {
     pub(crate) chain_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) network: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subname_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) record_count: Option<u64>,
     pub(crate) status: Status,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unsupported_reason: Option<String>,
@@ -118,6 +131,12 @@ pub(crate) async fn get_name_record(
         .clone()
         .unwrap_or_else(|| normalized.namespace.to_owned());
     let route_source = route_source(params.source)?;
+    let include_counts = counts::include_counts(&params.include)?;
+    let count_snapshot = if include_counts {
+        Some(CollectionSnapshot::capture_for_namespace(&state, None, Some(&namespace)).await?)
+    } else {
+        None
+    };
 
     let include_resolution_auxiliary =
         namespace == BASENAMES_NAMESPACE && route_source == Source::Verified;
@@ -162,6 +181,7 @@ pub(crate) async fn get_name_record(
             &row,
             &selected_snapshot,
             include_resolution_auxiliary,
+            route_source,
         )
         .await
         .map_err(|error| {
@@ -174,7 +194,7 @@ pub(crate) async fn get_name_record(
         None
     };
     let chain_id = response_chain_id(&selected_snapshot);
-    let record = verified::build_name_record_for_source(
+    let mut record = verified::build_name_record_for_source(
         &state,
         &row,
         record_inventory.as_ref(),
@@ -183,14 +203,55 @@ pub(crate) async fn get_name_record(
         route_source,
     )
     .await?;
+    let as_of_block = name_chain_id(&row)
+        .and_then(|chain_id| snapshot_block_for_chain(&selected_snapshot, &chain_id));
+    if record.status != Status::Unsupported {
+        record.subregistry = load_subregistry_refs(
+            &state.pool,
+            std::slice::from_ref(&row.logical_name_id),
+            as_of_block,
+        )
+        .await?
+        .remove(&row.logical_name_id);
+    }
+    if record.authority == Some(Authority::EnsV2) {
+        record.migrated_at =
+            load_migrated_at(&state.pool, std::slice::from_ref(&row.logical_name_id))
+                .await?
+                .remove(&row.logical_name_id);
+    }
+    counts::apply(
+        &state,
+        &row,
+        &selected_snapshot,
+        count_snapshot.as_ref(),
+        &mut record,
+    )
+    .await?;
     let mut meta = snapshot_meta(&selected_snapshot)?;
     meta.source = Some(route_source);
 
     Ok(Json(Envelope {
-        data: record.record,
+        data: record,
         page: None,
         meta,
     }))
+}
+
+/// RFC 3339 `migrated_at` per logical name for names whose current ENSv2 authority was proven by
+/// an ENSv1→ENSv2 migration transition; other names are absent.
+pub(crate) async fn load_migrated_at(
+    pool: &sqlx::PgPool,
+    logical_name_ids: &[String],
+) -> V2Result<BTreeMap<String, String>> {
+    let transitions =
+        bigname_storage::load_name_migration_transition_timestamps(pool, logical_name_ids)
+            .await
+            .map_err(|_| V2Error::internal_error("failed to load name migration transitions"))?;
+    Ok(transitions
+        .into_iter()
+        .map(|(logical_name_id, timestamp)| (logical_name_id, super::format_timestamp(timestamp)))
+        .collect())
 }
 
 pub(crate) fn build_name_record(
@@ -247,11 +308,9 @@ pub(crate) fn build_name_record(
         .flatten();
     let (wrapper_state, wrapper_fuses) = wrapper_metadata(&row.declared_summary)?
         .map_or((None, None), |(state, fuses)| (Some(state), Some(fuses)));
-    let resolver = (has_current_registration
-        && string_field(row.coverage.get("unsupported_reason")).as_deref()
-            != Some(PARTIAL_SERVE_UNSUPPORTED_REASON))
-    .then(|| resolver(&row.declared_summary))
-    .flatten();
+    let resolver = row_serves_resolver(row)
+        .then(|| resolver(&row.declared_summary))
+        .flatten();
 
     Ok(NameRecord {
         registration_id: (registration.registration_status != RegistrationStatus::Unregistered)
@@ -271,11 +330,14 @@ pub(crate) fn build_name_record(
         registration_status: Some(registration.registration_status),
         wrapper_state,
         wrapper_fuses,
+        authority: Authority::from_provenance(&row.provenance),
+        migrated_at: None,
         name: row.normalized_name.clone(),
         display_name: row.canonical_display_name.clone(),
         namespace: row.namespace.clone(),
         namehash: row.namehash.clone(),
         resolver,
+        subregistry: None,
         addresses,
         text_records,
         content_hash,
@@ -290,6 +352,8 @@ pub(crate) fn build_name_record(
         primary_address,
         chain_id,
         network: Some(network(row)),
+        subname_count: None,
+        record_count: None,
         status,
         unsupported_reason: None,
         failure_reason: None,
@@ -510,7 +574,7 @@ pub(super) fn record_content_hash(
 
 fn unsupported_fields(record_inventory: Option<&RecordInventoryCurrentRow>) -> Vec<String> {
     record_unsupported_fields(
-        record_inventory.is_some(),
+        serving_record_inventory(record_inventory).is_some(),
         record_inventory.map(|inventory| &inventory.unsupported_families),
         direct_json_field,
         V2_RECORD_UNSUPPORTED_FIELD_NAMES,

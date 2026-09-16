@@ -13,10 +13,13 @@ pub use paging::{
 };
 pub use reads::{
     load_permissions_current, load_permissions_current_by_resource_ids,
-    load_permissions_current_for_resolver_scope, load_permissions_current_resolver_targets,
+    load_permissions_current_for_resolver_scope,
+    load_permissions_current_for_resolver_scope_subjects,
+    load_permissions_current_resolver_targets,
 };
 pub use resource_summary::{
     load_permissions_current_resource_summaries, load_permissions_current_resource_summary,
+    permission_resource_matches_namespace,
 };
 pub use types::{
     PermissionCoverageExhaustiveness, PermissionCoverageStatus,

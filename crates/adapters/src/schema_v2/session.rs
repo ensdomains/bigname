@@ -1,3 +1,6 @@
+#[path = "session_interpret.rs"]
+mod interpret;
+use interpret::interpret_loaded;
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, bail};
@@ -8,6 +11,9 @@ use super::{
     sourced_events::prepare_v1_state_derived_events as prepare_v1, state::State,
     state_residency::StateCacheCapacity,
 };
+
+type RegistrarRegistrySetupKey = (String, String, String, String);
+type RegistrarRegistrySetups = BTreeMap<RegistrarRegistrySetupKey, Vec<(i64, String)>>;
 
 /// Opaque retained adapter state that can be moved into the next batch for the same chain.
 #[derive(Debug, Eq, PartialEq)]
@@ -305,75 +311,6 @@ pub fn prepare_schema_v2_batch_incremental_with_provenance(
     })
 }
 
-fn interpret_loaded(
-    catalog: &mut Catalog,
-    blocks: &[super::RawBlockInput],
-    raw_logs: Vec<RawLogInput>,
-    state: &mut State,
-) -> anyhow::Result<BatchOutput> {
-    let mut output = BatchOutput::default();
-    let mut migration_observations = Vec::new();
-    let mut raw_logs = raw_logs.into_iter().peekable();
-    let mut committed_state = state.clone();
-    committed_state.begin_batch();
-    for block in blocks {
-        let mut block_output = BatchOutput::default();
-        let mut block_state = committed_state.clone();
-        super::settle_block_boundary(catalog, block, &mut block_state, &mut block_output)?;
-        while raw_logs.peek().is_some_and(|raw| {
-            raw.block_number == block.block_number && raw.block_hash == block.block_hash
-        }) {
-            let raw = raw_logs.next().expect("peeked raw log");
-            interpret_raw(
-                catalog,
-                &raw,
-                &mut block_state,
-                &mut block_output,
-                &mut migration_observations,
-            )?;
-        }
-        super::protocol::reconcile_batch(&mut block_output);
-        if block_output
-            .normalized_events
-            .iter()
-            .any(|event| event.source_family.starts_with("ens_v1_"))
-        {
-            let delta = super::seam::fold_prior_events(
-                Vec::new(),
-                &block_output.normalized_events,
-                std::slice::from_ref(block),
-            )?;
-            let mut replayed_state = committed_state.clone();
-            replayed_state.apply_prior_event_delta(delta);
-            // Same-transaction reconciliation can remove or retarget ENSv1 transitions after live
-            // state observed them. Rebuild only ENSv1's durable protocol state from the survivors;
-            // other protocol state keeps the uninterrupted-walk behavior outside this fix's scope.
-            block_state.replace_ens_v1_protocol_state_from_replay(replayed_state);
-        }
-        committed_state = block_state;
-        append_output(&mut output, block_output);
-    }
-    if let Some(raw) = raw_logs.next() {
-        bail!(
-            "raw log {}:{} at block {} {} has no matching loaded live-lineage block",
-            raw.transaction_hash,
-            raw.log_index,
-            raw.block_number,
-            raw.block_hash
-        );
-    }
-    if let Some((logical_name_id, authority_arm)) =
-        committed_state.pending_v2_terminal_closure_hit()
-    {
-        bail!(
-            "terminal {authority_arm} binding closure for {logical_name_id} was not handled in its adapter batch"
-        );
-    }
-    super::identity::compact_reserved_label_preimages(&mut output)?;
-    super::migration::correlate(catalog, migration_observations, &mut output)?;
-    Ok(output)
-}
-
 fn append_output(into: &mut BatchOutput, from: BatchOutput) {
     let BatchOutput {
         decode_skips,
@@ -475,52 +412,80 @@ fn interpret_raw(
     state: &mut State,
     output: &mut BatchOutput,
     migration_observations: &mut Vec<super::protocol::MigrationObservation>,
-) -> anyhow::Result<()> {
+    registrar_registry_setups: &RegistrarRegistrySetups,
+) -> anyhow::Result<bool> {
     let Some(selected) = catalog.select(raw)? else {
-        return Ok(());
+        return Ok(false);
     };
-    let registrar_migration_source = if selected.source.source_family == "ens_v1_registrar_l1" {
-        super::migration::correlated_registrar_source(catalog, &selected, raw)?
+    let mut registrar_context = if selected.source.source_family == "ens_v1_registrar_l1" {
+        super::migration::registrar_context(catalog, &selected, raw)?
     } else {
-        None
+        super::migration::RegistrarContext::default()
     };
-    // Interpret on a structurally shared candidate so a malformed log cannot retain partial state.
+    if let Some((namehash, owner)) =
+        super::protocol::v1::registrar_registration_namehash(&selected, raw)?
+    {
+        registrar_context.transaction_has_registry_setup = registrar_registry_setups
+            .get(&(
+                selected.source.namespace.clone(),
+                raw.block_hash.clone(),
+                raw.transaction_hash.clone(),
+                namehash,
+            ))
+            .is_some_and(|setups| {
+                setups
+                    .iter()
+                    .filter(|(log_index, _)| *log_index < raw.log_index)
+                    .max_by_key(|(log_index, _)| *log_index)
+                    .map(|(_, setup_owner)| setup_owner == &owner)
+                    .unwrap_or_else(|| setups.iter().any(|(_, setup_owner)| setup_owner == &owner))
+            });
+    }
+    let registrar_migration_source = registrar_context
+        .migration_enabled
+        .then(|| catalog.source_for_family("ens_v2_migration_l1").cloned())
+        .flatten();
+    // Some protocol paths advance time-derived state before reaching their event-specific
+    // decoder. Interpret each log on a structurally shared candidate and commit it only after the
+    // whole protocol dispatch succeeds, so a non-fatal malformed log cannot change retained state.
     let mut candidate_state = state.clone();
-    let mut interpreted = match super::protocol::interpret(
+    let mut interpreted =
+        match super::protocol::interpret(&selected, raw, &mut candidate_state, registrar_context) {
+            Ok(interpreted) => interpreted,
+            Err(error)
+                if crate::evm_abi::is_malformed_event_log(&error)
+                    && !selected.manifest_declared_emitter =>
+            {
+                output.decode_skips.push(super::DecodeSkip {
+                    chain_id: raw.chain_id.clone(),
+                    block_hash: raw.block_hash.clone(),
+                    block_number: raw.block_number,
+                    transaction_hash: raw.transaction_hash.clone(),
+                    log_index: raw.log_index,
+                    emitting_address: raw.emitting_address.clone(),
+                    source_family: selected.source.source_family.clone(),
+                    selection_topic0: selected.event.topic0.clone(),
+                    match_all: selected.match_all,
+                    decode_context: error.to_string(),
+                });
+                return Ok(true);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "{} adapter failed for raw log {}:{}",
+                        selected.source.source_family, raw.block_hash, raw.log_index
+                    )
+                });
+            }
+        };
+    prepare_v1(
+        catalog,
         &selected,
         raw,
+        &mut interpreted,
         &mut candidate_state,
-        registrar_migration_source.is_some(),
-    ) {
-        Ok(interpreted) => interpreted,
-        Err(error)
-            if crate::evm_abi::is_malformed_event_log(&error)
-                && !selected.manifest_declared_emitter =>
-        {
-            output.decode_skips.push(super::DecodeSkip {
-                chain_id: raw.chain_id.clone(),
-                block_hash: raw.block_hash.clone(),
-                block_number: raw.block_number,
-                transaction_hash: raw.transaction_hash.clone(),
-                log_index: raw.log_index,
-                emitting_address: raw.emitting_address.clone(),
-                source_family: selected.source.source_family.clone(),
-                selection_topic0: selected.event.topic0.clone(),
-                match_all: selected.match_all,
-                decode_context: error.to_string(),
-            });
-            return Ok(());
-        }
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "{} adapter failed for raw log {}:{}",
-                    selected.source.source_family, raw.block_hash, raw.log_index
-                )
-            });
-        }
-    };
-    prepare_v1(&selected, raw, &mut interpreted, &mut candidate_state)?;
+    )?;
     *state = candidate_state;
     super::normalized::materialize(&selected, raw, interpreted.events.clone(), state, output);
     super::sourced_events::materialize(
@@ -545,7 +510,14 @@ fn interpret_raw(
         output,
     );
     super::identity::materialize(&selected, raw, &interpreted, state, output)?;
-    super::discovery::materialize(catalog, &selected, raw, interpreted.discovery, output)?;
+    super::discovery::materialize(
+        catalog,
+        &selected,
+        raw,
+        interpreted.discovery,
+        state,
+        output,
+    )?;
     if let Some(migration_source) = registrar_migration_source {
         migration_observations.extend(interpreted.migration_observations);
         super::normalized::materialize_for_source(
@@ -559,7 +531,36 @@ fn interpret_raw(
         debug_assert!(interpreted.migration_events.is_empty());
         migration_observations.extend(interpreted.migration_observations);
     }
-    Ok(())
+    Ok(true)
+}
+
+fn registrar_registry_setups(
+    catalog: &Catalog,
+    raw_logs: &[RawLogInput],
+) -> anyhow::Result<RegistrarRegistrySetups> {
+    let mut setups = BTreeMap::<RegistrarRegistrySetupKey, Vec<(i64, String)>>::new();
+    for raw in raw_logs {
+        let Some(selected) = catalog.select(raw)? else {
+            continue;
+        };
+        if selected.source.source_family != "ens_v1_registry_l1" {
+            continue;
+        }
+        if let Some((namehash, owner)) =
+            super::protocol::v1::registry_registration_setup_namehash(&selected, raw)?
+        {
+            setups
+                .entry((
+                    selected.source.namespace,
+                    raw.block_hash.clone(),
+                    raw.transaction_hash.clone(),
+                    namehash,
+                ))
+                .or_default()
+                .push((raw.log_index, owner));
+        }
+    }
+    Ok(setups)
 }
 
 #[cfg(test)]

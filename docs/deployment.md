@@ -559,9 +559,9 @@ phase-state reset, rerun the normal pipeline instead.
 ## Surviving services
 
 The API uses one `bigname_phase` request pool plus a reserved readiness
-connection. GraphQL, `/v2/status`, snapshot selection,
+connection. GraphQL, `/v1/status`, snapshot selection,
 [verified lookup](glossary.md#verified-lookup), and all projection reads use
-phase relations. The `/v2/status` phase-runner heartbeat
+phase relations. The `/v1/status` phase-runner heartbeat
 threshold uses `BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS` (60 seconds by
 default). V2 record lookup may perform only the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write;
@@ -576,7 +576,7 @@ or `UPDATE` on
 `resolution_divergences` and no `UPDATE` on the guarded head, lineage, or
 projection relations.
 
-API startup tolerates a wholly absent phase schema so `/v2/status` can return
+API startup tolerates a wholly absent phase schema so `/v1/status` can return
 its empty, `degraded` response. Once the phase schema exists, startup checks
 every phase-schema relation, function, and type its serving paths read:
 relations by name, both guarded functions by exact signature, and the
@@ -603,6 +603,7 @@ GRANT SELECT ON TABLE
     bigname_phase.migration_event_associations,
     bigname_phase.name_current,
     bigname_phase.address_names_current,
+    bigname_phase.address_records_current,
     bigname_phase.children_current,
     bigname_phase.permissions_current,
     bigname_phase.permissions_current_resource_summary,
@@ -614,7 +615,8 @@ GRANT SELECT ON TABLE
     bigname_phase.record_inventory_current,
     bigname_phase.primary_names_current,
     bigname_phase.manifest_versions,
-    bigname_phase.manifest_contract_instances
+    bigname_phase.manifest_contract_instances,
+    bigname_phase.contract_instance_addresses
 TO bigname_api;
 GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state(
     text, bigint, text, jsonb, jsonb, uuid, text, text
@@ -625,14 +627,18 @@ GRANT EXECUTE ON FUNCTION bigname_phase.write_resolution_divergence(
 ) TO bigname_api;
 ```
 
-This role cannot read raw facts, discovery state, the divergence table, or
-unrelated operational tables directly. Reapply these explicit relation and
-function grants after a reviewed phase-schema replacement; do not use ownership
+This role cannot read raw facts, the divergence table, or unrelated operational
+tables directly. Its only direct discovery-state read is
+`contract_instance_addresses`: the registry overview and labels routes use
+declared address intervals to recognize registry contracts at the selected
+block. The grant is SELECT-only and does not admit discovery writes.
+Reapply these explicit relation and function grants after a reviewed
+phase-schema replacement; do not use ownership
 or schema-wide write grants as a shortcut.
 
 `migration_event_associations` is on the list because
-`GET /v2/diagnostics/events` selects the ENSv1→ENSv2 migration correlation rows
-for its candidate payload; the public `GET /v2/events` path shares the same
+`GET /v1/diagnostics/events` selects the ENSv1→ENSv2 migration correlation rows
+for its candidate payload; the public `GET /v1/events` path shares the same
 loader but does not select from that table. The row set is Interpret
 coordination state rather than a projection, so the grant is deliberately
 read-only and does not widen the API's write boundary. A database provisioned
@@ -722,7 +728,18 @@ replay evidence.
 
 Configure
 `BIGNAME_API_CHAIN_RPC_URLS` for status and verified lookup as described in the
-API docs. The request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; together
+API docs. Verified ENS reads (`source=verified` and `source=auto` on
+`/v1/names/{name}/records`, `/v1/lookup`, and ENS/60 verification on
+`/v1/addresses/{address}/primary-name`) execute against the Ethereum L1 of the
+deployment profile the API serves, so an API in front of a `manifests/sepolia`
+projection needs an `ethereum-sepolia=<https url>` entry (an API in front of
+`manifests/mainnet` needs `ethereum-mainnet=`). Without that entry the verified
+routes fail closed with `409 stale` and `GET /v1/namespaces/ens` reports
+`verified_records` and `verified_primary_name` as `unsupported` with
+`unsupported_reason=execution_provider_not_configured` for chain `11155111`;
+with it, both report `full`. The Sepolia entrypoint is the checked-in shadow
+`manifests/sepolia/ethereum/ens/ens_execution/v1.toml`, which the normal
+manifest sync installs. The request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; together
 with the reserved readiness connection, one API process can open at most
 `BIGNAME_DATABASE_MAX_CONNECTIONS + 1` PostgreSQL connections.
 

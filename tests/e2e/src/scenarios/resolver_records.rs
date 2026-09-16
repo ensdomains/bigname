@@ -125,7 +125,7 @@ async fn v2_records(api: &V2Api, name: &str, source: &str) -> Result<Value> {
     let response = api
         .client
         .get(format!(
-            "{}/v2/names/{name}/records?namespace=ens&source={source}&keys=addr:60",
+            "{}/v1/names/{name}/records?namespace=ens&source={source}&keys=addr:60",
             api.base_url
         ))
         .send()
@@ -1387,6 +1387,8 @@ fn assert_zero_name_shape(record: &Value, namespace: &str, name: &str, verified:
     ];
     if namespace == "ens" {
         keys.push("token_id");
+        keys.push("authority");
+        assert_eq!(record["authority"], "ens_v1");
     }
     if verified {
         keys.push("unsupported_fields");
@@ -1418,7 +1420,7 @@ pub(super) async fn assert_zero_api_shapes(
 ) -> Result<()> {
     for source in ["indexed", "verified", "verified", "auto"] {
         let request = api.client.get(format!(
-            "{}/v2/names/{name}/records?namespace={namespace}&source={source}&keys=addr:60",
+            "{}/v1/names/{name}/records?namespace={namespace}&source={source}&keys=addr:60",
             api.base_url,
         ));
         let selected_source = if source == "auto" { "indexed" } else { source };
@@ -1450,7 +1452,7 @@ pub(super) async fn assert_zero_api_shapes(
     for source in ["indexed", "verified"] {
         let body = zero_api_response(
             api.client.get(format!(
-                "{}/v2/names/{name}?namespace={namespace}&source={source}",
+                "{}/v1/names/{name}?namespace={namespace}&source={source}",
                 api.base_url,
             )),
             Some(source),
@@ -1460,7 +1462,7 @@ pub(super) async fn assert_zero_api_shapes(
     }
     let batch = zero_api_response(
         api.client
-            .post(format!("{}/v2/lookup", api.base_url))
+            .post(format!("{}/v1/lookup", api.base_url))
             .json(&json!({"namespace":namespace,"inputs":[{"id":"zero","name":name}]})),
         None,
     )
@@ -1475,7 +1477,7 @@ pub(super) async fn assert_zero_api_shapes(
 
     let diagnostic = zero_api_response(
         api.client.get(format!(
-            "{}/v2/diagnostics/names/{name}/records?namespace={namespace}&keys=addr:60",
+            "{}/v1/diagnostics/names/{name}/records?namespace={namespace}&keys=addr:60",
             api.base_url,
         )),
         None,

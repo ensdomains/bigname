@@ -161,8 +161,8 @@ const DIAGNOSTICS_RECORDS_DICTIONARY_ALLOWLIST: &[&str] = &[
 
 const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
     V2ConformanceRoute {
-        label: "POST /v2/lookup",
-        error_uri: "/v2/lookup",
+        label: "POST /v1/lookup",
+        error_uri: "/v1/lookup",
         success: V2SuccessFixture::Lookup,
         envelope: V2TopLevelEnvelope::DataMeta,
         as_of: V2AsOfExpectation::Present,
@@ -170,8 +170,8 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         dictionary_allowlist: &[],
     },
     V2ConformanceRoute {
-        label: "GET /v2/status",
-        error_uri: "/v2/status",
+        label: "GET /v1/status",
+        error_uri: "/v1/status",
         success: V2SuccessFixture::Status,
         envelope: V2TopLevelEnvelope::DataMeta,
         as_of: V2AsOfExpectation::Absent,
@@ -179,8 +179,8 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         dictionary_allowlist: &[],
     },
     V2ConformanceRoute {
-        label: "GET /v2/names/{name}",
-        error_uri: "/v2/names/alice.eth",
+        label: "GET /v1/names/{name}",
+        error_uri: "/v1/names/alice.eth",
         success: V2SuccessFixture::Name,
         envelope: V2TopLevelEnvelope::DataMeta,
         as_of: V2AsOfExpectation::Present,
@@ -188,8 +188,8 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         dictionary_allowlist: &[],
     },
     V2ConformanceRoute {
-        label: "GET /v2/names/{name}/records",
-        error_uri: "/v2/names/alice.eth/records",
+        label: "GET /v1/names/{name}/records",
+        error_uri: "/v1/names/alice.eth/records",
         success: V2SuccessFixture::NameRecords,
         envelope: V2TopLevelEnvelope::DataMeta,
         as_of: V2AsOfExpectation::Present,
@@ -197,44 +197,44 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         dictionary_allowlist: &[],
     },
     V2ConformanceRoute {
-        label: "GET /v2/names/{name}/subnames",
-        error_uri: "/v2/names/alice.eth/subnames",
+        label: "GET /v1/names/{name}/subnames",
+        error_uri: "/v1/names/alice.eth/subnames",
         success: V2SuccessFixture::Subnames,
         envelope: V2TopLevelEnvelope::DataPageMeta,
-        as_of: V2AsOfExpectation::Absent,
+        as_of: V2AsOfExpectation::PresentWithoutToken,
         tier: V2RouteTier::Product,
         dictionary_allowlist: &[],
     },
     V2ConformanceRoute {
-        label: "GET /v2/names/{name}/history",
-        error_uri: "/v2/names/alice.eth/history",
+        label: "GET /v1/names/{name}/history",
+        error_uri: "/v1/names/alice.eth/history",
         success: V2SuccessFixture::NameHistory,
         envelope: V2TopLevelEnvelope::DataPageMeta,
-        as_of: V2AsOfExpectation::Absent,
+        as_of: V2AsOfExpectation::PresentWithoutToken,
         tier: V2RouteTier::Product,
         dictionary_allowlist: &[],
     },
     V2ConformanceRoute {
-        label: "GET /v2/permissions",
-        error_uri: "/v2/permissions",
+        label: "GET /v1/permissions",
+        error_uri: "/v1/permissions",
         success: V2SuccessFixture::Permissions,
         envelope: V2TopLevelEnvelope::DataPageMeta,
-        as_of: V2AsOfExpectation::Absent,
+        as_of: V2AsOfExpectation::PresentWithoutToken,
         tier: V2RouteTier::Product,
         dictionary_allowlist: &[],
     },
     V2ConformanceRoute {
-        label: "GET /v2/addresses/{address}/names",
-        error_uri: "/v2/addresses/0x00000000000000000000000000000000000000aa/names",
+        label: "GET /v1/addresses/{address}/names",
+        error_uri: "/v1/addresses/0x00000000000000000000000000000000000000aa/names",
         success: V2SuccessFixture::AddressNames,
         envelope: V2TopLevelEnvelope::DataPageMeta,
-        as_of: V2AsOfExpectation::Absent,
+        as_of: V2AsOfExpectation::PresentWithoutToken,
         tier: V2RouteTier::Product,
         dictionary_allowlist: &[],
     },
     V2ConformanceRoute {
-        label: "GET /v2/addresses/{address}/primary-name",
-        error_uri: "/v2/addresses/0x00000000000000000000000000000000000000aa/primary-name",
+        label: "GET /v1/addresses/{address}/primary-name",
+        error_uri: "/v1/addresses/0x00000000000000000000000000000000000000aa/primary-name",
         success: V2SuccessFixture::PrimaryName,
         envelope: V2TopLevelEnvelope::DataMeta,
         as_of: V2AsOfExpectation::Conditional,
@@ -242,17 +242,17 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         dictionary_allowlist: &[],
     },
     V2ConformanceRoute {
-        label: "GET /v2/addresses/{address}/history",
-        error_uri: "/v2/addresses/0x00000000000000000000000000000000000000aa/history",
+        label: "GET /v1/addresses/{address}/history",
+        error_uri: "/v1/addresses/0x00000000000000000000000000000000000000aa/history",
         success: V2SuccessFixture::AddressHistory,
         envelope: V2TopLevelEnvelope::DataPageMeta,
-        as_of: V2AsOfExpectation::Absent,
+        as_of: V2AsOfExpectation::PresentWithoutToken,
         tier: V2RouteTier::Product,
         dictionary_allowlist: &[],
     },
     V2ConformanceRoute {
-        label: "GET /v2/search",
-        error_uri: "/v2/search",
+        label: "GET /v1/search",
+        error_uri: "/v1/search",
         success: V2SuccessFixture::Search,
         envelope: V2TopLevelEnvelope::DataPageMeta,
         as_of: V2AsOfExpectation::PresentWithoutToken,
@@ -260,17 +260,17 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         dictionary_allowlist: &[],
     },
     V2ConformanceRoute {
-        label: "GET /v2/events",
-        error_uri: "/v2/events",
+        label: "GET /v1/events",
+        error_uri: "/v1/events",
         success: V2SuccessFixture::Events,
         envelope: V2TopLevelEnvelope::DataPageMeta,
-        as_of: V2AsOfExpectation::Absent,
+        as_of: V2AsOfExpectation::PresentWithoutToken,
         tier: V2RouteTier::Product,
         dictionary_allowlist: &[],
     },
     V2ConformanceRoute {
-        label: "GET /v2/resolvers/{chain_id}/{address}",
-        error_uri: "/v2/resolvers/1/0x00000000000000000000000000000000000000aa",
+        label: "GET /v1/resolvers/{chain_id}/{address}",
+        error_uri: "/v1/resolvers/1/0x00000000000000000000000000000000000000aa",
         success: V2SuccessFixture::Resolver,
         envelope: V2TopLevelEnvelope::DataMeta,
         as_of: V2AsOfExpectation::Present,
@@ -278,8 +278,8 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         dictionary_allowlist: &[],
     },
     V2ConformanceRoute {
-        label: "GET /v2/namespaces/{namespace}",
-        error_uri: "/v2/namespaces/ens",
+        label: "GET /v1/namespaces/{namespace}",
+        error_uri: "/v1/namespaces/ens",
         success: V2SuccessFixture::Namespace,
         envelope: V2TopLevelEnvelope::DataMeta,
         as_of: V2AsOfExpectation::Absent,
@@ -287,8 +287,8 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         dictionary_allowlist: &[],
     },
     V2ConformanceRoute {
-        label: "GET /v2/diagnostics/names/{name}/coverage",
-        error_uri: "/v2/diagnostics/names/alice.eth/coverage",
+        label: "GET /v1/diagnostics/names/{name}/coverage",
+        error_uri: "/v1/diagnostics/names/alice.eth/coverage",
         success: V2SuccessFixture::DiagnosticsCoverage,
         envelope: V2TopLevelEnvelope::DataMeta,
         as_of: V2AsOfExpectation::Present,
@@ -296,8 +296,8 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         dictionary_allowlist: &[],
     },
     V2ConformanceRoute {
-        label: "GET /v2/diagnostics/names/{name}/binding",
-        error_uri: "/v2/diagnostics/names/alice.eth/binding",
+        label: "GET /v1/diagnostics/names/{name}/binding",
+        error_uri: "/v1/diagnostics/names/alice.eth/binding",
         success: V2SuccessFixture::DiagnosticsBinding,
         envelope: V2TopLevelEnvelope::DataMeta,
         as_of: V2AsOfExpectation::Present,
@@ -305,8 +305,8 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         dictionary_allowlist: DIAGNOSTICS_BINDING_DICTIONARY_ALLOWLIST,
     },
     V2ConformanceRoute {
-        label: "GET /v2/diagnostics/names/{name}/authority",
-        error_uri: "/v2/diagnostics/names/alice.eth/authority",
+        label: "GET /v1/diagnostics/names/{name}/authority",
+        error_uri: "/v1/diagnostics/names/alice.eth/authority",
         success: V2SuccessFixture::DiagnosticsAuthority,
         envelope: V2TopLevelEnvelope::DataMeta,
         as_of: V2AsOfExpectation::Present,
@@ -314,8 +314,8 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         dictionary_allowlist: DIAGNOSTICS_AUTHORITY_DICTIONARY_ALLOWLIST,
     },
     V2ConformanceRoute {
-        label: "GET /v2/diagnostics/names/{name}/records",
-        error_uri: "/v2/diagnostics/names/alice.eth/records",
+        label: "GET /v1/diagnostics/names/{name}/records",
+        error_uri: "/v1/diagnostics/names/alice.eth/records",
         success: V2SuccessFixture::DiagnosticsRecords,
         envelope: V2TopLevelEnvelope::DataMeta,
         as_of: V2AsOfExpectation::Present,
@@ -323,8 +323,8 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         dictionary_allowlist: DIAGNOSTICS_RECORDS_DICTIONARY_ALLOWLIST,
     },
     V2ConformanceRoute {
-        label: "GET /v2/diagnostics/namespaces/{namespace}/manifests",
-        error_uri: "/v2/diagnostics/namespaces/ens/manifests",
+        label: "GET /v1/diagnostics/namespaces/{namespace}/manifests",
+        error_uri: "/v1/diagnostics/namespaces/ens/manifests",
         success: V2SuccessFixture::DiagnosticsNamespaceManifests,
         envelope: V2TopLevelEnvelope::DataMeta,
         as_of: V2AsOfExpectation::Absent,
@@ -332,8 +332,8 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         dictionary_allowlist: &[],
     },
     V2ConformanceRoute {
-        label: "GET /v2/diagnostics/events",
-        error_uri: "/v2/diagnostics/events",
+        label: "GET /v1/diagnostics/events",
+        error_uri: "/v1/diagnostics/events",
         success: V2SuccessFixture::DiagnosticsEvents,
         envelope: V2TopLevelEnvelope::DataPageMeta,
         as_of: V2AsOfExpectation::Absent,
@@ -408,7 +408,7 @@ async fn v2_address_history_filters_relation_sets_and_defaults_namespace() -> Re
 
     let set_payload = v2_conformance_get_json(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/history?relation=registrant,manager&page_size=20"),
+        &format!("/v1/addresses/{V2_ADDRESS}/history?relation=registrant,manager&page_size=20"),
     )
     .await?;
     let set_rows = set_payload["data"]
@@ -433,7 +433,7 @@ async fn v2_address_history_filters_relation_sets_and_defaults_namespace() -> Re
 
     let owner_payload = v2_conformance_get_json(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/history?relation=owner&page_size=20"),
+        &format!("/v1/addresses/{V2_ADDRESS}/history?relation=owner&page_size=20"),
     )
     .await?;
     let owner_rows = owner_payload["data"]
@@ -492,7 +492,7 @@ async fn v2_single_resource_as_of_token_replays_without_enabling_collection_repl
     )
     .await?;
 
-    let minted = v2_conformance_get_json(&database, "/v2/names/alpha.eth").await?;
+    let minted = v2_conformance_get_json(&database, "/v1/names/alpha.eth").await?;
     let token = minted["meta"]["as_of_token"]
         .as_str()
         .expect("name response must include meta.as_of_token");
@@ -500,11 +500,11 @@ async fn v2_single_resource_as_of_token_replays_without_enabling_collection_repl
     for (label, uri) in [
         (
             "records",
-            format!("/v2/names/alpha.eth/records?at={token}"),
+            format!("/v1/names/alpha.eth/records?at={token}"),
         ),
         (
             "resolver",
-            format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?at={token}"),
+            format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?at={token}"),
         ),
     ] {
         let replay = v2_conformance_get_json(&database, &uri).await?;
@@ -519,14 +519,14 @@ async fn v2_single_resource_as_of_token_replays_without_enabling_collection_repl
     }
 
     for base_uri in [
-        "/v2/names/alpha.eth/subnames",
-        "/v2/names/alpha.eth/history",
-        "/v2/permissions?address=0x00000000000000000000000000000000000000aa",
-        "/v2/addresses/0x00000000000000000000000000000000000000aa/names",
-        "/v2/addresses/0x00000000000000000000000000000000000000aa/history",
-        "/v2/search?q=alpha&namespace=ens",
-        "/v2/events",
-        "/v2/diagnostics/events",
+        "/v1/names/alpha.eth/subnames",
+        "/v1/names/alpha.eth/history",
+        "/v1/permissions?address=0x00000000000000000000000000000000000000aa",
+        "/v1/addresses/0x00000000000000000000000000000000000000aa/names",
+        "/v1/addresses/0x00000000000000000000000000000000000000aa/history",
+        "/v1/search?q=alpha&namespace=ens",
+        "/v1/events",
+        "/v1/diagnostics/events",
     ] {
         let separator = if base_uri.contains('?') { '&' } else { '?' };
         let uri = format!("{base_uri}{separator}at={token}");
@@ -678,7 +678,7 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
     database
         .insert_record_inventory_current_row(record_inventory)
         .await?;
-    let profile = v2_conformance_get_json(&database, "/v2/names/Case.eth").await?;
+    let profile = v2_conformance_get_json(&database, "/v1/names/Case.eth").await?;
     let lookup = v2_lookup_json(
         &database,
         json!({
@@ -727,7 +727,7 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
         .bind(unbacked_resource_id)
         .execute(&database.lookup_pool)
         .await?;
-    let unbacked_profile = v2_conformance_get_json(&database, "/v2/names/Unbacked.eth").await?;
+    let unbacked_profile = v2_conformance_get_json(&database, "/v1/names/Unbacked.eth").await?;
     let unbacked_lookup = v2_lookup_json(
         &database,
         json!({
@@ -751,7 +751,7 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
     );
 
     let profile_record = &profile["data"];
-    let search = v2_conformance_get_json(&database, "/v2/search?q=case&namespace=ens").await?;
+    let search = v2_conformance_get_json(&database, "/v1/search?q=case&namespace=ens").await?;
     assert_shared_record_subset(
         profile_record,
         data_row_named(&search, "case.eth", "search"),
@@ -761,7 +761,7 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
 
     let address_names = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{address}/names"),
+        &format!("/v1/addresses/{address}/names?namespace=ens"),
     )
     .await?;
     let address_name_row = data_row_named(&address_names, "case.eth", "address-names");
@@ -783,11 +783,11 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
     )?;
     let subname_profile = v2_conformance_get_json(
         &database,
-        &format!("/v2/names/Alpha.Parent.eth?at={subname_at}"),
+        &format!("/v1/names/Alpha.Parent.eth?at={subname_at}"),
     )
     .await?;
     let subnames =
-        v2_subnames_payload_for_database(&database, "/v2/names/parent.eth/subnames?page_size=3")
+        v2_subnames_payload_for_database(&database, "/v1/names/parent.eth/subnames?page_size=3")
             .await?;
     assert_shared_record_subset(
         &subname_profile["data"],
@@ -905,13 +905,13 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         }
         V2SuccessFixture::Status => {
             let database = TestDatabase::new_migrated().await?;
-            let payload = v2_conformance_get_json(&database, "/v2/status").await?;
+            let payload = v2_conformance_get_json(&database, "/v1/status").await?;
             database.cleanup().await?;
             Ok(payload)
         }
         V2SuccessFixture::Name => {
             let database = TestDatabase::new_with_schemas(false, true).await?;
-            let uri = "/v2/names/Alice.eth";
+            let uri = "/v1/names/Alice.eth";
             seed_v2_alice_name_records_fixture(&database, |_, _, _| {}).await?;
             let payload = v2_conformance_get_json(&database, uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
@@ -920,7 +920,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         }
         V2SuccessFixture::NameRecords => {
             let database = TestDatabase::new_with_schemas(false, true).await?;
-            let uri = "/v2/names/Alice.eth/records?keys=addr:60&include=inventory";
+            let uri = "/v1/names/Alice.eth/records?keys=addr:60&include=inventory";
             seed_v2_alice_name_records_fixture(
                 &database,
                 |_, _, inventory| {
@@ -944,7 +944,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
             Ok(payload)
         }
         V2SuccessFixture::Subnames => {
-            let uri = "/v2/names/Parent.eth/subnames?include=counts&page_size=3";
+            let uri = "/v1/names/Parent.eth/subnames?include=counts&page_size=3";
             let (database, payload) =
                 v2_subnames_payload(uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
@@ -952,7 +952,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
             Ok(payload)
         }
         V2SuccessFixture::NameHistory => {
-            let uri = "/v2/names/History.eth/history?page_size=20";
+            let uri = "/v1/names/History.eth/history?page_size=20";
             let (database, payload) = v2_history_payload(uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
             database.cleanup().await?;
@@ -960,14 +960,14 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         }
         V2SuccessFixture::Permissions => {
             let uri =
-                format!("/v2/permissions?address={V2_PERMISSIONS_SUBJECT}&include=lineage&page_size=10");
+                format!("/v1/permissions?address={V2_PERMISSIONS_SUBJECT}&include=lineage&page_size=10");
             let (database, payload) = v2_permissions_payload(&uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, &uri, &payload).await?;
             database.cleanup().await?;
             Ok(payload)
         }
         V2SuccessFixture::AddressNames => {
-            let uri = format!("/v2/addresses/{V2_ADDRESS}/names?include=role_summary");
+            let uri = format!("/v1/addresses/{V2_ADDRESS}/names?include=role_summary");
             let (database, payload) = v2_address_names_payload(&uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, &uri, &payload).await?;
             database.cleanup().await?;
@@ -997,7 +997,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
             let payload = v2_primary_name_payload_for_database(
                 &database,
                 &format!(
-                    "/v2/addresses/{V2_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
+                    "/v1/addresses/{V2_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
                 ),
             )
             .await?;
@@ -1007,7 +1007,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         V2SuccessFixture::AddressHistory => {
             let database = TestDatabase::new_migrated().await?;
             seed_v2_address_history_conformance_fixture(&database).await?;
-            let uri = format!("/v2/addresses/{V2_ADDRESS}/history?page_size=20");
+            let uri = format!("/v1/addresses/{V2_ADDRESS}/history?page_size=20");
             let payload = v2_conformance_get_json(&database, &uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, &uri, &payload).await?;
             database.cleanup().await?;
@@ -1016,7 +1016,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         V2SuccessFixture::Search => {
             let database = TestDatabase::new_migrated().await?;
             seed_v2_address_names_fixture(&database).await?;
-            let uri = "/v2/search?q=alpha&namespace=ens";
+            let uri = "/v1/search?q=alpha&namespace=ens";
             let payload = v2_conformance_get_json(&database, uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
             database.cleanup().await?;
@@ -1025,7 +1025,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         V2SuccessFixture::Events => {
             let database = TestDatabase::new_migrated().await?;
             seed_v2_history_fixture(&database).await?;
-            let uri = "/v2/events?name=history.eth&page_size=20";
+            let uri = "/v1/events?name=history.eth&page_size=20";
             let payload = v2_conformance_get_json(&database, uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
             database.cleanup().await?;
@@ -1040,7 +1040,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
                 json!(["resource_control", "set_resolver"]);
             upsert_test_resolver_current_rows(&database, &[resolver_row]).await?;
             let uri = format!(
-                "/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes,aliases,roles,events&page_size=5"
+                "/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes,aliases,roles,events&page_size=5"
             );
             let payload = v2_resolver_payload_for_database(&database, &uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, &uri, &payload).await?;
@@ -1050,7 +1050,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         V2SuccessFixture::Namespace => {
             let database = TestDatabase::new(true).await?;
             seed_v2_conformance_namespace_manifests(&database).await?;
-            let payload = v2_conformance_get_json(&database, "/v2/namespaces/ens").await?;
+            let payload = v2_conformance_get_json(&database, "/v1/namespaces/ens").await?;
             database.cleanup().await?;
             Ok(payload)
         }
@@ -1065,7 +1065,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
             };
             let database = TestDatabase::new_with_schemas(false, true).await?;
             seed_v2_diagnostics_name_fixture(&database, "ens:alice.eth", 21_000_003).await?;
-            let uri = format!("/v2/diagnostics/names/Alice.eth/{suffix}");
+            let uri = format!("/v1/diagnostics/names/Alice.eth/{suffix}");
             let payload = request_v2_diagnostics_json(&database, &uri, StatusCode::OK).await?;
             assert_v2_as_of_token_fixpoint(&database, route, &uri, &payload).await?;
             database.cleanup().await?;
@@ -1074,7 +1074,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         V2SuccessFixture::DiagnosticsRecords => {
             let database = TestDatabase::new_with_schemas(false, true).await?;
             seed_v2_alice_name_records_fixture(&database, |_, _, _| {}).await?;
-            let uri = "/v2/diagnostics/names/Alice.eth/records";
+            let uri = "/v1/diagnostics/names/Alice.eth/records";
             let payload = request_v2_diagnostics_json(&database, uri, StatusCode::OK).await?;
             assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
             database.cleanup().await?;
@@ -1085,14 +1085,14 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
             seed_v2_conformance_namespace_manifests(&database).await?;
             let payload = v2_conformance_get_json(
                 &database,
-                "/v2/diagnostics/namespaces/ens/manifests",
+                "/v1/diagnostics/namespaces/ens/manifests",
             )
             .await?;
             database.cleanup().await?;
             Ok(payload)
         }
         V2SuccessFixture::DiagnosticsEvents => {
-            let uri = "/v2/diagnostics/events?name=Diag.eth&page_size=10";
+            let uri = "/v1/diagnostics/events?name=Diag.eth&page_size=10";
             let (database, payload) = v2_diag_events_payload(uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
             database.cleanup().await?;
@@ -1126,17 +1126,17 @@ async fn collect_v2_stale_and_conflict_error_violations(
     for (route, uri, expected_code) in [
         (
             v2_conformance_route(V2SuccessFixture::Name),
-            format!("/v2/names/Alice.eth?at={alice_stale_at}"),
+            format!("/v1/names/Alice.eth?at={alice_stale_at}"),
             "stale",
         ),
         (
             v2_conformance_route(V2SuccessFixture::NameRecords),
-            format!("/v2/names/Alice.eth/records?at={alice_stale_at}"),
+            format!("/v1/names/Alice.eth/records?at={alice_stale_at}"),
             "stale",
         ),
         (
             v2_conformance_route(V2SuccessFixture::Name),
-            format!("/v2/names/Alice.eth?at={conflict_at}"),
+            format!("/v1/names/Alice.eth?at={conflict_at}"),
             "conflict",
         ),
     ] {
@@ -1185,7 +1185,7 @@ async fn collect_v2_stale_and_conflict_error_violations(
     let response = v2_conformance_response(
         &database,
         V2StrictQueryMethod::PostLookup,
-        "/v2/lookup",
+        "/v1/lookup",
     )
     .await?;
     assert_eq!(response.status(), StatusCode::CONFLICT, "{}", route.label);
@@ -1210,7 +1210,7 @@ async fn collect_v2_stale_and_conflict_error_violations(
     upsert_test_resolver_current_rows(&database, &[resolver_row]).await?;
     for (route, uri, expected_code) in [(
         v2_conformance_route(V2SuccessFixture::Resolver),
-        format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?at={resolver_conflict_at}"),
+        format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?at={resolver_conflict_at}"),
         "conflict",
     )] {
         let response = v2_conformance_response(&database, V2StrictQueryMethod::Get, &uri).await?;
@@ -1241,7 +1241,7 @@ async fn collect_v2_stale_and_conflict_error_violations(
     .execute(&database.lookup_pool)
     .await?;
     let route = v2_conformance_route(V2SuccessFixture::Resolver);
-    let uri = format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}");
+    let uri = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}");
     let response = v2_conformance_response(&database, V2StrictQueryMethod::Get, &uri).await?;
     assert_eq!(response.status(), StatusCode::CONFLICT, "{}", route.label);
     let payload: Value = read_json(response).await?;
@@ -1267,27 +1267,27 @@ async fn collect_v2_not_found_error_violations(violations: &mut Vec<String>) -> 
     for (route, uri) in [
         (
             v2_conformance_route(V2SuccessFixture::Name),
-            "/v2/names/missing.eth",
+            "/v1/names/missing.eth",
         ),
         (
             v2_conformance_route(V2SuccessFixture::NameRecords),
-            "/v2/names/missing.eth/records",
+            "/v1/names/missing.eth/records",
         ),
         (
             v2_conformance_route(V2SuccessFixture::Subnames),
-            "/v2/names/missing.eth/subnames",
+            "/v1/names/missing.eth/subnames",
         ),
         (
             v2_conformance_route(V2SuccessFixture::NameHistory),
-            "/v2/names/missing.eth/history",
+            "/v1/names/missing.eth/history",
         ),
         (
             v2_conformance_route(V2SuccessFixture::Resolver),
-            "/v2/resolvers/1/0x00000000000000000000000000000000000000aa",
+            "/v1/resolvers/1/0x00000000000000000000000000000000000000aa",
         ),
         (
             v2_conformance_route(V2SuccessFixture::Namespace),
-            "/v2/namespaces/unknown",
+            "/v1/namespaces/unknown",
         ),
     ] {
         let response =
@@ -1348,41 +1348,41 @@ fn v2_internal_error_probe(
     fixture: V2SuccessFixture,
 ) -> Option<(V2StrictQueryMethod, &'static str)> {
     match fixture {
-        V2SuccessFixture::Lookup => Some((V2StrictQueryMethod::PostLookup, "/v2/lookup")),
-        V2SuccessFixture::Status => Some((V2StrictQueryMethod::Get, "/v2/status")),
-        V2SuccessFixture::Name => Some((V2StrictQueryMethod::Get, "/v2/names/alice.eth")),
+        V2SuccessFixture::Lookup => Some((V2StrictQueryMethod::PostLookup, "/v1/lookup")),
+        V2SuccessFixture::Status => Some((V2StrictQueryMethod::Get, "/v1/status")),
+        V2SuccessFixture::Name => Some((V2StrictQueryMethod::Get, "/v1/names/alice.eth")),
         V2SuccessFixture::NameRecords => {
-            Some((V2StrictQueryMethod::Get, "/v2/names/alice.eth/records"))
+            Some((V2StrictQueryMethod::Get, "/v1/names/alice.eth/records"))
         }
         V2SuccessFixture::Subnames => {
-            Some((V2StrictQueryMethod::Get, "/v2/names/alice.eth/subnames"))
+            Some((V2StrictQueryMethod::Get, "/v1/names/alice.eth/subnames"))
         }
         V2SuccessFixture::NameHistory => {
-            Some((V2StrictQueryMethod::Get, "/v2/names/alice.eth/history"))
+            Some((V2StrictQueryMethod::Get, "/v1/names/alice.eth/history"))
         }
         V2SuccessFixture::Permissions => Some((
             V2StrictQueryMethod::Get,
-            "/v2/permissions?address=0x00000000000000000000000000000000000000aa",
+            "/v1/permissions?address=0x00000000000000000000000000000000000000aa",
         )),
         V2SuccessFixture::AddressNames => Some((
             V2StrictQueryMethod::Get,
-            "/v2/addresses/0x00000000000000000000000000000000000000aa/names",
+            "/v1/addresses/0x00000000000000000000000000000000000000aa/names",
         )),
         V2SuccessFixture::PrimaryName => Some((
             V2StrictQueryMethod::Get,
-            "/v2/addresses/0x00000000000000000000000000000000000000aa/primary-name",
+            "/v1/addresses/0x00000000000000000000000000000000000000aa/primary-name",
         )),
         V2SuccessFixture::AddressHistory => Some((
             V2StrictQueryMethod::Get,
-            "/v2/addresses/0x00000000000000000000000000000000000000aa/history",
+            "/v1/addresses/0x00000000000000000000000000000000000000aa/history",
         )),
-        V2SuccessFixture::Search => Some((V2StrictQueryMethod::Get, "/v2/search?q=alice")),
-        V2SuccessFixture::Events => Some((V2StrictQueryMethod::Get, "/v2/events")),
+        V2SuccessFixture::Search => Some((V2StrictQueryMethod::Get, "/v1/search?q=alice")),
+        V2SuccessFixture::Events => Some((V2StrictQueryMethod::Get, "/v1/events")),
         V2SuccessFixture::Resolver => Some((
             V2StrictQueryMethod::Get,
-            "/v2/resolvers/1/0x00000000000000000000000000000000000000aa",
+            "/v1/resolvers/1/0x00000000000000000000000000000000000000aa",
         )),
-        V2SuccessFixture::Namespace => Some((V2StrictQueryMethod::Get, "/v2/namespaces/ens")),
+        V2SuccessFixture::Namespace => Some((V2StrictQueryMethod::Get, "/v1/namespaces/ens")),
         V2SuccessFixture::DiagnosticsCoverage
         | V2SuccessFixture::DiagnosticsBinding
         | V2SuccessFixture::DiagnosticsAuthority
@@ -1445,7 +1445,7 @@ fn v2_conformance_request(method: V2StrictQueryMethod, uri: &str) -> Request<Bod
 
 async fn v2_conformance_name_records_verified_unsupported_payload() -> Result<Value> {
     v2_name_records_payload_with_setup(
-        "/v2/names/Alice.eth/records?source=verified&keys=addr:60",
+        "/v1/names/Alice.eth/records?source=verified&keys=addr:60",
         |_, _, _| {},
     )
     .await
@@ -1702,7 +1702,7 @@ fn assert_v2_exercised_expansions_non_empty(route: &V2ConformanceRoute, payload:
 fn assert_v2_name_records_verified_unsupported_fixture(payload: &Value) {
     assert_non_empty_json(
         &payload["data"]["records"],
-        "GET /v2/names/{name}/records verified unsupported",
+        "GET /v1/names/{name}/records verified unsupported",
         "$.data.records",
     );
     assert_eq!(

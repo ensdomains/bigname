@@ -35,6 +35,9 @@ pub(super) struct ParsedAddressLookup {
     pub(super) roles: bigname_storage::ReverseIdentityRoles,
     pub(super) page_size: u64,
     pub(super) page_cursor: Option<bigname_storage::ReverseIdentityCursor>,
+    /// Keyset cursor for a `relation=resolves_to` input, which pages `address_records_current`
+    /// instead of the authority relations.
+    pub(super) resolves_to_cursor: Option<bigname_storage::AddressNamesCurrentSortedCursor>,
     pub(super) page_cursor_token: Option<String>,
 }
 
@@ -129,6 +132,7 @@ pub(super) fn parse_address_input(
         roles,
         page_size,
         page_cursor: None,
+        resolves_to_cursor: None,
         page_cursor_token: None,
     })
 }
@@ -137,6 +141,21 @@ pub(super) fn bind_address_cursor(
     input: &mut ParsedAddressLookup,
     public_namespaces: &[String],
 ) -> V2Result<()> {
+    if input
+        .relation
+        .as_ref()
+        .is_some_and(RelationSet::is_resolves_to)
+    {
+        let (page_cursor, page_cursor_token) = super::resolves_to::parse_resolves_to_cursor(
+            input.input.cursor.as_deref(),
+            &input.address,
+            input.coin_type,
+            public_namespaces,
+        )?;
+        input.resolves_to_cursor = page_cursor;
+        input.page_cursor_token = page_cursor_token;
+        return Ok(());
+    }
     let (page_cursor, page_cursor_token) = parse_reverse_cursor(
         input.input.cursor.as_deref(),
         &input.address,

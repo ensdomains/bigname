@@ -494,7 +494,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=7
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=24
+expected_predecessor_shape_proof_count=30
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -570,7 +570,19 @@ for migration_file in \
     "$ROOT/migrations/20260902160100_registry_operator_account_permissions_validate.sql" \
     "$ROOT/migrations/20260902160200_registry_operator_account_permissions_swap.sql" \
     "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql" \
-    "$ROOT/migrations/20260906120000_exact_zero_addr60_default_derivation.sql"
+    "$ROOT/migrations/20260906120000_exact_zero_addr60_default_derivation.sql" \
+    "$ROOT/migrations/20260909120000_resolver_record_id_events.sql" \
+    "$ROOT/migrations/20260909120100_resolver_record_id_events_validate.sql" \
+    "$ROOT/migrations/20260909120200_resolver_record_id_events_swap.sql" \
+    "$ROOT/migrations/20260911120000_normalized_events_emitter_history_idx.sql" \
+    "$ROOT/migrations/20260911120100_address_records_current.sql" \
+    "$ROOT/migrations/20260911120200_name_current_registration_expiry_idx.sql" \
+    "$ROOT/migrations/20260913120000_unsupported_inventory_serves_no_record_values.sql" \
+    "$ROOT/migrations/20260913130000_permissions_resource_restrictions.sql" \
+    "$ROOT/migrations/20260913130100_account_permission_state_wrapper_operators.sql" \
+    "$ROOT/migrations/20260914120000_lookup_publication_revalidation.sql" \
+    "$ROOT/migrations/20260914120100_address_records_current_comments.sql" \
+    "$ROOT/migrations/20260915120000_address_records_optional_authority.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -608,6 +620,55 @@ report_timing empty-schema
 apply_baseline
 apply_baseline
 report_timing baseline-install
+# The production functions intentionally bind their SECURITY DEFINER lookups
+# to bigname_phase. Prove that contract before rebinding only this scratch
+# schema's copies so the remainder of this isolated harness can exercise them.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+DO $$
+DECLARE
+    unsafe_function_count bigint;
+BEGIN
+    SELECT count(*)
+    INTO unsafe_function_count
+    FROM pg_proc procedure
+    JOIN pg_namespace namespace
+      ON namespace.oid = procedure.pronamespace
+    WHERE namespace.nspname = current_schema()
+      AND procedure.proname IN (
+          'revalidate_resolution_lookup_state',
+          'write_resolution_divergence'
+      )
+      AND procedure.proconfig @>
+          ARRAY['search_path=pg_catalog, bigname_phase, pg_temp']::text[];
+
+    IF unsafe_function_count <> 2 THEN
+        RAISE EXCEPTION
+            'lookup SECURITY DEFINER functions lack the fixed production search path';
+    END IF;
+END
+$$;
+SQL
+    printf \
+        'ALTER FUNCTION "%s".revalidate_resolution_lookup_state(text, bigint, text, jsonb, jsonb, uuid, text, text) SET search_path = pg_catalog, "%s", pg_temp;\n' \
+        "$scratch_schema" "$scratch_schema"
+    printf \
+        'ALTER FUNCTION "%s".write_resolution_divergence(uuid, text, text, text, bigint, text, jsonb, text, text, text, text, jsonb, jsonb, boolean) SET search_path = pg_catalog, "%s", pg_temp;\n' \
+        "$scratch_schema" "$scratch_schema"
+} | run_psql
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+BEGIN;
+INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+    manifest_version, chain_id, derivation_kind)
+SELECT 'fresh-record-id-' || kind, 'schema-v2-check', kind, 'ens_v2_resolver_l1',
+    1, 'schema-v2-check', 'ens_v2_resolver'
+FROM unnest(ARRAY['ResolverRecordLinked', 'ResolverPermissionArgument']) AS kinds(kind);
+ROLLBACK;
+SQL
+} | run_psql
 
 
 {
@@ -747,11 +808,114 @@ for migration_file in \
     "$ROOT/migrations/20260902160200_registry_operator_account_permissions_swap.sql" \
     "$ROOT/migrations/20260902160200_registry_operator_account_permissions_swap.sql" \
     "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql" \
-    "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql"
+    "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql" \
+    "$ROOT/migrations/20260909120000_resolver_record_id_events.sql" \
+    "$ROOT/migrations/20260909120000_resolver_record_id_events.sql" \
+    "$ROOT/migrations/20260909120100_resolver_record_id_events_validate.sql" \
+    "$ROOT/migrations/20260909120100_resolver_record_id_events_validate.sql" \
+    "$ROOT/migrations/20260909120200_resolver_record_id_events_swap.sql" \
+    "$ROOT/migrations/20260909120200_resolver_record_id_events_swap.sql" \
+    "$ROOT/migrations/20260911120000_normalized_events_emitter_history_idx.sql" \
+    "$ROOT/migrations/20260911120000_normalized_events_emitter_history_idx.sql" \
+    "$ROOT/migrations/20260911120100_address_records_current.sql" \
+    "$ROOT/migrations/20260911120100_address_records_current.sql" \
+    "$ROOT/migrations/20260911120200_name_current_registration_expiry_idx.sql" \
+    "$ROOT/migrations/20260911120200_name_current_registration_expiry_idx.sql" \
+    "$ROOT/migrations/20260913120000_unsupported_inventory_serves_no_record_values.sql" \
+    "$ROOT/migrations/20260913120000_unsupported_inventory_serves_no_record_values.sql" \
+    "$ROOT/migrations/20260913130000_permissions_resource_restrictions.sql" \
+    "$ROOT/migrations/20260913130000_permissions_resource_restrictions.sql" \
+    "$ROOT/migrations/20260913130100_account_permission_state_wrapper_operators.sql" \
+    "$ROOT/migrations/20260913130100_account_permission_state_wrapper_operators.sql" \
+    "$ROOT/migrations/20260914120000_lookup_publication_revalidation.sql" \
+    "$ROOT/migrations/20260914120000_lookup_publication_revalidation.sql" \
+    "$ROOT/migrations/20260914120100_address_records_current_comments.sql" \
+    "$ROOT/migrations/20260914120100_address_records_current_comments.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
 report_timing baseline-first
+# The address-record table shipped before its column comments. The additive
+# comment migration must restore all current comments without rewriting that migration.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_address_record_comments AS
+SELECT objsubid, description
+FROM pg_description
+WHERE classoid = 'pg_class'::regclass
+  AND objoid = 'address_records_current'::regclass;
+DO $$
+DECLARE
+    column_name text;
+BEGIN
+    COMMENT ON TABLE address_records_current IS NULL;
+    FOR column_name IN
+        SELECT attname FROM pg_attribute
+        WHERE attrelid = 'address_records_current'::regclass
+          AND attnum > 0 AND NOT attisdropped
+    LOOP
+        EXECUTE format('COMMENT ON COLUMN address_records_current.%I IS NULL', column_name);
+    END LOOP;
+END
+$$;
+SQL
+    emit_phase_migration \
+        "$ROOT/migrations/20260914120100_address_records_current_comments.sql" \
+        preceding-shape
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT objsubid, description FROM expected_address_record_comments
+        EXCEPT
+        SELECT objsubid, description FROM pg_description
+        WHERE classoid = 'pg_class'::regclass
+          AND objoid = 'address_records_current'::regclass
+    ) THEN
+        RAISE EXCEPTION 'address-record comment migration did not restore baseline comments';
+    END IF;
+END
+$$;
+DROP TABLE expected_address_record_comments;
+SQL
+} | run_psql
+# The reverse index previously required authority identity even when a name had
+# a readable serving resource. Prove that exact predecessor upgrades and that
+# repeat application preserves the required record-resource identity.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+ALTER TABLE address_records_current
+    ALTER COLUMN surface_binding_id SET NOT NULL,
+    ALTER COLUMN resource_id SET NOT NULL,
+    ALTER COLUMN binding_kind SET NOT NULL;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" preceding-shape
+    emit_phase_migration "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" baseline-first
+    emit_phase_migration "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = 'address_records_current'::regclass
+          AND attname IN ('surface_binding_id', 'resource_id', 'binding_kind')
+          AND attnotnull
+    ) OR NOT EXISTS (
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = 'address_records_current'::regclass
+          AND attname = 'record_resource_id' AND attnotnull
+    ) THEN
+        RAISE EXCEPTION 'reverse-index upgrade did not preserve optional authority and required serving identity';
+    END IF;
+END
+$$;
+SQL
+} | run_psql
+assert_migration_context_count "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" empty-schema 1
+assert_migration_context_count "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" preceding-shape 1
+assert_migration_context_count "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" baseline-first 2
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor
 # shape, then validate the additive tuple invariant independently. Both files
 # must remain idempotent after the upgrade completes.
@@ -993,6 +1157,7 @@ INSERT INTO surface_bindings (
 TRUNCATE TABLE
     name_current,
     address_names_current,
+    address_records_current,
     surface_bindings
     CONTINUE IDENTITY RESTRICT;
 
@@ -1808,42 +1973,78 @@ SQL
     done
 } | run_psql
 
-# The production functions intentionally bind their SECURITY DEFINER lookups
-# to bigname_phase. Prove that contract before rebinding only this scratch
-# schema's copies so the remainder of this isolated harness can exercise them.
+# The preceding vocabulary reconstruction ends with the exact 20260902 constraint.
+record_id_add="$ROOT/migrations/20260909120000_resolver_record_id_events.sql"
+record_id_validate="$ROOT/migrations/20260909120100_resolver_record_id_events_validate.sql"
+record_id_swap="$ROOT/migrations/20260909120200_resolver_record_id_events_swap.sql"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+    manifest_version, chain_id, derivation_kind, after_state)
+VALUES ('record-id-predecessor', 'schema-v2-check', 'RecordChanged', 'ens_v2_resolver_l1',
+    1, 'schema-v2-check', 'ens_v2_resolver', '{"retained":true}');
+CREATE TEMP TABLE record_id_predecessor AS
+    SELECT * FROM normalized_events WHERE event_identity = 'record-id-predecessor';
+SQL
+    emit_phase_migration "$record_id_add" preceding-shape
+    emit_phase_migration "$record_id_swap" preceding-shape
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'normalized_events'::regclass
+          AND conname = 'normalized_events_event_kind_check' AND convalidated)
+    OR NOT EXISTS (SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'normalized_events'::regclass
+          AND conname = 'normalized_events_event_kind_check_record_id' AND NOT convalidated)
+    THEN RAISE EXCEPTION 'unvalidated record-ID replacement removed prior protection'; END IF;
+END $$;
+SQL
+    emit_phase_migration "$record_id_validate" preceding-shape
+    emit_phase_migration "$record_id_swap" preceding-shape
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF EXISTS (SELECT * FROM record_id_predecessor EXCEPT
+        SELECT * FROM normalized_events WHERE event_identity = 'record-id-predecessor')
+    THEN RAISE EXCEPTION 'record-ID upgrade changed existing facts'; END IF;
+END $$;
+DELETE FROM normalized_events WHERE event_identity = 'record-id-predecessor';
+SQL
+} | run_psql
+for migration_file in "$record_id_add" "$record_id_validate" "$record_id_swap"; do
+    emit_phase_migration "$migration_file" preceding-shape | run_psql
+    assert_migration_context_count "$migration_file" empty-schema 1
+    assert_migration_context_count "$migration_file" baseline-first 2
+    expected_record_id_applications=2
+    if [ "$migration_file" = "$record_id_swap" ]; then expected_record_id_applications=3; fi
+    assert_migration_context_count "$migration_file" preceding-shape "$expected_record_id_applications"
+done
+
+# Function migrations are rendered into this isolated schema. Their fixed search
+# paths must follow that rendering, including when replacing baseline functions.
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<'SQL'
 DO $$
-DECLARE
-    unsafe_function_count bigint;
 BEGIN
-    SELECT count(*)
-    INTO unsafe_function_count
-    FROM pg_proc procedure
-    JOIN pg_namespace namespace
-      ON namespace.oid = procedure.pronamespace
-    WHERE namespace.nspname = current_schema()
-      AND procedure.proname IN (
-          'revalidate_resolution_lookup_state',
-          'write_resolution_divergence'
-      )
-      AND procedure.proconfig @>
-          ARRAY['search_path=pg_catalog, bigname_phase, pg_temp']::text[];
-
-    IF unsafe_function_count <> 2 THEN
-        RAISE EXCEPTION
-            'lookup SECURITY DEFINER functions lack the fixed production search path';
+    IF (
+        SELECT count(*) FROM pg_proc procedure
+        JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+        WHERE namespace.nspname = current_schema()
+          AND procedure.proname IN (
+              'revalidate_resolution_lookup_state', 'write_resolution_divergence'
+          )
+          AND procedure.proconfig @> ARRAY[
+              'search_path=pg_catalog, ' || current_schema() || ', pg_temp'
+          ]::text[]
+    ) <> 2 THEN
+        RAISE EXCEPTION 'lookup function migrations lack the fixed scratch search path';
     END IF;
 END
 $$;
 SQL
-    printf \
-        'ALTER FUNCTION "%s".revalidate_resolution_lookup_state(text, bigint, text, jsonb, jsonb, uuid, text, text) SET search_path = pg_catalog, "%s", pg_temp;\n' \
-        "$scratch_schema" "$scratch_schema"
-    printf \
-        'ALTER FUNCTION "%s".write_resolution_divergence(uuid, text, text, text, bigint, text, jsonb, text, text, text, text, jsonb, jsonb, boolean) SET search_path = pg_catalog, "%s", pg_temp;\n' \
-        "$scratch_schema" "$scratch_schema"
 } | run_psql
 
 {
@@ -1866,6 +2067,7 @@ BEGIN
         VALUES
             ('account_permission_state_current'),
             ('address_names_current'),
+            ('address_records_current'),
             ('chain_heads'),
             ('chain_header_audit'),
             ('chain_lineage'),
@@ -1932,6 +2134,7 @@ BEGIN
         VALUES
             ('account_permission_state_current'),
             ('address_names_current'),
+            ('address_records_current'),
             ('chain_heads'),
             ('chain_header_audit'),
             ('chain_lineage'),
@@ -2124,6 +2327,7 @@ BEGIN
           AND table_name IN (
               'name_current',
               'address_names_current',
+              'address_records_current',
               'permissions_current',
               'account_permission_state_current',
               'permissions_current_resource_summary',
@@ -5468,6 +5672,14 @@ BEGIN
             END IF;
     END;
 
+    INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+        manifest_version, chain_id, derivation_kind)
+    SELECT 'valid-record-id-' || kind, 'schema-v2-check', kind, 'ens_v2_resolver_l1',
+        1, 'schema-v2-check', 'ens_v2_resolver'
+    FROM unnest(ARRAY['ResolverRecordLinked', 'ResolverPermissionArgument']) AS kinds(kind);
+    DELETE FROM normalized_events WHERE event_identity IN (
+        'valid-record-id-ResolverRecordLinked', 'valid-record-id-ResolverPermissionArgument');
+
     INSERT INTO normalized_events (
         event_identity,
         namespace,
@@ -6746,6 +6958,8 @@ SQL
 } | run_psql
 
 # The independent predecessor body and ACL are copied from public #855 f95200b3.
+# The exact-zero result body hash is pinned from baseline 9f417401; the newer
+# unsupported-inventory migration is proved separately against the current baseline.
 zero_default_migration="$ROOT/migrations/20260906120000_exact_zero_addr60_default_derivation.sql"
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
@@ -6788,7 +7002,11 @@ SQL
         cat <<'SQL'
 DO $$
 BEGIN
-    IF exact_zero_writer_metadata() <> (SELECT metadata FROM exact_zero_expected_writer) THEN
+    IF (SELECT md5(prosrc) FROM pg_proc
+        WHERE oid = 'write_resolution_divergence(uuid,text,text,text,bigint,text,jsonb,text,text,text,text,jsonb,jsonb,boolean)'::regprocedure)
+            IS DISTINCT FROM '23d078f731ff9405584f1587c0113045'
+        OR exact_zero_writer_metadata() - 'definition'
+            <> (SELECT metadata - 'definition' FROM exact_zero_expected_writer) THEN
         RAISE EXCEPTION 'exact-zero function definition, signature or privilege metadata diverged';
     END IF;
 END
@@ -7131,7 +7349,11 @@ SQL
         cat <<'SQL'
 DO $$
 BEGIN
-    IF exact_zero_writer_metadata() <> (SELECT metadata FROM exact_zero_expected_writer) THEN
+    IF (SELECT md5(prosrc) FROM pg_proc
+        WHERE oid = 'write_resolution_divergence(uuid,text,text,text,bigint,text,jsonb,text,text,text,text,jsonb,jsonb,boolean)'::regprocedure)
+            IS DISTINCT FROM '23d078f731ff9405584f1587c0113045'
+        OR exact_zero_writer_metadata() - 'definition'
+            <> (SELECT metadata - 'definition' FROM exact_zero_expected_writer) THEN
         RAISE EXCEPTION 'exact-zero function definition, signature or privilege metadata diverged';
     END IF;
 END
@@ -7141,7 +7363,20 @@ SELECT assert_exact_zero_migration_behavior();
 ROLLBACK;
 SQL
     done
+    emit_phase_migration \
+        "$ROOT/migrations/20260913120000_unsupported_inventory_serves_no_record_values.sql" \
+        preceding-shape
     cat <<'SQL'
+DO $$
+BEGIN
+    IF exact_zero_writer_metadata() <> (SELECT metadata FROM exact_zero_expected_writer) THEN
+        RAISE EXCEPTION 'unsupported-inventory writer upgrade diverged from the current baseline';
+    END IF;
+END
+$$;
+BEGIN;
+SELECT assert_exact_zero_migration_behavior();
+ROLLBACK;
 DROP TABLE exact_zero_expected_writer;
 DROP FUNCTION exact_zero_writer_metadata();
 DROP FUNCTION assert_exact_zero_migration_behavior();

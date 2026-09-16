@@ -1,15 +1,16 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use anyhow::{Context, Result, bail};
+use futures_util::{StreamExt, TryStreamExt, stream};
 use serde_json::{Value, json};
 
 use super::{
-    JsonRpcProvider,
+    JsonRpcProvider, PROVIDER_PARALLELISM,
     decode::normalize_hash,
     request::BatchCall,
     types::{
-        Block, BlockBundle, BlockTag, HeadSnapshot, Log, Receipt, ResolvedBlock,
-        block_number_parameter, hash_log_filter, range_log_filter,
+        Block, BlockBundle, BlockTag, HeadSnapshot, Log, Receipt, ResolvedBlock, Transaction,
+        TransactionPayload, block_number_parameter, hash_log_filter, range_log_filter,
     },
 };
 
@@ -49,111 +50,146 @@ impl JsonRpcProvider {
         .transpose()
     }
 
+    /// Runs `calls` as JSON-RPC batches of [`BATCH_LIMIT`], at most
+    /// [`PROVIDER_PARALLELISM`] in flight, and returns the results in call order.
+    async fn parallel_batches(&self, calls: Vec<BatchCall>) -> Result<Vec<Option<Value>>> {
+        let chunks = calls
+            .chunks(BATCH_LIMIT)
+            .map(<[BatchCall]>::to_vec)
+            .collect::<Vec<_>>();
+        let results = stream::iter(chunks.into_iter().map(|chunk| self.batch(chunk)))
+            .buffered(PROVIDER_PARALLELISM)
+            .try_collect::<Vec<_>>()
+            .await?;
+        Ok(results.into_iter().flatten().collect())
+    }
+
     pub async fn resolve(&self, numbers: &[i64]) -> Result<Vec<ResolvedBlock>> {
-        let mut resolved = Vec::with_capacity(numbers.len());
-        for chunk in numbers.chunks(BATCH_LIMIT) {
-            let calls = chunk
-                .iter()
-                .map(|number| {
-                    Ok(BatchCall {
-                        method: "eth_getBlockByNumber",
-                        params: vec![block_number_parameter(*number)?, Value::Bool(false)],
-                    })
+        let calls = numbers
+            .iter()
+            .map(|number| {
+                Ok(BatchCall {
+                    method: "eth_getBlockByNumber",
+                    params: vec![block_number_parameter(*number)?, Value::Bool(false)],
                 })
-                .collect::<Result<Vec<_>>>()?;
-            for (number, value) in chunk.iter().zip(self.batch(calls).await?) {
-                let block = value
-                    .with_context(|| format!("provider omitted block {number}"))
-                    .and_then(Block::from_value)?;
-                if block.number != *number {
-                    bail!(
-                        "provider returned block {} for requested {number}",
-                        block.number
-                    );
-                }
-                resolved.push(ResolvedBlock {
-                    number: *number,
-                    hash: block.hash,
-                });
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut resolved = Vec::with_capacity(numbers.len());
+        for (number, value) in numbers.iter().zip(self.parallel_batches(calls).await?) {
+            let block = value
+                .with_context(|| format!("provider omitted block {number}"))
+                .and_then(Block::from_value)?;
+            if block.number != *number {
+                bail!(
+                    "provider returned block {} for requested {number}",
+                    block.number
+                );
             }
+            resolved.push(ResolvedBlock {
+                number: *number,
+                hash: block.hash,
+            });
         }
         Ok(resolved)
     }
 
+    /// Rechecks every resolved block while loading its header after the range log queries.
+    /// Reading by number detects reorgs even when the replacement returned no watched logs.
     pub async fn headers(&self, resolved: &[ResolvedBlock]) -> Result<Vec<Block>> {
-        let mut headers = Vec::with_capacity(resolved.len());
-        for chunk in resolved.chunks(BATCH_LIMIT) {
-            let calls = chunk
-                .iter()
-                .map(|block| BatchCall {
-                    method: "eth_getBlockByHash",
-                    params: vec![Value::String(block.hash.clone()), Value::Bool(false)],
+        let calls = resolved
+            .iter()
+            .map(|block| {
+                Ok(BatchCall {
+                    method: "eth_getBlockByNumber",
+                    params: vec![block_number_parameter(block.number)?, Value::Bool(false)],
                 })
-                .collect();
-            for (expected, value) in chunk.iter().zip(self.batch(calls).await?) {
-                let block = value
-                    .with_context(|| format!("provider omitted block {}", expected.hash))
-                    .and_then(Block::from_value)?;
-                validate_block(expected, &block)?;
-                headers.push(block);
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut headers = Vec::with_capacity(resolved.len());
+        for (expected, value) in resolved.iter().zip(self.parallel_batches(calls).await?) {
+            let block = value
+                .with_context(|| {
+                    format!(
+                        "provider block disappeared during range log lookup: {}",
+                        expected.number
+                    )
+                })
+                .and_then(Block::from_value)?;
+            if block.hash != normalize_hash(&expected.hash) {
+                bail!("provider block hashes changed during range log lookup");
             }
+            validate_block(expected, &block)?;
+            headers.push(block);
         }
         Ok(headers)
     }
 
-    pub async fn logs(
+    /// Range log lookup over `from..=to` with no hash re-check of its own.
+    ///
+    /// Logs come back carrying the block hash the provider reported. The caller pins them
+    /// against the hashes the window resolved and checks them again when loading [`Self::headers`].
+    pub async fn range_logs(
         &self,
-        resolved: &[ResolvedBlock],
+        from: i64,
+        to: i64,
         addresses: &[String],
         topics: &[String],
+        topic1s: &[String],
     ) -> Result<Vec<Log>> {
-        if resolved.is_empty() || topics.is_empty() {
+        self.range_log_values(from, to, addresses, topics, topic1s)
+            .await?
+            .iter()
+            .map(Log::from_unpinned_value)
+            .collect()
+    }
+
+    /// Fetches the receipt and the transaction of every hash in `hashes`.
+    ///
+    /// Both methods go out as JSON-RPC batches with the provider's bounded parallelism;
+    /// results keep the order of `hashes`. A null result means the transaction left the
+    /// chain between the range query and this fetch, which is transient.
+    pub async fn transaction_payloads(&self, hashes: &[String]) -> Result<Vec<TransactionPayload>> {
+        if hashes.is_empty() {
             return Ok(Vec::new());
         }
-        validate_contiguous(resolved)?;
-        let mut queue = VecDeque::from([(0usize, resolved.len())]);
-        let mut values = Vec::new();
-        while let Some((start, end)) = queue.pop_front() {
-            let first = resolved[start].number;
-            let last = resolved[end - 1].number;
-            let result = self
-                .request(
-                    "eth_getLogs",
-                    vec![range_log_filter(first, last, addresses, topics)?],
-                )
-                .await;
-            match result {
-                Ok(Some(Value::Array(logs))) => values.extend(logs),
-                Ok(Some(_)) => bail!("provider returned a non-array log result"),
-                Ok(None) => bail!("provider returned null logs for {first}..={last}"),
-                Err(error) if end - start > 1 && range_too_large(&error) => {
-                    let middle = start + (end - start) / 2;
-                    queue.push_front((middle, end));
-                    queue.push_front((start, middle));
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        let by_number = resolved
+        let calls = hashes
             .iter()
-            .map(|block| (block.number, block.hash.as_str()))
-            .collect::<BTreeMap<_, _>>();
-        let mut logs = Vec::with_capacity(values.len());
-        for value in &values {
-            let number = Log::block_number(value)?;
-            let hash = by_number
-                .get(&number)
-                .with_context(|| format!("provider returned log for block {number}"))?;
-            logs.push(Log::from_value(value, hash, number)?);
-        }
-        if self
-            .resolve(&by_number.keys().copied().collect::<Vec<_>>())
-            .await?
-            != resolved
-        {
-            bail!("provider block hashes changed during range log lookup");
-        }
-        Ok(logs)
+            .map(|hash| BatchCall {
+                method: "eth_getTransactionReceipt",
+                params: vec![json!(hash)],
+            })
+            .chain(hashes.iter().map(|hash| BatchCall {
+                method: "eth_getTransactionByHash",
+                params: vec![json!(hash)],
+            }))
+            .collect();
+        let values = self.parallel_batches(calls).await?;
+        let (receipts, transactions) = values.split_at(hashes.len());
+        hashes
+            .iter()
+            .zip(receipts)
+            .zip(transactions)
+            .map(|((hash, receipt), transaction)| {
+                let receipt = receipt.as_ref().with_context(|| {
+                    format!("provider omitted receipt for selected transaction {hash}")
+                })?;
+                let transaction = transaction.as_ref().with_context(|| {
+                    format!("provider omitted transaction for selected log {hash}")
+                })?;
+                if transaction
+                    .get("blockHash")
+                    .is_none_or(serde_json::Value::is_null)
+                {
+                    bail!("provider returned a pending transaction for selected log {hash}");
+                }
+                Ok(TransactionPayload {
+                    transaction: Transaction::from_value(transaction)?,
+                    receipt: Receipt::from_value(receipt)?,
+                    receipt_logs: Receipt::logs_from_value(receipt)?,
+                    receipt_reported_status: Receipt::reported_status(receipt),
+                })
+            })
+            .collect()
     }
 
     pub(super) async fn verification_logs(
@@ -162,9 +198,10 @@ impl JsonRpcProvider {
         to_block: i64,
         addresses: &[String],
         topics: &[String],
+        topic1s: &[String],
     ) -> Result<Vec<Log>> {
         let values = self
-            .range_log_values(from_block, to_block, addresses, topics)
+            .range_log_values(from_block, to_block, addresses, topics, topic1s)
             .await?;
         let logs = values
             .iter()
@@ -190,6 +227,7 @@ impl JsonRpcProvider {
         to_block: i64,
         addresses: &[String],
         topics: &[String],
+        topic1s: &[String],
     ) -> Result<Vec<Value>> {
         if from_block > to_block || topics.is_empty() {
             return Ok(Vec::new());
@@ -200,7 +238,7 @@ impl JsonRpcProvider {
             let result = self
                 .request(
                     "eth_getLogs",
-                    vec![range_log_filter(first, last, addresses, topics)?],
+                    vec![range_log_filter(first, last, addresses, topics, topic1s)?],
                 )
                 .await;
             match result {
@@ -300,6 +338,29 @@ impl JsonRpcProvider {
     }
 }
 
+/// Pins range-query logs to the hashes the window resolved.
+///
+/// A log for a block outside the window, or for a hash that no longer matches, is the same
+/// mid-fetch reorg race the by-hash lookup used to report, and stays retryable.
+pub(super) fn pin_logs_to_resolved(resolved: &[ResolvedBlock], logs: Vec<Log>) -> Result<Vec<Log>> {
+    let by_number = resolved
+        .iter()
+        .map(|block| (block.number, block.hash.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    for log in &logs {
+        let hash = by_number
+            .get(&log.block_number)
+            .with_context(|| format!("provider returned log for block {}", log.block_number))?;
+        if log.block_hash != *hash {
+            bail!(
+                "provider returned log outside resolved block {} {hash}",
+                log.block_number
+            );
+        }
+    }
+    Ok(logs)
+}
+
 fn validate_block(expected: &ResolvedBlock, block: &Block) -> Result<()> {
     if block.number != expected.number || block.hash != normalize_hash(&expected.hash) {
         bail!(
@@ -353,15 +414,6 @@ fn order_receipts(bundle: &BlockBundle, receipts: Vec<Receipt>) -> Result<Vec<Re
     Ok(ordered)
 }
 
-fn validate_contiguous(resolved: &[ResolvedBlock]) -> Result<()> {
-    for pair in resolved.windows(2) {
-        if pair[1].number != pair[0].number + 1 {
-            bail!("provider log range is not contiguous");
-        }
-    }
-    Ok(())
-}
-
 fn range_too_large(error: &anyhow::Error) -> bool {
     let error = format!("{error:#}").to_ascii_lowercase();
     [
@@ -371,6 +423,10 @@ fn range_too_large(error: &anyhow::Error) -> bool {
         "result size exceeded",
         "more than 10000 results",
         "-32005",
+        // dRPC: "-32602: query block range exceeds server limit, narrow your filter: 1000".
+        "block range exceeds",
+        "exceeds server limit",
+        "narrow your filter",
     ]
     .iter()
     .any(|needle| error.contains(needle))
@@ -389,4 +445,22 @@ fn unsupported_checkpoint_tag(error: &anyhow::Error) -> bool {
         ]
         .iter()
         .any(|needle| error.contains(needle))
+}
+
+#[cfg(test)]
+mod range_limit_tests {
+    use super::range_too_large;
+
+    #[test]
+    fn hosted_block_range_limits_are_halved_not_terminal() {
+        for message in [
+            "provider returned JSON-RPC error for eth_getLogs: -32602: query block range exceeds server limit, narrow your filter: 1000",
+            "provider returned JSON-RPC error for eth_getLogs: -32005: query returned more than 10000 results",
+        ] {
+            assert!(range_too_large(&anyhow::anyhow!(message)), "{message}");
+        }
+        assert!(!range_too_large(&anyhow::anyhow!(
+            "provider returned JSON-RPC error for eth_getLogs: -32602: invalid argument 0: hex string"
+        )));
+    }
 }

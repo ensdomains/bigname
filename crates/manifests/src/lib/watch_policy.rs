@@ -9,6 +9,7 @@ const REGISTRY_CREATED_SIGNATURE: &str = "RegistryCreated()";
 pub const APPROVAL_FOR_ALL_SIGNATURE: &str = "ApprovalForAll(address,address,bool)";
 pub const APPROVAL_SIGNATURE: &str = "Approval(address,address,uint256)";
 pub const APPROVED_SIGNATURE: &str = "Approved(address,bytes32,address,bool)";
+const ERC1967_UPGRADED_SIGNATURE: &str = "Upgraded(address)";
 const ENS_V2_UNIQUE_RESOLVER_EVENT_SIGNATURES: &[&str] = &[
     "AliasChanged(bytes,bytes,bytes,bytes)",
     "NamedResource(uint256,bytes)",
@@ -46,6 +47,29 @@ pub fn all_emitter_topic0s(source_family: &str, manifest_topic0s: &[String]) -> 
         .into_iter()
         .filter(|topic| manifest_topic0s.contains(topic))
         .collect()
+}
+
+/// The `Upgraded(address)` topic0 when `source_family` admits resolvers by implementation
+/// announcement: the ENSv2 resolver family watches that event across every emitter, narrowed by
+/// `topic1` to its declared `resolver_implementations`.
+pub fn implementation_announcement_topic0(
+    source_family: &str,
+    manifest_topic0s: &[String],
+) -> Option<String> {
+    let upgraded = topic0(ERC1967_UPGRADED_SIGNATURE);
+    (source_family == ENS_V2_RESOLVER_SOURCE_FAMILY
+        && manifest_topic0s
+            .iter()
+            .any(|topic| topic.eq_ignore_ascii_case(&upgraded)))
+    .then_some(upgraded)
+}
+
+/// An address as the 32-byte indexed-topic word `eth_getLogs` filters on.
+pub fn address_topic(address: &str) -> String {
+    format!(
+        "0x{:0>64}",
+        address.trim_start_matches("0x").to_ascii_lowercase()
+    )
 }
 
 pub fn uses_discovered_emitters(source_family: &str) -> bool {

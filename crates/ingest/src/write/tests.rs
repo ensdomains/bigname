@@ -271,5 +271,6 @@ fn query(block_number: i64) -> WatchQuery {
         to_block: block_number,
         addresses: vec![ADDRESS.to_owned()],
         topic0s: vec![TOPIC.to_owned()],
+        topic1s: Vec::new(),
     }
 }

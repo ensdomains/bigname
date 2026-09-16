@@ -1,5 +1,5 @@
 use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow, SurfaceBindingKind};
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::types::time::OffsetDateTime;
 
 use super::*;
@@ -58,18 +58,50 @@ fn auto_rejects_derived_answer_from_nonauthoritative_inventory() {
 }
 
 #[test]
-fn auto_accepts_exact_success_from_nonauthoritative_inventory() {
+fn unsupported_inventory_refuses_exact_success_and_leaves_auto_unsatisfied() {
     let timestamp =
         OffsetDateTime::from_unix_timestamp(1_717_171_719).expect("test timestamp must be valid");
     let row = current_name_row(timestamp);
     let inventory = exact_success_inventory();
     let record = parse_resolution_record_key("addr:60").expect("test selector must parse");
 
-    let answer = indexed_satisfying_record_answer(&row, Some(&inventory), &record, false)
-        .expect("auto satisfaction must evaluate")
-        .expect("an exact indexed success does not depend on inventory exhaustiveness");
-    assert_eq!(answer.status, Status::Ok);
-    assert!(answer.meta.is_none());
+    let indexed = indexed_record_answer(Some(&inventory), &record)
+        .expect("explicit indexed evaluation must complete");
+    assert_eq!(indexed.status, Status::Unsupported);
+    assert_eq!(indexed.value, None);
+    assert_eq!(
+        indexed.unsupported_reason.as_deref(),
+        Some("resolver_implementation_unknown"),
+        "the row's own reason is the public reason"
+    );
+    assert!(
+        indexed_satisfying_record_answer(&row, Some(&inventory), &record, false)
+            .expect("auto satisfaction must evaluate")
+            .is_none(),
+        "a retained value on an unsupported row does not satisfy auto"
+    );
+}
+
+#[test]
+fn unsupported_inventory_reason_maps_through_the_projected_row_vocabulary() {
+    let record = parse_resolution_record_key("addr:60").expect("test selector must parse");
+    for (row_reason, public_reason) in [
+        // Pipeline wording cannot cross the serving boundary, and must not fail the request.
+        (
+            json!("coverage_incomplete"),
+            "unsupported_reason_unrecognized",
+        ),
+        // A row naming no reason reports the generic non-authoritative reason.
+        (Value::Null, "indexed_record_inventory_not_authoritative"),
+    ] {
+        let mut inventory = exact_success_inventory();
+        inventory.coverage = json!({"status":"unsupported","unsupported_reason": row_reason});
+
+        let indexed = indexed_record_answer(Some(&inventory), &record)
+            .expect("an unsupported inventory reason must not fail the request");
+        assert_eq!(indexed.status, Status::Unsupported, "{public_reason}");
+        assert_eq!(indexed.unsupported_reason.as_deref(), Some(public_reason));
+    }
 }
 
 #[test]
@@ -167,6 +199,88 @@ fn auto_null_resolver_falls_through_only_for_the_ens_mainnet_discovery_shape() {
 }
 
 #[test]
+fn sepolia_null_resolver_admission_matches_executed_discovery_and_rejects_route_changes() {
+    use super::super::{ZERO_ADDRESS, ensure_executed_route_matches_admission};
+
+    let record = parse_resolution_record_key("addr:60").expect("test selector must parse");
+    let mut row = null_resolver_discovery_row();
+    row.chain_positions = json!({"ethereum-sepolia":{"chain_id":"ethereum-sepolia"}});
+    row.provenance = json!({"authority_selection":{"authority_arm":"ens_v2"}});
+    row.declared_summary["topology"] = json!({
+        "registry_path": [], "subregistry_path": [],
+        "resolver_path": [{"logical_name_id":row.logical_name_id,
+            "chain_id":"ethereum-sepolia", "address":null}],
+        "wildcard":{"source":null,"matched_labels":[]},
+        "alias":{"final_target":null,"hops":[]}, "version_boundaries":{},
+        "transport":{"source_chain_id":null,"target_chain_id":null,
+            "contract_address":null,"latest_event_kind":null}
+    });
+    for candidate in [row.clone(), {
+        let mut absent = row.clone();
+        absent
+            .declared_summary
+            .as_object_mut()
+            .unwrap()
+            .remove("topology");
+        absent
+    }] {
+        let admitted = ens_universal_resolver_discovery_candidate(&candidate);
+        assert!(admitted, "Sepolia direct-null shape must agree with Lookup");
+        assert!(ensure_executed_route_matches_admission(ZERO_ADDRESS, admitted).is_ok());
+        assert!(
+            ensure_executed_route_matches_admission(
+                "0x1000000000000000000000000000000000000001",
+                admitted
+            )
+            .is_err(),
+            "a discovery-to-direct route change must remain stale"
+        );
+        assert!(
+            indexed_satisfying_record_answer(&candidate, None, &record, true)
+                .expect("candidate must evaluate")
+                .is_none()
+        );
+        let (_, unavailable) = build_auto_name_records(
+            &candidate,
+            None,
+            std::slice::from_ref(&record),
+            Some(VerifiedRecordLookup::NotSupported),
+            false,
+            true,
+        )
+        .expect("unadmitted execution must remain explicit");
+        assert_eq!(
+            unavailable.records.unwrap()["addr:60"].status,
+            Status::Unsupported
+        );
+    }
+
+    let mut rejected = Vec::new();
+    let mut wrong_hop = row.clone();
+    wrong_hop.declared_summary["topology"]["resolver_path"][0]["chain_id"] =
+        json!("ethereum-mainnet");
+    rejected.push(wrong_hop);
+    let mut wrong_slot = row.clone();
+    wrong_slot.chain_positions = json!({"ethereum":{"chain_id":"ethereum-sepolia"}});
+    rejected.push(wrong_slot);
+    let mut alias = row.clone();
+    alias.declared_summary["topology"]["alias"] = json!({
+        "final_target":{"logical_name_id":"ens:other"},"hops":[{"logical_name_id":"ens:other"}]
+    });
+    rejected.push(alias);
+    let mut malformed = row.clone();
+    malformed.declared_summary["topology"]["resolver_path"] = json!([]);
+    rejected.push(malformed);
+    let mut unsupported = row;
+    unsupported.declared_summary["resolver"]["status"] = json!("unsupported");
+    rejected.push(unsupported);
+    for candidate in rejected {
+        assert!(!ens_universal_resolver_discovery_candidate(&candidate));
+        assert!(ensure_executed_route_matches_admission(ZERO_ADDRESS, false).is_err());
+    }
+}
+
+#[test]
 fn null_resolver_discovery_keeps_avatar_stale_without_a_record_boundary() {
     let record = parse_resolution_record_key("avatar").expect("test selector must parse");
     let (_, records) = build_auto_name_records(
@@ -255,7 +369,7 @@ fn exact_success_inventory() -> RecordInventoryCurrentRow {
         provenance: json!({}),
         coverage: json!({
             "status":"unsupported",
-            "unsupported_reason":"coverage_incomplete"
+            "unsupported_reason":"resolver_implementation_unknown"
         }),
         chain_positions: json!({}),
         canonicality_summary: json!({}),

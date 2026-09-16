@@ -11,6 +11,7 @@ mod inventory;
 mod labels;
 mod primary;
 mod registry_resolver;
+mod registry_root;
 mod resolver;
 mod resolver_dependents;
 mod retracted;
@@ -39,6 +40,8 @@ pub(crate) async fn initialize(
 
     stage_changed_events(transaction, chain_id, window.from_block, window.to_block).await?;
     seed_direct_scope(transaction, chain_id, window.from_block, window.to_block).await?;
+    wrapper::include_operator_holder_resources(transaction, chain_id).await?;
+    registry_root::include_registry_registrations(transaction, chain_id, target.number).await?;
     inventory::include_changed_node_record_dependents(transaction, chain_id).await?;
     labels::include_changed_children(transaction, chain_id).await?;
     inventory::include_changed_record_consumers(transaction, chain_id, target.number).await?;
@@ -93,6 +96,9 @@ async fn create_scope_tables(transaction: &mut Transaction<'_, Postgres>) -> Res
         "CREATE TEMP TABLE project_scope_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_expiry_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_children (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
+        // Ancestors reached only through a changed child's edge: their own events and surfaces
+        // stage as parent evidence, but their child families are not rebuilt.
+        "CREATE TEMP TABLE project_scope_ancestors (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_account_permissions (chain_id text, authority_kind text, authority_contract text, owner text, subject text, relation_kind text, PRIMARY KEY (chain_id, authority_kind, authority_contract, owner, subject, relation_kind)) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_permission_effect_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
@@ -179,37 +185,50 @@ async fn seed_direct_scope(
             })?;
     }
 
-    sqlx::query(
-        "INSERT INTO project_scope_children
-         SELECT event.namespace || ':' || lower(candidate.node)
-         FROM project_changed_events event
-         CROSS JOIN LATERAL (
-             VALUES (event.after_state ->> 'node'),
-                    (event.after_state ->> 'child_node'),
-                    (event.before_state ->> 'node'),
-                    (event.before_state ->> 'child_node')
-         ) candidate(node)
-         WHERE event.event_kind IN ('SubregistryChanged', 'AuthorityTransferred')
-           AND event.source_family IN (
-               'ens_v1_registry_l1', 'basenames_base_registry'
-           )
-           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND EXISTS (
-               SELECT 1
-               FROM chain_lineage lineage
-               WHERE lineage.chain_id = event.chain_id
-                 AND lineage.block_number = event.block_number
-                 AND lineage.block_hash = event.block_hash
-                 AND lineage.canonicality_state IN (
-                     'canonical', 'safe', 'finalized'
-                 )
-           )
-           AND candidate.node IS NOT NULL AND btrim(candidate.node) <> ''
-         ON CONFLICT DO NOTHING",
-    )
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to derive direct child scope", error))?;
+    // A changed registry edge rebuilds the child's edge; the parent node is an ancestor whose
+    // evidence stages without restaging its other children.
+    for (table, columns) in [
+        (
+            "project_scope_children",
+            "(event.after_state ->> 'child_node'), (event.before_state ->> 'child_node')",
+        ),
+        (
+            "project_scope_ancestors",
+            "(event.after_state ->> 'node'), (event.before_state ->> 'node')",
+        ),
+    ] {
+        let statement = format!(
+            "INSERT INTO {table}
+             SELECT event.namespace || ':' || lower(candidate.node)
+             FROM project_changed_events event
+             CROSS JOIN LATERAL (
+                 VALUES {columns}
+             ) candidate(node)
+             WHERE event.event_kind IN ('SubregistryChanged', 'AuthorityTransferred')
+               AND event.source_family IN (
+                   'ens_v1_registry_l1', 'basenames_base_registry'
+               )
+               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND EXISTS (
+                   SELECT 1
+                   FROM chain_lineage lineage
+                   WHERE lineage.chain_id = event.chain_id
+                     AND lineage.block_number = event.block_number
+                     AND lineage.block_hash = event.block_hash
+                     AND lineage.canonicality_state IN (
+                         'canonical', 'safe', 'finalized'
+                     )
+               )
+               AND candidate.node IS NOT NULL AND btrim(candidate.node) <> ''
+             ON CONFLICT DO NOTHING"
+        );
+        sqlx::query(&statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to derive direct child scope", error)
+            })?;
+    }
 
     sqlx::query(
         "INSERT INTO project_scope_resources
@@ -291,7 +310,8 @@ async fn seed_direct_scope(
              UNION ALL
              SELECT raw_fact_ref ->> 'emitting_address' FROM project_changed_events
              WHERE event_kind IN (
-                 'RecordChanged', 'RecordVersionChanged', 'AliasChanged'
+                 'RecordChanged', 'RecordVersionChanged', 'AliasChanged',
+                 'ResolverRecordLinked', 'ResolverPermissionArgument'
              )
                AND source_family IN (
                    'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
@@ -315,26 +335,7 @@ async fn seed_direct_scope(
         .await
         .map_err(|error| ProjectError::database("failed to derive direct resolver scope", error))?;
 
-    sqlx::query(
-        "INSERT INTO project_scope_resolver_dependents
-         SELECT lower(address)
-         FROM (
-             SELECT after_state ->> 'proxy_address' AS address
-             FROM project_changed_events WHERE event_kind = 'Upgraded'
-             UNION ALL
-             SELECT before_state ->> 'proxy_address'
-             FROM project_changed_events WHERE event_kind = 'Upgraded'
-         ) candidate
-         WHERE address IS NOT NULL AND btrim(address) <> ''
-           AND lower(address) <>
-               '0x0000000000000000000000000000000000000000'
-         ON CONFLICT DO NOTHING",
-    )
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| {
-        ProjectError::database("failed to derive resolver-entity dependent scope", error)
-    })?;
+    resolver_dependents::seed(transaction).await?;
 
     primary::seed(transaction).await?;
     Ok(())

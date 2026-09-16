@@ -68,6 +68,19 @@ pub(in crate::schema_v2) fn restore_preimage(state: &mut State, event: &PriorEve
             state.record_restore_error(error);
         }
     }
+    if event
+        .after_state
+        .get("visibility_state")
+        .and_then(serde_json::Value::as_str)
+        != Some("shadow")
+        && event
+            .after_state
+            .get("surface_known")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        state.bind_v1_active_surface(&event.namespace, namehash);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -92,7 +105,6 @@ pub(super) fn restore_registrar(
                 return true;
             };
             let registration = source_event == Some("NameRegistered");
-            let current = state.v1_name(&event.namespace, namehash);
             let retained_authority_owner = event
                 .after_state
                 .get("authority_owner")
@@ -115,17 +127,23 @@ pub(super) fn restore_registrar(
                 .or(event_registrant);
             let ens_v1_ownerless = event.source_family.starts_with("ens_v1_")
                 && state.v1_explicit_ownerless_registry_evidence(&event.namespace, namehash);
-            let make_current = !ens_v1_ownerless
-                && current.is_none_or(|current| {
-                    let same_family = current.authority_source_family == event.source_family;
-                    current.authority_source_family != "ens_v1_wrapper_l1"
-                        && (registration || same_family)
-                });
+            let numeric_registration =
+                registration && event.after_state["registration_window"] == "whole_transaction";
+            let make_current = (!ens_v1_ownerless || numeric_registration)
+                && state.v1_registrar_event_makes_current(
+                    &event.namespace,
+                    namehash,
+                    &event.source_family,
+                    registrar_owner.as_deref(),
+                    registration,
+                    event.after_state["registration_window"] == "whole_transaction"
+                        && event.after_state["registration_registry_setup"] == true,
+                );
             let surface_known = event
                 .after_state
                 .get("surface_known")
                 .and_then(serde_json::Value::as_bool)
-                .unwrap_or(true);
+                .unwrap_or(false);
             let registrar_labelhash = event
                 .after_state
                 .get("labelhash")
@@ -206,7 +224,7 @@ pub(super) fn restore_registrar(
                 .get("surface_known")
                 .and_then(serde_json::Value::as_bool)
                 .or_else(|| retained.as_ref().map(|state| state.surface_known))
-                .unwrap_or(true);
+                .unwrap_or(false);
             let registrar_labelhash = event
                 .after_state
                 .get("labelhash")

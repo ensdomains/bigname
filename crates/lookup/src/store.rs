@@ -3,13 +3,12 @@ use bigname_domain::{
     vocabulary::Namespace,
 };
 use serde_json::Value;
-use sqlx::{FromRow, PgPool, Postgres, Transaction};
+use sqlx::{FromRow, PgPool};
 
 use crate::{
     ENS_EXECUTION_SOURCE_FAMILY, ENS_NAMESPACE, ENS_UNIVERSAL_RESOLVER_ROLE,
-    ENS_V1_REGISTRY_SOURCE_FAMILY, ETHEREUM_MAINNET_CHAIN_ID, LookupError, LookupPosition,
-    LookupRequest, RecordSelector, Result, abi::ResolutionResultAbi, call::ExecutionBlock,
-    error::database,
+    ENS_V1_REGISTRY_SOURCE_FAMILY, LookupError, LookupPosition, LookupRequest, RecordSelector,
+    Result, abi::ResolutionResultAbi, call::ExecutionBlock, ens_l1_chain, error::database,
 };
 
 mod indexed;
@@ -17,6 +16,9 @@ mod manifests;
 mod persistence;
 mod positions;
 mod routes;
+mod rows;
+
+use rows::{load_head, load_inventory, load_name};
 #[cfg(test)]
 pub(crate) fn indexed_answer(entries: &Value, selector: &RecordSelector) -> Value {
     indexed::answer(
@@ -30,6 +32,7 @@ pub(crate) fn indexed_answer(entries: &Value, selector: &RecordSelector) -> Valu
 pub(crate) use persistence::divergence_write_error;
 pub(crate) use persistence::{persist_comparisons, revalidate_primary_name_position};
 pub(crate) use routes::LookupRoute;
+pub use routes::{VerifiedExecutionEntrypoint, verified_execution_entrypoint};
 
 #[derive(Clone, Debug)]
 pub(crate) struct LookupSnapshot {
@@ -93,6 +96,7 @@ struct NameRow {
     dns_encoded_name: Vec<u8>,
     resource_chain_id: String,
     declared_summary: Value,
+    provenance: Value,
     chain_positions: Value,
     row_xmin: String,
 }
@@ -186,7 +190,8 @@ pub(crate) async fn load_snapshot(
             ));
         }
     };
-    let (resolver_chain_id, resolver_address) = routes::selected_resolver(route, &topology)?;
+    let (resolver_chain_id, resolver_address) =
+        routes::selected_resolver(route, &topology, &name.resource_chain_id)?;
     if resolver_chain_id.as_str() != name.resource_chain_id {
         return Err(LookupError::unsupported(
             "projected resolver and indexed authority object are on different chains",
@@ -206,7 +211,7 @@ pub(crate) async fn load_snapshot(
         ),
     };
     let resolver_head = load_head(&mut transaction, resolver_chain_id.as_str()).await?;
-    let project_row_xmin =
+    let project_publication =
         positions::ensure_project_at_head(&mut transaction, &resolver_head).await?;
     let resolver_position =
         positions::position_for_chain(&name.chain_positions, resolver_chain_id.as_str())?;
@@ -259,6 +264,7 @@ pub(crate) async fn load_snapshot(
         },
     )
     .await?;
+    ensure_authority_arm_admitted(namespace, &name, &entrypoint_manifest)?;
     let route_policy = routes::route_policy(namespace, &entrypoint_manifest)?;
     let path_class = topology
         .classify(&name.logical_name_id, route_policy)
@@ -268,6 +274,7 @@ pub(crate) async fn load_snapshot(
             &topology,
             path_class,
             &name.logical_name_id,
+            resolver_chain_id,
         )
     {
         return Err(LookupError::unsupported(
@@ -311,7 +318,7 @@ pub(crate) async fn load_snapshot(
     let revalidation_positions =
         positions::comparison_and_live_positions(&comparison_position, &live_execution_position)?;
     let execution_authority = execution_authority(
-        &project_row_xmin,
+        &project_publication,
         Some((&name.logical_name_id, &name.row_xmin)),
         std::slice::from_ref(&entrypoint_manifest),
     )?;
@@ -346,9 +353,61 @@ pub(crate) async fn load_snapshot(
     })
 }
 
+/// The ENS [authority arms](../../../docs/glossary.md#authority-epoch) whose names the selected
+/// `ens_execution` entrypoint on `chain_id` may verify: the manifest's `verified_authority_arms`,
+/// defaulting to `["ens_v1"]`. Uses the same active-or-shadow entrypoint selection at the readable
+/// head that record and primary-name lookup use, so callers gate on exactly what would execute.
+pub async fn admitted_verified_authority_arms(
+    pool: &PgPool,
+    chain_id: &str,
+) -> Result<Vec<String>> {
+    let chain = ens_l1_chain(chain_id).ok_or_else(|| {
+        LookupError::unsupported(format!(
+            "ENS verified lookup has no execution entrypoint on {chain_id}"
+        ))
+    })?;
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(database("start verified authority arm read"))?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .map_err(database("set verified authority arm read isolation"))?;
+    let head = load_head(&mut transaction, chain_id).await?;
+    let entrypoint = routes::entrypoint_authority(Namespace::Ens, chain)?;
+    let manifest = manifests::load_entrypoint(
+        &mut transaction,
+        manifests::EntrypointQuery {
+            namespace: ENS_NAMESPACE,
+            source_family: entrypoint.source_family.as_str(),
+            chain_id,
+            role: entrypoint.role,
+            allow_shadow: entrypoint.allow_shadow,
+            execution_block_number: head.block_number,
+            required_manifest_version: entrypoint.required_manifest_version,
+            require_resolution_capability: true,
+        },
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(database("commit verified authority arm read"))?;
+    Ok(manifest.verified_authority_arms)
+}
+
+/// Manifest entrypoints and the readable head for ENS primary-name lookup on `chain_id`, which
+/// must be the Ethereum L1 the deployment profile projects (Mainnet or Sepolia).
 pub(crate) async fn load_ens_primary_name_authority(
     pool: &PgPool,
+    chain_id: &str,
 ) -> Result<EnsPrimaryNameAuthority> {
+    if ens_l1_chain(chain_id).is_none() {
+        return Err(LookupError::unsupported(format!(
+            "ENS primary-name lookup has no execution entrypoint on {chain_id}"
+        )));
+    }
     let mut transaction = pool
         .begin()
         .await
@@ -357,14 +416,14 @@ pub(crate) async fn load_ens_primary_name_authority(
         .execute(&mut *transaction)
         .await
         .map_err(database("set primary-name authority read isolation"))?;
-    let head = load_head(&mut transaction, ETHEREUM_MAINNET_CHAIN_ID).await?;
-    let project_row_xmin = positions::ensure_project_at_head(&mut transaction, &head).await?;
+    let head = load_head(&mut transaction, chain_id).await?;
+    let project_publication = positions::ensure_project_at_head(&mut transaction, &head).await?;
     let registry_manifest = manifests::load_entrypoint(
         &mut transaction,
         manifests::EntrypointQuery {
             namespace: ENS_NAMESPACE,
             source_family: ENS_V1_REGISTRY_SOURCE_FAMILY,
-            chain_id: ETHEREUM_MAINNET_CHAIN_ID,
+            chain_id,
             role: crate::ENS_REGISTRY_ROLE,
             allow_shadow: false,
             execution_block_number: head.block_number,
@@ -378,7 +437,7 @@ pub(crate) async fn load_ens_primary_name_authority(
         manifests::EntrypointQuery {
             namespace: ENS_NAMESPACE,
             source_family: ENS_EXECUTION_SOURCE_FAMILY,
-            chain_id: ETHEREUM_MAINNET_CHAIN_ID,
+            chain_id,
             role: ENS_UNIVERSAL_RESOLVER_ROLE,
             allow_shadow: true,
             execution_block_number: head.block_number,
@@ -403,163 +462,58 @@ pub(crate) async fn load_ens_primary_name_authority(
             timestamp: head.timestamp,
         },
         execution_authority: execution_authority(
-            &project_row_xmin,
+            &project_publication,
             None,
             &[registry_manifest, universal_resolver_manifest],
         )?,
     })
 }
 
+/// The single arm gate for every record-path read (records, name detail, batch lookup,
+/// diagnostics): an ENS name whose projected authority selection names an arm the selected
+/// `ens_execution` manifest does not list in `verified_authority_arms` is refused rather than
+/// resolved through an entrypoint its own selection has ruled out. A row without a selected arm
+/// (registry-only serving rows) is not arm-scoped and keeps its topology rules; Basenames has no
+/// arm split.
+fn ensure_authority_arm_admitted(
+    namespace: Namespace,
+    name: &NameRow,
+    entrypoint_manifest: &manifests::ManifestEntry,
+) -> Result<()> {
+    if namespace != Namespace::Ens {
+        return Ok(());
+    }
+    let Some(arm) = name
+        .provenance
+        .pointer("/authority_selection/authority_arm")
+        .and_then(Value::as_str)
+    else {
+        return Ok(());
+    };
+    if entrypoint_manifest
+        .verified_authority_arms
+        .iter()
+        .any(|admitted| admitted == arm)
+    {
+        return Ok(());
+    }
+    Err(LookupError::authority_arm_not_admitted(format!(
+        "the selected execution entrypoint admits authority arms {:?}, not the name's {arm}",
+        entrypoint_manifest.verified_authority_arms
+    )))
+}
+
 fn execution_authority(
-    project_row_xmin: &str,
+    project_publication: &Value,
     name: Option<(&str, &str)>,
     manifests: &[manifests::ManifestEntry],
 ) -> Result<Value> {
     let (logical_name_id, name_row_xmin) = name.unzip();
     Ok(serde_json::json!({
-        "project_row_xmin": project_row_xmin,
+        "project_publication": project_publication,
+        "project_row_xmin": project_publication["row_xmin"],
         "logical_name_id": logical_name_id,
         "name_row_xmin": name_row_xmin,
         "manifest_authorities": manifests,
     }))
-}
-
-async fn load_name(
-    transaction: &mut Transaction<'_, Postgres>,
-    logical_name_id: &str,
-) -> Result<NameRow> {
-    sqlx::query_as::<_, NameRow>(
-        r#"
-        SELECT name.logical_name_id, name.namespace, name.raw_name, name.namehash,
-               surface.dns_encoded_name, resource.chain_id AS resource_chain_id,
-               name.declared_summary, name.chain_positions,
-               name.xmin::text AS row_xmin
-        FROM name_current name
-        JOIN name_surfaces surface
-          ON surface.logical_name_id = name.logical_name_id
-        JOIN resources resource
-          ON resource.resource_id = COALESCE(
-              name.serving_resource_id, name.resource_id
-          )
-        LEFT JOIN surface_bindings binding
-          ON binding.surface_binding_id = name.surface_binding_id
-         AND binding.logical_name_id = name.logical_name_id
-         AND binding.resource_id = name.resource_id
-         AND binding.binding_kind = name.binding_kind
-        LEFT JOIN token_lineages token_lineage
-          ON token_lineage.token_lineage_id = name.token_lineage_id
-        LEFT JOIN chain_lineage token_lineage_lineage
-          ON token_lineage_lineage.chain_id = token_lineage.chain_id
-         AND token_lineage_lineage.block_hash = token_lineage.block_hash
-        JOIN chain_lineage surface_lineage
-          ON surface_lineage.chain_id = surface.chain_id
-         AND surface_lineage.block_hash = surface.block_hash
-         AND surface_lineage.block_number = surface.block_number
-        JOIN chain_lineage resource_lineage
-          ON resource_lineage.chain_id = resource.chain_id
-         AND resource_lineage.block_hash = resource.block_hash
-         AND resource_lineage.block_number = resource.block_number
-        LEFT JOIN chain_lineage binding_lineage
-          ON binding_lineage.chain_id = binding.chain_id
-         AND binding_lineage.block_hash = binding.block_hash
-         AND binding_lineage.block_number = binding.block_number
-        WHERE name.logical_name_id = $1
-          AND name.support_status = 'supported'
-          AND surface.visibility_state = 'active'
-          AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
-          AND resource.canonicality_state IN ('canonical', 'safe', 'finalized')
-          AND (
-              (
-                  name.surface_binding_id IS NULL
-                  AND name.resource_id IS NULL
-                  AND name.binding_kind IS NULL
-                  AND name.serving_resource_id IS NOT NULL
-              )
-              OR (
-                  binding.canonicality_state IN ('canonical', 'safe', 'finalized')
-                  AND binding.active_to IS NULL
-                  AND binding_lineage.canonicality_state IN (
-                      'canonical', 'safe', 'finalized'
-                  )
-              )
-          )
-          AND (
-              name.token_lineage_id IS NULL
-              OR (
-                  token_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-                  AND token_lineage_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-              )
-          )
-          AND surface_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-          AND resource_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-        "#,
-    )
-    .bind(logical_name_id)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(database("load readable name projection"))?
-    .ok_or_else(|| LookupError::unsupported("verified lookup name is not readable or supported"))
-}
-
-async fn load_inventory(
-    transaction: &mut Transaction<'_, Postgres>,
-    resource_id: &str,
-    boundary: &Value,
-) -> Result<InventoryRow> {
-    sqlx::query_as::<_, InventoryRow>(
-        r#"
-        SELECT inventory.resource_id::text AS resource_id,
-               inventory.record_version_boundary_key, inventory.entries,
-               inventory.provenance,
-               CASE WHEN inventory.support_status = 'supported'
-                   THEN jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted')
-                   ELSE jsonb_build_object(
-                       'status', 'unsupported', 'exhaustiveness', 'not_asserted',
-                       'unsupported_reason', inventory.unsupported_reason
-                   )
-               END AS coverage,
-               inventory.chain_positions, inventory.xmin::text AS row_xmin
-        FROM record_inventory_current inventory
-        JOIN resources resource
-          ON resource.resource_id = inventory.resource_id
-        JOIN chain_lineage resource_lineage
-          ON resource_lineage.chain_id = resource.chain_id
-         AND resource_lineage.block_hash = resource.block_hash
-        WHERE inventory.resource_id = $1::uuid
-          AND inventory.record_version_boundary = $2
-          AND resource.canonicality_state IN ('canonical', 'safe', 'finalized')
-          AND resource_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-        "#,
-    )
-    .bind(resource_id)
-    .bind(boundary)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(database("load indexed record answer"))?
-    .ok_or_else(|| LookupError::unsupported("verified lookup requires an indexed record boundary"))
-}
-
-async fn load_head(transaction: &mut Transaction<'_, Postgres>, chain_id: &str) -> Result<HeadRow> {
-    sqlx::query_as::<_, HeadRow>(
-        r#"
-        SELECT head.chain_id, head.latest_block_hash AS block_hash,
-               head.latest_block_number AS block_number,
-               to_char(
-                   lineage.block_timestamp AT TIME ZONE 'UTC',
-                   'YYYY-MM-DD"T"HH24:MI:SS"Z"'
-               ) AS timestamp
-        FROM chain_heads head
-        JOIN chain_lineage lineage
-          ON lineage.chain_id = head.chain_id
-         AND lineage.block_hash = head.latest_block_hash
-         AND lineage.block_number = head.latest_block_number
-        WHERE head.chain_id = $1
-          AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-        "#,
-    )
-    .bind(chain_id)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(database("load lookup chain head"))?
-    .ok_or_else(|| LookupError::stale(format!("chain {chain_id} has no readable latest head")))
 }

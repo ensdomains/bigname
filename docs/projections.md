@@ -243,6 +243,7 @@ outcomes, or durable traces.
 | --- | --- | --- |
 | `name_current` | `logical_name_id` | exact-name lookup and search |
 | `address_names_current` | `(address, logical_name_id, relation)` | address-to-names and reverse lookup |
+| `address_records_current` | `(address, coin_type, logical_name_id)` | names whose current `addr:<coin_type>` record resolves to an address (`relation=resolves_to`) |
 | `children_current` | parent/child identity plus class | direct and classified child collections |
 | `permissions_current` | resource, subject, and scope | resource permissions and role summaries |
 | `account_permission_state_current` | (`chain_id`, `authority_kind`, `authority_contract`, `owner`, `subject`, `relation_kind`) | no serving reader yet; a follow-up change adds storage and API readers |
@@ -257,7 +258,9 @@ projection. Exact-name reads ordinarily first select the logical name's
 that epoch's binding and resources at the requested position. An activated
 ENSv1→ENSv2 authority proof may select a closed ENSv2 binding after release;
 that [released v2 authority](glossary.md#released-v2-authority) does not fall
-back to an active retained ENSv1 binding. The exact
+back to an active retained ENSv1 binding. A released ENSv1 lease with no
+revived custody and no open binding likewise selects its closed lease binding
+as a [released v1 authority](glossary.md#released-v1-authority) tombstone. The exact
 [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) no-proof
 exception selects a current ENSv2 arm when ENSv1 evidence is current or
 historical, without establishing an authority epoch, so its epoch start and
@@ -283,11 +286,47 @@ greater block number and, within one block, the normalized event stored later.
 [serving resource](glossary.md#serving-resource) when no control binding is open. It is not a binding, registration,
 address relation, or permission authority. Resolver and record readers use
 `COALESCE(serving_resource_id, resource_id)`; control, relation, and permission builders use only
-`resource_id`.
+`resource_id`. `provenance.read_reachability.basis` names how the serving resource was
+selected: `retained_registry_resolver_pointer` for an ownerless ENSv1 or Basenames registry
+name (registry owner proven zero, row supported and unregistered), or
+`root_registry_resolver_pointer` for an ENSv2 TLD whose root-registry token has a
+current nonzero resolver pointer but no registration (typically a reservation: owner zero with
+the pointer set in the same block), so no surface binding and no selected authority. That TLD
+row keeps `current_authority_not_projected`: the pointer is followed from the name-linked
+root-registry `ResolverChanged` to its token resource, the latest pointer on that resource
+wins (a state-derived expiry clear names the resource but no logical name), and a
+`RegistrationReleased` on the resource at or after the pointer withdraws it. A reservation does
+not withdraw it, and the row's lifecycle summary still reports the reservation. A rebuild
+triggered only by a name event also stages the root token resource's history, so earlier
+resource-only releases and resolver clears still withdraw the pointer. The root
+registry stores the pointer per token, for reservations too, and returns it while the label is
+unexpired; a finite reservation expiry withdraws through the interpreter's derived expiry
+release and pointer clear, an infinite one never does.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L150-L155 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
 Its projection provenance stores the [source family](glossary.md#source-family)
 of the event that selected the current resolver pointer. Resolver binding
 summaries use that stored event provenance rather than a prior resolver row's
 classification.
+
+`declared_summary.topology` is the lookup engine's routing input
+(`architecture.md` § `verified_queries`, `execution.md` § Resolver-record
+lookup). Project writes it in a fixed order and each builder fills only rows the
+earlier ones left without one: alias paths, observed wildcard paths, ownerless
+ENS registry pointers, then exact-surface direct ENS names, then Basenames
+transport. The direct builder covers an ENS name bound through its selected
+`declared_registry_path` binding on either [authority arm](glossary.md#authority-epoch):
+one `registry_path` hop for the binding, one `resolver_path` hop for the
+projected exact resolver (a declared ENSv1 mirror resolver stays the mirror
+address), empty `subregistry_path`, null wildcard, alias, and transport detail,
+and `version_boundaries` copied from the binding resource's
+`record_inventory_current.record_version_boundary`. A bound name whose exact
+resolver is null keeps no topology so the Universal Resolver discovery route
+classifies it from the absent shape, and a bound name whose binding resource has
+no inventory row is skipped because the engine requires the copied boundary to
+equal the inventory row's. Whether a verified read may then execute for the
+name's arm is decided per deployment profile by the `ens_execution` manifest's
+`verified_authority_arms`, not by the topology.
 
 When a retained direct-registry authority first becomes name-addressable, its
 [`state-derived normalized event`](glossary.md#state-derived-normalized-event)
@@ -343,6 +382,32 @@ Address-to-name collections use `address_names_current` membership and join
 `name_current` for display, sort, and compact record fields. Relation vocabulary
 is `registrant`, `token_holder`, and `effective_controller`. Surface is the
 default unit; resource deduplication is explicit.
+
+`address_records_current` is the reverse index over current `addr:<coin_type>`
+resolver records: one row per (lower-cased address the record resolves to, coin
+type, current name). It is derived from the published record inventory of
+the name's record-serving resource (`name_current.serving_resource_id`, else
+`resource_id`), never from record events directly, so a row exists exactly when
+the forward indexed read of that record answers `success` with a 20-byte
+non-zero EVM address, including names that have a serving resource but no current
+authority. Their `surface_binding_id`, `resource_id`, and `binding_kind` stay null;
+`record_resource_id` remains required. Zero-address values and cleared (`not_found`) entries
+produce no row; non-EVM-shaped payloads produce no row. `record_key` names the
+entry the row came from. The ENSIP-19 default EVM address (`addr:2147483648`)
+publishes one row under its own coin type; when the serving resolver declares
+the `ensip19_default_address` read feature that row carries
+`provenance.ensip19_default_address=true` and
+`provenance.shadowed_coin_types`, the EVM coin types whose exact entry (any
+retained answer, or the coin-60 zero-address clear the inventory marks as an
+exact absence) stops the default from answering. Readers apply the same
+fallback rule as `bigname_domain::resolver_read::evaluate_indexed_record`: a
+request for an eligible EVM coin type matches its exact row, or the unshadowed
+default row. Rows carry the record's chain position and the Project target like
+`address_names_current`; incremental publication deletes and republishes rows
+whose name is in scope or whose authority or record-serving resource is in
+scope, and a redo that orphans a record event retracts the row it produced.
+The serving relation is `resolves_to`; it is a resolver-record relation, not an
+authority relation, and `relation=any` does not include it.
 
 `children_current` stores direct and classified child relations. For registry
 events from ENSv1, Project first filters the relation by the parent's
@@ -449,15 +514,19 @@ effective powers, provenance, and chain positions. The companion resource
 summary distinguishes authoritative empty enumeration from unsupported or
 partial permission support. Current non-wrapper summaries are partial because
 registrar token and account approvals, resolver operators and delegates, and
-ENSv2 registry operators are not indexed.
+ENSv2 registry operators are not indexed. NameWrapper summaries are partial for
+a narrower reason described below: holders, operators, and per-token delegates
+are rows, while parent control of a non-emancipated wrapped subname and resolver
+operators/delegates are not.
 
 `account_permission_state_current` separately folds `AccountPermissionChanged`
 events from the [`standard_approval`
 derivation](glossary.md#standard-approval-derivation) by chain, authority kind, authority contract,
 owner, subject, and relation. It retains both active and revoked latest states;
-`approved=true` carries `registry_control`, while `approved=false` carries no
-effective powers. Project never fans this account mapping out into per-name
-rows. After constructing `name_current`, Project carries the latest
+`approved=true` carries `registry_control` for a registry and `wrapper_control`
+for a NameWrapper, while `approved=false` carries no effective powers. Project
+never fans the registry mapping out into per-name rows; the NameWrapper mapping
+is fanned out as described below. After constructing `name_current`, Project carries the latest
 [registry-owner binding](glossary.md#registry-owner-binding) onto the resource
 selected for an ENSv1 or Basenames name. Registry-family owner observations are
 first ranked by logical name or emitting resource to suppress detached history,
@@ -521,13 +590,121 @@ narrowing](upstream.md#known-divergences). The retirement citation therefore
 explains why the rows are absent without
 rewriting which event established authority.
 
-For ENSv1 wrapper-backed resources, fuse state alone does not manufacture a
-holder grant. A separately observed compatible holder grant is masked by the
-current lifecycle and [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word)
-fuse rules. Returned permission rows
-join the same wrapper lifecycle and fuse summary as exact-name reads; this does
-not change the companion resource summary's unsupported wrapper-holder
-enumeration status. For ENSv2, permissions remain keyed by the
+For ENSv1 NameWrapper resources the interpreter emits the holder grant itself.
+`NameWrapped` grants the wrapped owner `resource_control`, `set_resolver`,
+`set_ttl`, `create_subnames`, `transfer`, `unwrap`, `burn_fuses`, `approve`,
+`extend_subname_expiry`, and `extend_expiry` on the resource scope and
+`resolver_control` on the linked resolver; `TransferSingle` and `TransferBatch`
+revoke that set from the previous holder and grant it to the new one; a burn to
+the zero address revokes it and records the burn, so the `NameUnwrapped` that
+follows every burn other than the un-admitted upgrade path emits no second
+revocation, while an upgraded name still leaves no live holder row. Fuse state alone still manufactures
+no grant; Project masks each row with the current lifecycle and
+[expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) fuse
+word: `resource_control` clears on a `locked` position, `burn_fuses` is present
+only while `PARENT_CANNOT_CONTROL` is burnt (until then `_canFusesBeBurned`
+rejects every owner-controlled burn and the holder cannot burn that
+parent-controlled bit), and `extend_expiry` is present only while
+`CAN_EXTEND_EXPIRY` is burnt.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L421-L437 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L443-L470 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058-L1068 @ ens_v1@91c966f)
+Returned permission rows join the same wrapper lifecycle and fuse summary as
+exact-name reads.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L902 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L483-L509 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L278 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L283-L299 @ ens_v1@91c966f)
+
+The per-token delegate comes from NameWrapper `Approval`: the approved address
+receives `extend_subname_expiry` on the resource scope, an approval to the zero
+address revokes it, and the interpreter tracks the current delegate so it can
+revoke the row without an event when a transfer clears the approval
+(`CANNOT_APPROVE` unburnt, evaluated on the expiry-cleared fuse word) or a burn
+clears it unconditionally. The transfer revocation is emitted even when the
+delegate is the transfer recipient, so a restored interpreter that rebuilt the
+delegate from those rows replays identically, and it is emitted before the
+holder rows of the same log: Project folds permission rows by
+`(resource, subject, scope)` and keeps the newest by position and then
+`normalized_event_id`, so when the recipient is the delegate its holder grant
+(the later row) wins over the empty token-approval revocation. An approval that
+survives a transfer because `CANNOT_APPROVE` is burnt keeps its row, and when
+that retained delegate is the outgoing holder the interpreter re-emits its
+token-approval grant after the holder revocation, because `getApproved` still
+names it and `canExtendSubnames` still admits it; without the re-emission the
+empty holder revocation would be its newest row and the fold would drop it.
+Every token-approval row of a name and subject, whether from an `Approval` log
+or from the event-less clear on transfer or burn, shares one
+[interpreter state key](glossary.md#interpreter-state-key), so a resumed
+interpreter that keeps only the newest row per key restores the clear that
+followed a grant and replays the same rows as the first pass.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L108-L121 @ ens_v1@91c966f) The delegate's only power is the
+`getApproved` branch of `canExtendSubnames`; transfers and `approve` itself
+accept only the holder and its operators.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L109-L136 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L228-L238 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L837-L840 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L37-L47 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L137-L150 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L275 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L375-L378 @ ens_v1@91c966f)
+
+Owner-wide operators come from NameWrapper `ApprovalForAll`, normalized like
+registry operators into `account_permission_state_current` with
+`authority_kind=wrapper` and `wrapper_control`. Unlike registry operators,
+Project fans them out: after folding holder rows it joins every wrapper holder
+row (`grant_source.relation_kind=holder`) to the approved account rows whose
+owner is that holder and whose authority contract is the holder's NameWrapper,
+and inserts one row per operator and scope carrying the holder's masked powers
+with `grant_source.relation_kind=operator`. An operator who is also the token
+delegate keeps the operator set. Incremental builds read account state as the
+staged rows for changed keys plus the live rows for unchanged keys, and a
+changed wrapper approval scopes every resource its owner currently holds, so
+incremental, redo, and full builds converge. `canModifyName` and the
+ERC-1155-fuse approve and transfer checks authorize an operator exactly as the
+holder.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214-L222 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L105-L117 @ ens_v1@91c966f)
+
+The resource summary classifies a NameWrapper resource `unsupported` with
+`wrapper_parent_and_resolver_delegation_not_projected`, which readers map to
+partial coverage: the parent of a non-emancipated wrapped subname can still
+replace its owner, fuses, and expiry through `setSubnodeOwner`,
+`setSubnodeRecord`, and `setChildFuses`, and resolver operator/delegate
+approvals are not enumerated as rows.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L517 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L596 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
+
+The summary also carries `resource_restrictions`, the
+[resource restrictions](glossary.md#resource-restrictions) block the API
+serves as `restrictions`. For a NameWrapper resource whose wrapper fields
+would be served it is `{kind: ens_v1_wrapper, wrapper_state, fuses,
+expiry_seconds}` with the expiry-effective fuse word at the target timestamp,
+and it is omitted once the newest wrapper lifecycle evidence on the resource is
+a close rather than an open: opens are the `NameWrapped` token transfer and any
+resource-scope holder grant, closes are the `NameUnwrapped`
+`AuthorityEpochChanged`/`SurfaceUnbound` rows and any resource-scope holder
+revocation without a following grant, which covers the `.eth` 2LD unwrap whose
+epoch row lands on the reactivated registrar resource and the un-admitted
+`upgrade()` burn that emits no `NameUnwrapped`; for an ENSv2 registry resource it is
+`{kind: ens_v2_registry, locked_roles}`, where `locked_roles` lists
+`unregister`, `renew`, `set_subregistry`, `set_resolver`, and `transfer` whose
+admin role (`can_transfer_admin` for `transfer`) no current row on the resource
+or its registry root carries, because only a held admin role can grant or
+revoke that role and the registration cannot re-grant an admin role; it is
+`NULL` for every other resource. The registry root is read from the resource
+identity table rather than the build scope, the admin rows are the staged rows
+for in-scope resources plus the live rows for every other resource, and a
+changed root permission scopes every registration of that registry, so
+incremental, redo, and full builds converge on `locked_roles`.
+(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L418-L424 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L453-L455 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L560-L572 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L24-L45 @ ens_v2@a971bd64)
+For ENSv2, permissions remain keyed by the
 upstream resource linked to bigname `resource_id`, not by token ID.[^v2-iperm-l57][^v2-pr-l261][^v2-pr-l351]
 
 Unknown or inconsistent typed summary combinations are a storage error. A
@@ -535,6 +712,36 @@ persisted unsupported reason that a reader does not recognize maps to partial
 unknown support rather than wrapper support or an internal server error.
 
 ## Resolver and records
+
+### Records shared through resolver links
+
+For the [record-ID resolver generation](architecture.md), Project selects the
+latest canonical link for each materialized name and emitting resolver, falling
+back to the resolver's zero-node link only when the exact link is absent or zero.
+It then ranks updates within the selected record ID by selector. Relinking does
+not discard values written before the link, and an explicit empty value cannot
+fall back to a previous link or to a different record. The latest link selection
+and value event both contribute provenance. No unknown name acquires a serving
+row solely because its resolver emitted a link.
+
+Name history retains shared-record writes after an exact link, default link, or
+resolver pointer changes. Project reconstructs the effective exact/default record
+selection within each retained resolver-pointer interval. Each selected record
+contributes writes before that selection ends, including writes made before the
+link; writes made only after the name stopped selecting that record are excluded.
+Current record values still use only the latest selection. Historical attribution
+and its selecting link IDs remain in `provenance.attributed_event_ids`, so removing
+a link or write during redo rebuilds its former consumers. Link IDs are rebuild
+dependencies; they do not add a new public history event type. Exact links and
+the zero-node fallback select persistent record storage.
+(upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/PermissionedResolver.sol:L363 @ ens_v2_sepolia_20260903@5da83f6a)
+(upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/PermissionedResolver.sol:L381 @ ens_v2_sepolia_20260903@5da83f6a)
+
+A change or retraction to a link or shared-record update rebuilds all current
+name and resource consumers of that resolver. Incremental staging includes the
+resolver's canonical link and record history through the target, including
+updates with null name/resource fields. Full rebuild and redo use the same
+selection rule; retracted events never remain as synthetic per-name facts.
 
 `resolver_current` summarizes one resolver contract across readable bound names,
 aliases, roles, record evidence, and normalized events. Embedded binding,
@@ -544,6 +751,21 @@ sample no longer than that limit. Full bound-name and permission collections
 remain on their name-side projections and routes instead of being duplicated
 into one resolver row. The resolver summary is diagnostic and does not replace
 exact-name topology.
+
+`resolver_current.unsupported_reason` for an ENSv2 resolver (and the
+`coverage.unsupported_reason` copied onto its record inventory) uses a closed
+vocabulary: `resolver_not_declared` when an exact `public_resolver_v2`
+declaration is required and absent (also the ENSv1 and Basenames reason for an
+undeclared address); `resolver_implementation_unknown` when a discovered proxy
+has no canonical `Upgraded` observation — neither an ERC-1967 `Upgraded` log
+nor a factory announcement — so its implementation is unknown;
+`resolver_implementation_not_declared` when the latest observation names an
+implementation outside the active manifest's `resolver_implementations`; and
+`resolver_binding_enumeration_not_projected` on the binding summary of a
+supported resolver whose family does not project binding enumeration.
+`resolver_implementation_unknown` replaced the earlier
+`resolver_implementation_unknown` string; readers that do not recognize a
+persisted reason keep mapping it to partial coverage.
 
 `record_inventory_current` records the selectors observed under a resource's
 latest retained linked resolver event whose name has a readable canonical
@@ -566,7 +788,28 @@ to its emitting resolver. A selected `ens_v2_registry_l1` or `ens_v2_root_l1`
 pointer may also join when its target resolver's final classification is
 supported `ens_v1_resolver_l1` from an applicable exact declaration and the
 classifying manifest's namespace matches the pointer's namespace. Incremental
-staging applies the same guarded exception. A `basenames_base_resolver` event
+staging applies the same guarded exception. Every `RecordChanged` or
+`RecordVersionChanged` event that joins without a logical name of its own is
+listed in the row's `provenance.attributed_event_ids`, whether or not it is
+the current value for its record key, so `registration`- and `both`-scope name
+history can read those node-keyed writes back; retracting one of those events
+restages the row like any other cited event. Attribution spans every resolver
+pointer the resource has selected, not only the current one: each pointer
+attributes the node-keyed writes on its resolver at chain positions before the
+pointer that superseded it, and the latest pointer is open-ended. A write is
+therefore attributed exactly when it was visible to the name at some point,
+because resolver storage persists and ENSv1 reads it at read time; a write on a
+resolver the name never selected, or made only after the name left that resolver
+for good, stays unattributed. Value selection does not widen with it: records,
+versions, resets, and `unsupported_reason`s are still selected only through the
+latest non-zero pointer. When the selected pointer is a clear, the registration
+has no pointer to serve records through, so it publishes a history-only row
+instead: the boundary anchors on the clearing `ResolverChanged`, `support_status`
+is `unsupported` with `resolver_pointer_cleared`, there are no selectors, no
+entries, and no `resolver_address`, and `provenance.record_serving` is `false` so
+every record-serving read excludes the row and a cleared name answers exactly as
+it does with no row at all. Only history reads it, for the
+`attributed_event_ids` it carries. A `basenames_base_resolver` event
 with no logical-name attribution may join only when the selected pointer is
 `basenames_base_registry`, with the same chain, node-to-namehash, and resolver
 emitter match. Basenames keeps the current resolver by node, permits its
@@ -687,14 +930,95 @@ rotating a proxy to an unflagged implementation removes the rule on the same
 scoped rebuild. Full and incremental rebuilds select the feature from the same
 current resolver classification.
 
+A pointer from `ens_v2_registry_l1` or `ens_v2_root_l1` whose target is a
+supported
+[ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
+(`classification.role = ensv1_mirror_resolver`, declared under
+[`manifests.md`](manifests.md#ensv1-mirror-resolver-declarations)) is not
+attributed on the mirror's own address, because the mirror stores no records.
+Project models the call the mirror makes instead. The mirror finds the resolver
+with `RegistryUtils.findResolver` over the ENSv1 registry its declaration names:
+the walk reads the DNS-encoded name toward the root and selects the nearest
+node, the exact node first, whose registry resolver is nonzero; the root node is
+never consulted. It then calls that resolver with the caller's calldata: an
+immediate resolver receives the queried node's getter call and answers from its
+own storage for the queried node, while an `IExtendedResolver` receives
+`resolve(name, data)` and answers by its own logic.
+(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L38-L41 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L69 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L66-L70 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L88-L96 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L108-L127 @ ens_v1@91c966f)
+
+Project reproduces this from the staged events at the target. The registry's
+resolver per node is the latest canonical `ens_v1_registry_l1`,
+`ens_v1_registrar_l1`, or `ens_v1_wrapper_l1` `ResolverChanged` whose
+`after_state.node` is that namehash, clears included and whether or not the
+event is linked to a logical name or resource (the registry sets resolvers for
+nodes nobody owns in ENSv1, whose [pre-surface](glossary.md#pre-surface) pointer
+keeps both null); the consulted nodes are the queried name's surface
+and each proper ancestor surface below the root, matched by label suffix in the
+same namespace; the nearest consulted node with a nonzero resolver is selected.
+When the selected resolver is a supported, same-namespace `ens_v1_resolver_l1`
+declaration that is not itself a mirror and, for an ancestor selection, is not
+declared
+[`ensip10_extended_resolver`](manifests.md#required-fields), the mirrored
+resource is re-pointed at that resolver for the queried node and the ordinary
+node-keyed attribution above computes its `selectors`, `entries`,
+`unsupported_families`, `last_change`, record version boundary,
+`provenance.record_event_ids`, `provenance.attributed_event_ids`,
+`provenance.read_rules`, and `exact_nonempty_not_found_record_keys` exactly as
+for an ENSv1 name served by that resolver. An ancestor selection therefore
+serves the ancestor resolver's storage for the queried node, which is usually
+empty, never the ancestor's own records. `provenance.resolver_address` and
+`provenance.resolver_pointer_event_id` stay the name's own mirror pointer, and
+`provenance.mirror = {resolver_address, mirrored_source_family:
+"ens_v1_resolver_l1", mirrored_registry_source_family: "ens_v1_registry_l1",
+mirrored_registry_address, queried_node, mirrored_node, mirrored_name,
+ancestor_depth, forwarding, mirrored_resolver_address, mirrored_resource_id?,
+mirrored_pointer_event_id, mirrored_pointer_source_family}` records the walk
+(`mirrored_resource_id` only when the selected pointer event carries one):
+`mirrored_node` and `mirrored_name` are the selected registry node and its raw
+name, `ancestor_depth` is `0` for the exact node and otherwise the number of
+leading labels the walk stripped, and `forwarding` is `direct_call` or
+`extended_resolve` per the selected resolver's declared read features.
+
+Otherwise the row is `unsupported` with `mirrored_resolver_not_projected`, no
+entries, and no read rules. Either no consulted node has a nonzero resolver
+(`provenance.mirror` then carries only the registry fields and `queried_node`),
+or the selected resolver cannot be derived through:
+`provenance.mirror.mirrored_unsupported_reason` is
+`resolver_classification_missing` (unclassified, or declared in another
+namespace), the resolver's own unsupported reason, `mirrored_resolver_is_mirror`,
+`mirrored_resolver_not_ensv1`, or `ensip10_extended_resolver` (an ancestor whose
+answer for a descendant is resolver-defined), alongside the selected node. A
+mirror whose own classification is unsupported or belongs to another namespace
+keeps the ordinary resolver reason or `resolver_classification_missing`. The
+derivation is a pure function of the staged events: incremental scope pairs a
+mirror-pointer resource with the names (and any pointer resources) of every node
+its walk consults, pairs a scoped consulted name, pointer resource, or changed
+node-keyed ENSv1 pointer with the mirror-pointer resources of every name whose
+walk consults that node, stages a scoped name's node-keyed ENSv1 pointers and the
+queried node's writes on every declared ENSv1 resolver, and re-scopes a mirrored
+row when the resolver it was derived from writes. An ancestor's resolver change or clear and a write for the
+queried node therefore rebuild the mirrored row in the same publication, and
+full, incremental, and redo builds converge. `address_records_current` and
+name-side record reads consume mirrored rows like any other supported inventory.
+
 For ENSv1, an admitted current resolver may contribute supported address, text,
 and contenthash inventory. An unlisted or unsupported resolver family stays
 explicitly unsupported. For ENSv2, current-emitter version evidence may define a
 boundary while the unadmitted resolver profile still publishes no record
 values. Basenames record facts remain gated by the admitted Base resolver
-profile.
+profile. Readers enforce this on the inventory row itself: the records route,
+name detail, batch lookup, the GraphQL resolver fields, the
+`address_records_current` builder, and the divergence-ledger comparison take
+values only from a `supported` row. Entries retained on an `unsupported` row are
+diagnostics for operators, never answers
+([api-v2-routes.md](api-v2-routes.md#get-v1namesnamerecords)).
 
-`GET /v2/names/{name}/records` reads this inventory for `indexed` behavior.
+`GET /v1/names/{name}/records` reads this inventory for `indexed` behavior.
 `verified` and `auto` may use fresh schema-v2 lookup as described in
 [`execution.md`](execution.md); they never read a legacy execution cache.
 
@@ -706,6 +1030,31 @@ reverse-name polling selection state. Supported claim statuses are `success`,
 claim and whether its bytes already equal the normalized claim. The internal
 selection columns are not claim fields and readers never select them. Project
 does not persist a verified-primary result or trace identity.
+
+For a retained `ReverseClaimed` tuple, Project joins its `reverse_node` to
+node-keyed `NameChanged` records on the current registry resolver. No forward
+name surface or resource attribution is needed. Resolver records written before
+the tuple or before a resolver pointer change remain eligible when that resolver
+is current. Changing the reverse node's owner alone does not clear its stored
+name (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L170 @ ens_v1@91c966fe).
+The reverse registrar emits the tuple before assigning the registry
+resolver, then writes the name through that resolver
+(upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83 @ ens_v1@91c966fe)
+(upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966fe).
+
+Project selects the last canonical name write or record-version reset for that
+node and resolver at the projection head, ordered by block, transaction, log,
+and normalized-event ID. A version reset or blank name yields `not_found`;
+Names retained only as bytes yield `unsupported`. Changing away from a resolver stops
+using its name; changing back exposes that resolver's retained current-version
+name. This follows the resolver's version-keyed storage and reset behavior
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L17 @ ens_v1@91c966fe)
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L28 @ ens_v1@91c966fe)
+(upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L21 @ ens_v1@91c966fe).
+Scoped rebuilds retain this node history and invalidate the tuple on name,
+version, or resolver changes. Explicit `NameForAddrChanged` tuple claims retain
+their existing event path. These are declared claims; forward verification
+remains request-scoped.
 
 Current-head hydration for an admitted event-silent ENSv1 reverse resolver may
 refresh an existing ENS/60 claim tuple at the exact published Ethereum head. It

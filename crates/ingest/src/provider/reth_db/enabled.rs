@@ -24,6 +24,8 @@ mod convert;
 mod head;
 #[path = "logs.rs"]
 mod logs;
+#[path = "payloads.rs"]
+mod payloads;
 #[path = "retention.rs"]
 mod retention;
 
@@ -32,7 +34,7 @@ use convert::{
     provider_receipts_and_logs_from_recovered, provider_transactions_from_recovered, u64_to_i64,
 };
 
-use crate::provider::{Block, BlockBundle, HeadSnapshot, Log, ResolvedBlock};
+use crate::provider::{Block, BlockBundle, HeadSnapshot, Log, ResolvedBlock, SelectedPayloads};
 
 type EthereumRethProviderFactory =
     ProviderFactory<NodeTypesWithDBAdapter<EthereumNode, DatabaseEnv>>;
@@ -92,12 +94,14 @@ impl RethDbProvider {
         blocks: &[ResolvedBlock],
         addresses: &[String],
         topics: &[String],
+        topic1s: &[String],
     ) -> Result<Vec<Log>> {
         let blocks = convert::normalized_contiguous_resolved_blocks(blocks)?;
         let addresses = addresses.to_vec();
         let topics = topics.to_vec();
+        let topic1s = topic1s.to_vec();
         self.blocking("fetch logs", move |reader| {
-            reader.logs(&blocks, &topics, &addresses)
+            reader.logs(&blocks, &topics, &addresses, &topic1s)
         })
         .await
     }
@@ -106,6 +110,19 @@ impl RethDbProvider {
         let blocks = convert::normalized_resolved_blocks(blocks)?;
         self.blocking("fetch block bundles", move |reader| reader.bundles(&blocks))
             .await
+    }
+
+    pub(crate) async fn transaction_payloads(
+        &self,
+        blocks: &[ResolvedBlock],
+        logs: &[Log],
+    ) -> Result<SelectedPayloads> {
+        let blocks = convert::normalized_resolved_blocks(blocks)?;
+        let logs = logs.to_vec();
+        self.blocking("fetch selected transaction payloads", move |reader| {
+            reader.transaction_payloads(&blocks, &logs)
+        })
+        .await
     }
 
     async fn blocking<T, F>(&self, label: &'static str, operation: F) -> Result<T>
@@ -382,3 +399,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "payloads_tests.rs"]
+mod payloads_tests;

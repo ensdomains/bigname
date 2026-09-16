@@ -20,12 +20,29 @@ pub(super) async fn close(
         .map_err(|error| ProjectError::database("failed to disable topology JIT", error))?;
     create_frontier_tables(transaction).await?;
     include_changed_current_edges(transaction, chain_id).await?;
+    // A name whose own state changed rebuilds its edge rows (as child and as parent).
     sqlx::query(
-        "INSERT INTO project_scope_topology_pending
+        "INSERT INTO project_scope_children
          SELECT logical_name_id FROM project_scope_names
-         UNION
-         SELECT logical_name_id FROM project_scope_children
          ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to scope changed name edges", error))?;
+    // Names whose own state changed, and names already marked for a child-family rebuild, walk
+    // the tree in both directions. Names reached only as ancestors walk upward: a parent touched
+    // by one child's edge stages its own evidence without restaging its other children.
+    sqlx::query(
+        "INSERT INTO project_scope_topology_pending (logical_name_id, descend)
+         SELECT logical_name_id, bool_or(descend)
+         FROM (
+             SELECT logical_name_id, true AS descend FROM project_scope_names
+             UNION ALL
+             SELECT logical_name_id, true FROM project_scope_children
+             UNION ALL
+             SELECT logical_name_id, false FROM project_scope_ancestors
+         ) seed
+         GROUP BY logical_name_id",
     )
     .execute(&mut **transaction)
     .await
@@ -39,10 +56,10 @@ pub(super) async fn close(
         let moved = sqlx::query(
             "WITH moved AS (
                  DELETE FROM project_scope_topology_pending
-                 RETURNING logical_name_id
+                 RETURNING logical_name_id, descend
              )
-             INSERT INTO project_scope_topology_current (logical_name_id)
-             SELECT logical_name_id FROM moved",
+             INSERT INTO project_scope_topology_current (logical_name_id, descend)
+             SELECT logical_name_id, descend FROM moved",
         )
         .execute(&mut **transaction)
         .await
@@ -52,18 +69,52 @@ pub(super) async fn close(
             break;
         }
         sqlx::query(
-            "INSERT INTO project_scope_topology_seen
-             SELECT logical_name_id FROM project_scope_topology_current
-             ON CONFLICT DO NOTHING",
+            "INSERT INTO project_scope_topology_seen (logical_name_id, descend)
+             SELECT logical_name_id, descend FROM project_scope_topology_current
+             ON CONFLICT (logical_name_id) DO UPDATE
+                 SET descend = project_scope_topology_seen.descend OR EXCLUDED.descend",
         )
         .execute(&mut **transaction)
         .await
         .map_err(|error| ProjectError::database("failed to mark topology frontier", error))?;
 
-        include_current_edges(transaction, chain_id).await?;
-        include_v1_event_edges(transaction, chain_id, target_block).await?;
-        include_v2_event_edges(transaction, chain_id, target_block).await?;
+        // Upward: every frontier name reaches its parents as ancestors.
+        include_current_parent_edges(transaction, chain_id).await?;
+        include_v1_event_edges(transaction, chain_id, target_block, V1_PARENT_EDGE_SQLS).await?;
+        include_v2_parent_edges(transaction, chain_id, target_block).await?;
+        sqlx::query(
+            "INSERT INTO project_scope_ancestors
+             SELECT logical_name_id FROM project_scope_topology_candidates
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to retain topology ancestors", error))?;
+        sqlx::query(
+            "INSERT INTO project_scope_topology_pending (logical_name_id, descend)
+             SELECT candidate.logical_name_id, false
+             FROM project_scope_topology_candidates candidate
+             LEFT JOIN project_scope_topology_seen seen USING (logical_name_id)
+             WHERE seen.logical_name_id IS NULL
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to queue topology ancestors", error))?;
 
+        // Downward: only names whose own state changed (or that a changed ancestor reached)
+        // rebuild their child families.
+        sqlx::query("TRUNCATE project_scope_topology_candidates")
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| ProjectError::database("failed to reset topology frontier", error))?;
+        sqlx::query("DELETE FROM project_scope_topology_current WHERE NOT descend")
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| ProjectError::database("failed to narrow topology frontier", error))?;
+        include_current_child_edges(transaction, chain_id).await?;
+        include_v1_event_edges(transaction, chain_id, target_block, V1_CHILD_EDGE_SQLS).await?;
+        include_v2_child_edges(transaction, chain_id, target_block).await?;
         sqlx::query(
             "INSERT INTO project_scope_children
              SELECT logical_name_id FROM project_scope_topology_candidates
@@ -73,12 +124,12 @@ pub(super) async fn close(
         .await
         .map_err(|error| ProjectError::database("failed to retain topology candidates", error))?;
         sqlx::query(
-            "INSERT INTO project_scope_topology_pending
-             SELECT candidate.logical_name_id
+            "INSERT INTO project_scope_topology_pending (logical_name_id, descend)
+             SELECT candidate.logical_name_id, true
              FROM project_scope_topology_candidates candidate
              LEFT JOIN project_scope_topology_seen seen USING (logical_name_id)
-             WHERE seen.logical_name_id IS NULL
-             ON CONFLICT DO NOTHING",
+             WHERE seen.logical_name_id IS NULL OR NOT seen.descend
+             ON CONFLICT (logical_name_id) DO UPDATE SET descend = true",
         )
         .execute(&mut **transaction)
         .await
@@ -102,9 +153,9 @@ async fn restore_jit(
 
 async fn create_frontier_tables(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     for statement in [
-        "CREATE TEMP TABLE project_scope_topology_pending (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_topology_current (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_topology_seen (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
+        "CREATE TEMP TABLE project_scope_topology_pending (logical_name_id text PRIMARY KEY, descend boolean NOT NULL DEFAULT false) ON COMMIT DROP",
+        "CREATE TEMP TABLE project_scope_topology_current (logical_name_id text PRIMARY KEY, descend boolean NOT NULL DEFAULT false) ON COMMIT DROP",
+        "CREATE TEMP TABLE project_scope_topology_seen (logical_name_id text PRIMARY KEY, descend boolean NOT NULL DEFAULT false) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_topology_candidates (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
     ] {
         sqlx::query(statement)
@@ -135,10 +186,13 @@ async fn include_changed_current_edges(
                  OFFSET 0
              ) child
          )
-         INSERT INTO project_scope_children
+         , scoped_children AS (
+             INSERT INTO project_scope_children
+             SELECT child_logical_name_id FROM edges
+             ON CONFLICT DO NOTHING
+         )
+         INSERT INTO project_scope_ancestors
          SELECT parent_logical_name_id FROM edges
-         UNION
-         SELECT child_logical_name_id FROM edges
          ON CONFLICT DO NOTHING",
     )
     .bind(chain_id)
@@ -148,7 +202,7 @@ async fn include_changed_current_edges(
     Ok(())
 }
 
-async fn include_current_edges(
+async fn include_current_child_edges(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
 ) -> Result<()> {
@@ -163,7 +217,26 @@ async fn include_current_edges(
                    AND child.provenance ->> 'chain_id' = $1
                  OFFSET 0
              ) child
-             UNION ALL
+         )
+         INSERT INTO project_scope_topology_candidates
+         SELECT parent_logical_name_id FROM edges
+         UNION
+         SELECT child_logical_name_id FROM edges
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(chain_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to expand current child frontier", error))?;
+    Ok(())
+}
+
+async fn include_current_parent_edges(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+) -> Result<()> {
+    sqlx::query(
+        "WITH edges AS (
              SELECT child.parent_logical_name_id, child.child_logical_name_id
              FROM project_scope_topology_current scope
              CROSS JOIN LATERAL (
@@ -330,19 +403,26 @@ SELECT parent_id FROM edges UNION SELECT child_id FROM edges
 ON CONFLICT DO NOTHING
 "#;
 
-pub(crate) const V1_EVENT_EDGE_SQLS: [&str; 4] = [
+#[cfg(test)]
+const V1_EVENT_EDGE_SQLS: [&str; 4] = [
     V1_AFTER_NODE_SQL,
     V1_AFTER_CHILD_SQL,
     V1_BEFORE_NODE_SQL,
     V1_BEFORE_CHILD_SQL,
 ];
 
+/// Frontier name is the parent node: reaches its children.
+const V1_CHILD_EDGE_SQLS: [&str; 2] = [V1_AFTER_NODE_SQL, V1_BEFORE_NODE_SQL];
+/// Frontier name is the child node: reaches its parent.
+const V1_PARENT_EDGE_SQLS: [&str; 2] = [V1_AFTER_CHILD_SQL, V1_BEFORE_CHILD_SQL];
+
 async fn include_v1_event_edges(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target_block: i64,
+    queries: [&str; 2],
 ) -> Result<()> {
-    for query in V1_EVENT_EDGE_SQLS {
+    for query in queries {
         sqlx::query(query)
             .bind(chain_id)
             .bind(target_block)
@@ -355,7 +435,8 @@ async fn include_v1_event_edges(
     Ok(())
 }
 
-async fn include_v2_event_edges(
+/// Frontier name is the parent: its subregistry pointers reach the registrations under them.
+async fn include_v2_child_edges(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target_block: i64,
@@ -412,9 +493,31 @@ async fn include_v2_event_edges(
                   'canonical', 'safe', 'finalized'
               )
              WHERE pointer.address IS NOT NULL AND btrim(pointer.address) <> ''
-             UNION ALL
-             SELECT DISTINCT topology.logical_name_id,
-                    registration.logical_name_id
+         )
+         INSERT INTO project_scope_topology_candidates
+         SELECT parent_id FROM edges
+         UNION
+         SELECT child_id FROM edges
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(chain_id)
+    .bind(target_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to expand v2 child frontier", error))?;
+    Ok(())
+}
+
+/// Frontier name is a registration: its registry's subregistry pointer reaches the parent.
+async fn include_v2_parent_edges(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target_block: i64,
+) -> Result<()> {
+    sqlx::query(
+        "WITH edges AS (
+             SELECT DISTINCT topology.logical_name_id AS parent_id,
+                    registration.logical_name_id AS child_id
              FROM project_scope_topology_current scope
              CROSS JOIN LATERAL (
                  SELECT *
