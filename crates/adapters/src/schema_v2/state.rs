@@ -108,7 +108,7 @@ pub(super) struct State {
     v1_pending_wrapper_sync_expiries: OrdMap<String, (String, u64)>,
     v1_correlated_wrapper_expiries: OrdMap<String, u64>,
     v1_registrars: OrdMap<String, V1NameState>,
-    v1_registrar_evidence: OrdMap<String, Value>,
+    v1_registrar_evidence: OrdMap<String, registrar_evidence::StoredEvidence>,
     v1_expiries: OrdSet<(i64, String)>,
     v2_migration_times: OrdMap<String, i64>,
     v1_registry_authorities: OrdMap<String, V1NameState>,
