@@ -53,6 +53,10 @@ impl BlockBundle {
 }
 
 impl Transaction {
+    pub(super) fn from_value(value: &Value) -> Result<Self> {
+        Self::from_rpc(decode_ref::<RpcTransaction>(value, "transaction")?)
+    }
+
     fn from_rpc(transaction: RpcTransaction) -> Result<Self> {
         Ok(Self {
             hash: hash_hex(transaction.hash),
@@ -82,6 +86,24 @@ impl Receipt {
             logs_bloom: receipt.logs_bloom.map(|bytes| bytes.to_vec()),
         })
     }
+
+    /// Decodes the receipt's own log list, as the receipt reports it.
+    ///
+    /// The logs are left unpinned here: the per-transaction fetch path pins each of them
+    /// against the block the window already resolved, which is a stronger check than
+    /// trusting the enclosing envelope.
+    pub(super) fn logs_from_value(value: &Value) -> Result<Vec<Log>> {
+        decode_ref::<RpcReceiptLogs>(value, "receipt logs")?
+            .logs
+            .iter()
+            .map(Log::from_unpinned_value)
+            .collect()
+    }
+
+    /// Whether the raw receipt carried a non-null `status` field.
+    pub(super) fn reported_status(value: &Value) -> bool {
+        value.get("status").is_some_and(|status| !status.is_null())
+    }
 }
 
 impl Log {
@@ -99,70 +121,24 @@ impl Log {
         })
     }
 
-    pub(super) fn from_value(
-        value: &Value,
-        expected_hash: &str,
-        expected_number: i64,
-    ) -> Result<Self> {
-        Self::from_value_for_lookup(
-            value,
-            expected_hash,
-            expected_number,
-            LogLookup::ResolvedRange,
-        )
-    }
-
+    /// Decodes a log the caller already pinned to one block by hash.
+    ///
+    /// The bundle path asks the provider for exactly one block's logs, so a log from
+    /// anywhere else is a corrupt answer, not a race.
     pub(super) fn from_block_hash_value(
         value: &Value,
         expected_hash: &str,
         expected_number: i64,
     ) -> Result<Self> {
-        Self::from_value_for_lookup(value, expected_hash, expected_number, LogLookup::BlockHash)
-    }
-
-    fn from_value_for_lookup(
-        value: &Value,
-        expected_hash: &str,
-        expected_number: i64,
-        lookup: LogLookup,
-    ) -> Result<Self> {
-        let log = decode_ref::<RpcLog>(value, "log")?;
-        let block_hash = hash_hex(log.block_hash);
-        let block_number = u256_i64(log.block_number, "log block number")?;
-        if block_hash != expected_hash || block_number != expected_number {
-            match lookup {
-                LogLookup::ResolvedRange => bail!(
-                    "provider returned log outside resolved block {expected_number} {expected_hash}"
-                ),
-                LogLookup::BlockHash => bail!(
-                    "provider returned log outside blockHash-pinned block {expected_number} {expected_hash}"
-                ),
-            }
+        let log = Self::from_unpinned_value(value)?;
+        if log.block_hash != expected_hash || log.block_number != expected_number {
+            bail!(
+                "provider returned log outside blockHash-pinned block \
+                 {expected_number} {expected_hash}"
+            );
         }
-        Ok(Self {
-            block_hash,
-            block_number,
-            transaction_hash: hash_hex(log.transaction_hash),
-            transaction_index: u256_i64(log.transaction_index, "log transaction index")?,
-            log_index: u256_i64(log.log_index, "log index")?,
-            address: address_hex(log.address),
-            topics: log.topics.into_iter().map(hash_hex).collect(),
-            data: log.data.to_vec(),
-        })
+        Ok(log)
     }
-
-    pub(super) fn block_number(value: &Value) -> Result<i64> {
-        u256_i64(
-            decode_ref::<RpcLogNumber>(value, "log")?.block_number,
-            "log block number",
-        )
-    }
-}
-
-#[derive(Clone, Copy)]
-enum LogLookup {
-    ResolvedRange,
-    BlockHash,
 }
 
 pub(super) fn normalize_hash(value: &str) -> String {
@@ -269,6 +245,12 @@ struct RpcReceipt {
 }
 
 #[derive(Debug, Deserialize)]
+struct RpcReceiptLogs {
+    #[serde(default)]
+    logs: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RpcLog {
     block_hash: B256,
@@ -281,12 +263,6 @@ struct RpcLog {
     data: Bytes,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RpcLogNumber {
-    block_number: U256,
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -295,7 +271,7 @@ mod tests {
     use crate::{ErrorKind, provider::provider_error};
 
     #[test]
-    fn log_mismatch_classification_depends_on_lookup_scope() {
+    fn a_block_hash_pinned_log_from_elsewhere_is_a_data_integrity_fault() {
         let expected_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let value = json!({
             "blockHash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -308,14 +284,6 @@ mod tests {
             "topics": [],
             "data": "0x"
         });
-
-        let range_error =
-            Log::from_value(&value, expected_hash, 10).expect_err("range mismatch must fail");
-        assert!(range_error.to_string().contains("outside resolved block"));
-        assert_eq!(
-            provider_error("range log lookup failed", range_error).kind(),
-            ErrorKind::Transient
-        );
 
         let block_hash_error = Log::from_block_hash_value(&value, expected_hash, 10)
             .expect_err("blockHash-pinned mismatch must fail");

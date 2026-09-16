@@ -99,6 +99,19 @@ CREATE INDEX IF NOT EXISTS name_current_resolver_idx
     )
     WHERE declared_summary #>> '{resolver,address}' IS NOT NULL;
 
+-- Namespace-wide expiry window (`GET /v1/names?namespace=&expires_after=&expires_before=`).
+-- The projection writes `registration.expiry` as a JSON number of unix seconds; the partial
+-- predicate keeps the text-to-float cast off every other shape, so the expression is immutable
+-- and the index build cannot fail on a non-numeric string. The reader repeats the same
+-- JSONB_TYPEOF guard and cast in its WHERE clause so the planner can match this index.
+CREATE INDEX IF NOT EXISTS name_current_registration_expiry_idx
+    ON name_current (
+        namespace,
+        ((declared_summary #>> '{registration,expiry}')::double precision),
+        logical_name_id
+    )
+    WHERE jsonb_typeof(declared_summary #> '{registration,expiry}') = 'number';
+
 CREATE TABLE IF NOT EXISTS children_current (
     parent_logical_name_id text NOT NULL
         REFERENCES name_surfaces (logical_name_id),
@@ -235,7 +248,9 @@ CREATE INDEX IF NOT EXISTS permissions_current_resolver_scope_idx
 
 CREATE TABLE IF NOT EXISTS account_permission_state_current (
     chain_id text NOT NULL,
-    authority_kind text NOT NULL CHECK (authority_kind = 'registry'),
+    authority_kind text NOT NULL
+        CONSTRAINT account_permission_state_current_authority_kind_check
+        CHECK (authority_kind IN ('registry', 'wrapper')),
     authority_contract text NOT NULL CHECK (authority_contract ~ '^0x[0-9a-f]{40}$'),
     authority_contract_instance_id uuid NOT NULL,
     owner text NOT NULL CHECK (owner ~ '^0x[0-9a-f]{40}$'),
@@ -255,7 +270,11 @@ CREATE TABLE IF NOT EXISTS account_permission_state_current (
     inserted_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (chain_id, authority_kind, authority_contract, owner, subject, relation_kind),
     CHECK (btrim(chain_id) <> ''),
-    CHECK ((approved AND effective_powers = '["registry_control"]'::jsonb)
+    CONSTRAINT account_permission_state_current_effective_powers_check CHECK (
+        (approved AND authority_kind = 'registry'
+            AND effective_powers = '["registry_control"]'::jsonb)
+        OR (approved AND authority_kind = 'wrapper'
+            AND effective_powers = '["wrapper_control"]'::jsonb)
         OR (NOT approved AND effective_powers = '[]'::jsonb)),
     CHECK (jsonb_typeof(grant_source) = 'object'),
     CHECK (revocation_source IS NULL OR jsonb_typeof(revocation_source) = 'object'),
@@ -275,7 +294,7 @@ CREATE INDEX IF NOT EXISTS account_permission_state_current_applicability_idx
 
 COMMENT ON TABLE account_permission_state_current IS 'Latest account-wide permission states.';
 COMMENT ON COLUMN account_permission_state_current.chain_id IS 'The chain identifier.';
-COMMENT ON COLUMN account_permission_state_current.authority_kind IS 'The authority class.';
+COMMENT ON COLUMN account_permission_state_current.authority_kind IS 'The authority class: registry (ENSv1/Basenames registry operators) or wrapper (NameWrapper operators).';
 COMMENT ON COLUMN account_permission_state_current.authority_contract IS 'The authority contract address.';
 COMMENT ON COLUMN account_permission_state_current.authority_contract_instance_id IS 'The admitted contract instance.';
 COMMENT ON COLUMN account_permission_state_current.owner IS 'The approving account.';
@@ -304,6 +323,7 @@ CREATE TABLE IF NOT EXISTS permissions_current_resource_summary (
     registry_contract text,
     registry_binding_provenance jsonb,
     registry_binding_chain_positions jsonb,
+    resource_restrictions jsonb,
     support_status text NOT NULL,
     unsupported_reason text,
     provenance jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -325,6 +345,8 @@ CREATE TABLE IF NOT EXISTS permissions_current_resource_summary (
             AND jsonb_typeof(registry_binding_provenance) = 'object'
             AND jsonb_typeof(registry_binding_chain_positions) = 'object')
     ),
+    CONSTRAINT permissions_current_resource_summary_restrictions_check
+        CHECK (resource_restrictions IS NULL OR jsonb_typeof(resource_restrictions) = 'object'),
     CHECK (support_status IN ('supported', 'unsupported')),
     CHECK (
         (support_status = 'supported' AND unsupported_reason IS NULL)
@@ -508,6 +530,110 @@ CREATE INDEX IF NOT EXISTS address_names_current_address_idx
 
 CREATE INDEX IF NOT EXISTS address_names_current_name_idx
     ON address_names_current (logical_name_id, relation, lower(address));
+
+-- Reverse index over current `addr:<coin_type>` resolver records: one row per (address the
+-- record resolves to, coin type, current name). Rows are derived from the published
+-- record inventory of the name's record-serving resource; they answer "which names resolve to
+-- this address" without re-deciding forward record values.
+CREATE TABLE IF NOT EXISTS address_records_current (
+    address text NOT NULL,
+    coin_type text NOT NULL,
+    logical_name_id text NOT NULL
+        REFERENCES name_surfaces (logical_name_id),
+    namespace text NOT NULL,
+    raw_name text NOT NULL,
+    namehash text NOT NULL,
+    surface_binding_id uuid
+        REFERENCES surface_bindings (surface_binding_id),
+    resource_id uuid
+        REFERENCES resources (resource_id),
+    record_resource_id uuid NOT NULL
+        REFERENCES resources (resource_id),
+    binding_kind text,
+    record_key text NOT NULL,
+    support_status text NOT NULL,
+    unsupported_reason text,
+    provenance jsonb NOT NULL DEFAULT '{}'::jsonb,
+    chain_positions jsonb NOT NULL DEFAULT '{}'::jsonb,
+    canonicality_summary jsonb NOT NULL DEFAULT '{}'::jsonb,
+    manifest_version bigint NOT NULL,
+    last_recomputed_at timestamptz NOT NULL DEFAULT now(),
+    inserted_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (address, coin_type, logical_name_id),
+    CHECK (address = lower(address) AND address ~ '^0x[0-9a-f]{40}$'),
+    CHECK (coin_type ~ '^[0-9]+$'),
+    CHECK (btrim(namespace) <> ''),
+    CHECK (btrim(namehash) <> ''),
+    CONSTRAINT address_records_current_logical_identity_check
+        CHECK (logical_name_id = namespace || ':' || namehash),
+    CHECK (record_key = 'addr:' || coin_type OR record_key = 'addr:2147483648'),
+    CHECK (support_status IN ('supported', 'unsupported')),
+    CHECK (
+        (support_status = 'supported' AND unsupported_reason IS NULL)
+        OR (
+            support_status = 'unsupported'
+            AND unsupported_reason IS NOT NULL
+            AND btrim(unsupported_reason) <> ''
+        )
+    ),
+    CHECK (jsonb_typeof(provenance) = 'object'),
+    CHECK (jsonb_typeof(chain_positions) = 'object'),
+    CHECK (jsonb_typeof(canonicality_summary) = 'object'),
+    CHECK (manifest_version > 0)
+);
+
+CREATE INDEX IF NOT EXISTS address_records_current_address_sort_idx
+    ON address_records_current (address, coin_type, namespace, raw_name, logical_name_id);
+
+CREATE INDEX IF NOT EXISTS address_records_current_name_idx
+    ON address_records_current (logical_name_id);
+
+CREATE INDEX IF NOT EXISTS address_records_current_resource_idx
+    ON address_records_current (resource_id);
+
+CREATE INDEX IF NOT EXISTS address_records_current_record_resource_idx
+    ON address_records_current (record_resource_id);
+
+COMMENT ON TABLE address_records_current IS
+    'Project-owned reverse index over current addr:<coin_type> resolver records: one row per address a record resolves to, coin type, and current name. Rebuilt from record_inventory_current; not serving truth for forward record values.';
+COMMENT ON COLUMN address_records_current.address IS
+    'Lowercase EVM address stored by the selected address record.';
+COMMENT ON COLUMN address_records_current.coin_type IS
+    'Decimal coin type selected for reverse address-record membership.';
+COMMENT ON COLUMN address_records_current.logical_name_id IS
+    'Logical name identity selected by Project for this reverse membership.';
+COMMENT ON COLUMN address_records_current.namespace IS
+    'Namespace of the selected logical name.';
+COMMENT ON COLUMN address_records_current.raw_name IS
+    'Selected name text used for reverse address-record ordering.';
+COMMENT ON COLUMN address_records_current.namehash IS
+    'Namehash of the selected logical name.';
+COMMENT ON COLUMN address_records_current.surface_binding_id IS
+    'Binding selected by Project, absent when only a serving resource is known.';
+COMMENT ON COLUMN address_records_current.resource_id IS
+    'Registration resource referenced by the selected name binding, absent without authority.';
+COMMENT ON COLUMN address_records_current.record_resource_id IS
+    'Resource whose resolver record inventory supplies the address value.';
+COMMENT ON COLUMN address_records_current.binding_kind IS
+    'Kind of the selected name binding, absent without authority.';
+COMMENT ON COLUMN address_records_current.record_key IS
+    'Address record inventory key, including the default EVM key when used as a fallback.';
+COMMENT ON COLUMN address_records_current.support_status IS
+    'Whether the selected address record is supported for serving.';
+COMMENT ON COLUMN address_records_current.unsupported_reason IS
+    'Reason the selected address record is unsupported, or null for supported rows.';
+COMMENT ON COLUMN address_records_current.provenance IS
+    'Evidence for the selected name, resolver, and address record.';
+COMMENT ON COLUMN address_records_current.chain_positions IS
+    'Chain positions used by Project to rebuild this membership.';
+COMMENT ON COLUMN address_records_current.canonicality_summary IS
+    'Canonicality summary for the projected membership.';
+COMMENT ON COLUMN address_records_current.manifest_version IS
+    'Manifest version used to derive the membership.';
+COMMENT ON COLUMN address_records_current.last_recomputed_at IS
+    'Database timestamp when Project last rebuilt the membership.';
+COMMENT ON COLUMN address_records_current.inserted_at IS
+    'Database timestamp when this projection row was inserted.';
 
 CREATE SEQUENCE IF NOT EXISTS reverse_hydration_attempt_ordinal_seq AS bigint;
 
@@ -733,6 +859,8 @@ COMMENT ON COLUMN permissions_current_resource_summary.registry_binding_provenan
     'This object identifies the registry-owner evidence.';
 COMMENT ON COLUMN permissions_current_resource_summary.registry_binding_chain_positions IS
     'This object identifies the registry-owner chain position.';
+COMMENT ON COLUMN permissions_current_resource_summary.resource_restrictions IS
+    'The registration-level restriction block: NameWrapper state, expiry-effective fuses, and expiry, or ENSv2 locked roles.';
 COMMENT ON COLUMN permissions_current_resource_summary.support_status IS
     'This value states whether permission reads are supported.';
 COMMENT ON COLUMN permissions_current_resource_summary.unsupported_reason IS

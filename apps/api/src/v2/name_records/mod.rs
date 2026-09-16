@@ -15,26 +15,29 @@ use serde_json::Value;
 use crate::AppState;
 use crate::v2::support::{
     ResolutionLookupError, ResolutionRecordKey, load_name_current_for_selected_snapshot,
-    load_supported_record_inventory_current_for_snapshot, map_internal_api_error,
-    normalize_inferred_route_name, parse_resolution_record_key, snapshot_selection_api_error,
+    load_record_inventory_for_source, map_internal_api_error, normalize_inferred_route_name,
+    snapshot_selection_api_error,
 };
 
-use super::support::execute_resolution_lookup;
+use super::support::{ResolutionLookupOutcome, execute_resolution_lookup};
 
 use super::{
     AtSelector, Envelope, Finality, MAX_PAGE_SIZE, QueryParamAllowlist, RequestSource, Resolver,
     SnapshotReadResource, Source, Status, StrictQueryParams, V2Error, V2Result,
     api_error_to_v2_for_resource, default_requested_records,
     name_records_inventory::RecordInventory, resolve_v2_snapshot_for, snapshot_meta,
-    v2_exact_name_snapshot_scope_with_resolution_auxiliary, validate_product_record,
+    v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 
 mod build;
+mod keys;
 pub(crate) use build::{
-    VERIFIED_NOT_SUPPORTED_REASON, build_authority_unsupported_name_records,
-    build_auto_name_records, build_indexed_name_records, build_verified_name_records,
-    ens_universal_resolver_discovery_candidate, indexed_records_requiring_verified_fallback,
+    EXACT_NAME_AUTHORITY_NOT_VERIFIABLE, VERIFIED_NOT_SUPPORTED_REASON,
+    build_authority_unsupported_name_records, build_auto_name_records, build_indexed_name_records,
+    build_verified_name_records, ens_universal_resolver_discovery_candidate,
+    indexed_records_requiring_verified_fallback,
 };
+pub(crate) use keys::parse_record_keys;
 
 pub(crate) const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
 const VERIFIED_ANSWER_STALE_FOR_SNAPSHOT_REASON: &str = "verified_answer_stale_for_snapshot";
@@ -155,6 +158,9 @@ pub(crate) enum VerifiedRecordLookup {
     },
     Stale(String),
     NotSupported,
+    /// The name's selected authority arm is not admitted by this profile's execution
+    /// declaration; every requested key reports `exact_name_authority_not_verifiable`.
+    AuthorityArmNotAdmitted,
 }
 
 pub(crate) async fn get_name_records(
@@ -181,6 +187,7 @@ pub(crate) async fn get_name_records(
         params.at.as_ref(),
         params.finality,
         include_resolution_auxiliary,
+        params.source,
     )
     .await?;
 
@@ -228,7 +235,6 @@ pub(crate) async fn get_name_records(
                 let verified_lookup = load_verified_record_lookup(
                     &state,
                     &row,
-                    record_inventory.as_ref(),
                     requested_records.unwrap_or_default(),
                     &mut selected_snapshot,
                 )
@@ -284,6 +290,7 @@ pub(crate) async fn get_name_records(
                                 params.at.as_ref(),
                                 params.finality,
                                 true,
+                                RequestSource::Verified,
                             )
                             .await?;
                         let refreshed_fallback_records =
@@ -311,7 +318,6 @@ pub(crate) async fn get_name_records(
                     let verified_lookup = load_verified_record_lookup(
                         &state,
                         &row,
-                        record_inventory.as_ref(),
                         &fallback_records,
                         &mut selected_snapshot,
                     )
@@ -376,6 +382,7 @@ async fn load_name_records_snapshot_state(
     at: Option<&AtSelector>,
     finality: Finality,
     include_resolution_auxiliary: bool,
+    source: RequestSource,
 ) -> V2Result<(
     SelectedSnapshot,
     NameCurrentRow,
@@ -417,7 +424,7 @@ async fn load_name_records_snapshot_state(
     })?;
 
     let record_inventory = if super::name_record::row_has_current_registration(&row) {
-        load_supported_record_inventory_current_for_snapshot(&state.pool, &row, &selected_snapshot)
+        load_record_inventory_for_source(&state.pool, &row, &selected_snapshot, source)
             .await
             .map_err(|error| {
                 api_error_to_v2_for_resource(
@@ -443,14 +450,12 @@ pub(crate) fn ensure_verified_record_limit(records: &[ResolutionRecordKey]) -> V
 pub(crate) async fn load_verified_record_lookup(
     state: &AppState,
     row: &bigname_storage::NameCurrentRow,
-    record_inventory: Option<&RecordInventoryCurrentRow>,
     records: &[ResolutionRecordKey],
     selected_snapshot: &mut SelectedSnapshot,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
     load_verified_record_lookup_for_resource(
         state,
         row,
-        record_inventory,
         records,
         selected_snapshot,
         SnapshotReadResource::NameRecords,
@@ -461,7 +466,6 @@ pub(crate) async fn load_verified_record_lookup(
 pub(crate) async fn load_verified_record_lookup_for_resource(
     state: &AppState,
     row: &bigname_storage::NameCurrentRow,
-    record_inventory: Option<&RecordInventoryCurrentRow>,
     records: &[ResolutionRecordKey],
     selected_snapshot: &mut SelectedSnapshot,
     resource: SnapshotReadResource,
@@ -469,28 +473,18 @@ pub(crate) async fn load_verified_record_lookup_for_resource(
     if !super::name_record::row_has_current_registration(row) {
         return Ok(Some(VerifiedRecordLookup::NotSupported));
     }
-    load_verified_record_lookup_with_persistence(
-        state,
-        row,
-        record_inventory,
-        records,
-        selected_snapshot,
-        resource,
-    )
-    .await
+    execute_verified_record_lookup(state, row, records, selected_snapshot, resource).await
 }
 
 pub(crate) async fn load_ephemeral_verified_record_lookup(
     state: &AppState,
     row: &bigname_storage::NameCurrentRow,
-    record_inventory: Option<&RecordInventoryCurrentRow>,
     records: &[ResolutionRecordKey],
     selected_snapshot: &mut SelectedSnapshot,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
-    load_verified_record_lookup_with_persistence(
+    execute_verified_record_lookup(
         state,
         row,
-        record_inventory,
         records,
         selected_snapshot,
         SnapshotReadResource::NameRecords,
@@ -498,10 +492,9 @@ pub(crate) async fn load_ephemeral_verified_record_lookup(
     .await
 }
 
-async fn load_verified_record_lookup_with_persistence(
+async fn execute_verified_record_lookup(
     state: &AppState,
     row: &bigname_storage::NameCurrentRow,
-    record_inventory: Option<&RecordInventoryCurrentRow>,
     records: &[ResolutionRecordKey],
     selected_snapshot: &mut SelectedSnapshot,
     resource: SnapshotReadResource,
@@ -510,12 +503,14 @@ async fn load_verified_record_lookup_with_persistence(
         return Ok(None);
     }
 
-    let _ = record_inventory;
     match execute_resolution_lookup(state, row, records, selected_snapshot).await {
-        Ok(Some(response)) => Ok(Some(VerifiedRecordLookup::Found {
-            response: Box::new(response),
-        })),
-        Ok(None) => Ok(Some(VerifiedRecordLookup::NotSupported)),
+        Ok(ResolutionLookupOutcome::Executed(response)) => {
+            Ok(Some(VerifiedRecordLookup::Found { response }))
+        }
+        Ok(ResolutionLookupOutcome::NotSupported) => Ok(Some(VerifiedRecordLookup::NotSupported)),
+        Ok(ResolutionLookupOutcome::AuthorityArmNotAdmitted) => {
+            Ok(Some(VerifiedRecordLookup::AuthorityArmNotAdmitted))
+        }
         Err(ResolutionLookupError::Snapshot(error))
             if error.kind() == SnapshotSelectionErrorKind::Stale =>
         {
@@ -528,42 +523,6 @@ async fn load_verified_record_lookup_with_persistence(
             resource,
         )),
     }
-}
-
-pub(crate) fn parse_record_keys(keys: Option<&str>) -> V2Result<Option<Vec<ResolutionRecordKey>>> {
-    let Some(keys) = keys.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(None);
-    };
-
-    let mut parsed = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    for key in keys.split(',').map(str::trim) {
-        if parsed.len() >= MAX_RECORD_KEYS {
-            return Err(V2Error::invalid_input(format!(
-                "keys must contain at most {MAX_RECORD_KEYS} record keys"
-            )));
-        }
-        if key.is_empty() {
-            return Err(V2Error::invalid_input(
-                "keys must be a comma-separated record-key list",
-            ));
-        }
-        let record = parse_resolution_record_key(key)
-            .and_then(validate_product_record)
-            .ok_or_else(|| {
-                V2Error::invalid_input(
-                    "keys must contain only addr:<coin_type>, text:<key>, avatar, or contenthash",
-                )
-            })?;
-        if !seen.insert(record.record_key.clone()) {
-            return Err(V2Error::invalid_input(
-                "keys must not contain duplicate record keys",
-            ));
-        }
-        parsed.push(record);
-    }
-
-    Ok(Some(parsed))
 }
 
 fn records_include_inventory(include: &[String]) -> V2Result<bool> {

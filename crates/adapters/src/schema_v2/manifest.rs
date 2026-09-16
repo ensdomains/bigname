@@ -15,6 +15,9 @@ pub(super) struct ManifestSource {
     pub chain_id: String,
     pub deployment_label: String,
     pub correlation_addresses: BTreeMap<String, String>,
+    /// Lowercase `resolver_implementations[].address` entries; the admission authority for
+    /// announcement-discovered resolvers.
+    pub resolver_implementations: Vec<String>,
     pub events: Vec<ManifestEvent>,
 }
 
@@ -60,7 +63,14 @@ struct StoredPayload {
     #[serde(default)]
     correlation_addresses: BTreeMap<String, String>,
     #[serde(default)]
+    resolver_implementations: Vec<StoredImplementation>,
+    #[serde(default)]
     abi: StoredAbi,
+}
+
+#[derive(Deserialize)]
+struct StoredImplementation {
+    address: String,
 }
 
 #[derive(Default, Deserialize)]
@@ -104,6 +114,11 @@ pub(super) fn decode(input: ManifestInput) -> anyhow::Result<ManifestSource> {
         chain_id: input.chain_id,
         deployment_label: input.deployment_label,
         correlation_addresses: stored.correlation_addresses,
+        resolver_implementations: stored
+            .resolver_implementations
+            .into_iter()
+            .map(|implementation| implementation.address.to_ascii_lowercase())
+            .collect(),
         events,
     })
 }

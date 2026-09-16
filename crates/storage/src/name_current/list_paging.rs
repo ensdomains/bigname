@@ -1,4 +1,4 @@
-fn push_name_current_list_cursor_after<'a>(
+pub(super) fn push_name_current_list_cursor_after<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     sort: NameCurrentListSort,
     order: NameCurrentListOrder,
@@ -134,7 +134,7 @@ fn push_timestamp_tie_after<'a>(
     builder.push(")");
 }
 
-fn push_name_current_list_order(
+pub(super) fn push_name_current_list_order(
     builder: &mut QueryBuilder<'_, Postgres>,
     sort: NameCurrentListSort,
     order: NameCurrentListOrder,
@@ -216,7 +216,7 @@ fn timestamp_null_rank(value: Option<OffsetDateTime>, order: NameCurrentListOrde
     }
 }
 
-fn decode_name_current_list_row(row: PgRow) -> Result<NameCurrentListRow> {
+pub(super) fn decode_name_current_list_row(row: PgRow) -> Result<NameCurrentListRow> {
     let labelhash = crate::sql_row::get(&row, "labelhash")?;
     let token_id = crate::sql_row::get(&row, "token_id")?;
     let owner = crate::sql_row::get(&row, "owner")?;

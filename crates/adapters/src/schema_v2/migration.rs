@@ -6,7 +6,6 @@ use serde_json::{Value, json};
 use super::{
     BatchOutput, MigrationCandidateEffect, NormalizedEvent,
     catalog::{Catalog, Selected},
-    manifest::ManifestSource,
     protocol::MigrationObservation,
 };
 
@@ -15,35 +14,44 @@ mod child;
 mod registry;
 mod renewals;
 mod support;
+mod unwrapped_reconcile;
 use activation::activate_complete_groups;
 #[cfg(any(test, feature = "test-activation"))]
 pub use activation::inject_activated_transition_for_test;
 use registry::correlate_registry_creation;
 use renewals::correlate_renewals;
 use support::*;
+pub(super) use unwrapped_reconcile::{UnwrappedReconciliation, unwrapped_reconciliations};
 
 const MIGRATION_FAMILY: &str = "ens_v2_migration_l1";
 const V1_REGISTRAR_FAMILY: &str = "ens_v1_registrar_l1";
 const CANDIDATE: &str = "candidate";
 const TRANSITION_KIND: &str = "authority_transition";
 
-pub(super) fn correlated_registrar_source(
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct RegistrarContext {
+    pub(super) migration_enabled: bool,
+    pub(super) graveyard_cleanup: bool,
+    pub(super) transaction_has_registry_setup: bool,
+}
+
+pub(super) fn registrar_context(
     catalog: &Catalog,
     selected: &Selected,
     raw: &super::RawLogInput,
-) -> anyhow::Result<Option<ManifestSource>> {
+) -> anyhow::Result<RegistrarContext> {
     if selected.source.source_family != V1_REGISTRAR_FAMILY
         || selected.emitter_role.as_deref() != Some("registrar")
     {
-        return Ok(None);
+        return Ok(RegistrarContext::default());
     }
     let Some(migration_source) = catalog.source_for_family(MIGRATION_FAMILY) else {
-        return Ok(None);
+        return Ok(RegistrarContext::default());
     };
     if migration_source.namespace != selected.source.namespace
         || migration_source.chain_id != selected.source.chain_id
     {
-        return Ok(None);
+        return Ok(RegistrarContext::default());
     }
     let registrar = catalog
         .correlation_address(MIGRATION_FAMILY, "ens_v1_base_registrar")
@@ -52,9 +60,20 @@ pub(super) fn correlated_registrar_source(
         .declared_start_block_for_role(MIGRATION_FAMILY, "graveyard")
         .context("migration manifest has no launch-bounded Graveyard declaration")?;
     if !raw.emitting_address.eq_ignore_ascii_case(registrar) || raw.block_number < launch_block {
-        return Ok(None);
+        return Ok(RegistrarContext::default());
     }
-    Ok(Some(migration_source.clone()))
+    let graveyard = declared_address(catalog, "graveyard")?;
+    Ok(RegistrarContext {
+        migration_enabled: true,
+        graveyard_cleanup: super::protocol::migration::is_graveyard_cleanup(
+            selected, raw, &graveyard,
+        )?,
+        transaction_has_registry_setup: false,
+    })
+}
+
+pub(in crate::schema_v2) fn is_graveyard_cleanup(decoded: &Value, graveyard: &str) -> bool {
+    support::is_graveyard_cleanup(decoded, graveyard)
 }
 
 fn is_v1_registrar_observation(observation: &MigrationObservation) -> bool {

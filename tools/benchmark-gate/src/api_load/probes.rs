@@ -173,7 +173,7 @@ fn default_primary_name_requests(
                 coin_type.clone(),
                 get(
                     base,
-                    &["v2", "addresses", address, "primary-name"],
+                    &["v1", "addresses", address, "primary-name"],
                     &[("namespace", namespace), ("coin_type", coin_type)],
                 )?,
             ))

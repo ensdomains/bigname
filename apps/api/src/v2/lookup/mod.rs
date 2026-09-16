@@ -4,20 +4,18 @@ use axum::{
     Json,
     extract::{State, rejection::JsonRejection},
 };
-use bigname_storage::SelectedSnapshot;
 use tracing::error;
 
 use super::support::{load_reverse_identity_records_live, load_reverse_identity_records_page_live};
 use crate::AppState;
 
-use super::{
-    Envelope, NoQueryParams, Page, Relation, RelationSet, Status, V2Error, V2Result, encode,
-};
+use super::{Authority, Envelope, NoQueryParams, Page, Status, V2Error, V2Result, encode};
 
 mod admission;
 mod build;
 mod cursor;
 mod dto;
+mod forward;
 pub(crate) mod head;
 #[cfg(test)]
 pub(crate) use head::{
@@ -25,27 +23,30 @@ pub(crate) use head::{
 };
 mod page;
 mod parse;
+mod relation_filter;
+mod resolves_to;
 mod scope;
 
+use admission::require_reverse_records_at_served_head;
 pub(crate) use admission::{
     require_name_current_at_served_head, require_name_projection_at_served_head,
 };
-use admission::{require_name_records_at_served_head, require_reverse_records_at_served_head};
-use build::{
-    build_forward_detail_record, build_forward_feed_record, build_reverse_detail_record,
-    build_reverse_feed_record, lookup_address_status,
-};
+use build::{build_reverse_detail_record, build_reverse_feed_record, lookup_address_status};
 use cursor::{
     LookupReverseCursorBinding, ReverseCursorKey, ReverseStorageKey, lookup_reverse_cursor_payload,
     reverse_identity_sort, reverse_identity_storage_cursor,
 };
 use dto::{LookupInput, LookupKind, LookupRecord, LookupRequest, LookupResult};
+use forward::render_name_lookup_results;
 use head::{load_served_head, revalidate_served_head};
 use page::ReverseLookupPage;
 use parse::{
-    LookupProfile, ParsedAddressLookup, ParsedNameLookup, bind_address_cursor,
-    ensure_lookup_batch_limit, parse_address_input, parse_lookup_json_body, parse_lookup_namespace,
-    parse_lookup_profile, parse_name_input,
+    LookupProfile, ParsedAddressLookup, bind_address_cursor, ensure_lookup_batch_limit,
+    parse_address_input, parse_lookup_json_body, parse_lookup_namespace, parse_lookup_profile,
+    parse_name_input,
+};
+use relation_filter::{
+    requires_relation_post_filter, reverse_record_matches_relation, trim_reverse_record_relations,
 };
 use scope::{
     lookup_public_namespaces, lookup_request_scope_meta, lookup_snapshot_scope,
@@ -134,6 +135,7 @@ pub(crate) async fn get_lookup(
         &mut results,
     )
     .await?;
+    apply_migrated_at(&state, &mut results).await?;
     #[cfg(test)]
     head::served_head_revalidation_test_hooks::run(&state.pool).await?;
     revalidate_lookup_public_namespaces(&state, public_namespaces.as_ref()).await?;
@@ -152,90 +154,40 @@ pub(crate) async fn get_lookup(
     }))
 }
 
-async fn render_name_lookup_results(
-    state: &AppState,
-    profile: LookupProfile,
-    inputs: &[ParsedNameLookup],
-    selected_snapshot: Option<&SelectedSnapshot>,
-    results: &mut [Option<LookupResult>],
-) -> V2Result<()> {
-    let logical_name_ids = inputs
-        .iter()
-        .filter_map(|input| {
-            input
-                .lookup
-                .as_ref()
-                .map(|lookup| lookup.logical_name_id.clone())
+/// Fills `migrated_at` on every rendered record whose current authority is the ENSv2 arm, in one
+/// batch across name results and reverse rows.
+async fn apply_migrated_at(state: &AppState, results: &mut [Option<LookupResult>]) -> V2Result<()> {
+    let mut records = results
+        .iter_mut()
+        .flatten()
+        .flat_map(|result| {
+            result
+                .record
+                .iter_mut()
+                .chain(result.records.iter_mut().flatten())
         })
+        .filter(|record| record.authority == Some(Authority::EnsV2))
+        .map(|record| {
+            let logical_name_id =
+                bigname_storage::logical_name_id_for_name(&record.namespace, &record.name);
+            (logical_name_id, record)
+        })
+        .collect::<Vec<_>>();
+    if records.is_empty() {
+        return Ok(());
+    }
+    let logical_name_ids = records
+        .iter()
+        .map(|(logical_name_id, _)| logical_name_id.clone())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let records = load_name_records(state, profile, &logical_name_ids, selected_snapshot).await?;
-
-    for input in inputs {
-        let (status, record) = match input.lookup.as_ref() {
-            None => (Status::InvalidName, None),
-            Some(lookup) => match records.get(&lookup.logical_name_id) {
-                Some(record) => {
-                    let record = match profile {
-                        LookupProfile::Feed => build_forward_feed_record(record),
-                        LookupProfile::Detail => build_forward_detail_record(record),
-                    }?;
-                    (record.status, Some(record))
-                }
-                None => (Status::NotFound, None),
-            },
-        };
-        results[input.index] = Some(LookupResult {
-            input: input.input.clone(),
-            kind: LookupKind::Name,
-            status,
-            unsupported_reason: result_unsupported_reason(status, record.iter()),
-            failure_reason: result_failure_reason(status, record.iter()),
-            normalization: input.normalization.clone(),
-            record,
-            records: None,
-            page: None,
-        });
+    let migrated_at =
+        crate::v2::name_record::load_migrated_at(&state.pool, &logical_name_ids).await?;
+    for (logical_name_id, record) in &mut records {
+        record.migrated_at = migrated_at.get(logical_name_id).cloned();
     }
     Ok(())
-}
-
-async fn load_name_records(
-    state: &AppState,
-    profile: LookupProfile,
-    logical_name_ids: &[String],
-    selected_snapshot: Option<&SelectedSnapshot>,
-) -> V2Result<BTreeMap<String, bigname_storage::IdentityNameRecordRow>> {
-    let records = match profile {
-        LookupProfile::Feed => {
-            bigname_storage::load_phase_identity_name_feed_records_by_ids(
-                &state.pool,
-                logical_name_ids,
-            )
-            .await
-        }
-        LookupProfile::Detail => {
-            bigname_storage::load_phase_identity_records_by_ids(&state.pool, logical_name_ids).await
-        }
-    }
-    .map_err(|load_error| {
-        error!(
-            service = "api",
-            input_count = logical_name_ids.len(),
-            profile = ?profile,
-            error = ?load_error,
-            "failed to load v2 lookup name records"
-        );
-        V2Error::internal_error("failed to load lookup name records")
-    })?;
-    if let Some(selected_snapshot) = selected_snapshot {
-        require_name_records_at_served_head(&records, selected_snapshot)?;
-    }
-    Ok(records
-        .into_iter()
-        .map(|record| (record.row.logical_name_id.clone(), record))
-        .collect())
 }
 
 async fn render_reverse_lookup_results(
@@ -247,6 +199,15 @@ async fn render_reverse_lookup_results(
     results: &mut [Option<LookupResult>],
 ) -> V2Result<()> {
     render_storage_exact_reverse_lookup_results(
+        state,
+        profile,
+        inputs,
+        served_head,
+        public_namespaces,
+        results,
+    )
+    .await?;
+    resolves_to::render_resolves_to_lookup_results(
         state,
         profile,
         inputs,
@@ -277,7 +238,10 @@ async fn render_storage_exact_reverse_lookup_results(
     let selected_snapshot = served_head.map(head::ServedHead::selected);
     let storage_exact_inputs = inputs
         .iter()
-        .filter(|input| !requires_relation_post_filter(input.relation.as_ref()))
+        .filter(|input| {
+            !requires_relation_post_filter(input.relation.as_ref())
+                && !resolves_to::is_resolves_to_input(input)
+        })
         .collect::<Vec<_>>();
     let storage_inputs = deduped_reverse_storage_inputs(storage_exact_inputs.iter().copied());
     let groups =
@@ -525,51 +489,6 @@ fn result_failure_reason<'a>(
                 .next()
         })
         .flatten()
-}
-
-fn requires_relation_post_filter(relation: Option<&RelationSet>) -> bool {
-    relation.is_some_and(|relation| {
-        !relation.is_all()
-            && !relation.is_exact_manager()
-            && !relation.is_exact_owner_and_registrant()
-    })
-}
-
-fn reverse_record_matches_relation(
-    record: &bigname_storage::ReverseIdentityRecordRow,
-    relation: Option<&RelationSet>,
-) -> bool {
-    relation.is_none_or(|relation| {
-        record.relation_facets.iter().any(|facet| {
-            relation
-                .as_slice()
-                .iter()
-                .any(|relation| relation_to_storage(*relation) == *facet)
-        })
-    })
-}
-
-fn trim_reverse_record_relations(
-    mut record: bigname_storage::ReverseIdentityRecordRow,
-    relation: Option<&RelationSet>,
-) -> bigname_storage::ReverseIdentityRecordRow {
-    if let Some(relation) = relation {
-        record.relation_facets.retain(|facet| {
-            relation
-                .as_slice()
-                .iter()
-                .any(|relation| relation_to_storage(*relation) == *facet)
-        });
-    }
-    record
-}
-
-fn relation_to_storage(relation: Relation) -> bigname_storage::AddressNameRelation {
-    match relation {
-        Relation::Owner => bigname_storage::AddressNameRelation::TokenHolder,
-        Relation::Manager => bigname_storage::AddressNameRelation::EffectiveController,
-        Relation::Registrant => bigname_storage::AddressNameRelation::Registrant,
-    }
 }
 
 fn deduped_reverse_storage_inputs<'a>(

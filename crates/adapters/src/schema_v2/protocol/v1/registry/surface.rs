@@ -1,0 +1,81 @@
+use serde_json::Value;
+
+use super::{authority_kind, merge_observation};
+use crate::schema_v2::{
+    common::{event_time, stable_uuid},
+    model::RawLogInput,
+    protocol::{BindingDraft, EventDraft, Interpreted},
+    state::V1NameState,
+};
+
+pub(in crate::schema_v2::protocol::v1) fn append_binding(
+    output: &mut Interpreted,
+    authority: &V1NameState,
+    authority_arm: &str,
+    raw: &RawLogInput,
+    active_from: Option<time::OffsetDateTime>,
+) {
+    output.bindings.push(BindingDraft {
+        logical_name_id: authority.logical_name_id.clone(),
+        resource_id: authority.resource_id,
+        binding_kind: "declared_registry_path".to_owned(),
+        authority_arm: authority_arm.to_owned(),
+        surface_binding_id: authority.authority_key.as_ref().map(|authority_key| {
+            stable_uuid(&format!(
+                "binding:{authority_key}:{}",
+                event_time(raw).unix_timestamp_nanos()
+            ))
+        }),
+        active_from,
+    });
+}
+
+pub(in crate::schema_v2::protocol::v1) fn append_bound_event(
+    output: &mut Interpreted,
+    authority: &V1NameState,
+    raw: &RawLogInput,
+    observation_state: &Value,
+) {
+    let source_event = observation_state
+        .get("source_event")
+        .and_then(Value::as_str)
+        .unwrap_or("AuthorityTransferred");
+    output.events.push(EventDraft {
+        event_kind: "SurfaceBound".to_owned(),
+        logical_name_id: Some(authority.logical_name_id.clone()),
+        resource_id: Some(authority.resource_id),
+        identity_suffix: format!("SurfaceBound:{source_event}:{}", authority.resource_id),
+        explicit_before: Some(serde_json::json!({})),
+        after_state: merge_observation(
+            observation_state,
+            serde_json::json!({
+                "source_event":source_event,
+                "authority_kind":authority_kind(authority),
+                "authority_key":authority.authority_key,
+                "active_from":raw.block_timestamp.unix_timestamp(),
+                "binding_kind":"declared_registry_path",
+            }),
+        ),
+        state_scope: String::new(),
+    });
+}
+
+pub(super) fn link_resolver_event(
+    event: Option<&mut EventDraft>,
+    previous_resolver: Option<&str>,
+    anchor: Option<&(uuid::Uuid, Option<String>)>,
+    authority: Option<&V1NameState>,
+) {
+    let Some(event) = event else { return };
+    event.explicit_before = Some(serde_json::json!({"resolver": previous_resolver}));
+    if let Some((resource_id, logical_name_id)) = anchor {
+        event.resource_id = Some(*resource_id);
+        event.logical_name_id = logical_name_id.clone();
+    }
+    if let Some(authority) = authority
+        && event.resource_id == Some(authority.resource_id)
+        && authority_kind(authority) == "registrar"
+    {
+        event.after_state["authority_kind"] = Value::String("registrar".to_owned());
+    }
+}

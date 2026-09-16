@@ -12,12 +12,21 @@ use bigname_domain::{
 
 use crate::attribution::validate_block_derived_preimage_attribution;
 use crate::model::RawSourceManifest;
-use crate::{LoadedManifest, ManifestAbi, ManifestLoadStatus, ManifestLoadSummary};
+use crate::{
+    ENSV1_MIRROR_RESOLVER_ROLE, LoadedManifest, ManifestAbi, ManifestLoadStatus,
+    ManifestLoadSummary,
+};
 use crate::{ManifestRepository, SourceManifest, event_allows_empty_emitter_roles};
 
+#[path = "repository/metadata.rs"]
+mod metadata;
+#[path = "repository/mirror.rs"]
+mod mirror;
 #[path = "repository/read_features.rs"]
 mod read_features;
 
+use metadata::{validate_start_block_fits_i64, validate_verified_authority_arms};
+use mirror::validate_mirror_declarations;
 use read_features::validate_read_features;
 
 pub fn load_repository(root: impl AsRef<Path>) -> Result<ManifestRepository> {
@@ -197,6 +206,7 @@ fn validate_repository_manifests(manifests: &[LoadedManifest]) -> Result<()> {
     }
 
     validate_migration_correlations(manifests)?;
+    validate_mirror_declarations(manifests)?;
     validate_block_derived_preimage_attribution(manifests)?;
 
     Ok(())
@@ -395,7 +405,11 @@ fn validate_manifest_metadata(
 
     let mut contract_roles = BTreeSet::new();
     for contract in &manifest.contracts {
-        if !contract_roles.insert(contract.role.as_str()) {
+        // The ENSv1 mirror role names an instance kind, not a singleton: a family may declare
+        // several mirror instances, which repository/mirror.rs holds to distinct addresses.
+        if contract.role != ENSV1_MIRROR_RESOLVER_ROLE
+            && !contract_roles.insert(contract.role.as_str())
+        {
             bail!(
                 "source family {} manifest version {} in {} duplicates contract role {}",
                 manifest.source_family,
@@ -408,6 +422,7 @@ fn validate_manifest_metadata(
     }
 
     validate_manifest_abi(manifest, path)?;
+    validate_verified_authority_arms(manifest, path)?;
 
     Ok(())
 }
@@ -416,24 +431,6 @@ fn manifest_chain_combo(chain: &str) -> &str {
     chain
         .split_once('-')
         .map_or(chain, |(chain_combo, _)| chain_combo)
-}
-
-fn validate_start_block_fits_i64(
-    start_block: Option<u64>,
-    declaration_kind: &str,
-    declaration_name: &str,
-    path: &Path,
-) -> Result<()> {
-    if let Some(start_block) = start_block
-        && i64::try_from(start_block).is_err()
-    {
-        bail!(
-            "manifest {declaration_kind} {declaration_name} in {} has start_block {start_block} that does not fit into BIGINT",
-            path.display()
-        );
-    }
-
-    Ok(())
 }
 
 fn validate_manifest_abi(manifest: &SourceManifest, path: &Path) -> Result<()> {

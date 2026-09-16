@@ -20,7 +20,8 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
 
 - Schema-v2 interpret writes identity rows, discovery edges, normalized
   events, and append-only operator diagnostics for event logs from undeclared
-  emitters skipped after an ABI decode failure. Before deleting a redo range,
+  emitters skipped after an ABI decode failure or logged before their
+  emitter's same-batch discovery admission. Before deleting a redo range,
   Interpret may also preserve the small set of resolver references that Project
   consumes during replay, logical names or permission resources from
   state-derived ENSv2 path-expiry releases that Project consumes as bounded

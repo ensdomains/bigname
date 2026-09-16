@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use bigname_storage::{
     SelectedSnapshot, SnapshotConsistency, SnapshotSelectionError, SnapshotSelectionErrorKind,
-    SnapshotSelectionScope, SnapshotSelectorInput, resolve_exact_name_snapshot_selection,
-    snapshot_chain_has_head,
+    SnapshotSelectionScope, SnapshotSelectorInput, load_served_project_generation,
+    resolve_exact_name_snapshot_selection, snapshot_chain_has_head,
 };
 use sqlx::PgPool;
 
@@ -85,23 +85,14 @@ pub(crate) async fn load_project_generations(
 ) -> V2Result<BTreeMap<String, String>> {
     let mut generations = BTreeMap::new();
     for position in selected.chain_positions.as_map().values() {
-        let generation = sqlx::query_scalar::<_, String>(
-            r#"
-            SELECT project.xmin::TEXT
-            FROM chain_heads head
-            JOIN chain_phase_state project
-              ON project.chain_id = head.chain_id
-             AND project.phase_name = 'project'
-             AND project.phase_status = 'completed'
-             AND project.current_block_number = head.latest_block_number
-             AND project.current_block_hash = head.latest_block_hash
-             AND project.input_content_hash = $2
-            WHERE head.chain_id = $1
-            "#,
+        let generation = load_served_project_generation(
+            pool,
+            &position.chain_id,
+            position.block_number,
+            &position.block_hash,
+            false,
+            false,
         )
-        .bind(&position.chain_id)
-        .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
-        .fetch_optional(pool)
         .await
         .map_err(|_| V2Error::internal_error("failed to validate lookup data"))?
         .ok_or_else(|| V2Error::stale("served data is not available at the selected snapshot"))?;

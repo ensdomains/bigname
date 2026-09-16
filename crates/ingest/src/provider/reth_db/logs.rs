@@ -23,11 +23,16 @@ impl RethDbReader {
         blocks: &[ResolvedBlock],
         topics: &[String],
         addresses: &[String],
+        topic1s: &[String],
     ) -> Result<Vec<Log>> {
         let started = Instant::now();
         let topics = topics
             .iter()
             .map(|topic| parse_b256(topic, "log topic"))
+            .collect::<Result<BTreeSet<_>>>()?;
+        let topic1s = topic1s
+            .iter()
+            .map(|topic| parse_b256(topic, "log topic1"))
             .collect::<Result<BTreeSet<_>>>()?;
         let addresses = addresses
             .iter()
@@ -37,6 +42,9 @@ impl RethDbReader {
             return Ok(Vec::new());
         }
         let mut filter = Filter::new().event_signature(Topic::from_iter(topics.iter().copied()));
+        if !topic1s.is_empty() {
+            filter = filter.topic1(Topic::from_iter(topic1s.iter().copied()));
+        }
         if !addresses.is_empty() {
             filter = filter.address(addresses.iter().copied().collect::<Vec<_>>());
         }

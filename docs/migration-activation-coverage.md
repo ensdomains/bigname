@@ -25,41 +25,42 @@ The dispositions are:
   Interpret defect prevents the activated boundary from being committed and
   reaching Project.
 
-Every registrar-token-path `unwrapped` row whose ENSv1→ENSv2 migration transaction carries
-the controller's registry cleanup—19 rows: U-01 through U-09, H-01, G-01,
-R-02, R-04, P-02, P-03, P-06, P-07, P-08, and P-11—is deferred by the same
-blocker named below. The 15 rows that remain marked `activated` carry wrapper- or
-child-path boundaries without that registrar-token cleanup sequence. No row requires
-new schema, manifest, event, selector, or public vocabulary. Each scenario links its exact
-immutable catalog result. A `blocked` disposition infers the production failure from that exact
-log shape plus current writer behavior; it is not an exact-prestate conformance claim. The
-final column separately names the exact checked-in test when the repository
-imports that scenario shape or pins the production rule it exercises; `exact
-catalog result only` states plainly that the external artifact is not itself a
-checked-in test.
+The recorded baseline classified 19 registrar-token `unwrapped` rows as blocked
+by #822: U-01 through U-09, H-01, G-01, R-02, R-04, P-02, P-03, P-06,
+P-07, P-08, and P-11. Their registry cleanup displaced the registrar predecessor
+before the strict transition writer selected it. The table retains that baseline
+disposition until each row has its required replay evidence; adding a correction
+and regressions does not establish exact-prestate catalog conformance.
 
-U-01 has no passing checked-in end-to-end database path. Its faithful ten-log ENSv1→ENSv2 migration
-transaction is retained by the ignored
-`faithful_unwrapped_migration_reaches_predecessor_refusal` test, which reaches
-Interpret's `0 active ENSv1 predecessors` refusal. The fixture is faithful for the
-ENSv1→ENSv2 migration block only: its predecessor comes from a wrapped name
-unwrapped to the eventual ENSv1→ENSv2 migration sender, while U-01's predecessor comes from
-plain `BaseRegistrar.register` and has resolver state. Plain-registration
-predecessor materialization is a separate open question. The reduced
-`checked_in_sepolia_manifests_materialize_exactly_one_transition_predecessor`
-fixture omits the registry reclaim and cleanup logs and therefore tests only
-transition materialization. In every affected catalog transaction, the
-controller's `setRecord` emits `ENSRegistry.Transfer(node, Graveyard)` before the
-registrar cleanup. That exact log makes Interpret replace the registrar-backed
-predecessor before the writer can commit the transition, so end-to-end publication
-for all affected rows remains deferred to `#822`
+The adapter correction now reconciles a fully proved existing-token unwrapped
+transaction before retaining its block's ENSv1 state. It preserves the original
+registrar interval through cleanup and removes every intervening ENSv1 opening,
+including the reopening at registrar cleanup. Incomplete or ambiguous proof leaves
+ordinary interpretation unchanged, and the writer still rejects zero or multiple
+matching predecessors. The ownership and cleanup observations remain auditable.
+The controller's reclaim, registry cleanup, registrar cleanup, and injection order,
+including conditional resolver/TTL logs, follows the pinned sources:
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L33-L41 @ ens_v1@91c966f)
-(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f).
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174-L188 @ ens_v1@91c966f).
 
-| ID | Production disposition | Pinned exact catalog result | Checked-in rule anchor |
+`faithful_unwrapped_migration_retires_all_v1_bindings` exercises the existing
+wrapped-then-unwrapped predecessor through normal Interpret with ten migration
+logs. `plain_unwrapped_cleanup_keeps_one_predecessor_without_v1_reopenings` and
+`plain_unwrapped_cleanup_is_identical_after_cold_predecessor_restore` use a
+constructed plain registration and eleven-log transaction. The connected
+`plain_unwrapped_eleven_log_migration_publishes_only_v2_authority` exercises
+local contracts, normal Interpret/Project, and public name/permission reads with
+its controller declared in the fixture [deployment profile](glossary.md#deployment-profile) before intake. It requires zero
+current ENSv1 bindings and permissions for the current name, one ENSv2 binding,
+and the expected ENSv2 owner. These tests require execution evidence before a
+passing claim; none of them substitutes for the complete catalog replay matrix.
+The reduced `checked_in_sepolia_manifests_materialize_exactly_one_transition_predecessor`
+remains a transition-materialization test, not a complete transaction proof.
+
+| ID | Recorded baseline disposition | Pinned exact catalog result | Checked-in rule anchor |
 | --- | --- | --- | --- |
-| U-01 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal | [validation/U-01.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-01.json) | reduced transition-only fixture `checked_in_sepolia_manifests_materialize_exactly_one_transition_predecessor`; ignored faithful ENSv1→ENSv2 migration-block refusal `faithful_unwrapped_migration_reaches_predecessor_refusal` (`#822`) |
+| U-01 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal | [validation/U-01.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-01.json) | reduced transition-only fixture `checked_in_sepolia_manifests_materialize_exactly_one_transition_predecessor`; faithful migration retirement `faithful_unwrapped_migration_retires_all_v1_bindings`; connected plain migration `plain_unwrapped_eleven_log_migration_publishes_only_v2_authority` |
 | U-02 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal | [validation/U-02.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-02.json) | exact catalog result only; adapter-level activation does not prove the production writer path (`#822`) |
 | U-03 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal | [validation/U-03.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-03.json) | exact catalog result only; adapter-level activation does not prove the production writer path (`#822`) |
 | U-04 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal | [validation/U-04.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-04.json) | resolver override does not change the blocking owner-transfer log; no production-writer path (`#822`) |

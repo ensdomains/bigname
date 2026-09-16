@@ -66,26 +66,27 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
     // Nothing lease-bearing derives. Schema-v2 expands the registry-side
     // child edge into its authority and permission facets, but all three
     // remain registry-family facts.
-    let derived_kinds: Vec<(String, String)> = sqlx::query_as(
+    let mut derived_kinds: Vec<(String, String)> = sqlx::query_as(
         "SELECT event_kind, source_family FROM normalized_events \
          WHERE transaction_hash = $1 AND canonicality_state = 'canonical'",
     )
     .bind(&register_tx)
     .fetch_all(&run.db.pool)
     .await?;
+    derived_kinds.sort_unstable();
     assert_eq!(
         derived_kinds,
         vec![
-            (
-                "SubregistryChanged".to_owned(),
-                "ens_v1_registry_l1".to_owned(),
-            ),
             (
                 "AuthorityTransferred".to_owned(),
                 "ens_v1_registry_l1".to_owned(),
             ),
             (
                 "PermissionChanged".to_owned(),
+                "ens_v1_registry_l1".to_owned(),
+            ),
+            (
+                "SubregistryChanged".to_owned(),
                 "ens_v1_registry_l1".to_owned(),
             ),
         ],

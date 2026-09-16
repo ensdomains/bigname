@@ -26,7 +26,7 @@ use bigname_storage::{
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
-use support::ScratchDatabase;
+use support::{ScratchDatabase, chain_double};
 
 const CHAIN: &str = "ethereum-sepolia";
 const ANNOUNCEMENT_BLOCK: i64 = 11_163_420;
@@ -739,12 +739,12 @@ fn rpc_response(request: &Value, head: i64) -> Value {
             };
             number
                 .filter(|number| *number <= head)
-                .map(|number| block(number, params.get(1) == Some(&Value::Bool(true))))
+                .map(|number| block(number, params.get(1) == Some(&Value::Bool(true)), head))
         }
         "eth_getBlockByHash" => {
             block_number_from_hash(params.first().and_then(Value::as_str).unwrap_or_default())
                 .filter(|number| *number <= head)
-                .map(|number| block(number, params.get(1) == Some(&Value::Bool(true))))
+                .map(|number| block(number, params.get(1) == Some(&Value::Bool(true)), head))
         }
         "eth_getLogs" => Some(Value::Array(range_logs(
             params.first().unwrap_or(&Value::Null),
@@ -756,14 +756,42 @@ fn rpc_response(request: &Value, head: i64) -> Value {
                 .or_else(|| rpc_quantity(Some(&Value::String(selected.to_owned()))));
             number
                 .filter(|number| *number <= head)
-                .map(|number| json!([receipt(number)]))
+                .map(|number| json!(block_receipts(number, head)))
         }
-        _ => None,
+        method => transaction_number(method, &params, head).map(|number| {
+            chain_double::per_transaction_result(
+                method,
+                &params,
+                &block_receipts(number, head),
+                &[block(number, true, head)],
+            )
+            .unwrap_or(Value::Null)
+        }),
     };
     json!({"jsonrpc":"2.0", "id":id, "result":result})
 }
 
-fn block(number: i64, full_transactions: bool) -> Value {
+/// The block this double owns the requested transaction of, when it owns one.
+fn transaction_number(method: &str, params: &[Value], head: i64) -> Option<i64> {
+    if !matches!(
+        method,
+        "eth_getTransactionReceipt" | "eth_getTransactionByHash"
+    ) {
+        return None;
+    }
+    let hash = params.first().and_then(Value::as_str)?;
+    (0..=head).find(|number| transaction_hash(*number) == hash)
+}
+
+/// Every receipt in one block, carrying the logs the double serves for it.
+fn block_receipts(number: i64, head: i64) -> Vec<Value> {
+    chain_double::receipts_with_logs(
+        &[receipt(number)],
+        &range_logs(&json!({"blockHash": block_hash(number)}), head),
+    )
+}
+
+fn block(number: i64, full_transactions: bool, head: i64) -> Value {
     let transaction_hash = transaction_hash(number);
     let transactions = if full_transactions {
         json!([{
@@ -784,7 +812,10 @@ fn block(number: i64, full_transactions: bool) -> Value {
         "parentHash":block_hash(number - 1),
         "number":format!("0x{number:x}"),
         "timestamp":format!("0x{:x}", number + 1_000),
-        "logsBloom":"0x",
+        "logsBloom":chain_double::logs_bloom(&range_logs(
+            &json!({"blockHash": block_hash(number)}),
+            head,
+        )),
         "transactions":transactions
     })
 }

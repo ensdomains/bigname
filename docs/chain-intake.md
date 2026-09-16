@@ -52,7 +52,7 @@ as [required redo](glossary.md#redo-marker-scope). Sepolia's
 [provider-trusted verification](glossary.md#verification-level) readiness degrades
 until re-verification completes. On Base and Ethereum Mainnet, serving remains
 governed by Project: the demotion is visible in phase status and operator surfaces,
-but `/v2/status` readiness does not observe the Verify marker today. On every
+but `/v1/status` readiness does not observe the Verify marker today. On every
 chain, any prior level remains historical until the ordinary or continuous runner
 re-verifies.
 
@@ -327,6 +327,93 @@ repeating the empty read. Live follow plans no declared range, so it is judged
 on the suffix it is about to load. Sources that do not read a node's database
 report no floor: an RPC endpoint owns its retention behind the wire, and the
 Coinbase SQL warehouse is not a block provider at all.
+
+## Remote fetch and stored-fact cross-checks
+
+A 256-block ingest window remains the interpret, project, lineage, and commit
+unit. How a JSON-RPC source fills that window is separate from what the window
+means, and is shaped by the fact that a remote endpoint charges a round trip for
+every request.
+
+**Per-transaction fetch.** For a remote JSON-RPC source, a window fetches
+exactly the transactions its range log queries selected: the distinct
+transaction hashes go out as `eth_getTransactionReceipt` and
+`eth_getTransactionByHash` in JSON-RPC batches, with a bounded number of batches
+in flight. A window no longer asks for a block body
+(`eth_getBlockByHash(hash, true)`), a block's whole receipt set
+(`eth_getBlockReceipts`), or a block's whole log set
+(`eth_getLogs({blockHash})`). What ingest stores is unchanged: the selected
+transactions, their receipts, and every log of those transactions. The local
+reth datadir reader keeps reading whole blocks, because it already holds them.
+
+**Whole-block consistency of unstored data is no longer checked.** The old path
+fetched a block's full transaction list, its complete log set, and all of its
+receipts, cross-checked those against each other, and then discarded almost all
+of it. Those checks covered data that was never stored, and they are gone. Each
+check below applies to a fact ingest actually keeps.
+
+**Resolved-hash pin.** A fetched receipt and its transaction must both name the
+block number *and* the block hash the window already resolved, and must agree
+with each other on transaction index. A disagreement is the chain moving under
+an in-flight window, so it is transient and retried. A null receipt or a null
+transaction — the transaction left the chain between the range query and the
+fetch — is transient the same way.
+
+**Range-versus-receipt identity.** Every log the range query selected must
+reappear inside its receipt with the same log index and identical address,
+topics, data, transaction hash, and block hash. Every stored log comes from the
+receipt. A mismatch is a data-integrity failure.
+
+**Header bloom membership.** Every stored log's address and every one of its
+topics must be admitted by the `logsBloom` of that block's header — the header
+the window already fetched by hash for its lineage row. This ties each stored
+log to the block header without refetching the block. A log the header's bloom
+does not admit is a data-integrity failure.
+
+**Filter completeness.** Every log in a fetched receipt that the window's watch
+filter admits for that block must have been present in the range-query result.
+The range query and the receipt are two independent reads of the same
+transaction; a watched log that only one of them reports means one read is
+wrong and the window would silently store less than it should. That is a
+data-integrity failure, not a retry.
+
+**Receipt sanity.** Log indices strictly increase within a receipt, every
+receipt log belongs to the requested transaction and its block, and a receipt
+that reports a status must decode one.
+
+**Hash re-check while loading headers.** Range log lookups for all of a window's
+queries run first, concurrently. RPC then loads every window header by block
+number and compares its hash with the initial resolution before storing any
+facts. This includes blocks that returned no logs: a replacement block's empty
+result cannot be paired with an old header fetched by hash. A mismatch fails
+with `provider block hashes changed during range log lookup` and is retried.
+The required header fetch performs this check without separate re-resolve calls.
+The direct datadir reader keeps its hash-pinned local reads.
+
+**Wide-range log prefetch.** The persisted watch filter's queries do not change
+from window to window, so each is read over a wide block range — 10,000 blocks,
+halved on a provider's `range_too_large` refusal exactly as a window-sized query
+already is — and the result is sliced into the 256-block windows that consume
+it. The watch query's own bounds are already clipped to the window that loaded
+the filter, so they cannot bound the prefetch; each window instead takes only
+the slice its own query admits, which is why reading past a watch's true end
+costs bytes and never widens what a window stores. A cached range carries the block hash the
+provider reported at prefetch time; a window may use it only when every cached
+log's block hash equals the hash that window resolved. Anything else drops the
+cache entry and rereads the window's own range. Prefetching is limited to normal
+historical batches and to blocks at or below the finalized head: a block that
+can still reorg might gain a log after the prefetch read it, and nothing later
+would notice: a later header re-check cannot detect a log omitted by an earlier
+cache entry whose empty block had no recorded hash. Redo windows and live-follow
+windows therefore always read their own range.
+Supplemental discovery queries — the ones that admit registry-announced
+addresses part-way through a window — are never prefetched, for the same reason.
+
+**Concurrency.** The initial batched block-hash lookups (`resolve`), the subsequent batched
+header lookups (`headers`), the per-window range log queries, and the per-transaction
+receipt and transaction fetches all run with the same bounded parallelism,
+preserving output order. Nothing about window boundaries, markers, cursor pins,
+or what a window stores changes.
 
 ## Reorgs and required downstream redo
 

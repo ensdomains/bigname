@@ -6,13 +6,13 @@ fn records_probe_requires_a_found_requested_record() {
     let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
     let both = get(
         &base,
-        &["v2", "names", "records.eth", "records"],
+        &["v1", "names", "records.eth", "records"],
         &[("keys", "addr:60,text:avatar")],
     )
     .unwrap();
     let address_only = get(
         &base,
-        &["v2", "names", "records.eth", "records"],
+        &["v1", "names", "records.eth", "records"],
         &[("keys", "addr:60")],
     )
     .unwrap();
@@ -76,7 +76,7 @@ async fn timed_keyless_record_aggregates_do_not_satisfy_the_requested_key_floor(
         stream.write_all(response.as_bytes()).await.unwrap();
     });
     let base = normalized_base_url(&format!("http://{address}")).unwrap();
-    let request = get(&base, &["v2", "names", "aggregate.eth", "records"], &[]).unwrap();
+    let request = get(&base, &["v1", "names", "aggregate.eth", "records"], &[]).unwrap();
 
     let sample = sample_request(&Client::new(), &request, "records", Instant::now(), false).await;
     server.await.unwrap();

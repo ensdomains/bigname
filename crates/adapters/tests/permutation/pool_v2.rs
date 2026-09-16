@@ -2,7 +2,7 @@ use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::SolEvent;
 
 use super::{
-    events::{V2Registrar, V2Registry, V2Resolver},
+    events::{V2RecordResolver, V2Registrar, V2Registry, V2Resolver},
     names::{dns_encode, labelhash, namehash},
     scenario::{
         Action, AuthorityShape, Dimensions, ExpiryWindow, Perturbation, RecordState,
@@ -22,6 +22,7 @@ struct Wires<'a> {
     registry: &'a str,
     registrar: &'a str,
     resolver: &'a str,
+    public_resolver: Option<&'a str>,
 }
 
 pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) -> Vec<Action> {
@@ -30,6 +31,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         registry: wiring.address(REGISTRY, "registry"),
         registrar: wiring.address(REGISTRAR, "registrar"),
         resolver: wiring.address(RESOLVER, "resolver"),
+        public_resolver: wiring.optional_address(RESOLVER, "public_resolver_v2"),
     };
     let registry_address = address(wires.registry);
     let resolver_address = address(wires.resolver);
@@ -39,6 +41,48 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
     let eth_hash = labelhash("eth");
     let eth_token = U256::from_be_bytes(eth_hash.0);
     let mut actions = vec![
+        action(
+            "root:reserved",
+            stage::REGISTER,
+            vec![emission(
+                wires.root,
+                V2Registry::LabelReserved {
+                    tokenId: U256::from_be_bytes(labelhash("reserved").0),
+                    labelHash: labelhash("reserved"),
+                    label: "reserved".to_owned(),
+                    expiry: u64::try_from(settle_timestamp + 31_536_000)
+                        .expect("reservation expiry fits u64"),
+                    sender: actor(0),
+                }
+                .encode_log_data(),
+            )],
+        ),
+        action(
+            "root:roles",
+            stage::WRITE,
+            vec![emission(
+                wires.root,
+                V2Registry::EACRolesChanged {
+                    resource: U256::ZERO,
+                    account: actor(0),
+                    oldRoleBitmap: U256::ZERO,
+                    newRoleBitmap: U256::from(1_u64),
+                }
+                .encode_log_data(),
+            )],
+        ),
+        action(
+            "resolver:version-reset",
+            stage::WRITE,
+            vec![emission(
+                wires.public_resolver.unwrap_or(wires.resolver),
+                V2Resolver::VersionChanged {
+                    node: namehash(&["version", "eth"]),
+                    newVersion: 1,
+                }
+                .encode_log_data(),
+            )],
+        ),
         action(
             "root:eth-label",
             stage::REGISTER,
@@ -166,36 +210,118 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             ));
         }
 
-        actions.push(action(
-            format!("{label}:alias"),
-            stage::WRITE,
-            vec![emission(
-                wires.resolver,
-                V2Resolver::AliasChanged {
-                    indexedFromName: alloy_primitives::keccak256(dns_encode(&[label, "eth"])),
-                    indexedToName: alloy_primitives::keccak256(dns_encode(&[
-                        alias_label.as_str(),
-                        "eth",
-                    ])),
-                    fromName: dns_encode(&[label, "eth"]).into(),
-                    toName: dns_encode(&[alias_label.as_str(), "eth"]).into(),
-                }
-                .encode_log_data(),
-            )],
-        ));
-        actions.push(action(
-            format!("{label}:alias-record"),
-            stage::LATE,
-            vec![emission(
-                wires.resolver,
-                V2Resolver::AddressChanged {
-                    node: alias_node,
-                    coinType: U256::from(60_u64),
-                    newAddress: owner.to_vec().into(),
-                }
-                .encode_log_data(),
-            )],
-        ));
+        if wires.public_resolver.is_some() {
+            // The record-ID deployment links both names to one record, then writes through that
+            // ID. It has no AliasChanged event.
+            // (upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/PermissionedResolver.sol:L352-L366 @ ens_v2_sepolia_20260903@5da83f6a)
+            let record_id = U256::from(seat + 1);
+            actions.push(action(
+                format!("{label}:record-link"),
+                stage::WRITE,
+                vec![
+                    emission(
+                        wires.resolver,
+                        V2RecordResolver::Linked {
+                            recordId: record_id,
+                            node,
+                            name: dns_encode(&[label, "eth"]).into(),
+                        }
+                        .encode_log_data(),
+                    ),
+                    emission(
+                        wires.resolver,
+                        V2RecordResolver::Linked {
+                            recordId: record_id,
+                            node: alias_node,
+                            name: dns_encode(&[alias_label.as_str(), "eth"]).into(),
+                        }
+                        .encode_log_data(),
+                    ),
+                ],
+            ));
+            actions.push(action(
+                format!("{label}:record-write"),
+                stage::LATE,
+                vec![
+                    emission(
+                        wires.resolver,
+                        V2RecordResolver::AddressUpdated {
+                            recordId: record_id,
+                            coinType: U256::from(60_u64),
+                            addressBytes: owner.to_vec().into(),
+                        }
+                        .encode_log_data(),
+                    ),
+                    emission(
+                        wires.resolver,
+                        V2RecordResolver::NameUpdated {
+                            recordId: record_id,
+                            primaryName: format!("{label}.eth"),
+                        }
+                        .encode_log_data(),
+                    ),
+                ],
+            ));
+            // Setter argument evidence precedes the matching role grant.
+            // (upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/PermissionedResolver.sol:L253-L261 @ ens_v2_sepolia_20260903@5da83f6a)
+            let argument = format!("key-{label}").into_bytes();
+            let permission_resource = U256::from_be_bytes(alloy_primitives::keccak256(&argument).0);
+            actions.push(action(
+                format!("{label}:resolver-permission"),
+                stage::WRITE,
+                vec![
+                    emission(
+                        wires.resolver,
+                        V2RecordResolver::ResourceArgument {
+                            resource: permission_resource,
+                            arg: argument.into(),
+                        }
+                        .encode_log_data(),
+                    ),
+                    emission(
+                        wires.resolver,
+                        V2Resolver::EACRolesChanged {
+                            resource: permission_resource,
+                            account: owner,
+                            oldRoleBitmap: U256::ZERO,
+                            newRoleBitmap: U256::from(1_u64 << 4),
+                        }
+                        .encode_log_data(),
+                    ),
+                ],
+            ));
+        } else {
+            actions.push(action(
+                format!("{label}:alias"),
+                stage::WRITE,
+                vec![emission(
+                    wires.resolver,
+                    V2Resolver::AliasChanged {
+                        indexedFromName: alloy_primitives::keccak256(dns_encode(&[label, "eth"])),
+                        indexedToName: alloy_primitives::keccak256(dns_encode(&[
+                            alias_label.as_str(),
+                            "eth",
+                        ])),
+                        fromName: dns_encode(&[label, "eth"]).into(),
+                        toName: dns_encode(&[alias_label.as_str(), "eth"]).into(),
+                    }
+                    .encode_log_data(),
+                )],
+            ));
+            actions.push(action(
+                format!("{label}:alias-record"),
+                stage::LATE,
+                vec![emission(
+                    wires.resolver,
+                    V2Resolver::AddressChanged {
+                        node: alias_node,
+                        coinType: U256::from(60_u64),
+                        newAddress: owner.to_vec().into(),
+                    }
+                    .encode_log_data(),
+                )],
+            ));
+        }
 
         match dimensions.record_state {
             RecordState::NoResolver => {}
@@ -218,7 +344,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                     stage::WRITE,
                     vec![
                         emission(
-                            wires.resolver,
+                            wires.public_resolver.unwrap_or(wires.resolver),
                             V2Resolver::AddressChanged {
                                 node,
                                 coinType: U256::from(60_u64),
@@ -227,7 +353,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                             .encode_log_data(),
                         ),
                         emission(
-                            wires.resolver,
+                            wires.public_resolver.unwrap_or(wires.resolver),
                             V2Resolver::TextChanged {
                                 node,
                                 indexedKey: labelhash("url"),
@@ -362,11 +488,19 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                 stage::LATE,
                 vec![emission(
                     wires.resolver,
-                    V2Resolver::NameChanged {
-                        node,
-                        name: format!("{label}.eth"),
-                    }
-                    .encode_log_data(),
+                    if wires.public_resolver.is_some() {
+                        V2RecordResolver::NameUpdated {
+                            recordId: U256::from(seat + 1),
+                            primaryName: format!("{label}.eth"),
+                        }
+                        .encode_log_data()
+                    } else {
+                        V2Resolver::NameChanged {
+                            node,
+                            name: format!("{label}.eth"),
+                        }
+                        .encode_log_data()
+                    },
                 )],
             ));
         }

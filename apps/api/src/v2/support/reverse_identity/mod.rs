@@ -276,6 +276,37 @@ pub(crate) async fn load_reverse_identity_records_page_live(
     .await
 }
 
+/// The readable primary-name claims for one address and coin type, keyed by public namespace.
+/// Shares the single primary-name read of the reverse page loader so `relation=resolves_to`
+/// computes `is_primary` from the same claim and snapshot rules as the authority relations.
+pub(crate) async fn load_reverse_identity_primary_snapshots(
+    pool: &PgPool,
+    address: &str,
+    coin_type: &str,
+    public_namespaces: &[String],
+) -> Result<BTreeMap<String, IdentityPrimaryNameSnapshot>> {
+    let input = ReverseIdentityStorageInput {
+        address: address.to_owned(),
+        coin_type: coin_type.to_owned(),
+        roles: ReverseIdentityRoles::Both,
+        page_size: 1,
+        cursor: None,
+    };
+    let mut loaded =
+        page::load_primary_names(pool, std::slice::from_ref(&input), public_namespaces).await?;
+    let by_namespace = loaded
+        .pop()
+        .and_then(|value| match value {
+            serde_json::Value::Object(map) => Some(map),
+            _ => None,
+        })
+        .unwrap_or_default();
+    by_namespace
+        .into_iter()
+        .map(|(namespace, value)| Ok((namespace, page::decode_primary_name(value)?)))
+        .collect()
+}
+
 pub(crate) async fn prepare_reverse_identity_additional_scan(
     pool: &PgPool,
     served_head: Option<&crate::v2::lookup::head::ServedHead>,

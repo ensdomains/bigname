@@ -11,11 +11,9 @@ pub(super) async fn build(
     // current name/resource. They read no resolver classification or pointer history; a resolver
     // event can therefore affect only its directly scoped name/resource here.
     //
-    // Every per-name fold reads project_authority_events, the selected authority epoch's event
-    // set, rather than project_events. Ranking the name's whole cross-era history here would
-    // re-decide authority per relation, so a superseded-resource event could outrank the
-    // selected registration; the resource-keyed folds below are already scoped by their join to
-    // the staged current resource.
+    // Reuse the registrant event already selected by name_current, including its lifecycle
+    // scope. Controller folds read the selected authority epoch's project_authority_events;
+    // the resource-keyed folds below are scoped by their join to the staged current resource.
     sqlx::query(
         r#"
         WITH RECURSIVE target_time AS (
@@ -344,7 +342,7 @@ pub(super) async fn build(
         ),
         binding_state AS (
             SELECT name.*,
-                   registration.registrant,
+                   lower(name.declared_summary #>> '{registration,registrant}') AS registrant,
                    registration.normalized_event_id AS registration_event_id,
                    registration.block_number AS registration_block_number,
                    registration.block_hash AS registration_block_hash,
@@ -362,28 +360,14 @@ pub(super) async fn build(
                    modifier.resource_id AS wrapper_modifier_resource_id,
                    modifier.in_grace AS wrapper_in_grace
             FROM project_stage_name_current name
-            LEFT JOIN LATERAL (
-                SELECT lower(CASE event.event_kind
-                           WHEN 'TokenControlTransferred' THEN event.after_state ->> 'to'
-                           ELSE event.after_state ->> 'registrant'
-                       END) AS registrant,
-                       event.*
-                FROM project_authority_events event
-                WHERE event.logical_name_id = name.logical_name_id
-                  AND event.event_kind IN (
-                      'RegistrationGranted', 'TokenControlTransferred'
-                  )
-                ORDER BY event.block_number DESC NULLS LAST,
-                         event.transaction_index DESC NULLS LAST,
-                         event.log_index DESC NULLS LAST,
-                         event.normalized_event_id DESC
-                LIMIT 1
-            ) registration ON TRUE
+            LEFT JOIN project_authority_events registration
+              ON registration.normalized_event_id =
+                 (name.provenance ->> 'registrant_event_id')::bigint
             LEFT JOIN LATERAL (
                 SELECT lower(event.after_state ->> 'to') AS token_holder,
                        event.*
                 FROM project_authority_events event
-                WHERE event.logical_name_id = name.logical_name_id
+                WHERE event.normalized_event_id = registration.normalized_event_id
                   AND event.event_kind = 'TokenControlTransferred'
                 ORDER BY event.block_number DESC NULLS LAST,
                          event.transaction_index DESC NULLS LAST,
@@ -398,6 +382,8 @@ pub(super) async fn build(
             WHERE name.surface_binding_id IS NOT NULL
               AND name.resource_id IS NOT NULL
               AND name.binding_kind IS NOT NULL
+              -- Released identity rows remain readable but grant no current relationships.
+              AND name.declared_summary #>> '{control,status}' IS DISTINCT FROM 'unregistered'
         ),
         relations AS (
             SELECT lower(state.registrant) AS address,
@@ -488,8 +474,10 @@ pub(super) async fn build(
                CASE
                    WHEN selected.relation = 'effective_controller'
                        AND summary.support_status = 'unsupported'
-                       AND summary.unsupported_reason =
-                           'operator_approval_surfaces_not_ingested'
+                       AND summary.unsupported_reason IN (
+                           'operator_approval_surfaces_not_ingested',
+                           'wrapper_parent_and_resolver_delegation_not_projected'
+                       )
                        THEN 'supported'
                    WHEN selected.relation = 'effective_controller'
                        THEN summary.support_status
@@ -498,8 +486,10 @@ pub(super) async fn build(
                CASE
                    WHEN selected.relation = 'effective_controller'
                        AND summary.support_status = 'unsupported'
-                       AND summary.unsupported_reason =
-                           'operator_approval_surfaces_not_ingested'
+                       AND summary.unsupported_reason IN (
+                           'operator_approval_surfaces_not_ingested',
+                           'wrapper_parent_and_resolver_delegation_not_projected'
+                       )
                        THEN NULL
                    WHEN selected.relation = 'effective_controller'
                        THEN summary.unsupported_reason

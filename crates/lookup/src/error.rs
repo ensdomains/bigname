@@ -9,10 +9,21 @@ pub enum ErrorKind {
     ConcurrentState,
 }
 
+/// A closed refusal the engine states alongside `ErrorKind::Unsupported` when the caller needs
+/// to report it under its own public reason rather than as generic non-support.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum LookupRefusal {
+    /// The name's selected authority arm is outside the `verified_authority_arms` the selected
+    /// `ens_execution` manifest declares (`docs/manifests.md` § `verified_authority_arms`).
+    AuthorityArmNotAdmitted,
+}
+
 #[derive(Debug)]
 pub struct LookupError {
     kind: ErrorKind,
     message: String,
+    refusal: Option<LookupRefusal>,
 }
 
 impl LookupError {
@@ -20,6 +31,14 @@ impl LookupError {
         Self {
             kind,
             message: message.into(),
+            refusal: None,
+        }
+    }
+
+    pub(crate) fn authority_arm_not_admitted(message: impl Into<String>) -> Self {
+        Self {
+            refusal: Some(LookupRefusal::AuthorityArmNotAdmitted),
+            ..Self::unsupported(message)
         }
     }
 
@@ -57,6 +76,10 @@ impl LookupError {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    pub const fn refusal(&self) -> Option<LookupRefusal> {
+        self.refusal
     }
 }
 

@@ -34,9 +34,9 @@ run without the count assertion:
 scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --test-threads=8
 ```
 
-The default gate requires the exact library-test summary `92 passed; 0 failed;
+The default gate requires the exact library-test summary `93 passed; 0 failed;
 3 ignored; 0 filtered out`. CI shard 1 requires `46 passed; 0 failed; 2
-ignored; 47 filtered out`, and shard 2 requires `46 passed; 0 failed; 1
+ignored; 48 filtered out`, and shard 2 requires `47 passed; 0 failed; 1
 ignored; 48 filtered out`. The gate checks both Cargo's exit status and every
 summary count, so a prematurely successful process or an incorrectly filtered
 suite cannot satisfy CI.
@@ -58,7 +58,9 @@ suite cannot satisfy CI.
 4. Provider-fault and intake-path parity scenarios execute the real JSON-RPC
    ingest redo path.
    Truncated JSON, transient errors, delayed responses, omitted logs, and
-   partial receipts pass through the production provider implementation.
+   partial receipts pass through the production provider implementation. A
+   temporarily missing selected receipt must be refetched by the same redo;
+   the test observes the retry and checks the retained receipt before a clean redo.
    The silent-log case explicitly pins pre-existing defect #154: a valid but
    incomplete response is accepted and published, and only the scenario's
    explicit clean redo repairs it. Its green result is evidence of that known
@@ -141,8 +143,9 @@ four ENSv1 [source families](../../docs/glossary.md#source-family) except
 reverse, the four ordinary ENSv2 source families, and `ens_v2_migration_l1`. It
 mirrors every shipped `v*.toml` into a scenario
 `TempDir`, then separately substitutes ENSv1, ENSv2, and ENSv1→ENSv2 migration
-targets and the ENSv1→ENSv2 migration family's local `NameWrapper` and
-`BaseRegistrar` correlation addresses. The ordinary Sepolia generator remains
+targets, the ENSv1→ENSv2 migration family's local `NameWrapper` and
+`BaseRegistrar` correlation addresses, and the ENSv2 resolver family's local
+ENSv1 registry correlation address. The ordinary Sepolia generator remains
 ENSv2-only and substitutes only roots and contracts. Checked-in `manifests/` is
 unchanged.
 Of the ENSv1→ENSv2 migration family's eight roles, `ens_v1_renewal_bridge`,
@@ -210,11 +213,11 @@ registry-created child remains in
 [non-name form](../../docs/glossary.md#non-name-form) in the fixture, so that
 route is already absent before ENSv1→ENSv2 migration.
 
-`forge` must be on `PATH` before the 67 Foundry-dependent semantic scenarios are
+`forge` must be on `PATH` before the 68 Foundry-dependent semantic scenarios are
 described as runnable; the other 3 semantic scenarios are retired and ignored.
 Together with the two [pre-surface](../../docs/glossary.md#pre-surface) resolver scenarios, these three connected
-scenarios plus the two zero-address and API shutdown scenarios produce 95 tests: 92 runnable and 3 ignored,
-split as 46 runnable plus 2 ignored on shard 1 and 46 runnable plus 1 ignored on
+scenarios plus the two zero-address and API shutdown scenarios and the eleven-log migration scenario produce 96 tests: 93 runnable and 3 ignored,
+split as 46 runnable plus 2 ignored on shard 1 and 47 runnable plus 1 ignored on
 shard 2. Those migration fixtures change no production rollout,
 deployment file, Docker configuration, environment file, checked-in manifest,
 or interpreter source.
@@ -272,7 +275,7 @@ to the lower predicted load subject to the required final capacities, except
 for an explicitly documented scenario-family grouping. The current inventory
 uses one such grouping: the standalone connected ENSv1→ENSv2 migration facts
 scenario is on shard 1 and both connected `cross_protocol` reachability
-scenarios are on shard 2. The current runnable split is 46 on shard 1 and 46 on
+scenarios and the eleven-log migration scenario are on shard 2. The current runnable split is 46 on shard 1 and 47 on
 shard 2. Break
 equal-duration or equal-load ties by full test name, keep at most five of the
 measured top ten on either shard, and keep two ignored tests on shard 1 and one
@@ -287,22 +290,21 @@ The OPS-OWNER-01 measurements on the warm server used one compiler worker and
 one test thread. All 89 runnable names passed; their measured total was
 2569.389 seconds. The resulting shard predictions are 1288.036 seconds for
 shard 1 and 1281.353 seconds for shard 2, with five of the measured top ten
-on each shard. These historical forecasts exclude this lane's added scenario and the two zero-address scenarios
-added on main; the documented family grouping is unchanged.
+on each shard. These historical forecasts exclude the API shutdown, eleven-log migration and two zero-address scenarios; the documented family grouping is unchanged.
 
 ## Coverage ledger
 
-The semantic inventory contains 70 scenario tests:
+The semantic inventory contains 71 scenario tests:
 
-- 67 runnable;
+- 68 runnable;
 - 3 explicitly retired with one-line reasons.
 
-The 67 runnable scenarios include the #154 known-defect reproduction described
+The 68 runnable scenarios include the #154 known-defect reproduction described
 above; it is kept runnable so the provider path and explicit repair remain
 observable rather than being hidden as an ignored test.
 
-The crate contains 95 total tests when 25 harness/support checks are included.
-The pre-retarget crate contained 88; the net change is +7: obsolete
+The crate contains 96 total tests when 25 harness/support checks are included.
+The pre-retarget crate contained 88; the net change is +8: obsolete
 Cargo-artifact tests for the old indexer, worker, v1 API, and execution plane
 were removed, while deployment-profile binary lifecycle and normalized-event
 parity-completeness regression tests, the archived-artifact path check, the
@@ -314,7 +316,7 @@ semantic scenario. The final worker-coordination stub, verified-resolution
 scenario, and stale observed-code-hash admission scenario were removed
 explicitly with issue #314.
 
-### Runnable semantic scenarios (67)
+### Runnable semantic scenarios (68)
 
 - Basenames:
   `basenames::basenames_declared_state_matrix_end_to_end`;
@@ -331,6 +333,7 @@ explicitly with issue #314.
   `cross_protocol::base_reorg_leaves_ethereum_canonicality_untouched`;
   `cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage`;
   `cross_protocol::locked_parent_publishes_only_migratable_ens_v1_children`;
+  `cross_protocol::plain_unwrapped_eleven_log_migration_publishes_only_v2_authority`;
   `cross_protocol::unlocked_parent_hides_retained_ens_v1_children`.
 - ENSv2:
   `ens_v2_lifecycle::expiry_passes_then_reregistration_advances_lineage`;
@@ -378,11 +381,11 @@ explicitly with issue #314.
   `resolver_records::resolver_changes_follow_registry_and_zero_releases`;
   `resolver_records::shared_resolver_keeps_per_name_records_and_projection_marks_fan_in_unsupported`;
   `reverse_primary::reverse_claim_invalid_name_surfaces_raw_claim`;
-  `reverse_primary::generic_name_record_set_changed_then_cleared_stays_unadmitted`;
-  `reverse_primary_claims::authorised_third_party_generic_name_record_does_not_key_claim`;
+  `reverse_primary::reverse_node_name_set_changed_then_cleared_updates_declared_claim`;
+  `reverse_primary_claims::authorised_third_party_name_record_keys_claimed_address`;
   `reverse_primary_claims::claim_without_name_record_keeps_candidate_absent`;
-  `reverse_primary_claims::forward_mismatch_keeps_generic_name_record_unadmitted`;
-  `reverse_primary_claims::unadmitted_reverse_resolver_keeps_candidate_absent`.
+  `reverse_primary_claims::forward_mismatch_preserves_the_declared_reverse_claim`;
+  `reverse_primary_claims::undeclared_reverse_resolver_record_populates_declared_claim`.
 - Authority and wrapping:
   `unadmitted_controller::unadmitted_controller_registration_derives_registry_side_only`;
   `wrapper::wrapper_wrap_fuses_subnames_and_unwrap_restore_identity`;
@@ -402,15 +405,15 @@ explicitly with issue #314.
 
 | Measure | Historical baseline | Current suite | Delta |
 | --- | ---: | ---: | ---: |
-| Total crate tests | 88 | 95 | +7 |
-| Semantic scenario inventory | 62 at the retarget base, including one pure helper | 70 | -1 reclassified, -3 deleted, +12 added |
-| Runnable passed-count gate | 65 in the historical Anvil gate | 92 | +27 |
-| Anvil-backed semantic inventory | 65 historical gate reference | 70 | +5 |
-| Runnable Anvil-backed semantic scenarios | 65 historical gate reference | 67 | +2 |
+| Total crate tests | 88 | 96 | +8 |
+| Semantic scenario inventory | 62 at the retarget base, including one pure helper | 71 | -1 reclassified, -3 deleted, +13 added |
+| Runnable passed-count gate | 65 in the historical Anvil gate | 93 | +28 |
+| Anvil-backed semantic inventory | 65 historical gate reference | 71 | +6 |
+| Runnable Anvil-backed semantic scenarios | 65 historical gate reference | 68 | +3 |
 
 The 65 comparisons are reported because that is the historical gate reference,
-but the current passed-count denominator is explicit: 67 runnable Anvil
-scenarios and 25 harness/support checks produce 92 passes. Three semantic
+but the current passed-count denominator is explicit: 68 runnable Anvil
+scenarios and 25 harness/support checks produce 93 passes. Three semantic
 scenarios are explicitly ignored with their retired behavior recorded above.
 
 ## Diagnostics

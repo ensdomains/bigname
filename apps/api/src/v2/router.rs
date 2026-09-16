@@ -1,58 +1,81 @@
 use axum::{
-    Router,
+    Router, middleware,
     routing::{get, post},
 };
 
 use crate::AppState;
 
+use super::cache_headers::indexed_read_cache_headers;
+
 use super::{
     get_address_history, get_address_names, get_diagnostic_events,
     get_diagnostic_namespace_manifests, get_events, get_history, get_lookup,
     get_name_authority_diagnostic, get_name_binding_diagnostic, get_name_coverage_diagnostic,
-    get_name_record, get_name_records, get_name_records_diagnostic, get_namespace, get_permissions,
-    get_primary_name, get_resolver, get_search, get_status, get_subnames,
+    get_name_record, get_name_records, get_name_records_diagnostic, get_names, get_namespace,
+    get_permissions, get_primary_name, get_registry, get_registry_labels, get_resolver,
+    get_resolver_aliases, get_resolver_roles, get_search, get_status, get_subnames,
 };
 
 pub(super) fn router() -> Router<AppState> {
-    Router::new()
-        .route("/v2/lookup", post(get_lookup))
-        .route("/v2/status", get(get_status))
-        .route("/v2/names/{name}", get(get_name_record))
-        .route("/v2/names/{name}/records", get(get_name_records))
-        .route("/v2/names/{name}/subnames", get(get_subnames))
-        .route("/v2/names/{name}/history", get(get_history))
-        .route("/v2/permissions", get(get_permissions))
-        .route("/v2/addresses/{address}/names", get(get_address_names))
+    // Indexed single-resource reads carry the snapshot they were read at as `meta.as_of_token`;
+    // only these routes get body-derived weak ETags and Cache-Control (see `cache_headers`).
+    let indexed_single_resource_reads = Router::new()
+        .route("/v1/names/{name}", get(get_name_record))
+        .route("/v1/names/{name}/records", get(get_name_records))
         .route(
-            "/v2/addresses/{address}/primary-name",
+            "/v1/addresses/{address}/primary-name",
             get(get_primary_name),
         )
-        .route("/v2/addresses/{address}/history", get(get_address_history))
-        .route("/v2/search", get(get_search))
-        .route("/v2/events", get(get_events))
-        .route("/v2/resolvers/{chain_id}/{address}", get(get_resolver))
-        .route("/v2/namespaces/{namespace}", get(get_namespace))
+        .route("/v1/resolvers/{chain_id}/{address}", get(get_resolver))
+        .route_layer(middleware::from_fn(indexed_read_cache_headers));
+
+    Router::new()
+        .merge(indexed_single_resource_reads)
+        .route("/v1/lookup", post(get_lookup))
         .route(
-            "/v2/diagnostics/names/{name}/coverage",
+            "/v1/resolvers/{chain_id}/{address}/aliases",
+            get(get_resolver_aliases),
+        )
+        .route(
+            "/v1/resolvers/{chain_id}/{address}/roles",
+            get(get_resolver_roles),
+        )
+        .route("/v1/status", get(get_status))
+        .route("/v1/names", get(get_names))
+        .route("/v1/names/{name}/subnames", get(get_subnames))
+        .route("/v1/names/{name}/history", get(get_history))
+        .route("/v1/permissions", get(get_permissions))
+        .route("/v1/addresses/{address}/names", get(get_address_names))
+        .route("/v1/addresses/{address}/history", get(get_address_history))
+        .route("/v1/search", get(get_search))
+        .route("/v1/events", get(get_events))
+        .route("/v1/registries/{chain_id}/{address}", get(get_registry))
+        .route(
+            "/v1/registries/{chain_id}/{address}/labels",
+            get(get_registry_labels),
+        )
+        .route("/v1/namespaces/{namespace}", get(get_namespace))
+        .route(
+            "/v1/diagnostics/names/{name}/coverage",
             get(get_name_coverage_diagnostic),
         )
         .route(
-            "/v2/diagnostics/names/{name}/binding",
+            "/v1/diagnostics/names/{name}/binding",
             get(get_name_binding_diagnostic),
         )
         .route(
-            "/v2/diagnostics/names/{name}/authority",
+            "/v1/diagnostics/names/{name}/authority",
             get(get_name_authority_diagnostic),
         )
         .route(
-            "/v2/diagnostics/names/{name}/records",
+            "/v1/diagnostics/names/{name}/records",
             get(get_name_records_diagnostic),
         )
         .route(
-            "/v2/diagnostics/namespaces/{namespace}/manifests",
+            "/v1/diagnostics/namespaces/{namespace}/manifests",
             get(get_diagnostic_namespace_manifests),
         )
-        .route("/v2/diagnostics/events", get(get_diagnostic_events))
+        .route("/v1/diagnostics/events", get(get_diagnostic_events))
 }
 
 #[cfg(test)]
@@ -69,22 +92,70 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
-    async fn status_route_rejects_query_params_with_v2_error_envelope() {
-        let state = AppState::new(
+    fn test_state() -> AppState {
+        AppState::new(
             PgPool::connect_lazy_with(
                 "postgres://bigname:bigname@127.0.0.1:5432/bigname"
                     .parse()
                     .expect("static test database URL must parse"),
             ),
             bigname_lookup::ChainRpcUrls::default(),
+        )
+    }
+
+    async fn status_for(uri: &str) -> StatusCode {
+        router()
+            .with_state(test_state())
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .expect("request must complete")
+            .status()
+    }
+
+    /// #315: the product surface lives under `/v1`; no `/v2` prefix survives. The
+    /// `?at=` query is rejected before any database work, so a `400` proves the
+    /// route is matched while a `404` proves it is not.
+    #[tokio::test]
+    async fn status_route_is_served_under_v1_and_not_v2() {
+        assert_eq!(
+            status_for("/v1/status?at=2026-06-10T00:00:00Z").await,
+            StatusCode::BAD_REQUEST
         );
+        assert_eq!(
+            status_for("/v2/status?at=2026-06-10T00:00:00Z").await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(status_for("/v2/lookup").await, StatusCode::NOT_FOUND);
+    }
+
+    /// #205 fold-in: an encoded `..` segment is a literal segment to the router, so
+    /// a traversal-shaped path never reaches a handler.
+    #[tokio::test]
+    async fn encoded_traversal_paths_are_not_routed() {
+        assert_eq!(
+            status_for("/v1/%2e%2e/v1/status").await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status_for("/v1/%2e%2e/healthz").await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn status_route_rejects_query_params_with_v2_error_envelope() {
+        let state = test_state();
 
         let response = router()
             .with_state(state)
             .oneshot(
                 Request::builder()
-                    .uri("/v2/status?at=2026-06-10T00:00:00Z")
+                    .uri("/v1/status?at=2026-06-10T00:00:00Z")
                     .body(Body::empty())
                     .expect("request must build"),
             )

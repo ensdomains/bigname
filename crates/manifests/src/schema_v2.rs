@@ -357,6 +357,7 @@ async fn replace_manifest_children(
     for contract in &manifest.contracts {
         validate_proxy_shape(loaded, contract)?;
         let address = normalize_address(&contract.address);
+        let declaration_name = contract_declaration_name(&contract.role, &address);
         let instance = resolve_contract(
             transaction,
             &manifest.chain,
@@ -369,7 +370,7 @@ async fn replace_manifest_children(
                 "source": "manifest_declaration",
                 "manifest_id": manifest_id,
                 "declaration_kind": "contract",
-                "declaration_name": contract.role,
+                "declaration_name": declaration_name,
                 "declared_address": address,
             }),
             repaired_floor_chains,
@@ -406,7 +407,7 @@ async fn replace_manifest_children(
             manifest_id,
             &manifest.chain,
             "contract",
-            &contract.role,
+            &declaration_name,
             instance,
             &address,
             None,
@@ -459,4 +460,17 @@ async fn replace_manifest_children(
         manifest.discovery_rules.len(),
         proxy_edge_count,
     ))
+}
+
+/// The persisted `declaration_name` of a `[[contracts]]` entry: the role for singleton roles, whose
+/// name is the succession key across manifest versions, and `<role>@<address>` for the repeatable
+/// [ENSv1 mirror resolver](../../../docs/glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
+/// instance role, whose instances are identified by address and never succeed one another
+/// (`docs/manifests.md` § ENSv1 mirror resolver declarations).
+pub fn contract_declaration_name(role: &str, normalized_address: &str) -> String {
+    if role == crate::ENSV1_MIRROR_RESOLVER_ROLE {
+        format!("{role}@{normalized_address}")
+    } else {
+        role.to_owned()
+    }
 }

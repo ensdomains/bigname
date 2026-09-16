@@ -20,7 +20,7 @@ pub(super) async fn include_registry_read_anchors(
            AND pointer.block_number <= $2
            AND pointer.event_kind = 'ResolverChanged'
            AND pointer.source_family IN (
-               'ens_v1_registry_l1', 'basenames_base_registry'
+               'ens_v1_registry_l1', 'basenames_base_registry', 'ens_v2_root_l1'
            )
            AND pointer.resource_id IS NOT NULL
            AND pointer.consumer_visibility = 'activated'

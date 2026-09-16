@@ -20,10 +20,13 @@ use super::permission_support::{
 };
 use super::support::{ensure_public_namespace, parse_evm_address};
 use super::{
-    AddressNamesDedupe, AddressNamesSort, Envelope, Meta, Page, QueryParamAllowlist,
+    AddressNamesDedupe, AddressNamesSort, Authority, Envelope, Page, QueryParamAllowlist,
     RegistrationStatus, Relation, RelationSet, SortOrder, StrictQueryParams, V2Error, V2Result,
-    api_error_to_v2, decode, encode, name_record::name_registration_fields,
-    permission_powers_value, permission_scope_value, validate_latest_collection_selectors,
+    api_error_to_v2, decode, encode,
+    name_record::{load_migrated_at, name_registration_fields},
+    permission_powers_value, permission_scope_value,
+    restrictions::ResourceRestrictions,
+    validate_latest_collection_selectors,
 };
 
 #[cfg(test)]
@@ -37,6 +40,9 @@ pub(crate) use self::cursor::{
 };
 
 mod cursor;
+mod resolves_to;
+
+pub(crate) use self::resolves_to::{AddressNameResolution, address_name_resolution};
 
 pub(crate) struct AddressNamesQueryParams;
 
@@ -46,6 +52,9 @@ impl QueryParamAllowlist for AddressNamesQueryParams {
         "at",
         "finality",
         "relation",
+        "coin_type",
+        "authority",
+        "is_migrated",
         "q",
         "sort",
         "order",
@@ -75,12 +84,26 @@ pub(crate) struct AddressName {
     pub(crate) created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) authority: Option<Authority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) migrated_at: Option<String>,
     pub(crate) relations: Vec<Relation>,
     pub(crate) is_primary: bool,
+    /// Present only on `relation=resolves_to` rows: the coin type asked about and the record
+    /// key that answered it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resolution: Option<AddressNameResolution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subname_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) record_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) role_summary: Option<Vec<AddressNameRoleSummary>>,
+    /// Present with `include=role_summary` when the row's registration has a resource-level
+    /// constraint model; the same block `GET /v1/permissions` serves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) restrictions: Option<ResourceRestrictions>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -106,8 +129,21 @@ pub(crate) async fn get_address_names(
     if let Some(namespace) = params.namespace.as_deref() {
         ensure_public_namespace(namespace).map_err(api_error_to_v2)?;
     }
+    if params
+        .relation
+        .as_ref()
+        .is_some_and(RelationSet::is_resolves_to)
+    {
+        return resolves_to::get_address_resolves_to(&state, &normalized_address, &params).await;
+    }
+    if params.coin_type.is_some() {
+        return Err(V2Error::invalid_input(
+            "coin_type requires relation=resolves_to",
+        ));
+    }
     let namespace_filter = params.namespace.clone();
-    let include_role_summary = address_names_include_role_summary(&params.include)?;
+    let include = address_names_include(&params.include)?;
+    let include_role_summary = include.role_summary;
     let storage_relations = params
         .relation
         .as_ref()
@@ -116,7 +152,8 @@ pub(crate) async fn get_address_names(
     let storage_relations = (!storage_relations.is_empty()).then_some(storage_relations.as_slice());
     let storage_dedupe = dedupe_to_storage(params.dedupe);
     let storage_sort = sort_to_storage(params.sort);
-    let storage_order = order_to_storage(params.order);
+    let order = params.order.unwrap_or(SortOrder::Asc);
+    let storage_order = order_to_storage(order);
     let normalized_q = params.q.as_deref().map(normalize_name_prefix).transpose()?;
 
     let cursor_binding = AddressNamesCursorBinding {
@@ -125,25 +162,37 @@ pub(crate) async fn get_address_names(
         relation: params.relation.as_ref(),
         dedupe: params.dedupe,
         q: normalized_q.as_deref(),
+        authority: params.authority,
+        is_migrated: params.is_migrated,
         sort: params.sort,
-        order: params.order,
+        order,
     };
+    let snapshot = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+        &state,
+        params.cursor.as_deref(),
+        params.namespace.as_deref(),
+    )
+    .await?;
     let storage_cursor = params
         .cursor
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
-            address_names_storage_cursor(&payload, &cursor_binding)
+            let cursor = address_names_storage_cursor(&payload, &cursor_binding)?;
+            snapshot.validate_cursor(&payload)?;
+            Ok(cursor)
         })
         .transpose()?;
 
-    let storage_page = bigname_storage::load_address_names_current_page_sorted_for_relations(
+    let storage_page = bigname_storage::load_address_names_current_page_filtered(
         &state.pool,
         &normalized_address,
         namespace_filter.as_deref(),
         storage_relations,
         storage_dedupe,
         normalized_q.as_deref(),
+        params.authority.map(Authority::as_str),
+        params.is_migrated,
         storage_sort,
         storage_order,
         storage_cursor.as_ref(),
@@ -178,6 +227,12 @@ pub(crate) async fn get_address_names(
                     "failed to load address-name registration summaries for {normalized_address}"
                 ))
             })?;
+    let migrated_logical_name_ids = name_rows
+        .values()
+        .filter(|row| Authority::from_provenance(&row.provenance) == Some(Authority::EnsV2))
+        .map(|row| row.logical_name_id.clone())
+        .collect::<Vec<_>>();
+    let migrated_at_by_name = load_migrated_at(&state.pool, &migrated_logical_name_ids).await?;
     let primary_names_by_namespace = load_primary_names_by_namespace(
         &state.pool,
         &normalized_address,
@@ -218,22 +273,47 @@ pub(crate) async fn get_address_names(
     } else {
         BTreeMap::new()
     };
-    let record_counts_by_name = if include_role_summary {
-        load_address_name_record_counts(&state.pool, &storage_page.entries, &name_rows)
+    let subname_counts_by_name = if include.counts {
+        bigname_storage::load_children_current_summaries(&state.pool, &logical_name_ids)
             .await
             .map_err(|_| {
                 V2Error::internal_error(format!(
-                    "failed to load address-name record counts for {normalized_address}"
+                    "failed to load address-name subname counts for {normalized_address}"
                 ))
             })?
+            .into_iter()
+            .map(|summary| {
+                (
+                    summary.parent_logical_name_id,
+                    u64::try_from(summary.child_count).unwrap_or_default(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        BTreeMap::new()
+    };
+    let record_counts_by_name = if include_role_summary || include.counts {
+        load_address_name_record_counts(
+            &state.pool,
+            storage_page
+                .entries
+                .iter()
+                .map(|entry| entry.logical_name_id.as_str()),
+            &name_rows,
+        )
+        .await
+        .map_err(|_| {
+            V2Error::internal_error(format!(
+                "failed to load address-name record counts for {normalized_address}"
+            ))
+        })?
     } else {
         BTreeMap::new()
     };
 
-    let next_cursor = storage_page
-        .next_cursor
-        .as_ref()
-        .map(|cursor| encode(&address_names_cursor_payload(cursor, &cursor_binding)));
+    let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
+        encode(&snapshot.bind_cursor(address_names_cursor_payload(cursor, &cursor_binding)))
+    });
     let has_more = next_cursor.is_some();
     let data = storage_page
         .entries
@@ -249,18 +329,33 @@ pub(crate) async fn get_address_names(
             } else {
                 None
             };
-            Ok(build_address_name(
+            let mut row = build_address_name(
                 entry,
                 name_rows.get(&entry.logical_name_id),
                 primary_names_by_namespace
                     .get(&entry.namespace)
                     .and_then(Option::as_deref),
+                migrated_at_by_name.get(&entry.logical_name_id).cloned(),
+                include.counts.then(|| {
+                    subname_counts_by_name
+                        .get(&entry.logical_name_id)
+                        .copied()
+                        .unwrap_or_default()
+                }),
                 record_counts_by_name.get(&entry.logical_name_id).copied(),
                 role_summary,
-            ))
+            );
+            if include_role_summary {
+                row.restrictions = permission_summaries
+                    .get(&entry.resource_id)
+                    .map(ResourceRestrictions::from_summary)
+                    .transpose()?
+                    .flatten();
+            }
+            Ok(row)
         })
         .collect::<V2Result<Vec<_>>>()?;
-    let mut meta = Meta::default();
+    let mut meta = snapshot.finish(&state).await?;
     if let Some(resource_ids) = role_resource_ids.as_deref() {
         let permission_support =
             permission_support_for_resources(resource_ids, &permission_summaries);
@@ -273,7 +368,7 @@ pub(crate) async fn get_address_names(
             cursor: params.cursor.clone(),
             next_cursor,
             page_size: params.page_size,
-            total_count: None,
+            total_count: Some(storage_page.summary.grouped_entry_count),
             has_more,
         }),
         meta,
@@ -308,15 +403,15 @@ async fn load_primary_names_by_namespace<'a>(
     Ok(primary_names)
 }
 
-async fn load_address_name_record_counts(
+async fn load_address_name_record_counts<'a>(
     pool: &sqlx::PgPool,
-    entries: &[AddressNameCurrentEntry],
+    names: impl Iterator<Item = &'a str>,
     name_rows: &BTreeMap<String, NameCurrentRow>,
 ) -> anyhow::Result<BTreeMap<String, u64>> {
     let mut logical_name_ids = Vec::new();
     let mut keys = Vec::new();
-    for entry in entries {
-        let Some(name_row) = name_rows.get(&entry.logical_name_id) else {
+    for logical_name_id in names {
+        let Some(name_row) = name_rows.get(logical_name_id) else {
             continue;
         };
         let Some((resource_id, boundary)) =
@@ -324,7 +419,7 @@ async fn load_address_name_record_counts(
         else {
             continue;
         };
-        logical_name_ids.push(entry.logical_name_id.clone());
+        logical_name_ids.push(logical_name_id.to_owned());
         keys.push((resource_id, boundary));
     }
 
@@ -341,6 +436,8 @@ pub(crate) fn build_address_name(
     entry: &AddressNameCurrentEntry,
     name_row: Option<&NameCurrentRow>,
     primary_name: Option<&str>,
+    migrated_at: Option<String>,
+    subname_count: Option<u64>,
     record_count: Option<u64>,
     role_summary: Option<Vec<AddressNameRoleSummary>>,
 ) -> AddressName {
@@ -357,6 +454,8 @@ pub(crate) fn build_address_name(
         registered_at: registration.registered_at,
         created_at: registration.created_at,
         expires_at: registration.expires_at,
+        authority: name_row.and_then(|row| Authority::from_provenance(&row.provenance)),
+        migrated_at,
         relations: entry
             .relations
             .iter()
@@ -364,16 +463,22 @@ pub(crate) fn build_address_name(
             .map(relation_from_storage)
             .collect(),
         is_primary: primary_name == Some(entry.normalized_name.as_str()),
+        resolution: None,
+        subname_count,
         record_count,
         role_summary,
+        restrictions: None,
     }
 }
 
-pub(crate) fn relation_to_storage(relation: Relation) -> AddressNameRelation {
+/// The `address_names_current` relation an authority relation reads. `resolves_to` reads
+/// `address_records_current` instead and has no storage relation here.
+pub(crate) fn relation_to_storage(relation: Relation) -> Option<AddressNameRelation> {
     match relation {
-        Relation::Owner => AddressNameRelation::TokenHolder,
-        Relation::Manager => AddressNameRelation::EffectiveController,
-        Relation::Registrant => AddressNameRelation::Registrant,
+        Relation::Owner => Some(AddressNameRelation::TokenHolder),
+        Relation::Manager => Some(AddressNameRelation::EffectiveController),
+        Relation::Registrant => Some(AddressNameRelation::Registrant),
+        Relation::ResolvesTo => None,
     }
 }
 
@@ -382,7 +487,7 @@ pub(crate) fn relation_set_to_storage(relation_set: &RelationSet) -> Vec<Address
         .as_slice()
         .iter()
         .copied()
-        .map(relation_to_storage)
+        .filter_map(relation_to_storage)
         .collect()
 }
 
@@ -445,19 +550,26 @@ pub(crate) fn build_address_name_role_summary(
         .collect()
 }
 
-fn address_names_include_role_summary(include: &[String]) -> V2Result<bool> {
-    let mut include_role_summary = false;
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct AddressNamesInclude {
+    pub(super) role_summary: bool,
+    pub(super) counts: bool,
+}
+
+pub(super) fn address_names_include(include: &[String]) -> V2Result<AddressNamesInclude> {
+    let mut parsed = AddressNamesInclude::default();
     for value in include {
         match value.as_str() {
-            "role_summary" => include_role_summary = true,
+            "role_summary" => parsed.role_summary = true,
+            "counts" => parsed.counts = true,
             _ => {
                 return Err(V2Error::invalid_input(
-                    "include must contain only role_summary",
+                    "include must contain only role_summary or counts",
                 ));
             }
         }
     }
-    Ok(include_role_summary)
+    Ok(parsed)
 }
 
 #[cfg(test)]

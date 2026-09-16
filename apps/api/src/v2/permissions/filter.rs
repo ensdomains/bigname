@@ -22,6 +22,7 @@ use super::{
 pub(super) enum EmptyPermissionsSelection {
     MissingOrUnsupportedNameAnchor,
     SupersededNameRegistrationPair,
+    NamespaceRegistrationMismatch,
 }
 
 #[derive(Debug)]
@@ -121,6 +122,21 @@ pub(super) async fn resolve_permissions_filter(
         Some(EmptyPermissionsSelection::MissingOrUnsupportedNameAnchor)
     } else {
         None
+    };
+    let empty_selection = if empty_selection.is_none()
+        && inputs.name_filter.is_none()
+        && let (Some(resource_id), Some(namespace)) = (resource_id, params.namespace.as_deref())
+        && !bigname_storage::permission_resource_matches_namespace(
+            &state.pool,
+            resource_id,
+            namespace,
+        )
+        .await
+        .map_err(|_| V2Error::internal_error("failed to check permission namespace"))?
+    {
+        Some(EmptyPermissionsSelection::NamespaceRegistrationMismatch)
+    } else {
+        empty_selection
     };
     let authority_context = if inputs.name_filter.is_some() {
         AuthorityContext::CurrentForName

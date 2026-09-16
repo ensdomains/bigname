@@ -15,6 +15,7 @@ fn address_range_only_admits_topics_from_its_manifest() {
             topic0s: vec!["0xaa".to_owned()],
         }],
         all_emitter_ranges: Vec::new(),
+        implementation_ranges: Vec::new(),
         registry_announcements: None,
     };
 
@@ -38,6 +39,7 @@ fn announced_registry_topics_are_address_scoped_forward_only() {
     let mut filter = WatchFilter {
         address_ranges: Vec::new(),
         all_emitter_ranges: Vec::new(),
+        implementation_ranges: Vec::new(),
         registry_announcements: Some(RegistryAnnouncementWatch {
             announcement_topic0: "0xaa".to_owned(),
             scoped_topic0s: vec!["0xbb".to_owned()],
@@ -55,6 +57,7 @@ fn announced_registry_topics_are_address_scoped_forward_only() {
             to_block: 20,
             addresses: vec!["0x01".to_owned()],
             topic0s: vec!["0xbb".to_owned()],
+            topic1s: Vec::new(),
         }]
     );
 }
@@ -91,6 +94,7 @@ fn query_windows_do_not_cross_product_manifest_topics() {
             },
         ],
         all_emitter_ranges: Vec::new(),
+        implementation_ranges: Vec::new(),
         registry_announcements: None,
     };
 
@@ -102,12 +106,14 @@ fn query_windows_do_not_cross_product_manifest_topics() {
                 to_block: 20,
                 addresses: vec!["0x01".to_owned()],
                 topic0s: vec!["0xaa".to_owned()],
+                topic1s: Vec::new(),
             },
             WatchQuery {
                 from_block: 10,
                 to_block: 20,
                 addresses: vec!["0x02".to_owned()],
                 topic0s: vec!["0xbb".to_owned()],
+                topic1s: Vec::new(),
             },
         ]
     );
@@ -122,6 +128,7 @@ fn generic_resolver_topics_scan_all_emitters() {
             to_block: 20,
             topic0s: vec!["0xaa".to_owned()],
         }],
+        implementation_ranges: Vec::new(),
         registry_announcements: None,
     };
 
@@ -133,7 +140,73 @@ fn generic_resolver_topics_scan_all_emitters() {
             to_block: 20,
             addresses: Vec::new(),
             topic0s: vec!["0xaa".to_owned()],
+            topic1s: Vec::new(),
         }]
+    );
+}
+
+#[test]
+fn implementation_announcements_scan_all_emitters_narrowed_by_topic1() {
+    let implementation =
+        bigname_manifests::address_topic("0x0000000000000000000000000000000000000077");
+    let filter = WatchFilter {
+        address_ranges: Vec::new(),
+        all_emitter_ranges: Vec::new(),
+        implementation_ranges: vec![ImplementationRange {
+            from_block: 10,
+            to_block: 20,
+            topic0: "0xaa".to_owned(),
+            topic1s: vec![implementation.clone()],
+        }],
+        registry_announcements: None,
+    };
+
+    let announced = vec!["0xaa".to_owned(), implementation.clone()];
+    let other = vec!["0xaa".to_owned(), bigname_manifests::address_topic("0x99")];
+    assert!(filter.includes_log("0x-unlisted", &announced, 10));
+    assert!(!filter.includes_log("0x-unlisted", &announced, 21));
+    assert!(!filter.includes_log("0x-unlisted", &other, 10));
+    assert!(!filter.includes_log("0x-unlisted", &["0xaa".to_owned()], 10));
+    assert!(
+        !filter.includes("0x-unlisted", "0xaa", 10),
+        "a topic0-only check cannot admit a topic1-narrowed watch"
+    );
+    assert_eq!(
+        filter.queries(),
+        vec![WatchQuery {
+            from_block: 10,
+            to_block: 20,
+            addresses: Vec::new(),
+            topic0s: vec!["0xaa".to_owned()],
+            topic1s: vec![implementation],
+        }]
+    );
+}
+
+#[test]
+fn implementation_announcement_topic_requires_the_resolver_family_and_upgraded() {
+    let upgraded = format!(
+        "{}",
+        alloy_primitives::keccak256("Upgraded(address)".as_bytes())
+    );
+    assert_eq!(
+        implementation_announcement_topic0(
+            ENS_V2_RESOLVER_SOURCE_FAMILY,
+            std::slice::from_ref(&upgraded)
+        ),
+        Some(upgraded.clone())
+    );
+    assert_eq!(
+        implementation_announcement_topic0(ENS_V2_RESOLVER_SOURCE_FAMILY, &[]),
+        None
+    );
+    assert_eq!(
+        implementation_announcement_topic0(ENS_V2_REGISTRY_SOURCE_FAMILY, &[upgraded]),
+        None
+    );
+    assert_eq!(
+        bigname_manifests::address_topic("0xA9d3814AB151BF6E37A427432795371a8361614e"),
+        "0x000000000000000000000000a9d3814ab151bf6e37a427432795371a8361614e"
     );
 }
 
@@ -158,6 +231,7 @@ fn aliased_root_and_contract_ranges_form_one_provider_query() {
             },
         ],
         all_emitter_ranges: Vec::new(),
+        implementation_ranges: Vec::new(),
         registry_announcements: None,
     };
 
@@ -168,6 +242,7 @@ fn aliased_root_and_contract_ranges_form_one_provider_query() {
             to_block: 20,
             addresses: vec![address],
             topic0s: vec![generic.to_owned(), approval.to_owned()],
+            topic1s: Vec::new(),
         }],
         "a root alias must not duplicate generic-topic provider traffic from its contract declaration"
     );

@@ -12,6 +12,19 @@ pub struct BlockBundle {
     pub receipts: Vec<Receipt>,
 }
 
+/// One selected transaction with the receipt that confirms it and the receipt's own logs.
+///
+/// This is what the JSON-RPC provider fetches instead of a whole block: everything ingest
+/// stores for a transaction, and nothing it discards.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransactionPayload {
+    pub transaction: Transaction,
+    pub receipt: Receipt,
+    pub receipt_logs: Vec<Log>,
+    /// Whether the raw receipt carried a non-null `status` field.
+    pub receipt_reported_status: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedBlock {
     pub number: i64,
@@ -105,6 +118,7 @@ pub(super) fn range_log_filter(
     to: i64,
     addresses: &[String],
     topics: &[String],
+    topic1s: &[String],
 ) -> Result<Value> {
     let addresses = addresses
         .iter()
@@ -114,6 +128,10 @@ pub(super) fn range_log_filter(
         .iter()
         .map(|topic| hash_hex_from_str(topic, "provider log topic"))
         .collect::<Result<Vec<_>>>()?;
+    let topic1s = topic1s
+        .iter()
+        .map(|topic| hash_hex_from_str(topic, "provider log topic1"))
+        .collect::<Result<Vec<_>>>()?;
     let mut filter = json!({
         "fromBlock": block_number_parameter(from)?,
         "toBlock": block_number_parameter(to)?,
@@ -121,8 +139,10 @@ pub(super) fn range_log_filter(
     if !addresses.is_empty() {
         filter["address"] = json!(addresses);
     }
-    if !topics.is_empty() {
+    if !topics.is_empty() && topic1s.is_empty() {
         filter["topics"] = json!([topics]);
+    } else if !topics.is_empty() {
+        filter["topics"] = json!([topics, topic1s]);
     }
     Ok(filter)
 }

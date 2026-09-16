@@ -46,3 +46,24 @@ pub(crate) async fn load_record_inventory_current_matching_selected_snapshot(
     )
     .await
 }
+
+pub(crate) async fn load_indexed_record_inventory_current_for_snapshot(
+    pool: &PgPool,
+    row: &NameCurrentRow,
+    selected_snapshot: &SelectedSnapshot,
+) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
+    readback::load_indexed_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await
+}
+
+pub(crate) async fn load_record_inventory_for_source(
+    pool: &PgPool,
+    row: &NameCurrentRow,
+    selected_snapshot: &SelectedSnapshot,
+    source: crate::v2::RequestSource,
+) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
+    if source == crate::v2::RequestSource::Verified {
+        load_supported_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await
+    } else {
+        load_indexed_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await
+    }
+}

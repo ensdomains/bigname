@@ -55,7 +55,7 @@ async fn v2_status_and_startup_chain_discovery_read_phase_state() -> Result<()> 
     );
 
     let response = app_router(database.app_state())
-        .oneshot(Request::builder().uri("/v2/status").body(Body::empty())?)
+        .oneshot(Request::builder().uri("/v1/status").body(Body::empty())?)
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
@@ -621,7 +621,7 @@ async fn startup_and_v2_status_tolerate_an_absent_phase_schema() -> Result<()> {
             .is_empty()
     );
     let response = app_router(database.app_state())
-        .oneshot(Request::builder().uri("/v2/status").body(Body::empty())?)
+        .oneshot(Request::builder().uri("/v1/status").body(Body::empty())?)
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
@@ -644,7 +644,7 @@ async fn startup_and_v2_status_reject_a_partially_missing_phase_schema() -> Resu
             .is_err()
     );
     let response = app_router(database.app_state())
-        .oneshot(Request::builder().uri("/v2/status").body(Body::empty())?)
+        .oneshot(Request::builder().uri("/v1/status").body(Body::empty())?)
         .await?;
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
@@ -658,7 +658,7 @@ async fn status_value(state: AppState) -> Result<Value> {
 
 async fn status_payload(state: AppState) -> Result<Value> {
     let response = app_router(state)
-        .oneshot(Request::builder().uri("/v2/status").body(Body::empty())?)
+        .oneshot(Request::builder().uri("/v1/status").body(Body::empty())?)
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     read_json(response).await
@@ -666,7 +666,7 @@ async fn status_payload(state: AppState) -> Result<Value> {
 
 async fn sepolia_status_value(state: AppState) -> Result<Value> {
     let response = app_router(state)
-        .oneshot(Request::builder().uri("/v2/status").body(Body::empty())?)
+        .oneshot(Request::builder().uri("/v1/status").body(Body::empty())?)
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;

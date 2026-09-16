@@ -1,11 +1,33 @@
 #[tokio::test]
+async fn v2_address_history_rejects_resolves_to_relation() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    let response = v2_history_response_for_database(
+        &database,
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?relation=resolves_to&page_size=20",
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("invalid_input"));
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("resolves_to")
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_history_returns_lean_product_rows_newest_first() -> Result<()> {
-    let (database, payload) = v2_history_payload("/v2/names/History.eth/history?page_size=20").await?;
+    let (database, payload) = v2_history_payload("/v1/names/History.eth/history?page_size=20").await?;
 
     assert_eq!(payload["page"]["page_size"], json!(20));
-    assert_eq!(payload["page"]["total_count"], Value::Null);
+    assert_eq!(payload["page"]["total_count"], json!(10));
     assert_eq!(payload["page"]["has_more"], json!(false));
-    assert_eq!(payload["meta"], json!({}));
+    assert!(payload["meta"]["as_of"].is_object());
 
     let data = payload["data"]
         .as_array()
@@ -70,6 +92,132 @@ async fn v2_get_history_returns_lean_product_rows_newest_first() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_history_lists_pointer_attributed_record_writes_for_the_registration() -> Result<()> {
+    const ADDRESS: &str = "0x0000000000000000000000000000000000007130";
+    const RESOLVER: &str = "0x00000000000000000000000000000000000000c2";
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:attributed-record.eth";
+    let resource_id = Uuid::from_u128(0x7130);
+    seed_identity_name(
+        &database,
+        logical_name_id,
+        "attributed-record.eth",
+        "attributed-record.eth",
+        "node:attributed-record.eth",
+        resource_id,
+        Uuid::from_u128(0x8130),
+        Uuid::from_u128(0x9130),
+        ADDRESS,
+        bigname_storage::AddressNameRelation::EffectiveController,
+        80,
+    )
+    .await?;
+    seed_v2_history_blocks(&database, 131..=132).await?;
+
+    // PublicResolverV2 writes stay node-keyed at interpretation: no logical name, no resource.
+    // Project attributes the first one to this registration through its resolver pointer and
+    // publishes that attribution in the record inventory provenance; the second write targets
+    // another node and stays unattributed.
+    let node_write = |event_identity: &str, block_number: i64, node: &str| {
+        let mut event =
+            v2_history_event(event_identity, None, None, "RecordChanged", block_number);
+        event.source_family = "ens_v2_resolver_l1".to_owned();
+        event.derivation_kind = "ens_v2_resolver".to_owned();
+        event.after_state = json!({
+            "source_event": "TextChanged",
+            "resolver": RESOLVER,
+            "node": node,
+            "record_key": "text:post-migration",
+            "record_family": "text",
+            "selector_key": "post-migration",
+            "value_retained": true,
+            "value": "current",
+        });
+        event
+    };
+    let attributed_identity = "ens_v2_resolver:2:ethereum-mainnet:0xhistory131:0xtx131:0:RecordChanged:0";
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            node_write(attributed_identity, 131, "node:attributed-record.eth"),
+            node_write(
+                "ens_v2_resolver:2:ethereum-mainnet:0xhistory132:0xtx132:0:RecordChanged:0",
+                132,
+                "node:other.eth",
+            ),
+        ],
+    )
+    .await?;
+    let attributed_event_id: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM bigname_phase.normalized_events WHERE event_identity = $1",
+    )
+    .bind(attributed_identity)
+    .fetch_one(&database.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.record_inventory_current
+         SET provenance = provenance
+             || jsonb_build_object('attributed_event_ids', jsonb_build_array($2::bigint))
+         WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .bind(attributed_event_id)
+    .execute(&database.pool)
+    .await?;
+
+    for (scope, listed) in [("both", true), ("registration", true), ("name", false)] {
+        let payload = v2_history_payload_for_database(
+            &database,
+            &format!("/v1/names/attributed-record.eth/history?scope={scope}&page_size=20"),
+        )
+        .await?;
+        let rows = payload["data"].as_array().expect("history data");
+        let attributed = rows.iter().find(|row| row["transaction_hash"] == json!("0xtx131"));
+        assert_eq!(attributed.is_some(), listed, "scope={scope}: {rows:?}");
+        if let Some(row) = attributed {
+            assert_eq!(row["type"], json!("record"), "scope={scope}");
+            assert_eq!(row["block_number"], json!(131), "scope={scope}");
+            assert_eq!(row["registration_id"], Value::Null, "scope={scope}");
+        }
+        assert!(
+            !rows.iter().any(|row| row["transaction_hash"] == json!("0xtx132")),
+            "scope={scope}: an unattributed node write must not appear: {rows:?}"
+        );
+    }
+
+    // A keyset cursor issued on the attributed row must validate and continue.
+    let first = v2_history_payload_for_database(
+        &database,
+        "/v1/names/attributed-record.eth/history?scope=registration&page_size=1",
+    )
+    .await?;
+    assert_eq!(first["data"][0]["transaction_hash"], json!("0xtx131"));
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .map(str::to_owned);
+    if let Some(cursor) = cursor {
+        let next = v2_history_payload_for_database(
+            &database,
+            &format!(
+                "/v1/names/attributed-record.eth/history?scope=registration&page_size=1&cursor={cursor}"
+            ),
+        )
+        .await?;
+        assert!(
+            !next["data"]
+                .as_array()
+                .expect("history data")
+                .iter()
+                .any(|row| row["transaction_hash"] == json!("0xtx131")),
+            "the attributed row must not repeat after its cursor: {next}"
+        );
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> Result<()> {
     const ADDRESS: &str = "0x0000000000000000000000000000000000007120";
     let database = TestDatabase::new_migrated().await?;
@@ -122,11 +270,11 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
     .await?;
 
     for route in [
-        "/v2/names/resolver-history.eth/history?scope=both&page_size=20",
-        "/v2/names/resolver-history.eth/history?scope=registration&page_size=20",
-        "/v2/events?name=resolver-history.eth&page_size=20",
-        "/v2/events?registration_id=00000000-0000-0000-0000-000000007120&page_size=20",
-        "/v2/addresses/0x0000000000000000000000000000000000007120/history?relation=manager&page_size=20",
+        "/v1/names/resolver-history.eth/history?scope=both&page_size=20",
+        "/v1/names/resolver-history.eth/history?scope=registration&page_size=20",
+        "/v1/events?name=resolver-history.eth&page_size=20",
+        "/v1/events?registration_id=00000000-0000-0000-0000-000000007120&page_size=20",
+        "/v1/addresses/0x0000000000000000000000000000000000007120/history?relation=manager&page_size=20",
     ] {
         let payload = v2_history_payload_for_database(&database, route).await?;
         let rows = payload["data"].as_array().expect("history data");
@@ -141,7 +289,7 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
 
     let diagnostics = v2_history_payload_for_database(
         &database,
-        "/v2/diagnostics/events?name=resolver-history.eth&page_size=20",
+        "/v1/diagnostics/events?name=resolver-history.eth&page_size=20",
     )
     .await?;
     let diagnostic_rows = diagnostics["data"].as_array().expect("diagnostic events");
@@ -154,7 +302,7 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
 
     let diagnostic_first = v2_history_payload_for_database(
         &database,
-        "/v2/diagnostics/events?name=resolver-history.eth&page_size=1",
+        "/v1/diagnostics/events?name=resolver-history.eth&page_size=1",
     )
     .await?;
     let diagnostic_cursor = diagnostic_first["page"]["next_cursor"]
@@ -166,7 +314,7 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
     let diagnostic_second = v2_history_payload_for_database(
         &database,
         &format!(
-            "/v2/diagnostics/events?name=resolver-history.eth&page_size=1&cursor={diagnostic_cursor}"
+            "/v1/diagnostics/events?name=resolver-history.eth&page_size=1&cursor={diagnostic_cursor}"
         ),
     )
     .await?;
@@ -185,7 +333,10 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
         None,
         20,
         bigname_storage::HistorySummaryMode::Count,
-        &product_event_kinds,
+        &bigname_storage::HistoryPageOptions {
+            event_kinds: product_event_kinds,
+            ..bigname_storage::HistoryPageOptions::default()
+        },
         None,
     )
     .await?;
@@ -264,7 +415,7 @@ async fn v2_registry_history_registration_identity_uses_event_position() -> Resu
 
     let payload = v2_history_payload_for_database(
         &database,
-        "/v2/events?name=event-position-history.eth&page_size=20",
+        "/v1/events?name=event-position-history.eth&page_size=20",
     )
     .await?;
     let rows = payload["data"].as_array().expect("product history rows");
@@ -377,8 +528,8 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
     .await?;
 
     for route in [
-        "/v2/names/ownerless-history.eth/history?scope=both&page_size=20",
-        "/v2/events?name=ownerless-history.eth&page_size=20",
+        "/v1/names/ownerless-history.eth/history?scope=both&page_size=20",
+        "/v1/events?name=ownerless-history.eth&page_size=20",
     ] {
         let payload = v2_history_payload_for_database(&database, route).await?;
         let rows = payload["data"].as_array().expect("product history rows");
@@ -399,14 +550,14 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
 
     let filtered = v2_history_payload_for_database(
         &database,
-        &format!("/v2/events?registration_id={read_resource_id}&page_size=20"),
+        &format!("/v1/events?registration_id={read_resource_id}&page_size=20"),
     )
     .await?;
     assert_eq!(filtered["data"], json!([]));
 
     let diagnostics = v2_history_payload_for_database(
         &database,
-        "/v2/diagnostics/events?name=ownerless-history.eth&page_size=20",
+        "/v1/diagnostics/events?name=ownerless-history.eth&page_size=20",
     )
     .await?;
     let diagnostic_rows = diagnostics["data"].as_array().expect("diagnostic rows");
@@ -489,7 +640,7 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
 
     let payload = v2_history_payload_for_database(
         &database,
-        &format!("/v2/events?registration_id={resource_id}&page_size=20"),
+        &format!("/v1/events?registration_id={resource_id}&page_size=20"),
     )
     .await?;
     let rows = payload["data"].as_array().expect("product event rows");
@@ -499,7 +650,7 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
 
     let first_page = v2_history_payload_for_database(
         &database,
-        &format!("/v2/events?registration_id={resource_id}&page_size=1"),
+        &format!("/v1/events?registration_id={resource_id}&page_size=1"),
     )
     .await?;
     assert_eq!(history_types(first_page["data"].as_array().unwrap()), vec!["record"]);
@@ -567,8 +718,8 @@ async fn v2_product_event_routes_preserves_stored_ensip15_normalized_name_bytes(
     .await?;
 
     for uri in [
-        "/v2/events?name=%E1%8F%A3%E1%8E%B3%E1%8E%A9.eth&page_size=20".to_owned(),
-        format!("/v2/addresses/{ADDRESS}/history?page_size=20"),
+        "/v1/events?name=%E1%8F%A3%E1%8E%B3%E1%8E%A9.eth&page_size=20".to_owned(),
+        format!("/v1/addresses/{ADDRESS}/history?page_size=20"),
     ] {
         let payload = v2_history_payload_for_database(&database, &uri).await?;
         assert_eq!(payload["data"][0]["name"], json!(stored_raw_name), "{uri}");
@@ -580,7 +731,7 @@ async fn v2_product_event_routes_preserves_stored_ensip15_normalized_name_bytes(
 #[tokio::test]
 async fn v2_get_history_paginates_with_anchor_bound_cursor() -> Result<()> {
     let (database, first_page) =
-        v2_history_payload("/v2/names/history.eth/history?page_size=3").await?;
+        v2_history_payload("/v1/names/history.eth/history?page_size=3").await?;
     let next_cursor = first_page["page"]["next_cursor"]
         .as_str()
         .expect("first page must include a next cursor")
@@ -589,7 +740,7 @@ async fn v2_get_history_paginates_with_anchor_bound_cursor() -> Result<()> {
 
     let second_page = v2_history_payload_for_database(
         &database,
-        &format!("/v2/names/history.eth/history?page_size=3&cursor={next_cursor}"),
+        &format!("/v1/names/history.eth/history?page_size=3&cursor={next_cursor}"),
     )
     .await?;
 
@@ -608,7 +759,7 @@ async fn v2_get_history_paginates_with_anchor_bound_cursor() -> Result<()> {
 
     let replay = v2_history_payload_for_database(
         &database,
-        &format!("/v2/names/history.eth/history?page_size=3&cursor={next_cursor}"),
+        &format!("/v1/names/history.eth/history?page_size=3&cursor={next_cursor}"),
     )
     .await?;
     assert_eq!(replay["data"], second_page["data"]);
@@ -625,16 +776,16 @@ async fn normalized_event_cursors_resume_after_rewalk_ids_rotate() -> Result<()>
     seed_v2_history_fixture(&database).await?;
     let routes = [
         (
-            "/v2/names/history.eth/history?page_size=1".to_owned(),
+            "/v1/names/history.eth/history?page_size=1".to_owned(),
             false,
         ),
-        ("/v2/events?name=history.eth&page_size=1".to_owned(), false),
+        ("/v1/events?name=history.eth&page_size=1".to_owned(), false),
         (
-            format!("/v2/addresses/{ADDRESS}/history?page_size=1"),
+            format!("/v1/addresses/{ADDRESS}/history?page_size=1"),
             false,
         ),
         (
-            "/v2/diagnostics/events?name=history.eth&page_size=1".to_owned(),
+            "/v1/diagnostics/events?name=history.eth&page_size=1".to_owned(),
             true,
         ),
     ];
@@ -722,9 +873,9 @@ async fn candidate_migration_rows_are_diagnostic_only() -> Result<()> {
     .await?;
 
     let product_routes = [
-        "/v2/names/history.eth/history?page_size=20".to_owned(),
-        "/v2/events?name=history.eth&page_size=20".to_owned(),
-        format!("/v2/addresses/{ADDRESS}/history?page_size=20"),
+        "/v1/names/history.eth/history?page_size=20".to_owned(),
+        "/v1/events?name=history.eth&page_size=20".to_owned(),
+        format!("/v1/addresses/{ADDRESS}/history?page_size=20"),
     ];
     let mut product_before = Vec::new();
     for route in &product_routes {
@@ -780,7 +931,7 @@ async fn candidate_migration_rows_are_diagnostic_only() -> Result<()> {
 
     let diagnostics = v2_history_payload_for_database(
         &database,
-        "/v2/diagnostics/events?name=history.eth&page_size=20",
+        "/v1/diagnostics/events?name=history.eth&page_size=20",
     )
     .await?;
     let diagnostic_rows = diagnostics["data"].as_array().expect("diagnostic rows");
@@ -807,7 +958,7 @@ async fn candidate_migration_rows_are_diagnostic_only() -> Result<()> {
     let candidate_only_diagnostics = v2_history_payload_for_database(
         &database,
         &format!(
-            "/v2/diagnostics/events?registration_id={}&page_size=20",
+            "/v1/diagnostics/events?registration_id={}&page_size=20",
             Uuid::from_u128(0x7500)
         ),
     )
@@ -818,7 +969,7 @@ async fn candidate_migration_rows_are_diagnostic_only() -> Result<()> {
 
     let candidate_address_diagnostics = v2_history_payload_for_database(
         &database,
-        &format!("/v2/diagnostics/events?address={ADDRESS}&page_size=20"),
+        &format!("/v1/diagnostics/events?address={ADDRESS}&page_size=20"),
     )
     .await?;
     let candidate_address_rows = candidate_address_diagnostics["data"]
@@ -854,7 +1005,7 @@ async fn diagnostics_hide_an_event_on_an_orphaned_lineage_with_its_still_canonic
     )
     .execute(&database.pool)
     .await?;
-    let route = "/v2/diagnostics/events?name=history.eth&page_size=20";
+    let route = "/v1/diagnostics/events?name=history.eth&page_size=20";
 
     let before = v2_history_payload_for_database(&database, route).await?;
     let renewal = before["data"]
@@ -965,7 +1116,7 @@ async fn v2_get_history_rejects_cross_name_and_cross_scope_cursor_reuse() -> Res
     .await?;
 
     let first_page =
-        v2_history_payload_for_database(&database, "/v2/names/history.eth/history?page_size=3")
+        v2_history_payload_for_database(&database, "/v1/names/history.eth/history?page_size=3")
             .await?;
     let next_cursor = first_page["page"]["next_cursor"]
         .as_str()
@@ -973,7 +1124,7 @@ async fn v2_get_history_rejects_cross_name_and_cross_scope_cursor_reuse() -> Res
 
     let cross_name = v2_history_response_for_database(
         &database,
-        &format!("/v2/names/other.eth/history?page_size=3&cursor={next_cursor}"),
+        &format!("/v1/names/other.eth/history?page_size=3&cursor={next_cursor}"),
     )
     .await?;
     assert_eq!(cross_name.status(), StatusCode::BAD_REQUEST);
@@ -982,7 +1133,7 @@ async fn v2_get_history_rejects_cross_name_and_cross_scope_cursor_reuse() -> Res
 
     let cross_scope = v2_history_response_for_database(
         &database,
-        &format!("/v2/names/history.eth/history?scope=name&page_size=3&cursor={next_cursor}"),
+        &format!("/v1/names/history.eth/history?scope=name&page_size=3&cursor={next_cursor}"),
     )
     .await?;
     assert_eq!(cross_scope.status(), StatusCode::BAD_REQUEST);
@@ -994,17 +1145,73 @@ async fn v2_get_history_rejects_cross_name_and_cross_scope_cursor_reuse() -> Res
 }
 
 #[tokio::test]
-async fn v2_get_history_scope_filters_name_registration_and_both() -> Result<()> {
-    let (database, name_scope) =
-        v2_history_payload("/v2/names/history.eth/history?scope=name&page_size=20").await?;
+async fn v2_get_history_serves_subregistry_changes_as_registration_rows() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    seed_v2_history_blocks(&database, 112..=112).await?;
+    let mut event = v2_history_event(
+        "history-subregistry",
+        None,
+        Some(Uuid::from_u128(0x7100)),
+        "SubregistryChanged",
+        112,
+    );
+    event.after_state = json!({
+        "subregistry": "0x0000000000000000000000000000000000000abd",
+    });
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event])
+        .await
+        .context("failed to upsert subregistry history event")?;
+
+    let unfiltered = v2_history_payload_for_database(
+        &database,
+        "/v1/names/history.eth/history?page_size=20",
+    )
+    .await?;
+    let rows = unfiltered["data"].as_array().expect("data");
+    assert_eq!(rows.len(), 11);
+    assert_eq!(rows[0]["type"], json!("subregistry"));
+    assert_eq!(rows[0]["block_number"], json!(112));
+    assert_eq!(
+        rows[0]["registration_id"],
+        json!(Uuid::from_u128(0x7100).to_string())
+    );
+
+    let filtered = v2_history_payload_for_database(
+        &database,
+        "/v1/events?name=history.eth&type=subregistry&page_size=20",
+    )
+    .await?;
+    assert_eq!(
+        history_types(filtered["data"].as_array().expect("data")),
+        vec!["subregistry"]
+    );
     let registration_scope = v2_history_payload_for_database(
         &database,
-        "/v2/names/history.eth/history?scope=registration&page_size=20",
+        "/v1/names/history.eth/history?scope=registration&page_size=20",
+    )
+    .await?;
+    assert_eq!(
+        history_types(registration_scope["data"].as_array().expect("data"))[0],
+        "subregistry"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_history_scope_filters_name_registration_and_both() -> Result<()> {
+    let (database, name_scope) =
+        v2_history_payload("/v1/names/history.eth/history?scope=name&page_size=20").await?;
+    let registration_scope = v2_history_payload_for_database(
+        &database,
+        "/v1/names/history.eth/history?scope=registration&page_size=20",
     )
     .await?;
     let both_scope = v2_history_payload_for_database(
         &database,
-        "/v2/names/history.eth/history?scope=both&page_size=20",
+        "/v1/names/history.eth/history?scope=both&page_size=20",
     )
     .await?;
 
@@ -1097,7 +1304,7 @@ async fn v2_address_history_ignores_masked_owner_tail_but_keeps_valid_authority_
     let address_payload = v2_history_payload_for_database(
         &database,
         &format!(
-            "/v2/addresses/{MATCHED_ADDRESS}/history?relation=manager&page_size=20"
+            "/v1/addresses/{MATCHED_ADDRESS}/history?relation=manager&page_size=20"
         ),
     )
     .await?;
@@ -1116,7 +1323,7 @@ async fn v2_address_history_ignores_masked_owner_tail_but_keeps_valid_authority_
 
     let name_payload = v2_history_payload_for_database(
         &database,
-        "/v2/names/masked-tail.eth/history?scope=name&page_size=20",
+        "/v1/names/masked-tail.eth/history?scope=name&page_size=20",
     )
     .await?;
     let name_rows = name_payload["data"].as_array().expect("name history data");
@@ -1180,7 +1387,7 @@ async fn v2_get_history_keeps_prior_registration_resources_after_rebinding() -> 
 
     let payload = v2_history_payload_for_database(
         &database,
-        "/v2/names/history.eth/history?scope=registration&page_size=20",
+        "/v1/names/history.eth/history?scope=registration&page_size=20",
     )
     .await?;
     assert!(payload["data"].as_array().expect("history data").iter().any(
@@ -1218,12 +1425,12 @@ async fn v2_get_history_empty_and_missing_name_semantics() -> Result<()> {
     .await?;
 
     let payload =
-        v2_history_payload_for_database(&database, "/v2/names/quiet.eth/history").await?;
+        v2_history_payload_for_database(&database, "/v1/names/quiet.eth/history").await?;
     assert_eq!(payload["data"], json!([]));
     assert_eq!(payload["page"]["has_more"], json!(false));
     assert_eq!(payload["page"]["next_cursor"], Value::Null);
 
-    let response = v2_history_response_for_database(&database, "/v2/names/missing.eth/history")
+    let response = v2_history_response_for_database(&database, "/v1/names/missing.eth/history")
         .await?;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let payload: Value = read_json(response).await?;
@@ -1234,20 +1441,20 @@ async fn v2_get_history_empty_and_missing_name_semantics() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_get_history_uses_current_sepolia_anchor_on_mixed_phase_heads() -> Result<()> {
+async fn v2_get_history_excludes_unpublished_sepolia_events_on_mixed_phase_heads() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_mixed_phase_head_names(&database).await?;
     seed_v2_mixed_phase_head_history(&database).await?;
 
     let payload = v2_history_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_SEPOLIA_SNAPSHOT_NAME}/history"),
+        &format!("/v1/names/{V2_SEPOLIA_SNAPSHOT_NAME}/history"),
     )
     .await?;
-    assert_eq!(payload["meta"], json!({}));
+    assert!(payload["meta"]["as_of"].is_object());
     assert_eq!(
         history_types(payload["data"].as_array().expect("history data")),
-        vec!["registration"]
+        Vec::<String>::new()
     );
 
     database.cleanup().await
@@ -1272,7 +1479,7 @@ async fn v2_history_response_for_database(
     database: &TestDatabase,
     uri: &str,
 ) -> Result<Response> {
-    app_router(database.app_state())
+    app_router(database.app_state_with_public_namespaces(&["ens"]))
         .oneshot(
             Request::builder()
                 .uri(uri)
@@ -1384,6 +1591,7 @@ async fn seed_v2_history_fixture(database: &TestDatabase) -> Result<()> {
     .await
     .context("failed to upsert v2 history fixture events")?;
 
+    database.seed_default_ens_primary_name_fallback_context().await?;
     Ok(())
 }
 
@@ -1462,13 +1670,15 @@ async fn seed_v2_history_name(
             }
         }),
     )
-    .await
+    .await?;
+    database.seed_default_ens_snapshot_selector_position().await
 }
 
 async fn seed_v2_history_blocks(
     database: &TestDatabase,
     range: std::ops::RangeInclusive<i64>,
 ) -> Result<()> {
+    let end = *range.end();
     let blocks = range
         .map(|block_number| {
             raw_block(
@@ -1481,6 +1691,13 @@ async fn seed_v2_history_blocks(
         })
         .collect::<Vec<_>>();
     upsert_phase_raw_blocks(&database.pool, &blocks).await?;
+    let current: Option<i64> = sqlx::query_scalar("SELECT latest_block_number FROM chain_heads WHERE chain_id = 'ethereum-mainnet'")
+        .fetch_optional(&database.pool).await?;
+    if !blocks.is_empty() && current.is_none_or(|head| head < end) {
+        let timestamp = sqlx::types::time::OffsetDateTime::from_unix_timestamp(1_700_000_000 + end)?;
+        seed_schema_v2_ens_lookup_head(&database.pool, end, &format!("0xhistory{end}"),
+            &crate::v2::format_timestamp(timestamp)).await?;
+    }
     Ok(())
 }
 
@@ -1576,4 +1793,711 @@ fn history_transaction_hashes(payload: &Value) -> Vec<&str> {
                 .expect("history row transaction_hash")
         })
         .collect()
+}
+
+#[tokio::test]
+async fn v2_history_order_asc_returns_oldest_first_with_order_bound_cursor() -> Result<()> {
+    let (database, first_page) =
+        v2_history_payload("/v1/names/History.eth/history?order=asc&page_size=4").await?;
+
+    assert_eq!(history_blocks(&first_page), vec![101, 102, 103, 104]);
+    assert_eq!(first_page["page"]["has_more"], json!(true));
+    let cursor = first_page["page"]["next_cursor"]
+        .as_str()
+        .expect("nonterminal asc page must provide a cursor")
+        .to_owned();
+
+    let second_page = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/names/history.eth/history?order=asc&page_size=4&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(history_blocks(&second_page), vec![105, 106, 107, 108]);
+    let cursor = second_page["page"]["next_cursor"]
+        .as_str()
+        .expect("second asc page must provide a cursor")
+        .to_owned();
+    let third_page = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/names/history.eth/history?order=asc&page_size=4&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(history_blocks(&third_page), vec![109, 110]);
+    assert_eq!(third_page["page"]["has_more"], json!(false));
+    assert_eq!(third_page["page"]["next_cursor"], Value::Null);
+
+    // An asc cursor cannot continue a desc (default) request.
+    let response = v2_history_response_for_database(
+        &database,
+        &format!("/v1/names/history.eth/history?page_size=4&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let default_page =
+        v2_history_payload_for_database(&database, "/v1/names/history.eth/history?page_size=3")
+            .await?;
+    assert_eq!(history_blocks(&default_page), vec![110, 109, 108]);
+    let desc_page = v2_history_payload_for_database(
+        &database,
+        "/v1/names/history.eth/history?order=desc&page_size=3",
+    )
+    .await?;
+    assert_eq!(history_blocks(&desc_page), vec![110, 109, 108]);
+
+    for route in [
+        "/v1/events?name=history.eth&order=asc&page_size=3",
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?order=asc&page_size=3",
+    ] {
+        let payload = v2_history_payload_for_database(&database, route).await?;
+        let blocks = history_blocks(&payload);
+        assert!(
+            blocks.windows(2).all(|pair| pair[0] < pair[1]),
+            "{route} must return oldest-first rows: {blocks:?}"
+        );
+        assert_eq!(blocks[0], 101, "{route} must start at the oldest row");
+    }
+
+    let response =
+        v2_history_response_for_database(&database, "/v1/events?name=history.eth&order=sideways")
+            .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_history_type_sets_filter_rows_and_bind_cursors() -> Result<()> {
+    let (database, payload) = v2_history_payload(
+        "/v1/names/history.eth/history?type=registration,renewal,%20renewal&page_size=20",
+    )
+    .await?;
+    let rows = payload["data"].as_array().expect("history data");
+    assert_eq!(history_types(rows), vec!["renewal", "registration"]);
+    assert_eq!(payload["page"]["total_count"], json!(2));
+
+    let events = v2_history_payload_for_database(
+        &database,
+        "/v1/events?name=history.eth&type=record,resolver,transfer&order=asc&page_size=2",
+    )
+    .await?;
+    assert_eq!(
+        history_types(events["data"].as_array().expect("events data")),
+        vec!["transfer", "resolver"]
+    );
+    assert_eq!(events["page"]["has_more"], json!(true));
+    let cursor = events["page"]["next_cursor"]
+        .as_str()
+        .expect("type-set page must provide a cursor")
+        .to_owned();
+    let continued = v2_history_payload_for_database(
+        &database,
+        &format!(
+            "/v1/events?name=history.eth&type=transfer,resolver,record&order=asc&page_size=2&cursor={cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(
+        history_types(continued["data"].as_array().expect("events data")),
+        vec!["record"]
+    );
+    // The same cursor cannot continue a request with a different type set.
+    let response = v2_history_response_for_database(
+        &database,
+        &format!("/v1/events?name=history.eth&type=record&order=asc&page_size=2&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let address = v2_history_payload_for_database(
+        &database,
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?type=authority,record&page_size=20",
+    )
+    .await?;
+    let types = history_types(address["data"].as_array().expect("address history data"));
+    assert!(!types.is_empty());
+    assert!(types.iter().all(|kind| *kind == "authority" || *kind == "record"), "{types:?}");
+
+    for route in [
+        "/v1/names/history.eth/history?type=registration,bogus",
+        "/v1/names/history.eth/history?type=,",
+        "/v1/events?name=history.eth&type=registered",
+    ] {
+        let response = v2_history_response_for_database(&database, route).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{route}");
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_history_timestamp_window_resolves_blocks_through_lineage() -> Result<()> {
+    // Fixture block N has timestamp 1_700_000_000 + N; block 104 is 2023-11-14T22:15:04Z.
+    let (database, payload) = v2_history_payload(
+        "/v1/names/history.eth/history?from_timestamp=2023-11-14T22:15:04Z&to_timestamp=2023-11-14T22:15:07Z&page_size=20",
+    )
+    .await?;
+    assert_eq!(history_blocks(&payload), vec![107, 106, 105, 104]);
+    assert_eq!(payload["page"]["total_count"], json!(4));
+
+    // A bound between two blocks snaps inward: 22:15:04.5 -> block 105, 22:15:06.5 -> block 106.
+    let payload = v2_history_payload_for_database(
+        &database,
+        "/v1/events?name=history.eth&from_timestamp=2023-11-14T22:15:04.500Z&to_timestamp=2023-11-14T22:15:06.500Z&order=asc",
+    )
+    .await?;
+    assert_eq!(history_blocks(&payload), vec![105, 106]);
+
+    // Open-ended bounds and numeric-offset timestamps work; block bounds intersect.
+    let payload = v2_history_payload_for_database(
+        &database,
+        "/v1/events?name=history.eth&from_timestamp=2023-11-14T23:15:08%2B01:00&to_block=109",
+    )
+    .await?;
+    assert_eq!(history_blocks(&payload), vec![109, 108]);
+
+    // A window after the last known block matches nothing.
+    let payload = v2_history_payload_for_database(
+        &database,
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?from_timestamp=2030-01-01T00:00:00Z",
+    )
+    .await?;
+    assert_eq!(payload["data"], json!([]));
+    assert_eq!(payload["page"]["total_count"], json!(0));
+
+    // Cursors bind the timestamp window.
+    let first = v2_history_payload_for_database(
+        &database,
+        "/v1/names/history.eth/history?from_timestamp=2023-11-14T22:15:04Z&page_size=2",
+    )
+    .await?;
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .expect("windowed page must provide a cursor")
+        .to_owned();
+    let response = v2_history_response_for_database(
+        &database,
+        &format!("/v1/names/history.eth/history?page_size=2&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let continued = v2_history_payload_for_database(
+        &database,
+        &format!(
+            "/v1/names/history.eth/history?from_timestamp=2023-11-14T22:15:04Z&page_size=2&cursor={cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(history_blocks(&continued), vec![108, 107]);
+
+    for route in [
+        "/v1/names/history.eth/history?from_timestamp=yesterday",
+        "/v1/names/history.eth/history?from_timestamp=2023-11-14T22:15:07Z&to_timestamp=2023-11-14T22:15:04Z",
+        "/v1/events?name=history.eth&to_timestamp=1700000000",
+    ] {
+        let response = v2_history_response_for_database(&database, route).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{route}");
+        assert_eq!(
+            read_json::<Value>(response).await?["error"]["code"],
+            json!("invalid_input"),
+            "{route}"
+        );
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_history_total_count_is_populated_only_for_anchored_requests() -> Result<()> {
+    let (database, payload) = v2_history_payload("/v1/names/history.eth/history?page_size=3").await?;
+    assert_eq!(payload["page"]["total_count"], json!(10));
+    assert_eq!(payload["page"]["has_more"], json!(true));
+
+    let payload =
+        v2_history_payload_for_database(&database, "/v1/events?name=history.eth&page_size=3")
+            .await?;
+    assert_eq!(payload["page"]["total_count"], json!(10));
+
+    let payload = v2_history_payload_for_database(
+        &database,
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?page_size=3",
+    )
+    .await?;
+    let total = payload["page"]["total_count"]
+        .as_u64()
+        .expect("address history must count anchored rows");
+    assert!(total >= 1);
+
+    let payload =
+        v2_history_payload_for_database(&database, "/v1/events?namespace=ens&page_size=3").await?;
+    assert_eq!(payload["page"]["total_count"], Value::Null);
+    let payload = v2_history_payload_for_database(
+        &database,
+        "/v1/events?namespace=ens&type=registration&from_block=100&to_block=200",
+    )
+    .await?;
+    assert_eq!(payload["page"]["total_count"], Value::Null);
+
+    database.cleanup().await
+}
+
+fn history_blocks(payload: &Value) -> Vec<i64> {
+    payload["data"]
+        .as_array()
+        .expect("history data")
+        .iter()
+        .map(|row| row["block_number"].as_i64().expect("history row block_number"))
+        .collect()
+}
+
+#[tokio::test]
+async fn v2_history_include_data_adds_friendly_payloads_and_keeps_lean_rows_otherwise(
+) -> Result<()> {
+    const RESOLVER: &str = "0x0000000000000000000000000000000000000abc";
+    let (database, lean) = v2_history_payload("/v1/names/history.eth/history?page_size=20").await?;
+    for row in lean["data"].as_array().expect("history data") {
+        assert!(row.get("data").is_none());
+        assert!(row.get("kind").is_none());
+        assert!(row.get("contract_address").is_none());
+    }
+    // The record write was emitted by the resolver contract; the fixture stores
+    // the emitter in mixed case on the raw fact reference.
+    sqlx::query(
+        "UPDATE bigname_phase.normalized_events \
+         SET raw_fact_ref = raw_fact_ref || '{\"emitting_address\":\"0x0000000000000000000000000000000000000ABC\"}'::jsonb \
+         WHERE event_identity = 'history-record'",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let payload = v2_history_payload_for_database(
+        &database,
+        "/v1/names/history.eth/history?include=data&page_size=20",
+    )
+    .await?;
+    let rows = payload["data"].as_array().expect("history data");
+    assert_eq!(rows.len(), 10);
+    let row_at = |block: i64| {
+        rows.iter()
+            .find(|row| row["block_number"] == json!(block))
+            .unwrap_or_else(|| panic!("row at block {block}"))
+    };
+    for row in rows {
+        assert!(row.get("kind").is_none(), "{row}");
+        assert!(row.get("contract_address").is_some(), "{row}");
+        assert!(row["data"].is_object(), "{row}");
+        for key in ["type", "name", "namespace", "registration_id", "block_number", "timestamp", "transaction_hash", "log_index"] {
+            assert!(row.get(key).is_some(), "{key} missing from {row}");
+        }
+        assert!(row.get("before_state").is_none());
+        assert!(row.get("after_state").is_none());
+        assert!(row.get("event_kind").is_none());
+    }
+    assert_no_banned_v1_spellings(&payload);
+
+    let registration = row_at(102);
+    assert!(registration.get("kind").is_none());
+    assert_eq!(registration["contract_address"], Value::Null);
+    assert_eq!(
+        registration["data"],
+        json!({
+            "registrant": "0x00000000000000000000000000000000000000aa",
+            "expires_at": "2030-03-17T17:46:40Z",
+        })
+    );
+    assert_eq!(
+        row_at(110)["data"],
+        json!({ "expires_at": "2031-10-17T10:40:00Z" })
+    );
+    assert_eq!(
+        row_at(109)["data"],
+        json!({ "expires_at": "2031-10-17T10:40:00Z" })
+    );
+    assert_eq!(row_at(108)["data"], json!({}));
+    assert_eq!(
+        row_at(103)["data"],
+        json!({ "to": "0x00000000000000000000000000000000000000bb" })
+    );
+    assert_eq!(
+        row_at(101)["data"],
+        json!({ "owner": "0x00000000000000000000000000000000000000cc" })
+    );
+    assert_eq!(
+        row_at(105)["data"],
+        json!({ "owner": "0x00000000000000000000000000000000000000cc" })
+    );
+    assert_eq!(
+        row_at(104)["data"],
+        json!({ "resolver": { "chain_id": 1, "address": RESOLVER } })
+    );
+    let record = row_at(106);
+    assert!(record.get("kind").is_none());
+    assert_eq!(record["contract_address"], json!(RESOLVER));
+    assert_eq!(
+        record["data"],
+        json!({
+            "key": "addr:60",
+            "coin_type": 60,
+            "value": "0x0000000000000000000000000000000000000def",
+        })
+    );
+    assert_eq!(
+        row_at(107)["data"],
+        json!({
+            "address": "0x00000000000000000000000000000000000000dd",
+            "powers": ["registration_control"],
+        })
+    );
+
+    let events = v2_history_payload_for_database(
+        &database,
+        "/v1/events?name=history.eth&type=record&include=data",
+    )
+    .await?;
+    let event_rows = events["data"].as_array().expect("events data");
+    assert_eq!(event_rows.len(), 1);
+    assert!(event_rows[0].get("kind").is_none());
+    assert_eq!(event_rows[0]["contract_address"], json!(RESOLVER));
+    assert_eq!(event_rows[0]["data"]["key"], json!("addr:60"));
+    let lean_events =
+        v2_history_payload_for_database(&database, "/v1/events?name=history.eth&type=record")
+            .await?;
+    assert!(lean_events["data"][0].get("data").is_none());
+    assert!(lean_events["data"][0].get("kind").is_none());
+
+    let address = v2_history_payload_for_database(
+        &database,
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?include=data&page_size=20",
+    )
+    .await?;
+    let address_rows = address["data"].as_array().expect("address history data");
+    assert!(!address_rows.is_empty());
+    assert!(address_rows.iter().all(|row| row.get("kind").is_none() && row["data"].is_object()));
+
+    for route in [
+        "/v1/names/history.eth/history?include=bogus",
+        "/v1/names/history.eth/history?include=data,bogus",
+        "/v1/events?name=history.eth&include=events",
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?include=payload",
+    ] {
+        let response = v2_history_response_for_database(&database, route).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{route}");
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_history_include_raw_exposes_storage_kind_only_behind_the_opt_in() -> Result<()> {
+    let (database, raw) =
+        v2_history_payload("/v1/names/history.eth/history?include=raw&page_size=20").await?;
+    let rows = raw["data"].as_array().expect("history data");
+    assert_eq!(rows.len(), 10);
+    for row in rows {
+        assert!(row["kind"].is_string(), "{row}");
+        assert!(row.get("data").is_none(), "{row}");
+        assert!(row.get("contract_address").is_none(), "{row}");
+        assert!(row.get("event_kind").is_none(), "{row}");
+    }
+    let row_at = |block: i64| {
+        rows.iter()
+            .find(|row| row["block_number"] == json!(block))
+            .unwrap_or_else(|| panic!("row at block {block}"))
+    };
+    assert_eq!(row_at(101)["kind"], json!("AuthorityTransferred"));
+    assert_eq!(row_at(102)["kind"], json!("RegistrationGranted"));
+    assert_eq!(row_at(103)["kind"], json!("TokenControlTransferred"));
+    assert_eq!(row_at(104)["kind"], json!("ResolverChanged"));
+    assert_eq!(row_at(105)["kind"], json!("AuthorityEpochChanged"));
+    assert_eq!(row_at(106)["kind"], json!("RecordChanged"));
+    assert_eq!(row_at(107)["kind"], json!("PermissionChanged"));
+    assert_eq!(row_at(108)["kind"], json!("RegistrationReleased"));
+    assert_eq!(row_at(109)["kind"], json!("ExpiryChanged"));
+    assert_eq!(row_at(110)["kind"], json!("RegistrationRenewed"));
+
+    // The two flags compose in either order.
+    for route in [
+        "/v1/names/history.eth/history?include=data,raw&page_size=20",
+        "/v1/names/history.eth/history?include=raw,%20data&page_size=20",
+    ] {
+        let both = v2_history_payload_for_database(&database, route).await?;
+        let rows = both["data"].as_array().expect("history data");
+        assert_eq!(rows.len(), 10, "{route}");
+        for row in rows {
+            assert!(row["kind"].is_string(), "{route}: {row}");
+            assert!(row["data"].is_object(), "{route}: {row}");
+            assert!(row.get("contract_address").is_some(), "{route}: {row}");
+        }
+    }
+
+    let events = v2_history_payload_for_database(
+        &database,
+        "/v1/events?name=history.eth&type=record&include=raw",
+    )
+    .await?;
+    assert_eq!(events["data"][0]["kind"], json!("RecordChanged"));
+    assert!(events["data"][0].get("data").is_none());
+    let events = v2_history_payload_for_database(
+        &database,
+        "/v1/events?name=history.eth&type=record&include=raw,data",
+    )
+    .await?;
+    assert_eq!(events["data"][0]["kind"], json!("RecordChanged"));
+    assert_eq!(events["data"][0]["data"]["key"], json!("addr:60"));
+
+    let address = v2_history_payload_for_database(
+        &database,
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?include=raw&page_size=20",
+    )
+    .await?;
+    let address_rows = address["data"].as_array().expect("address history data");
+    assert!(!address_rows.is_empty());
+    assert!(
+        address_rows
+            .iter()
+            .all(|row| row["kind"].is_string() && row.get("data").is_none())
+    );
+
+    for route in [
+        "/v1/names/history.eth/history?include=raw,bogus",
+        "/v1/events?name=history.eth&include=kind",
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?include=raw_kind",
+    ] {
+        let response = v2_history_response_for_database(&database, route).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{route}");
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_events_resolver_filter_lists_rows_for_one_resolver_contract() -> Result<()> {
+    const RESOLVER: &str = "0x0000000000000000000000000000000000000abc";
+    let (database, _) = v2_history_payload("/v1/names/history.eth/history?page_size=1").await?;
+    sqlx::query(
+        "UPDATE bigname_phase.normalized_events \
+         SET raw_fact_ref = raw_fact_ref || '{\"emitting_address\":\"0x0000000000000000000000000000000000000ABC\"}'::jsonb \
+         WHERE event_identity = 'history-record'",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    // The record write was emitted by the resolver and the pointer change names it.
+    let payload = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?resolver=1:{RESOLVER}"),
+    )
+    .await?;
+    assert_eq!(history_blocks(&payload), vec![106, 104]);
+    assert_eq!(
+        history_types(payload["data"].as_array().expect("events data")),
+        vec!["record", "resolver"]
+    );
+    assert_eq!(payload["page"]["total_count"], json!(2));
+    assert_eq!(payload["data"][0]["name"], json!("history.eth"));
+
+    let mixed_case = v2_history_payload_for_database(
+        &database,
+        "/v1/events?resolver=1:0x0000000000000000000000000000000000000ABC&order=asc",
+    )
+    .await?;
+    assert_eq!(history_blocks(&mixed_case), vec![104, 106]);
+
+    let detailed = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?resolver=1:{RESOLVER}&type=record&include=data"),
+    )
+    .await?;
+    assert_eq!(history_blocks(&detailed), vec![106]);
+    assert_eq!(detailed["data"][0]["contract_address"], json!(RESOLVER));
+
+    // Cursors bind the resolver filter.
+    let first = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?resolver=1:{RESOLVER}&page_size=1"),
+    )
+    .await?;
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .expect("resolver page must provide a cursor")
+        .to_owned();
+    let continued = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?resolver=1:{RESOLVER}&page_size=1&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(history_blocks(&continued), vec![104]);
+    let response = v2_history_response_for_database(
+        &database,
+        &format!(
+            "/v1/events?resolver=1:0x0000000000000000000000000000000000000bbb&page_size=1&cursor={cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Another chain or another resolver matches nothing; the chain scopes the read.
+    let empty = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?resolver=8453:{RESOLVER}"),
+    )
+    .await?;
+    assert_eq!(empty["data"], json!([]));
+    assert_eq!(empty["page"]["total_count"], json!(0));
+
+    for route in [
+        format!("/v1/events?resolver={RESOLVER}"),
+        format!("/v1/events?resolver=99:{RESOLVER}"),
+        "/v1/events?resolver=1:0x12".to_owned(),
+        format!("/v1/events?resolver=one:{RESOLVER}"),
+        format!("/v1/diagnostics/events?resolver=1:{RESOLVER}"),
+    ] {
+        let response = v2_history_response_for_database(&database, &route).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{route}");
+        assert_eq!(
+            read_json::<Value>(response).await?["error"]["code"],
+            json!("invalid_input"),
+            "{route}"
+        );
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_history_requested_exact_count_exceeds_default_cap() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    let extra = (0..10_001)
+        .map(|n| {
+            v2_history_event(
+                &format!("exact-count-{n}"),
+                Some("ens:history.eth"),
+                None,
+                "RecordChanged",
+                101,
+            )
+        })
+        .collect::<Vec<_>>();
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &extra).await?;
+    let base = "/v1/names/history.eth/history?scope=name&type=record&page_size=1";
+    let capped = v2_history_payload_for_database(&database, base).await?;
+    assert_eq!(capped["page"]["total_count"], Value::Null);
+    let exact =
+        v2_history_payload_for_database(&database, &format!("{base}&include=total_count")).await?;
+    assert!(exact["page"]["total_count"].as_u64().unwrap() > 10_000);
+    let cursor = exact["page"]["next_cursor"].as_str().unwrap();
+    let next = v2_history_payload_for_database(
+        &database,
+        &format!("{base}&include=total_count&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(next["page"]["total_count"], exact["page"]["total_count"]);
+    let events = v2_history_payload_for_database(
+        &database,
+        "/v1/events?name=history.eth&type=record&page_size=1&include=total_count",
+    )
+    .await?;
+    assert_eq!(events["page"]["total_count"], exact["page"]["total_count"]);
+    let unanchored = v2_history_payload_for_database(
+        &database,
+        "/v1/events?namespace=ens&page_size=1&include=total_count",
+    )
+    .await?;
+    assert_eq!(unanchored["page"]["total_count"], Value::Null);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_history_continuation_excludes_unpublished_interpret_events() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    let base = "/v1/names/history.eth/history?page_size=1&include=total_count";
+    let first = v2_history_payload_for_database(&database, base).await?;
+    let cursor = first["page"]["next_cursor"].as_str().unwrap();
+    // Interpret can append this block while Project still publishes the previous block.
+    upsert_phase_raw_blocks(&database.pool, &[raw_block("ethereum-mainnet",
+        "0xhistory21000004", None, 21_000_004, 1_776_384_004)]).await?;
+    let next_event = v2_history_event("unpublished-history", Some("ens:history.eth"), None,
+        "RecordChanged", 21_000_004);
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[next_event]).await?;
+    let next = v2_history_payload_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
+    assert_eq!(next["page"]["total_count"], first["page"]["total_count"]);
+    assert!(history_blocks(&next).iter().all(|block| *block <= 21_000_003));
+    database.seed_snapshot_selector_chain_positions(&json!({"ethereum": {
+        "chain_id": "ethereum-mainnet", "block_number": 21_000_004,
+        "block_hash": "0xhistory21000004", "timestamp": "2026-04-17T00:00:04Z"
+    }})).await?;
+    let response = v2_history_response_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let failure: Value = read_json(response).await?;
+    assert_eq!(failure["error"]["code"], json!("stale"));
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_history_ignores_unpublished_binding_and_address_anchor_expansion() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    let resource = Uuid::from_u128(0xf7100);
+    let token_lineage = Uuid::from_u128(0xf8100);
+    upsert_test_token_lineages(&database.pool,
+        &[address_name_token_lineage(token_lineage, "0xhistory101", 101)]).await?;
+    upsert_test_resources(&database.pool, &[address_name_resource(resource, Some(token_lineage), "0xhistory101", 101)]).await?;
+    let old_record = v2_history_event("old-unlinked-resource", None, Some(resource), "RecordChanged", 106);
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[old_record]).await?;
+    let first = v2_history_payload_for_database(&database,
+        "/v1/names/history.eth/history?page_size=1&include=total_count").await?;
+    upsert_phase_raw_blocks(&database.pool, &[raw_block("ethereum-mainnet", "0xfuture-binding",
+        None, 21_000_004, 1_776_384_004)]).await?;
+    let mut future_binding = address_name_surface_binding(Uuid::from_u128(0xf9100),
+        "ens:history.eth", resource, "0xfuture-binding", 21_000_004, 1_776_384_004);
+    future_binding.authority_arm = "ens_v2".to_owned();
+    future_binding.active_to = Some(bigname_storage::parse_rfc3339_utc_timestamp("2027-01-01T00:00:00Z")?);
+    upsert_test_surface_bindings(&database.pool, &[future_binding]).await?;
+    let mut future_owner = v2_history_event("future-owner-anchor", None, Some(resource), "RegistrationGranted", 21_000_004);
+    future_owner.block_hash = Some("0xfuture-binding".to_owned());
+    future_owner.after_state = json!({"registrant":"0x0000000000000000000000000000000000000f99"});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[future_owner]).await?;
+    for route in ["/v1/names/history.eth/history?page_size=1&include=total_count",
+        "/v1/events?name=history.eth&page_size=1&include=total_count"] {
+        let page = v2_history_payload_for_database(&database, route).await?;
+        assert_eq!(page["page"]["total_count"], first["page"]["total_count"]);
+    }
+    for route in ["/v1/addresses/0x0000000000000000000000000000000000000f99/history?include=total_count",
+        "/v1/events?address=0x0000000000000000000000000000000000000f99&include=total_count"] {
+        let page = v2_history_payload_for_database(&database, route).await?;
+        assert_eq!(page["page"]["total_count"], json!(0));
+    }
+    let mut prior_owner = v2_history_event("prior-owner-anchor", None, Some(resource), "RegistrationGranted", 101);
+    prior_owner.after_state = json!({"registrant":"0x0000000000000000000000000000000000000f98"});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[prior_owner]).await?;
+    let narrowed = v2_history_payload_for_database(&database,
+        "/v1/addresses/0x0000000000000000000000000000000000000f98/history?type=record&from_timestamp=2023-11-14T22%3A15%3A06Z&include=total_count").await?;
+    assert_eq!(narrowed["page"]["total_count"], json!(1), "an ownership anchor before the requested event window still applies");
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_collection_routes_reject_unknown_namespace_before_publication_capture() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    for uri in [
+        "/v1/events?namespace=en",
+        "/v1/events?namespace=en&name=history.eth",
+        "/v1/names/history.eth/history?namespace=en",
+        "/v1/names/history.eth/subnames?namespace=en",
+        "/v1/names/history.eth?namespace=en&include=counts",
+    ] {
+        let response = v2_history_response_for_database(&database, uri).await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["error"]["code"], json!("not_found"));
+        assert_eq!(payload["error"]["message"], json!("namespace en is not supported"));
+    }
+    // A recognized namespace without a publication is a temporary availability failure.
+    let response = v2_history_response_for_database(&database, "/v1/events?namespace=ens").await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("stale"));
+    database.cleanup().await
 }

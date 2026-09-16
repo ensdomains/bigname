@@ -31,14 +31,14 @@ async fn v2_search_preserves_stored_ensip15_normalized_name_bytes() -> Result<()
 
     let prefix = v2_search_payload_for_database(
         &database,
-        "/v2/search?q=%E1%8F%A3%E1%8E%B3&namespace=ens",
+        "/v1/search?q=%E1%8F%A3%E1%8E%B3&namespace=ens",
     )
     .await?;
     assert_eq!(prefix["data"][0]["name"], json!(stored_raw_name));
 
     let contains = v2_search_payload_for_database(
         &database,
-        "/v2/search?q=%E1%8F%A3%E1%8E%B3&match=contains&namespace=ens",
+        "/v1/search?q=%E1%8F%A3%E1%8E%B3&match=contains&namespace=ens",
     )
     .await?;
     assert_eq!(contains["data"][0]["name"], json!(NORMALIZED_NAME));
@@ -48,7 +48,7 @@ async fn v2_search_preserves_stored_ensip15_normalized_name_bytes() -> Result<()
 
 #[tokio::test]
 async fn v2_search_prefix_returns_record_rows() -> Result<()> {
-    let (database, payload) = v2_search_payload("/v2/search?q=al&namespace=ens").await?;
+    let (database, payload) = v2_search_payload("/v1/search?q=al&namespace=ens").await?;
 
     assert_eq!(payload["page"]["page_size"], json!(50));
     assert_eq!(payload["page"]["total_count"], Value::Null);
@@ -88,7 +88,7 @@ async fn v2_search_prefix_returns_record_rows() -> Result<()> {
 
 #[tokio::test]
 async fn v2_search_uses_dictionary_owner_and_registrant_precedence() -> Result<()> {
-    let (database, payload) = v2_search_payload("/v2/search?q=precedence&namespace=ens").await?;
+    let (database, payload) = v2_search_payload("/v1/search?q=precedence&namespace=ens").await?;
 
     let data = payload["data"]
         .as_array()
@@ -106,12 +106,12 @@ async fn v2_search_uses_dictionary_owner_and_registrant_precedence() -> Result<(
 
 #[tokio::test]
 async fn v2_search_match_modes_and_q_validation() -> Result<()> {
-    let (database, prefix) = v2_search_payload("/v2/search?q=amm&namespace=ens").await?;
+    let (database, prefix) = v2_search_payload("/v1/search?q=amm&namespace=ens").await?;
     assert_eq!(prefix["data"], json!([]));
 
     let contains = v2_search_payload_for_database(
         &database,
-        "/v2/search?q=amm&match=contains&namespace=ens",
+        "/v1/search?q=amm&match=contains&namespace=ens",
     )
     .await?;
     assert_eq!(
@@ -120,10 +120,10 @@ async fn v2_search_match_modes_and_q_validation() -> Result<()> {
     );
 
     for uri in [
-        "/v2/search?namespace=ens",
-        "/v2/search?q=&namespace=ens",
-        "/v2/search?q=al&match=suffix&namespace=ens",
-        "/v2/search?q=al%25&namespace=ens",
+        "/v1/search?namespace=ens",
+        "/v1/search?q=&namespace=ens",
+        "/v1/search?q=al&match=suffix&namespace=ens",
+        "/v1/search?q=al%25&namespace=ens",
     ] {
         let response = v2_search_response_for_database(&database, uri).await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
@@ -173,7 +173,7 @@ async fn v2_search_contains_accepts_label_boundary_fragments() -> Result<()> {
         (".eth.", Some(vec!["alice.eth.example"])),
         ("th.e", Some(vec!["alice.eth.example"])),
     ] {
-        let uri = format!("/v2/search?q={fragment}&match=contains&namespace=ens");
+        let uri = format!("/v1/search?q={fragment}&match=contains&namespace=ens");
         let response = v2_search_response_for_database(&database, &uri).await?;
         assert_eq!(response.status(), StatusCode::OK, "{fragment}");
         let payload: Value = read_json(response).await?;
@@ -188,7 +188,7 @@ async fn v2_search_contains_accepts_label_boundary_fragments() -> Result<()> {
     }
 
     for fragment in [".", ".."] {
-        let uri = format!("/v2/search?q={fragment}&match=contains&namespace=ens");
+        let uri = format!("/v1/search?q={fragment}&match=contains&namespace=ens");
         let response = v2_search_response_for_database(&database, &uri).await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{fragment}");
         assert_eq!(
@@ -203,13 +203,13 @@ async fn v2_search_contains_accepts_label_boundary_fragments() -> Result<()> {
 
 #[tokio::test]
 async fn v2_search_normalizes_q_and_filters_namespace() -> Result<()> {
-    let (database, uppercase) = v2_search_payload("/v2/search?q=AL&namespace=ens").await?;
+    let (database, uppercase) = v2_search_payload("/v1/search?q=AL&namespace=ens").await?;
     assert_eq!(
         v2_search_names(uppercase["data"].as_array().expect("uppercase data")),
         vec!["alpha.eth", "alpine.eth"]
     );
 
-    let public = v2_search_payload_for_database(&database, "/v2/search?q=alpha").await?;
+    let public = v2_search_payload_for_database(&database, "/v1/search?q=alpha").await?;
     assert_eq!(
         v2_search_names(public["data"].as_array().expect("public data")),
         vec!["alpha.base.eth", "alpha.eth"]
@@ -217,21 +217,21 @@ async fn v2_search_normalizes_q_and_filters_namespace() -> Result<()> {
     assert_search_meta_chains(&public, &["1", "8453"], &[]);
 
     let label_boundary =
-        v2_search_payload_for_database(&database, "/v2/search?q=ALPHA.&namespace=ens").await?;
+        v2_search_payload_for_database(&database, "/v1/search?q=ALPHA.&namespace=ens").await?;
     assert_eq!(
         v2_search_names(label_boundary["data"].as_array().expect("boundary data")),
         vec!["alpha.eth"]
     );
 
     let basenames =
-        v2_search_payload_for_database(&database, "/v2/search?q=alpha&namespace=basenames").await?;
+        v2_search_payload_for_database(&database, "/v1/search?q=alpha&namespace=basenames").await?;
     assert_eq!(
         v2_search_names(basenames["data"].as_array().expect("basenames data")),
         vec!["alpha.base.eth"]
     );
 
     let unknown =
-        v2_search_response_for_database(&database, "/v2/search?q=alpha&namespace=internal").await?;
+        v2_search_response_for_database(&database, "/v1/search?q=alpha&namespace=internal").await?;
     assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
         read_json::<Value>(unknown).await?["error"]["code"],
@@ -266,7 +266,7 @@ async fn v2_search_bare_scope_matches_the_served_deployment_namespaces() -> Resu
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
 
-    let codeployed = v2_search_payload_for_database(&database, "/v2/search?q=alpha").await?;
+    let codeployed = v2_search_payload_for_database(&database, "/v1/search?q=alpha").await?;
     assert_eq!(
         v2_search_names(codeployed["data"].as_array().expect("codeployed data")),
         vec!["alpha.base.eth", "alpha.eth"]
@@ -275,7 +275,7 @@ async fn v2_search_bare_scope_matches_the_served_deployment_namespaces() -> Resu
 
     let ens_only = v2_search_payload_for_database_with_public_namespaces(
         &database,
-        "/v2/search?q=alpha",
+        "/v1/search?q=alpha",
         &["ens"],
     )
     .await?;
@@ -288,7 +288,7 @@ async fn v2_search_bare_scope_matches_the_served_deployment_namespaces() -> Resu
 
     let explicit_basenames = v2_search_payload_for_database_with_public_namespaces(
         &database,
-        "/v2/search?q=alpha&namespace=basenames",
+        "/v1/search?q=alpha&namespace=basenames",
         &["ens"],
     )
     .await?;
@@ -333,7 +333,7 @@ async fn v2_search_explicit_namespace_bypasses_broken_public_derivation() -> Res
     let response = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/search?q=alpha&namespace=basenames")
+                .uri("/v1/search?q=alpha&namespace=basenames")
                 .body(Body::empty())
                 .expect("search request must build"),
         )
@@ -401,7 +401,7 @@ async fn v2_search_rejects_manifest_change_between_derivation_and_row_read() -> 
         app_router(state)
             .oneshot(
                 Request::builder()
-                    .uri("/v2/search?q=alpha")
+                    .uri("/v1/search?q=alpha")
                     .body(Body::empty())
                     .expect("search request must build"),
             )
@@ -446,7 +446,7 @@ async fn v2_search_manifest_change_that_breaks_derivation_returns_conflict() -> 
         app_router(state)
             .oneshot(
                 Request::builder()
-                    .uri("/v2/search?q=alpha")
+                    .uri("/v1/search?q=alpha")
                     .body(Body::empty())
                     .expect("search request must build"),
             )
@@ -483,14 +483,14 @@ async fn v2_search_manifest_change_that_breaks_derivation_returns_conflict() -> 
 async fn v2_search_bare_cursor_fails_closed_when_the_served_namespace_set_changes() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
-    let first = v2_search_payload_for_database(&database, "/v2/search?q=al&page_size=1").await?;
+    let first = v2_search_payload_for_database(&database, "/v1/search?q=al&page_size=1").await?;
     let cursor = first["page"]["next_cursor"]
         .as_str()
         .expect("codeployed first page must include a cursor");
 
     let response = v2_search_response_for_database_with_public_namespaces(
         &database,
-        &format!("/v2/search?q=al&page_size=1&cursor={cursor}"),
+        &format!("/v1/search?q=al&page_size=1&cursor={cursor}"),
         &["ens"],
     )
     .await?;
@@ -510,7 +510,7 @@ async fn v2_search_validates_cursor_before_deployment_readiness() -> Result<()> 
 
     let malformed = v2_search_response_for_database_with_public_namespaces(
         &database,
-        "/v2/search?q=alpha&cursor=not-a-cursor",
+        "/v1/search?q=alpha&cursor=not-a-cursor",
         &[],
     )
     .await?;
@@ -522,7 +522,7 @@ async fn v2_search_validates_cursor_before_deployment_readiness() -> Result<()> 
 
     let valid = v2_search_response_for_database_with_public_namespaces(
         &database,
-        "/v2/search?q=alpha",
+        "/v1/search?q=alpha",
         &[],
     )
     .await?;
@@ -576,7 +576,7 @@ async fn public_namespace_derivation_tracks_manifest_authority_and_ready_checkpo
     let response = app_router(sepolia_state)
         .oneshot(
             Request::builder()
-                .uri("/v2/search?q=alpha")
+                .uri("/v1/search?q=alpha")
                 .body(Body::empty())
                 .expect("search request must build"),
         )
@@ -678,7 +678,7 @@ async fn v2_search_bare_request_narrows_when_a_publication_is_not_ready() -> Res
     ))
     .oneshot(
         Request::builder()
-            .uri("/v2/search?q=alpha")
+            .uri("/v1/search?q=alpha")
             .body(Body::empty())
             .expect("search request must build"),
     )
@@ -713,7 +713,7 @@ async fn v2_search_bare_request_returns_conflict_when_every_public_namespace_is_
     ))
     .oneshot(
         Request::builder()
-            .uri("/v2/search?q=alpha")
+            .uri("/v1/search?q=alpha")
             .body(Body::empty())
             .expect("bare search request must build"),
     )
@@ -737,7 +737,7 @@ async fn v2_search_test_override_withholds_redo_suppressed_namespace_rows() -> R
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/search?q=alpha")
+                .uri("/v1/search?q=alpha")
                 .body(Body::empty())
                 .expect("bare search request must build"),
         )
@@ -774,7 +774,7 @@ async fn v2_search_bare_request_recovers_when_publication_becomes_ready() -> Res
     let narrowed = app_router(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2/search?q=alpha")
+                .uri("/v1/search?q=alpha")
                 .body(Body::empty())
                 .expect("search request must build"),
         )
@@ -801,7 +801,7 @@ async fn v2_search_bare_request_recovers_when_publication_becomes_ready() -> Res
     let recovered = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/search?q=alpha")
+                .uri("/v1/search?q=alpha")
                 .body(Body::empty())
                 .expect("search request must build"),
         )
@@ -849,7 +849,7 @@ async fn v2_search_suppresses_bare_redo_scope_but_refuses_explicit_redo_scope()
     let bare_response = app_router(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2/search?q=alpha")
+                .uri("/v1/search?q=alpha")
                 .body(Body::empty())
                 .expect("bare search request must build"),
         )
@@ -873,7 +873,7 @@ async fn v2_search_suppresses_bare_redo_scope_but_refuses_explicit_redo_scope()
     let explicit_response = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/search?q=alpha&namespace=basenames")
+                .uri("/v1/search?q=alpha&namespace=basenames")
                 .body(Body::empty())
                 .expect("explicit search request must build"),
         )
@@ -889,7 +889,7 @@ async fn v2_search_suppresses_bare_redo_scope_but_refuses_explicit_redo_scope()
 #[tokio::test]
 async fn v2_search_escapes_like_metacharacters() -> Result<()> {
     // `_under.eth` and `bunder.eth` both match the unescaped LIKE pattern `_und%`.
-    let (database, underscore) = v2_search_payload("/v2/search?q=_und&namespace=ens").await?;
+    let (database, underscore) = v2_search_payload("/v1/search?q=_und&namespace=ens").await?;
     assert_eq!(
         v2_search_names(underscore["data"].as_array().expect("underscore data")),
         vec!["_under.eth"]
@@ -899,7 +899,7 @@ async fn v2_search_escapes_like_metacharacters() -> Result<()> {
     // also match `bunder.eth`.
     let contains = v2_search_payload_for_database(
         &database,
-        "/v2/search?q=_und&namespace=ens&match=contains",
+        "/v1/search?q=_und&namespace=ens&match=contains",
     )
     .await?;
     assert_eq!(
@@ -912,7 +912,7 @@ async fn v2_search_escapes_like_metacharacters() -> Result<()> {
 
 #[tokio::test]
 async fn v2_search_paginates_without_overlap_or_gap() -> Result<()> {
-    let (database, first) = v2_search_payload("/v2/search?q=a&page_size=1").await?;
+    let (database, first) = v2_search_payload("/v1/search?q=a&page_size=1").await?;
     assert_eq!(
         v2_search_names(first["data"].as_array().expect("first page data")),
         vec!["alpha.base.eth"]
@@ -928,7 +928,7 @@ async fn v2_search_paginates_without_overlap_or_gap() -> Result<()> {
         };
         page = v2_search_payload_for_database(
             &database,
-            &format!("/v2/search?q=a&page_size=1&cursor={cursor}"),
+            &format!("/v1/search?q=a&page_size=1&cursor={cursor}"),
         )
         .await?;
         assert_eq!(page["page"]["cursor"], json!(cursor));
@@ -1004,7 +1004,7 @@ async fn v2_search_rejects_project_republication_during_public_read() -> Result<
         app_router(state)
             .oneshot(
                 Request::builder()
-                    .uri("/v2/search?q=alpha")
+                    .uri("/v1/search?q=alpha")
                     .body(Body::empty())
                     .expect("search request must build"),
             )
@@ -1046,7 +1046,7 @@ async fn v2_search_explicit_namespace_rejects_a_position_change_after_the_page_r
         app_router(state)
             .oneshot(
                 Request::builder()
-                    .uri("/v2/search?q=alpha&namespace=ens")
+                    .uri("/v1/search?q=alpha&namespace=ens")
                     .body(Body::empty())
                     .expect("explicit search request must build"),
             )
@@ -1096,7 +1096,7 @@ async fn v2_search_explicit_unpublished_scope_rejects_completed_redo_during_read
         app_router(state)
             .oneshot(
                 Request::builder()
-                    .uri("/v2/search?q=alpha&namespace=ens")
+                    .uri("/v1/search?q=alpha&namespace=ens")
                     .body(Body::empty())
                     .expect("explicit search request must build"),
             )
@@ -1133,7 +1133,7 @@ async fn v2_search_explicit_namespace_rejects_a_head_change_while_suppressed() -
         app_router(state)
             .oneshot(
                 Request::builder()
-                    .uri("/v2/search?q=alpha&namespace=ens")
+                    .uri("/v1/search?q=alpha&namespace=ens")
                     .body(Body::empty())
                     .expect("explicit search request must build"),
             )
@@ -1196,7 +1196,7 @@ async fn v2_search_explicit_namespace_reports_publication_readiness_change_as_co
         app_router(state)
             .oneshot(
                 Request::builder()
-                    .uri("/v2/search?q=alpha&namespace=ens")
+                    .uri("/v1/search?q=alpha&namespace=ens")
                     .body(Body::empty())
                     .expect("explicit search request must build"),
             )
@@ -1251,7 +1251,7 @@ async fn v2_search_explicit_namespace_rejects_project_republication_after_the_pa
         app_router(state)
             .oneshot(
                 Request::builder()
-                    .uri("/v2/search?q=alpha&namespace=ens")
+                    .uri("/v1/search?q=alpha&namespace=ens")
                     .body(Body::empty())
                     .expect("explicit search request must build"),
             )
@@ -1300,7 +1300,7 @@ async fn v2_search_bare_namespace_returns_conflict_when_interpret_redo_begins_du
         app_router(state)
             .oneshot(
                 Request::builder()
-                    .uri("/v2/search?q=alpha")
+                    .uri("/v1/search?q=alpha")
                     .body(Body::empty())
                     .expect("search request must build"),
             )
@@ -1358,7 +1358,7 @@ async fn v2_search_explicit_namespace_returns_stale_when_interpret_redo_begins_d
         app_router(state)
             .oneshot(
                 Request::builder()
-                    .uri("/v2/search?q=alpha&namespace=ens")
+                    .uri("/v1/search?q=alpha&namespace=ens")
                     .body(Body::empty())
                     .expect("search request must build"),
             )
@@ -1415,7 +1415,7 @@ async fn v2_search_allows_interpret_live_progress_during_public_read() -> Result
         app_router(state)
             .oneshot(
                 Request::builder()
-                    .uri("/v2/search?q=alpha")
+                    .uri("/v1/search?q=alpha")
                     .body(Body::empty())
                     .expect("search request must build"),
             )
@@ -1500,7 +1500,7 @@ async fn v2_search_allows_manifest_freshness_change_without_authority_change() -
         app_router(state)
             .oneshot(
                 Request::builder()
-                    .uri("/v2/search?q=alpha")
+                    .uri("/v1/search?q=alpha")
                     .body(Body::empty())
                     .expect("search request must build"),
             )
@@ -1532,17 +1532,17 @@ async fn v2_search_allows_manifest_freshness_change_without_authority_change() -
 
 #[tokio::test]
 async fn v2_search_rejects_cursor_anchor_changes() -> Result<()> {
-    let (database, first) = v2_search_payload("/v2/search?q=al&namespace=ens&page_size=1").await?;
+    let (database, first) = v2_search_payload("/v1/search?q=al&namespace=ens&page_size=1").await?;
     let cursor = first["page"]["next_cursor"]
         .as_str()
         .expect("first page must include a cursor")
         .to_owned();
 
     for uri in [
-        format!("/v2/search?q=ga&namespace=ens&page_size=1&cursor={cursor}"),
-        format!("/v2/search?q=al&match=contains&namespace=ens&page_size=1&cursor={cursor}"),
-        format!("/v2/search?q=al&namespace=basenames&page_size=1&cursor={cursor}"),
-        format!("/v2/search?q=al&page_size=1&cursor={cursor}"),
+        format!("/v1/search?q=ga&namespace=ens&page_size=1&cursor={cursor}"),
+        format!("/v1/search?q=al&match=contains&namespace=ens&page_size=1&cursor={cursor}"),
+        format!("/v1/search?q=al&namespace=basenames&page_size=1&cursor={cursor}"),
+        format!("/v1/search?q=al&page_size=1&cursor={cursor}"),
     ] {
         let response = v2_search_response_for_database(&database, &uri).await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
@@ -1563,15 +1563,15 @@ async fn v2_search_rejects_snapshot_selectors_and_accepts_explicit_latest() -> R
 
     for (uri, message) in [
         (
-            "/v2/search?q=al&namespace=ens&at=2026-04-17T00:01:48Z",
+            "/v1/search?q=al&namespace=ens&at=2026-04-17T00:01:48Z",
             "at is not supported because collection routes read latest state",
         ),
         (
-            "/v2/search?q=al&namespace=ens&finality=safe",
+            "/v1/search?q=al&namespace=ens&finality=safe",
             "finality must be latest because collection routes read latest state",
         ),
         (
-            "/v2/search?q=al&namespace=ens&finality=finalized",
+            "/v1/search?q=al&namespace=ens&finality=finalized",
             "finality must be latest because collection routes read latest state",
         ),
     ] {
@@ -1583,7 +1583,7 @@ async fn v2_search_rejects_snapshot_selectors_and_accepts_explicit_latest() -> R
     }
 
     let latest =
-        v2_search_payload_for_database(&database, "/v2/search?q=al&namespace=ens&finality=latest")
+        v2_search_payload_for_database(&database, "/v1/search?q=al&namespace=ens&finality=latest")
             .await?;
     assert_search_meta_chains(&latest, &["1"], &[]);
 
@@ -1596,7 +1596,7 @@ async fn v2_search_rejects_unknown_params_and_returns_empty_matches() -> Result<
     seed_v2_search_fixture(&database).await?;
 
     let unknown =
-        v2_search_response_for_database(&database, "/v2/search?q=al&namespace=ens&sort=name")
+        v2_search_response_for_database(&database, "/v1/search?q=al&namespace=ens&sort=name")
             .await?;
     assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
@@ -1604,7 +1604,7 @@ async fn v2_search_rejects_unknown_params_and_returns_empty_matches() -> Result<
         json!("invalid_input")
     );
 
-    let empty = v2_search_payload_for_database(&database, "/v2/search?q=nomatch").await?;
+    let empty = v2_search_payload_for_database(&database, "/v1/search?q=nomatch").await?;
     assert_eq!(empty["data"], json!([]));
     assert_eq!(empty["page"]["has_more"], json!(false));
     assert_eq!(empty["page"]["next_cursor"], Value::Null);
@@ -1618,10 +1618,10 @@ async fn v2_search_discloses_request_scope_without_snapshot_tokens() -> Result<(
     seed_v2_search_fixture(&database).await?;
 
     for (uri, chains) in [
-        ("/v2/search?q=alpha", &["1", "8453"][..]),
-        ("/v2/search?q=alpha&namespace=ens", &["1"][..]),
+        ("/v1/search?q=alpha", &["1", "8453"][..]),
+        ("/v1/search?q=alpha&namespace=ens", &["1"][..]),
         (
-            "/v2/search?q=alpha&namespace=basenames",
+            "/v1/search?q=alpha&namespace=basenames",
             &["8453"][..],
         ),
     ] {
@@ -1704,7 +1704,7 @@ async fn v2_search_omits_every_unsupported_exact_name() -> Result<()> {
 
         // Anti-vacuity: both names are served while the projection still supports them.
         let before =
-            v2_search_payload_for_database(&database, "/v2/search?q=al&namespace=ens").await?;
+            v2_search_payload_for_database(&database, "/v1/search?q=al&namespace=ens").await?;
         assert_eq!(
             v2_search_names(before["data"].as_array().expect("search data must be an array")),
             vec!["alpha.eth", "alpine.eth"]
@@ -1720,7 +1720,7 @@ async fn v2_search_omits_every_unsupported_exact_name() -> Result<()> {
         .await?;
 
         let payload =
-            v2_search_payload_for_database(&database, "/v2/search?q=al&namespace=ens").await?;
+            v2_search_payload_for_database(&database, "/v1/search?q=al&namespace=ens").await?;
         assert_eq!(
             v2_search_names(payload["data"].as_array().expect("search data must be an array")),
             vec!["alpine.eth"],
