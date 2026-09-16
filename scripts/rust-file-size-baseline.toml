@@ -51,11 +51,6 @@ loc = 685
 justification = "ENSv2 topology removal and rebound groups remain adjacent while the fixed expiry event group and pointer clears live in the bounded sibling module."
 
 [[files]]
-path = "crates/adapters/src/schema_v2/state_surfaces.rs"
-loc = 641
-justification = "The selected numeric registrar import retains current authority selection and registry resolver-read state together; the new readable-name registrar evidence and snapshot eligibility are isolated in a bounded sibling module."
-
-[[files]]
 path = "crates/manifests/src/schema_v2_persistence.rs"
 loc = 607
 justification = "Manifest state, address-epoch persistence, and derived-phase invalidation remain in one transaction boundary; PR #583 grew the file to 598 lines on main and this branch's nine-line no-effect notice crosses the threshold when rebased. Split on the next substantive touch."

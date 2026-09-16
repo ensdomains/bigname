@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::state_residency::{StateCacheCapacity, StateResidency};
 use imbl::{ordmap::OrdMap, ordset::OrdSet};
 use serde_json::Value;
@@ -22,6 +24,8 @@ mod registrar;
 #[path = "state_registrar_evidence.rs"]
 mod registrar_evidence;
 pub(super) use registrar::v1_key;
+#[path = "state_sharing.rs"]
+mod sharing;
 #[path = "state_surfaces.rs"]
 mod surfaces;
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -98,7 +102,7 @@ pub(super) struct V1Release {
 pub(super) struct State {
     pub(super) values: StateResidency,
     pub(super) provisional_values: OrdMap<String, Value>,
-    v1_names: OrdMap<String, V1NameState>,
+    v1_names: OrdMap<String, Arc<V1NameState>>,
     v1_wrapper_data: OrdMap<String, V1WrapperData>,
     v1_wrapper_delegates: OrdMap<String, String>,
     v1_wrapper_burnt: imbl::OrdSet<String>,
@@ -107,11 +111,11 @@ pub(super) struct State {
     v1_registrar_controllers: OrdSet<String>,
     v1_pending_wrapper_sync_expiries: OrdMap<String, (String, u64)>,
     v1_correlated_wrapper_expiries: OrdMap<String, u64>,
-    v1_registrars: OrdMap<String, V1NameState>,
+    v1_registrars: OrdMap<String, Arc<V1NameState>>,
     v1_registrar_evidence: OrdMap<String, registrar_evidence::StoredEvidence>,
     v1_expiries: OrdSet<(i64, String)>,
     v2_migration_times: OrdMap<String, i64>,
-    v1_registry_authorities: OrdMap<String, V1NameState>,
+    v1_registry_authorities: OrdMap<String, Arc<V1NameState>>,
     v1_registry_owners: OrdMap<String, String>,
     v1_registry_owner_words: OrdMap<String, String>,
     v1_registry_owner_reasons: OrdMap<String, String>,
@@ -178,7 +182,7 @@ impl State {
         }
         self.v1_names.insert(
             key,
-            V1NameState {
+            Arc::new(V1NameState {
                 logical_name_id,
                 surface_known,
                 resource_id,
@@ -191,7 +195,7 @@ impl State {
                 registry_contract: None,
                 authority_key,
                 wrapper_fallback: false,
-            },
+            }),
         );
     }
 
@@ -221,7 +225,7 @@ impl State {
                 .insert(logical_name_id.clone(), resource_id);
         }
         let key = v1_key(namespace, namehash);
-        let value = V1NameState {
+        let value = Arc::new(V1NameState {
             logical_name_id,
             surface_known,
             resource_id,
@@ -234,7 +238,7 @@ impl State {
             registry_contract: None,
             authority_key,
             wrapper_fallback,
-        };
+        });
         let previous_expiry = self
             .v1_registrars
             .insert(key.clone(), value.clone())
@@ -245,7 +249,9 @@ impl State {
         }
     }
     pub(super) fn v1_name(&self, namespace: &str, namehash: &str) -> Option<V1NameState> {
-        self.v1_names.get(&v1_key(namespace, namehash)).cloned()
+        self.v1_names
+            .get(&v1_key(namespace, namehash))
+            .map(|value| value.as_ref().clone())
     }
     #[allow(clippy::too_many_arguments)]
     #[cfg(test)]
@@ -276,7 +282,8 @@ impl State {
             authority_key,
             wrapper_fallback: false,
         };
-        self.v1_registry_authorities.insert(key, authority.clone());
+        self.v1_registry_authorities
+            .insert(key, Arc::new(authority.clone()));
         self.activate_v1_authority(namespace, namehash, Some(authority));
     }
     pub(super) fn remember_v1_registry_authority(
@@ -285,8 +292,9 @@ impl State {
         namehash: &str,
         authority: V1NameState,
     ) {
-        self.v1_registry_authorities
-            .insert(v1_key(namespace, namehash), authority);
+        let key = v1_key(namespace, namehash);
+        let authority = self.share_v1_authority(&key, authority);
+        self.v1_registry_authorities.insert(key, authority);
     }
 
     pub(super) fn remember_v1_registry_read_anchor(
@@ -319,7 +327,7 @@ impl State {
         let owner = self.v1_registry_owners.get(key).filter(|owner| {
             !owner.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
         })?;
-        let mut authority = self.v1_registry_authorities.get(key)?.clone();
+        let mut authority = self.v1_registry_authorities.get(key)?.as_ref().clone();
         authority.owner = Some(owner.clone());
         Some(authority)
     }
@@ -405,9 +413,10 @@ impl State {
                 self.active_resources
                     .insert(authority.logical_name_id.clone(), authority.resource_id);
             }
+            let authority = self.share_v1_authority(&key, authority);
             self.v1_names.insert(key, authority);
         }
-        previous
+        previous.map(Arc::unwrap_or_clone)
     }
 
     pub(super) fn v1_is_migrated(&self, namespace: &str, namehash: &str) -> bool {
@@ -418,7 +427,7 @@ impl State {
     pub(super) fn v1_registrar(&self, namespace: &str, namehash: &str) -> Option<V1NameState> {
         self.v1_registrars
             .get(&v1_key(namespace, namehash))
-            .cloned()
+            .map(|value| value.as_ref().clone())
     }
 
     pub(super) fn transfer_v1_registrar_owner(
@@ -428,7 +437,7 @@ impl State {
         owner: String,
     ) -> Option<(V1NameState, V1NameState)> {
         let key = v1_key(namespace, namehash);
-        let registrar = self.v1_registrars.get_mut(&key)?;
+        let registrar = Arc::make_mut(self.v1_registrars.get_mut(&key)?);
         let before = registrar.clone();
         registrar.owner = Some(owner);
         let after = registrar.clone();
@@ -446,6 +455,7 @@ impl State {
         if current.authority_source_family != source_family {
             return None;
         }
+        let current = Arc::make_mut(current);
         let before = current.clone();
         current.owner = Some(owner);
         Some((before, current.clone()))
@@ -469,7 +479,7 @@ impl State {
             self.active_resources
                 .insert(registrar.logical_name_id.clone(), registrar.resource_id);
         }
-        Some(registrar)
+        Some(registrar.as_ref().clone())
     }
 
     pub(super) fn reactivate_v1_registrar_for_owner(
@@ -479,7 +489,10 @@ impl State {
         owner: &str,
         at_unix_timestamp: i64,
     ) -> Option<V1NameState> {
-        let registrar = self.v1_registrar(namespace, namehash)?;
+        let registrar = self
+            .v1_registrars
+            .get(&v1_key(namespace, namehash))?
+            .clone();
         if registrar
             .owner
             .as_deref()
@@ -495,6 +508,6 @@ impl State {
             self.active_resources
                 .insert(registrar.logical_name_id.clone(), registrar.resource_id);
         }
-        Some(registrar)
+        Some(registrar.as_ref().clone())
     }
 }

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::{State, V1NameState, V1WrapperData, v1_key};
 use crate::schema_v2::model::RawLogInput;
 
@@ -221,7 +223,7 @@ impl State {
         if let Some(state) = self.v1_names.get_mut(&v1_key(namespace, namehash))
             && state.authority_source_family == "ens_v1_wrapper_l1"
         {
-            state.expiry = Some(i64::try_from(expiry).unwrap_or(i64::MAX));
+            Arc::make_mut(state).expiry = Some(i64::try_from(expiry).unwrap_or(i64::MAX));
         }
     }
 
@@ -328,6 +330,7 @@ impl State {
         if state.authority_source_family != "ens_v1_wrapper_l1" {
             return None;
         }
+        let state = Arc::make_mut(state);
         state.expiry = Some(i64::try_from(data.expiry).unwrap_or(i64::MAX));
         Some((previous, state.clone()))
     }

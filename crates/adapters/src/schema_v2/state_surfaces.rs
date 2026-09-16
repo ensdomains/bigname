@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use uuid::Uuid;
 
 use super::{
@@ -379,6 +381,7 @@ impl State {
     ) {
         let key = v1_key(namespace, namehash);
         if let Some(registry) = self.v1_registry_authorities.get_mut(&key) {
+            let registry = Arc::make_mut(registry);
             registry.logical_name_id = logical_name_id.to_owned();
             registry.surface_known = surface_known;
             registry.labelhash = labelhash.map(str::to_owned);
@@ -402,27 +405,6 @@ impl State {
                 .registry_contract
                 .clone()?,
         ))
-    }
-
-    pub(super) fn promote_known_v1_authority(
-        &mut self,
-        key: &str,
-        authority: &mut V1NameState,
-    ) -> bool {
-        if self.known_surfaces.contains(&authority.logical_name_id) {
-            authority.surface_known = true;
-            if let Some(registrar) = self.v1_registrars.get_mut(key)
-                && registrar.resource_id == authority.resource_id
-            {
-                registrar.surface_known = true;
-            }
-            if let Some(registry) = self.v1_registry_authorities.get_mut(key)
-                && registry.resource_id == authority.resource_id
-            {
-                registry.surface_known = true;
-            }
-        }
-        authority.surface_known
     }
 
     pub(in crate::schema_v2) fn materialize_v1_surface(
@@ -483,9 +465,10 @@ impl State {
             })?;
             self.require_source_manifest(namespace, namehash, source_manifest_id)?;
             let mut promoted = previous.clone();
-            promoted.logical_name_id = logical_name_id.to_owned();
-            promoted.labelhash = Some(labelhash.to_owned());
-            promoted.surface_known = true;
+            let promoted_state = Arc::make_mut(&mut promoted);
+            promoted_state.logical_name_id = logical_name_id.to_owned();
+            promoted_state.labelhash = Some(labelhash.to_owned());
+            promoted_state.surface_known = true;
             self.v1_names.insert(key.clone(), promoted.clone());
             self.v1_registry_authorities
                 .insert(key.clone(), promoted.clone());
@@ -501,8 +484,8 @@ impl State {
                 link.logical_name_id = Some(logical_name_id.to_owned());
             }
             return Ok(V1SurfaceMaterialization::RegistryAuthority {
-                previous: Box::new(previous),
-                promoted: Box::new(promoted),
+                previous: Box::new(Arc::unwrap_or_clone(previous)),
+                promoted: Box::new(Arc::unwrap_or_clone(promoted)),
                 resolver,
                 source_manifest_id,
             });
@@ -592,33 +575,8 @@ impl State {
         let authority = self
             .v1_registry_authorities
             .get(&v1_key(namespace, namehash))
-            .cloned();
+            .map(|value| value.as_ref().clone());
         self.activate_v1_authority(namespace, namehash, authority);
-    }
-
-    pub(in crate::schema_v2) fn bind_v1_active_surface(&mut self, namespace: &str, namehash: &str) {
-        self.observe_v1_active_surface(namespace, namehash);
-        let key = v1_key(namespace, namehash);
-        let logical_name_id = format!("{namespace}:{namehash}");
-        let Some(resource_id) = self.v1_names.get(&key).map(|state| state.resource_id) else {
-            return;
-        };
-        self.v1_names
-            .get_mut(&key)
-            .expect("current V1 authority")
-            .surface_known = true;
-        self.active_resources
-            .insert(logical_name_id.clone(), resource_id);
-        if let Some(registrar) = self.v1_registrars.get_mut(&key)
-            && registrar.resource_id == resource_id
-        {
-            registrar.surface_known = true;
-        }
-        if let Some(authority) = self.v1_registry_authorities.get_mut(&key)
-            && authority.resource_id == resource_id
-        {
-            authority.surface_known = true;
-        }
     }
 
     pub(in crate::schema_v2) fn v1_active_surface_materialized(

@@ -171,7 +171,7 @@ impl State {
         timestamp: i64,
     ) -> Option<(V1NameState, Option<V1ResolverLink>, Value)> {
         let key = v1_key(namespace, node);
-        let registrar = self.v1_registrars.get(&key)?.clone();
+        let registrar = self.v1_registrars.get(&key)?.as_ref().clone();
         let selected = self.v1_names.get(&key)?;
         let (registry_owner, registry_contract) = self.v1_registry_binding(namespace, node)?;
         let owner = registrar.owner.as_deref()?;
