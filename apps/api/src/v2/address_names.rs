@@ -44,6 +44,8 @@ mod resolves_to;
 mod role_summary;
 
 pub(crate) use self::resolves_to::{AddressNameResolution, address_name_resolution};
+#[cfg(test)]
+pub(crate) use self::role_summary::grant_read_test_hooks;
 
 pub(crate) struct AddressNamesQueryParams;
 
@@ -261,7 +263,8 @@ pub(crate) async fn get_address_names(
     let permission_namespace = namespace_filter.as_deref();
     let permissions_by_resource = if let Some(resource_ids) = role_resource_ids.as_deref() {
         role_summary::load_rows(
-            &state.pool,
+            &state,
+            &snapshot,
             resource_ids,
             permission_namespace,
             storage_page.entries.iter().map(|entry| entry.resource_id),

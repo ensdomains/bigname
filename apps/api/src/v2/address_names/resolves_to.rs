@@ -192,7 +192,8 @@ pub(super) async fn get_address_resolves_to(
     });
     let permissions_by_resource = if let Some(resource_ids) = role_resource_ids.as_deref() {
         super::role_summary::load_rows(
-            &state.pool,
+            state,
+            &snapshot,
             resource_ids,
             params.namespace.as_deref(),
             entries.iter().filter_map(|entry| entry.resource_id),
