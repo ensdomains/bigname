@@ -391,33 +391,14 @@
         LEFT JOIN LATERAL (
             SELECT lower(CASE event.event_kind
                        WHEN 'TokenControlTransferred' THEN event.after_state ->> 'to'
-                       WHEN 'RegistrationReleased' THEN event.before_state ->> 'registrant'
                        ELSE event.after_state ->> 'registrant'
                    END) AS registrant,
                    event.normalized_event_id
             FROM project_registration_events event
             WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind IN (
-                  'RegistrationGranted', 'RegistrationReleased', 'TokenControlTransferred'
+                  'RegistrationGranted', 'TokenControlTransferred'
               )
-              AND NOT (
-                  event.event_kind = 'RegistrationReleased'
-                  AND event.source_family = 'ens_v1_registrar_l1'
-                  AND EXISTS (
-                      SELECT 1
-                      FROM project_events wrapper_binding
-                      WHERE wrapper_binding.logical_name_id = event.logical_name_id
-                        AND wrapper_binding.source_family = 'ens_v1_wrapper_l1'
-                        AND wrapper_binding.event_kind = 'SurfaceBound'
-                        AND wrapper_binding.after_state ->>
-                            'wrapped_registrar_resource_id' = event.resource_id::text
-                  )
-              )
-              AND CASE event.event_kind
-                      WHEN 'TokenControlTransferred' THEN event.after_state ->> 'to'
-                      WHEN 'RegistrationReleased' THEN event.before_state ->> 'registrant'
-                      ELSE event.after_state ->> 'registrant'
-                  END IS NOT NULL
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
