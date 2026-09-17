@@ -17,11 +17,26 @@ const PERMISSIONS_PARTIALLY_LISTED_REASON: &str = "permissions_partially_listed"
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum UnlistedPermissionSurface {
-    /// BaseRegistrar ERC-721 per-token and operator approvals.
+    /// BaseRegistrar ERC-721 per-token and operator approvals. An approved spender passes the
+    /// same check as the token owner, which also gates `reclaim`.
+    /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+    /// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327-L330 @ basenames@1809bbc)
+    /// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L458-L466 @ basenames@1809bbc)
     RegistrarApprovals,
-    /// Resolver operator approvals and per-name delegates.
+    /// Resolver operator approvals and per-name delegates. The resolver authorises the node
+    /// owner, the owner's approved operators, and the owner's delegates for that node.
+    /// (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L79-L87 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L98-L103 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L114-L129 @ ens_v1@91c966f)
+    /// (upstream: .refs/basenames/src/L2/L2Resolver.sol:L142-L147 @ basenames@1809bbc)
+    /// (upstream: .refs/basenames/src/L2/L2Resolver.sol:L162-L167 @ basenames@1809bbc)
+    /// (upstream: .refs/basenames/src/L2/L2Resolver.sol:L193-L199 @ basenames@1809bbc)
     ResolverApprovals,
-    /// The parent name's control over a wrapped subname that is not emancipated.
+    /// The parent name's control over a wrapped subname that is not emancipated. The parent's
+    /// token owner may replace the subname's owner until `PARENT_CANNOT_CONTROL` is burned.
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565-L577 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L701-L731 @ ens_v1@91c966f)
     WrapperParentControl,
 }
 
