@@ -1,8 +1,5 @@
-mod binding_anchors;
-use binding_anchors::{
-    load_logical_name_ids_for_resource_id, load_resource_ids_for_logical_name_id,
-};
 mod address_matches;
+mod binding_anchors;
 mod block_window;
 mod decoders;
 mod duplicates;
@@ -10,13 +7,18 @@ mod event_page;
 mod filters;
 #[cfg(any(test, feature = "test-support"))]
 pub mod history_anchor_read_test_hooks;
+mod lineage;
 mod options;
 mod paging;
+#[cfg(any(test, feature = "test-support"))]
+mod query_plan;
+mod read_filter;
 mod redo;
 mod registration_identity;
 mod selectors;
 mod source;
 mod summary;
+mod wrapped_registrar;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -27,6 +29,7 @@ use crate::{CanonicalityState, address_names::AddressNameRelation};
 
 use address_matches::load_address_history_selector;
 use paging::{load_event_history_rows, load_history, load_history_head};
+use read_filter::{EventHistoryReadFilter, event_history_read_filter};
 use selectors::{name_history_selector, resource_history_selector};
 
 pub use block_window::resolve_chain_block_ranges;
@@ -39,6 +42,7 @@ pub use redo::{
     revalidate_interpret_redo_fence,
 };
 pub use redo::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
+pub use wrapped_registrar::load_wrapped_registrar_resource_ids_by_logical_name_id;
 
 /// Replay-stable normalized event exposed to history readers.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -157,31 +161,6 @@ pub struct EventHistoryFilter {
     pub block_window: Option<HistoryBlockWindow>,
     /// Publication upper bounds for expanding bindings and historical ownership anchors.
     pub publication_block_bounds: Option<std::collections::BTreeMap<String, i64>>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(in crate::history) struct EventHistoryReadFilter {
-    pub(in crate::history) selectors: Vec<selectors::HistorySelector>,
-    pub(in crate::history) registration_id: Option<Uuid>,
-    pub(in crate::history) namespace: Option<String>,
-    pub(in crate::history) contract_address: Option<String>,
-    pub(in crate::history) event_kinds: Vec<String>,
-    pub(in crate::history) bind_cursor_anchor_to_event_kinds: bool,
-    pub(in crate::history) from_block: Option<i64>,
-    pub(in crate::history) to_block: Option<i64>,
-    pub(in crate::history) order: HistoryOrder,
-    pub(in crate::history) block_window: Option<HistoryBlockWindow>,
-    pub(in crate::history) resolver: Option<EventHistoryResolverFilter>,
-}
-
-impl EventHistoryReadFilter {
-    fn with_page_options(mut self, options: &HistoryPageOptions) -> Self {
-        self.event_kinds = options.event_kinds.clone();
-        self.bind_cursor_anchor_to_event_kinds = options.bind_cursor_anchor_to_event_kinds;
-        self.order = options.order;
-        self.block_window = options.block_window.clone();
-        self
-    }
 }
 
 /// Load history rows for one logical name anchor.
@@ -496,108 +475,50 @@ pub async fn load_address_history_page_for_relations(
     })
 }
 
-async fn event_history_read_filter(
-    pool: &PgPool,
-    filter: EventHistoryFilter,
-    canonical_only: bool,
-    include_candidates: bool,
-) -> Result<EventHistoryReadFilter> {
-    let mut selectors = Vec::new();
-
-    if let Some(logical_name_id) = filter.logical_name_id.as_deref() {
-        let resource_ids =
-            load_resource_ids_for_logical_name_id(pool, logical_name_id, canonical_only, filter.publication_block_bounds.as_ref())
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to load event history resource anchors for logical_name_id {logical_name_id}"
-                    )
-                })?;
-        selectors.push(name_history_selector(
-            logical_name_id,
-            &resource_ids,
-            HistoryScope::Both,
-        ));
-    }
-
-    if let Some(resource_id) = filter.resource_id {
-        let logical_name_ids = load_logical_name_ids_for_resource_id(
-            pool,
-            resource_id,
-            canonical_only,
-            filter.publication_block_bounds.as_ref(),
-        )
-        .await
-        .with_context(|| {
-            format!("failed to load event history surface anchors for resource_id {resource_id}")
-        })?;
-        selectors.push(resource_history_selector(
-            resource_id,
-            &logical_name_ids,
-            HistoryScope::Both,
-        ));
-    }
-
-    if let Some(address_filter) = filter.address.as_ref() {
-        let normalized_address = address_filter.address.to_ascii_lowercase();
-        let relations = address_filter.relation.into_iter().collect::<Vec<_>>();
-        let relations = (!relations.is_empty()).then_some(relations.as_slice());
-        selectors.push(
-            load_address_history_selector(
-                pool,
-                &normalized_address,
-                filter.namespace.as_deref(),
-                relations,
-                HistoryScope::Both,
-                canonical_only,
-                include_candidates,
-                filter.publication_block_bounds.as_ref(),
-            )
-            .await
-            .with_context(|| {
-                let mut parts = vec![format!("address {normalized_address}")];
-                if let Some(namespace) = filter.namespace.as_ref() {
-                    parts.push(format!("namespace {namespace}"));
-                }
-                if let Some(relation) = address_filter.relation {
-                    parts.push(format!("relation {}", relation.as_str()));
-                }
-                format!(
-                    "failed to load event history address anchors for {}",
-                    parts.join(" ")
-                )
-            })?,
-        );
-    }
-
-    Ok(EventHistoryReadFilter {
-        selectors,
-        registration_id: if include_candidates {
-            None
-        } else {
-            filter.resource_id
-        },
-        namespace: filter.namespace,
-        contract_address: filter
-            .contract_address
-            .map(|address| address.to_ascii_lowercase()),
-        event_kinds: filter.event_kinds,
-        bind_cursor_anchor_to_event_kinds: filter.bind_cursor_anchor_to_event_kinds,
-        from_block: filter.from_block,
-        to_block: filter.to_block,
-        order: filter.order,
-        block_window: filter.block_window,
-        resolver: filter.resolver.map(|resolver| EventHistoryResolverFilter {
-            chain_id: resolver.chain_id,
-            address: resolver.address.to_ascii_lowercase(),
-        }),
-    })
-}
-
 /// Load canonical normalized events by row id in the shared chain-position
 /// order, for callers that already hold event ids from projection provenance.
 pub async fn load_history_events_by_ids(pool: &PgPool, ids: &[i64]) -> Result<Vec<HistoryEvent>> {
     paging::load_history_events_by_ids(pool, ids)
         .await
         .context("failed to load normalized events by id")
+}
+
+/// The exact names a `registration_id` belongs to: the names its resource is bound to, and the
+/// names whose `NameWrapped` rows recorded it as the BaseRegistrar lease they wrapped.
+pub async fn load_logical_name_ids_for_registration_id(
+    pool: &PgPool,
+    registration_id: Uuid,
+) -> Result<Vec<String>> {
+    binding_anchors::load_logical_name_ids_for_resource_id(pool, registration_id, true, None)
+        .await
+        .with_context(|| format!("failed to load names for registration_id {registration_id}"))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub async fn explain_registration_history_filter_for_test(
+    pool: &PgPool,
+    registration_id: Uuid,
+    logical_name_id: &str,
+    chain_id: &str,
+    namespace: &str,
+    namehash: &str,
+) -> Result<String> {
+    let filter = event_history_read_filter(
+        pool,
+        EventHistoryFilter {
+            resource_id: Some(registration_id),
+            ..EventHistoryFilter::default()
+        },
+        true,
+        false,
+    )
+    .await?;
+    let lookup = query_plan::HistoryPlanLookup {
+        logical_name_id,
+        registration_id,
+        chain_id,
+        namespace,
+        namehash,
+    };
+    query_plan::explain_history_filter_for_test(pool, filter, lookup, true).await
 }

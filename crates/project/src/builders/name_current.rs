@@ -31,9 +31,5 @@ mod tests {
             query.contains("current_wrapper.resource_id = selected_registration.resource_id"),
             "the registration-identity lookup must anchor the selected wrapper by resource_id"
         );
-        assert!(
-            query.contains("registrar_grant.resource_id = lifecycle.registrar_resource_id"),
-            "the registration-identity lookup must anchor the registrar grant by resource_id"
-        );
     }
 }

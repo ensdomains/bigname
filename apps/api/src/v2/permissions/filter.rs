@@ -3,11 +3,12 @@
 
 use std::collections::BTreeMap;
 
+use bigname_storage::NameCurrentRow;
 use sqlx::types::Uuid;
 
 use crate::AppState;
 
-use super::super::name_record::{name_registration_fields, string_field};
+use super::super::name_record::{name_registration_fields, registration_id, string_field};
 use super::super::support::normalize_inferred_route_name;
 use super::super::{
     QueryParams, V2Result,
@@ -93,29 +94,31 @@ pub(super) async fn resolve_permissions_filter(
     // A name filter selects only the exact-name authority's current registration. An unsupported
     // name has no such registration, so it selects nothing rather than falling back to whatever
     // resource the projection still carries.
-    let name_resource_id = resolved_name_row
+    let name_row = resolved_name_row
         .as_ref()
         .and_then(|row| row.as_ref())
-        .filter(|row| string_field(row.coverage.get("status")).as_deref() != Some("unsupported"))
-        .filter(|row| {
-            matches!(
-                name_registration_fields(Some(row), &row.namespace).registration_status,
-                RegistrationStatus::Active
-                    | RegistrationStatus::Wrapped
-                    | RegistrationStatus::Registered
-            )
-        })
-        .and_then(|row| row.resource_id);
+        .filter(|row| current_registration_row(row));
+    // Permissions live on the resource that currently holds control of the name. For a wrapped
+    // `.eth` name that is its NameWrapper resource, while the registration the name serves is
+    // its BaseRegistrar lease.
+    let name_resource_id = name_row.and_then(|row| row.resource_id);
+    let name_registration_id = name_row.and_then(registration_uuid);
 
     // A registration the name filter did not select is a superseded pair: queryable on its own as
     // an audit read, but empty when combined with the name it no longer holds.
     let superseded_pair = matches!(
-        (inputs.requested_resource_id, name_resource_id),
+        (inputs.requested_resource_id, name_registration_id),
         (Some(requested), Some(resolved)) if requested != resolved
     );
 
     let namespace = inputs.namespace.clone();
-    let resource_id = inputs.requested_resource_id.or(name_resource_id);
+    let resource_id = match (name_resource_id, inputs.requested_resource_id) {
+        (Some(name_resource_id), _) => Some(name_resource_id),
+        (None, Some(requested)) if inputs.name_filter.is_none() => {
+            Some(control_resource_for_registration(state, requested).await?)
+        }
+        (None, requested) => requested,
+    };
     let empty_selection = if superseded_pair {
         Some(EmptyPermissionsSelection::SupersededNameRegistrationPair)
     } else if inputs.name_filter.is_some() && name_resource_id.is_none() {
@@ -167,6 +170,49 @@ pub(super) async fn resolve_permissions_filter(
         authority_context,
         cursor_filters,
     })
+}
+
+fn current_registration_row(row: &NameCurrentRow) -> bool {
+    string_field(row.coverage.get("status")).as_deref() != Some("unsupported")
+        && matches!(
+            name_registration_fields(Some(row), &row.namespace).registration_status,
+            RegistrationStatus::Active
+                | RegistrationStatus::Wrapped
+                | RegistrationStatus::Registered
+        )
+}
+
+fn registration_uuid(row: &NameCurrentRow) -> Option<Uuid> {
+    registration_id(&row.declared_summary, row.resource_id)
+        .and_then(|registration_id| Uuid::parse_str(&registration_id).ok())
+}
+
+/// The resource whose permission rows belong to `registration_id`. A BaseRegistrar lease that is
+/// currently wrapped is controlled through its name's NameWrapper resource; every other
+/// registration, and every audit read of a resource no current name serves, is its own resource.
+async fn control_resource_for_registration(
+    state: &AppState,
+    registration_id: Uuid,
+) -> V2Result<Uuid> {
+    let failed = |_| V2Error::internal_error("failed to resolve registration resource");
+    let logical_name_ids =
+        bigname_storage::load_logical_name_ids_for_registration_id(&state.pool, registration_id)
+            .await
+            .map_err(failed)?;
+    for logical_name_id in logical_name_ids {
+        let row = bigname_storage::load_name_current(&state.pool, &logical_name_id)
+            .await
+            .map_err(failed)?;
+        if let Some(resource_id) = row
+            .as_ref()
+            .filter(|row| current_registration_row(row))
+            .filter(|row| registration_uuid(row) == Some(registration_id))
+            .and_then(|row| row.resource_id)
+        {
+            return Ok(resource_id);
+        }
+    }
+    Ok(registration_id)
 }
 
 fn normalized_name_filter(params: &QueryParams) -> V2Result<Option<NormalizedNameFilter>> {

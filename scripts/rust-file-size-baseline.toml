@@ -66,11 +66,6 @@ loc = 720
 justification = "The inventory build retains pointer eligibility, value selection, and cleared-pointer rows; historical attribution and mirror substitution are separate modules."
 
 [[files]]
-path = "crates/storage/src/history.rs"
-loc = 603
-justification = "History read facade keeps every loader signature and the public row, cursor, summary and filter types in one place; the order, block-window and page-option types already live in `history/options.rs`. Move the row and summary types out next."
-
-[[files]]
 path = "crates/storage/src/record_inventory/snapshot_reads.rs"
 loc = 612
 justification = "Snapshot admission, anchor fallback, and canonical-lineage proof remain together; this slice ratchets the file below its base allowance without expanding its responsibilities."

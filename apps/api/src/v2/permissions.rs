@@ -10,7 +10,7 @@ use crate::AppState;
 
 use super::collection_snapshot::CollectionSnapshot;
 use super::cursor::{cursor_value, invalid_cursor_error};
-use super::name_record::wrapper_metadata;
+use super::name_record::{registration_id, wrapper_metadata};
 use super::permission_support::{
     PermissionSupport, apply_permissions_collection_support_meta, permission_support_for_resources,
 };
@@ -201,7 +201,15 @@ pub(crate) async fn get_permissions(
         .and_then(|resource_id| permission_summaries.get(&resource_id))
         .map(ResourceRestrictions::from_summary)
         .transpose()?
-        .flatten();
+        .flatten()
+        .map(|restrictions| {
+            restrictions.for_registration(
+                resolved
+                    .resource_id
+                    .and_then(|resource_id| current_names.get(&resource_id))
+                    .and_then(|name| registration_id(&name.declared_summary, None)),
+            )
+        });
 
     Ok(Json(PermissionsResponse {
         envelope: Envelope {
@@ -266,7 +274,9 @@ pub(crate) fn build_permission_row(
             grant_scope: permission_scope_value(&row.scope)?,
             powers: permission_powers_value(&row.effective_powers)?,
         },
-        registration_id: row.resource_id.to_string(),
+        registration_id: declared_summary
+            .and_then(|summary| registration_id(summary, None))
+            .unwrap_or_else(|| row.resource_id.to_string()),
         name: name.map(str::to_owned),
         authority_context,
         wrapper_state,

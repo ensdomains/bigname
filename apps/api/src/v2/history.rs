@@ -9,11 +9,15 @@ use bigname_storage::{
     HistoryPageOptions, HistorySummary, HistorySummaryMode, SnapshotAt, SnapshotSelectionScope,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::types::time::{OffsetDateTime, UtcOffset};
+use sqlx::types::{
+    Uuid,
+    time::{OffsetDateTime, UtcOffset},
+};
 
 use crate::AppState;
 
 use super::cursor::{cursor_value, invalid_cursor_error};
+use super::name_record::projected_registration_resource_id;
 use super::support::{
     ExactNameSnapshotSelector, exact_name_snapshot_scope, normalize_inferred_route_name,
 };
@@ -177,6 +181,7 @@ pub(crate) async fn get_history(
                 .is_some_and(|block| binding.block_number <= *block)
         })
         .map(|binding| binding.resource_id)
+        .chain(registration_lease_resource_ids(&state, &parent, &snapshot.block_bounds()).await?)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -229,6 +234,42 @@ pub(crate) async fn get_history(
         }),
         meta: snapshot.finish(&state).await?,
     }))
+}
+
+/// The BaseRegistrar leases behind a name that is, or was, wrapped. The name is bound to its
+/// NameWrapper resource, so the lease rows are reached through the link each `NameWrapped` row
+/// recorded, and through the registration resource Project selected.
+async fn registration_lease_resource_ids(
+    state: &AppState,
+    parent: &bigname_storage::NameCurrentRow,
+    block_bounds: &BTreeMap<String, i64>,
+) -> V2Result<Vec<Uuid>> {
+    let mut resource_ids = bigname_storage::load_wrapped_registrar_resource_ids_by_logical_name_id(
+        &state.pool,
+        &parent.logical_name_id,
+        Some(block_bounds),
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(
+            logical_name_id = %parent.logical_name_id,
+            error = ?error,
+            "failed to load history wrapped registrar resources"
+        );
+        V2Error::internal_error("failed to load name history")
+    })?;
+    if let Some(resource_id) = projected_registration_resource_id(&parent.declared_summary) {
+        resource_ids.push(Uuid::parse_str(resource_id).map_err(|error| {
+            tracing::error!(
+                logical_name_id = %parent.logical_name_id,
+                resource_id,
+                error = ?error,
+                "projected registration resource id is invalid"
+            );
+            V2Error::internal_error("failed to load name history")
+        })?);
+    }
+    Ok(resource_ids)
 }
 
 /// History routes default to newest-first; `order=asc` is the exact reverse.

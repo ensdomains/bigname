@@ -23,7 +23,7 @@ use super::{
     AddressNamesDedupe, AddressNamesSort, Authority, Envelope, Page, QueryParamAllowlist,
     RegistrationStatus, Relation, RelationSet, SortOrder, StrictQueryParams, V2Error, V2Result,
     api_error_to_v2, decode, encode,
-    name_record::{load_migrated_at, name_registration_fields},
+    name_record::{load_migrated_at, name_registration_fields, registration_id},
     permission_powers_value, permission_scope_value,
     restrictions::ResourceRestrictions,
     validate_latest_collection_selectors,
@@ -350,7 +350,14 @@ pub(crate) async fn get_address_names(
                     .get(&entry.resource_id)
                     .map(ResourceRestrictions::from_summary)
                     .transpose()?
-                    .flatten();
+                    .flatten()
+                    .map(|restrictions| {
+                        restrictions.for_registration(
+                            name_rows
+                                .get(&entry.logical_name_id)
+                                .and_then(|row| registration_id(&row.declared_summary, None)),
+                        )
+                    });
             }
             Ok(row)
         })

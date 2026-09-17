@@ -39,7 +39,12 @@
                        END,
                        'authority_kind', authority_context.authority_kind,
                        'authority_key', authority_context.authority_key,
-                       'resource_id', product_registration.resource_id,
+                       -- The registration's identity is its BaseRegistrar lease, also while the
+                       -- name is wrapped and whether it was wrapped at or after registration.
+                       -- ENSv2 registrations keep the bound resource as their identity.
+                       'resource_id', CASE
+                           WHEN NOT COALESCE(selected_registration.is_v2_lifecycle, false)
+                               THEN lifecycle.registrar_resource_id END,
                        'registrant', registrant.registrant,
                        'expiry', CASE
                            WHEN selected_registration.is_v2_lifecycle
@@ -72,11 +77,19 @@
                                'registrant', NULL, 'expiry', NULL
                            )
                        -- A released ENSv1 lease whose custody was not revived is a tombstone:
-                       -- the registrar lease is gone and nothing current owns the node, so the
-                       -- lapsed registrant, authority and expiry are history only.
+                       -- the registrar lease is gone and nothing current owns the node, so no
+                       -- current registrant or authority is served. `expiry` stays the lapsed
+                       -- lease's own expiry, and the holder and authority the lease had when it
+                       -- lapsed move into `lapsed_registration`, a block only a tombstone
+                       -- carries and nothing reads as current state.
                        WHEN COALESCE(selected_authority.released_v1_tombstone, false)
                            THEN jsonb_build_object('authority_kind', NULL, 'authority_key', NULL,
-                               'registrant', NULL, 'expiry', NULL)
+                               'registrant', NULL,
+                               'lapsed_registration', jsonb_build_object(
+                                   'registrant', registrant.registrant,
+                                   'authority_kind', lapsed_authority.authority_kind,
+                                   'authority_key', lapsed_authority.authority_key,
+                                   'released_at', selected_registration.after_state -> 'released_at'))
                        -- An ENSv2 registration lapsed by path expiry keeps its lapsed expiry as
                        -- a readable detail (the registry entry still holds it); an explicit
                        -- release clears the entry, so nothing current remains.
@@ -336,24 +349,6 @@
                 LIMIT 1
             ), selected_registration.resource_id) AS registrar_resource_id
         ) lifecycle CROSS JOIN LATERAL (
-            SELECT COALESCE((
-                SELECT born_wrapper.resource_id
-                FROM project_events registrar_grant
-                JOIN project_events born_wrapper
-                  ON born_wrapper.chain_id = registrar_grant.chain_id
-                 AND born_wrapper.logical_name_id = surface.logical_name_id
-                 AND born_wrapper.transaction_hash = registrar_grant.transaction_hash
-                 AND (born_wrapper.after_state ->> 'wrapped_registrar_resource_id')::uuid = registrar_grant.resource_id
-                WHERE registrar_grant.resource_id = lifecycle.registrar_resource_id
-                  AND registrar_grant.event_kind = 'RegistrationGranted'
-                  AND registrar_grant.source_family = 'ens_v1_registrar_l1'
-                  AND born_wrapper.event_kind = 'SurfaceBound'
-                  AND born_wrapper.source_family = 'ens_v1_wrapper_l1'
-                ORDER BY born_wrapper.block_number NULLS LAST,
-                         born_wrapper.normalized_event_id
-                LIMIT 1
-            ), lifecycle.registrar_resource_id) AS resource_id
-        ) product_registration CROSS JOIN LATERAL (
             SELECT CASE WHEN identity.mismatch THEN NULL ELSE binding.surface_binding_id END AS surface_binding_id,
                    CASE WHEN identity.mismatch THEN NULL ELSE binding.resource_id END AS resource_id, CASE WHEN identity.mismatch THEN NULL ELSE binding.binding_kind END AS binding_kind,
                    CASE WHEN identity.has_lifecycle THEN selected_registration.resource_id ELSE binding.resource_id END AS event_resource_id FROM (SELECT selected_registration.is_v2_lifecycle AND selected_registration.event_kind IS NOT NULL AS has_lifecycle,
@@ -401,6 +396,22 @@
                      event.normalized_event_id DESC
             LIMIT 1
         ) authority_context ON TRUE
+        LEFT JOIN LATERAL (
+            -- The authority the released lease binding had before its closing epoch cleared
+            -- it: the NameWrapper for a lease that lapsed while wrapped. Only a released
+            -- tombstone serves it, inside `lapsed_registration`.
+            SELECT event.after_state ->> 'authority_kind' AS authority_kind,
+                   event.after_state ->> 'authority_key' AS authority_key
+            FROM project_authority_events event
+            WHERE COALESCE(selected_authority.released_v1_tombstone, false)
+              AND event.resource_id = resource.resource_id
+              AND event.event_kind IN ('RegistrationGranted', 'AuthorityEpochChanged')
+              AND event.after_state ->> 'authority_kind' IS NOT NULL
+            ORDER BY event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
+                     event.normalized_event_id DESC
+            LIMIT 1
+        ) lapsed_authority ON TRUE
         LEFT JOIN LATERAL (
             SELECT lower(CASE event.event_kind
                        WHEN 'TokenControlTransferred' THEN event.after_state ->> 'to'

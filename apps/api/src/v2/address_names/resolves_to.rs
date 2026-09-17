@@ -32,7 +32,7 @@ use super::{
     AddressName, address_names_include, build_address_name_role_summary, dedupe_to_storage,
     load_address_name_record_counts, name_registration_fields, order_to_storage, sort_to_storage,
 };
-use crate::v2::name_record::load_migrated_at;
+use crate::v2::name_record::{load_migrated_at, registration_id};
 use crate::v2::vocab::Authority;
 
 const NAMESPACE_FILTER_KEY: &str = "namespace";
@@ -303,7 +303,12 @@ pub(super) async fn get_address_resolves_to(
                     .and_then(|id| permission_summaries.get(&id))
                     .map(ResourceRestrictions::from_summary)
                     .transpose()?
-                    .flatten();
+                    .flatten()
+                    .map(|restrictions| {
+                        restrictions.for_registration(
+                            name_row.and_then(|row| registration_id(&row.declared_summary, None)),
+                        )
+                    });
             }
             Ok(row)
         })
