@@ -240,7 +240,9 @@ A nonempty `name` also produces preimage observations that can attach
 already-observed forward-node facts to a human-readable name; an empty clear
 produces no preimage observation.
 Regardless of resolver or node type, these rows carry no `primary_claim_source`;
-they do not synthesize ownership, resolver selection, or primary-name facts.
+interpretation does not synthesize ownership, resolver selection, or primary-name facts from them.
+The primary-name projection may later join such a row to a `ReverseClaimed` reverse node on
+that node's current resolver ([projections.md](projections.md#primary-names)).
 
 For ENSv2, admitted registry, registrar, and resolver name-bearing events produce preimage observations: registry `LabelRegistered`, `LabelReserved`, `ParentUpdated`; registrar `NameRegistered`, `NameRenewed`; resolver `AliasChanged`, `NamedResource`, `NamedTextResource`, `NamedAddrResource`.[^v2-events-l15][^v2-events-l30][^v2-events-l75][^v2-iethreg-l32][^v2-iethreg-l53][^v2-iperm-resolver-l14][^v2-pres-l132][^v2-pres-l142][^v2-pres-l153] These do not write projections or mutate manifest capability state.
 
