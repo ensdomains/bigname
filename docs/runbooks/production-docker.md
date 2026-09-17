@@ -601,7 +601,8 @@ EXISTS (
 ) AS normalized_events_emitter_history_index_ready;
 
 -- The schema qualifier on the enum type depends on the session search_path,
--- so it is removed before the predicate is compared.
+-- so both spellings of the predicate are accepted. The printed text is not
+-- rewritten, because a replacement would also change a string literal.
 SELECT EXISTS (
     SELECT 1
     FROM pg_class index_relation
@@ -628,10 +629,10 @@ SELECT EXISTS (
               '(provenance ->> ''observation_key''::text)',
               'active_from_block_number'
           ]
-      AND replace(
-              pg_get_expr(index_state.indpred, index_state.indrelid, true),
-              'bigname_phase.', ''
-          ) = 'canonicality_state <> ''orphaned''::canonicality_state'
+      AND pg_get_expr(index_state.indpred, index_state.indrelid, true) IN (
+              'canonicality_state <> ''orphaned''::canonicality_state',
+              'canonicality_state <> ''orphaned''::bigname_phase.canonicality_state'
+          )
 ) AS discovery_edges_observation_history_index_ready;
 
 SELECT EXISTS (
