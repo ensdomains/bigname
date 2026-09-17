@@ -206,90 +206,165 @@ migration_uses_unicode_escape() {
 }
 # The frozen artifact is the baseline plus the inventoried schema-migrations
 # through the documented head. schema-v2/frozen-schema.txt is that artifact's
-# catalog -- every relation, column, default, constraint, index, view, routine,
-# trigger, sequence, type and comment, with the schema name normalized -- built
+# catalog -- every relation with its storage options, row-security flags,
+# replica identity and partitioning, every column with its storage and
+# privileges, constraint, index, view, routine, trigger with its firing state,
+# sequence with its full range, type, domain, comment, policy, rule, extended
+# statistics object and the schema's own privileges, with the schema name
+# normalized -- built
 # here into its own schema and compared line for line, so a change to a
 # baseline file or a migration that moves the schema without moving the
 # frozen catalog fails, whatever its name. Regenerate deliberately with
 # SCHEMA_V2_APPLY_CHECK_WRITE_FINGERPRINT=1 in the change that moves the schema.
-frozen_schema_catalog_sql='
+frozen_schema_catalog_sql="$(cat <<'CATALOG_SQL'
 SELECT line FROM (
-    SELECT 0 AS section, c.relname AS a, '"'"''"'"' AS b,
-           format('"'"'relation %s kind=%s persistence=%s acl=%s'"'"', c.relname, c.relkind, c.relpersistence,
-                  COALESCE(replace(array_to_string(c.relacl, '"'"','"'"'), current_user, '"'"'owner'"'"'), '"'"'default'"'"')) AS line
+    SELECT 0 AS section, c.relname AS a, '' AS b,
+           format('relation %s kind=%s persistence=%s acl=%s options=%s rls=%s force_rls=%s replica_identity=%s partition_key=%s partition_bound=%s inherits=%s',
+                  c.relname, c.relkind, c.relpersistence,
+                  COALESCE(replace(array_to_string(c.relacl, ','), current_user, 'owner'), 'default'),
+                  COALESCE((SELECT string_agg(o, ',' ORDER BY o) FROM unnest(c.reloptions) o), '-'),
+                  c.relrowsecurity, c.relforcerowsecurity, c.relreplident,
+                  COALESCE(pg_get_partkeydef(c.oid), '-'),
+                  COALESCE(pg_get_expr(c.relpartbound, c.oid), '-'),
+                  COALESCE((SELECT string_agg(p.relname, ',' ORDER BY i.inhseqno)
+                            FROM pg_inherits i JOIN pg_class p ON p.oid = i.inhparent
+                            WHERE i.inhrelid = c.oid), '-')) AS line
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = current_schema() AND c.relkind IN ('"'"'r'"'"', '"'"'p'"'"', '"'"'v'"'"', '"'"'m'"'"', '"'"'S'"'"')
+    WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
     UNION ALL
-    SELECT 1, c.relname, lpad(a.attnum::text, 4, '"'"'0'"'"'),
-           format('"'"'column %s.%s %s %s default=%s identity=%s generated=%s collation=%s'"'"',
+    SELECT 1, c.relname, lpad(a.attnum::text, 4, '0'),
+           format('column %s.%s %s %s default=%s identity=%s generated=%s collation=%s storage=%s compression=%s acl=%s options=%s',
                   c.relname, a.attname,
                   format_type(a.atttypid, a.atttypmod),
-                  CASE WHEN a.attnotnull THEN '"'"'not null'"'"' ELSE '"'"'null'"'"' END,
-                  COALESCE(pg_get_expr(d.adbin, d.adrelid), '"'"'-'"'"'),
-                  COALESCE(NULLIF(a.attidentity, '"'"''"'"'), '"'"'-'"'"'),
-                  COALESCE(NULLIF(a.attgenerated, '"'"''"'"'), '"'"'-'"'"'),
+                  CASE WHEN a.attnotnull THEN 'not null' ELSE 'null' END,
+                  COALESCE(pg_get_expr(d.adbin, d.adrelid), '-'),
+                  COALESCE(NULLIF(a.attidentity, ''), '-'),
+                  COALESCE(NULLIF(a.attgenerated, ''), '-'),
                   COALESCE((SELECT quote_ident(col.collname) FROM pg_collation col
-                            WHERE col.oid = a.attcollation AND a.attcollation <> 0), '"'"'-'"'"'))
+                            WHERE col.oid = a.attcollation AND a.attcollation <> 0), '-'),
+                  a.attstorage, COALESCE(NULLIF(a.attcompression, ''), '-'),
+                  COALESCE(replace(array_to_string(a.attacl, ','), current_user, 'owner'), 'default'),
+                  COALESCE((SELECT string_agg(o, ',' ORDER BY o) FROM unnest(a.attoptions) o), '-'))
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
     JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
     LEFT JOIN pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum
-    WHERE n.nspname = current_schema() AND c.relkind IN ('"'"'r'"'"', '"'"'p'"'"', '"'"'v'"'"', '"'"'m'"'"')
+    WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
     UNION ALL
     SELECT 2, c.relname, con.conname,
-           format('"'"'constraint %s.%s %s'"'"', c.relname, con.conname, pg_get_constraintdef(con.oid))
+           format('constraint %s.%s %s', c.relname, con.conname, pg_get_constraintdef(con.oid))
     FROM pg_constraint con
     JOIN pg_class c ON c.oid = con.conrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = current_schema()
     UNION ALL
-    SELECT 3, tablename, indexname, format('"'"'index %s.%s %s'"'"', tablename, indexname, indexdef)
-    FROM pg_indexes WHERE schemaname = current_schema()
+    SELECT 3, c.relname, i.relname,
+           format('index %s.%s %s valid=%s', c.relname, i.relname, pg_get_indexdef(x.indexrelid), x.indisvalid)
+    FROM pg_index x
+    JOIN pg_class i ON i.oid = x.indexrelid
+    JOIN pg_class c ON c.oid = x.indrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = current_schema()
     UNION ALL
-    SELECT 4, c.relname, '"'"''"'"', format('"'"'view %s %s'"'"', c.relname, pg_get_viewdef(c.oid, true))
+    SELECT 4, c.relname, '', format('view %s %s', c.relname, pg_get_viewdef(c.oid, true))
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = current_schema() AND c.relkind IN ('"'"'v'"'"', '"'"'m'"'"')
+    WHERE n.nspname = current_schema() AND c.relkind IN ('v', 'm')
     UNION ALL
     SELECT 5, p.proname, pg_get_function_identity_arguments(p.oid),
-           format('"'"'routine %s(%s) returns %s kind=%s lang=%s volatile=%s strict=%s leakproof=%s parallel=%s secdef=%s config=%s acl=%s body=%s'"'"',
+           format('routine %s(%s) returns %s kind=%s lang=%s volatile=%s strict=%s leakproof=%s parallel=%s secdef=%s config=%s acl=%s body=%s',
                   p.proname, pg_get_function_identity_arguments(p.oid),
                   pg_get_function_result(p.oid), p.prokind,
                   (SELECT l.lanname FROM pg_language l WHERE l.oid = p.prolang),
                   p.provolatile, p.proisstrict, p.proleakproof, p.proparallel, p.prosecdef,
-                  COALESCE(array_to_string(p.proconfig, '"'"';'"'"'), '"'"'-'"'"'),
-                  COALESCE(replace(array_to_string(p.proacl, '"'"','"'"'), current_user, '"'"'owner'"'"'), '"'"'default'"'"'),
-                  md5(replace(p.prosrc, current_schema(), '"'"'bigname_phase'"'"')))
+                  COALESCE(array_to_string(p.proconfig, ';'), '-'),
+                  COALESCE(replace(array_to_string(p.proacl, ','), current_user, 'owner'), 'default'),
+                  md5(replace(p.prosrc, current_schema(), 'bigname_phase')))
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = current_schema()
     UNION ALL
-    SELECT 6, c.relname, t.tgname, format('"'"'trigger %s.%s %s'"'"', c.relname, t.tgname, pg_get_triggerdef(t.oid))
+    SELECT 6, c.relname, t.tgname,
+           format('trigger %s.%s %s enabled=%s', c.relname, t.tgname, pg_get_triggerdef(t.oid), t.tgenabled)
     FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = current_schema() AND NOT t.tgisinternal
     UNION ALL
-    SELECT 7, sequencename, '"'"''"'"',
-           format('"'"'sequence %s %s start=%s increment=%s'"'"', sequencename, data_type, start_value, increment_by)
-    FROM pg_sequences WHERE schemaname = current_schema()
+    SELECT 7, s.sequencename, '',
+           format('sequence %s %s start=%s increment=%s min=%s max=%s cache=%s cycle=%s owned_by=%s',
+                  s.sequencename, s.data_type, s.start_value, s.increment_by,
+                  s.min_value, s.max_value, s.cache_size, s.cycle,
+                  COALESCE((SELECT format('%s.%s', c.relname, a.attname)
+                            FROM pg_depend dep
+                            JOIN pg_class c ON c.oid = dep.refobjid
+                            JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = dep.refobjsubid
+                            WHERE dep.classid = 'pg_class'::regclass
+                              AND dep.objid = format('%I.%I', s.schemaname, s.sequencename)::regclass
+                              AND dep.refclassid = 'pg_class'::regclass
+                              AND dep.deptype IN ('a', 'i')), '-'))
+    FROM pg_sequences s WHERE s.schemaname = current_schema()
     UNION ALL
-    SELECT 8, t.typname, '"'"''"'"',
-           format('"'"'type %s %s %s'"'"', t.typname, t.typtype,
-                  COALESCE((SELECT string_agg(e.enumlabel, '"'"','"'"' ORDER BY e.enumsortorder)
-                            FROM pg_enum e WHERE e.enumtypid = t.oid), '"'"'-'"'"'))
+    SELECT 8, t.typname, '',
+           format('type %s %s %s base=%s %s default=%s check=%s attributes=%s', t.typname, t.typtype,
+                  COALESCE((SELECT string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder)
+                            FROM pg_enum e WHERE e.enumtypid = t.oid), '-'),
+                  CASE WHEN t.typtype = 'd' THEN format_type(t.typbasetype, t.typtypmod) ELSE '-' END,
+                  CASE WHEN t.typtype = 'd' AND t.typnotnull THEN 'not null' ELSE 'null' END,
+                  COALESCE(t.typdefault, '-'),
+                  COALESCE((SELECT string_agg(format('%s %s', con.conname, pg_get_constraintdef(con.oid)), ',' ORDER BY con.conname)
+                            FROM pg_constraint con WHERE con.contypid = t.oid), '-'),
+                  COALESCE((SELECT string_agg(format('%s %s', a.attname, format_type(a.atttypid, a.atttypmod)), ',' ORDER BY a.attnum)
+                            FROM pg_attribute a WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped), '-'))
     FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
-    WHERE n.nspname = current_schema() AND t.typtype IN ('"'"'e'"'"', '"'"'d'"'"', '"'"'c'"'"')
-      AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.reltype = t.oid)
+    WHERE n.nspname = current_schema() AND t.typtype IN ('e', 'd', 'c', 'r')
+      AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.reltype = t.oid AND c.relkind <> 'c')
     UNION ALL
-    SELECT 9, COALESCE(c.relname, p.proname), lpad(COALESCE(d.objsubid, 0)::text, 4, '"'"'0'"'"'),
-           format('"'"'comment %s %s %s'"'"', COALESCE(c.relname, p.proname), d.objsubid, d.description)
+    SELECT 9, COALESCE(c.relname, p.proname, t.typname, con.conname), lpad(COALESCE(d.objsubid, 0)::text, 4, '0'),
+           format('comment %s %s %s', COALESCE(c.relname, p.proname, t.typname, con.conname), d.objsubid, d.description)
     FROM pg_description d
-    LEFT JOIN pg_class c ON d.classoid = '"'"'pg_class'"'"'::regclass AND c.oid = d.objoid
-    LEFT JOIN pg_proc p ON d.classoid = '"'"'pg_proc'"'"'::regclass AND p.oid = d.objoid
-    JOIN pg_namespace n ON n.oid = COALESCE(c.relnamespace, p.pronamespace)
+    LEFT JOIN pg_class c ON d.classoid = 'pg_class'::regclass AND c.oid = d.objoid
+    LEFT JOIN pg_proc p ON d.classoid = 'pg_proc'::regclass AND p.oid = d.objoid
+    LEFT JOIN pg_type t ON d.classoid = 'pg_type'::regclass AND t.oid = d.objoid
+    LEFT JOIN pg_constraint con ON d.classoid = 'pg_constraint'::regclass AND con.oid = d.objoid
+    JOIN pg_namespace n ON n.oid = COALESCE(c.relnamespace, p.pronamespace, t.typnamespace, con.connamespace)
     WHERE n.nspname = current_schema()
+    UNION ALL
+    SELECT 10, c.relname, pol.polname,
+           format('policy %s.%s permissive=%s command=%s roles=%s using=%s check=%s',
+                  c.relname, pol.polname, pol.polpermissive, pol.polcmd,
+                  COALESCE((SELECT string_agg(label, ',' ORDER BY label)
+                            FROM (SELECT CASE WHEN r = 0 THEN 'public'
+                                              WHEN pg_get_userbyid(r) = current_user THEN 'owner'
+                                              ELSE pg_get_userbyid(r) END AS label
+                                  FROM unnest(pol.polroles) r) roles), '-'),
+                  COALESCE(pg_get_expr(pol.polqual, pol.polrelid), '-'),
+                  COALESCE(pg_get_expr(pol.polwithcheck, pol.polrelid), '-'))
+    FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = current_schema()
+    UNION ALL
+    SELECT 11, c.relname, r.rulename,
+           format('rule %s.%s %s', c.relname, r.rulename, pg_get_ruledef(r.oid, true))
+    FROM pg_rewrite r JOIN pg_class c ON c.oid = r.ev_class
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = current_schema() AND r.rulename <> '_RETURN'
+    UNION ALL
+    SELECT 12, s.stxname, '',
+           format('statistics %s %s', s.stxname, pg_get_statisticsobjdef(s.oid))
+    FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid = s.stxnamespace
+    WHERE n.nspname = current_schema()
+    UNION ALL
+    SELECT 13, '', '',
+           format('schema acl=%s default_acl=%s',
+                  COALESCE(replace(array_to_string(n.nspacl, ','), current_user, 'owner'), 'default'),
+                  COALESCE((SELECT string_agg(format('%s:%s', da.defaclobjtype,
+                                                     replace(array_to_string(da.defaclacl, ','), current_user, 'owner')),
+                                              ';' ORDER BY da.defaclobjtype)
+                            FROM pg_default_acl da WHERE da.defaclnamespace = n.oid), '-'))
+    FROM pg_namespace n WHERE n.nspname = current_schema()
 ) catalog
 ORDER BY section, a, b, line;
-'
+CATALOG_SQL
+)"
 frozen_schema_catalog="$ROOT/schema-v2/frozen-schema.txt"
 # A fresh database gets the baseline alone (the schema-migrations are no-ops
 # before it exists); an initialized one gets the baseline it was born with plus
@@ -370,8 +445,13 @@ current_migration_inventory() {
     (cd "$ROOT/migrations" && sha384sum -- *.sql | sort -k2)
 }
 assert_no_migration_below_prior_head() {
-    local prior prior_head line entry checksum
-    prior="$(prior_migration_inventory)" || return 0
+    local prior prior_head line entry checksum status
+    prior="$(prior_migration_inventory)" && status=0 || status=$?
+    case "$status" in
+        0) ;;
+        2) return 0 ;;
+        *) exit 1 ;;
+    esac
     prior_head="$(printf '%s\n' "$prior" | tail -n 1 | awk '{print $2}')"
     [ -n "$prior_head" ] || return 0
     local prior_checksum
@@ -403,14 +483,17 @@ assert_no_migration_below_prior_head() {
         fi
     done <<< "$prior"
 }
-# The previous inventory, or a nonzero status (with a note) when no history is
-# reachable, which only a checkout without git or without a base can produce.
+# The previous inventory on status 0; status 2 (with a note) when no history is
+# reachable, which only a checkout without git or without a base can produce;
+# status 1 when the base must be there and is not. The caller runs this in a
+# command substitution, so the fatal case is a status, not an exit, and the
+# caller tells it from the optional one instead of folding both into success.
 # SCHEMA_V2_PRIOR_INVENTORY_REF names the comparison point explicitly.
 prior_migration_inventory() {
     local base
     if ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
         printf '%s\n' "note: no git history, previous inventory not compared" >&2
-        return 1
+        return 2
     fi
     if [ -n "${SCHEMA_V2_PRIOR_INVENTORY_REF:-}" ]; then
         base="$SCHEMA_V2_PRIOR_INVENTORY_REF"
@@ -419,7 +502,7 @@ prior_migration_inventory() {
         # is a guard a flaky network switches off.
         if ! git -C "$ROOT" fetch -q --depth=1 origin "$GITHUB_BASE_REF"; then
             printf '%s\n' "could not fetch the base branch $GITHUB_BASE_REF for the previous inventory" >&2
-            exit 1
+            return 1
         fi
         base="FETCH_HEAD"
     elif git -C "$ROOT" rev-parse --verify -q origin/main >/dev/null 2>&1 \
@@ -432,14 +515,14 @@ prior_migration_inventory() {
     if ! git -C "$ROOT" rev-parse --verify -q "$base^{commit}" >/dev/null 2>&1; then
         if [ -n "${GITHUB_ACTIONS:-}" ]; then
             printf '%s\n' "the previous commit $base is not available for the previous inventory" >&2
-            exit 1
+            return 1
         fi
         printf '%s\n' "note: $base is not available, previous inventory not compared" >&2
-        return 1
+        return 2
     fi
     if ! git -C "$ROOT" cat-file -e "$base:schema-v2/migration-inventory.txt" 2>/dev/null; then
         printf '%s\n' "note: $base has no migration inventory, previous inventory not compared" >&2
-        return 1
+        return 2
     fi
     # A line with no checksum is an inventory written before checksums were recorded.
     git -C "$ROOT" show "$base:schema-v2/migration-inventory.txt" | awk 'NF == 1 { print "-", $1; next } { print }'
