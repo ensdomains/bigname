@@ -2301,8 +2301,11 @@ For a registrar lease first identified by a later readable observation, registra
   record_resource?}` row
   for each current resolver-scoped permission row with at least one power.
   `record_resource` follows the `GET /v1/permissions` contract: on a record-ID
-  resolver it names the record a holder's argument-scoped grant is about, so
-  grouping rows by `record_resource.hash` lists the resolver's named resources.
+  resolver it names the record a holder's argument-scoped grant is about.
+  Grouping rows by `record_resource.hash` therefore lists the records some
+  current holder may set — not every resource the resolver has ever named:
+  a resource whose setter grants were all revoked, or whose surviving rows
+  hold only `link` or `admin_set_*` powers, contributes no hash.
   Rows sort by address and registration ID; multiple registrations for one
   holder remain separate. `name` is present when the registration has a current
   readable name. `grant_event` follows the overview provenance shape,
