@@ -518,10 +518,13 @@ ENSv2 registry operators are not indexed. NameWrapper summaries are partial for
 a narrower reason described below: holders, operators, and per-token delegates
 are rows, while parent control of a non-emancipated wrapped subname and resolver
 operators/delegates are not. For a grant on an ENSv2 record-ID resolver, whose
-resource is a setter argument rather than a name, `scope_detail` also keeps the
-selector the interpreter decoded from that argument (`resource_selector`) so
-reads can say which record the grant is about; a grant whose argument was never
-observed keeps a plain scope.
+resource is the keccak of a setter argument rather than a name
+(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64),
+`scope_detail` also keeps the selector the interpreter decoded from that
+argument (`resource_selector`) so reads can say which record the grant is
+about; the interpreter reads the argument under the union of the old and new
+role bitmaps, and reads keep only the readings the row's effective powers
+still hold. A grant whose argument was never observed keeps a plain scope.
 
 `account_permission_state_current` separately folds `AccountPermissionChanged`
 events from the [`standard_approval`

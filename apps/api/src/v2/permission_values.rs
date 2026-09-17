@@ -78,11 +78,16 @@ fn permission_scope_chain_id(storage_chain_id: &str) -> V2Result<u64> {
 /// The record an argument-scoped resolver resource is about, from the selector the
 /// interpreter decoded out of the setter argument: an address family keyed by coin
 /// type, a text or data key, an ABI content type, an interface id, or — when one
-/// argument authorizes several setters — the list of those. An argument the
-/// interpreter could not decode describes nothing and is omitted.
+/// argument authorizes several setters — the list of those. The interpreter reads
+/// the argument under the union of the old and new role bitmaps so it can describe
+/// the revoked side of a change too; a served row keeps only the readings whose
+/// setter the holder currently has (`powers`), so a revoked family drops out. An
+/// argument the interpreter could not decode describes nothing and is omitted, as
+/// is a resource whose every reading was revoked. A text or data key that is not
+/// printable UTF-8 is served as `key_bytes` (hex), never as a lookalike string.
 /// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64)
 /// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L252-L259 @ ens_v2@a971bd64)
-pub(crate) fn record_resource_value(selector: &Value) -> V2Result<Option<Value>> {
+pub(crate) fn record_resource_value(selector: &Value, powers: &Value) -> V2Result<Option<Value>> {
     let Some(object) = selector.as_object() else {
         return Err(record_resource_error());
     };
@@ -104,23 +109,45 @@ pub(crate) fn record_resource_value(selector: &Value) -> V2Result<Option<Value>>
             .map(str::to_owned)
             .ok_or_else(record_resource_error)
     };
+    let held = |family: &str| {
+        powers.as_array().is_some_and(|powers| {
+            powers.iter().filter_map(Value::as_str).any(|power| {
+                power == format!("set_{family}") || power == format!("admin_set_{family}")
+            })
+        })
+    };
     let value = match kind {
-        "address" => json!({"kind": "address", "hash": hash, "coin_type": key()?}),
-        "text" | "data" => json!({"kind": kind, "hash": hash, "key": key()?}),
-        "abi" => json!({"kind": "abi", "hash": hash, "content_type": key()?}),
-        "interface" => json!({"kind": "interface", "hash": hash, "interface_id": key()?}),
+        "address" if held("addr") => {
+            json!({"kind": "address", "hash": hash, "coin_type": key()?})
+        }
+        "text" | "data" if held(kind) => {
+            if object.contains_key("raw_selector_key") {
+                json!({"kind": kind, "hash": hash, "key_bytes": key()?})
+            } else {
+                json!({"kind": kind, "hash": hash, "key": key()?})
+            }
+        }
+        "abi" if held("abi") => json!({"kind": "abi", "hash": hash, "content_type": key()?}),
+        "interface" if held("interface") => {
+            json!({"kind": "interface", "hash": hash, "interface_id": key()?})
+        }
+        "address" | "text" | "data" | "abi" | "interface" => return Ok(None),
         "argument" => {
             let selectors = object
                 .get("selectors")
                 .and_then(Value::as_array)
                 .ok_or_else(record_resource_error)?
                 .iter()
-                .map(record_resource_value)
+                .map(|selector| record_resource_value(selector, powers))
                 .collect::<V2Result<Vec<_>>>()?
                 .into_iter()
                 .flatten()
                 .collect::<Vec<_>>();
-            json!({"kind": "argument", "hash": hash, "selectors": selectors})
+            match selectors.len() {
+                0 => return Ok(None),
+                1 => selectors.into_iter().next().expect("one selector"),
+                _ => json!({"kind": "argument", "hash": hash, "selectors": selectors}),
+            }
         }
         _ => return Err(record_resource_error()),
     };
@@ -286,48 +313,93 @@ mod tests {
         use super::record_resource_value;
 
         let hash = "0x00000000000000000000000000000000000000000000000000000000000000aa";
+        let all = json!([
+            "set_addr",
+            "set_text",
+            "set_data",
+            "set_abi",
+            "set_interface"
+        ]);
         assert_eq!(
-            record_resource_value(&json!({"kind": "address", "key": "60", "hash": hash})).unwrap(),
+            record_resource_value(&json!({"kind": "address", "key": "60", "hash": hash}), &all)
+                .unwrap(),
             Some(json!({"kind": "address", "hash": hash, "coin_type": "60"}))
         );
         assert_eq!(
-            record_resource_value(&json!({"kind": "text", "key": "url", "hash": hash,
-                "raw_selector_key": {"encoding": "hex", "bytes": "0x75726c"}}))
-            .unwrap(),
+            record_resource_value(&json!({"kind": "text", "key": "url", "hash": hash}), &all)
+                .unwrap(),
             Some(json!({"kind": "text", "hash": hash, "key": "url"}))
         );
+        // A key that is not printable UTF-8 is bytes, not a string that looks like hex.
         assert_eq!(
-            record_resource_value(&json!({"kind": "data", "key": "0xdead", "hash": hash})).unwrap(),
+            record_resource_value(
+                &json!({"kind": "text", "key": "0xff", "hash": hash,
+                "raw_selector_key": {"encoding": "hex", "bytes": "0xff"}}),
+                &all
+            )
+            .unwrap(),
+            Some(json!({"kind": "text", "hash": hash, "key_bytes": "0xff"}))
+        );
+        assert_eq!(
+            record_resource_value(
+                &json!({"kind": "data", "key": "0xdead", "hash": hash}),
+                &all
+            )
+            .unwrap(),
             Some(json!({"kind": "data", "hash": hash, "key": "0xdead"}))
         );
         assert_eq!(
-            record_resource_value(&json!({"kind": "abi", "key": "1", "hash": hash})).unwrap(),
+            record_resource_value(&json!({"kind": "abi", "key": "1", "hash": hash}), &all).unwrap(),
             Some(json!({"kind": "abi", "hash": hash, "content_type": "1"}))
         );
         assert_eq!(
-            record_resource_value(&json!({"kind": "interface", "key": "0x01ffc9a7", "hash": hash}))
-                .unwrap(),
+            record_resource_value(
+                &json!({"kind": "interface", "key": "0x01ffc9a7", "hash": hash}),
+                &json!(["admin_set_interface"])
+            )
+            .unwrap(),
             Some(json!({"kind": "interface", "hash": hash, "interface_id": "0x01ffc9a7"}))
         );
-        // One argument authorizing several setters keeps every applicable reading.
+        // A reading whose setter the holder no longer has is not what the holder may set.
         assert_eq!(
-            record_resource_value(&json!({"kind": "argument", "key": null, "hash": hash,
-                "argument_hex": "0x00", "selectors": [
-                    {"kind": "address", "key": "0", "hash": hash},
-                    {"kind": "abi", "key": "0", "hash": hash}]}))
+            record_resource_value(
+                &json!({"kind": "text", "key": "url", "hash": hash}),
+                &json!(["set_data"])
+            )
             .unwrap(),
+            None
+        );
+        // One argument read as text and data: keep only the readings still held, and a
+        // single survivor is served as that reading.
+        let multi = json!({"kind": "argument", "key": null, "hash": hash, "argument_hex": "0x00",
+            "selectors": [{"kind": "text", "key": "k", "hash": hash}, {"kind": "data", "key": "k", "hash": hash}]});
+        assert_eq!(
+            record_resource_value(&multi, &all).unwrap(),
             Some(json!({"kind": "argument", "hash": hash, "selectors": [
-                {"kind": "address", "hash": hash, "coin_type": "0"},
-                {"kind": "abi", "hash": hash, "content_type": "0"}]}))
+                {"kind": "text", "hash": hash, "key": "k"},
+                {"kind": "data", "hash": hash, "key": "k"}]}))
+        );
+        assert_eq!(
+            record_resource_value(&multi, &json!(["set_data"])).unwrap(),
+            Some(json!({"kind": "data", "hash": hash, "key": "k"}))
+        );
+        assert_eq!(
+            record_resource_value(&multi, &json!(["link"])).unwrap(),
+            None
         );
         // An argument the interpreter never saw describes nothing.
         assert_eq!(
-            record_resource_value(&json!({"kind": "resource", "key": null, "hash": null})).unwrap(),
+            record_resource_value(
+                &json!({"kind": "resource", "key": null, "hash": null}),
+                &all
+            )
+            .unwrap(),
             None
         );
-        assert!(record_resource_value(&json!({"kind": "text", "hash": hash})).is_err());
+        assert!(record_resource_value(&json!({"kind": "text", "hash": hash}), &all).is_err());
         assert!(
-            record_resource_value(&json!({"kind": "mystery", "key": "x", "hash": hash})).is_err()
+            record_resource_value(&json!({"kind": "mystery", "key": "x", "hash": hash}), &all)
+                .is_err()
         );
     }
 }

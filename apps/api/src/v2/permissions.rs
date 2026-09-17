@@ -274,7 +274,7 @@ pub(crate) fn build_permission_row(
         record_resource: row
             .record_resource_selector
             .as_ref()
-            .map(record_resource_value)
+            .map(|selector| record_resource_value(selector, &row.effective_powers))
             .transpose()?
             .flatten(),
         name: name.map(str::to_owned),

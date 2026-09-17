@@ -186,9 +186,11 @@ async fn record_history_survives_relinks_and_excludes_later_unselected_writes() 
     Ok(())
 }
 
-// A grant scoped to a setter argument keeps the interpreter's decoded selector on the
-// permission row, so reads can say which record the resource is about; an argument the
-// interpreter never saw leaves the scope alone.
+// A grant scoped to a setter argument -- the resource is the keccak of the argument --
+// keeps the interpreter's decoded selector on the permission row, so reads can say
+// which record the resource is about; an argument the interpreter never saw leaves
+// the scope alone.
+// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64)
 #[tokio::test]
 async fn record_resolver_permission_rows_keep_the_decoded_argument_selector() -> Result<()> {
     let (db, pool) = database("record_id_permission_selector").await?;

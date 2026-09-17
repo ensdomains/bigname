@@ -1415,8 +1415,12 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   hash, content_type}`, `{kind: "interface", hash, interface_id}`, or, when
   one argument authorizes several setters, `{kind: "argument", hash,
   selectors: [...]}` of those shapes. `hash` is the on-chain resource, the
-  keccak of the argument. A grant whose argument was never observed carries no
-  `record_resource`.
+  keccak of the argument. Only readings whose setter the row's `powers` still
+  hold are served — a revoked family drops out, and a multi-setter argument
+  left with one held reading is served as that reading — so a row with no
+  held reading, like a grant whose argument was never observed, carries no
+  `record_resource`. A text or data key that is not printable UTF-8 is served
+  as `key_bytes` (hex) instead of `key`.
   (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L252-L259 @ ens_v2@a971bd64) The two wrapper fields use the same atomic,
   [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word)

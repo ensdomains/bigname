@@ -26,8 +26,10 @@ pub(super) async fn build(
         decoded AS (
             SELECT event.*,
                    lower(event.after_state ->> 'subject') AS subject,
-                   -- A record-ID resolver scopes a grant to a setter argument; the
-                   -- decoded selector says which record the resource is about.
+                   -- A record-ID resolver scopes a grant to a setter argument (the
+                   -- resource is the keccak of the argument); the decoded selector says
+                   -- which record the resource is about.
+                   -- (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64)
                    CASE WHEN event.after_state -> 'selector' ->> 'kind'
                              IN ('address', 'text', 'abi', 'interface', 'data', 'argument')
                         THEN event.after_state -> 'scope' || jsonb_build_object(

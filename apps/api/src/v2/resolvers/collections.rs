@@ -189,14 +189,15 @@ async fn collection(
     let mut data = Vec::with_capacity(rows.len());
     for (_, _, mut item) in rows {
         if section == "roles" {
-            item["powers"] = permission_powers_value(&item["powers"])?;
             if let Some(selector) = item
                 .as_object_mut()
                 .and_then(|object| object.remove("record_resource_selector"))
-                && let Some(resource) = crate::v2::record_resource_value(&selector)?
+                && let Some(resource) =
+                    crate::v2::record_resource_value(&selector, &item["powers"])?
             {
                 item["record_resource"] = resource;
             }
+            item["powers"] = permission_powers_value(&item["powers"])?;
             data.push(item);
         } else {
             data.push(compact_resolver_binding_item(&item)?);
