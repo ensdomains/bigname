@@ -1296,10 +1296,56 @@ compiled from the resolver manifest's `ResolverCreated()` ABI declaration;
 adding it triggers ordinary watch-plan widening and one Ingest redo. Changes
 to the topology rule still invalidate derived interpretation.
 
-For other address-admitting resolver rules, synchronization conservatively
-rejects historical rule/source widening whose target address set would only
-be known after Interpret. The comparison remains scoped by namespace, source
-family, edge kind, role, and admission policy.
+For the other address-admitting `resolver` rules (ENSv1 and Basenames registry
+pointers), adding or broadening a rule over an already-ingested range is an
+ordering problem. Replacing a declaration that emits an unchanged active
+resolver rule has the same problem: the replacement contract's discovery
+events name resolver addresses only after Interpret materializes their edges,
+so an Ingest redo cannot yet fetch those resolvers' address-scoped history.
+`resolver` [discovery-rule widening and
+narrowing](glossary.md#discovery-rule-widening-and-narrowing) comparison is
+scoped within one chain by
+`(namespace, source_family, edge_kind, from_role, admission)` and preserves the
+normalized address and inclusive start block of each declaration for its
+`from_role`. Manifest synchronization loudly rejects either transition
+instead of mis-certifying a one-pass redo. The operator cannot perform that
+ordering with the current in-place phase workflow, because Interpret reads
+discovery rules only after admission. These transitions are therefore
+unsupported over retained history and require a fresh rebuild or a future
+dedicated discovery backfill mechanism. Adding the first emitting declaration
+to a resolver rule that previously matched no root or contract declaration is
+classified as widening and is intentionally rejected over retained history as
+a conservative case of the same ordering constraint. A `resolver` discovery
+rule with no matching root or contract declaration is itself historical
+discovery input, so adding such a rule in a new namespace over retained
+history is rejected like any other widening.
+
+The runner repairs the ordinary case of this ordering problem by itself.
+On a database that is being built or replayed, Interpret can discover resolver
+address/topic intervals after the Ingest pass over those blocks has completed.
+This happens for ENSv1 and Basenames registry pointers and for the ENSv2
+`Upgraded` and `ProxyDeployed`
+[implementation announcements](#resolver-admission-by-implementation-announcement).
+It does not happen for ENSv2 registry pointers, which admit nothing, or for
+`ResolverCreated()`, whose events Ingest already fetched in the creation
+window. When those
+intervals add coverage over already-ingested blocks, Interpret records required
+Ingest work. The runner automatically re-fetches the affected retained range
+with the discovery-aware filter and re-runs Interpret before Project and Verify
+proceed. Interrupted discovery repairs remain durable and resume through the
+normal runner recovery path. At startup, after Live, and after an
+operator-requested Interpret or all-phase redo, the runner can repeat the
+sequence of re-fetching newly admitted historical logs and re-running
+Interpret once for each active admitted discovery rule, plus eight additional
+times before downstream phases proceed. This fixed ceiling is a runaway
+backstop, not a tuning control:
+exhausting it stops the chain with an operator-visible error while Project and
+Verify remain fenced. Keep serving disabled, inspect
+`discovery_watch_admissions` and `chain_phase_state`, correct the
+non-converging admission or redo lifecycle, and then restart the runner.
+Operators do not need to schedule a manual second pass for the
+ordinary convergent case. Keep serving disabled until repair, projection, and
+the configured verification gate have completed.
 
 Runtime resolver admission also requires the registry and resolver families to
 have the same [deployment epoch](glossary.md#deployment-epoch). Manifest
