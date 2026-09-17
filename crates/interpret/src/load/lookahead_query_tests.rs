@@ -1,4 +1,4 @@
-use super::{ENS_GRACE_PERIOD_SECS, due_names, events, events_with_byte_limit};
+use super::{ENS_GRACE_PERIOD_SECS, due_names, events};
 use bigname_adapters::schema_v2::seam::{
     INTERPRETER_STATE_KEY, SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY,
 };
@@ -132,7 +132,7 @@ async fn global_winners_preserve_partitions_positions_and_canonical_hashes() -> 
     sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,'replacement-4',4,to_timestamp(4),'safe')")
         .bind(CHAIN).execute(db.pool()).await?;
     let mut connection = db.pool().acquire().await?;
-    let selected = events(&mut connection, CHAIN, 5, &["ens:a".into()], &[], 100).await?;
+    let selected = events(&mut connection, CHAIN, 5, &["ens:a".into()], &[]).await?;
     assert_eq!(
         identities(&selected),
         [
@@ -226,11 +226,10 @@ async fn unnamed_direct_facts_route_by_child_without_parent_descendant_expansion
         2,
         &["ens:parent".into()],
         &[resource],
-        100,
     )
     .await?;
     assert_eq!(identities(&parent), ["parent", "resource-only"]);
-    let child = events(&mut connection, CHAIN, 2, &["ens:child".into()], &[], 100).await?;
+    let child = events(&mut connection, CHAIN, 2, &["ens:child".into()], &[]).await?;
     assert_eq!(
         identities(&child),
         [
@@ -242,7 +241,7 @@ async fn unnamed_direct_facts_route_by_child_without_parent_descendant_expansion
             "revocation"
         ]
     );
-    let resource_only = events(&mut connection, CHAIN, 2, &[], &[resource], 100).await?;
+    let resource_only = events(&mut connection, CHAIN, 2, &[], &[resource]).await?;
     assert_eq!(identities(&resource_only), ["resource-only"]);
     drop(connection);
     db.cleanup().await?;
@@ -310,11 +309,11 @@ async fn expiry_candidates_match_strict_grace_boundary_and_total_i64_parsing() -
         .execute(&mut *connection)
         .await?;
     assert_eq!(
-        due_names(&mut connection, CHAIN, 3, Some(predecessor), last, 100).await?,
+        due_names(&mut connection, CHAIN, 3, Some(predecessor), last).await?,
         ["ens:between", "ens:predecessor", "ens:zeros"]
     );
     assert_eq!(
-        due_names(&mut connection, CHAIN, 3, None, last, 100).await?,
+        due_names(&mut connection, CHAIN, 3, None, last).await?,
         [
             "ens:between",
             "ens:minimum",
@@ -324,67 +323,65 @@ async fn expiry_candidates_match_strict_grace_boundary_and_total_i64_parsing() -
         ]
     );
     assert!(
-        due_names(&mut connection, CHAIN, 3, Some(last), last, 100)
+        due_names(&mut connection, CHAIN, 3, Some(last), last)
             .await?
             .is_empty()
-    );
-    let error = due_names(&mut connection, CHAIN, 3, None, last, 2)
-        .await
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("refusing incomplete prior state")
     );
     drop(connection);
     db.cleanup().await?;
     Ok(())
 }
 
+/// The loader once stopped at 100,000 rows and 64 MiB. Removing those stops must not leave a
+/// silent truncation behind: a working set larger than the old row limit comes back whole.
 #[tokio::test]
-async fn row_and_byte_limits_fail_instead_of_returning_partial_state() -> Result {
+async fn working_sets_larger_than_the_removed_limits_are_returned_whole() -> Result {
+    const NAMES: i64 = 100_500;
     let db = database().await?;
-    for id in ["one", "two"] {
-        seed(
-            db.pool(),
-            id,
-            None,
-            None,
-            1,
-            None,
-            key(id),
-            json!({"node":"a","value":"x".repeat(1024)}),
-        )
-        .await?;
-    }
+    sqlx::query(
+        "INSERT INTO normalized_events
+         (event_identity,namespace,event_kind,source_family,manifest_version,chain_id,
+          block_number,block_hash,transaction_hash,raw_fact_ref,derivation_kind,
+          canonicality_state,after_state)
+         SELECT 'mass-expiry-'||n,'ens','RegistrationGranted','ens_v1_registrar_l1',1,$1,
+                1,'block-1','tx',jsonb_build_object($2::text,'key-'||n),
+                'ens_v1_unwrapped_authority','canonical',
+                jsonb_build_object('namehash','node-'||n,'expiry',1000)
+         FROM generate_series(1,$3) n",
+    )
+    .bind(CHAIN)
+    .bind(INTERPRETER_STATE_KEY)
+    .bind(NAMES)
+    .execute(db.pool())
+    .await?;
     let mut connection = db.pool().acquire().await?;
-    let names = ["ens:a".into()];
-    assert_eq!(
-        events(&mut connection, CHAIN, 2, &names, &[], 2)
-            .await?
-            .len(),
-        2
-    );
-    for limit in [0, 1] {
-        let error = events(&mut connection, CHAIN, 2, &names, &[], limit)
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("event count"));
-    }
-    let error = events_with_byte_limit(&mut connection, CHAIN, 2, &names, &[], 2, 100)
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("event bytes"));
-    // Each body fits independently; their combined retained size exceeds this bound.
-    let error = events_with_byte_limit(&mut connection, CHAIN, 2, &names, &[], 2, 2000)
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("event bytes"));
+    // Fresh statistics, as autovacuum keeps them in production; without them the planner
+    // chooses a plan for this many names that does not finish in minutes.
+    sqlx::raw_sql("ANALYZE normalized_events")
+        .execute(&mut *connection)
+        .await?;
+    // Every one of these registrations falls due at the same timestamp.
+    let last = OffsetDateTime::from_unix_timestamp(ENS_GRACE_PERIOD_SECS + 1001)?;
+    let names = due_names(&mut connection, CHAIN, 2, None, last).await?;
+    assert_eq!(names.len(), usize::try_from(NAMES)?);
+    let loaded = events(&mut connection, CHAIN, 2, &names, &[]).await?;
+    assert_eq!(loaded.len(), usize::try_from(NAMES)?);
     assert!(
-        events(&mut connection, CHAIN, 2, &[], &[], 0)
+        events(&mut connection, CHAIN, 2, &[], &[])
             .await?
             .is_empty()
     );
+    for sql in [super::EVENTS, super::DUE_NAMES] {
+        let limits: Vec<_> = sql
+            .lines()
+            .map(|line| line.split("--").next().unwrap_or("").trim())
+            .filter(|line| line.contains("LIMIT") && !line.ends_with("LIMIT 1"))
+            .collect();
+        assert!(
+            limits.is_empty(),
+            "only LIMIT 1 probes may remain: {limits:?}"
+        );
+    }
     drop(connection);
     db.cleanup().await?;
     Ok(())
@@ -413,14 +410,14 @@ async fn expiry_generic_plan_uses_both_timestamp_index_bounds() -> Result {
         .execute(&mut *connection)
         .await?;
     sqlx::raw_sql(&format!(
-        "PREPARE expiry_plan(text,bigint,bigint,bigint,bigint,bigint,bigint) AS {}",
+        "PREPARE expiry_plan(text,bigint,bigint,bigint,bigint) AS {}",
         super::DUE_NAMES
     ))
     .execute(&mut *connection)
     .await?;
     let plan: Value = sqlx::query_scalar(&format!(
         "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) EXECUTE expiry_plan(
-         '{CHAIN}',3,{}, {},100001,{ENS_GRACE_PERIOD_SECS},67108864)",
+         '{CHAIN}',3,{}, {},{ENS_GRACE_PERIOD_SECS})",
         ENS_GRACE_PERIOD_SECS + 1900,
         ENS_GRACE_PERIOD_SECS + 1910
     ))
@@ -449,7 +446,6 @@ async fn expiry_generic_plan_uses_both_timestamp_index_bounds() -> Result {
             ENS_GRACE_PERIOD_SECS + 1900,
         )?),
         OffsetDateTime::from_unix_timestamp(ENS_GRACE_PERIOD_SECS + 1910)?,
-        100,
     )
     .await?;
     assert_eq!(

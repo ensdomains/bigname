@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::{num::NonZeroU32, path::PathBuf, time::Duration};
 
 use clap::Args;
 
@@ -13,6 +13,13 @@ pub(super) struct CapacityArgs {
     /// letting each chain choose the per-batch ENSv1 lookahead loader automatically.
     #[arg(long, env = "BIGNAME_INTERPRET_FORCE_FULL_STATE_LOADER")]
     interpret_force_full_state_loader: bool,
+    /// Canonical blocks per Interpret batch; at least 1. Smaller batches use less memory.
+    #[arg(
+        long,
+        env = "BIGNAME_INTERPRET_BLOCKS_PER_BATCH",
+        default_value_t = bigname_interpret::DEFAULT_INTERPRET_BLOCKS_PER_BATCH
+    )]
+    interpret_blocks_per_batch: NonZeroU32,
     #[arg(long, env = "BIGNAME_PHASE_RUNNER_INTERPRETER_STATE_CACHE_ENTRIES")]
     interpreter_state_cache_entries: Option<usize>,
     #[arg(long, env = "BIGNAME_PHASE_RUNNER_DATABASE_MAX_BYTES")]
@@ -44,6 +51,7 @@ pub(super) fn resolve_capacity(args: CapacityArgs) -> RunnerResult<CapacityConfi
         ));
     }
     Ok(CapacityConfig {
+        interpret_blocks_per_batch: args.interpret_blocks_per_batch,
         interpret_force_full_state_loader: args.interpret_force_full_state_loader,
         database_max_bytes: args.database_max_bytes,
         minimum_free_disk_bytes: args.minimum_free_disk_bytes,

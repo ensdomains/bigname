@@ -1760,6 +1760,7 @@ async fn capacity_breach_pauses_and_then_resumes_the_phase() -> Result<()> {
     let loop_heartbeat = RunnerLoopHeartbeat::default();
     let capacity = CapacityGuard::new(
         CapacityConfig {
+            interpret_blocks_per_batch: bigname_interpret::DEFAULT_INTERPRET_BLOCKS_PER_BATCH,
             interpret_force_full_state_loader: false,
             database_max_bytes: None,
             minimum_free_disk_bytes: 1,

@@ -1199,8 +1199,8 @@ Physical batching is an execution detail, not an input to interpretation for a c
 Identity rows, discovery edges, and normalized events must be a pure function
 of the canonical raw facts and the declared manifests, discovery rules, and
 admissions: after completion, a fresh full walk, an incremental follow, and a resumed session
-over identical input must write identical rows no matter where the 500-block
-batch boundaries fall. A finitely retired manifest-declared address range is
+over identical input must write identical rows no matter where the
+[batch](glossary.md#batch-grid) boundaries fall or how many blocks a batch holds. A finitely retired manifest-declared address range is
 the narrow history-bearing exception: manifest synchronization supplies its
 retirement boundary, Interpret redo preserves it, and a fresh database that
 starts after the declaration was removed need not contain that historical

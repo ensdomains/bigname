@@ -18,13 +18,11 @@ pub struct InterpretPhase {
 impl InterpretPhase {
     /// The Interpret settings an operator controls, taken from the runner's capacity settings.
     pub fn from_capacity(pool: PgPool, capacity: &crate::config::CapacityConfig) -> Self {
-        Self::with_state_cache_capacity(pool, capacity.interpreter_state_cache_entries)
-            .with_full_state_loader_forced(capacity.interpret_force_full_state_loader)
-    }
-
-    pub fn with_full_state_loader_forced(mut self, forced: bool) -> Self {
-        self.engine = self.engine.with_full_state_loader_forced(forced);
-        self
+        let engine =
+            Engine::with_state_cache_capacity(pool, capacity.interpreter_state_cache_entries)
+                .with_blocks_per_batch(capacity.interpret_blocks_per_batch)
+                .with_full_state_loader_forced(capacity.interpret_force_full_state_loader);
+        Self { engine }
     }
 
     pub fn new(pool: PgPool) -> Self {

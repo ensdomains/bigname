@@ -1,11 +1,12 @@
-use std::{collections::HashMap, sync::Mutex, time::Instant};
+use std::{collections::HashMap, num::NonZeroU32, sync::Mutex, time::Instant};
 
 use bigname_adapters::{SchemaV2AdapterSession, StateCacheCapacity};
 use sqlx::PgPool;
 
 use crate::{InterpretError, Result, load, recompute, write};
 
-const CANONICAL_BLOCKS_PER_BATCH: i64 = 500;
+/// Canonical blocks one Interpret batch reads, interprets and publishes in one transaction.
+pub const DEFAULT_INTERPRET_BLOCKS_PER_BATCH: NonZeroU32 = NonZeroU32::new(500).unwrap();
 pub const DEFAULT_INTERPRETER_STATE_CACHE_ENTRIES: usize = 65_536;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,6 +42,7 @@ pub struct BatchOutcome {
 pub struct Engine {
     pool: PgPool,
     state_cache_capacity: StateCacheCapacity,
+    blocks_per_batch: NonZeroU32,
     force_full_state_loader: bool,
     loader_choices: loader_choice::LoaderChoices,
     prior_sessions: Mutex<HashMap<String, PriorSession>>,
@@ -69,10 +71,18 @@ impl Engine {
         Self {
             pool,
             state_cache_capacity: StateCacheCapacity::Entries(entries),
+            blocks_per_batch: DEFAULT_INTERPRET_BLOCKS_PER_BATCH,
             force_full_state_loader: false,
             loader_choices: loader_choice::LoaderChoices::default(),
             prior_sessions: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Batch length in canonical blocks. It bounds the memory and transaction size of one
+    /// batch and must not change stored output.
+    pub fn with_blocks_per_batch(mut self, blocks: NonZeroU32) -> Self {
+        self.blocks_per_batch = blocks;
+        self
     }
 
     /// Operator override: always restore prior state with the full-state loader, even on
@@ -135,7 +145,7 @@ impl Engine {
             &request.chain_id,
             next_block,
             target.number,
-            CANONICAL_BLOCKS_PER_BATCH,
+            i64::from(self.blocks_per_batch.get()),
         )
         .await?;
         validate_contiguous_markers(&request.chain_id, next_block, &markers)?;

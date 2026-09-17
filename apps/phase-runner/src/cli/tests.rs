@@ -745,7 +745,7 @@ fn inspect_cli_resolves_each_kept_schema_v2_window() {
 }
 
 #[test]
-fn run_cli_forces_the_full_state_interpret_loader_only_when_asked() {
+fn run_cli_carries_the_interpret_batch_length_and_loader_override() {
     let run = |extra: &[&str]| {
         let mut arguments = vec![
             "phase-runner",
@@ -766,6 +766,31 @@ fn run_cli_forces_the_full_state_interpret_loader_only_when_asked() {
         };
         resolve_capacity(args.capacity).expect("capacity must resolve")
     };
+    assert_eq!(run(&[]).interpret_blocks_per_batch.get(), 500);
+    assert_eq!(
+        run(&["--interpret-blocks-per-batch", "50"])
+            .interpret_blocks_per_batch
+            .get(),
+        50
+    );
     assert!(!run(&[]).interpret_force_full_state_loader);
     assert!(run(&["--interpret-force-full-state-loader"]).interpret_force_full_state_loader);
+}
+
+#[test]
+fn run_cli_rejects_an_interpret_batch_of_zero_blocks() {
+    let error = Cli::try_parse_from([
+        "phase-runner",
+        "run",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--verification-database-url",
+        "postgres://phase-runner.invalid/verification",
+        "--chain",
+        "ethereum-mainnet",
+        "--interpret-blocks-per-batch",
+        "0",
+    ])
+    .expect_err("a batch must hold at least one block");
+    assert!(error.to_string().contains("--interpret-blocks-per-batch"));
 }

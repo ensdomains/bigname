@@ -181,9 +181,20 @@ every chain use the full-state loader. It defaults to false. The lookahead
 loader depends on the two `normalized_events_v1_*_probe_idx` indexes; build them
 on an initialized database as described in
 [`ops/v1-lookahead-indexes/README.md`](../ops/v1-lookahead-indexes/README.md)
-before starting a release that contains the loader. Incomplete dependencies or
-an exceeded read limit stop the batch before publication; they never publish
-output from partial state.
+before starting a release that contains the loader. If interpretation reads a
+name the loader did not restore, the batch stops before publication; it never
+publishes output from partial state.
+
+`BIGNAME_INTERPRET_BLOCKS_PER_BATCH` (`--interpret-blocks-per-batch`) sets how
+many canonical blocks one Interpret [batch](glossary.md#batch-grid) reads,
+interprets and publishes in one transaction. It defaults to 500 and must be at
+least 1. It is the operator's control over Interpret memory per batch: the
+lookahead loader has no row or byte limit of its own, so a batch in which very
+many registrations fall due or very many names change loads all of their
+history, and a smaller batch holds fewer of them at once. Names that fall due at
+one block timestamp cannot be split across batches. The setting must not change
+stored output or the interpreter content hash, so it can be changed between runs
+without a redo.
 
 `BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR` configures the Prometheus listener for
 a directly launched runner and defaults to `127.0.0.1:9465`. The server Compose

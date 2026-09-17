@@ -93,7 +93,8 @@ WITH candidates AS MATERIALIZED (
           event.log_index DESC NULLS LAST, event.normalized_event_id DESC LIMIT 1
     ) chosen ON TRUE
 )
-SELECT CASE WHEN payload.bytes <= $6 THEN payload.body END AS body, payload.bytes, lineage.block_timestamp
+-- No LIMIT anywhere below: a truncated result would restore partial state.
+SELECT value.body, lineage.block_timestamp
 FROM winners
 JOIN normalized_events event ON event.normalized_event_id = winners.normalized_event_id
 JOIN LATERAL (
@@ -116,8 +117,4 @@ CROSS JOIN LATERAL (
         'after_state', event.after_state
     ) AS body
 ) value
-CROSS JOIN LATERAL (
-    SELECT value.body, octet_length(value.body::text)::bigint AS bytes
-) payload
 ORDER BY winners.block_number,winners.normalized_event_id
-LIMIT $5

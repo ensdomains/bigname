@@ -16,8 +16,9 @@ pub(crate) enum Attempt {
     FullStateRequired(StateLoader),
 }
 
-const MAX_REQUESTS: usize = 100_000;
-const MAX_PRIOR_EVENTS: usize = 100_000;
+// A termination guard, not a size limit. Each round either adds a name or resource from the
+// chain's finite history or ends the loop, so the closure always terminates; sixteen rounds
+// of links between names is far beyond any ENSv1 shape the adapter emits.
 const MAX_DEPENDENCY_ROUNDS: usize = 16;
 
 pub(crate) async fn batch_input(
@@ -81,15 +82,9 @@ pub(crate) async fn batch_input(
     let mut dependencies = collect_v1_batch_dependencies(&input, &provenance)
         .map_err(|error| invalid_dependencies("decode", error))?;
     validate_dependencies(&dependencies)?;
-    for name in lookahead_query::due_names(
-        &mut tx,
-        chain_id,
-        from_block,
-        predecessor,
-        last_timestamp,
-        MAX_REQUESTS,
-    )
-    .await?
+    for name in
+        lookahead_query::due_names(&mut tx, chain_id, from_block, predecessor, last_timestamp)
+            .await?
     {
         let (namespace, node) = name.split_once(':').ok_or_else(|| {
             InterpretError::data_integrity("lookahead expiry candidate has no namespace")
@@ -109,15 +104,8 @@ pub(crate) async fn batch_input(
             .map(|request| format!("{}:{}", request.namespace, request.node))
             .collect();
         let resources: Vec<_> = dependencies.resource_ids.iter().copied().collect();
-        let events = lookahead_query::events(
-            &mut tx,
-            chain_id,
-            from_block,
-            &names,
-            &resources,
-            MAX_PRIOR_EVENTS,
-        )
-        .await?;
+        let events =
+            lookahead_query::events(&mut tx, chain_id, from_block, &names, &resources).await?;
         dependencies
             .include_prior_events(&events)
             .map_err(|error| invalid_dependencies("expand prior links", error))?;
@@ -187,16 +175,6 @@ fn validate_dependencies(dependencies: &V1BatchDependencies) -> Result<()> {
             "lookahead was chosen but does not cover: {:?}",
             dependencies.unsupported,
         )));
-    }
-    if dependencies
-        .nodes
-        .len()
-        .saturating_add(dependencies.resource_ids.len())
-        > MAX_REQUESTS
-    {
-        return Err(InterpretError::data_integrity(
-            "lookahead exceeds 100000 dependency requests; refusing incomplete state",
-        ));
     }
     Ok(())
 }

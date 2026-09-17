@@ -12,14 +12,14 @@ use time::OffsetDateTime;
 
 use crate::{InterpretError, Result};
 
-// These are experiment limits, independent of the process environment. SQL suppresses
-// an oversized payload before sending it; streaming also bounds the accumulated batch.
-const MAX_EVENT_BYTES: i64 = 64 * 1024 * 1024;
+// Neither query has a row or byte limit. A batch that legitimately needs a large working
+// set (many names falling due at one timestamp, say) must load all of it; memory is the
+// operator's concern, managed through `BIGNAME_INTERPRET_BLOCKS_PER_BATCH`.
 const ENS_GRACE_PERIOD_SECS: i64 = 90 * 24 * 60 * 60;
 const EVENTS: &str = include_str!("lookahead/events.sql");
 const DUE_NAMES: &str = include_str!("lookahead/due_names.sql");
 
-type EventRow = (Option<Value>, i64, Option<OffsetDateTime>);
+type EventRow = (Value, Option<OffsetDateTime>);
 
 pub(super) async fn events(
     connection: &mut PgConnection,
@@ -27,29 +27,6 @@ pub(super) async fn events(
     before: i64,
     names: &[String],
     resources: &[Uuid],
-    limit: usize,
-) -> Result<Vec<PriorEventInput>> {
-    events_with_byte_limit(
-        connection,
-        chain,
-        before,
-        names,
-        resources,
-        limit,
-        MAX_EVENT_BYTES,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn events_with_byte_limit(
-    connection: &mut PgConnection,
-    chain: &str,
-    before: i64,
-    names: &[String],
-    resources: &[Uuid],
-    limit: usize,
-    byte_limit: i64,
 ) -> Result<Vec<PriorEventInput>> {
     if names.is_empty() && resources.is_empty() {
         return Ok(Vec::new());
@@ -63,29 +40,14 @@ async fn events_with_byte_limit(
         .bind(before)
         .bind(names)
         .bind(resources)
-        .bind(probe_limit(limit)?)
-        .bind(byte_limit)
         .fetch(connection);
     let mut result = Vec::new();
-    let mut bytes = 0_i64;
-    while let Some((body, size, timestamp)) = rows
+    while let Some((body, timestamp)) = rows
         .try_next()
         .await
         .map_err(|error| InterpretError::database("failed to load lookahead prior events", error))?
     {
-        if result.len() == limit {
-            return Err(cap_error("event count", limit));
-        }
-        bytes = bytes
-            .checked_add(size)
-            .ok_or_else(|| cap_error("event bytes", byte_limit))?;
-        if bytes > byte_limit || body.is_none() {
-            return Err(cap_error("event bytes", byte_limit));
-        }
-        result.push(decode_event(
-            body.expect("checked payload size"),
-            timestamp,
-        )?);
+        result.push(decode_event(body, timestamp)?);
     }
     Ok(result)
 }
@@ -96,49 +58,20 @@ pub(super) async fn due_names(
     before: i64,
     predecessor: Option<OffsetDateTime>,
     last: OffsetDateTime,
-    limit: usize,
 ) -> Result<Vec<String>> {
-    let mut rows = sqlx::query_scalar::<_, Option<String>>(DUE_NAMES)
+    let mut names: Vec<String> = sqlx::query_scalar(DUE_NAMES)
         .bind(chain)
         .bind(before)
         .bind(predecessor.map(OffsetDateTime::unix_timestamp))
         .bind(last.unix_timestamp())
-        .bind(probe_limit(limit)?)
         .bind(ENS_GRACE_PERIOD_SECS)
-        .bind(MAX_EVENT_BYTES)
-        .fetch(connection);
-    let mut names = Vec::new();
-    let mut bytes = 0_usize;
-    while let Some(name) = rows.try_next().await.map_err(|error| {
-        InterpretError::database("failed to load lookahead expiry candidates", error)
-    })? {
-        if names.len() == limit {
-            return Err(cap_error("expiry candidate count", limit));
-        }
-        let name = name.ok_or_else(|| cap_error("expiry candidate bytes", MAX_EVENT_BYTES))?;
-        bytes = bytes.saturating_add(name.len());
-        if bytes > MAX_EVENT_BYTES as usize {
-            return Err(cap_error("expiry candidate bytes", MAX_EVENT_BYTES));
-        }
-        names.push(name);
-    }
+        .fetch_all(connection)
+        .await
+        .map_err(|error| {
+            InterpretError::database("failed to load lookahead expiry candidates", error)
+        })?;
     names.sort();
     Ok(names)
-}
-
-fn probe_limit(limit: usize) -> Result<i64> {
-    limit
-        .checked_add(1)
-        .and_then(|value| i64::try_from(value).ok())
-        .ok_or_else(|| {
-            InterpretError::configuration("lookahead row limit cannot represent its overflow probe")
-        })
-}
-
-fn cap_error(kind: &str, limit: impl std::fmt::Display) -> InterpretError {
-    InterpretError::data_integrity(format!(
-        "lookahead {kind} exceeds limit {limit}; refusing incomplete prior state"
-    ))
 }
 
 fn decode_event(
