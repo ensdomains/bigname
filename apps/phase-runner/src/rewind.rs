@@ -219,8 +219,8 @@ async fn require_rewind_preserves_operator_redo(
         let instruction = redo_rerun_instruction(chain_id, PhaseName::Ingest, None, Some(range));
         return Err(RunnerError::data_integrity(format!(
             "cannot rewind chain {chain_id} to ancestor block {ancestor}: interrupted Ingest \
-             redo {from}..{to} would lose its readable range end; {instruction} with the \
-             configured sources to complete the covering Ingest repair before rewinding"
+             redo {from}..{to} would lose its readable range end; {instruction} to complete \
+             the covering Ingest repair before rewinding"
         )));
     }
     Ok(())
