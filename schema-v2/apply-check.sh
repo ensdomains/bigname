@@ -184,6 +184,26 @@ migration_is_closed_form_drop() {
 migration_uses_unicode_escape() {
     grep -qiE "U&[\"']" "$1"
 }
+# The frozen artifact is the baseline plus the schema-migration head that
+# ADR 0007 and storage.md name; a merge that brings a newer file moves the
+# artifact without moving the contract. Both documents name the head once as
+# `migrations/<file>.sql`; each must be the newest file, and they must agree.
+assert_documented_head_is_newest_migration() {
+    local newest documented doc
+    newest="$(ls "$ROOT"/migrations/*.sql | sort | tail -n 1 | xargs basename)"
+    for doc in docs/adrs/0007-v1-schema-freeze.md docs/storage.md; do
+        documented="$(grep -oE 'migrations/[0-9]{14}_[a-z0-9_]+\.sql' "$ROOT/$doc" | head -n 1 | sed 's#^migrations/##')"
+        if [ -z "$documented" ]; then
+            printf '%s\n' "$doc names no schema-migration head" >&2
+            exit 1
+        fi
+        if [ "$documented" != "$newest" ]; then
+            printf '%s\n' \
+                "$doc names the schema-migration head $documented, but the newest file in migrations/ is $newest; advance the frozen head in ADR 0007 and storage.md in the change that lands the schema-migration" >&2
+            exit 1
+        fi
+    done
+}
 assert_uninventoried_migrations_are_schema_qualified() {
     local migration_file migration_basename reason noncanonical
     # The rule proves itself on every run: each planted form must be refused
@@ -7855,6 +7875,7 @@ SQL
 report_timing specialized-predecessor "$refusal_probe_seconds"
 if [ "${SCHEMA_V2_APPLY_CHECK_TIMING:-0}" = 1 ]; then printf 'schema-v2 timing: refusal-probes=%ss\n' "$refusal_probe_seconds"; fi
 assert_uninventoried_migrations_are_schema_qualified
+assert_documented_head_is_newest_migration
 assert_reviewed_phase_migrations_applied
 if [ "$refusal_assertions_passed" -ne "$expected_refusal_assertions" ]; then
     printf '%s\n' \
