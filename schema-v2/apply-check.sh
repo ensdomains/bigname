@@ -100,16 +100,25 @@ phase_migration_uses_production_schema() {
 # table), quoted or not; the check prints what carries no schema qualifier and
 # any statement it cannot read.
 legacy_public_schema_drop="20260806120000_drop_legacy_public_schema.sql"
+# The schema-migrations that sort at or before the legacy-schema drop are the
+# fixed historical set listed in historical-migrations.txt; sqlx applies any
+# version a database has not recorded, whatever its position, so a new file
+# named to sort among them would run on an initialized database while looking
+# historical. The rule below therefore exempts the list, not the name order.
+historical_migrations_list="$ROOT/schema-v2/historical-migrations.txt"
 # A post-cutoff schema-migration that names no bigname_phase object is never
 # applied by this check, so the rule for one is closed rather than parsed: it
-# may consist only of `DROP INDEX|TABLE|SEQUENCE|VIEW|FUNCTION|PROCEDURE`
-# statements (with CONCURRENTLY, IF EXISTS, RESTRICT) whose every target is
-# `schema.name`, written with plain identifiers and no strings, quoted
-# identifiers, dollar quoting, block comments, or other lexical forms. CASCADE
-# is refused: PostgreSQL would drop whatever depends on the target, so a
-# bigname_phase view, trigger, or foreign key hanging off a public object
+# may consist only of `DROP INDEX|SEQUENCE|VIEW|MATERIALIZED VIEW|FUNCTION|
+# PROCEDURE` statements (with CONCURRENTLY, IF EXISTS, RESTRICT) whose every
+# target is `schema.name`, written with plain identifiers and no strings,
+# quoted identifiers, dollar quoting, block comments, or other lexical forms.
+# CASCADE is refused: PostgreSQL would drop whatever depends on the target, so
+# a bigname_phase view, trigger, or foreign key hanging off a public object
 # would go with it unlisted, while RESTRICT (the default) makes such a
-# dependency fail the real schema-migration loudly.
+# dependency fail the real schema-migration loudly. DROP TABLE is refused
+# outright: a table in another schema can be an inheritance child or a
+# partition of a bigname_phase table, and RESTRICT does not guard that link --
+# the drop succeeds and takes the rows visible through the phase parent.
 # Anything else -- any DDL that creates or alters, any DML, any expression,
 # any routine call -- must name `bigname_phase` and thereby join the
 # inventory, where it is applied and observed. A search-path-relative name
@@ -126,7 +135,11 @@ migration_is_closed_form_drop() {
                 s = statements[i]; sub(/^ +/, "", s); sub(/ +$/, "", s)
                 if (s == "") continue
                 u = toupper(s)
-                if (!match(u, /^DROP (INDEX( CONCURRENTLY)?|TABLE|SEQUENCE|VIEW|MATERIALIZED VIEW|FUNCTION|PROCEDURE)( IF EXISTS)? /)) {
+                if (match(u, /^DROP TABLE /)) {
+                    bad = bad " [DROP TABLE may detach a child or partition of a bigname_phase table: " substr(s, 1, 40) "]"
+                    continue
+                }
+                if (!match(u, /^DROP (INDEX( CONCURRENTLY)?|SEQUENCE|VIEW|MATERIALIZED VIEW|FUNCTION|PROCEDURE)( IF EXISTS)? /)) {
                     bad = bad " [not a closed-form drop: " substr(s, 1, 40) "]"
                     continue
                 }
@@ -171,9 +184,11 @@ assert_uninventoried_migrations_are_schema_qualified() {
         'DROP INDEX IF EXISTS public.old_idx, name_current_lookup_idx RESTRICT;'
         'DROP VIEW public.bridge CASCADE;'
         'DROP FUNCTION IF EXISTS public.fn(integer, text) cascade;'
+        'DROP TABLE public.phase_child RESTRICT;'
+        'drop table if exists public.a, public.b;'
         'DROP INDEX CONCURRENTLY IF EXISTS "public"."ok_idx";'
-        'DROP TABLE "phase.audit";'
-        'DROP TABLE U&"bigname\005Fphase".chain_phase_state;'
+        'DROP VIEW "phase.audit";'
+        'DROP SEQUENCE U&"bigname\005Fphase".chain_phase_state_seq;'
         'CREATE INDEX x ON public.t (a);'
         'UPDATE public.t SET a = 1;'
         'ALTER TABLE public.shadow INHERIT chain_phase_state;'
@@ -187,9 +202,9 @@ assert_uninventoried_migrations_are_schema_qualified() {
         'CREATE TABLE public.audit AS SELECT "write_resolution_divergence"(1);'
         'INSERT INTO public.audit VALUES (nextval('"'"'reverse_hydration_attempt_ordinal_seq'"'"'));'
         'COMMENT ON TABLE public.audit IS $msg$text -- literal$msg$; UPDATE chain_phase_state SET a = 1;'
-        'DROP TABLE public.a /* -- */; UPDATE chain_phase_state SET a = 1;'
+        'DROP VIEW public.a /* -- */; UPDATE chain_phase_state SET a = 1;'
         'CREATE FUNCTION public.touch() RETURNS int LANGUAGE sql AS '"'"'SELECT 1'"'"';'
-        'DROP TABLE public.a; DROP TABLE b;'
+        'DROP VIEW public.a; DROP VIEW b;'
     )
     for reason in "${refused[@]}"; do
         if printf '%s\n' "$reason" | migration_is_closed_form_drop /dev/stdin >/dev/null; then
@@ -207,14 +222,34 @@ assert_uninventoried_migrations_are_schema_qualified() {
         printf '%s\n' "unicode-escape check refused a plain identifier" >&2
         exit 1
     fi
-    if ! printf -- '-- no-transaction\nDROP INDEX CONCURRENTLY IF EXISTS\n    public.old_idx;\nDROP TABLE IF EXISTS public.a, public.b;\nDROP FUNCTION IF EXISTS public.fn(integer, text), public.g(numeric(10,2));\nDROP PROCEDURE public.p(integer, text) RESTRICT;\n' \
+    if ! printf -- '-- no-transaction\nDROP INDEX CONCURRENTLY IF EXISTS\n    public.old_idx;\nDROP VIEW IF EXISTS public.a, public.b;\nDROP MATERIALIZED VIEW public.mv RESTRICT;\nDROP SEQUENCE IF EXISTS public.s;\nDROP FUNCTION IF EXISTS public.fn(integer, text), public.g(numeric(10,2));\nDROP PROCEDURE public.p(integer, text) RESTRICT;\n' \
         | migration_is_closed_form_drop /dev/stdin >/dev/null; then
         printf '%s\n' "closed-form check refused the closed form" >&2
         exit 1
     fi
+    local -A historical_lookup=()
+    while IFS= read -r migration_basename; do
+        [ -n "$migration_basename" ] || continue
+        if [ ! -f "$ROOT/migrations/$migration_basename" ]; then
+            printf '%s\n' "historical schema-migration listed in $(basename "$historical_migrations_list") is missing: $migration_basename" >&2
+            exit 1
+        fi
+        if [[ "$migration_basename" > "$legacy_public_schema_drop" ]]; then
+            printf '%s\n' "$(basename "$historical_migrations_list") lists a schema-migration newer than the legacy-schema drop: $migration_basename" >&2
+            exit 1
+        fi
+        historical_lookup["$migration_basename"]=1
+    done < "$historical_migrations_list"
     for migration_file in "$ROOT"/migrations/*.sql; do
         migration_basename="$(basename "$migration_file")"
-        [[ "$migration_basename" > "$legacy_public_schema_drop" ]] || continue
+        if [ -n "${historical_lookup[$migration_basename]:-}" ]; then
+            continue
+        fi
+        if ! [[ "$migration_basename" > "$legacy_public_schema_drop" ]]; then
+            printf '%s\n' \
+                "$migration_basename sorts among the historical schema-migrations but is not one of them; a schema-migration cannot be backdated, name it after the current head" >&2
+            exit 1
+        fi
         # PostgreSQL folds an unquoted BIGNAME_PHASE to the production schema, but
         # the inventory and the scratch-schema rewrite match the lowercase literal
         # only, so any other spelling anywhere -- even beside a lowercase one --

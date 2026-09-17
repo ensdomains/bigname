@@ -9,7 +9,7 @@ Accepted: 2026-09-11
 > The freeze is effective from the acceptance date, 2026-09-11 — the day the
 > last of that history landed (#885, the canonicality rule of carve-out 3;
 > the pre-acceptance head landed on 2026-09-07). Every schema-migration up to
-> that day predates the freeze; the twelve that landed after it, before this
+> that day predates the freeze; the thirteen that landed after it, before this
 > ADR merged, are the first breach and are recorded as such below.
 
 ## Context
@@ -97,14 +97,14 @@ The V1 schema contract is the pair:
 
 - the `schema-v2/baseline/` tree, and
 - the schema-migration head at
-  `migrations/20260915120000_address_records_optional_authority.sql`.
+  `migrations/20260916120000_surface_bindings_name_history_idx.sql`.
 
 The draft named `20260811120200_ens_v2_migration_slice_1_constraints.sql`, which
-was the head when it was written. Fifty schema-migrations follow it up to the
+was the head when it was written. Fifty-one schema-migrations follow it up to the
 head named above: 38 landed before acceptance, while this ADR was a draft,
 under the review-only process § Alternatives describes, so none of them is a
 carve-out under this ADR — they entered the frozen artifact by predating the
-freeze — and twelve landed after acceptance, which the next paragraphs
+freeze — and thirteen landed after acceptance, which the next paragraphs
 record. The head is restated so the frozen artifact is the tree the
 milestone actually builds on. The 38 are not all slice work. Four are the
 ENSv1→ENSv2 slice schema this ADR anticipated:
@@ -138,10 +138,10 @@ is one more independent change:
 exact zero `addr:60` stays absent when a default derivation exists — a
 serving-semantics change, and the last schema-migration before acceptance.
 
-The remaining twelve landed after acceptance and before this ADR merged, all
-in #893 (2026-09-16), and none as a carve-out or with an amendment: under the
-effective date above they are the first breach of the freeze, recorded here
-rather than reclassified as history.
+The remaining thirteen landed after acceptance and before this ADR merged,
+twelve in #893 (2026-09-16) and one in #897 (2026-09-17), none as a carve-out
+or with an amendment: under the effective date above they are the first
+breach of the freeze, recorded here rather than reclassified as history.
 `20260909120000`–`120200_resolver_record_id_events` widen the
 `normalized_events` event-kind CHECK in three steps — a constraint
 replacement on a populated table; `20260911120000` and `20260911120200` add
@@ -151,26 +151,37 @@ and `20260915120000` drops three of its NOT NULL constraints;
 `20260913120000` and `20260914120000` replace `write_resolution_divergence`
 and add `revalidate_resolution_lookup_state`; `20260913130000` and
 `20260913130100` replace the CHECKs on `permissions_current_resource_summary`
-and `account_permission_state_current`. The head named above is the last of
-them, so the frozen artifact is the tree an initialized database actually
-holds; the breach is the subject of the Rollout section below.
+and `account_permission_state_current`. #897's `20260916120000` adds the
+`surface_bindings` `(chain_id, logical_name_id)` index that Interpret redo
+preparation reads without a canonicality predicate. The head named above is
+the last of them, so the frozen artifact is the tree an initialized database
+actually holds; the breach is the subject of the Rollout section below.
 
 Since #849 `apply-check.sh` applies every schema-migration that names a
 `bigname_phase` object and fails on one it does not list. Its inventory is
 that literal token, so a schema-migration written against the connection's
 search path would not be in it; the same script therefore closes that door
-by rule rather than by parsing: a schema-migration newer than the
-legacy-schema drop that names no `bigname_phase` object may consist only of
-`DROP` statements whose every target is `schema.name`, written with plain
+by rule rather than by parsing: a schema-migration outside the historical
+set that names no `bigname_phase` object may consist only of `DROP`
+statements for indexes, sequences, views, materialized views, functions, and
+procedures whose every target is `schema.name`, written with plain
 identifiers and nothing quoted — no strings, quoted identifiers, dollar
 quoting, or block comments — and without `CASCADE`, since a cascading drop
 would take any dependent `bigname_phase` object with it unlisted, where the
 default `RESTRICT` makes that dependency fail the schema-migration loudly.
-Any other statement, any expression, any routine
+`DROP TABLE` is refused even with `RESTRICT`: a table in another schema can
+be an inheritance child or a partition of a `bigname_phase` table, and
+PostgreSQL drops it without complaint, taking the rows visible through the
+phase parent. Any other statement, any expression, any routine
 call, and any spelling of the phase schema other than `bigname_phase` is
 refused, so a search-path-relative name cannot be written outside the
-inventory whatever statement carries it. The check proves itself on every
-run against a planted set of the forms it refuses and the one it accepts.
+inventory whatever statement carries it. The historical set is the explicit
+list in `schema-v2/historical-migrations.txt`, not a filename cutoff: sqlx
+applies whichever versions a database has not recorded, so a new file named
+to sort among the historical ones would run on an initialized database
+while looking historical, and the check refuses it. The check proves itself
+on every run against a planted set of the forms it refuses and the one it
+accepts.
 From acceptance on, a
 schema-migration of any of these kinds cannot land without moving the
 conformance test, which is where the carve-out or amendment is checked for.
@@ -487,8 +498,9 @@ is a process miss worth naming: the freeze was observable the whole time
 through `apply-check.sh`, but the written contract trailed the schema by three
 weeks. And the miss repeated once more: between acceptance and this ADR's
 merge, #893 landed twelve schema-migrations — a new projection table,
-constraint replacements on populated tables, function replacements — under
-the review-only process, with no carve-out and no amendment. They are
+constraint replacements on populated tables, function replacements — and
+#897 a thirteenth, an index, under the review-only process, with no carve-out
+and no amendment. They are
 inventoried under the frozen artifact and the head advanced to the last of
 them, because the artifact has to be the tree that exists; they are not
 retroactively authorized. From this ADR's merge the process is the one it
