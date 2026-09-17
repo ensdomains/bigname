@@ -2,9 +2,67 @@ use std::{io::Read, path::Path, time::Instant};
 
 use bigname_adapters::schema_v2::{StateCacheCapacity, prepare_schema_v2_batch_lookahead};
 
-/// Opt-in operator experiment. All connections enforce read-only mode; no writer is called.
+fn manifest(source_family: &str) -> bigname_adapters::schema_v2::ManifestInput {
+    bigname_adapters::schema_v2::ManifestInput {
+        manifest_id: 1,
+        manifest_version: 1,
+        namespace: "ens".to_owned(),
+        source_family: source_family.to_owned(),
+        chain_id: "ethereum-mainnet".to_owned(),
+        deployment_label: "test".to_owned(),
+        normalizer_version: "test".to_owned(),
+        payload_json: "{}".to_owned(),
+    }
+}
+
+#[test]
+fn any_uncovered_manifest_family_requires_the_full_state_loader() {
+    use crate::FullStateReason::UnsupportedSourceFamily;
+    let mainnet: Vec<_> = [
+        "basenames_execution",
+        "basenames_l1_compat",
+        "ens_v1_registrar_l1",
+        "ens_v1_registry_l1",
+        "ens_v1_resolver_l1",
+        "ens_v1_reverse_l1",
+        "ens_v1_wrapper_l1",
+    ]
+    .map(manifest)
+    .into();
+    assert_eq!(super::full_state_reason(&mainnet, &mainnet), None);
+
+    let mut sepolia = mainnet.clone();
+    sepolia.push(manifest("ens_v2_registry_l1"));
+    assert_eq!(
+        super::full_state_reason(&sepolia, &sepolia),
+        Some(UnsupportedSourceFamily {
+            source_family: "ens_v2_registry_l1".to_owned(),
+            rollout_status: "active",
+        })
+    );
+    // The full-state loader restores a deprecated manifest's retained events; lookahead
+    // reads none of them, so a deprecated uncovered family also requires the full-state loader.
+    assert_eq!(
+        super::full_state_reason(&mainnet, &sepolia),
+        Some(UnsupportedSourceFamily {
+            source_family: "ens_v2_registry_l1".to_owned(),
+            rollout_status: "deprecated",
+        })
+    );
+    let base = [manifest("basenames_base_registry")];
+    assert!(super::full_state_reason(&base, &base).is_some());
+}
+
+/// Opt-in operator probe. All connections enforce read-only mode; no writer is called.
+///
+/// `BIGNAME_LOOKAHEAD_PROBE_OUTPUT` names a directory that receives one complete
+/// `BatchOutput` file per batch, named by the batch's first block. With
+/// `BIGNAME_LOOKAHEAD_PROBE_LOADER=full-state` the same batches run through the full-state
+/// loader, carrying its session between batches as the engine does, which produces the
+/// baseline directory. With `BIGNAME_LOOKAHEAD_PROBE_BASELINE` set, every batch, not only
+/// the first, must equal its baseline file; a missing baseline file fails the probe.
 #[tokio::test]
-#[ignore = "requires a read-only mainnet database and optional saved full-state baseline"]
+#[ignore = "requires a read-only mainnet database and optional saved full-state baselines"]
 async fn readonly_mainnet_batches() -> anyhow::Result<()> {
     let url = std::env::var("BIGNAME_LOOKAHEAD_PROBE_DATABASE_URL")?;
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -15,9 +73,6 @@ async fn readonly_mainnet_batches() -> anyhow::Result<()> {
                     .execute(&mut *connection)
                     .await?;
                 sqlx::query("SET search_path = bigname_phase, public")
-                    .execute(&mut *connection)
-                    .await?;
-                sqlx::query("SET statement_timeout = '60s'")
                     .execute(&mut *connection)
                     .await?;
                 Ok(())
@@ -35,29 +90,58 @@ async fn readonly_mainnet_batches() -> anyhow::Result<()> {
         (1..=32).contains(&batches),
         "probe batch count must be 1..=32"
     );
+    let full_state = match std::env::var("BIGNAME_LOOKAHEAD_PROBE_LOADER").as_deref() {
+        Ok("full-state") => true,
+        Ok("lookahead") | Err(_) => false,
+        Ok(other) => anyhow::bail!("unknown probe loader {other}"),
+    };
+    let capacity = StateCacheCapacity::Entries(65_536);
+    let mut carried = None;
     for batch in 0..batches {
         let started = Instant::now();
         let from = first + batch * 500;
-        let loaded = super::batch_input(
-            &pool,
-            "ethereum-mainnet",
-            from,
-            from + 499,
-            None,
-            StateCacheCapacity::Entries(65_536),
-        )
-        .await?;
+        let loaded = if full_state {
+            crate::load::batch_input(
+                &pool,
+                "ethereum-mainnet",
+                from,
+                from + 499,
+                None,
+                carried.take(),
+                capacity,
+            )
+            .await?
+        } else {
+            match super::batch_input(&pool, "ethereum-mainnet", from, from + 499, None, capacity)
+                .await?
+            {
+                super::Attempt::Loaded(loaded) => *loaded,
+                super::Attempt::FullStateRequired(choice) => {
+                    anyhow::bail!("lookahead is not chosen for this database: {choice:?}")
+                }
+            }
+        };
         let load_ms = started.elapsed().as_millis();
         let count = loaded.restored_event_count;
         let raw = loaded.input.raw_logs.len();
-        let nodes = loaded.lookahead_nodes.unwrap();
-        let prepared = prepare_schema_v2_batch_lookahead(
-            loaded.input,
-            loaded.provenance_manifests,
-            loaded.adapter_session.unwrap(),
-            &nodes,
-            StateCacheCapacity::Entries(65_536),
-        )?;
+        let session = loaded
+            .adapter_session
+            .expect("both loaders restore a session");
+        let prepared = match &loaded.lookahead_nodes {
+            Some(nodes) => prepare_schema_v2_batch_lookahead(
+                loaded.input,
+                loaded.provenance_manifests,
+                session,
+                nodes,
+                capacity,
+            )?,
+            None => bigname_adapters::prepare_schema_v2_batch_incremental_with_provenance(
+                loaded.input,
+                loaded.provenance_manifests,
+                Some(session),
+                capacity,
+            )?,
+        };
         let values = crate::load::prior_state_values(
             &pool,
             "ethereum-mainnet",
@@ -67,26 +151,41 @@ async fn readonly_mainnet_batches() -> anyhow::Result<()> {
         .await?;
         let (output, session) = prepared.finish(values)?;
         eprintln!(
-            "lookahead from={from} nodes={} prior_events={count} raw_logs={raw} normalized_events={} load_ms={load_ms} total_ms={} rss_kib={}",
-            nodes.len(),
+            "probe loader={} from={from} nodes={} prior_events={count} raw_logs={raw} normalized_events={} load_ms={load_ms} total_ms={} rss_kib={}",
+            if full_state {
+                "full-state"
+            } else {
+                "lookahead"
+            },
+            loaded
+                .lookahead_nodes
+                .as_ref()
+                .map_or(0, |nodes| nodes.len()),
             output.normalized_events.len(),
             started.elapsed().as_millis(),
             rss_kib()
         );
-        if batch == 0
-            && let Ok(path) = std::env::var("BIGNAME_LOOKAHEAD_PROBE_OUTPUT")
-        {
+        if let Ok(directory) = std::env::var("BIGNAME_LOOKAHEAD_PROBE_OUTPUT") {
+            let path = Path::new(&directory).join(format!("{from}.txt"));
             std::fs::write(&path, format!("{output:?}"))?;
             if let Ok(baseline) = std::env::var("BIGNAME_LOOKAHEAD_PROBE_BASELINE") {
                 anyhow::ensure!(
-                    same_file(Path::new(&path), Path::new(&baseline))?,
-                    "lookahead complete BatchOutput differs from full-state baseline"
+                    same_file(&path, &Path::new(&baseline).join(format!("{from}.txt")))?,
+                    "complete BatchOutput for the batch at {from} differs from its baseline"
                 );
-                eprintln!("lookahead complete_output_identical=true");
+                eprintln!("probe from={from} complete_output_identical=true");
             }
         }
-        drop((output, session, nodes));
-        eprintln!("lookahead released from={from} rss_kib={}", rss_kib());
+        if full_state {
+            let cache =
+                crate::load::fold_prior_cache(loaded.prior_cache, &output.normalized_events);
+            carried = Some(crate::load::CachedPrior {
+                cache,
+                adapter_session: session,
+            });
+        }
+        drop(output);
+        eprintln!("probe released from={from} rss_kib={}", rss_kib());
     }
     Ok(())
 }

@@ -1211,6 +1211,26 @@ the adapter advances time-derived protocol state to that timestamp. Exact
 cold-restore reconstruction therefore depends on the predecessor remaining
 readable in the same input snapshot.
 
+On a chain whose manifests all belong to ENSv1 source families (or to the
+families that interpret no logs), Interpret instead restores state for each
+batch with the [lookahead loader](glossary.md#lookahead-loader). Before
+interpreting, the adapter decodes the batch's logs without interpreting them
+and lists every ENSv1 name (by namehash) and resource the logs can touch.
+Interpret adds the names whose registrar expiry plus the 90-day grace period
+falls inside the batch's time span, because time-derived releases touch names no
+log mentions. It then reads, in the batch's input snapshot, the latest readable
+event per interpreter state key among the events of those names and resources,
+follows the names and resources those events reference until no new one
+appears, and restores a fresh adapter state from exactly those events under the
+same canonical-lineage and pre-batch boundary rules as a cold restore. The
+session is discarded after the batch. Two partial expression indexes on
+`normalized_events` serve these reads: `normalized_events_v1_direct_node_probe_idx`
+(events of one name) and `normalized_events_v1_due_probe_idx` (registrar expiry
+ranges). The loader is an access path, not a semantic: it must produce the same
+normalized events, identity rows and discovery edges as the full-state loader,
+and it is covered by the same interpreter content hash. It fails the batch,
+rather than publishing, if interpretation reads a name that was not loaded.
+
 For ENSv2, a retained registry/root `PreimageObserved` event for a canonical
 [name surface](glossary.md#surface-name-surface), or a retained resolver
 `AliasChanged` preimage observation whose DNS name passes normalization,

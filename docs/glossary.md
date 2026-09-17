@@ -1502,6 +1502,18 @@ protocol topology and current authority needed by the next batch, plus a
 bounded cache of persisted event values. It is disposable: a cold restore
 rebuilds it from readable `normalized_events` rows.
 
+## Lookahead loader
+
+the way Interpret restores prior adapter state for one batch on a chain
+whose manifests all belong to ENSv1 source families: it loads only the history
+of the names and resources the batch can touch (those its logs mention, those
+earlier events link to them, and registrations falling due in the batch)
+instead of all retained history. The other way is the *full-state loader*,
+which restores everything once and then carries the
+[interpreter session](#interpreter-session) between batches. Interpret chooses
+between them automatically for each chain and batch; both must produce identical
+output. See [Interpret process memory](storage.md#interpret-process-memory).
+
 ## Interpreter state key
 
 the opaque string an adapter derives for one

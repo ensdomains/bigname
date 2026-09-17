@@ -90,6 +90,12 @@ because replay must also find orphaned and closed observations. Follow its
 [online index runbook](../ops/discovery-reopen-index/README.md) before applying
 the matching schema-migration on a large initialized database.
 
+Interpret's per-batch ENSv1 [lookahead loader](glossary.md#lookahead-loader)
+reads `normalized_events` through two partial expression indexes. Follow their
+[online index runbook](../ops/v1-lookahead-indexes/README.md) before applying
+the matching schema-migration on a large initialized database, and before
+starting a release that contains the loader.
+
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
 runtime configuration is documented in
@@ -148,18 +154,36 @@ values reduce process memory and cause more indexed reads from
 through that read path. The setting does not change stored output or the
 [interpreter content hash](glossary.md#interpreter-content-hash).
 
-`BIGNAME_EXPERIMENTAL_V1_LOOKAHEAD=true` enables the experimental ENSv1
-batch loader for the isolated blue-brain deployment. It defaults to false.
-Install and verify the two indexes in
-[`ops/experimental/v1-lookahead-indexes.sql`](../ops/experimental/v1-lookahead-indexes.sql)
-first; they are not part of the normal baseline upgrade. The loader selects
-the batch's explicit name and resource dependencies plus registrations due to
-expire, restores their canonical prior state, and discards the adapter session
-after each committed batch. It preserves the existing publication and reorg
-checks. Unsupported protocol families, incomplete dependencies, or exceeded
-read limits stop the experiment before publication; it does not silently switch
-back to a full-history restore. The deployment procedure and rollback limits are
-in [`ops/experimental/README.md`](../ops/experimental/README.md).
+Interpret chooses how it restores prior adapter state for each chain and each
+batch; there is nothing to enable. When every active or deprecated manifest of
+the chain belongs to a source family the
+[lookahead loader](glossary.md#lookahead-loader) covers (the five `ens_v1_*`
+families, plus `basenames_l1_compat` and the `*_execution` families, which
+interpret no logs), Interpret uses the lookahead loader: it reads the names and
+resources the batch's logs mention plus the registrations falling due in the
+batch, restores only their history, and keeps no
+[interpreter session](glossary.md#interpreter-session) between batches.
+Otherwise it uses the full-state loader, which restores all retained history
+once and then carries the session. Ethereum Sepolia has active ENSv2 manifests
+and Base has Basenames registry manifests, so both always use the full-state
+loader. Both loaders must produce identical stored output and share one
+[interpreter content hash](glossary.md#interpreter-content-hash), so a change
+of loader needs no redo. The choice can change only when a release changes the
+chain's manifest set; a change to the full-state loader costs one cold restore
+of the chain's history, with the memory that implies.
+
+The runner logs the choice at info level when a chain's loader is first chosen
+and whenever it changes (`interpret chose its prior-state loader`,
+`interpret changed its prior-state loader`), with the source family that
+required the full-state loader. `BIGNAME_INTERPRET_FORCE_FULL_STATE_LOADER=true`
+(`--interpret-force-full-state-loader`) is the one operator override: it makes
+every chain use the full-state loader. It defaults to false. The lookahead
+loader depends on the two `normalized_events_v1_*_probe_idx` indexes; build them
+on an initialized database as described in
+[`ops/v1-lookahead-indexes/README.md`](../ops/v1-lookahead-indexes/README.md)
+before starting a release that contains the loader. Incomplete dependencies or
+an exceeded read limit stop the batch before publication; they never publish
+output from partial state.
 
 `BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR` configures the Prometheus listener for
 a directly launched runner and defaults to `127.0.0.1:9465`. The server Compose

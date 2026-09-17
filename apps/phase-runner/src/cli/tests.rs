@@ -743,3 +743,29 @@ fn inspect_cli_resolves_each_kept_schema_v2_window() {
         }
     }
 }
+
+#[test]
+fn run_cli_forces_the_full_state_interpret_loader_only_when_asked() {
+    let run = |extra: &[&str]| {
+        let mut arguments = vec![
+            "phase-runner",
+            "run",
+            "--database-url",
+            "postgres://phase-runner.invalid/fresh",
+            "--verification-database-url",
+            "postgres://phase-runner.invalid/verification",
+            "--chain",
+            "ethereum-mainnet",
+        ];
+        arguments.extend_from_slice(extra);
+        let Command::Run(args) = Cli::try_parse_from(arguments)
+            .expect("run options must parse")
+            .command
+        else {
+            panic!("expected run command");
+        };
+        resolve_capacity(args.capacity).expect("capacity must resolve")
+    };
+    assert!(!run(&[]).interpret_force_full_state_loader);
+    assert!(run(&["--interpret-force-full-state-loader"]).interpret_force_full_state_loader);
+}

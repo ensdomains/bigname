@@ -41,7 +41,8 @@ pub struct BatchOutcome {
 pub struct Engine {
     pool: PgPool,
     state_cache_capacity: StateCacheCapacity,
-    experimental_v1_lookahead: bool,
+    force_full_state_loader: bool,
+    loader_choices: loader_choice::LoaderChoices,
     prior_sessions: Mutex<HashMap<String, PriorSession>>,
 }
 
@@ -68,13 +69,16 @@ impl Engine {
         Self {
             pool,
             state_cache_capacity: StateCacheCapacity::Entries(entries),
-            experimental_v1_lookahead: false,
+            force_full_state_loader: false,
+            loader_choices: loader_choice::LoaderChoices::default(),
             prior_sessions: Mutex::new(HashMap::new()),
         }
     }
 
-    pub fn with_experimental_v1_lookahead(mut self, enabled: bool) -> Self {
-        self.experimental_v1_lookahead = enabled;
+    /// Operator override: always restore prior state with the full-state loader, even on
+    /// a chain where the per-batch ENSv1 lookahead loader would be chosen automatically.
+    pub fn with_full_state_loader_forced(mut self, forced: bool) -> Self {
+        self.force_full_state_loader = forced;
         self
     }
 
@@ -156,8 +160,13 @@ impl Engine {
             .resume_current
             .as_ref()
             .map(|marker| (marker.number, marker.hash.as_str()));
-        let loaded = if self.experimental_v1_lookahead {
-            drop(cached_prior);
+        // The loader is chosen for each chain and each batch, inside the loader's own
+        // database snapshot, so the choice always matches the manifests the batch uses.
+        let lookahead = if self.force_full_state_loader {
+            load::lookahead::Attempt::FullStateRequired(StateLoader::FullState {
+                reason: FullStateReason::OperatorOverride,
+            })
+        } else {
             load::lookahead::batch_input(
                 &self.pool,
                 &request.chain_id,
@@ -167,18 +176,29 @@ impl Engine {
                 self.state_cache_capacity,
             )
             .await?
-        } else {
-            load::batch_input(
-                &self.pool,
-                &request.chain_id,
-                *batch_from,
-                *batch_to,
-                resume_marker,
-                cached_prior,
-                self.state_cache_capacity,
-            )
-            .await?
         };
+        let loaded = match lookahead {
+            load::lookahead::Attempt::Loaded(loaded) => {
+                drop(cached_prior);
+                self.loader_choices
+                    .record(&request.chain_id, StateLoader::Lookahead)?;
+                *loaded
+            }
+            load::lookahead::Attempt::FullStateRequired(choice) => {
+                self.loader_choices.record(&request.chain_id, choice)?;
+                load::batch_input(
+                    &self.pool,
+                    &request.chain_id,
+                    *batch_from,
+                    *batch_to,
+                    resume_marker,
+                    cached_prior,
+                    self.state_cache_capacity,
+                )
+                .await?
+            }
+        };
+        let used_lookahead = loaded.lookahead_nodes.is_some();
         let restored_event_count = loaded.restored_event_count;
         profile_phase(
             profile,
@@ -270,7 +290,8 @@ impl Engine {
         .await?;
         profile_phase(profile, "write_batch", phase_started, None);
         let phase_started = Instant::now();
-        if !self.experimental_v1_lookahead {
+        // Lookahead restores each batch from the database, so it keeps no session.
+        if !used_lookahead {
             self.store_prior_session(
                 session_key,
                 batch_to.saturating_add(1),
@@ -390,6 +411,10 @@ fn validate_loaded_lineage(
     }
     Ok(())
 }
+
+#[path = "engine/loader_choice.rs"]
+mod loader_choice;
+pub use loader_choice::{FullStateReason, StateLoader};
 
 #[cfg(test)]
 #[path = "engine/tests.rs"]

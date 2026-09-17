@@ -1,4 +1,4 @@
-//! Experimental ENSv1 working-set requests. Persistence and canonical selection stay in Interpret.
+//! ENSv1 per-batch working-set requests. Persistence and canonical selection stay in Interpret.
 use std::collections::BTreeSet;
 
 use anyhow::{Context, ensure};
@@ -102,6 +102,12 @@ impl V1BatchDependencies {
         }
         Ok(())
     }
+}
+
+/// Whether lookahead restores everything a manifest of this source family can depend on.
+/// Interpret uses it to choose between lookahead and the full-state loader.
+pub fn v1_lookahead_supports_family(family: &str) -> bool {
+    supported_family(family)
 }
 
 fn supported_family(family: &str) -> bool {

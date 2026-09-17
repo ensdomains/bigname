@@ -16,8 +16,14 @@ pub struct InterpretPhase {
 }
 
 impl InterpretPhase {
-    pub fn with_experimental_v1_lookahead(mut self, enabled: bool) -> Self {
-        self.engine = self.engine.with_experimental_v1_lookahead(enabled);
+    /// The Interpret settings an operator controls, taken from the runner's capacity settings.
+    pub fn from_capacity(pool: PgPool, capacity: &crate::config::CapacityConfig) -> Self {
+        Self::with_state_cache_capacity(pool, capacity.interpreter_state_cache_entries)
+            .with_full_state_loader_forced(capacity.interpret_force_full_state_loader)
+    }
+
+    pub fn with_full_state_loader_forced(mut self, forced: bool) -> Self {
+        self.engine = self.engine.with_full_state_loader_forced(forced);
         self
     }
 
