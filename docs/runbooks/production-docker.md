@@ -83,9 +83,9 @@ requirement below exists.
    it the reader can fail to open the database with
    `Resource temporarily unavailable (11)`; see
    [deployment.md](../deployment.md#switching-sepolia-from-local-rpc-to-direct-reth-reads).
-   A `container:` namespace exists only while the node container runs, so start
-   the node first, and recreate the phase runner after the node container is
-   recreated.
+   A `container:` namespace belongs to one run of the node container, so start
+   the node first, and restart the phase runner whenever the node container
+   restarts or is recreated.
 7. **Memory.** Direct reads are memory-mapped, and the pages the reader touches
    are file page cache charged to the phase-runner container. Where the runner
    has a container memory ceiling (`BIGNAME_PHASE_RUNNER_MEMORY_LIMIT`, added
