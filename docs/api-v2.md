@@ -188,6 +188,8 @@ events. The matched row is returned with `grant_relation=operator`,
 `grant_scope={"kind":"account","detail":{"chain_id":...,"authority_kind":"registry","authority_contract":...,"owner":...}}`,
 and `powers=["registry_control"]`. Direct rows keep their existing wire shape
 and omit `grant_relation`. `include=lineage` emits only the bare `lineage.grant={"kind":"event"}` marker; the binding evidence remains internal.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L21 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L112-L118 @ ens_v1@91c966f)
 (upstream: .refs/basenames/src/L2/Registry.sol:L46-L52 @ basenames@1809bbc)
 (upstream: .refs/basenames/src/L2/Registry.sol:L148-L158 @ basenames@1809bbc)
 
