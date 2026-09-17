@@ -444,12 +444,12 @@ The latest resolver declares `read_features = ["ensip19_default_address"]`, matc
 Admission is necessary but not sufficient for a migrated child's cleanup to be
 observable. Both cleanup shapes — the wrapper token parked in the Graveyard, and
 the node unwrapped into it — are derived against wrapper state that only exists
-if that child's original `NameWrapped` was itself ingested. A source's ingest
-floor is operator-configured per run, not derived from a manifest
-`start_block`, so a Sepolia runtime started at the ENSv2 floor admits the
-wrapper family but still sees no cleanup for children wrapped earlier. Deriving
-child boundaries on this profile requires an ingest floor at or below the
-wrapper's `start_block`, and below each child's own wrap block.
+if that child's original `NameWrapped` was itself ingested. On Sepolia the
+runner therefore requires every chain source to start ingesting at block `0`
+and rejects any other configured start, so NameWrapper history from before the
+ENSv2 deployment stays observable. Each manifest `start_block` remains a
+per-contract watch lower bound: it sets the first block from which that
+contract's logs are watched and does not move the chain-wide ingest start.
 
 No ENSv1 registrar-controller contract is admitted on this deployment profile. The ordinary BaseRegistrar token lifecycle is present, but label-bearing registration and renewal observations emitted by registrar controllers are absent. Registrations visible only as numeric BaseRegistrar events establish no ordinary registrar identity after a full lapse, so re-registrations in that coverage gap do not independently restore an exact `.eth` name surface. The pinned `LegacyETHRegistrarController` at `0x7e02892cfc2Bfd53a75275451d73cF620e793fc0`, from block `3790197`, and `ETHRegistrarController` at `0xfb3cE5D01e0f33f41DbB39035dB9745962F1f968`, from block `8579988`, have receipt-backed deployment records. They remain outside this part because admitting either or both would only partially widen label-bearing intake and would not cover the wrapped-controller path that exposes the #515 gap.[^v1-sepolia-receipt-backed-controllers] This part therefore adopts #515 option (b); a separate controller capability slice owns any later admission.
 
