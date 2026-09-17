@@ -51,20 +51,27 @@ impl Rebuild {
     /// Seeds `names` names and runs a from-zero Project pass up to and including `last`.
     async fn through(prefix: &str, names: i64, last: Builder) -> Result<Self> {
         let database = TestDatabase::create(TestDatabaseConfig::new(prefix)).await?;
-        let mut transaction = database.pool().begin().await?;
+        // The schema and the seed are committed first: one transaction that also created every
+        // staging table would hold more locks than the server allows.
+        let mut setup = database.pool().begin().await?;
         raw_sql("CREATE SCHEMA bigname_phase; SET LOCAL search_path TO bigname_phase, public")
-            .execute(&mut *transaction)
+            .execute(&mut *setup)
             .await?;
         for script in BASELINE {
-            raw_sql(script).execute(&mut *transaction).await?;
+            raw_sql(script).execute(&mut *setup).await?;
         }
         raw_sql(
             &SEED
                 .replace("__NAMES__", &names.to_string())
                 .replace("__CHAIN__", CHAIN),
         )
-        .execute(&mut *transaction)
+        .execute(&mut *setup)
         .await?;
+        setup.commit().await?;
+        let mut transaction = database.pool().begin().await?;
+        raw_sql("SET LOCAL search_path TO bigname_phase, public")
+            .execute(&mut *transaction)
+            .await?;
         let target = Marker {
             number: TARGET_BLOCK,
             hash: format!("0x{TARGET_BLOCK:064x}"),
@@ -282,5 +289,90 @@ async fn authority_events_are_staged_without_sorting_them() -> Result<()> {
         rows <= 40.0 * PLAN_NAMES as f64,
         "project_events rows handled: {rows}; {plan}"
     );
+    rebuild.finish().await
+}
+
+const PREVIOUS_V2_LIFECYCLE_CTE: &str =
+    include_str!("../../tests/rebuild_performance/previous_v2_lifecycle_cte.sql");
+
+fn without_whitespace(sql: &str) -> String {
+    sql.split_whitespace().collect()
+}
+
+/// `name_current` is one statement of nearly nine hundred lines, too entangled to rewrite piece by
+/// piece. Its `v2_lifecycle_events` CTE became a staged table built by the same SELECT, and the
+/// rest of the statement is untouched. Putting the old CTE back in front (a CTE hides a table of
+/// the same name) gives the statement as it was, and both must write the same rows.
+#[tokio::test]
+async fn name_current_matches_the_statement_with_the_lifecycle_cte() -> Result<()> {
+    use super::name_current::query::{BUILD_NAME_CURRENT, STAGE_V2_LIFECYCLE_EVENTS};
+    let key = |sql: &str| {
+        let sql = without_whitespace(sql);
+        let from = sql
+            .find("COALESCE(event.resource_id::text")
+            .expect("lifecycle key");
+        sql[from..].trim_end_matches(')').to_owned()
+    };
+    assert_eq!(
+        key(STAGE_V2_LIFECYCLE_EVENTS[0]),
+        key(PREVIOUS_V2_LIFECYCLE_CTE),
+        "the staged table must compute the lifecycle key over the same rows as the CTE did"
+    );
+
+    let mut rebuild = Rebuild::through("rebuild_equal_names", 600, Builder::NameCurrent).await?;
+    raw_sql(
+        "CREATE TEMP TABLE current_name_rows AS TABLE project_stage_name_current;
+         TRUNCATE project_stage_name_current",
+    )
+    .execute(&mut *rebuild.transaction)
+    .await?;
+    let previous = format!(
+        "{PREVIOUS_V2_LIFECYCLE_CTE}{}",
+        BUILD_NAME_CURRENT.replace("project_v2_lifecycle_events", "v2_lifecycle_events")
+    );
+    rebuild.execute(&previous).await?;
+    rebuild
+        .assert_same_rows("current_name_rows", "project_stage_name_current")
+        .await?;
+    let (v2_rows, released): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE declared_summary #>> '{registration,authority_kind}'
+                                       = 'ens_v2_registry'),
+                count(*) FILTER (WHERE declared_summary #>> '{registration,status}' = 'released')
+         FROM current_name_rows",
+    )
+    .fetch_one(&mut *rebuild.transaction)
+    .await?;
+    ensure!(
+        v2_rows > 0 && released > 0,
+        "the seed must reach the ENSv2 lifecycle paths: {v2_rows} registered, {released} released"
+    );
+    rebuild.finish().await
+}
+
+/// Each name reads its own ENSv2 lifecycle rows, authority events and resource by key. Before,
+/// every name scanned the whole lifecycle CTE several times and the whole resource stage once.
+#[tokio::test]
+async fn name_current_reads_each_name_by_key() -> Result<()> {
+    let mut rebuild =
+        Rebuild::through("rebuild_plan_names", PLAN_NAMES, Builder::NameCurrent).await?;
+    let plan = rebuild
+        .explain(super::name_current::query::BUILD_NAME_CURRENT)
+        .await?;
+    ensure!(
+        !any_node(&plan, &|node| node["Node Type"] == "CTE Scan"),
+        "name_current scans a CTE again: {plan}"
+    );
+    for relation in [
+        "project_v2_lifecycle_events",
+        "project_authority_events",
+        "project_registration_events",
+        "project_resources",
+    ] {
+        let rows = rows_read(&plan, relation);
+        ensure!(
+            rows <= 100.0 * PLAN_NAMES as f64,
+            "{relation} rows handled: {rows}; {plan}"
+        );
+    }
     rebuild.finish().await
 }
