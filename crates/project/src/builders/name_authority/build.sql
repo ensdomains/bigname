@@ -488,6 +488,7 @@
                       -- the released lease when the wrap recorded the lease, or, where a
                       -- controller event granted the lease after NameWrapped and the wrap
                       -- recorded nothing, when the named grant shares the wrap's transaction.
+                      -- (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
                       OR EXISTS (
                           SELECT 1 FROM project_events wrapper_binding
                           WHERE wrapper_binding.logical_name_id = lifecycle.logical_name_id

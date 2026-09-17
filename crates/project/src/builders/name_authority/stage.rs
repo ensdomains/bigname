@@ -16,6 +16,7 @@ pub(super) async fn prepare(transaction: &mut Transaction<'_, Postgres>) -> Resu
 /// leaves out the registrar transfer that moves the token into the NameWrapper in the wrap's own
 /// transaction: it names the NameWrapper contract, not a holder. Rows named the second way are
 /// listed in `project_wrapper_linked_events`.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L265 @ ens_v1@91c966f)
 async fn bind_resource_events(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     for statement in [
         "UPDATE project_events event SET logical_name_id = binding.logical_name_id

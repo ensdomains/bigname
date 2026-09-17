@@ -90,6 +90,7 @@ WHERE (
                                -- Rule 1: a named grant in the wrap's own transaction. When a
                                -- controller event grants the lease it follows NameWrapped in
                                -- the transaction, so the wrap could not record the lease.
+                               -- (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
                                (registration.logical_name_id =
                                     selected_wrapper.logical_name_id
                                 AND registration.transaction_hash =
