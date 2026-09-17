@@ -234,8 +234,8 @@ SELECT line FROM (
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
     UNION ALL
-    SELECT 1, c.relname, lpad(a.attnum::text, 4, '0'),
-           format('column %s.%s %s %s default=%s identity=%s generated=%s collation=%s storage=%s compression=%s statistics=%s acl=%s options=%s',
+    SELECT 1, c.relname, a.attname,
+           format('column %s.%s %s %s default=%s identity=%s generated=%s collation=%s storage=%s compression=%s statistics=%s acl=%s options=%s existing_rows=%s',
                   c.relname, a.attname,
                   format_type(a.atttypid, a.atttypmod),
                   CASE WHEN a.attnotnull THEN 'not null' ELSE 'null' END,
@@ -248,7 +248,16 @@ SELECT line FROM (
                   CASE WHEN a.attstattarget IS NULL OR a.attstattarget < 0 THEN 'default'
                        ELSE a.attstattarget::text END,
                   COALESCE(replace(array_to_string(a.attacl, ','), current_user, 'owner'), 'default'),
-                  COALESCE((SELECT string_agg(o, ',' ORDER BY o) FROM unnest(a.attoptions) o), '-'))
+                  COALESCE((SELECT string_agg(o, ',' ORDER BY o) FROM unnest(a.attoptions) o), '-'),
+                  -- A column added with a default keeps that value for the rows that
+                  -- predate it. Printed only when it is not the current default: then
+                  -- old and new rows read different values, which a fresh database
+                  -- never does.
+                  CASE WHEN a.atthasmissing
+                        AND a.attmissingval::text IS DISTINCT FROM
+                            pg_temp.frozen_catalog_default(pg_get_expr(d.adbin, d.adrelid),
+                                                           format_type(a.atttypid, a.atttypmod) LIKE '%[]')
+                       THEN a.attmissingval::text ELSE 'default' END)
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
     JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
@@ -322,10 +331,12 @@ SELECT line FROM (
     WHERE n.nspname = current_schema() AND t.typtype IN ('e', 'd', 'c', 'r')
       AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.reltype = t.oid AND c.relkind <> 'c')
     UNION ALL
-    SELECT 9, COALESCE(c.relname, p.proname, t.typname, con.conname), lpad(COALESCE(d.objsubid, 0)::text, 4, '0'),
-           format('comment %s %s %s', COALESCE(c.relname, p.proname, t.typname, con.conname), d.objsubid, d.description)
+    SELECT 9, COALESCE(c.relname, p.proname, t.typname, con.conname), COALESCE(a.attname, ''),
+           format('comment %s %s %s', COALESCE(c.relname, p.proname, t.typname, con.conname),
+                  COALESCE(a.attname, '-'), d.description)
     FROM pg_description d
     LEFT JOIN pg_class c ON d.classoid = 'pg_class'::regclass AND c.oid = d.objoid
+    LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = d.objsubid AND d.objsubid > 0
     LEFT JOIN pg_proc p ON d.classoid = 'pg_proc'::regclass AND p.oid = d.objoid
     LEFT JOIN pg_type t ON d.classoid = 'pg_type'::regclass AND t.oid = d.objoid
     LEFT JOIN pg_constraint con ON d.classoid = 'pg_constraint'::regclass AND con.oid = d.objoid
@@ -375,7 +386,9 @@ frozen_schema_catalog="$ROOT/schema-v2/frozen-schema.txt"
 # every schema-migration since. Both must be the same artifact, so the catalog
 # is taken twice -- after the baseline, and again after the schema-migrations
 # -- and the two must agree before either is compared with the frozen file.
+# The catalog of one schema, the schema name normalized to bigname_phase.
 frozen_schema_catalog() {
+    local schema="$1"
     # An extension lives outside the schema (its objects usually in public), so
     # the declarations the baseline carries head the catalog as written, one
     # per line with whitespace collapsed: a new or changed CREATE EXTENSION is
@@ -384,9 +397,28 @@ frozen_schema_catalog() {
         | sed -E 's/[[:space:]]+/ /g; s/ *; *$//; s/^ //' | sort | sed 's/^/extension /'
     {
         printf '\\pset format unaligned\n\\pset tuples_only on\n'
-        printf 'SET search_path TO "%s";\n' "$frozen_schema"
+        printf 'SET search_path TO "%s";\n' "$schema"
+        # Evaluates a column default expression as the column's type and prints
+        # it as a one-element array, which is how pg_attribute.attmissingval
+        # prints, so the two compare.
+        cat <<'SQL'
+CREATE FUNCTION pg_temp.frozen_catalog_default(expression text, is_array boolean) RETURNS text
+LANGUAGE plpgsql STABLE AS $$
+DECLARE evaluated text;
+BEGIN
+    IF expression IS NULL THEN RETURN NULL; END IF;
+    -- An array value is stored as the one element of a text-typed array, and
+    -- PostgreSQL flattens ARRAY[ARRAY[...]] instead.
+    IF is_array THEN
+        EXECUTE format('SELECT ARRAY[(%s)::text]::text', expression) INTO evaluated;
+    ELSE
+        EXECUTE format('SELECT ARRAY[(%s)]::text', expression) INTO evaluated;
+    END IF;
+    RETURN evaluated;
+END $$;
+SQL
         printf '%s\n' "$frozen_schema_catalog_sql"
-    } | run_psql | sed "s/$frozen_schema/bigname_phase/g"
+    } | run_psql | sed "s/$schema/bigname_phase/g"
 }
 assert_frozen_schema_fingerprint() {
     local observed after_baseline migration_file
@@ -395,13 +427,13 @@ assert_frozen_schema_fingerprint() {
     (
         scratch_schema="$frozen_schema"
         apply_baseline
-        frozen_schema_catalog > "$after_baseline"
+        frozen_schema_catalog "$frozen_schema" > "$after_baseline"
         for migration_file in "$ROOT"/migrations/*.sql; do
             if phase_migration_uses_production_schema "$migration_file"; then
                 render_phase_migration "$migration_file" | run_psql
             fi
         done
-        frozen_schema_catalog > "$observed"
+        frozen_schema_catalog "$frozen_schema" > "$observed"
     )
     if [ ! -s "$observed" ] || [ ! -s "$after_baseline" ]; then
         printf '%s\n' "the frozen artifact produced an empty catalog" >&2
@@ -424,6 +456,30 @@ assert_frozen_schema_fingerprint() {
         exit 1
     fi
     rm -f -- "$observed"
+}
+# The fresh artifact above has no rows, so a schema-migration whose DDL runs
+# only when a table holds data leaves it unchanged there. The scratch schema
+# has by now been populated by every predecessor-shape and behavior proof, and
+# the proofs leave parts of it at older shapes; applying the whole inventoried
+# sequence once more is what sqlx does on an initialized database at deploy
+# (every file is required to be idempotent once applied), and the result must
+# be the frozen artifact too, rows and all.
+assert_exercised_schema_matches_frozen() {
+    local exercised migration_file
+    exercised="$(mktemp "${TMPDIR:-/tmp}/schema-v2-exercised-catalog.XXXXXX")"
+    for migration_file in "$ROOT"/migrations/*.sql; do
+        if phase_migration_uses_production_schema "$migration_file"; then
+            emit_phase_migration "$migration_file" exercised | run_psql
+        fi
+    done
+    frozen_schema_catalog "$scratch_schema" > "$exercised"
+    if ! diff -u "$frozen_schema_catalog" "$exercised" >&2; then
+        printf '%s\n' \
+            "the exercised scratch schema (populated, every schema-migration applied) differs from $(basename "$frozen_schema_catalog") (diff above: - frozen, + exercised); a schema-migration whose effect depends on the rows it finds is not the frozen artifact on an initialized database" >&2
+        rm -f -- "$exercised"
+        exit 1
+    fi
+    rm -f -- "$exercised"
 }
 # The documented head is checked separately from the catalog: the head names
 # the artifact, the catalog is the artifact; a merge that brings a newer file moves the
@@ -484,10 +540,14 @@ assert_no_migration_below_prior_head() {
             exit 1
         fi
     done < "$migration_inventory"
+    local current_entries
+    current_entries="$(awk '{print $2}' "$migration_inventory")"
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         entry="${line##* }"
-        if ! awk '{print $2}' "$migration_inventory" | grep -qxF -- "$entry"; then
+        # grep -q closes its input on the first match; under pipefail the
+        # upstream writer's SIGPIPE would fail the pipeline, so no pipe here.
+        if ! grep -qxF -- "$entry" <<< "$current_entries"; then
             printf '%s\n' "$entry was in the previous inventory and is gone; frozen history is immutable" >&2
             exit 1
         fi
@@ -1045,9 +1105,9 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=30
+expected_refusal_assertions=33
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=34
+expected_predecessor_shape_proof_count=35
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -1228,7 +1288,8 @@ for migration_file in \
     "$ROOT/migrations/20260916120000_surface_bindings_name_history_idx.sql" \
     "$ROOT/migrations/20260917120000_discovery_edges_observation_history_idx.sql" \
     "$ROOT/migrations/20260917130000_discovery_edges_reopen_idx.sql" \
-    "$ROOT/migrations/20260917160000_discovery_edges_index_validity_check.sql"
+    "$ROOT/migrations/20260917160000_discovery_edges_index_validity_check.sql" \
+    "$ROOT/migrations/20260918120000_normalized_events_resolver_history_idx.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -2850,6 +2911,78 @@ SQL
         emit_phase_migration "$migration_file" preceding-shape
     done
 } | run_psql
+
+# Dropping consumer_visibility above took the four resolver-history indexes
+# whose predicates name it with it, which is the shape of a database that took
+# slice 1 in place: #415 added them to the baseline with no schema-migration.
+# The file that carries them now must build all four to the fresh-baseline
+# definition from that shape, change nothing when rerun, and refuse an index
+# under the right name that is invalid, is another definition, or is a table.
+resolver_history_index_migration="$ROOT/migrations/20260918120000_normalized_events_resolver_history_idx.sql"
+resolver_history_index_names="normalized_events_pointer_after_resolver_history_idx normalized_events_pointer_before_resolver_history_idx normalized_events_permission_after_resolver_history_idx normalized_events_permission_before_resolver_history_idx"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_class
+        WHERE relnamespace = current_schema()::regnamespace
+          AND relname LIKE 'normalized_events_%_resolver_history_idx'
+    ) THEN
+        RAISE EXCEPTION 'the slice-1 predecessor shape still carries a resolver-history index';
+    END IF;
+END $$;
+SQL
+    emit_phase_migration "$resolver_history_index_migration" preceding-shape
+    emit_phase_migration "$resolver_history_index_migration" baseline-first
+    cat <<'SQL'
+DO $$
+DECLARE built integer;
+BEGIN
+    SELECT count(*) INTO built FROM pg_index
+    WHERE indrelid = 'normalized_events'::regclass
+      AND indexrelid::regclass::text LIKE 'normalized_events_%_resolver_history_idx'
+      AND indisvalid AND indisready;
+    IF built <> 4 THEN
+        RAISE EXCEPTION 'resolver-history index schema-migration built % of 4 indexes', built;
+    END IF;
+END $$;
+SQL
+} | run_psql
+assert_migration_context_count "$resolver_history_index_migration" preceding-shape 1
+assert_migration_context_count "$resolver_history_index_migration" baseline-first 1
+# The definitions the file expects are the fresh baseline's, as printed with
+# search_path set to pg_catalog; the frozen catalog comparison at the end
+# proves the built indexes match the baseline. Refusals, on the first index:
+resolver_history_probe_index="normalized_events_pointer_after_resolver_history_idx"
+resolver_history_probe_reviewed="$(
+    {
+        printf '\\pset tuples_only on\n\\pset format unaligned\n'
+        printf 'SET search_path TO pg_catalog;\n'
+        printf "SELECT pg_get_indexdef('%s.%s'::regclass);\n" "$scratch_schema" "$resolver_history_probe_index"
+    } | run_psql
+)"
+printf 'UPDATE pg_index SET indisvalid = false WHERE indexrelid = %s::regclass;\n' \
+    "'$scratch_schema.$resolver_history_probe_index'" | run_psql_as_owner >/dev/null
+assert_migration_refusal "invalid-$resolver_history_probe_index" \
+    "$resolver_history_index_migration" \
+    "$resolver_history_probe_index exists but is not a valid and ready index on $scratch_schema.normalized_events; DROP INDEX CONCURRENTLY it, then run the schema-migrations again" <<SQL
+SQL
+printf 'UPDATE pg_index SET indisvalid = true WHERE indexrelid = %s::regclass;\n' \
+    "'$scratch_schema.$resolver_history_probe_index'" | run_psql_as_owner >/dev/null
+assert_migration_refusal "wrong-definition-$resolver_history_probe_index" \
+    "$resolver_history_index_migration" \
+    "$resolver_history_probe_index exists but does not have the reviewed definition; found \"CREATE INDEX $resolver_history_probe_index ON $scratch_schema.normalized_events USING btree (chain_id, block_number)\", expected \"$resolver_history_probe_reviewed\"; DROP INDEX CONCURRENTLY it, then run the schema-migrations again" <<SQL
+DROP INDEX $resolver_history_probe_index;
+CREATE INDEX $resolver_history_probe_index ON normalized_events (chain_id, block_number);
+SQL
+assert_migration_refusal "table-named-$resolver_history_probe_index" \
+    "$resolver_history_index_migration" \
+    "$scratch_schema.$resolver_history_probe_index is a table, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again" <<SQL
+DROP INDEX $resolver_history_probe_index;
+CREATE TABLE $resolver_history_probe_index ();
+SQL
 
 # The preceding vocabulary reconstruction ends with the exact 20260902 constraint.
 record_id_add="$ROOT/migrations/20260909120000_resolver_record_id_events.sql"
@@ -8510,6 +8643,7 @@ assert_uninventoried_migrations_are_schema_qualified
 assert_documented_head_is_newest_migration
 assert_no_migration_below_prior_head
 assert_frozen_schema_fingerprint
+assert_exercised_schema_matches_frozen
 assert_reviewed_phase_migrations_applied
 if [ "$refusal_assertions_passed" -ne "$expected_refusal_assertions" ]; then
     printf '%s\n' \

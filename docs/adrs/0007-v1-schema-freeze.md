@@ -97,19 +97,20 @@ The V1 schema contract is the pair:
 
 - the `schema-v2/baseline/` tree, and
 - the schema-migration head at
-  `migrations/20260917160000_discovery_edges_index_validity_check.sql`.
+  `migrations/20260918120000_normalized_events_resolver_history_idx.sql`.
   `schema-v2/apply-check.sh` asserts on every run that this line and the one
   in [`storage.md`](../storage.md) name the newest file in `migrations/`, so a
   merge that brings a later schema-migration fails the conformance job until
   the head is advanced here.
 
 The draft named `20260811120200_ens_v2_migration_slice_1_constraints.sql`, which
-was the head when it was written. Fifty-four schema-migrations follow it up to the
+was the head when it was written. Fifty-five schema-migrations follow it up to the
 head named above: 38 landed before acceptance, while this ADR was a draft,
 under the review-only process § Alternatives describes, so none of them is a
 carve-out under this ADR — they entered the frozen artifact by predating the
-freeze — and sixteen landed after acceptance, which the next paragraphs
-record. The head is restated so the frozen artifact is the tree the
+freeze — sixteen landed after acceptance, which the next paragraphs
+record, and the last is carve-out 6 below, which this ADR lands with itself.
+The head is restated so the frozen artifact is the tree the
 milestone actually builds on. The 38 are not all slice work. Four are the
 ENSv1→ENSv2 slice schema this ADR anticipated:
 `20260814130000_surface_binding_authority_arm.sql` (slice 2A, #468),
@@ -165,8 +166,8 @@ contract seen before reads, with a concurrent prebuild installer under
 `ops/discovery-reopen-index/`, and its `20260917160000` changes no object: it
 fails the run when either discovery index exists under its name but is not
 the reviewed, valid index, since `CREATE INDEX IF NOT EXISTS` matches on the
-name alone. The head named above is
-the last of them, so the frozen artifact is the tree an initialized database
+name alone. Then `20260918120000`, carve-out 6, is this ADR's own. The head
+named above is the last of them, so the frozen artifact is the tree an initialized database
 actually holds; the breach is the subject of the Rollout section below.
 
 Since #849 `apply-check.sh` applies every schema-migration that names a
@@ -202,7 +203,7 @@ head would run on an initialized database while the freeze recorded
 nothing. A schema-migration lands by joining the inventory after the head
 and advancing the head in the same change. Inside the inventory the
 rewrite is textual — the literal `bigname_phase` becomes the scratch schema —
-so it cannot see a name a migration assembles at run time (`'bigname_' ||
+so it cannot see a name a schema-migration assembles at run time (`'bigname_' ||
 'phase.…'` inside `EXECUTE`, or a search-path-relative name in a `DO` body).
 The check therefore applies every batch on a connection of its own, a
 per-run login that owns the scratch schema and holds no privilege on
@@ -216,7 +217,8 @@ Finally the frozen artifact itself is a checked-in catalog:
 every relation (with its privileges, storage parameters, row-level-security
 flags, replica identity, partitioning and parents), column (type,
 nullability, default, identity, generation, collation, storage, compression,
-statistics target, privileges), constraint, index (with its validity), view,
+statistics target, privileges, and the value rows that predate the column
+read when it is no longer the default), constraint, index (with its validity), view,
 routine (its full argument list with defaults, execution modes, planner cost
 and rows, privileges and a digest of its body), trigger (with its firing
 state), sequence (its whole range, cache, cycle and owning column), type,
@@ -231,7 +233,16 @@ the baseline alone (what a fresh database gets, the schema-migrations being
 no-ops before it exists) and after the schema-migrations (what an
 initialized database gets), and the two must agree: a baseline edit without
 its schema-migration, or the reverse, is refused on that comparison before
-the frozen file is consulted.
+the frozen file is consulted. That fresh artifact holds no rows, so a
+schema-migration whose DDL runs only when a table has data would leave it
+unchanged; the check therefore also takes the catalog of its scratch schema
+at the end of the run — populated by every predecessor-shape and behavior
+proof, rewound to older shapes by those proofs and carried back through the
+whole inventoried sequence, as sqlx would carry an initialized database —
+and that must be the frozen artifact too. Column order is not part of the
+artifact: a column a schema-migration adds sits last on an initialized
+database and wherever the baseline lists it on a fresh one, and no
+schema-migration can move it.
 From acceptance on, a
 schema-migration of any of these kinds cannot land without moving the
 conformance test, which is where the carve-out or amendment is checked for.
@@ -455,6 +466,32 @@ values the system already documents as unstable across a boundary.
    should be found by a benchmark rather than by the milestone's own
    measurements. Both are additive and require no re-derivation.
 
+6. **The four `normalized_events` resolver-history indexes no
+   schema-migration carried** — #415 (2026-08-14) added
+   `normalized_events_pointer_after_resolver_history_idx`,
+   `…_pointer_before_…`, `…_permission_after_…` and
+   `…_permission_before_…` to `schema-v2/baseline/05_normalized_events.sql`
+   with no schema-migration. Their predicates name `consumer_visibility`,
+   which slice 1's `20260811120000` adds, so a database that took slice 1 in
+   place and was never replaced from the baseline has the column and not the
+   indexes; Project's resolver scoping (`crates/project/src/scope`) reads
+   them. The conformance test found this the first time it compared the
+   frozen catalog with the exercised scratch schema — the one its
+   predecessor-shape proofs rewind and re-upgrade — rather than with the
+   fresh one, where a baseline object needs no schema-migration to be
+   present. **Decided: in, with this ADR.**
+   `migrations/20260918120000_normalized_events_resolver_history_idx.sql`
+   builds each of the four when it is missing and, when one is present,
+   refuses an invalid index, another definition, or a table under the name
+   rather than adopting it; on a large database the operator prebuilds them
+   concurrently with the definitions the file prints. Additive; no
+   re-derivation. Whether other objects #415 and its neighbours added to the
+   baseline without a schema-migration are missing on some initialized
+   database is a question for the deployment that would hold it, since the
+   exercised comparison sees only what the proofs rewind; the fresh baseline
+   is the artifact, and a database that differs from it is replaced or
+   carried to it by a schema-migration under this process.
+
 ### Derivation-side changes that are not schema changes
 
 These rotate the interpreter content hash rather than touching DDL, so the
@@ -531,7 +568,7 @@ without understanding the whole replay model.
 
 **Negative.** Tooling enforces only the mechanics of the freeze: `apply-check.sh`
 fails CI when the schema the baseline and inventoried schema-migrations build
-no longer matches the checked-in frozen catalog, when the migration directory
+no longer matches the checked-in frozen catalog, when the `migrations/` directory
 differs from the inventory, and when a schema-migration lands without
 advancing the head this ADR and `storage.md` name. Whether a change is an
 authorized carve-out or a substantive amendment is still decided by review —
@@ -562,9 +599,10 @@ inventoried under the frozen artifact and the head advanced to the last of
 them, because the artifact has to be the tree that exists; they are not
 retroactively authorized. From this ADR's merge the process is the one it
 describes: a schema change is a listed carve-out or an amendment, and
-`apply-check.sh` is where the omission fails. Carve-out 5 is the one still
-ahead, and it follows the intended order — this ADR first, then the
-schema-migration referencing it.
+`apply-check.sh` is where the omission fails. Carve-out 6 lands in this
+change, listed here before its schema-migration is inventoried; carve-out 5
+is the one still ahead, and it follows the intended order — this ADR first,
+then the schema-migration referencing it.
 
 Ownership follows [`workstreams.md`](../internal/workstreams.md): Storage and
 Domain own the schema-migrations and `apply-check.sh`; Projections and API own
