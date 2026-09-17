@@ -68,7 +68,8 @@ async fn basenames_node_record_recovery_uses_its_partial_index() -> Result<()> {
          ) ON COMMIT DROP;
          CREATE TEMP TABLE project_declared_resolver_addresses (
              namespace text NOT NULL,
-             resolver_address text NOT NULL
+             resolver_address text NOT NULL,
+             source_family text, classification_role text, manifest_id bigint
          ) ON COMMIT DROP;
          INSERT INTO project_scope_names VALUES
              ('basenames:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'),

@@ -242,7 +242,7 @@ fn database_instance_identity(
 /// Judge the phase runner by its worst expected chain, not by the single freshest heartbeat row.
 /// One stalled chain must not be masked by another chain still writing heartbeats, so an expected
 /// chain with no heartbeat at all, or a freshest-per-chain heartbeat older than the configured
-/// age, reports `stale`. The expected chain set is the one `/v2/status` reads, so the two
+/// age, reports `stale`. The expected chain set is the one `/v1/status` reads, so the two
 /// readiness surfaces cannot disagree about which chains a missing heartbeat is missing from.
 async fn load_phase_runner_health(
     pool: &PgPool,

@@ -17,6 +17,60 @@ const V2_RESOLVER_JUSTIFICATION: &str =
 
 /// The finite set of emitter-role-independent manifest events.
 pub const ROLE_INSENSITIVE_EVENTS: &[RoleInsensitiveEvent] = &[
+    RoleInsensitiveEvent {
+        source_family: "ens_v2_resolver_l1",
+        event: "Linked",
+        justification: "the record-ID resolver adapter does not read Selected.emitter_role",
+        adapter_file: "crates/adapters/src/schema_v2/protocol/v2_record_resolver.rs",
+    },
+    RoleInsensitiveEvent {
+        source_family: "ens_v2_resolver_l1",
+        event: "AddressUpdated",
+        justification: "the record-ID resolver adapter does not read Selected.emitter_role",
+        adapter_file: "crates/adapters/src/schema_v2/protocol/v2_record_resolver.rs",
+    },
+    RoleInsensitiveEvent {
+        source_family: "ens_v2_resolver_l1",
+        event: "ContenthashUpdated",
+        justification: "the record-ID resolver adapter does not read Selected.emitter_role",
+        adapter_file: "crates/adapters/src/schema_v2/protocol/v2_record_resolver.rs",
+    },
+    RoleInsensitiveEvent {
+        source_family: "ens_v2_resolver_l1",
+        event: "ABIUpdated",
+        justification: "the record-ID resolver adapter does not read Selected.emitter_role",
+        adapter_file: "crates/adapters/src/schema_v2/protocol/v2_record_resolver.rs",
+    },
+    RoleInsensitiveEvent {
+        source_family: "ens_v2_resolver_l1",
+        event: "InterfaceUpdated",
+        justification: "the record-ID resolver adapter does not read Selected.emitter_role",
+        adapter_file: "crates/adapters/src/schema_v2/protocol/v2_record_resolver.rs",
+    },
+    RoleInsensitiveEvent {
+        source_family: "ens_v2_resolver_l1",
+        event: "TextUpdated",
+        justification: "the record-ID resolver adapter does not read Selected.emitter_role",
+        adapter_file: "crates/adapters/src/schema_v2/protocol/v2_record_resolver.rs",
+    },
+    RoleInsensitiveEvent {
+        source_family: "ens_v2_resolver_l1",
+        event: "DataUpdated",
+        justification: "the record-ID resolver adapter does not read Selected.emitter_role",
+        adapter_file: "crates/adapters/src/schema_v2/protocol/v2_record_resolver.rs",
+    },
+    RoleInsensitiveEvent {
+        source_family: "ens_v2_resolver_l1",
+        event: "NameUpdated",
+        justification: "the record-ID resolver adapter does not read Selected.emitter_role",
+        adapter_file: "crates/adapters/src/schema_v2/protocol/v2_record_resolver.rs",
+    },
+    RoleInsensitiveEvent {
+        source_family: "ens_v2_resolver_l1",
+        event: "ResourceArgument",
+        justification: "the record-ID resolver adapter does not read Selected.emitter_role",
+        adapter_file: "crates/adapters/src/schema_v2/protocol/v2_record_resolver.rs",
+    },
     // Adapter: crates/adapters/src/schema_v2/protocol/v1/resolver.rs.
     RoleInsensitiveEvent {
         source_family: "ens_v1_resolver_l1",
@@ -146,21 +200,7 @@ pub const ROLE_INSENSITIVE_EVENTS: &[RoleInsensitiveEvent] = &[
     // Adapter: crates/adapters/src/schema_v2/protocol/v2_resolver.rs.
     RoleInsensitiveEvent {
         source_family: "ens_v2_resolver_l1",
-        event: "AddressChanged",
-        justification: V2_RESOLVER_JUSTIFICATION,
-        adapter_file: V2_RESOLVER_ADAPTER,
-    },
-    // Adapter: crates/adapters/src/schema_v2/protocol/v2_resolver.rs.
-    RoleInsensitiveEvent {
-        source_family: "ens_v2_resolver_l1",
         event: "AliasChanged",
-        justification: V2_RESOLVER_JUSTIFICATION,
-        adapter_file: V2_RESOLVER_ADAPTER,
-    },
-    // Adapter: crates/adapters/src/schema_v2/protocol/v2_resolver.rs.
-    RoleInsensitiveEvent {
-        source_family: "ens_v2_resolver_l1",
-        event: "ContenthashChanged",
         justification: V2_RESOLVER_JUSTIFICATION,
         adapter_file: V2_RESOLVER_ADAPTER,
     },
@@ -202,21 +242,7 @@ pub const ROLE_INSENSITIVE_EVENTS: &[RoleInsensitiveEvent] = &[
     // Adapter: crates/adapters/src/schema_v2/protocol/v2_resolver.rs.
     RoleInsensitiveEvent {
         source_family: "ens_v2_resolver_l1",
-        event: "TextChanged",
-        justification: V2_RESOLVER_JUSTIFICATION,
-        adapter_file: V2_RESOLVER_ADAPTER,
-    },
-    // Adapter: crates/adapters/src/schema_v2/protocol/v2_resolver.rs.
-    RoleInsensitiveEvent {
-        source_family: "ens_v2_resolver_l1",
         event: "Upgraded",
-        justification: V2_RESOLVER_JUSTIFICATION,
-        adapter_file: V2_RESOLVER_ADAPTER,
-    },
-    // Adapter: crates/adapters/src/schema_v2/protocol/v2_resolver.rs.
-    RoleInsensitiveEvent {
-        source_family: "ens_v2_resolver_l1",
-        event: "VersionChanged",
         justification: V2_RESOLVER_JUSTIFICATION,
         adapter_file: V2_RESOLVER_ADAPTER,
     },
@@ -235,6 +261,11 @@ pub fn event_allows_empty_emitter_roles(
     has_registry_announcement_rule: bool,
 ) -> bool {
     role_insensitivity_justification(source_family, event).is_some()
+        || (source_family == "ens_v2_resolver_l1"
+            && matches!(
+                event,
+                "AddressChanged" | "TextChanged" | "ContenthashChanged" | "VersionChanged"
+            ))
         || (source_family == "ens_v2_registry_l1"
             && event == "RegistryCreated"
             && has_registry_announcement_rule)

@@ -2375,8 +2375,9 @@ fn dense_output_is_purely_additive_over_the_pre_retention_snapshot() -> Result<(
     // must leave every pre-retention row byte-for-byte intact: the only permitted dense-corpus
     // differences are the non-persisted `before_state_explicit` debug flag and the retained
     // resource rows themselves (exactly the rows no surviving normalized event or surface
-    // binding references). Remove both and the output must collapse to the pre-retention
-    // snapshot — pinned here by that snapshot's own committed keccak.
+    // binding references), plus the bounded registrar provenance described in docs/storage.md.
+    // Assert that provenance separately, then remove these additions to recover the original
+    // pre-retention hash. The full snapshot above also pins every provenance field.
     let fixture: DenseFixture = serde_json::from_str(DENSE_SAME_TRANSACTION)?;
     let case = dense_case(fixture)?;
     let expected_gate = ExpectedCase {
@@ -2389,6 +2390,61 @@ fn dense_output_is_purely_additive_over_the_pre_retention_snapshot() -> Result<(
     };
     let input = batch_input(&case.case, &expected_gate, &checked_in_manifests()?)?;
     let mut reduced = interpret_with_incremental_equivalence(&case.case.id, input)?;
+    let mut registry_evidence = BTreeMap::new();
+    let mut evidence_counts = (0, 0);
+    for event in &mut reduced.normalized_events {
+        let Some(evidence) = event
+            .after_state
+            .as_object_mut()
+            .and_then(|state| state.remove("registrar_surface_evidence"))
+        else {
+            continue;
+        };
+        let fields = evidence
+            .as_object()
+            .context("dense registrar evidence must be an object")?;
+        let logical_name_id = event
+            .logical_name_id
+            .as_ref()
+            .context("dense registrar evidence must identify its name")?;
+        match (event.source_family.as_str(), event.event_kind.as_str()) {
+            ("ens_v1_registry_l1", "AuthorityTransferred") => {
+                assert_eq!(event.after_state["source_event"], "NewOwner");
+                assert_eq!(fields.len(), 1);
+                let owner_evidence = fields
+                    .get("registry_owner")
+                    .context("dense authority event must retain registry-owner evidence")?;
+                assert_eq!(
+                    owner_evidence["state"]["child_node"],
+                    event.after_state["child_node"]
+                );
+                assert!(
+                    registry_evidence
+                        .insert(logical_name_id.clone(), owner_evidence.clone())
+                        .is_none(),
+                    "dense authority evidence must belong to a distinct name"
+                );
+                evidence_counts.0 += 1;
+            }
+            ("ens_v1_registrar_l1", "RegistrationGranted") => {
+                assert_eq!(event.after_state["source_event"], "NameRegistered");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(evidence["lease"]["state"], event.after_state);
+                assert_eq!(
+                    registry_evidence.remove(logical_name_id),
+                    fields.get("registry_owner").cloned(),
+                    "each lease must retain the preceding ownership evidence for its own name"
+                );
+                evidence_counts.1 += 1;
+            }
+            _ => bail!(
+                "unexpected dense registrar evidence on {}",
+                event.event_identity
+            ),
+        }
+    }
+    assert_eq!(evidence_counts, (320, 320));
+    assert!(registry_evidence.is_empty());
     let mut referenced = std::collections::BTreeSet::new();
     for event in &reduced.normalized_events {
         if let Some(resource_id) = event.resource_id {
@@ -2424,7 +2480,7 @@ fn dense_output_is_purely_additive_over_the_pre_retention_snapshot() -> Result<(
     assert_eq!(
         format!("{:#x}", keccak256(snapshot.as_bytes())),
         "0xb9f842fdc4a0679e37ac4bdfec4f3ec4a8eada269211a176df7ce0580d31677d",
-        "output minus the debug-only flag and the retained rows must equal the pre-retention snapshot"
+        "output minus the debug-only flag, retained rows, and verified registrar evidence must equal the pre-retention snapshot"
     );
     Ok(())
 }

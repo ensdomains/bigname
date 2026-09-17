@@ -130,7 +130,7 @@ pub struct NameCurrentListPage {
 /// read path appends its own `WHERE` / `ORDER BY` / `LIMIT` after this so the column shape that
 /// [`decode_name_current_list_row`] decodes stays identical across cursor, offset, and by-namehash
 /// reads.
-const NAME_CURRENT_LIST_SELECT: &str = r#"
+pub(super) const NAME_CURRENT_LIST_SELECT: &str = r#"
         SELECT
             logical_name_id,
             namespace,
@@ -344,6 +344,16 @@ fn push_filtered_name_current_cte<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a NameCurrentListFilter,
 ) {
+    push_filtered_name_current_cte_with(builder, filter, |_| {});
+}
+
+/// Push the `filtered_names` CTE and let the caller append extra predicates against `nc` after
+/// the standard filter predicates, inside the CTE's `WHERE`, where they can drive an index scan.
+pub(super) fn push_filtered_name_current_cte_with<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    filter: &'a NameCurrentListFilter,
+    push_extra_predicates: impl FnOnce(&mut QueryBuilder<'a, Postgres>),
+) {
     builder.push("WITH ");
     if let Some(address_filter) = filter.address.as_ref() {
         let address_namespace = match filter.namespaces.as_ref() {
@@ -450,6 +460,7 @@ fn push_filtered_name_current_cte<'a>(
     builder.push(" WHERE TRUE ");
     builder.push(DEFAULT_NAME_CURRENT_READ_FILTER);
     push_name_current_filter_predicates(builder, filter);
+    push_extra_predicates(builder);
     builder.push(")");
 }
 

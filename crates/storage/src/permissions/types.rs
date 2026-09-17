@@ -73,7 +73,7 @@ impl PermissionCoverageExhaustiveness {
 #[serde(rename_all = "snake_case")]
 pub enum PermissionCoverageUnsupportedReason {
     OperatorApprovalSurfacesNotIngested,
-    Ensv1WrapperHolderPermissionsNotProjected,
+    WrapperParentAndResolverDelegationNotProjected,
     ResourcePermissionAuthorityNotProjected,
 }
 
@@ -81,8 +81,8 @@ impl PermissionCoverageUnsupportedReason {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::OperatorApprovalSurfacesNotIngested => "operator_approval_surfaces_not_ingested",
-            Self::Ensv1WrapperHolderPermissionsNotProjected => {
-                "ensv1_wrapper_holder_permissions_not_projected"
+            Self::WrapperParentAndResolverDelegationNotProjected => {
+                "wrapper_parent_and_resolver_delegation_not_projected"
             }
             Self::ResourcePermissionAuthorityNotProjected => {
                 "resource_permission_authority_not_projected"
@@ -145,17 +145,19 @@ impl ResourcePermissionCoverage {
         }
     }
 
-    pub fn ensv1_wrapper_holder_permissions_not_projected() -> Self {
+    /// NameWrapper holders, operators, and per-token delegates are projected; parent control of a
+    /// non-emancipated wrapped subname and resolver operators/delegates are not.
+    pub fn wrapper_parent_and_resolver_delegation_not_projected() -> Self {
         Self {
-            status: PermissionCoverageStatus::Unsupported,
-            exhaustiveness: PermissionCoverageExhaustiveness::NotApplicable,
+            status: PermissionCoverageStatus::Partial,
+            exhaustiveness: PermissionCoverageExhaustiveness::BestEffort,
             source_classes_considered: vec![
                 "permissions_current".to_owned(),
                 "ens_v1_wrapper_l1".to_owned(),
             ],
             enumeration_basis: "resource_permissions".to_owned(),
             unsupported_reason: Some(
-                PermissionCoverageUnsupportedReason::Ensv1WrapperHolderPermissionsNotProjected,
+                PermissionCoverageUnsupportedReason::WrapperParentAndResolverDelegationNotProjected,
             ),
         }
     }
@@ -196,10 +198,10 @@ impl ResourcePermissionCoverage {
                 PermissionCoverageExhaustiveness::BestEffort,
                 Some(PermissionCoverageUnsupportedReason::ResourcePermissionAuthorityNotProjected)
             ) | (
-                PermissionCoverageStatus::Unsupported,
-                PermissionCoverageExhaustiveness::NotApplicable,
+                PermissionCoverageStatus::Partial,
+                PermissionCoverageExhaustiveness::BestEffort,
                 Some(
-                    PermissionCoverageUnsupportedReason::Ensv1WrapperHolderPermissionsNotProjected
+                    PermissionCoverageUnsupportedReason::WrapperParentAndResolverDelegationNotProjected
                 )
             ) | (
                 PermissionCoverageStatus::Projected,
@@ -260,6 +262,9 @@ pub struct PermissionsCurrentResourceSummary {
     pub root_resource_id: Option<Uuid>,
     #[sqlx(json)]
     pub coverage: ResourcePermissionCoverage,
+    /// Registration-level restriction block served as `restrictions`; `None` when the resource
+    /// has no resource-level constraint model.
+    pub resource_restrictions: Option<Value>,
     pub provenance: Value,
     pub chain_positions: Value,
     pub canonicality_summary: Value,

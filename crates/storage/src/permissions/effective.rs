@@ -103,9 +103,12 @@ fn push_namespace_filter<'a>(
     namespace: Option<&'a str>,
 ) {
     if let Some(namespace) = namespace {
-        builder.push(" AND EXISTS (SELECT 1 FROM bigname_phase.surface_bindings sb JOIN bigname_phase.name_surfaces ns ON ns.logical_name_id=sb.logical_name_id JOIN bigname_phase.chain_lineage ns_binding_lineage ON ns_binding_lineage.chain_id=sb.chain_id AND ns_binding_lineage.block_hash=sb.block_hash JOIN bigname_phase.chain_lineage ns_surface_lineage ON ns_surface_lineage.chain_id=ns.chain_id AND ns_surface_lineage.block_hash=ns.block_hash WHERE sb.resource_id=")
-            .push(resource).push(" AND ns.namespace=").push_bind(namespace)
-            .push(" AND sb.canonicality_state IN ('canonical','safe','finalized') AND ns.canonicality_state IN ('canonical','safe','finalized') AND ns_binding_lineage.canonicality_state IN ('canonical','safe','finalized') AND ns_surface_lineage.canonicality_state IN ('canonical','safe','finalized'))");
+        // Same membership rule as the direct permission page: resource audit reads include
+        // unnamed and superseded registrations, so namespace evidence comes from retained
+        // interpreted events rather than name bindings.
+        builder.push(" AND EXISTS (SELECT 1 FROM bigname_phase.normalized_events ne JOIN bigname_phase.chain_lineage ne_lineage ON ne_lineage.chain_id=ne.chain_id AND ne_lineage.block_hash=ne.block_hash WHERE ne.resource_id=")
+            .push(resource).push(" AND ne.namespace=").push_bind(namespace)
+            .push(" AND ne.consumer_visibility='activated' AND ne.canonicality_state IN ('canonical','safe','finalized') AND ne_lineage.canonicality_state IN ('canonical','safe','finalized'))");
     }
 }
 

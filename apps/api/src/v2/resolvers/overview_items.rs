@@ -73,7 +73,7 @@ fn resolver_event_summary_mapping_error() -> V2Error {
     V2Error::internal_error("failed to map resolver event summary")
 }
 
-fn compact_resolver_binding_item(item: &Value) -> V2Result<Value> {
+pub(super) fn compact_resolver_binding_item(item: &Value) -> V2Result<Value> {
     if resolver_alias_item_has_writer_shape(item) {
         return compact_resolver_alias_item(item);
     }

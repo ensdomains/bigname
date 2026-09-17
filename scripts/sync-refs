@@ -4,6 +4,7 @@
 Usage:
     scripts/sync-refs            # sync ref pins and required submodule pins
     scripts/sync-refs --check    # verify ref pins and required submodule pins
+    scripts/sync-refs --include-optional  # also sync optional comparison sources
 
 Refs are declared in .refs/MANIFEST.toml. Each lives under .refs/<key>/; those
 directories are gitignored. MANIFEST.toml and .refs/README.md are tracked.
@@ -38,8 +39,8 @@ def load_manifest() -> dict:
 
     # macOS still ships Python 3.9. Keep the no-dependency script usable there
     # by parsing only the ref table fields this script consumes.
-    refs: dict[str, dict[str, str]] = {}
-    current: dict[str, str] | None = None
+    refs: dict[str, dict[str, str | bool]] = {}
+    current: dict[str, str | bool] | None = None
     for line in MANIFEST.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -54,7 +55,11 @@ def load_manifest() -> dict:
         if current is None or "=" not in stripped:
             continue
         key, raw_value = stripped.split("=", maxsplit=1)
-        if key.strip() in {"repo", "commit"}:
+        if key.strip() == "optional":
+            if raw_value.strip() not in {"true", "false"}:
+                raise ValueError("optional must be a boolean")
+            current["optional"] = raw_value.strip() == "true"
+        elif key.strip() in {"repo", "commit"}:
             value = ast.literal_eval(raw_value.strip())
             if not isinstance(value, str):
                 raise ValueError(f"{key.strip()} must be a string")
@@ -163,6 +168,11 @@ def main() -> int:
         action="store_true",
         help="verify pins without mutating the tree",
     )
+    parser.add_argument(
+        "--include-optional",
+        action="store_true",
+        help="also sync/check optional comparison sources, which may require credentials",
+    )
     args = parser.parse_args()
 
     if not MANIFEST.exists():
@@ -170,7 +180,10 @@ def main() -> int:
         return 1
 
     manifest = load_manifest()
-    refs = manifest.get("refs", {})
+    refs = {
+        key: entry for key, entry in manifest.get("refs", {}).items()
+        if args.include_optional or not entry.get("optional", False)
+    }
     if not refs:
         print("no refs declared in MANIFEST.toml", file=sys.stderr)
         return 1

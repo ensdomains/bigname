@@ -64,7 +64,9 @@ pub(crate) async fn revalidate_primary_name_position(
     pool: &PgPool,
     authority: &EnsPrimaryNameAuthority,
 ) -> Result<()> {
-    let observed_positions = json!({ "ethereum": authority.position });
+    let observed_positions = json!({
+        super::positions::chain_slot(&authority.position.chain_id)?: authority.position
+    });
     let mut transaction = pool
         .begin()
         .await

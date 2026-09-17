@@ -59,6 +59,9 @@ async fn fixture() -> Result<(TestDatabase, Uuid)> {
         .bind(CHAIN).bind(NAMESPACE_HASH).execute(db.pool()).await?;
     sqlx::query("INSERT INTO bigname_phase.surface_bindings (surface_binding_id,logical_name_id,resource_id,binding_kind,authority_arm,active_from,chain_id,block_hash,block_number,canonicality_state) VALUES ('00000000-0000-0000-0000-000000000606','ens:fixture',$1,'declared_registry_path','ens_v1',now(),$2,$3,2,'canonical')")
         .bind(resource).bind(CHAIN).bind(NAMESPACE_HASH).execute(db.pool()).await?;
+    // Namespace membership comes from a retained canonical interpreted event.
+    sqlx::query("INSERT INTO bigname_phase.normalized_events (event_identity,namespace,resource_id,event_kind,source_family,manifest_version,chain_id,block_hash,block_number,derivation_kind,canonicality_state) VALUES ('fixture-namespace','ens',$1,'PermissionChanged','ens_v1_registry_l1',1,$2,$3,2,'ens_v1_unwrapped_authority','canonical')")
+        .bind(resource).bind(CHAIN).bind(NAMESPACE_HASH).execute(db.pool()).await?;
     sqlx::query(
         r#"INSERT INTO bigname_phase.permissions_current_resource_summary (
         resource_id,authority_kind,registry_owner,registry_contract,
@@ -200,7 +203,7 @@ async fn effective_permissions_namespace_filter_rejects_orphaned_identity_lineag
     assert_eq!(namespaced_count(db.pool(), resource).await?, 1);
     sqlx::query("INSERT INTO bigname_phase.chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,3,now(),'orphaned')")
         .bind(CHAIN).bind(ORPHAN_HASH).execute(db.pool()).await?;
-    sqlx::query("WITH surface AS (UPDATE bigname_phase.name_surfaces SET block_hash=$1,block_number=3 WHERE logical_name_id='ens:fixture') UPDATE bigname_phase.surface_bindings SET block_hash=$1,block_number=3 WHERE logical_name_id='ens:fixture'")
+    sqlx::query("UPDATE bigname_phase.normalized_events SET block_hash=$1,block_number=3 WHERE event_identity='fixture-namespace'")
         .bind(ORPHAN_HASH).execute(db.pool()).await?;
     assert_eq!(namespaced_count(db.pool(), resource).await?, 0);
     db.cleanup().await
@@ -332,7 +335,7 @@ async fn effective_permissions_address_page_uses_active_subject_and_binding_inde
         &[
             "account_permission_state_current_active_subject_idx",
             "permissions_current_resource_registry_binding_idx",
-            "surface_bindings_resource_idx",
+            "normalized_events_resource_history_idx",
         ],
     )
     .await?;
@@ -373,7 +376,7 @@ async fn effective_permissions_summary_uses_the_anchored_effective_plan() -> Res
         &[
             "account_permission_state_current_active_subject_idx",
             "permissions_current_resource_registry_binding_idx",
-            "surface_bindings_resource_idx",
+            "normalized_events_resource_history_idx",
         ],
     )
     .await?;
@@ -387,8 +390,7 @@ async fn effective_permissions_resource_batch_uses_applicability_index() -> Resu
         explain_effective_permissions_by_resource_ids(db.pool(), &[resource], Some("ens")).await?,
         &[
             "account_permission_state_current_applicability_idx",
-            "name_surfaces_visibility_idx",
-            "surface_bindings_no_overlap",
+            "normalized_events_resource_history_idx",
         ],
     )
     .await?;
@@ -421,6 +423,8 @@ async fn page_fixture(grants: i32, per_grant: i32) -> Result<(TestDatabase, Vec<
         );
         sqlx::query(&query).execute(pool).await?;
     }
+    sqlx::query("INSERT INTO bigname_phase.normalized_events (event_identity,namespace,resource_id,event_kind,source_family,manifest_version,chain_id,block_hash,block_number,derivation_kind,canonicality_state) SELECT 'page-'||s.id,'ens',s.id,'PermissionChanged','ens_v1_registry_l1',1,$1,$2,2,'ens_v1_unwrapped_authority','canonical' FROM bigname_phase.page_seed s")
+        .bind(CHAIN).bind(NAMESPACE_HASH).execute(pool).await?;
     sqlx::query("INSERT INTO bigname_phase.account_permission_state_current SELECT (jsonb_populate_record(NULL::bigname_phase.account_permission_state_current,to_jsonb(t)||jsonb_build_object('owner',s.owner))).* FROM bigname_phase.account_permission_state_current t CROSS JOIN (SELECT DISTINCT owner FROM bigname_phase.page_seed) s")
         .execute(pool).await?;
     let mut ids: Vec<Uuid> =
@@ -499,7 +503,7 @@ async fn effective_permissions_grant_pages_match_unlimited_relation() -> Result<
     assert_page_equivalence(db.pool(), &ids, None).await?;
     assert_page_equivalence(db.pool(), &ids, Some("ens")).await?;
     // Sparse matches must be filtered before the grant-local limit.
-    sqlx::query("UPDATE bigname_phase.name_surfaces SET canonicality_state='orphaned' WHERE logical_name_id IN (SELECT 'ens:'||id FROM bigname_phase.page_seed WHERE n%5<>0)")
+    sqlx::query("UPDATE bigname_phase.normalized_events SET canonicality_state='orphaned' WHERE resource_id IN (SELECT id FROM bigname_phase.page_seed WHERE n%5<>0)")
         .execute(db.pool()).await?;
     assert_page_equivalence(db.pool(), &ids, Some("ens")).await?;
     sqlx::query("UPDATE bigname_phase.account_permission_state_current SET approved=false,effective_powers='[]' WHERE owner=(SELECT owner FROM bigname_phase.page_seed WHERE g=2 LIMIT 1)")

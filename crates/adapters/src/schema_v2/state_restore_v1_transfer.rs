@@ -31,6 +31,14 @@ pub(super) fn restore(state: &mut State, event: &PriorEventInput) {
             &event.source_family,
             to.to_owned(),
         );
+        // A burnt token cannot move again before `NameWrapped`: `_burn` zeroes the owner,
+        // `_transfer` requires `oldOwner == from`, and the transfer entry points require the
+        // caller to be or be approved by `from`, so a transfer clears a burn recorded from an
+        // earlier holder revocation whose own transfer was folded away.
+        // (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L137-L150 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L278 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L296-L303 @ ens_v1@91c966f)
+        state.set_v1_wrapper_burnt(&event.namespace, namehash, false);
     } else if matches!(
         event.source_family.as_str(),
         "ens_v1_registrar_l1" | "basenames_base_registrar"

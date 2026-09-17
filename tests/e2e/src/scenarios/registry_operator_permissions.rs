@@ -129,9 +129,9 @@ async fn assert_operator(
     assert_eq!(found, expected);
 
     for uri in [
-        format!("/v2/permissions?address={operator_hex}"),
-        format!("/v2/permissions?name={NAME}"),
-        format!("/v2/permissions?registration_id={resource}"),
+        format!("/v1/permissions?address={operator_hex}"),
+        format!("/v1/permissions?name={NAME}"),
+        format!("/v1/permissions?registration_id={resource}"),
     ] {
         let (status, body) = api.get_json(&uri).await?;
         ensure!(status == 200, "{uri} failed: {body}");
@@ -144,7 +144,7 @@ async fn assert_operator(
     }
     let (status, body) = api
         .get_json(&format!(
-            "/v2/addresses/{owner:#x}/names?include=role_summary"
+            "/v1/addresses/{owner:#x}/names?include=role_summary"
         ))
         .await?;
     ensure!(status == 200, "role summary failed: {body}");
@@ -322,7 +322,7 @@ async fn verify_snapshot(
             "getter {name}"
         );
         let body = api
-            .get(&format!("/v2/permissions?name={name}&include=lineage"))
+            .get(&format!("/v1/permissions?name={name}&include=lineage"))
             .await?;
         let projected_names: Vec<Value> =
             sqlx::query_scalar("SELECT to_jsonb(n) FROM name_current n WHERE raw_name=$1")
@@ -333,7 +333,7 @@ async fn verify_snapshot(
             .bind(&name).fetch_all(&run.db.pool).await?;
         let account_http = api
             .get(&format!(
-                "/v2/permissions?address={operator:#x}&include=lineage"
+                "/v1/permissions?address={operator:#x}&include=lineage"
             ))
             .await?;
         println!(
@@ -418,7 +418,7 @@ async fn verify_snapshot(
             expected_resources.insert(id.to_owned());
             let audit = api
                 .get(&format!(
-                    "/v2/permissions?registration_id={id}&address={operator:#x}&include=lineage"
+                    "/v1/permissions?registration_id={id}&address={operator:#x}&include=lineage"
                 ))
                 .await?;
             assert!(has_operator(&audit), "registration route {name}");
@@ -428,7 +428,7 @@ async fn verify_snapshot(
             } else {
                 "ens"
             };
-            let empty = api.get(&format!("/v2/permissions?registration_id={id}&namespace={other_namespace}&address={operator:#x}")).await?;
+            let empty = api.get(&format!("/v1/permissions?registration_id={id}&namespace={other_namespace}&address={operator:#x}")).await?;
             assert_eq!(empty["data"], json!([]));
         }
         println!(
@@ -439,7 +439,7 @@ async fn verify_snapshot(
     let mut actual_resources = std::collections::BTreeSet::new();
     let mut cursor = String::new();
     for _ in 0..10 {
-        let body = api.get(&format!("/v2/permissions?address={operator:#x}&namespace={namespace}&include=lineage&page_size=1{cursor}")).await?;
+        let body = api.get(&format!("/v1/permissions?address={operator:#x}&namespace={namespace}&include=lineage&page_size=1{cursor}")).await?;
         for row in body["data"].as_array().unwrap() {
             assert_eq!(row["grant_relation"], "operator");
             assert!(
@@ -458,7 +458,7 @@ async fn verify_snapshot(
     );
     let names = api
         .get(&format!(
-            "/v2/addresses/{account:#x}/names?namespace={namespace}&include=role_summary"
+            "/v1/addresses/{account:#x}/names?namespace={namespace}&include=role_summary"
         ))
         .await?;
     for label in ["authorcurrent", "authortoken"] {
@@ -489,7 +489,7 @@ async fn verify_snapshot(
     }
     let empty = api
         .get(&format!(
-            "/v2/addresses/{operator:#x}/names?include=role_summary"
+            "/v1/addresses/{operator:#x}/names?include=role_summary"
         ))
         .await?;
     assert_eq!(

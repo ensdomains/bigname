@@ -3,15 +3,15 @@ set -uo pipefail
 
 # Keep the inventory counts and assignments together. Test-list changes should
 # require edits only in this block; the checks below reject every other drift.
-expected_total=96
-expected_runnable=93
+expected_total=97
+expected_runnable=94
 expected_ignored=3
 expected_shard_1_runnable=46
 expected_shard_1_ignored=2
-expected_shard_1_filtered=48
-# Main historical forecasts exclude the zero-address, registry-operator and shutdown scenarios; they are not timings of the combined suite.
+expected_shard_1_filtered=49
+# Main historical forecasts exclude the zero-address scenarios, the API shutdown test, the eleven-log migration test and the registry-operator scenario; they are not timings of the combined suite.
 expected_shard_1_predicted_seconds=1288.036
-expected_shard_2_runnable=47
+expected_shard_2_runnable=48
 expected_shard_2_ignored=1
 expected_shard_2_filtered=48
 expected_shard_2_predicted_seconds=1281.353
@@ -63,9 +63,9 @@ shard_1_tests=(
     "scenarios::resolver_records::pre_surface_record_history_follows_current_resolver_and_version_boundary"
     "scenarios::resolver_records::records_route_values_and_version_boundaries_follow_current_resolver"
     "scenarios::resolver_records::shared_resolver_keeps_per_name_records_and_projection_marks_fan_in_unsupported"
-    "scenarios::reverse_primary::generic_name_record_set_changed_then_cleared_stays_unadmitted"
-    "scenarios::reverse_primary_claims::authorised_third_party_generic_name_record_does_not_key_claim"
-    "scenarios::reverse_primary_claims::forward_mismatch_keeps_generic_name_record_unadmitted"
+    "scenarios::reverse_primary::reverse_node_name_set_changed_then_cleared_updates_declared_claim"
+    "scenarios::reverse_primary_claims::authorised_third_party_name_record_keys_claimed_address"
+    "scenarios::reverse_primary_claims::forward_mismatch_preserves_the_declared_reverse_claim"
     "scenarios::service_shutdown::api_signals_drain_accepted_indexed_name_read"
     "scenarios::support::tests::temp_dirs_created_concurrently_are_distinct"
     "scenarios::unadmitted_controller::unadmitted_controller_registration_derives_registry_side_only"
@@ -92,6 +92,7 @@ shard_2_tests=(
     "scenarios::catchup_equivalence::primary_route_normalization_preserves_contract_instance_identity"
     "scenarios::catchup_equivalence::upfront_facts_match_rpc_ingest_wrapper_reverse_outputs"
     "scenarios::cross_protocol::locked_parent_publishes_only_migratable_ens_v1_children"
+    "scenarios::cross_protocol::plain_unwrapped_eleven_log_migration_publishes_only_v2_authority"
     "scenarios::cross_protocol::unlocked_parent_hides_retained_ens_v1_children"
     "scenarios::ens_v2_lifecycle::renewal_preserves_promoted_coverage_and_registry_edges_follow"
     "scenarios::ens_v2_lifecycle::root_apex_attach_and_root_scope_roles"
@@ -116,7 +117,7 @@ shard_2_tests=(
     "scenarios::resolver_records::resolver_changes_follow_registry_and_zero_releases"
     "scenarios::reverse_primary::reverse_claim_invalid_name_surfaces_raw_claim"
     "scenarios::reverse_primary_claims::claim_without_name_record_keeps_candidate_absent"
-    "scenarios::reverse_primary_claims::unadmitted_reverse_resolver_keeps_candidate_absent"
+    "scenarios::reverse_primary_claims::undeclared_reverse_resolver_record_populates_declared_claim"
     "scenarios::support::tests::canonical_event_readiness_adds_only_requested_record_key"
     "scenarios::wrapper::wrapper_wrap_fuses_subnames_and_unwrap_restore_identity"
     "scenarios::wrapper_registration::born_wrapped_registration_retains_wrapper_authority"

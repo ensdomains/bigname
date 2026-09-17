@@ -44,27 +44,41 @@ pub(super) fn position_for_chain(positions: &Value, chain_id: &str) -> Result<Pr
 pub(super) async fn ensure_project_at_head(
     transaction: &mut Transaction<'_, Postgres>,
     head: &HeadRow,
-) -> Result<String> {
-    let project_row_xmin: Option<String> = sqlx::query_scalar(
+) -> Result<Value> {
+    // The publication may trail the stored head within the shared lag tolerance (see
+    // bigname_storage::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS); it must be on the readable
+    // lineage and belong to this build's interpreter generation.
+    let publication: Option<Value> = sqlx::query_scalar(
         r#"
-        SELECT xmin::text
-        FROM chain_phase_state
-        WHERE chain_id = $1
-          AND phase_name = 'project'
-          AND phase_status = 'completed'
-          AND current_block_number = $2
-          AND current_block_hash = $3
-          AND input_content_hash = $4
+        SELECT jsonb_build_object(
+            'row_xmin', project.xmin::text,
+            'block_number', project.current_block_number,
+            'block_hash', project.current_block_hash,
+            'input_content_hash', project.input_content_hash
+        )
+        FROM chain_phase_state project
+        JOIN chain_lineage lineage
+          ON lineage.chain_id = project.chain_id
+         AND lineage.block_number = project.current_block_number
+         AND lineage.block_hash = project.current_block_hash
+         AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+        WHERE project.chain_id = $1
+          AND project.phase_name = 'project'
+          AND project.phase_status IN ('completed', 'running')
+          AND $2 - project.current_block_number BETWEEN 0 AND $5
+          AND (project.current_block_number <> $2 OR project.current_block_hash = $3)
+          AND project.input_content_hash = $4
         "#,
     )
     .bind(&head.chain_id)
     .bind(head.block_number)
     .bind(&head.block_hash)
     .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .bind(bigname_storage::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(database("validate project publication head"))?;
-    project_row_xmin.ok_or_else(|| {
+    publication.ok_or_else(|| {
         LookupError::stale(format!(
             "projected state has not reached the newest processed {} block",
             head.chain_id
@@ -218,9 +232,12 @@ impl From<ProjectedPosition> for LookupPosition {
     }
 }
 
-fn chain_slot(chain_id: &str) -> Result<&'static str> {
+/// The `chain_positions` slot a projection publishes for `chain_id`. Mainnet chains use the
+/// short network slot; Sepolia is keyed by its full chain id, as the project phase writes it.
+pub(super) fn chain_slot(chain_id: &str) -> Result<&'static str> {
     match chain_id {
         crate::ETHEREUM_MAINNET_CHAIN_ID => Ok("ethereum"),
+        crate::ETHEREUM_SEPOLIA_CHAIN_ID => Ok(crate::ETHEREUM_SEPOLIA_CHAIN_ID),
         crate::BASE_MAINNET_CHAIN_ID => Ok("base"),
         _ => Err(LookupError::unsupported(format!(
             "lookup chain {chain_id} has no declared position slot"

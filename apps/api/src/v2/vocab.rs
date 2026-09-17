@@ -50,10 +50,36 @@ pub(crate) enum Source {
     Verified,
 }
 
+/// The protocol arm that supplies a name's current registration fields; see
+/// [authority epoch](../../../../docs/glossary.md#authority-epoch).
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum GrantRelation {
-    Operator,
+pub(crate) enum Authority {
+    EnsV1,
+    EnsV2,
+}
+
+impl Authority {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::EnsV1 => "ens_v1",
+            Self::EnsV2 => "ens_v2",
+        }
+    }
+
+    pub(crate) fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "ens_v1" => Some(Self::EnsV1),
+            "ens_v2" => Some(Self::EnsV2),
+            _ => None,
+        }
+    }
+
+    /// The arm Project selected for a current name row; Basenames rows have no ENSv1/ENSv2 era
+    /// split and yield `None`.
+    pub(crate) fn from_provenance(provenance: &serde_json::Value) -> Option<Self> {
+        bigname_storage::name_current_authority_arm(provenance).and_then(Self::from_wire)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -95,10 +121,11 @@ pub(crate) enum HistoryEventType {
     Record,
     PrimaryName,
     Permission,
+    Subregistry,
 }
 
 impl HistoryEventType {
-    pub(crate) const ALL: [Self; 10] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::Registration,
         Self::Renewal,
         Self::Release,
@@ -109,6 +136,7 @@ impl HistoryEventType {
         Self::Record,
         Self::PrimaryName,
         Self::Permission,
+        Self::Subregistry,
     ];
 
     pub(crate) const fn as_str(self) -> &'static str {
@@ -123,7 +151,15 @@ impl HistoryEventType {
             Self::Record => "record",
             Self::PrimaryName => "primary_name",
             Self::Permission => "permission",
+            Self::Subregistry => "subregistry",
         }
+    }
+
+    pub(crate) fn from_wire(value: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|event_type| event_type.as_str() == value)
     }
 
     pub(crate) const fn storage_event_kinds(self) -> &'static [&'static str] {
@@ -143,6 +179,59 @@ impl HistoryEventType {
                 "RolesChanged",
                 "EACRolesChanged",
             ],
+            Self::Subregistry => &["SubregistryChanged"],
+        }
+    }
+}
+
+/// Non-empty set of product event types in canonical (`HistoryEventType::ALL`)
+/// order with duplicates removed, so equal sets always share one wire value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HistoryEventTypeSet {
+    event_types: Vec<HistoryEventType>,
+}
+
+impl HistoryEventTypeSet {
+    pub(crate) fn from_event_types(
+        event_types: impl IntoIterator<Item = HistoryEventType>,
+    ) -> Option<Self> {
+        let requested = event_types.into_iter().collect::<Vec<_>>();
+        let normalized = HistoryEventType::ALL
+            .iter()
+            .copied()
+            .filter(|candidate| requested.contains(candidate))
+            .collect::<Vec<_>>();
+        (!normalized.is_empty()).then_some(Self {
+            event_types: normalized,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn as_slice(&self) -> &[HistoryEventType] {
+        &self.event_types
+    }
+
+    pub(crate) fn canonical_value(&self) -> String {
+        self.event_types
+            .iter()
+            .map(|event_type| event_type.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    pub(crate) fn storage_event_kinds(&self) -> Vec<String> {
+        self.event_types
+            .iter()
+            .flat_map(|event_type| event_type.storage_event_kinds())
+            .map(|kind| (*kind).to_owned())
+            .collect()
+    }
+}
+
+impl From<HistoryEventType> for HistoryEventTypeSet {
+    fn from(value: HistoryEventType) -> Self {
+        Self {
+            event_types: vec![value],
         }
     }
 }
@@ -157,7 +246,9 @@ pub(crate) enum RegistrationStatus {
     Unregistered,
 }
 
-/// How a permission row is anchored for serving.
+/// How a permission row may be read. `CurrentForName` is claimed only when a
+/// `name` filter selected the row's current registration for that name;
+/// everything else is a resource-keyed read that makes no current-name claim.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AuthorityContext {
@@ -171,9 +262,14 @@ pub(crate) enum Relation {
     Owner,
     Manager,
     Registrant,
+    /// The address is the value of the name's current `addr:<coin_type>` resolver record. A
+    /// resolver-record relation, not an authority relation: it is coin-type scoped, never part
+    /// of `any`, and never combined with the authority relations in one set.
+    ResolvesTo,
 }
 
 impl Relation {
+    /// The authority relations `any` expands to. `resolves_to` is deliberately outside this set.
     pub(crate) const ALL: [Self; 3] = [Self::Owner, Self::Manager, Self::Registrant];
 
     pub(crate) const fn as_str(self) -> &'static str {
@@ -181,6 +277,7 @@ impl Relation {
             Self::Owner => "owner",
             Self::Manager => "manager",
             Self::Registrant => "registrant",
+            Self::ResolvesTo => "resolves_to",
         }
     }
 
@@ -189,6 +286,7 @@ impl Relation {
             "owner" => Some(Self::Owner),
             "manager" => Some(Self::Manager),
             "registrant" => Some(Self::Registrant),
+            "resolves_to" => Some(Self::ResolvesTo),
             _ => None,
         }
     }
@@ -206,8 +304,18 @@ impl RelationSet {
         }
     }
 
+    /// Canonicalizes a requested set. `resolves_to` is only valid on its own: a set that mixes it
+    /// with an authority relation has no canonical form and returns `None`.
     pub(crate) fn from_relations(relations: impl IntoIterator<Item = Relation>) -> Option<Self> {
         let requested = relations.into_iter().collect::<Vec<_>>();
+        if requested.contains(&Relation::ResolvesTo) {
+            return requested
+                .iter()
+                .all(|relation| *relation == Relation::ResolvesTo)
+                .then(|| Self {
+                    relations: vec![Relation::ResolvesTo],
+                });
+        }
         let mut normalized = Vec::new();
         for candidate in Relation::ALL {
             if requested.contains(&candidate) && !normalized.contains(&candidate) {
@@ -237,6 +345,10 @@ impl RelationSet {
 
     pub(crate) fn is_exact_manager(&self) -> bool {
         self.relations == [Relation::Manager]
+    }
+
+    pub(crate) fn is_resolves_to(&self) -> bool {
+        self.relations == [Relation::ResolvesTo]
     }
 
     pub(crate) fn is_exact_owner_and_registrant(&self) -> bool {
@@ -311,6 +423,7 @@ pub(crate) const PRODUCT_PIPELINE_TERMS: &[&str] = &[
     "enumeration_basis",
     "source_classes_considered",
     "address_names_current",
+    "address_records_current",
     "chain_header_audit",
     "chain_lineage",
     "children_current",
@@ -445,6 +558,8 @@ fn term_match_has_underscore_boundaries(candidate: &str, term: &str, start: usiz
 
 #[cfg(test)]
 mod tests {
+    mod relation_tests;
+
     use serde::Serialize;
 
     use super::*;
@@ -517,6 +632,7 @@ mod tests {
         assert_wire(HistoryEventType::Record, "record");
         assert_wire(HistoryEventType::PrimaryName, "primary_name");
         assert_wire(HistoryEventType::Permission, "permission");
+        assert_wire(HistoryEventType::Subregistry, "subregistry");
     }
 
     #[test]
@@ -532,6 +648,7 @@ mod tests {
             HistoryEventType::Record,
             HistoryEventType::PrimaryName,
             HistoryEventType::Permission,
+            HistoryEventType::Subregistry,
         ] {
             for storage_kind in event_type.storage_event_kinds() {
                 assert_eq!(
@@ -540,6 +657,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn history_event_type_sets_canonicalize_order_and_duplicates() {
+        let set = HistoryEventTypeSet::from_event_types([
+            HistoryEventType::Renewal,
+            HistoryEventType::Registration,
+            HistoryEventType::Renewal,
+        ])
+        .expect("non-empty set must build");
+        assert_eq!(
+            set.as_slice(),
+            &[HistoryEventType::Registration, HistoryEventType::Renewal]
+        );
+        assert_eq!(set.canonical_value(), "registration,renewal");
+        assert_eq!(
+            set.storage_event_kinds(),
+            vec![
+                "RegistrationGranted".to_owned(),
+                "LabelRegistered".to_owned(),
+                "RegistrationRenewed".to_owned(),
+            ]
+        );
+        assert!(HistoryEventTypeSet::from_event_types([]).is_none());
+        assert_eq!(
+            HistoryEventType::from_wire("primary_name"),
+            Some(HistoryEventType::PrimaryName)
+        );
+        assert_eq!(HistoryEventType::from_wire("registered"), None);
     }
 
     #[test]
@@ -563,6 +709,7 @@ mod tests {
         assert_wire(Relation::Owner, "owner");
         assert_wire(Relation::Manager, "manager");
         assert_wire(Relation::Registrant, "registrant");
+        assert_wire(Relation::ResolvesTo, "resolves_to");
     }
 
     #[test]

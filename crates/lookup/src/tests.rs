@@ -24,7 +24,8 @@ use crate::{
     BASENAMES_NAMESPACE, ChainRpcUrls, ENS_NAMESPACE, EnsPrimaryNameStatus, ErrorKind,
     LedgerAction, LookupEngine, LookupPosition, LookupRequest, LookupResponse, RecordSelector,
     abi::{dns_encode_name, hex_string, namehash},
-    ccip::encode_offchain_lookup_for_test,
+    admitted_verified_authority_arms,
+    ccip::{encode_batch_query_for_test, encode_offchain_lookup_for_test},
 };
 
 const ETHEREUM: &str = "ethereum-mainnet";
@@ -34,6 +35,8 @@ const ETHEREUM_LATER_HASH: &str =
     "0x3333333333333333333333333333333333333333333333333333333333333333";
 const ETHEREUM_PRIOR_HASH: &str =
     "0x4444444444444444444444444444444444444444444444444444444444444444";
+const ETHEREUM_FAR_HASH: &str =
+    "0x5555555555555555555555555555555555555555555555555555555555555555";
 const BASE_HASH: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
 const UNIVERSAL_RESOLVER: &str = "0xeeeeeeee14d718c2b47d9923deab1335e144eeee";
 const ENS_REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
@@ -55,7 +58,20 @@ enum RpcResponse {
 #[derive(Clone, Copy)]
 enum FixtureKind {
     Ens,
+    /// An ENS name whose selected authority arm is `ens_v2`, projected with a direct topology, on
+    /// an `ens_execution` entrypoint that declares `verified_authority_arms = ["ens_v1", "ens_v2"]`.
+    EnsV2Arm,
     Basenames,
+}
+
+impl FixtureKind {
+    fn authority_arm(self) -> &'static str {
+        match self {
+            Self::Ens => "ens_v1",
+            Self::EnsV2Arm => "ens_v2",
+            Self::Basenames => "basenames",
+        }
+    }
 }
 
 struct Fixture {
@@ -332,22 +348,43 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
             "supported",
         )
     })
-    .chain([(
-        "exact not found with non-authoritative coverage",
-        "text:empty".to_owned(),
-        json!([{
-            "record_key":"text:empty",
-            "record_family":"text",
-            "selector_key":"empty",
-            "status":"not_found"
-        }]),
-        json!({}),
-        json!({
-            "status":"unsupported",
-            "unsupported_reason":"coverage_incomplete"
-        }),
-        "unsupported",
-    )]);
+    .chain([
+        (
+            "exact not found with non-authoritative coverage",
+            "text:empty".to_owned(),
+            json!([{
+                "record_key":"text:empty",
+                "record_family":"text",
+                "selector_key":"empty",
+                "status":"not_found"
+            }]),
+            json!({}),
+            json!({
+                "status":"unsupported",
+                "unsupported_reason":"coverage_incomplete"
+            }),
+            "unsupported",
+        ),
+        // A retained value on an unsupported row is diagnostics, not an answer: both derivations
+        // must compare the live result against `unsupported`, never against the entry value.
+        (
+            "exact success with unsupported coverage",
+            "addr:60".to_owned(),
+            json!([{
+                "record_key":"addr:60",
+                "record_family":"addr",
+                "selector_key":"60",
+                "status":"success",
+                "value":"0xFA75ED860000000000000000000000000000ABCD"
+            }]),
+            json!({}),
+            json!({
+                "status":"unsupported",
+                "unsupported_reason":"coverage_incomplete"
+            }),
+            "unsupported",
+        ),
+    ]);
     let marker_value = "0x2222222222222222222222222222222222222222";
     let marker_cases = [
         ("marked absence", Some("not_found"), json!(["addr:60"])),
@@ -458,6 +495,9 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
         .bind(&record_key)
         .fetch_one(fixture.pool())
         .await?;
+        if case_name == "exact success with unsupported coverage" {
+            assert_eq!(rust_answer, json!({"status":"unsupported"}), "{case_name}");
+        }
         if provenance
             .get("exact_nonempty_not_found_record_keys")
             .is_some()
@@ -1001,16 +1041,103 @@ async fn stable_projection_divergence_tracks_live_reorg_dependency() -> AnyResul
 }
 
 #[tokio::test]
-async fn lookup_is_stale_while_project_cursor_lags_the_head() -> AnyResult<()> {
+async fn lookup_is_stale_while_project_cursor_lags_the_head_beyond_tolerance() -> AnyResult<()> {
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    advance_head(fixture.pool()).await?;
+    advance_head_to(
+        fixture.pool(),
+        10 + bigname_storage::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS + 1,
+        ETHEREUM_FAR_HASH,
+    )
+    .await?;
 
     let error = lookup_engine(fixture.pool(), "http://127.0.0.1:1")?
         .lookup(lookup_request(&fixture.logical_name_id)?)
         .await
-        .expect_err("lookup must wait for project to publish the newest processed head");
+        .expect_err("lookup must wait for project to publish near the newest processed head");
     assert_eq!(error.kind(), ErrorKind::Stale);
     fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn lookup_completes_with_a_lagging_publication() -> AnyResult<()> {
+    for running in [false, true] {
+        let (rpc_url, rpc_handle) =
+            spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+        let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+        advance_head(fixture.pool()).await?;
+        if running {
+            mark_project_running(fixture.pool()).await?;
+        }
+        let response = run_lookup(&fixture, &rpc_url).await?;
+        assert_eq!(response.records[0].ledger_action, LedgerAction::Written);
+        assert_eq!(response.records[0].value, Some(json!(LIVE_VALUE)));
+        assert_eq!(ledger_count(fixture.pool()).await?, 1);
+        fixture.cleanup().await?;
+        assert_hash_pinned(&join_rpc(rpc_handle).await?, ETHEREUM_LATER_HASH);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn lookup_rejects_a_republished_lagging_generation() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    advance_head(fixture.pool()).await?;
+    mark_project_running(fixture.pool()).await?;
+    let pool = fixture.pool().clone();
+    let update_pool = pool.clone();
+    let result = lookup_engine(&pool, &rpc_url)?
+        .lookup_with_before_persist(lookup_request(&fixture.logical_name_id)?, move || async move {
+            // Even the same height and content hash must retain its publication generation.
+            sqlx::query("UPDATE chain_phase_state SET current_block_number = current_block_number WHERE phase_name = 'project'")
+                .execute(&update_pool).await.expect("republish the same position");
+        }).await;
+    assert_eq!(
+        result.expect_err("new generation must be refused").kind(),
+        ErrorKind::ConcurrentState
+    );
+    assert_eq!(ledger_count(&pool).await?, 0);
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn lookup_publication_migration_preserves_guard_and_privileges() -> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let before: (String, Option<String>) = sqlx::query_as(
+        "SELECT pg_get_functiondef(oid), proacl::text FROM pg_proc WHERE oid =
+         'revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)'::regprocedure"
+    ).fetch_one(fixture.pool()).await?;
+    raw_sql(include_str!(
+        "../../../migrations/20260914120000_lookup_publication_revalidation.sql"
+    ))
+    .execute(fixture.pool())
+    .await?;
+    let after: (String, Option<String>) = sqlx::query_as(
+        "SELECT pg_get_functiondef(oid), proacl::text FROM pg_proc WHERE oid =
+         'revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)'::regprocedure"
+    ).fetch_one(fixture.pool()).await?;
+    assert_eq!(
+        before, after,
+        "fresh and migrated guards must have identical definitions and grants"
+    );
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+async fn mark_project_running(pool: &PgPool) -> AnyResult<()> {
+    sqlx::query(
+        "UPDATE chain_phase_state SET phase_status = 'running', finished_at = NULL,
+             target_block_number = 11, target_block_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(ETHEREUM)
+    .bind(ETHEREUM_LATER_HASH)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -2490,6 +2617,256 @@ async fn successful_ccip_result_is_never_persisted() -> AnyResult<()> {
 }
 
 #[tokio::test]
+async fn hanging_gateways_are_cut_off_by_the_ccip_read_budget_in_band() -> AnyResult<()> {
+    // Each hanging server accepts one connection, reads the gateway POST body,
+    // and never answers, so every URL would otherwise run to the per-request
+    // timeout in turn. The budget has to stop the chain before that.
+    let (first_url, first_handle) = spawn_hanging_rpc().await?;
+    let (second_url, second_handle) = spawn_hanging_rpc().await?;
+    let sender = Address::from_str(BASE_L1_RESOLVER)?;
+    let offchain_data = encode_offchain_lookup_for_test(
+        sender,
+        vec![first_url, second_url],
+        vec![0x12, 0x34],
+        [0x01, 0x02, 0x03, 0x04],
+        vec![0xab],
+    );
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Error {
+        code: 3,
+        message: "execution reverted".to_owned(),
+        data: Value::String(offchain_data),
+    }])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Basenames, INDEXED_VALUE).await?;
+
+    let started = std::time::Instant::now();
+    let result = run_lookup(&fixture, &rpc_url).await?;
+    let elapsed = started.elapsed();
+
+    let record = &result.records[0];
+    assert!(
+        record.ccip_read,
+        "the record must be marked as a CCIP-Read attempt"
+    );
+    assert_eq!(record.value, None);
+    assert_eq!(
+        record.failure_reason.as_deref(),
+        Some("resolver_call_failed"),
+        "budget exhaustion must fail this record in band, like a configured timeout"
+    );
+    // One stalled URL alone would take the 1500 ms per-request timeout; the
+    // 400 ms test budget must have ended the chain well before that.
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "budget did not bound the chain: {elapsed:?}"
+    );
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(
+        requests.len(),
+        1,
+        "no callback may run once the budget is exhausted"
+    );
+    first_handle.abort();
+    second_handle.abort();
+    Ok(())
+}
+
+fn batch_offchain_lookup(request_count: usize, gateway_url: &str) -> AnyResult<String> {
+    let sender = Address::from_str(BASE_L1_RESOLVER)?;
+    let requests = (0..request_count)
+        .map(|index| (sender, vec![gateway_url.to_owned()], vec![index as u8]))
+        .collect();
+    Ok(encode_offchain_lookup_for_test(
+        sender,
+        vec!["x-batch-gateway:true".to_owned()],
+        encode_batch_query_for_test(requests),
+        [0x01, 0x02, 0x03, 0x04],
+        vec![0xab],
+    ))
+}
+
+#[tokio::test]
+async fn batch_gateway_queries_above_the_request_cap_fail_in_band_before_any_fan_out()
+-> AnyResult<()> {
+    // The gateway task finishes the moment anything connects, so it must
+    // still be pending after the lookup if the cap refused the batch first.
+    let (gateway_url, gateway_handle) = spawn_untouchable_gateway().await?;
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Error {
+        code: 3,
+        message: "execution reverted".to_owned(),
+        data: Value::String(batch_offchain_lookup(9, &gateway_url)?),
+    }])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Basenames, INDEXED_VALUE).await?;
+
+    let result = run_lookup(&fixture, &rpc_url).await?;
+
+    let record = &result.records[0];
+    assert!(record.ccip_read);
+    assert_eq!(record.value, None);
+    assert_eq!(
+        record.failure_reason.as_deref(),
+        Some("ccip_read_failed"),
+        "an oversized batch must be refused before the fan-out: {record:?}"
+    );
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests.len(), 1, "no callback may run for a refused batch");
+    assert!(
+        !gateway_handle.is_finished(),
+        "the gateway must not have been contacted"
+    );
+    gateway_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn batch_gateway_fan_out_runs_at_most_four_requests_at_a_time() -> AnyResult<()> {
+    // Eight inner requests against one gateway that holds each answer for
+    // 25 ms and records how many were in flight together.
+    let (gateway_url, gateway_handle) =
+        spawn_batch_gateway(8, vec![0xca, 0xfe], Duration::from_millis(25)).await?;
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Error {
+            code: 3,
+            message: "execution reverted".to_owned(),
+            data: Value::String(batch_offchain_lookup(8, &gateway_url)?),
+        },
+        RpcResponse::Result(encoded_basenames_text_result(LIVE_VALUE)),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Basenames, INDEXED_VALUE).await?;
+
+    let result = run_lookup(&fixture, &rpc_url).await?;
+
+    let record = &result.records[0];
+    assert!(record.ccip_read);
+    assert_eq!(
+        record.value,
+        Some(json!(LIVE_VALUE)),
+        "a batch within the caps must resolve: {record:?}"
+    );
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests.len(), 2, "initial call and the batch callback");
+    let peak = gateway_handle.await??;
+    assert!(
+        (2..=4).contains(&peak),
+        "the fan-out must run concurrently but never more than four at once: {peak}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn batch_gateway_responses_are_capped_in_aggregate() -> AnyResult<()> {
+    // Each inner response is 400 KiB, under the 1 MiB per-response cap. Two
+    // of them fit the same 1 MiB in total; three do not.
+    let response = vec![0x5a_u8; 400 * 1024];
+    let (gateway_url, gateway_handle) =
+        spawn_batch_gateway(2, response.clone(), Duration::ZERO).await?;
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Error {
+            code: 3,
+            message: "execution reverted".to_owned(),
+            data: Value::String(batch_offchain_lookup(2, &gateway_url)?),
+        },
+        RpcResponse::Result(encoded_basenames_text_result(LIVE_VALUE)),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Basenames, INDEXED_VALUE).await?;
+    let result = run_lookup(&fixture, &rpc_url).await?;
+    let record = &result.records[0];
+    assert_eq!(
+        record.value,
+        Some(json!(LIVE_VALUE)),
+        "two 400 KiB responses fit the aggregate cap: {record:?}"
+    );
+    assert_eq!(join_rpc(rpc_handle).await?.len(), 2);
+    gateway_handle.await??;
+
+    let (gateway_url, gateway_handle) = spawn_batch_gateway(3, response, Duration::ZERO).await?;
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Error {
+        code: 3,
+        message: "execution reverted".to_owned(),
+        data: Value::String(batch_offchain_lookup(3, &gateway_url)?),
+    }])
+    .await?;
+    let result = run_lookup(&fixture, &rpc_url).await?;
+    let record = &result.records[0];
+    assert_eq!(record.value, None);
+    assert_eq!(
+        record.failure_reason.as_deref(),
+        Some("ccip_read_failed"),
+        "three 400 KiB responses exceed the aggregate cap: {record:?}"
+    );
+
+    fixture.cleanup().await?;
+    assert_eq!(
+        join_rpc(rpc_handle).await?.len(),
+        1,
+        "no callback may run for a batch over the aggregate cap"
+    );
+    gateway_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn slow_callbacks_do_not_consume_the_gateway_budget() -> AnyResult<()> {
+    // Two healthy gateways answer at once; the callback between them stalls
+    // longer than the whole test budget. Only gateway time may be charged, so
+    // the second step must still get its full share and the resolution succeed.
+    let (first_gateway, first_gateway_handle) = spawn_gateway(vec![0xca, 0xfe]).await?;
+    let (second_gateway, second_gateway_handle) = spawn_gateway(vec![0xbe, 0xef]).await?;
+    let sender = Address::from_str(BASE_L1_RESOLVER)?;
+    let first = encode_offchain_lookup_for_test(
+        sender,
+        vec![first_gateway],
+        vec![0x12, 0x34],
+        [0x01, 0x02, 0x03, 0x04],
+        vec![0xab],
+    );
+    let second = encode_offchain_lookup_for_test(
+        sender,
+        vec![second_gateway],
+        vec![0x56, 0x78],
+        [0x01, 0x02, 0x03, 0x04],
+        vec![0xcd],
+    );
+    let (rpc_url, rpc_handle) =
+        spawn_two_step_ccip_rpc(first, second, Duration::from_millis(600)).await?;
+    let fixture = setup_fixture(FixtureKind::Basenames, INDEXED_VALUE).await?;
+
+    let result = run_lookup(&fixture, &rpc_url).await?;
+
+    let record = &result.records[0];
+    assert!(record.ccip_read);
+    assert_eq!(
+        record.value,
+        Some(json!(LIVE_VALUE)),
+        "a stalled callback must not exhaust the gateway budget: {record:?}"
+    );
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(
+        requests.len(),
+        3,
+        "initial call, slow callback, final callback"
+    );
+    first_gateway_handle
+        .await
+        .context("first gateway task was cancelled")??;
+    second_gateway_handle
+        .await
+        .context("second gateway task was cancelled")??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn mixed_ccip_and_direct_batch_persists_only_the_direct_disagreement() -> AnyResult<()> {
     let (gateway_url, gateway_handle) = spawn_gateway(vec![0xca, 0xfe]).await?;
     let offchain_data = encode_offchain_lookup_for_test(
@@ -2882,6 +3259,134 @@ async fn unsupported_active_ens_manifest_does_not_fall_back_to_shadow() -> AnyRe
 }
 
 #[tokio::test]
+async fn ens_v2_arm_direct_route_executes_and_compares_through_an_admitting_entrypoint()
+-> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::EnsV2Arm, INDEXED_VALUE).await?;
+    let arm: String = sqlx::query_scalar(
+        "SELECT provenance #>> '{authority_selection,authority_arm}' FROM name_current",
+    )
+    .fetch_one(fixture.pool())
+    .await?;
+    assert_eq!(arm, "ens_v2");
+
+    let response = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(response.entrypoint_address, UNIVERSAL_RESOLVER);
+    assert_eq!(response.records.len(), 1);
+    assert_eq!(
+        response.records[0].status,
+        crate::LookupRecordStatus::Success
+    );
+    assert_eq!(response.records[0].ledger_action, LedgerAction::Written);
+    assert_eq!(
+        ledger_count(fixture.pool()).await?,
+        1,
+        "a direct ENSv2-arm route is compared against its indexed inventory like any direct route"
+    );
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests[0]["params"][0]["to"], UNIVERSAL_RESOLVER);
+    assert_hash_pinned(&requests, ETHEREUM_HASH);
+    Ok(())
+}
+
+#[tokio::test]
+async fn ens_v2_arm_is_refused_before_rpc_by_an_ens_v1_only_entrypoint() -> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::EnsV2Arm, INDEXED_VALUE).await?;
+    for payload in [
+        // The default: no declaration admits only the ENSv1 arm.
+        "manifest_payload - 'verified_authority_arms'",
+        "manifest_payload || '{\"verified_authority_arms\": [\"ens_v1\"]}'::jsonb",
+    ] {
+        sqlx::query(&format!(
+            "UPDATE manifest_versions SET manifest_payload = {payload}
+             WHERE source_family = 'ens_execution'"
+        ))
+        .execute(fixture.pool())
+        .await?;
+        let error = lookup_engine(fixture.pool(), "http://127.0.0.1:1")?
+            .lookup(lookup_request(&fixture.logical_name_id)?)
+            .await
+            .expect_err("an ENSv2-arm name must not execute through an ENSv1-only entrypoint");
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert_eq!(
+            error.refusal(),
+            Some(crate::LookupRefusal::AuthorityArmNotAdmitted),
+            "{payload}: {error}"
+        );
+    }
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    // The ENSv1 arm stays admitted by the same default declaration.
+    sqlx::query(
+        "UPDATE name_current SET provenance = jsonb_build_object(
+             'authority_selection', jsonb_build_object('authority_arm', 'ens_v1'))",
+    )
+    .execute(fixture.pool())
+    .await?;
+    sqlx::query("UPDATE surface_bindings SET authority_arm = 'ens_v1'")
+        .execute(fixture.pool())
+        .await?;
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(
+        INDEXED_VALUE,
+    ))])
+    .await?;
+    let response = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(
+        response.records[0].status,
+        crate::LookupRecordStatus::Success
+    );
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn admitted_verified_authority_arms_follow_the_selected_entrypoint_declaration()
+-> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    assert_eq!(
+        admitted_verified_authority_arms(fixture.pool(), ETHEREUM).await?,
+        ["ens_v1"],
+        "an execution manifest without the declaration admits only the ENSv1 arm"
+    );
+
+    sqlx::query(
+        "UPDATE manifest_versions
+         SET manifest_payload = manifest_payload
+             || '{\"verified_authority_arms\": [\"ens_v1\", \"ens_v2\"]}'::jsonb
+         WHERE source_family = 'ens_execution'",
+    )
+    .execute(fixture.pool())
+    .await?;
+    assert_eq!(
+        admitted_verified_authority_arms(fixture.pool(), ETHEREUM).await?,
+        ["ens_v1", "ens_v2"]
+    );
+
+    let error = admitted_verified_authority_arms(fixture.pool(), BASE)
+        .await
+        .expect_err("Base is not an ENS execution chain");
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+
+    sqlx::query(
+        "UPDATE manifest_versions
+         SET manifest_payload = '{\"capability_flags\": {}}'::jsonb
+         WHERE source_family = 'ens_execution'",
+    )
+    .execute(fixture.pool())
+    .await?;
+    let error = admitted_verified_authority_arms(fixture.pool(), ETHEREUM)
+        .await
+        .expect_err("a manifest without the resolution capability declares no entrypoint");
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn primary_name_lookup_uses_manifest_entrypoints_and_readable_head() -> AnyResult<()> {
     let target = "0x8e8db5ccef88cca9d624701db544989c996e3216";
     let reverse_resolver = "0xa2c122be93b0074270ebee7f6b7292c7deb45047";
@@ -2911,7 +3416,7 @@ async fn primary_name_lookup_uses_manifest_entrypoints_and_readable_head() -> An
     .execute(fixture.pool())
     .await?;
     let result = lookup_engine(fixture.pool(), &rpc_url)?
-        .lookup_ens_primary_name(target)
+        .lookup_ens_primary_name(ETHEREUM, target)
         .await?;
 
     assert_eq!(result.status, EnsPrimaryNameStatus::Success);
@@ -2930,6 +3435,39 @@ async fn primary_name_lookup_uses_manifest_entrypoints_and_readable_head() -> An
     assert_eq!(requests[1]["params"][0]["to"], reverse_resolver);
     assert_eq!(requests[2]["params"][0]["to"], UNIVERSAL_RESOLVER);
     assert_hash_pinned(&requests, ETHEREUM_HASH);
+    Ok(())
+}
+
+#[tokio::test]
+async fn primary_name_completes_with_a_running_lagging_publication() -> AnyResult<()> {
+    let target = "0x8e8db5ccef88cca9d624701db544989c996e3216";
+    let reverse_resolver = "0xa2c122be93b0074270ebee7f6b7292c7deb45047";
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Result(Value::String(hex_string(
+            &Address::from_str(reverse_resolver)?.abi_encode(),
+        ))),
+        RpcResponse::Result(Value::String(hex_string(&"alice.eth".abi_encode()))),
+        RpcResponse::Result(encoded_address_result(target)?),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    seed_manifest(
+        fixture.pool(),
+        ENS_NAMESPACE,
+        "ens_v1_registry_l1",
+        "registry",
+        ENS_REGISTRY,
+        "00000000-0000-0000-0000-000000000104",
+    )
+    .await?;
+    advance_head(fixture.pool()).await?;
+    mark_project_running(fixture.pool()).await?;
+    let result = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup_ens_primary_name(ETHEREUM, target)
+        .await?;
+    assert_eq!(result.forward_address.as_deref(), Some(target));
+    fixture.cleanup().await?;
+    assert_hash_pinned(&join_rpc(rpc_handle).await?, ETHEREUM_LATER_HASH);
     Ok(())
 }
 
@@ -2958,7 +3496,7 @@ async fn primary_name_revalidates_its_position_after_live_calls() -> AnyResult<(
     let pool = fixture.pool().clone();
     let update_pool = pool.clone();
     let result = lookup_engine(&pool, &rpc_url)?
-        .lookup_ens_primary_name_with_before_revalidate(target, move || async move {
+        .lookup_ens_primary_name_with_before_revalidate(ETHEREUM, target, move || async move {
             advance_head(&update_pool)
                 .await
                 .expect("second session must advance the readable head");
@@ -2997,7 +3535,7 @@ async fn primary_name_rejects_a_project_generation_change_after_live_calls() -> 
     let pool = fixture.pool().clone();
     let update_pool = pool.clone();
     let result = lookup_engine(&pool, &rpc_url)?
-        .lookup_ens_primary_name_with_before_revalidate(target, move || async move {
+        .lookup_ens_primary_name_with_before_revalidate(ETHEREUM, target, move || async move {
             sqlx::query(
                 "UPDATE chain_phase_state
                  SET input_content_hash = 'manifest-authority:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:test-invalidation'
@@ -3043,7 +3581,7 @@ async fn primary_name_missing_forward_address_is_not_found() -> AnyResult<()> {
     .await?;
 
     let result = lookup_engine(fixture.pool(), &rpc_url)?
-        .lookup_ens_primary_name(target)
+        .lookup_ens_primary_name(ETHEREUM, target)
         .await?;
     assert_eq!(result.status, EnsPrimaryNameStatus::NotFound);
     assert_eq!(result.forward_address, None);
@@ -3081,7 +3619,7 @@ async fn primary_name_does_not_reclassify_resolver_not_found() -> AnyResult<()> 
     .await?;
 
     let result = lookup_engine(fixture.pool(), &rpc_url)?
-        .lookup_ens_primary_name(target)
+        .lookup_ens_primary_name(ETHEREUM, target)
         .await?;
     assert_eq!(result.status, EnsPrimaryNameStatus::ExecutionFailed);
 
@@ -3110,7 +3648,7 @@ async fn primary_name_selected_block_error_is_stale() -> AnyResult<()> {
     .await?;
 
     let error = lookup_engine(fixture.pool(), &rpc_url)?
-        .lookup_ens_primary_name("0x8e8db5ccef88cca9d624701db544989c996e3216")
+        .lookup_ens_primary_name(ETHEREUM, "0x8e8db5ccef88cca9d624701db544989c996e3216")
         .await
         .expect_err("unavailable selected block must be stale");
     assert_eq!(error.kind(), ErrorKind::Stale);
@@ -3140,7 +3678,7 @@ async fn primary_name_missing_selected_state_is_stale() -> AnyResult<()> {
     .await?;
 
     let error = lookup_engine(fixture.pool(), &rpc_url)?
-        .lookup_ens_primary_name("0x8e8db5ccef88cca9d624701db544989c996e3216")
+        .lookup_ens_primary_name(ETHEREUM, "0x8e8db5ccef88cca9d624701db544989c996e3216")
         .await
         .expect_err("missing selected state must be stale");
     assert_eq!(error.kind(), ErrorKind::Stale);
@@ -3167,7 +3705,7 @@ async fn primary_name_configured_response_timeout_is_in_band() -> AnyResult<()> 
         .with_http_timeouts(Duration::from_millis(50), Duration::from_millis(150))?;
 
     let result = LookupEngine::new(fixture.pool().clone(), rpc_urls)
-        .lookup_ens_primary_name("0x8e8db5ccef88cca9d624701db544989c996e3216")
+        .lookup_ens_primary_name(ETHEREUM, "0x8e8db5ccef88cca9d624701db544989c996e3216")
         .await?;
     assert_eq!(result.status, EnsPrimaryNameStatus::ExecutionFailed);
     assert_eq!(
@@ -3259,7 +3797,7 @@ async fn setup_fixture(kind: FixtureKind, indexed_value: &str) -> AnyResult<Fixt
     apply_baseline(database.pool()).await?;
     let (namespace, name, resolver_chain, resolver_hash, entrypoint, role, source_family) =
         match kind {
-            FixtureKind::Ens => (
+            FixtureKind::Ens | FixtureKind::EnsV2Arm => (
                 ENS_NAMESPACE,
                 "alice.eth",
                 ETHEREUM,
@@ -3332,7 +3870,7 @@ async fn setup_fixture(kind: FixtureKind, indexed_value: &str) -> AnyResult<Fixt
         },
     });
     let transport = match kind {
-        FixtureKind::Ens => json!({
+        FixtureKind::Ens | FixtureKind::EnsV2Arm => json!({
             "source_chain_id": null,
             "target_chain_id": null,
             "contract_address": null,
@@ -3370,6 +3908,7 @@ async fn setup_fixture(kind: FixtureKind, indexed_value: &str) -> AnyResult<Fixt
         resolver_hash,
         resource_id,
         binding_id,
+        kind.authority_arm(),
         &topology,
         &boundary,
         &name_positions,
@@ -3377,6 +3916,16 @@ async fn setup_fixture(kind: FixtureKind, indexed_value: &str) -> AnyResult<Fixt
         indexed_value,
     )
     .await?;
+    if matches!(kind, FixtureKind::EnsV2Arm) {
+        sqlx::query(
+            "UPDATE manifest_versions
+             SET manifest_payload = manifest_payload
+                 || '{\"verified_authority_arms\": [\"ens_v1\", \"ens_v2\"]}'::jsonb
+             WHERE source_family = 'ens_execution'",
+        )
+        .execute(database.pool())
+        .await?;
+    }
 
     Ok(Fixture {
         database,
@@ -3497,22 +4046,28 @@ async fn seed_project_state(pool: &PgPool, chain_id: &str, block_hash: &str) -> 
 }
 
 async fn advance_head(pool: &PgPool) -> AnyResult<()> {
+    advance_head_to(pool, 11, ETHEREUM_LATER_HASH).await
+}
+
+async fn advance_head_to(pool: &PgPool, block_number: i64, block_hash: &str) -> AnyResult<()> {
     sqlx::query(
         "INSERT INTO chain_lineage
             (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
-         VALUES ($1, $2, 11, '2026-08-03T00:00:01Z', 'canonical')",
+         VALUES ($1, $2, $3, '2026-08-03T00:00:01Z', 'canonical')",
     )
     .bind(ETHEREUM)
-    .bind(ETHEREUM_LATER_HASH)
+    .bind(block_hash)
+    .bind(block_number)
     .execute(pool)
     .await?;
     sqlx::query(
         "UPDATE chain_heads
-         SET latest_block_hash = $2, latest_block_number = 11
+         SET latest_block_hash = $2, latest_block_number = $3
          WHERE chain_id = $1",
     )
     .bind(ETHEREUM)
-    .bind(ETHEREUM_LATER_HASH)
+    .bind(block_hash)
+    .bind(block_number)
     .execute(pool)
     .await?;
     Ok(())
@@ -3599,6 +4154,7 @@ async fn seed_identity_and_projection(
     block_hash: &str,
     resource_id: &str,
     binding_id: &str,
+    authority_arm: &str,
     topology: &Value,
     boundary: &Value,
     name_positions: &Value,
@@ -3636,8 +4192,7 @@ async fn seed_identity_and_projection(
         "INSERT INTO surface_bindings
             (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from,
              chain_id, block_hash, block_number, canonicality_state)
-         VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path',
-                 CASE WHEN $2 LIKE 'basenames:%' THEN 'basenames' ELSE 'ens_v1' END,
+         VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', $6,
                  '2026-08-03T00:00:00Z', $4, $5, 10, 'canonical')",
     )
     .bind(binding_id)
@@ -3645,6 +4200,7 @@ async fn seed_identity_and_projection(
     .bind(resource_id)
     .bind(chain_id)
     .bind(block_hash)
+    .bind(authority_arm)
     .execute(pool)
     .await?;
     sqlx::query(
@@ -3653,8 +4209,11 @@ async fn seed_identity_and_projection(
              resource_id, binding_kind, declared_summary, support_status,
              provenance, chain_positions, canonicality_summary, manifest_version)
          VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid, 'declared_registry_path',
-                 jsonb_build_object('topology', $7::jsonb), 'supported', '{}', $8,
-                 jsonb_build_object('state', 'canonical'), 1)",
+                 jsonb_build_object('topology', $7::jsonb), 'supported',
+                 jsonb_build_object(
+                     'authority_selection', jsonb_build_object('authority_arm', $9::text)
+                 ),
+                 $8, jsonb_build_object('state', 'canonical'), 1)",
     )
     .bind(logical_name_id)
     .bind(namespace)
@@ -3664,6 +4223,7 @@ async fn seed_identity_and_projection(
     .bind(resource_id)
     .bind(topology)
     .bind(name_positions)
+    .bind(authority_arm)
     .execute(pool)
     .await?;
     let selectors = json!([{
@@ -3742,6 +4302,43 @@ fn encoded_address_result(address: &str) -> AnyResult<Value> {
     let record_result = Address::from_str(address)?.abi_encode();
     let universal_result = (Bytes::from(record_result), Address::ZERO).abi_encode_params();
     Ok(Value::String(hex_string(&universal_result)))
+}
+
+/// Initial call reverts with `first`; the callback stalls for `callback_delay`
+/// and reverts with `second`; the final callback answers with the live value.
+async fn spawn_two_step_ccip_rpc(
+    first: String,
+    second: String,
+    callback_delay: Duration,
+) -> AnyResult<(String, JoinHandle<AnyResult<Vec<Value>>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let mut requests = Vec::with_capacity(3);
+        for step in 0..3 {
+            let (mut socket, _) = listener.accept().await?;
+            requests.push(read_http_json_body(&mut socket).await?);
+            let response = match step {
+                0 => RpcResponse::Error {
+                    code: 3,
+                    message: "execution reverted".to_owned(),
+                    data: Value::String(first.clone()),
+                },
+                1 => {
+                    tokio::time::sleep(callback_delay).await;
+                    RpcResponse::Error {
+                        code: 3,
+                        message: "execution reverted".to_owned(),
+                        data: Value::String(second.clone()),
+                    }
+                }
+                _ => RpcResponse::Result(encoded_basenames_text_result(LIVE_VALUE)),
+            };
+            write_rpc_response(&mut socket, response).await?;
+        }
+        Ok(requests)
+    });
+    Ok((url, handle))
 }
 
 async fn spawn_mock_rpc(
@@ -3834,6 +4431,51 @@ async fn spawn_gateway(response: Vec<u8>) -> AnyResult<(String, JoinHandle<AnyRe
         read_http_json_body(&mut socket).await?;
         let body = json!({ "data": hex_string(&response) }).to_string();
         write_http_response(&mut socket, &body).await
+    });
+    Ok((url, handle))
+}
+
+async fn spawn_batch_gateway(
+    request_count: usize,
+    response: Vec<u8>,
+    delay: Duration,
+) -> AnyResult<(String, JoinHandle<AnyResult<usize>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let body = Arc::new(json!({ "data": hex_string(&response) }).to_string());
+    let handle = tokio::spawn(async move {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut tasks = tokio::task::JoinSet::<AnyResult<()>>::new();
+        for _ in 0..request_count {
+            let (mut socket, _) = listener.accept().await?;
+            let active = Arc::clone(&active);
+            let peak = Arc::clone(&peak);
+            let body = Arc::clone(&body);
+            tasks.spawn(async move {
+                read_http_json_body(&mut socket).await?;
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(current, Ordering::SeqCst);
+                tokio::time::sleep(delay).await;
+                write_http_response(&mut socket, &body).await?;
+                active.fetch_sub(1, Ordering::SeqCst);
+                AnyResult::Ok(())
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result??;
+        }
+        Ok(peak.load(Ordering::SeqCst))
+    });
+    Ok((url, handle))
+}
+
+async fn spawn_untouchable_gateway() -> AnyResult<(String, JoinHandle<AnyResult<()>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        listener.accept().await?;
+        Ok(())
     });
     Ok((url, handle))
 }

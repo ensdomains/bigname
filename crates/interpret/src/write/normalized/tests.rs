@@ -453,3 +453,36 @@ async fn insert_error_identifies_only_the_attempted_slice() -> TestResult {
     database.cleanup().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn record_id_resolver_events_persist_through_production_writer() -> TestResult {
+    let database = database("interpret_record_id_resolver_admission").await?;
+    let submitted = [
+        ("ResolverRecordLinked", json!({"resolver_record_id":"7", "node":format!("0x{:064x}",0), "dns_encoded_name":"0x00", "storage_model":"resolver_record_id"})),
+        ("ResolverPermissionArgument", json!({"upstream_resource":alloy_primitives::keccak256([0]).to_string(), "argument_hex":"0x00"})),
+    ].map(|(kind, after)| {
+        let mut row = event(kind, after);
+        row.event_kind = kind.to_owned();
+        row.source_family = "ens_v2_resolver_l1".to_owned();
+        row
+    });
+    let mut transaction = database.pool().begin().await?;
+    events(&mut transaction, &submitted).await?;
+    transaction.commit().await?;
+    let rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT event_kind, derivation_kind, after_state FROM normalized_events ORDER BY normalized_event_id"
+    ).fetch_all(database.pool()).await?;
+    assert_eq!(rows.len(), submitted.len());
+    for (row, expected) in rows.iter().zip(&submitted) {
+        assert_eq!(
+            (&row.0, &row.1, &row.2),
+            (
+                &expected.event_kind,
+                &expected.derivation_kind,
+                &expected.after_state
+            )
+        );
+    }
+    database.cleanup().await?;
+    Ok(())
+}

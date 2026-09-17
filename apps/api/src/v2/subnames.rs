@@ -5,25 +5,42 @@ use axum::{
     extract::{Path, State},
 };
 use bigname_storage::{
-    ChildrenCurrentKeysetCursor, ChildrenCurrentRow, ChildrenCurrentSummary, NameCurrentRow,
+    ChildrenCurrentKeysetCursor, ChildrenCurrentOrder, ChildrenCurrentPageFilter,
+    ChildrenCurrentRow, ChildrenCurrentSort, ChildrenCurrentSortValue, ChildrenCurrentSummary,
+    NameCurrentRow,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 
 use super::cursor::{cursor_value, invalid_cursor_error};
+use super::name_filter::normalize_name_prefix;
 use super::support::normalize_inferred_route_name;
 use super::{
-    CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, RegistrationStatus,
-    StrictQueryParams, V2Error, V2Result, decode, encode, name_record::name_registration_fields,
+    AddressNamesSort, CursorPayload, Envelope, Page, QueryParamAllowlist, RegistrationStatus,
+    RegistryRef, SortOrder, StrictQueryParams, V2Error, V2Result, decode, encode, format_timestamp,
+    load_subregistry_refs, name_record::name_registration_fields,
     validate_latest_collection_selectors,
 };
 
-const SUBNAMES_SORT: &str = "display_name_asc";
+/// Sort tag of cursors issued before `sort`/`order`/`q`/`include_expired` existed. Such a cursor
+/// names the default `name` ascending page over every child, so it stays valid for a request
+/// that asks for exactly that.
+const LEGACY_SUBNAMES_SORT: &str = "display_name_asc";
 const DISPLAY_NAME_CURSOR_KEY: &str = "display_name";
 const CHILD_LOGICAL_NAME_ID_CURSOR_KEY: &str = "child_logical_name_id";
+const SORT_KIND_CURSOR_KEY: &str = "sort_kind";
+const SORT_VALUE_CURSOR_KEY: &str = "sort_value";
+const SORT_KIND_NAME: &str = "name";
+const SORT_KIND_TIMESTAMP_NULL: &str = "timestamp_null";
+const SORT_KIND_TIMESTAMP_VALUE: &str = "timestamp_value";
 const NAMESPACE_FILTER_KEY: &str = "namespace";
 const PARENT_FILTER_KEY: &str = "parent";
+const ORDER_FILTER_KEY: &str = "order";
+const Q_FILTER_KEY: &str = "q";
+const INCLUDE_EXPIRED_FILTER_KEY: &str = "include_expired";
+/// Today's behaviour, kept as the default: a page lists released and past-expiry children.
+const DEFAULT_INCLUDE_EXPIRED: bool = true;
 
 pub(crate) struct SubnamesQueryParams;
 
@@ -32,6 +49,10 @@ impl QueryParamAllowlist for SubnamesQueryParams {
         "namespace",
         "at",
         "finality",
+        "q",
+        "sort",
+        "order",
+        "include_expired",
         "include",
         "cursor",
         "page_size",
@@ -60,6 +81,8 @@ pub(crate) struct Subname {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subregistry: Option<RegistryRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subname_count: Option<u64>,
 }
 
@@ -80,6 +103,12 @@ pub(crate) async fn get_subnames(
 
     let logical_name_id =
         bigname_storage::logical_name_id_for_name(&namespace, &normalized.normalized_name);
+    let snapshot = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+        &state,
+        params.cursor.as_deref(),
+        Some(&namespace),
+    )
+    .await?;
     let parent = bigname_storage::load_name_current(&state.pool, &logical_name_id)
         .await
         .map_err(|_| {
@@ -95,18 +124,37 @@ pub(crate) async fn get_subnames(
             ))
         })?;
 
+    let normalized_q = params.q.as_deref().map(normalize_name_prefix).transpose()?;
+    let binding = SubnamesCursorBinding {
+        namespace: &namespace,
+        parent_logical_name_id: &parent.logical_name_id,
+        q: normalized_q.as_deref(),
+        include_expired: params.include_expired.unwrap_or(DEFAULT_INCLUDE_EXPIRED),
+        sort: params.sort,
+        order: params.order.unwrap_or(SortOrder::Asc),
+    };
+    let filter = ChildrenCurrentPageFilter {
+        evaluated_at: Some(snapshot.evaluated_at()),
+        q: binding.q,
+        include_expired: binding.include_expired,
+        sort: sort_to_storage(binding.sort),
+        order: order_to_storage(binding.order),
+    };
     let storage_cursor = params
         .cursor
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
-            subname_storage_cursor(&payload, &namespace, &parent.logical_name_id)
+            let cursor = subname_storage_cursor(&payload, &binding)?;
+            snapshot.validate_cursor(&payload)?;
+            Ok(cursor)
         })
         .transpose()?;
 
-    let storage_page = bigname_storage::load_children_current_page(
+    let storage_page = bigname_storage::load_children_current_page_filtered(
         &state.pool,
         &parent.logical_name_id,
+        &filter,
         storage_cursor.as_ref(),
         params.page_size,
     )
@@ -149,25 +197,40 @@ pub(crate) async fn get_subnames(
     } else {
         std::collections::BTreeMap::new()
     };
+    let mut pointer_names_by_chain = BTreeMap::<String, Vec<String>>::new();
+    for row in child_name_rows.values() {
+        if let Some(chain) = super::name_chain_id(row) {
+            pointer_names_by_chain
+                .entry(chain)
+                .or_default()
+                .push(row.logical_name_id.clone());
+        }
+    }
+    let mut subregistries = BTreeMap::new();
+    let bounds = snapshot.block_bounds();
+    for (chain, names) in pointer_names_by_chain {
+        if let Some(block) = bounds.get(&chain) {
+            subregistries.extend(load_subregistry_refs(&state.pool, &names, Some(*block)).await?);
+        }
+    }
 
-    let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
-        encode(&subname_cursor_payload(
-            cursor,
-            &namespace,
-            &parent.logical_name_id,
-        ))
-    });
+    let next_cursor = storage_page
+        .next_cursor
+        .as_ref()
+        .map(|cursor| encode(&snapshot.bind_cursor(subname_cursor_payload(cursor, &binding))));
     let has_more = next_cursor.is_some();
     let data = storage_page
         .rows
         .iter()
         .map(|row| {
-            build_subname(
+            let mut subname = build_subname(
                 row,
                 child_name_rows.get(&row.child_logical_name_id),
                 child_summaries.get(&row.child_logical_name_id),
                 include_counts,
-            )
+            );
+            subname.subregistry = subregistries.remove(&row.child_logical_name_id);
+            subname
         })
         .collect();
     Ok(Json(Envelope {
@@ -176,10 +239,10 @@ pub(crate) async fn get_subnames(
             cursor: params.cursor.clone(),
             next_cursor,
             page_size: params.page_size,
-            total_count: None,
+            total_count: Some(storage_page.total_count),
             has_more,
         }),
-        meta: Meta::default(),
+        meta: snapshot.finish(&state).await?,
     }))
 }
 
@@ -223,6 +286,7 @@ pub(crate) fn build_subname(
         registered_at: registration.registered_at,
         created_at: registration.created_at,
         expires_at: registration.expires_at,
+        subregistry: None,
         subname_count: include_counts.then(|| {
             summary
                 .and_then(|summary| u64::try_from(summary.child_count).ok())
@@ -231,21 +295,78 @@ pub(crate) fn build_subname(
     }
 }
 
-pub(crate) fn subname_cursor_payload(
-    cursor: &ChildrenCurrentKeysetCursor,
-    namespace: &str,
-    parent_logical_name_id: &str,
-) -> CursorPayload {
-    CursorPayload::new(
-        SUBNAMES_SORT,
+/// Everything a subnames cursor binds besides its keyset position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SubnamesCursorBinding<'a> {
+    pub(crate) namespace: &'a str,
+    pub(crate) parent_logical_name_id: &'a str,
+    pub(crate) q: Option<&'a str>,
+    pub(crate) include_expired: bool,
+    pub(crate) sort: AddressNamesSort,
+    pub(crate) order: SortOrder,
+}
+
+impl SubnamesCursorBinding<'_> {
+    /// True when the request asks for the page a legacy cursor was issued for.
+    fn is_legacy_default(&self) -> bool {
+        self.q.is_none()
+            && self.include_expired == DEFAULT_INCLUDE_EXPIRED
+            && self.sort == AddressNamesSort::Name
+            && self.order == SortOrder::Asc
+    }
+
+    fn filters(&self) -> BTreeMap<String, String> {
         BTreeMap::from([
-            (NAMESPACE_FILTER_KEY.to_owned(), namespace.to_owned()),
+            (NAMESPACE_FILTER_KEY.to_owned(), self.namespace.to_owned()),
             (
                 PARENT_FILTER_KEY.to_owned(),
-                parent_logical_name_id.to_owned(),
+                self.parent_logical_name_id.to_owned(),
             ),
-        ]),
+            (ORDER_FILTER_KEY.to_owned(), self.order.as_str().to_owned()),
+            (
+                Q_FILTER_KEY.to_owned(),
+                self.q.unwrap_or_default().to_owned(),
+            ),
+            (
+                INCLUDE_EXPIRED_FILTER_KEY.to_owned(),
+                self.include_expired.to_string(),
+            ),
+        ])
+    }
+}
+
+pub(crate) fn sort_to_storage(sort: AddressNamesSort) -> ChildrenCurrentSort {
+    match sort {
+        AddressNamesSort::Name => ChildrenCurrentSort::Name,
+        AddressNamesSort::ExpiresAt => ChildrenCurrentSort::ExpiresAt,
+        AddressNamesSort::RegisteredAt => ChildrenCurrentSort::RegisteredAt,
+    }
+}
+
+pub(crate) fn order_to_storage(order: SortOrder) -> ChildrenCurrentOrder {
+    match order {
+        SortOrder::Asc => ChildrenCurrentOrder::Asc,
+        SortOrder::Desc => ChildrenCurrentOrder::Desc,
+    }
+}
+
+pub(crate) fn subname_cursor_payload(
+    cursor: &ChildrenCurrentKeysetCursor,
+    binding: &SubnamesCursorBinding<'_>,
+) -> CursorPayload {
+    let (sort_kind, sort_value) = match &cursor.sort_value {
+        ChildrenCurrentSortValue::Name => (SORT_KIND_NAME, String::new()),
+        ChildrenCurrentSortValue::Timestamp(None) => (SORT_KIND_TIMESTAMP_NULL, String::new()),
+        ChildrenCurrentSortValue::Timestamp(Some(value)) => {
+            (SORT_KIND_TIMESTAMP_VALUE, format_timestamp(*value))
+        }
+    };
+    CursorPayload::new(
+        binding.sort.as_str(),
+        binding.filters(),
         BTreeMap::from([
+            (SORT_KIND_CURSOR_KEY.to_owned(), sort_kind.to_owned()),
+            (SORT_VALUE_CURSOR_KEY.to_owned(), sort_value),
             (
                 DISPLAY_NAME_CURSOR_KEY.to_owned(),
                 cursor.canonical_display_name.clone(),
@@ -261,10 +382,61 @@ pub(crate) fn subname_cursor_payload(
 
 pub(crate) fn subname_storage_cursor(
     payload: &CursorPayload,
-    namespace: &str,
-    parent_logical_name_id: &str,
+    binding: &SubnamesCursorBinding<'_>,
 ) -> V2Result<ChildrenCurrentKeysetCursor> {
-    if payload.sort != SUBNAMES_SORT {
+    if payload.sort == LEGACY_SUBNAMES_SORT {
+        return legacy_subname_storage_cursor(payload, binding);
+    }
+    if payload.sort != binding.sort.as_str() || payload.filters != binding.filters() {
+        return Err(invalid_cursor_error());
+    }
+    if payload.last_item.len() != 4 {
+        return Err(invalid_cursor_error());
+    }
+
+    let sort_kind = cursor_value(payload, SORT_KIND_CURSOR_KEY, invalid_cursor_error)?;
+    let sort_value = payload
+        .last_item
+        .get(SORT_VALUE_CURSOR_KEY)
+        .cloned()
+        .ok_or_else(invalid_cursor_error)?;
+    let sort_value = match (binding.sort, sort_kind.as_str()) {
+        (AddressNamesSort::Name, SORT_KIND_NAME) if sort_value.is_empty() => {
+            ChildrenCurrentSortValue::Name
+        }
+        (
+            AddressNamesSort::ExpiresAt | AddressNamesSort::RegisteredAt,
+            SORT_KIND_TIMESTAMP_NULL,
+        ) if sort_value.is_empty() => ChildrenCurrentSortValue::Timestamp(None),
+        (
+            AddressNamesSort::ExpiresAt | AddressNamesSort::RegisteredAt,
+            SORT_KIND_TIMESTAMP_VALUE,
+        ) if !sort_value.trim().is_empty() => ChildrenCurrentSortValue::Timestamp(Some(
+            bigname_storage::parse_rfc3339_utc_timestamp(&sort_value)
+                .map_err(|_| invalid_cursor_error())?,
+        )),
+        _ => return Err(invalid_cursor_error()),
+    };
+    let canonical_display_name =
+        cursor_value(payload, DISPLAY_NAME_CURSOR_KEY, invalid_cursor_error)?;
+    let child_logical_name_id = cursor_value(
+        payload,
+        CHILD_LOGICAL_NAME_ID_CURSOR_KEY,
+        invalid_cursor_error,
+    )?;
+
+    Ok(ChildrenCurrentKeysetCursor {
+        sort_value,
+        canonical_display_name,
+        child_logical_name_id,
+    })
+}
+
+fn legacy_subname_storage_cursor(
+    payload: &CursorPayload,
+    binding: &SubnamesCursorBinding<'_>,
+) -> V2Result<ChildrenCurrentKeysetCursor> {
+    if !binding.is_legacy_default() {
         return Err(invalid_cursor_error());
     }
     if payload.filters.len() != 2
@@ -272,9 +444,9 @@ pub(crate) fn subname_storage_cursor(
             .filters
             .get(NAMESPACE_FILTER_KEY)
             .map(String::as_str)
-            != Some(namespace)
+            != Some(binding.namespace)
         || payload.filters.get(PARENT_FILTER_KEY).map(String::as_str)
-            != Some(parent_logical_name_id)
+            != Some(binding.parent_logical_name_id)
     {
         return Err(invalid_cursor_error());
     }
@@ -291,6 +463,7 @@ pub(crate) fn subname_storage_cursor(
     )?;
 
     Ok(ChildrenCurrentKeysetCursor {
+        sort_value: ChildrenCurrentSortValue::Name,
         canonical_display_name,
         child_logical_name_id,
     })
@@ -308,74 +481,4 @@ fn subnames_include_counts(include: &[String]) -> V2Result<bool> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn subname_cursor_payload_round_trips_storage_cursor() {
-        let cursor = ChildrenCurrentKeysetCursor {
-            canonical_display_name: "alice.eth".to_owned(),
-            child_logical_name_id: "ens:alice.eth".to_owned(),
-        };
-        let payload = subname_cursor_payload(&cursor, "ens", "ens:parent.eth");
-
-        assert_eq!(
-            payload.filters,
-            BTreeMap::from([
-                ("namespace".to_owned(), "ens".to_owned()),
-                ("parent".to_owned(), "ens:parent.eth".to_owned()),
-            ])
-        );
-
-        assert_eq!(
-            subname_storage_cursor(&payload, "ens", "ens:parent.eth").expect("cursor must decode"),
-            cursor
-        );
-        assert!(payload.snapshot.is_none());
-    }
-
-    #[test]
-    fn subname_cursor_rejects_wrong_sort_or_filter() {
-        let cursor = ChildrenCurrentKeysetCursor {
-            canonical_display_name: "alice.eth".to_owned(),
-            child_logical_name_id: "ens:alice.eth".to_owned(),
-        };
-        let mut payload = subname_cursor_payload(&cursor, "ens", "ens:parent.eth");
-
-        payload.sort = "wrong".to_owned();
-        assert!(subname_storage_cursor(&payload, "ens", "ens:parent.eth").is_err());
-
-        let mut payload = subname_cursor_payload(&cursor, "ens", "ens:parent.eth");
-        payload
-            .filters
-            .insert("namespace".to_owned(), "basenames".to_owned());
-        assert!(subname_storage_cursor(&payload, "ens", "ens:parent.eth").is_err());
-    }
-
-    #[test]
-    fn subname_cursor_ignores_legacy_snapshot_component() {
-        let cursor = ChildrenCurrentKeysetCursor {
-            canonical_display_name: "alice.eth".to_owned(),
-            child_logical_name_id: "ens:alice.eth".to_owned(),
-        };
-        let mut payload = subname_cursor_payload(&cursor, "ens", "ens:parent.eth");
-        payload.snapshot = Some("legacy-snapshot".to_owned());
-
-        assert_eq!(
-            subname_storage_cursor(&payload, "ens", "ens:parent.eth")
-                .expect("legacy snapshot component must not bind a latest-state cursor"),
-            cursor
-        );
-    }
-
-    #[test]
-    fn subname_cursor_rejects_wrong_parent_filter() {
-        let cursor = ChildrenCurrentKeysetCursor {
-            canonical_display_name: "alice.eth".to_owned(),
-            child_logical_name_id: "ens:alice.eth".to_owned(),
-        };
-        let payload = subname_cursor_payload(&cursor, "ens", "ens:parent-a.eth");
-
-        assert!(subname_storage_cursor(&payload, "ens", "ens:parent-b.eth").is_err());
-    }
-}
+mod tests;

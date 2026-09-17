@@ -104,6 +104,7 @@ impl crate::engine::redo::RedoWindowLoader for ScriptedRedoWindowLoader {
 // Each test owns its endpoint: the injected floor is keyed by endpoint, and CI runs
 // these as threads in one process.
 const PRUNED_DATADIR: &str = "/var/lib/reth/pruned-datadir-fixture";
+#[cfg(feature = "reth-db")]
 const UNREADABLE_DATADIR: &str = "/var/lib/reth/absent-datadir-fixture";
 const REDO_DATADIR: &str = "/var/lib/reth/pruned-redo-datadir-fixture";
 const V1_REGISTRY_START: i64 = 3_327_417;
@@ -1584,23 +1585,33 @@ fn marker_hash(number: i64) -> String {
 async fn single_block_chain_endpoint(node: Arc<test_floors::PruningNode>) -> AnyResult<String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("http://{}/", listener.local_addr()?);
+    let block_zero_reads = Arc::new(AtomicUsize::new(0));
     tokio::spawn(async move {
         while let Ok((mut socket, _)) = listener.accept().await {
             let node = Arc::clone(&node);
+            let block_zero_reads = Arc::clone(&block_zero_reads);
             tokio::spawn(async move {
                 while let Some(body) = read_request_body(&mut socket).await {
+                    let respond_and_prune = |call: &Value| {
+                        // Block zero is first pinned, then loaded by number as a header.
+                        if call.get("method").and_then(Value::as_str)
+                            == Some("eth_getBlockByNumber")
+                            && call.pointer("/params/0").and_then(Value::as_str) == Some("0x0")
+                            && block_zero_reads.fetch_add(1, Ordering::SeqCst) > 0
+                        {
+                            node.observe_fetch();
+                        }
+                        respond(call)
+                    };
                     let response =
                         serde_json::from_str::<Value>(&body).map_or(Value::Null, |request| {
                             match request {
                                 Value::Array(calls) => {
-                                    Value::Array(calls.iter().map(respond).collect())
+                                    Value::Array(calls.iter().map(respond_and_prune).collect())
                                 }
-                                single => respond(&single),
+                                single => respond_and_prune(&single),
                             }
                         });
-                    if body.contains("eth_getBlockByHash") {
-                        node.observe_fetch();
-                    }
                     let payload = response.to_string();
                     let http = format!(
                         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{payload}",

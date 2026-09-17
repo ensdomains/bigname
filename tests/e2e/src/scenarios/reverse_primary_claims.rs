@@ -20,6 +20,24 @@ fn assert_declared_not_found(body: &Value) {
     );
 }
 
+fn assert_declared_name(body: &Value, expected_name: &str) {
+    assert_eq!(
+        pointer(body, "/declared_state/claimed_primary_name/status"),
+        "success"
+    );
+    assert_eq!(
+        pointer(body, "/declared_state/claimed_primary_name/name"),
+        expected_name
+    );
+    assert_eq!(
+        pointer(
+            body,
+            "/declared_state/claimed_primary_name/claim_name_is_normalized"
+        ),
+        true
+    );
+}
+
 async fn assert_persisted_not_found(run: &support::PipelineRun, address: &str) -> Result<()> {
     let row: (String, Option<String>) = sqlx::query_as(
         "SELECT claim_status, raw_claim_name FROM primary_names_current \
@@ -132,7 +150,7 @@ async fn claim_without_name_record_keeps_candidate_absent() -> Result<()> {
 /// (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f)
 #[tokio::test]
-async fn authorised_third_party_generic_name_record_does_not_key_claim() -> Result<()> {
+async fn authorised_third_party_name_record_keys_claimed_address() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
 
@@ -185,7 +203,7 @@ async fn authorised_third_party_generic_name_record_does_not_key_claim() -> Resu
     .await?;
     assert!(
         name_state.get("primary_claim_source").is_none(),
-        "generic resolver NameChanged must not become a primary claim: {name_state}"
+        "the resolver observation stays node-keyed before Project joins the reverse tuple: {name_state}"
     );
     let sender: String = sqlx::query_scalar(
         "SELECT from_address FROM raw_transactions raw \
@@ -199,7 +217,7 @@ async fn authorised_third_party_generic_name_record_does_not_key_claim() -> Resu
     assert_ne!(sender, claimed_path);
 
     let claimed = primary_name(&run.api, "ens", 60, &claimed_path, "declared").await?;
-    assert_declared_not_found(&claimed);
+    assert_declared_name(&claimed, "thirdparty.eth");
     let operator_rows: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM primary_names_current \
          WHERE address = $1 AND namespace = 'ens' AND coin_type = '60'",
@@ -216,7 +234,7 @@ async fn authorised_third_party_generic_name_record_does_not_key_claim() -> Resu
 /// `claimWithResolver` accepts the resolver address supplied by the caller.
 /// (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L93 @ ens_v1@91c966f)
 #[tokio::test]
-async fn unadmitted_reverse_resolver_keeps_candidate_absent() -> Result<()> {
+async fn undeclared_reverse_resolver_record_populates_declared_claim() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
     let root = repo_root();
@@ -283,13 +301,30 @@ async fn unadmitted_reverse_resolver_keeps_candidate_absent() -> Result<()> {
         assert_eq!(after_state["raw_name"], "hidden.eth");
         assert!(
             after_state.get("primary_claim_source").is_none(),
-            "an unadmitted resolver observation must not become primary-name identity: {after_state}"
+            "the resolver observation stays node-keyed before Project joins the reverse tuple: {after_state}"
         );
     }
 
-    assert_persisted_not_found(&run, &claimant_path).await?;
+    let persisted: (String, Option<String>) = sqlx::query_as(
+        "SELECT claim_status, raw_claim_name FROM primary_names_current \
+         WHERE address = $1 AND namespace = 'ens' AND coin_type = '60'",
+    )
+    .bind(&claimant_path)
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(
+        persisted,
+        ("success".to_owned(), Some("hidden.eth".to_owned()))
+    );
     let body = primary_name(&run.api, "ens", 60, &claimant_path, "declared").await?;
-    assert_declared_not_found(&body);
+    assert_declared_name(&body, "hidden.eth");
+    assert_eq!(
+        pointer(
+            &body,
+            "/declared_state/claimed_primary_name/provenance/resolver_address"
+        ),
+        unadmitted_path
+    );
 
     run.db.cleanup().await?;
     Ok(())
@@ -299,7 +334,7 @@ async fn unadmitted_reverse_resolver_keeps_candidate_absent() -> Result<()> {
 /// (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L105 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L26 @ ens_v1@91c966f)
 #[tokio::test]
-async fn forward_mismatch_keeps_generic_name_record_unadmitted() -> Result<()> {
+async fn forward_mismatch_preserves_the_declared_reverse_claim() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
     let root = repo_root();
@@ -367,7 +402,7 @@ async fn forward_mismatch_keeps_generic_name_record_unadmitted() -> Result<()> {
     );
 
     let declared = primary_name(&run.api, "ens", 60, &claimant_path, "declared").await?;
-    assert_declared_not_found(&declared);
+    assert_declared_name(&declared, "primarymismatch.eth");
 
     run.db.cleanup().await?;
     Ok(())

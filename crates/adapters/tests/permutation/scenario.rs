@@ -388,8 +388,12 @@ pub fn pool(
 ) -> Vec<Action> {
     match world.label {
         "ens_v1_mainnet" => pool_v1::build(wiring, dimensions, settle_timestamp),
-        "ens_v1_sepolia" => pool_v1_sepolia::build(wiring, dimensions, settle_timestamp),
-        "ens_v2_sepolia" => pool_v2::build(wiring, dimensions, settle_timestamp),
+        "ens_v1_sepolia" | "ens_v1_sepolia_hackathon" => {
+            pool_v1_sepolia::build(wiring, dimensions, settle_timestamp)
+        }
+        "ens_v2_sepolia" | "ens_v2_sepolia_hackathon" => {
+            pool_v2::build(wiring, dimensions, settle_timestamp)
+        }
         label => panic!("unknown permutation world {label}"),
     }
 }

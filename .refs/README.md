@@ -12,10 +12,16 @@ Pinned checkouts of the canonical ENSv1, ENSv2, and Basenames codebases, referen
 
 ```
 scripts/sync-refs           # clone/fetch/checkout refs and required recursive submodules
-scripts/sync-refs --check   # fail for missing/off-pin refs or required submodules
+scripts/sync-refs --check   # fail for missing/off-pin required refs or submodules
+scripts/sync-refs --include-optional # also fetch optional comparison sources
 ```
 
-First sync clones each repo shallowly and initializes required recursive
+Refs marked `optional = true` are comparison evidence only and are excluded from
+default sync/check and CI bootstrap. Use `--include-optional` (also with `--check`)
+when working on their cited comparisons; access may require Git credentials.
+A required ref failing to fetch still fails the command.
+
+First sync clones each selected repo shallowly and initializes required recursive
 submodules (currently Basenames' Forge dependencies). Subsequent runs re-fetch,
 re-checkout, and verify both the superproject pins and those gitlinks.
 

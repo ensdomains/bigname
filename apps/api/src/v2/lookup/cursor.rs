@@ -221,7 +221,7 @@ fn cursor_filters(binding: &LookupReverseCursorBinding<'_>) -> BTreeMap<String, 
     filters
 }
 
-fn is_codeployed_public_namespace_set(namespaces: &[String]) -> bool {
+pub(super) fn is_codeployed_public_namespace_set(namespaces: &[String]) -> bool {
     namespaces.len() == 2
         && namespaces.iter().any(|namespace| namespace == "ens")
         && namespaces.iter().any(|namespace| namespace == "basenames")
@@ -236,7 +236,7 @@ fn cursor_value(payload: &CursorPayload, key: &str) -> V2Result<String> {
         .ok_or_else(invalid_lookup_cursor)
 }
 
-fn invalid_lookup_cursor() -> V2Error {
+pub(super) fn invalid_lookup_cursor() -> V2Error {
     V2Error::invalid_input("cursor must match this lookup input")
 }
 

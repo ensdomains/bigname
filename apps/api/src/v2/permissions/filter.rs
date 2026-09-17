@@ -22,13 +22,13 @@ use super::{
 pub(super) enum EmptyPermissionsSelection {
     MissingOrUnsupportedNameAnchor,
     SupersededNameRegistrationPair,
+    NamespaceRegistrationMismatch,
 }
 
 #[derive(Debug)]
 pub(super) struct ResolvedPermissionsFilter {
     pub(super) subject: Option<String>,
     pub(super) resource_id: Option<Uuid>,
-    pub(super) namespace: Option<String>,
     pub(super) empty_selection: Option<EmptyPermissionsSelection>,
     pub(super) authority_context: AuthorityContext,
     pub(super) cursor_filters: BTreeMap<String, String>,
@@ -123,6 +123,21 @@ pub(super) async fn resolve_permissions_filter(
     } else {
         None
     };
+    let empty_selection = if empty_selection.is_none()
+        && inputs.name_filter.is_none()
+        && let (Some(resource_id), Some(namespace)) = (resource_id, params.namespace.as_deref())
+        && !bigname_storage::permission_resource_matches_namespace(
+            &state.pool,
+            resource_id,
+            namespace,
+        )
+        .await
+        .map_err(|_| V2Error::internal_error("failed to check permission namespace"))?
+    {
+        Some(EmptyPermissionsSelection::NamespaceRegistrationMismatch)
+    } else {
+        empty_selection
+    };
     let authority_context = if inputs.name_filter.is_some() {
         AuthorityContext::CurrentForName
     } else {
@@ -156,7 +171,6 @@ pub(super) async fn resolve_permissions_filter(
     Ok(ResolvedPermissionsFilter {
         subject: params.address.clone(),
         resource_id,
-        namespace: namespace_filter,
         empty_selection,
         authority_context,
         cursor_filters,

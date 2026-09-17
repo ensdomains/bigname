@@ -9,7 +9,7 @@ of re-defining or assuming it.
 Three terms are overloaded enough that bare use is discouraged: **promotion**
 (always qualify: checkpoint promotion vs. capability promotion), **profile**
 (always qualify: deployment profile, resolver profile, exact-name profile, or
-the `/v2/lookup` `profile=` parameter), and **migration** (always qualify:
+the `/v1/lookup` `profile=` parameter), and **migration** (always qualify:
 bigname's own schema migration, written here as *schema-migration*, vs. the
 on-chain [ENSv1→ENSv2 migration](#ensv1ensv2-migration)). Entries below that
 describe retired bigname database state say *schema-migration-era*; they have
@@ -69,7 +69,11 @@ authority lives in the registry/registrar/resolver system on Base
 and has no ENSv1/ENSv2 era split. `surface_bindings.authority_arm` is the sole
 arm vocabulary and stores the closed value `ens_v1`, `ens_v2`, or `basenames`
 on each binding. It makes ordinary interval conflicts arm-specific and is
-supplied by adapters, never inferred in SQL. Project stages the selected arm,
+supplied by adapters, never inferred in SQL. Verified reads consult the selected
+arm against the `verified_authority_arms` the deployment profile's
+`ens_execution` manifest declares (`manifests.md` § `verified_authority_arms`):
+an arm outside that list is refused in band rather than resolved through an
+entrypoint the selection has ruled out. Project stages the selected arm,
 binding, resource, start position, lifecycle state, and proof together; field
 selection cannot rank events from different arms or combine them in one
 `name_current` row. The exact [shared ENS
@@ -81,6 +85,31 @@ name's authority anchor (registry-, registrar-, or wrapper-held), so most such
 rows — millions on Basenames alone — mark within-era anchor transitions.
 
 <a id="shared-ens-infrastructure"></a>
+## Implementation-announcement watch
+
+a [watch plan](#watch-plan--watched-tuple) entry compiled from one
+`resolver_implementations` address of an `ens_v2_resolver_l1` manifest that
+declares `Upgraded`: every emitter, the ERC-1967 `Upgraded` event, narrowed by
+the indexed `implementation` topic to that address, from block zero. It is how
+bigname learns of an upgradeable resolver proxy before any registry points at
+it, without per-address historical lookback. Adding an implementation adds
+exactly one such entry and counts as watch-plan widening. Defined in
+[`manifests.md` § Resolver admission by implementation
+announcement](manifests.md#resolver-admission-by-implementation-announcement).
+
+## Resolver announcement admission
+
+the admission of an ENSv2 resolver proxy as an `ens_v2_resolver_l1` instance
+from the block in which it announces a declared implementation — its own
+ERC-1967 `Upgraded(implementation)`, or a declared `verifiable_factory`'s
+`ProxyDeployed` naming it — rather than from a later registry pointer. The
+edge kind is `resolver` with `admission_basis`
+`declared_resolver_implementation`; the announcing implementation is the
+proxy's implementation observation for the support rule. It complements, and
+never closes, registry-pointer discovery. Defined in [`manifests.md` §
+Resolver admission by implementation
+announcement](manifests.md#resolver-admission-by-implementation-announcement).
+
 ## Shared ENS infrastructure
 
 the exact ENS root, `eth`, `reverse`, and `addr.reverse` names. When an active
@@ -303,7 +332,7 @@ protocol never mix silently.
 the single manifest tree a runtime loads
 (`manifests/mainnet/` or `manifests/sepolia/`), which fixes its chains and
 admitted contracts. One runtime, one profile. "Profile" also means resolver
-profile, exact-name profile, or the `/v2/lookup` `profile=` parameter; always
+profile, exact-name profile, or the `/v1/lookup` `profile=` parameter; always
 qualify which one is meant.
 
 ## Derivation kind
@@ -321,9 +350,11 @@ names alike, whether the name is registry-, registrar-, or NameWrapper-held.
 
 the adapter-owned derivation path for declaration-backed Ethereum approval
 events whose manifests deliberately leave `normalized_events` empty. In the
-current scope it emits `AccountPermissionChanged` only for admitted ENSv1 and
-Basenames registry `ApprovalForAll` logs; declared registrar, resolver, and
-NameWrapper approvals still decode without normalized output.
+current scope it emits `AccountPermissionChanged` for admitted ENSv1 and
+Basenames registry `ApprovalForAll` logs and for NameWrapper `ApprovalForAll`
+logs, and a resource-scoped `PermissionChanged` for the NameWrapper per-token
+`Approval`; declared registrar and resolver approvals still decode without
+normalized output.
 
 ## Discovery graph / discovery edge
 
@@ -545,6 +576,28 @@ normalized value.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L153 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L856 @ ens_v1@91c966f)
+
+## Resource restrictions
+
+bigname's name for the constraints that bind a registration itself rather than
+any one account's permission row: served as `restrictions` on
+`GET /v1/permissions` (resource-bound reads) and on
+`GET /v1/addresses/{address}/names?include=role_summary` rows, and stored as
+the Project-owned `permissions_current_resource_summary.resource_restrictions`
+column. For a current ENSv1 NameWrapper registration it is the lifecycle label,
+the [expiry-effective fuse word](#expiry-effective-namewrapper-fuse-word), and
+the entry expiry; for an ENSv2 registration it is `locked_roles`, the
+token-scoped registry roles whose assignment can no longer change because no
+current row on the registration or its registry root holds the matching admin
+role. It is absent for registrations without a resource-level constraint model
+(ENSv1 registrar- and registry-held names, Basenames), for an expired
+emancipated or locked NameWrapper position, and once the wrapped token is burnt
+or unwrapped. Field
+shapes are in [api-v2.md](api-v2.md#resource-restrictions); the derivation is in
+[projections.md](projections.md#permissions).
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058-L1068 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L418-L424 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L560-L572 @ ens_v2@a971bd64)
 
 ## ENSv1→ENSv2 migration
 
@@ -1321,6 +1374,26 @@ Its effect is that a name resolves correctly through the ENSv2 tree while ENSv1
 is still its authority, so attributing which version served a resolution is
 time-dependent and cannot be read off the resolver pointer alone.
 
+## ENSv1 mirror resolver (`ensv1_mirror_resolver`)
+
+bigname's manifest role for a declared instance of the
+[v1 fallback resolver](#v1-fallback-resolver-ensv1resolver-exposed-as-v1_resolver)
+contract family: an `ens_v2_resolver_l1` contract declaration whose address
+stores no records and answers a name by reading the ENSv1 registry named in the
+manifest's `correlation_addresses.ens_v1_registry` and forwarding to the
+resolver found there
+(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L38-L41 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L74 @ ens_v2@a971bd64).
+Project classifies the address as supported without `Upgraded` history and
+serves a name bound to it from the storage of the ENSv1 resolver the mirror's
+registry walk selects, the exact node's or else the nearest ancestor's, read for
+the queried node, marking the row with `provenance.mirror` (`mirrored_node`,
+`ancestor_depth`, `forwarding`); when no consulted node has a projected resolver,
+or the selected ancestor resolver is declared `ensip10_extended_resolver`, the
+row is unsupported with `mirrored_resolver_not_projected`. See
+[manifest declarations](manifests.md#ensv1-mirror-resolver-declarations) and
+[projections](projections.md#resolver-and-records).
+
 ## Exact-name profile (`exact_name_profile`)
 
 the per-manifest capability
@@ -1328,6 +1401,11 @@ flag that, when `supported`, makes declared exact-name reads authoritative for
 that deployment profile. Today the only family whose active manifest carries
 `supported` is the ENSv2 Sepolia registrar; the flag also exists in `shadow`
 elsewhere (for example the mainnet ENSv1 registrar). It promotes nothing else.
+A name whose current ENSv2 authority comes from a validated migration, or from
+a positive child registration under a migrated parent, qualifies without a
+registrar event when its registry is either declared in the post-audit registry
+manifest or was created and announced by the migration itself (the per-name
+`WrapperRegistry` of the locked path); see [architecture](architecture.md).
 
 ## Generation (raw-log retention generation)
 
@@ -1571,7 +1649,7 @@ a string a route puts in a name-typed field for a label
 bigname cannot state as a name. Registry events prove a child node and its
 labelhash without proving the label, so some children have no name to serve;
 rather than omit the row or return null, the read composes a readable stand-in.
-Two exist today, both on `GET /v2/names/{name}/subnames`: the placeholder
+Two exist today, both on `GET /v1/names/{name}/subnames`: the placeholder
 `[<labelhash-without-0x>].<parent-name>` for a label never observed or whose
 observed text fails ENSIP-15 normalization, and, for a
 label observed as bytes that are not valid UTF-8 or that contain a NUL, the
@@ -1682,7 +1760,7 @@ The closed set of Project-owned maintenance fields is `last_recomputed_at` on
 every projection
 table except `primary_names_current`; `inserted_at` on `name_current`,
 `children_current`, `permissions_current`, `record_inventory_current`,
-`resolver_current`, and `address_names_current`; and
+`resolver_current`, `address_names_current`, and `address_records_current`; and
 `reverse_hydration_attempted_block_number`,
 `reverse_hydration_attempted_block_hash`, and
 `reverse_hydration_attempt_ordinal` on `primary_names_current`. The Project
@@ -1738,9 +1816,13 @@ a row whose canonicality is `canonical`, `safe`, or
 kept as audit input; internal invalidation and reorg-repair machinery still
 consumes them. Readability is a statement about block canonicality only, not
 about support: a readable row may still carry an unsupported support status,
-and routes that additionally require supported rows say so. `POST /v2/lookup`
+and routes that additionally require supported rows say so. `POST /v1/lookup`
 reverse address results are one such route
-([api-v2.md](api-v2.md#cursors-and-pagination)).
+([api-v2.md](api-v2.md#cursors-and-pagination)); indexed resolver-record values
+on `GET /v1/names/{name}/records`, `GET /v1/names/{name}`, and `POST /v1/lookup`
+name results are another: a readable but `unsupported` record inventory row
+serves no record values, only its unsupported reason
+([api-v2-routes.md](api-v2-routes.md#get-v1namesnamerecords)).
 
 ## Re-derivation boundary
 
@@ -1789,7 +1871,10 @@ a manifest-authorized, implementation-sensitive
 resolver getter behavior that Project copies into the current resolver
 classification and then into record-inventory read rules. It authorizes a
 deterministic indexed read from projected records; it does not create record
-events, synthetic selectors, or reusable provider results.
+events, synthetic selectors, or reusable provider results. The vocabulary is
+`ensip19_default_address` (a getter fallback) and `ensip10_extended_resolver`
+(a capability statement that the resolver answers `resolve(name, data)`, which
+only narrows what Project derives through it).
 
 <a id="registry-fallback-handoff"></a>
 ## Registry fallback handoff
@@ -1861,6 +1946,24 @@ not retroactively validate a non-qualifying release. A release that does not
 qualify leaves no tombstone: the name resolves to explicit
 `current_authority_not_projected`.
 
+<a id="released-v1-authority"></a>
+## Released v1 authority
+
+the authority tombstone left when the latest ENSv1 registrar lifecycle fact for a
+name is a release and no custody was revived behind it: no binding of any arm
+is open and the registry owner is not a proven zero. The lease that lapsed
+while wrapped is the ordinary case: the NameWrapper's registry custody expired
+with the lease, so nothing current owns the node. The tombstone selects the
+released lease binding, serves the registration as `released` with its
+identity and timestamps, and serves no current registrant, authority, expiry,
+owner, control, resolver or records. It is positive proof that the
+registration is absent, so the row is supported rather than
+`current_authority_not_projected`. A release whose registry owner was revived
+is not a tombstone; it selects the revived registry-only binding. A registry
+owner proven zero stays the supported ownerless-registry profile.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L143-L154 @ ens_v1@91c966f)
+
 ## Retained-history proof
 
 a schema-migration-era ENSv2 tuple (retention generation,
@@ -1911,6 +2014,28 @@ returning data.
 **Serving resource** — the typed `resource_id` reference used to select resolver and record data
 when a name has no current control binding. It preserves event-derived read reachability only: it
 does not establish a registration, authority, address-to-name relation, or permission grant.
+Two event-linked bases select one: the retained registry resolver pointer of an ownerless ENSv1
+or Basenames registry name, and the [root-registry resolver
+pointer](#root-registry-resolver-pointer) of an ENSv2 TLD.
+
+<a id="root-registry-resolver-pointer"></a>
+**Root-registry resolver pointer** — the resolver an ENSv2 root registry stores for a TLD token
+and returns while the label is unexpired. When the TLD's registration was never observed, the
+token has a resource and a pointer but no surface binding, so the name is
+`current_authority_not_projected`; the current nonzero pointer still becomes the TLD's serving
+resource (`read_reachability.basis = root_registry_resolver_pointer`) so name detail, batch
+lookup, the records route, and `bound_names` serve the resolver and its inventory without
+inventing the TLD's registration, authority, or control. A root-registry reservation (owner
+zero, `LabelReserved`, on staging with an infinite expiry) does not withdraw it: the root
+registry sets and returns a reservation's resolver the same way, so this is the one ENSv2
+reservation whose resolver bigname serves; reservations in other ENSv2 registries keep the
+documented narrowing. A `RegistrationReleased` on the token resource at or after the pointer, or
+a later zero/null `ResolverChanged` (the state-derived expiry clear), withdraws it; a finite
+expiry therefore withdraws through the expiry release the interpreter derives, and an infinite
+expiry never does.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L150-L155 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L463-L478 @ ens_v2@a971bd64)
 
 ## Shadow
 
@@ -1961,7 +2086,7 @@ is re-registered mints a new lineage.
 
 ## Transport
 
-in `/v2/lookup` topology, the field describing a resolution
+in `/v1/lookup` topology, the field describing a resolution
 that was served across a chain boundary: `{source_chain_id, target_chain_id,
 contract_address, latest_event_kind}`, all `null` when no chain boundary was
 crossed. The only path that populates it is Basenames, whose names live on Base
@@ -1978,8 +2103,8 @@ discovery edge kind.
 
 ## Universal Resolver ancestor discovery
 
-the request-scoped ENS Mainnet
-records path for a projected name whose exact registry resolver is null. When
+the request-scoped ENS records path, on the deployment profile's Ethereum L1
+(Mainnet or Sepolia), for a projected name whose exact registry resolver is null. When
 the name has no projected alias, linked-subregistry, wildcard, or cross-chain
 transport path, bigname calls the manifest-admitted Universal Resolver at the
 selected block and lets that contract find the nearest ENSIP-10 ancestor

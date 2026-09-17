@@ -88,6 +88,12 @@ impl PhaseLock {
         Ok(&mut self.connection)
     }
 
+    /// Run `future`, probing the lock's connection every `check_interval`. The
+    /// probe is polled alongside the future, never in its place: a probe that
+    /// stalls on a dead connection must not keep a future that would otherwise
+    /// finish -- or observe a stop -- from doing so. A probe still pending when
+    /// the future finishes is dropped with its query; the caller's next probe
+    /// or release finds out what became of the connection.
     pub async fn run_while_alive<T>(
         &mut self,
         check_interval: Duration,
@@ -100,9 +106,18 @@ impl PhaseLock {
         loop {
             tokio::select! {
                 biased;
-                _ = checks.tick() => self.check_alive().await?,
                 result = &mut future => return result,
+                _ = checks.tick() => {}
             }
+            let probe = self.check_alive();
+            tokio::pin!(probe);
+            tokio::select! {
+                biased;
+                result = &mut future => return result,
+                probed = &mut probe => probed?,
+            }
+            // A slow probe must leave a full interval before the next one.
+            checks.reset();
         }
     }
 

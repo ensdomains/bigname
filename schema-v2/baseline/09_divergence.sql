@@ -78,6 +78,7 @@ DECLARE
     position_value jsonb;
     manifest_authority jsonb;
     compared_project_row_xmin text;
+    compared_publication jsonb;
     compared_logical_name_id text;
     compared_name_row_xmin text;
 BEGIN
@@ -102,6 +103,17 @@ BEGIN
         RETURN 'invalid_comparison';
     END IF;
 
+    compared_publication := compared_execution_authority -> 'project_publication';
+    IF compared_publication IS NOT NULL AND (
+        jsonb_typeof(compared_publication) IS DISTINCT FROM 'object'
+        OR compared_publication ->> 'block_number' IS NULL
+        OR compared_publication ->> 'block_hash' IS NULL
+        OR compared_publication ->> 'input_content_hash' IS NULL
+        OR compared_publication ->> 'row_xmin' IS NULL
+    ) THEN
+        RETURN 'invalid_comparison';
+    END IF;
+
     compared_project_row_xmin :=
         compared_execution_authority ->> 'project_row_xmin';
     compared_logical_name_id :=
@@ -115,19 +127,37 @@ BEGIN
         RETURN 'invalid_comparison';
     END IF;
 
-    -- This lock is the projection-publication generation fence. Phase
-    -- transitions change this row before a new projected generation is
-    -- admitted. The advisory lock above separately fences manifest sync,
-    -- including changes to admitted shadow execution declarations.
+    -- Lock the captured publication, including its generation, while a running
+    -- pass may be preparing its successor. Older callers without a publication
+    -- object retain the exact-head fence. Keep the one-block bound aligned with
+    -- PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS in crates/storage.
     PERFORM 1
-    FROM chain_phase_state
-    WHERE chain_id = requested_authoritative_chain_id
-      AND phase_name = 'project'
-      AND phase_status = 'completed'
-      AND current_block_number = requested_authoritative_block_number
-      AND current_block_hash = requested_authoritative_block_hash
-      AND xmin::text = compared_project_row_xmin
-    FOR SHARE;
+    FROM chain_phase_state project
+    JOIN chain_lineage lineage
+      ON lineage.chain_id = project.chain_id
+     AND lineage.block_number = project.current_block_number
+     AND lineage.block_hash = project.current_block_hash
+     AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+    WHERE project.chain_id = requested_authoritative_chain_id
+      AND project.phase_name = 'project'
+      AND project.phase_status IN ('completed', 'running')
+      AND project.current_block_number::text = COALESCE(
+          compared_publication ->> 'block_number',
+          requested_authoritative_block_number::text
+      )
+      AND project.current_block_hash = COALESCE(
+          compared_publication ->> 'block_hash',
+          requested_authoritative_block_hash
+      )
+      AND requested_authoritative_block_number - project.current_block_number BETWEEN 0 AND 1
+      AND (project.current_block_number <> requested_authoritative_block_number
+           OR project.current_block_hash = requested_authoritative_block_hash)
+      AND (compared_publication IS NULL OR (
+          project.input_content_hash = compared_publication ->> 'input_content_hash'
+          AND project.xmin::text = compared_publication ->> 'row_xmin'
+      ))
+      AND project.xmin::text = compared_project_row_xmin
+    FOR SHARE OF project, lineage;
 
     IF NOT FOUND THEN
         RETURN 'project_changed';
@@ -383,55 +413,57 @@ BEGIN
         RETURN 'guard_rejected';
     END IF;
 
-    SELECT candidate.entry
-    INTO indexed_entry
-    FROM jsonb_array_elements(compared_entries)
-        WITH ORDINALITY AS candidate(entry, ordinal)
-    WHERE candidate.entry ->> 'record_key' = requested_record_key
-       OR (
-            candidate.entry ->> 'record_family' = selector_family
-            AND (candidate.entry ->> 'selector_key')
-                IS NOT DISTINCT FROM selector_key
-       )
-       OR (
-            requested_record_key = 'avatar'
-            AND candidate.entry ->> 'record_key' = 'text:avatar'
-       )
-    ORDER BY CASE
-        WHEN candidate.entry ->> 'record_key' = 'text:avatar'
-            AND requested_record_key = 'avatar'
-        THEN 1
-        ELSE 0
-    END,
-    candidate.ordinal
-    LIMIT 1;
+    IF compared_support_status IS DISTINCT FROM 'supported' THEN
+        -- The row's coverage is not authoritative: it serves no value, derivation, or absence,
+        -- so the comparison target is the same refusal the records route serves.
+        indexed_answer := jsonb_build_object('status', 'unsupported');
+    ELSE
+        SELECT candidate.entry
+        INTO indexed_entry
+        FROM jsonb_array_elements(compared_entries)
+            WITH ORDINALITY AS candidate(entry, ordinal)
+        WHERE candidate.entry ->> 'record_key' = requested_record_key
+           OR (
+                candidate.entry ->> 'record_family' = selector_family
+                AND (candidate.entry ->> 'selector_key')
+                    IS NOT DISTINCT FROM selector_key
+           )
+           OR (
+                requested_record_key = 'avatar'
+                AND candidate.entry ->> 'record_key' = 'text:avatar'
+           )
+        ORDER BY CASE
+            WHEN candidate.entry ->> 'record_key' = 'text:avatar'
+                AND requested_record_key = 'avatar'
+            THEN 1
+            ELSE 0
+        END,
+        candidate.ordinal
+        LIMIT 1;
 
-    IF (indexed_entry IS NULL OR indexed_entry ->> 'status' = 'not_found')
-       AND NOT COALESCE(
-           requested_record_key = 'addr:60'
-           AND indexed_entry ->> 'status' = 'not_found'
-           AND jsonb_typeof(compared_provenance -> 'exact_nonempty_not_found_record_keys') = 'array'
-           AND compared_provenance -> 'exact_nonempty_not_found_record_keys'
-               @> jsonb_build_array(requested_record_key),
-           false
-       )
-       AND selector_family = 'addr'
-       AND (
-           selector_key = '60'
-           OR selector_key::numeric BETWEEN 2147483649::numeric AND 4294967295::numeric
-       )
-       AND EXISTS (
-           SELECT 1
-           FROM jsonb_array_elements(COALESCE(
-               compared_provenance -> 'read_rules', '[]'::jsonb
-           )) rule
-           WHERE rule ->> 'kind' = 'ensip19_default_address'
-             AND rule ->> 'source_record_key' = 'addr:2147483648'
-       )
-    THEN
-        IF compared_support_status <> 'supported' THEN
-            indexed_entry := jsonb_build_object('status', 'unsupported');
-        ELSE
+        IF (indexed_entry IS NULL OR indexed_entry ->> 'status' = 'not_found')
+           AND NOT COALESCE(
+               requested_record_key = 'addr:60'
+               AND indexed_entry ->> 'status' = 'not_found'
+               AND jsonb_typeof(compared_provenance -> 'exact_nonempty_not_found_record_keys') = 'array'
+               AND compared_provenance -> 'exact_nonempty_not_found_record_keys'
+                   @> jsonb_build_array(requested_record_key),
+               false
+           )
+           AND selector_family = 'addr'
+           AND (
+               selector_key = '60'
+               OR selector_key::numeric BETWEEN 2147483649::numeric AND 4294967295::numeric
+           )
+           AND EXISTS (
+               SELECT 1
+               FROM jsonb_array_elements(COALESCE(
+                   compared_provenance -> 'read_rules', '[]'::jsonb
+               )) rule
+               WHERE rule ->> 'kind' = 'ensip19_default_address'
+                 AND rule ->> 'source_record_key' = 'addr:2147483648'
+           )
+        THEN
             SELECT candidate.entry
             INTO default_entry
             FROM jsonb_array_elements(compared_entries)
@@ -468,40 +500,36 @@ BEGIN
                 indexed_entry := jsonb_build_object('status', 'unsupported');
             END IF;
         END IF;
-    ELSIF (indexed_entry IS NULL OR indexed_entry ->> 'status' = 'not_found')
-          AND compared_support_status <> 'supported'
-    THEN
-        indexed_entry := jsonb_build_object('status', 'unsupported');
-    END IF;
 
-    IF indexed_entry IS NULL THEN
-        indexed_answer := jsonb_build_object('status', 'not_found');
-    ELSE
-        indexed_status := CASE COALESCE(
-            indexed_entry ->> 'status',
-            'unsupported'
-        )
-            WHEN 'failed' THEN 'execution_failed'
-            ELSE COALESCE(indexed_entry ->> 'status', 'unsupported')
-        END;
-        indexed_answer := jsonb_build_object('status', indexed_status);
-        IF indexed_status = 'success' THEN
-            indexed_value := COALESCE(
-                indexed_entry #> '{value,value}',
-                indexed_entry #> '{value,bytes}',
-                indexed_entry -> 'value'
-            );
-            IF jsonb_typeof(indexed_value) = 'string' THEN
-                indexed_answer := indexed_answer || jsonb_build_object(
-                    'value',
-                    CASE
-                        WHEN selector_family = 'addr'
-                            THEN lower(indexed_value #>> '{}')
-                        ELSE indexed_value #>> '{}'
-                    END
+        IF indexed_entry IS NULL THEN
+            indexed_answer := jsonb_build_object('status', 'not_found');
+        ELSE
+            indexed_status := CASE COALESCE(
+                indexed_entry ->> 'status',
+                'unsupported'
+            )
+                WHEN 'failed' THEN 'execution_failed'
+                ELSE COALESCE(indexed_entry ->> 'status', 'unsupported')
+            END;
+            indexed_answer := jsonb_build_object('status', indexed_status);
+            IF indexed_status = 'success' THEN
+                indexed_value := COALESCE(
+                    indexed_entry #> '{value,value}',
+                    indexed_entry #> '{value,bytes}',
+                    indexed_entry -> 'value'
                 );
-            ELSE
-                indexed_answer := jsonb_build_object('status', 'unsupported');
+                IF jsonb_typeof(indexed_value) = 'string' THEN
+                    indexed_answer := indexed_answer || jsonb_build_object(
+                        'value',
+                        CASE
+                            WHEN selector_family = 'addr'
+                                THEN lower(indexed_value #>> '{}')
+                            ELSE indexed_value #>> '{}'
+                        END
+                    );
+                ELSE
+                    indexed_answer := jsonb_build_object('status', 'unsupported');
+                END IF;
             END IF;
         END IF;
     END IF;

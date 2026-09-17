@@ -164,11 +164,13 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
         "function: bigname_phase.write_resolution_divergence(uuid,text,text,text,bigint,text,jsonb,text,text,text,text,jsonb,jsonb,boolean)",
         "relation: bigname_phase.account_permission_state_current",
         "relation: bigname_phase.address_names_current",
+        "relation: bigname_phase.address_records_current",
         "relation: bigname_phase.chain_header_audit",
         "relation: bigname_phase.chain_heads",
         "relation: bigname_phase.chain_lineage",
         "relation: bigname_phase.chain_phase_state",
         "relation: bigname_phase.children_current",
+        "relation: bigname_phase.contract_instance_addresses",
         "relation: bigname_phase.manifest_contract_instances",
         "relation: bigname_phase.manifest_versions",
         "relation: bigname_phase.migration_event_associations",
@@ -190,7 +192,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     .map(str::to_owned));
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 26);
+    assert_eq!(actual.len(), 28);
     database.cleanup().await
 }
 
@@ -294,7 +296,7 @@ async fn v2_address_names_rejects_unrecognized_namespace() -> Result<()> {
         .oneshot(
             Request::builder()
                 .uri(
-                    "/v2/addresses/0x0000000000000000000000000000000000000001/names?namespace=not-served",
+                    "/v1/addresses/0x0000000000000000000000000000000000000001/names?namespace=not-served",
                 )
                 .body(Body::empty())?,
         )
@@ -314,7 +316,7 @@ async fn v2_address_history_rejects_unrecognized_namespace() -> Result<()> {
         .oneshot(
             Request::builder()
                 .uri(
-                    "/v2/addresses/0x0000000000000000000000000000000000000001/history?namespace=not-served",
+                    "/v1/addresses/0x0000000000000000000000000000000000000001/history?namespace=not-served",
                 )
                 .body(Body::empty())?,
         )

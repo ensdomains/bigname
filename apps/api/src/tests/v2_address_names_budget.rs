@@ -4,7 +4,7 @@ async fn address_name_permission_grants(
     id: &str,
     namespace: &str,
 ) -> Result<Vec<String>> {
-    let mut uri = format!("/v2/permissions?registration_id={id}{namespace}&page_size=37");
+    let mut uri = format!("/v1/permissions?registration_id={id}{namespace}&page_size=37");
     let mut grants = Vec::new();
     loop {
         let payload = v2_permissions_payload_for_database(database, &uri).await?;
@@ -23,7 +23,7 @@ async fn address_name_permission_grants(
             break;
         };
         uri =
-            format!("/v2/permissions?registration_id={id}{namespace}&page_size=37&cursor={cursor}");
+            format!("/v1/permissions?registration_id={id}{namespace}&page_size=37&cursor={cursor}");
     }
     grants.sort();
     let unique = grants.iter().collect::<BTreeSet<_>>();
@@ -84,7 +84,7 @@ async fn v2_address_names_grant_budget_boundaries_and_single_resource_recovery()
     let id = Uuid::from_u128(0xa100);
     for count in [999, 1000, 1001] {
         seed_address_name_budget_grants(&database, id, count).await?;
-        let uri = format!("/v2/addresses/{V2_ADDRESS}/names?q=alpha&page_size=200");
+        let uri = format!("/v1/addresses/{V2_ADDRESS}/names?q=alpha&page_size=200");
         let plain = v2_address_names_payload_for_database(&database, &uri).await?;
         assert_eq!(
             plain["data"][0]["permission_resource_id"],
@@ -159,7 +159,7 @@ async fn v2_address_names_grant_budget_counts_repeated_resource_summaries() -> R
     let id = Uuid::from_u128(0xd100);
     for count in [500, 501] {
         seed_address_name_budget_grants(&database, id, count).await?;
-        let uri = format!("/v2/addresses/{V2_ADDRESS}/names?q=shared&include=role_summary");
+        let uri = format!("/v1/addresses/{V2_ADDRESS}/names?q=shared&include=role_summary");
         let response = v2_address_names_response_for_database(&database, &uri).await?;
         assert_eq!(
             response.status(),
@@ -201,6 +201,7 @@ async fn v2_address_names_permission_id_recovery_ignores_name_anchor_and_product
     seed_v2_address_names_fixture(&database).await?;
     seed_v2_address_registry_operator(&database).await?;
     let id = Uuid::from_u128(0xa100);
+    seed_permission_namespace_event(&database, "ens", id).await?;
     // Prepare distinct and matching declared product IDs for the #816 name-detail
     // preference. This baseline does not yet expose that preference through name detail;
     // the test checks that this metadata cannot redirect permission-resource reads.
@@ -224,7 +225,7 @@ async fn v2_address_names_permission_id_recovery_ignores_name_anchor_and_product
                 for namespace in ["", "&namespace=ens"] {
                     for dedupe in ["name", "registration"] {
                         let uri = format!(
-                            "/v2/addresses/{V2_ADDRESS}/names?q=alpha&dedupe={dedupe}{namespace}"
+                            "/v1/addresses/{V2_ADDRESS}/names?q=alpha&dedupe={dedupe}{namespace}"
                         );
                         let plain = v2_address_names_payload_for_database(&database, &uri).await?;
                         let included = v2_address_names_payload_for_database(
@@ -258,7 +259,7 @@ async fn v2_address_names_permission_id_does_not_resolve_name_again() -> Result<
     let selected = Uuid::from_u128(0xa100);
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"),
     )
     .await?;
     assert_eq!(
@@ -296,7 +297,7 @@ async fn v2_address_names_permission_id_does_not_resolve_name_again() -> Result<
     );
     assert_eq!(current.token_lineage_id, Some(replacement.token_lineage_id));
     let named =
-        v2_permissions_payload_for_database(&database, "/v2/permissions?name=alpha.eth").await?;
+        v2_permissions_payload_for_database(&database, "/v1/permissions?name=alpha.eth").await?;
     assert_eq!(named["data"], json!([]));
     assert_eq!(
         grants,
@@ -381,7 +382,7 @@ async fn v2_address_names_grant_budget_maximum_page_operators_and_default_plan()
         .iter()
         .map(|spec| spec.resource_id)
         .collect::<Vec<_>>();
-    let uri = format!("/v2/addresses/{V2_ADDRESS}/names?page_size=200");
+    let uri = format!("/v1/addresses/{V2_ADDRESS}/names?page_size=200");
     let plain = v2_address_names_payload_for_database(&database, &uri).await?;
     let at_budget =
         v2_address_names_payload_for_database(&database, &format!("{uri}&include=role_summary"))
@@ -502,11 +503,12 @@ async fn v2_address_names_grant_budget_filters_ineligible_direct_rows_before_lim
     seed_v2_address_names_fixture(&database).await?;
     let id = Uuid::from_u128(0xa100);
     seed_address_name_budget_grants(&database, id, 2100).await?;
+    seed_permission_namespace_event(&database, "ens", id).await?;
     sqlx::query("UPDATE bigname_phase.permissions_current SET canonicality_summary=jsonb_build_object('state', 'orphaned') WHERE subject <= $1")
         .bind(format!("0x{:040x}", 1100)).execute(&database.pool).await?;
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary&namespace=ens"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary&namespace=ens"),
     )
     .await?;
     let grants = address_name_inline_grants(&payload["data"][0]);

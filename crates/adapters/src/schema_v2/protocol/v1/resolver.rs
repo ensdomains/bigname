@@ -49,7 +49,7 @@ sol! {
     event VersionChanged(bytes32 indexed node, uint64 newVersion);
 }
 
-pub(super) fn interpret(
+pub(in crate::schema_v2::protocol) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
@@ -434,6 +434,7 @@ pub(super) fn interpret(
     let mut output = single_event(kind, None, None, after);
     if let Some(linked) = affected_node
         .as_deref()
+        .filter(|_| selected.source.source_family != "ens_v2_resolver_l1")
         .filter(|node| state.v1_surface_materialized(&selected.source.namespace, node))
         .and_then(|node| state.v1_name(&selected.source.namespace, node))
     {

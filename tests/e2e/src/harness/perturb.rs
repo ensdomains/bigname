@@ -233,7 +233,9 @@ fn normalize_snapshot_body(value: &mut Value) {
                     // `normalized_event_id` is a database sequence value. A
                     // reorg-observed DB can assign different ids than a fresh
                     // winning-branch control DB for the same event identities.
-                    "normalized_event_id" => normalize_present_id(value, "<normalized_event_id>"),
+                    "normalized_event_id" | "registrant_event_id" => {
+                        normalize_present_id(value, "<normalized_event_id>")
+                    }
                     // Route provenance aggregates those same sequence values;
                     // preserve cardinality but not run-specific ids.
                     "normalized_event_ids" => normalize_id_array(value, "<normalized_event_id>"),

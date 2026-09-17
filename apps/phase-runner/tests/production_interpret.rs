@@ -3900,7 +3900,7 @@ async fn subregistry_topology_edge_does_not_expand_the_watch_plan() -> Result<()
 #[tokio::test]
 async fn root_resolver_discovery_projects_single_label_records_in_normal_and_redo() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_root_resolver_watch").await?;
-    let chain = "interpret-root-resolver-watch";
+    let chain = "ethereum-sepolia";
     seed_root_resolver_watch_fixture(scratch.pool(), chain).await?;
 
     run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Normal).await?;
@@ -3919,9 +3919,9 @@ async fn root_resolver_discovery_projects_single_label_records_in_normal_and_red
     assert_eq!(pointer.1, DISCOVERED_RESOLVER);
     assert_eq!(pointer.4, "box");
 
-    let edge: (i64, String, String, String) = sqlx::query_as(
-        "SELECT count(*), min(source.source_family), min(address.address),
-                min(edge.admission_basis)
+    let edges: Vec<(String, String, String, i64, String)> = sqlx::query_as(
+        "SELECT source.source_family, address.address, edge.admission_basis,
+                edge.active_from_block_number, edge.discovery_source
          FROM discovery_edges edge
          JOIN manifest_versions source ON source.manifest_id = edge.source_manifest_id
          JOIN contract_instance_addresses address
@@ -3929,19 +3929,32 @@ async fn root_resolver_discovery_projects_single_label_records_in_normal_and_red
           AND address.chain_id = edge.chain_id
          WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
            AND edge.deactivated_at IS NULL
-           AND edge.canonicality_state IN ('canonical', 'safe', 'finalized')",
+           AND edge.canonicality_state IN ('canonical', 'safe', 'finalized')
+         ORDER BY edge.active_from_block_number",
     )
     .bind(chain)
-    .fetch_one(scratch.pool())
+    .fetch_all(scratch.pool())
     .await?;
     assert_eq!(
-        edge,
-        (
-            1,
-            "ens_v2_root_l1".into(),
-            DISCOVERED_RESOLVER.into(),
-            "reachable_from_root".into(),
-        )
+        edges,
+        [
+            (
+                "ens_v2_root_l1".into(),
+                DISCOVERED_RESOLVER.into(),
+                "reachable_from_root".into(),
+                1,
+                "ResolverUpdated".into(),
+            ),
+            (
+                "ens_v2_resolver_l1".into(),
+                DISCOVERED_RESOLVER.into(),
+                "declared_resolver_implementation".into(),
+                2,
+                "Upgraded".into(),
+            ),
+        ],
+        "the registry pointer admits the proxy; its later Upgraded to a declared implementation \
+         is recorded as a second, later resolver edge"
     );
 
     let record_topic = format!("{:#x}", TextChanged::SIGNATURE_HASH);
@@ -3988,9 +4001,125 @@ async fn root_resolver_discovery_projects_single_label_records_in_normal_and_red
     .bind(DISCOVERED_RESOLVER)
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(replay_counts, (1, 1, 2));
+    assert_eq!(replay_counts, (2, 1, 2));
     run_project(scratch.pool(), chain, 2, 0, 2).await?;
     assert_root_resolver_projection(scratch.pool(), chain, &pointer.2, pointer.3).await?;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn construction_upgraded_before_the_registry_pointer_admits_and_supports_the_resolver()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_announced_resolver").await?;
+    let chain = "ethereum-sepolia";
+    seed_root_resolver_watch_manifests(scratch.pool(), chain).await?;
+    seed_root_resolver_watch_logs(scratch.pool(), chain, true).await?;
+
+    run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Normal).await?;
+
+    let upgraded: (String, i64, String, String) = sqlx::query_as(
+        "SELECT source_family, block_number, after_state ->> 'proxy_address',
+                after_state ->> 'implementation'
+         FROM normalized_events WHERE chain_id = $1 AND event_kind = 'Upgraded'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        upgraded,
+        (
+            "ens_v2_resolver_l1".into(),
+            1,
+            DISCOVERED_RESOLVER.into(),
+            "0x0000000000000000000000000000000000000077".into(),
+        ),
+        "the construction-time Upgraded is interpreted although no registry pointed at the proxy yet"
+    );
+    let edges: Vec<(String, String, i64, String)> = sqlx::query_as(
+        "SELECT edge.discovery_source, edge.admission_basis, edge.active_from_block_number,
+                source.source_family
+         FROM discovery_edges edge
+         JOIN manifest_versions source ON source.manifest_id = edge.source_manifest_id
+         WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
+           AND edge.deactivated_at IS NULL
+         ORDER BY edge.active_from_block_number",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        edges,
+        [
+            (
+                "Upgraded".into(),
+                "declared_resolver_implementation".into(),
+                1,
+                "ens_v2_resolver_l1".into(),
+            ),
+            (
+                "ResolverUpdated".into(),
+                "reachable_from_root".into(),
+                2,
+                "ens_v2_root_l1".into(),
+            ),
+        ]
+    );
+    let record_topic = format!("{:#x}", TextChanged::SIGNATURE_HASH);
+    let watch = load_watch_filter(scratch.pool(), chain, 0, 2).await?;
+    assert!(!watch.includes(DISCOVERED_RESOLVER, &record_topic, 0));
+    assert!(
+        watch.includes(DISCOVERED_RESOLVER, &record_topic, 1),
+        "the announcement admits the proxy's record events from its own block"
+    );
+    let upgraded_topic = format!("{:#x}", Upgraded::SIGNATURE_HASH);
+    let announcement = vec![
+        upgraded_topic.clone(),
+        "0x0000000000000000000000000000000000000000000000000000000000000077".to_owned(),
+    ];
+    assert!(
+        watch.includes_log(
+            "0x00000000000000000000000000000000000000ff",
+            &announcement,
+            0
+        ),
+        "Upgraded naming a declared implementation is watched from any emitter"
+    );
+    assert!(!watch.includes(
+        "0x00000000000000000000000000000000000000ff",
+        &upgraded_topic,
+        0
+    ));
+
+    run_project(scratch.pool(), chain, 2, 0, 2).await?;
+    let resolver: (String, Option<String>, String) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason,
+                declared_summary #>> '{classification,role}'
+         FROM resolver_current WHERE chain_id = $1 AND lower(resolver_address) = lower($2)",
+    )
+    .bind(chain)
+    .bind(DISCOVERED_RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        resolver,
+        ("supported".into(), None, "permissioned_resolver".into())
+    );
+
+    run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Redo).await?;
+    let replay_counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM discovery_edges
+              WHERE chain_id = $1 AND edge_kind = 'resolver' AND deactivated_at IS NULL),
+             (SELECT count(*) FROM contract_instance_addresses
+              WHERE chain_id = $1 AND lower(address) = lower($2) AND deactivated_at IS NULL),
+             (SELECT count(*) FROM normalized_events
+              WHERE chain_id = $1 AND event_kind IN ('Upgraded', 'ResolverChanged'))",
+    )
+    .bind(chain)
+    .bind(DISCOVERED_RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(replay_counts, (2, 1, 2));
     scratch.cleanup().await
 }
 
@@ -7360,6 +7489,11 @@ async fn seed_discovery_fixture(pool: &PgPool, chain_id: &str) -> Result<()> {
 }
 
 async fn seed_root_resolver_watch_fixture(pool: &PgPool, chain_id: &str) -> Result<()> {
+    seed_root_resolver_watch_manifests(pool, chain_id).await?;
+    seed_root_resolver_watch_logs(pool, chain_id, false).await
+}
+
+async fn seed_root_resolver_watch_manifests(pool: &PgPool, chain_id: &str) -> Result<()> {
     let root_id = Uuid::new_v4();
     for block in 0..=2 {
         sqlx::query(
@@ -7547,7 +7681,31 @@ async fn seed_root_resolver_watch_fixture(pool: &PgPool, chain_id: &str) -> Resu
     .execute(pool)
     .await?;
 
-    for (block, to_address) in [(1, CONTRACT), (2, DISCOVERED_RESOLVER)] {
+    Ok(())
+}
+
+/// The registry pointer in block 1 and the resolver's `Upgraded` in block 2 is the historical
+/// fixture order. `announced_first` uses the on-chain order instead: the proxy announces its
+/// implementation at construction (block 1), and the registry points at it later (block 2).
+async fn seed_root_resolver_watch_logs(
+    pool: &PgPool,
+    chain_id: &str,
+    announced_first: bool,
+) -> Result<()> {
+    let (pointer_block, resolver_block) = if announced_first { (2, 1) } else { (1, 2) };
+    seed_root_resolver_watch_logs_body(pool, chain_id, pointer_block, resolver_block).await
+}
+
+async fn seed_root_resolver_watch_logs_body(
+    pool: &PgPool,
+    chain_id: &str,
+    pointer_block: i64,
+    resolver_block: i64,
+) -> Result<()> {
+    for (block, to_address) in [
+        (pointer_block, CONTRACT),
+        (resolver_block, DISCOVERED_RESOLVER),
+    ] {
         sqlx::query(
             "INSERT INTO raw_transactions (
                  chain_id, block_hash, block_number, transaction_hash,
@@ -7591,8 +7749,8 @@ async fn seed_root_resolver_watch_fixture(pool: &PgPool, chain_id: &str) -> Resu
         insert_log_at(
             pool,
             chain_id,
-            1,
-            &format!("{chain_id}-transaction-1"),
+            pointer_block,
+            &format!("{chain_id}-transaction-{pointer_block}"),
             i64::try_from(log_index)?,
             CONTRACT,
             fact.topics(),
@@ -7618,8 +7776,8 @@ async fn seed_root_resolver_watch_fixture(pool: &PgPool, chain_id: &str) -> Resu
         insert_log_at(
             pool,
             chain_id,
-            2,
-            &format!("{chain_id}-transaction-2"),
+            resolver_block,
+            &format!("{chain_id}-transaction-{resolver_block}"),
             i64::try_from(log_index)?,
             DISCOVERED_RESOLVER,
             fact.topics(),

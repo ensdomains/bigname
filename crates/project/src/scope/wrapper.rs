@@ -146,6 +146,36 @@ async fn include_all(
     Ok(())
 }
 
+// A changed NameWrapper operator approval re-fans every registration its owner currently holds;
+// resources whose holder changed inside the window are already scoped by their own events.
+pub(super) async fn include_operator_holder_resources(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO project_scope_permission_effect_resources
+        SELECT DISTINCT holder.resource_id
+        FROM project_scope_account_permissions scope
+        JOIN permissions_current holder
+          ON holder.subject = scope.owner
+         AND lower(holder.grant_source ->> 'authority_contract') = scope.authority_contract
+        WHERE scope.chain_id = $1
+          AND scope.authority_kind = 'wrapper'
+          AND holder.grant_source ->> 'authority_kind' = 'wrapper'
+          AND holder.grant_source ->> 'relation_kind' = 'holder'
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(chain_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to scope wrapper operator holder resources", error)
+    })?;
+    Ok(())
+}
+
 pub(super) async fn include_effect_resources(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,

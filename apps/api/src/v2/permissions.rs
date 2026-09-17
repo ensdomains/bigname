@@ -10,17 +10,18 @@ use sqlx::types::Uuid;
 
 use crate::AppState;
 
+use super::collection_snapshot::CollectionSnapshot;
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::name_record::wrapper_metadata;
 use super::permission_support::{
     PermissionRequestScope, PermissionSupport, apply_permissions_collection_support_meta,
     permission_support_for_resources,
 };
-use super::support::ensure_public_namespace;
 use super::{
     AddressNameGrant, CursorPayload, Envelope, GrantRelation, Meta, Page, QueryParamAllowlist,
-    QueryParams, StrictQueryParams, V2Error, V2Result, api_error_to_v2, decode,
-    effective_permission_scope_value, encode, permission_powers_value,
+    QueryParams, StrictQueryParams, V2Error, V2Result, decode, effective_permission_scope_value,
+    encode, permission_powers_value,
+    restrictions::ResourceRestrictions,
     validate_latest_collection_selectors,
     vocab::{AuthorityContext, WrapperFuses, WrapperState},
 };
@@ -80,6 +81,16 @@ pub(crate) struct PermissionRow {
     pub(crate) lineage: Option<PermissionLineage>,
 }
 
+/// The `GET /v1/permissions` body: the collection envelope plus, for a resource-bound read, the
+/// selected registration's [resource restrictions](../../../../docs/api-v2.md#resource-restrictions).
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct PermissionsResponse {
+    #[serde(flatten)]
+    pub(crate) envelope: Envelope<Vec<PermissionRow>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) restrictions: Option<ResourceRestrictions>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct PermissionLineage {
     pub(crate) grant: Value,
@@ -94,14 +105,19 @@ pub(crate) struct PermissionLineage {
 pub(crate) async fn get_permissions(
     params: PermissionsQuery,
     State(state): State<AppState>,
-) -> V2Result<Json<Envelope<Vec<PermissionRow>>>> {
+) -> V2Result<Json<PermissionsResponse>> {
     let params = params.into_inner();
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let include_lineage = permissions_include_lineage(&params.include)?;
     let filter_inputs = permissions_filter_inputs(&params)?;
-    if params.namespace.is_some() {
-        ensure_public_namespace(&filter_inputs.namespace).map_err(api_error_to_v2)?;
-    }
+    let namespace = filter_inputs
+        .name_filter
+        .as_ref()
+        .map(|name| name.namespace.as_str())
+        .or(params.namespace.as_deref());
+    let snapshot =
+        CollectionSnapshot::capture_for_namespace(&state, params.cursor.as_deref(), namespace)
+            .await?;
 
     let resolved =
         resolve_permissions_filter(&state, &params, include_lineage, &filter_inputs).await?;
@@ -125,14 +141,23 @@ pub(crate) async fn get_permissions(
         } else {
             PermissionSupport::Unknown
         };
-        return Ok(empty_permissions_response(&params, selection, support));
+        return Ok(empty_permissions_response(
+            &params,
+            selection,
+            support,
+            snapshot.finish(&state).await?,
+        ));
     }
 
     let storage_page = bigname_storage::load_effective_permissions_account_resource_page(
         &state.pool,
         resolved.subject.as_deref(),
         resolved.resource_id,
-        resolved.namespace.as_deref(),
+        // A name filter already selected its registration inside the name's namespace.
+        params
+            .namespace
+            .as_deref()
+            .filter(|_| filter_inputs.name_filter.is_none()),
         storage_cursor.as_ref(),
         params.page_size,
     )
@@ -162,10 +187,7 @@ pub(crate) async fn get_permissions(
             .await
             .map_err(|_| V2Error::internal_error("failed to load permission names"))?;
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
-        encode(&permissions_cursor_payload(
-            cursor,
-            &resolved.cursor_filters,
-        ))
+        encode(&snapshot.bind_cursor(permissions_cursor_payload(cursor, &resolved.cursor_filters)))
     });
     let has_more = next_cursor.is_some();
     let data = storage_page
@@ -182,7 +204,7 @@ pub(crate) async fn get_permissions(
             )
         })
         .collect::<V2Result<Vec<_>>>()?;
-    let mut meta = Meta::default();
+    let mut meta = snapshot.finish(&state).await?;
     let permission_support =
         permission_support_for_resources(&support_resource_ids, &permission_summaries);
     apply_permissions_collection_support_meta(
@@ -194,17 +216,26 @@ pub(crate) async fn get_permissions(
             PermissionRequestScope::AccountWide
         },
     );
+    let restrictions = resolved
+        .resource_id
+        .and_then(|resource_id| permission_summaries.get(&resource_id))
+        .map(ResourceRestrictions::from_summary)
+        .transpose()?
+        .flatten();
 
-    Ok(Json(Envelope {
-        data,
-        page: Some(Page {
-            cursor: params.cursor.clone(),
-            next_cursor,
-            page_size: params.page_size,
-            total_count: None,
-            has_more,
-        }),
-        meta,
+    Ok(Json(PermissionsResponse {
+        envelope: Envelope {
+            data,
+            page: Some(Page {
+                cursor: params.cursor.clone(),
+                next_cursor,
+                page_size: params.page_size,
+                total_count: None,
+                has_more,
+            }),
+            meta,
+        },
+        restrictions,
     }))
 }
 
@@ -212,9 +243,8 @@ fn empty_permissions_response(
     params: &QueryParams,
     selection: EmptyPermissionsSelection,
     support: PermissionSupport,
-) -> Json<Envelope<Vec<PermissionRow>>> {
-    let mut meta = Meta::default();
-
+    mut meta: Meta,
+) -> Json<PermissionsResponse> {
     match selection {
         EmptyPermissionsSelection::MissingOrUnsupportedNameAnchor => {
             apply_permissions_collection_support_meta(
@@ -230,18 +260,22 @@ fn empty_permissions_response(
                 PermissionRequestScope::ResourceBound,
             );
         }
+        EmptyPermissionsSelection::NamespaceRegistrationMismatch => {}
     }
 
-    Json(Envelope {
-        data: Vec::new(),
-        page: Some(Page {
-            cursor: params.cursor.clone(),
-            next_cursor: None,
-            page_size: params.page_size,
-            total_count: None,
-            has_more: false,
-        }),
-        meta,
+    Json(PermissionsResponse {
+        envelope: Envelope {
+            data: Vec::new(),
+            page: Some(Page {
+                cursor: params.cursor.clone(),
+                next_cursor: None,
+                page_size: params.page_size,
+                total_count: None,
+                has_more: false,
+            }),
+            meta,
+        },
+        restrictions: None,
     })
 }
 

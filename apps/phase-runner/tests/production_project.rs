@@ -176,6 +176,7 @@ sol! {
         string value
     );
     event ReverseClaimed(address indexed addr, bytes32 indexed node);
+    event NameChanged(bytes32 indexed node, string name);
     event LabelRegistered(
         uint256 indexed tokenId,
         bytes32 indexed labelHash,
@@ -287,6 +288,7 @@ async fn canonical_fixture_builds_all_eight_projection_families() -> Result<()> 
                 "registry_contract": null,
                 "registry_owner": null,
                 "resource_id": RESOURCE,
+                "resource_restrictions": null,
                 "root_resource_id": null,
                 "support_status": "unsupported",
                 "unsupported_reason": "operator_approval_surfaces_not_ingested"
@@ -818,6 +820,7 @@ async fn permission_builder_preserves_grouped_history_output_exactly() -> Result
                 "registry_contract": null,
                 "registry_owner": null,
                 "resource_id": RESOURCE,
+                "resource_restrictions": null,
                 "root_resource_id": null,
                 "support_status": "unsupported",
                 "unsupported_reason": "operator_approval_surfaces_not_ingested"
@@ -1550,6 +1553,130 @@ async fn authority_epoch_rebind_updates_the_current_registration_authority() -> 
     scratch.cleanup().await
 }
 
+// A wrapped ENSv1 subname has no registrar lease; the NameWrapper entry's expiry is the only
+// expiry the chain holds for it, so the registration serves that expiry instead of none.
+#[tokio::test]
+async fn wrapped_subname_serves_its_name_wrapper_expiry() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_wrapped_subname_expiry").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    let resource = Uuid::parse_str("00000000-0000-0000-0000-0000000000a7")?;
+    let binding = Uuid::parse_str("00000000-0000-0000-0000-0000000000b7")?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash,
+             labelhashes, normalizer_version, visibility_state, chain_id, block_hash,
+             block_number, canonicality_state
+         ) VALUES (
+             'ens:0xsub', 'ens', 'sub.alice.eth', ARRAY['sub','alice','eth'],
+             decode('00', 'hex'), '0xsub', ARRAY['0xsub-label','0xalice-label','0xeth'], $1,
+             'active', $2, $3, 2, 'canonical'
+         )",
+    )
+    .bind(NORMALIZER)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 2))
+    .execute(scratch.pool())
+    .await?;
+    insert_classifier_resource_and_binding(
+        scratch.pool(),
+        CHAIN,
+        "ens:0xsub",
+        "ens_v1",
+        resource,
+        binding,
+        2,
+        None,
+    )
+    .await?;
+    let resource_text = resource.to_string();
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        Some("ens:0xsub"),
+        Some(&resource_text),
+        "SubregistryChanged",
+        "ens_v1_registry_l1",
+        json!({
+            "node":"0xalice",
+            "child_node":"0xsub",
+            "labelhash":"0xsub-label",
+            "owner":OWNER
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        Some("ens:0xsub"),
+        Some(&resource_text),
+        "RegistrationGranted",
+        "ens_v1_registry_l1",
+        json!({"authority_kind":"registry_only","registrant":OWNER,"status":"registered"}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        Some("ens:0xsub"),
+        Some(&resource_text),
+        "AuthorityTransferred",
+        "ens_v1_registry_l1",
+        json!({"owner":OWNER}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        Some("ens:0xsub"),
+        Some(&resource_text),
+        "PermissionScopeChanged",
+        "ens_v1_wrapper_l1",
+        json!({"fuses":65536,"wrapper_state":"emancipated"}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        Some("ens:0xsub"),
+        Some(&resource_text),
+        "ExpiryChanged",
+        "ens_v1_wrapper_l1",
+        json!({"authority_kind":"wrapper","expiry":2_000_000_000_i64}),
+        json!({}),
+    )
+    .await?;
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let summary: Value = sqlx::query_scalar(
+        "SELECT declared_summary FROM name_current WHERE logical_name_id = 'ens:0xsub'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(summary["wrapper_state"], "emancipated");
+    assert_eq!(
+        summary["registration"]["expiry"], 2_000_000_000_i64,
+        "a wrapped subname's registration expiry is its NameWrapper expiry"
+    );
+    assert_eq!(summary["control"]["expiry"], "2033-05-18T03:33:20Z");
+    // The registrar-backed parent is untouched by the fallback.
+    let parent: Value = sqlx::query_scalar(
+        "SELECT declared_summary FROM name_current WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(parent["registration"]["expiry"].is_null());
+    scratch.cleanup().await
+}
+
 #[tokio::test]
 async fn expiry_fold_ignores_malformed_updates_and_clears_unrepresentable_numbers() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_expiry_fold").await?;
@@ -1719,7 +1846,7 @@ async fn permission_support_marks_approvals_partial_without_hiding_known_control
             (
                 "wrapper".into(),
                 "unsupported".into(),
-                Some("ensv1_wrapper_holder_permissions_not_projected".into())
+                Some("wrapper_parent_and_resolver_delegation_not_projected".into())
             ),
             (
                 "future_authority".into(),
@@ -3613,6 +3740,378 @@ async fn parent_reachability_filters_before_positive_v2_child_integrity() -> Res
     Ok(())
 }
 
+// A child migrated through the wrapper receiver lands in the WrapperRegistry its parent's
+// migration created (LockedMigrationController / WrapperRegistry deploy one per migrated name
+// and announce it). That registry is the child's successor registry, so the migration branch
+// of the exact-name profile accepts it on the same registry-creation proof the authority
+// builder uses; without that proof the undeclared registry stays shadowed.
+#[tokio::test]
+async fn migrated_child_in_a_migration_created_registry_serves_the_exact_profile() -> Result<()> {
+    let scratch =
+        ScratchDatabase::create("project_exact_profile_migration_created_registry").await?;
+    let chain = "ethereum-sepolia";
+    seed_lineage(scratch.pool(), chain, 5).await?;
+    declare_sepolia_post_audit_profile(scratch.pool(), chain).await?;
+    let registry_manifest = insert_namespaced_manifest(
+        scratch.pool(),
+        "ens",
+        chain,
+        "ens_v2_registry_l1",
+        1,
+        "ens_v2_sepolia_post_audit",
+        "tests/project-exact-profile-created-registry.toml",
+        json!({"contracts":[]}),
+    )
+    .await?;
+    insert_namespaced_manifest(
+        scratch.pool(),
+        "ens",
+        chain,
+        "ens_v2_registrar_l1",
+        1,
+        "ens_v2_sepolia_post_audit",
+        "tests/project-exact-profile-created-registrar.toml",
+        json!({"capability_flags":{"exact_name_profile":{"status":"shadow"}}}),
+    )
+    .await?;
+    let migration_manifest = insert_namespaced_manifest(
+        scratch.pool(),
+        "ens",
+        chain,
+        "ens_v2_migration_l1",
+        1,
+        "ens_v2_sepolia_post_audit",
+        "tests/project-exact-profile-created-migration.toml",
+        json!({}),
+    )
+    .await?;
+    let logical_name_id = format!(
+        "ens:{:#x}",
+        raw_namehash(&[b"child", b"created-registry", b"eth"])
+    );
+    seed_authority_classifier_case(
+        scratch.pool(),
+        chain,
+        &logical_name_id,
+        EnsArmSet::Both,
+        EnsArmSet::Both,
+        1,
+        Some(5),
+    )
+    .await?;
+    let (binding, resource, proof_identity) = insert_activated_authority_proof(
+        scratch.pool(),
+        chain,
+        &logical_name_id,
+        "locked_child",
+        None,
+    )
+    .await?;
+
+    // The successor registry: created at block 1 by the parent's migration, announced there,
+    // and never declared in the registry manifest.
+    let registry_instance = Uuid::new_v4();
+    let registry_address = "0x00000000000000000000000000000000000000c7";
+    sqlx::query(
+        "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+         VALUES ($1, $2, 'contract')",
+    )
+    .bind(registry_instance)
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (
+             contract_instance_id, chain_id, address, active_from_block_number,
+             active_from_block_hash, source_manifest_id
+         ) VALUES ($1, $2, $3, 1, $4, $5)",
+    )
+    .bind(registry_instance)
+    .bind(chain)
+    .bind(registry_address)
+    .bind(block_hash(chain, 1))
+    .bind(registry_manifest)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO discovery_edges (
+             chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id,
+             discovery_source, admission_basis, source_manifest_id,
+             active_from_block_number, active_from_block_hash, canonicality_state,
+             provenance
+         ) VALUES (
+             $1, 'registry_announcement', $2, $2, 'RegistryCreated',
+             'reachable_from_root', $3, 1, $4, 'canonical',
+             '{\"transaction_index\":0,\"log_index\":0}'::jsonb
+         )",
+    )
+    .bind(chain)
+    .bind(registry_instance)
+    .bind(registry_manifest)
+    .bind(block_hash(chain, 1))
+    .execute(scratch.pool())
+    .await?;
+    let insert_creation = |pool: PgPool| async move {
+        sqlx::query(
+            "INSERT INTO migration_discovery_associations (
+                 logical_edge_identity, migration_correlation_id, correlation_kind,
+                 registry_contract_instance_id, registry_address, source_manifest_id,
+                 evidence_refs, chain_id, block_number, block_hash, transaction_hash,
+                 transaction_index, log_index, canonicality_state, consumer_visibility,
+                 interpreter_content_hash
+             ) VALUES (
+                 $1, $2, 'migration_registry_creation', $3, lower($4), $5,
+                 '[{\"event_identity\":\"created-registry-proof\"}]'::jsonb,
+                 $6, 1, $7, $8, 0, 0, 'canonical', 'candidate', $9
+             )",
+        )
+        .bind(format!("{chain}:created-registry-edge"))
+        .bind(format!("{chain}:created-registry-correlation"))
+        .bind(registry_instance)
+        .bind(registry_address)
+        .bind(registry_manifest)
+        .bind(chain)
+        .bind(block_hash(chain, 1))
+        .bind(format!("{chain}:created-registry-tx"))
+        .bind(INTERPRETER_CONTENT_HASH)
+        .execute(&pool)
+        .await
+        .map(|_| ())
+    };
+    insert_creation(scratch.pool().clone()).await?;
+    // The child's boundary names that registry as its successor registry, and the successor
+    // binding is bound by that registry in the same transaction.
+    sqlx::query(
+        "UPDATE normalized_events
+         SET source_manifest_id = $2,
+             after_state = after_state
+                 || jsonb_build_object('successor_registry_contract_instance_id', $3::text)
+         WHERE event_identity = $1",
+    )
+    .bind(&proof_identity)
+    .bind(migration_manifest)
+    .bind(registry_instance)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, resource_id, event_kind,
+             source_family, manifest_version, source_manifest_id, chain_id, block_number,
+             block_hash, transaction_hash, transaction_index, log_index, raw_fact_ref,
+             derivation_kind, canonicality_state, before_state, after_state
+         ) VALUES (
+             $1, 'ens', $2, $3, 'SurfaceBound', 'ens_v2_registry_l1', 1, $4, $5, 1, $6,
+             $7, 0, 1, jsonb_build_object('emitting_address', $8::text),
+             'ens_v1_unwrapped_authority', 'canonical', '{}'::jsonb,
+             jsonb_build_object('surface_binding_id', $9::text)
+         )",
+    )
+    .bind(format!("{chain}:SurfaceBound:created-registry-successor"))
+    .bind(&logical_name_id)
+    .bind(resource)
+    .bind(registry_manifest)
+    .bind(chain)
+    .bind(block_hash(chain, 1))
+    .bind(format!("{chain}:created-registry-successor-tx"))
+    .bind(registry_address)
+    .bind(binding)
+    .execute(scratch.pool())
+    .await?;
+
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
+    type ProfileRow = (Option<String>, String, Option<String>, Option<Uuid>);
+    let profile_row = |pool: PgPool, name: String| async move {
+        sqlx::query_as::<_, ProfileRow>(
+            "SELECT provenance #>> '{authority_selection,proof_kind}', support_status,
+                    unsupported_reason, surface_binding_id
+             FROM name_current WHERE logical_name_id = $1",
+        )
+        .bind(name)
+        .fetch_one(&pool)
+        .await
+    };
+    let served = profile_row(scratch.pool().clone(), logical_name_id.clone()).await?;
+    assert_eq!(served.0.as_deref(), Some("migration_authority_transition"));
+    assert_eq!(served.3, Some(binding));
+    assert_eq!(
+        (served.1.as_str(), served.2),
+        ("supported", None),
+        "the migration-created successor registry qualifies the exact profile"
+    );
+
+    // Without the registry-creation proof the same undeclared registry is still shadowed.
+    sqlx::query("DELETE FROM migration_discovery_associations WHERE chain_id = $1")
+        .bind(chain)
+        .execute(scratch.pool())
+        .await?;
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
+    let shadowed = profile_row(scratch.pool().clone(), logical_name_id.clone()).await?;
+    assert_eq!(
+        (shadowed.1.as_str(), shadowed.2.as_deref()),
+        ("unsupported", Some("ensv2_exact_name_profile_shadow")),
+        "an undeclared registry without a creation proof stays shadowed"
+    );
+    scratch.cleanup().await
+}
+
+// The ENSv1→ENSv2 correlation tables stamp `canonicality_state` at insert and never
+// maintain it. This drives the production reorg path — head publication orphans the
+// lineage and stamps the required redo, Interpret's redo keeps the losing-fork
+// association as evidence while orphaning its announcement edge, Project rebuilds —
+// and pins both halves of the documented rule: the retained row still reads
+// `canonical`, and no reader publishes from it.
+#[tokio::test]
+async fn reorg_retains_a_migration_association_that_still_reads_canonical_and_publishes_nothing_from_it()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_association_reorg").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    seed_positive_child_authority_fixture(scratch.pool(), 5, "locked_wrapped").await?;
+    publish_heads(
+        scratch.pool(),
+        CHAIN,
+        &HeadMarkers {
+            latest: BlockMarker::new(6, block_hash(CHAIN, 6))?,
+            safe: Some(BlockMarker::new(0, block_hash(CHAIN, 0))?),
+            finalized: Some(BlockMarker::new(0, block_hash(CHAIN, 0))?),
+        },
+    )
+    .await?;
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 6).await?;
+    assert_eq!(
+        child_relation(scratch.pool()).await?,
+        Some((None, Some(OWNER.to_owned()))),
+        "positive control: the association-backed ENSv2 relation publishes"
+    );
+
+    // A competing fork replaces heights 1 through 6, starting at the block where the
+    // migration registry association and its announcement edge are anchored. Head
+    // publication orphans the old branch and stamps the required Interpret and
+    // Project redo in the same transaction; supplying every replacement height keeps
+    // the redo range readable, so the runner re-derives instead of waiting on Live
+    // intake for blocks it has not seen.
+    let store = PhaseStore::new(scratch.pool().clone());
+    store.initialize_chain(CHAIN).await?;
+    seed_completed_project_extent(scratch.pool(), CHAIN, 6).await?;
+    let winning_hash = |number: i64| format!("{CHAIN}-winning-block-{number}");
+    for number in 1..=6 {
+        let parent = if number == 1 {
+            block_hash(CHAIN, 0)
+        } else {
+            winning_hash(number - 1)
+        };
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number,
+                 block_timestamp, canonicality_state
+             ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'observed')",
+        )
+        .bind(CHAIN)
+        .bind(winning_hash(number))
+        .bind(parent)
+        .bind(number)
+        .execute(scratch.pool())
+        .await?;
+    }
+    publish_heads(
+        scratch.pool(),
+        CHAIN,
+        &HeadMarkers {
+            latest: BlockMarker::new(6, winning_hash(6))?,
+            safe: Some(BlockMarker::new(0, block_hash(CHAIN, 0))?),
+            finalized: Some(BlockMarker::new(0, block_hash(CHAIN, 0))?),
+        },
+    )
+    .await?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        PhaseSet::with_ingest_interpret_and_project(
+            Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+            Arc::new(InterpretPhase::new(scratch.pool().clone())),
+            Arc::new(ProjectPhase::new(scratch.pool().clone())),
+        )?,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-association-reorg",
+        test_timing(),
+    )?;
+    let terminal = runner
+        .run_chain(&chain_config(CHAIN)?, CancellationToken::new())
+        .await
+        .expect_err("the intentionally unavailable verify/live slot stops after re-derivation");
+    assert_eq!(
+        terminal.kind(),
+        RunnerErrorKind::Configuration,
+        "unexpected terminal error: {terminal:#}"
+    );
+
+    let (association_state, association_anchor): (String, String) = sqlx::query_as(
+        "SELECT canonicality_state::text, block_hash FROM migration_discovery_associations
+         WHERE logical_edge_identity = $1",
+    )
+    .bind(format!("{CHAIN}:positive-child-registry-edge"))
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(association_anchor, block_hash(CHAIN, 1));
+    assert_eq!(
+        association_state, "canonical",
+        "the retained losing-fork row keeps its insert-time stamp"
+    );
+    let anchor_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::text FROM chain_lineage
+         WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 1))
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(anchor_state, "orphaned");
+    let edge_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::text FROM discovery_edges
+         WHERE chain_id = $1 AND edge_kind = 'registry_announcement'
+           AND active_from_block_hash = $2",
+    )
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 1))
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        edge_state, "orphaned",
+        "Interpret's redo orphans the announcement edge before Project runs"
+    );
+    assert_eq!(
+        child_relation(scratch.pool()).await?,
+        None,
+        "nothing is published from a retained association whose anchor was replaced"
+    );
+    let states: Vec<(String, String, bool, Option<String>)> = sqlx::query_as(
+        "SELECT phase_name, phase_status, redo_in_progress, current_block_hash
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')
+         ORDER BY phase_name",
+    )
+    .bind(CHAIN)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        states,
+        vec![
+            (
+                "interpret".into(),
+                "completed".into(),
+                false,
+                Some(winning_hash(6))
+            ),
+            (
+                "project".into(),
+                "completed".into(),
+                false,
+                Some(winning_hash(6))
+            ),
+        ]
+    );
+    scratch.cleanup().await?;
+    Ok(())
+}
+
 // Basenames subnames are their own authority arm. The child's authority selects `basenames`,
 // so a Basenames-derived relation publishes only because it is staged under that arm.
 #[tokio::test]
@@ -4715,6 +5214,9 @@ fn expected_wrapper_fuses(fuses: u32) -> Value {
 
 #[tokio::test]
 async fn wrapper_states_and_expiry_gate_permissions_and_controller_relations() -> Result<()> {
+    // A `wrapped` name keeps every holder power but `burn_fuses`: `_canFusesBeBurned` rejects an
+    // owner-controlled burn until the parent has burnt PARENT_CANNOT_CONTROL.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058-L1068 @ ens_v1@91c966f)
     let cases = [
         (
             "wrapped_expired",
@@ -4722,7 +5224,7 @@ async fn wrapper_states_and_expiry_gate_permissions_and_controller_relations() -
             "wrapped",
             2,
             Some("wrapped"),
-            9,
+            8,
             true,
             true,
         ),
@@ -4732,7 +5234,7 @@ async fn wrapper_states_and_expiry_gate_permissions_and_controller_relations() -
             "wrapped",
             2,
             Some("wrapped"),
-            9,
+            8,
             true,
             true,
         ),
@@ -7444,6 +7946,94 @@ async fn record_inventory_normalizes_empty_address_shapes_and_coin60_siblings() 
 }
 
 #[tokio::test]
+async fn record_inventory_normalizes_a_cleared_contenthash_in_the_nested_value_shape() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("production_project_empty_contenthash_shape").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    for after_state in [
+        json!({
+            "resolver":RESOLVER,
+            "source_event":"ContenthashChanged",
+            "record_key":"contenthash",
+            "record_family":"contenthash",
+            "value":{"encoding":"hex","bytes":"0xe3010170122011"}
+        }),
+        json!({
+            "resolver":RESOLVER,
+            "source_event":"ContenthashChanged",
+            "record_key":"contenthash",
+            "record_family":"contenthash",
+            "value":{"encoding":"hex","bytes":"0x"}
+        }),
+        json!({
+            "resolver":RESOLVER,
+            "source_event":"TextChanged",
+            "record_key":"text:url",
+            "record_family":"text",
+            "selector_key":"url",
+            "value":"https://example.invalid"
+        }),
+    ] {
+        insert_event(
+            scratch.pool(),
+            CHAIN,
+            3,
+            Some("ens:0xalice"),
+            Some(RESOURCE),
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            after_state,
+            json!({"emitting_address":RESOLVER}),
+        )
+        .await?;
+    }
+    // Order the set before the clear so the retained entry is the cleared one.
+    sqlx::query(
+        "UPDATE normalized_events
+         SET transaction_index = 0,
+             transaction_hash = '0xcontenthashclear',
+             log_index = CASE
+                 WHEN after_state #>> '{value,bytes}' = '0x' THEN 11
+                 ELSE 10
+             END
+         WHERE chain_id = $1
+           AND block_number = 3
+           AND after_state ->> 'record_key' = 'contenthash'",
+    )
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let entries: Value =
+        sqlx::query_scalar("SELECT entries FROM record_inventory_current WHERE resource_id = $1")
+            .bind(Uuid::parse_str(RESOURCE)?)
+            .fetch_one(scratch.pool())
+            .await?;
+    let contenthash = entries
+        .as_array()
+        .expect("entries array")
+        .iter()
+        .find(|entry| entry["record_key"] == "contenthash")
+        .expect("missing contenthash");
+    assert_eq!(contenthash["status"], json!("not_found"));
+    assert!(
+        contenthash.get("value").is_none(),
+        "cleared contenthash retained a value"
+    );
+    // The empty-value normalization is scoped to contenthash and addr; a text
+    // record on the same resource must still publish its value.
+    let text = entries
+        .as_array()
+        .expect("entries array")
+        .iter()
+        .find(|entry| entry["record_key"] == "text:url")
+        .expect("missing text:url");
+    assert_eq!(text["status"], json!("success"));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn record_inventory_coin60_pair_does_not_override_a_later_same_transaction_write()
 -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_coin60_pair_scope").await?;
@@ -8007,6 +8597,23 @@ async fn orphaned_later_pointer_does_not_hide_node_attributed_records_incrementa
                         && entry["value"] == "survives-orphaned-pointer"
                 })
             })
+    );
+    // The node-keyed write has no logical name of its own; the pointer attribution that serves
+    // it as a record is published so registration-scoped history can list the same write.
+    let attributed_event_id: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM normalized_events
+         WHERE chain_id = $1 AND block_number = 1 AND event_kind = 'RecordChanged'
+           AND logical_name_id IS NULL AND after_state ->> 'record_key' = 'text:before-surface'",
+    )
+    .bind(CHAIN)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert!(
+        incremental_inventory["provenance"]["attributed_event_ids"]
+            .as_array()
+            .is_some_and(|ids| ids.contains(&json!(attributed_event_id))),
+        "provenance must cite the pointer-attributed node write: {}",
+        incremental_inventory["provenance"]
     );
 
     incremental.cleanup().await?;
@@ -8734,14 +9341,18 @@ async fn incremental_sibling_update_retains_unbound_migrated_name_v2_subnames() 
     normalize_projection_clocks(incremental.pool()).await?;
     normalize_projection_clocks(full.pool()).await?;
     let incremental_children: Value = sqlx::query_scalar(
-        "SELECT COALESCE(jsonb_agg(to_jsonb(child) ORDER BY child_logical_name_id), '[]'::jsonb)
+        // An untouched sibling row keeps its earlier target position; compare served content.
+        "SELECT COALESCE(jsonb_agg(to_jsonb(child) - 'chain_positions' - 'canonicality_summary'
+                                  ORDER BY child_logical_name_id), '[]'::jsonb)
          FROM children_current child
          WHERE parent_logical_name_id = 'ens:0xequivalence-parent'",
     )
     .fetch_one(incremental.pool())
     .await?;
     let rebuilt_children: Value = sqlx::query_scalar(
-        "SELECT COALESCE(jsonb_agg(to_jsonb(child) ORDER BY child_logical_name_id), '[]'::jsonb)
+        // An untouched sibling row keeps its earlier target position; compare served content.
+        "SELECT COALESCE(jsonb_agg(to_jsonb(child) - 'chain_positions' - 'canonicality_summary'
+                                  ORDER BY child_logical_name_id), '[]'::jsonb)
          FROM children_current child
          WHERE parent_logical_name_id = 'ens:0xequivalence-parent'",
     )
@@ -10997,6 +11608,20 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
         admitted_registry_proof.as_deref(),
         Some("positive_v2_child_registration")
     );
+    // The child's registry was created and announced by its parent's migration and is not
+    // in the manifest's declared registry list; the exact profile follows that proof.
+    let admitted_registry_support: (String, Option<String>) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        admitted_registry_support,
+        ("supported".into(), None),
+        "a positive child registration under a migration-created registry serves the exact profile"
+    );
     sqlx::query(
         "UPDATE normalized_events
          SET consumer_visibility = 'candidate',
@@ -11508,7 +12133,7 @@ async fn authority_classifier_covers_every_ens_binding_event_arm_combination() -
 #[tokio::test]
 async fn sepolia_live_v1_plus_new_v2_reservation_selects_v1() -> Result<()> {
     let scratch = ScratchDatabase::create("project_authority_new_reservation").await?;
-    let chain = "project-authority-new-reservation";
+    let chain = CHAIN;
     let source_family = "ens_v2_registry_l1";
     let (logical_name_id, _) =
         seed_raw_v2_reservation_fixture(scratch.pool(), chain, source_family).await?;
@@ -11539,7 +12164,7 @@ async fn sepolia_live_v1_plus_reserved_expiry_resync_selects_v1() -> Result<()> 
         let chain = if source_family == "ens_v2_root_l1" {
             "ethereum-sepolia".to_owned()
         } else {
-            format!("project-authority-reservation-resync-{fixture}")
+            CHAIN.to_owned()
         };
         let (logical_name_id, token_id) =
             seed_raw_v2_reservation_fixture(scratch.pool(), &chain, source_family).await?;
@@ -11603,7 +12228,7 @@ async fn sepolia_live_v1_plus_reserved_expiry_resync_selects_v1() -> Result<()> 
 #[tokio::test]
 async fn sepolia_live_v1_plus_released_v2_reservation_selects_v1() -> Result<()> {
     let scratch = ScratchDatabase::create("project_authority_reservation_release").await?;
-    let chain = "project-authority-reservation-release";
+    let chain = CHAIN;
     let source_family = "ens_v2_registry_l1";
     let (logical_name_id, token_id) =
         seed_raw_v2_reservation_fixture(scratch.pool(), chain, source_family).await?;
@@ -11983,7 +12608,7 @@ async fn reservation_release_event_vote_requires_a_preexisting_binding() -> Resu
 async fn reservation_era_selection_incremental_matches_fresh() -> Result<()> {
     let incremental = ScratchDatabase::create("project_reservation_incremental").await?;
     let fresh = ScratchDatabase::create("project_reservation_fresh").await?;
-    let chain = "project-reservation-convergence";
+    let chain = CHAIN;
     let (incremental_name, incremental_token) =
         seed_raw_v2_reservation_fixture(incremental.pool(), chain, "ens_v2_registry_l1").await?;
     let (fresh_name, fresh_token) =
@@ -12105,6 +12730,218 @@ async fn identity_only_name_has_no_projected_current_authority() -> Result<()> {
         )
     );
     scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn lapsed_wrapped_v1_lease_without_revived_custody_serves_a_released_tombstone() -> Result<()>
+{
+    let incremental =
+        ScratchDatabase::create("project_authority_lapsed_wrapped_v1_tombstone").await?;
+    let fresh =
+        ScratchDatabase::create("project_authority_lapsed_wrapped_v1_tombstone_fresh").await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        seed_project_fixture(pool).await?;
+        seed_wrapped_v1_lease(pool).await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+    let live: (String, Option<String>, Value) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason, declared_summary
+         FROM name_current WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(live.0, "supported");
+    assert_eq!(live.1, None);
+    assert_eq!(live.2["registration"]["status"], "active");
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        release_wrapped_v1_lease_without_revival(pool).await?;
+    }
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(CHAIN, 4),
+        }),
+        RunMode::Normal,
+        5,
+        5,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 5).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        normalize_projection_clocks(pool).await?;
+    }
+
+    let row: (
+        String,
+        Option<String>,
+        Option<Uuid>,
+        Option<Uuid>,
+        Value,
+        Value,
+    ) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason, surface_binding_id, resource_id,
+                declared_summary, provenance -> 'authority_selection'
+         FROM name_current WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(
+        (row.0.as_str(), row.1.as_deref()),
+        ("supported", None),
+        "a lapsed lease whose release is proven is not an unresolved authority selection"
+    );
+    assert_eq!(row.2, Some(Uuid::parse_str(SURFACE_BINDING)?));
+    assert_eq!(row.3, Some(Uuid::parse_str(RESOURCE)?));
+    let registration = &row.4["registration"];
+    assert_eq!(registration["status"], "released");
+    assert_eq!(registration["released_at"], 5);
+    assert!(registration["registrant"].is_null());
+    assert!(registration["authority_kind"].is_null());
+    assert!(registration["expiry"].is_null());
+    assert_eq!(row.4["control"], json!({"status": "unregistered"}));
+    assert!(row.4["resolver"]["address"].is_null());
+    assert!(row.4["resolver"]["chain_id"].is_null());
+    assert_eq!(row.5["authority_arm"], "ens_v1");
+    assert_eq!(row.5["lifecycle_state"], "unregistered");
+    assert_eq!(
+        row.5["resource_authority_context"]["released_tombstone"],
+        "ens_v1"
+    );
+
+    let incremental_row: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current
+         WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_one(incremental.pool())
+    .await?;
+    let fresh_row: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current
+         WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_one(fresh.pool())
+    .await?;
+    assert_eq!(incremental_row, fresh_row);
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+/// Wraps the fixture's registrar lease in place: the NameWrapper holds the registry node
+/// and the lease resource carries the wrapper authority kind.
+async fn seed_wrapped_v1_lease(pool: &PgPool) -> Result<()> {
+    for block in 4..=5 {
+        insert_lineage_block(pool, CHAIN, block).await?;
+    }
+    sqlx::query(
+        "UPDATE resources
+         SET provenance = jsonb_build_object(
+             'authority_kind', 'wrapper', 'source_family', 'ens_v1_wrapper_l1',
+             'manifest_version', 1
+         )
+         WHERE resource_id = $1",
+    )
+    .bind(Uuid::parse_str(RESOURCE)?)
+    .execute(pool)
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "AuthorityEpochChanged",
+        "ens_v1_wrapper_l1",
+        json!({
+            "source_event":"NameWrapped",
+            "authority_kind":"wrapper",
+            "authority_key":"wrapper:0xalice",
+            "owner":OWNER
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "PermissionScopeChanged",
+        "ens_v1_wrapper_l1",
+        json!({"fuses":0,"wrapper_state":"wrapped"}),
+        json!({}),
+    )
+    .await?;
+    Ok(())
+}
+
+/// The lease lapses past grace while wrapped: the interpreter releases the registration,
+/// unbinds the wrapper surface and closes the authority epoch without a successor, because
+/// the NameWrapper's registry custody is not a live authority once its own entry expired.
+async fn release_wrapped_v1_lease_without_revival(pool: &PgPool) -> Result<()> {
+    insert_event(
+        pool,
+        CHAIN,
+        5,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "RegistrationReleased",
+        "ens_v1_registrar_l1",
+        json!({
+            "source_event":"RegistrationReleased",
+            "released_at":5,
+            "labelhash":"0xalice-label",
+            "namehash":"0xalice",
+            "expiry":4
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        5,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "SurfaceUnbound",
+        "ens_v1_registrar_l1",
+        json!({
+            "source_event":"RegistrationReleased",
+            "authority_kind":"wrapper",
+            "authority_key":"wrapper:0xalice",
+            "active_to":5
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        5,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "AuthorityEpochChanged",
+        "ens_v1_registrar_l1",
+        json!({
+            "source_event":"RegistrationReleased",
+            "authority_kind":null,
+            "authority_key":null,
+            "owner":null
+        }),
+        json!({}),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(5)
+         WHERE surface_binding_id = $1",
+    )
+    .bind(Uuid::parse_str(SURFACE_BINDING)?)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -12254,7 +13091,7 @@ async fn bindingless_resolver_summary_ignores_selected_head_resource_shape() -> 
 #[tokio::test]
 async fn raw_ingest_fixture_flows_through_interpret_then_project() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_raw_flow").await?;
-    let chain = "project-raw-flow";
+    let chain = CHAIN;
     seed_raw_registration_fixture(scratch.pool(), chain).await?;
     InterpretEngine::new(scratch.pool().clone())
         .run_batch(InterpretRequest {
@@ -12537,11 +13374,197 @@ async fn checked_in_sepolia_v1_resolver_logs_flow_through_interpret_and_project(
     scratch.cleanup().await
 }
 
+/// The separately evidenced `sepolia-hackathon` deployment profile declares its own
+/// ENSv1 ReverseRegistrar under `ens_v1_reverse_l1`. A wallet's `setName` on it emits
+/// `ReverseClaimed`, then the registry's `NewOwner`/`NewResolver` for `<addr>.addr.reverse`, then
+/// the default PublicResolver's `NameChanged`
+/// (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83-L84 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129-L130 @ ens_v1@91c966f).
+/// Interpret must turn the claim into a `ReverseChanged` attributed to that registrar, and Project
+/// must publish the wallet's ENS/60 primary-name tuple keyed by it, pointing at the reverse node's
+/// resolver. Project joins the retained name-family `RecordChanged` to that reverse node
+/// and selected resolver, publishing the indexed claim value without a provider call.
+#[tokio::test]
+async fn checked_in_hackathon_reverse_claim_flows_through_interpret_and_project() -> Result<()> {
+    const CHAIN: &str = "ethereum-sepolia";
+    const REVERSE_REGISTRAR: &str = "0x060D5a54a8751eEc63B756E32Ef66f5eEf418e60";
+    const REGISTRY: &str = "0x82080Cc8ca78597BdE586A003D0a080c79a1814B";
+    const RESOLVER: &str = "0xaec512a71de820A57DC2aafc197a743D035b82df";
+    const WALLET: &str = "0x14da852647954d90b2e313d9cde524db31ce7cbc";
+    // Block of the observed `setName("bigname-verify.eth")` transaction on the hackathon deployment.
+    const CLAIM_BLOCK: i64 = 11_698_738;
+
+    let scratch = ScratchDatabase::create("production_project_hackathon_reverse_claim").await?;
+    let profile = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/sepolia-hackathon");
+    sync_schema_v2_repository(scratch.pool(), &load_repository(profile)?).await?;
+    insert_lineage_block(scratch.pool(), CHAIN, CLAIM_BLOCK).await?;
+
+    let wallet: Address = WALLET.parse()?;
+    let reverse_label = WALLET.trim_start_matches("0x").as_bytes();
+    let addr_reverse_node = raw_namehash(&[b"addr", b"reverse"]);
+    // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L15 @ ens_v1@91c966f)
+    assert_eq!(
+        format!("{addr_reverse_node:#x}"),
+        "0x91d1777781884d03a6757a803996e38de2a42967fb37eeaca72729271025a9e2"
+    );
+    let reverse_node = raw_namehash(&[reverse_label, b"addr", b"reverse"]);
+    let reverse_node_hex = format!("{reverse_node:#x}");
+
+    let logs = [
+        (
+            REVERSE_REGISTRAR,
+            ReverseClaimed {
+                addr: wallet,
+                node: reverse_node,
+            }
+            .encode_log_data(),
+        ),
+        (
+            REGISTRY,
+            NewOwner {
+                node: addr_reverse_node,
+                label: B256::from(keccak256(reverse_label)),
+                owner: wallet,
+            }
+            .encode_log_data(),
+        ),
+        (
+            REGISTRY,
+            NewResolver {
+                node: reverse_node,
+                resolver: RESOLVER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            RESOLVER,
+            NameChanged {
+                node: reverse_node,
+                name: "bigname-verify.eth".into(),
+            }
+            .encode_log_data(),
+        ),
+    ];
+    for (log_index, (emitter, log)) in logs.iter().enumerate() {
+        insert_raw_event_at(
+            scratch.pool(),
+            CHAIN,
+            CLAIM_BLOCK,
+            0,
+            i64::try_from(log_index)?,
+            emitter,
+            log.topics(),
+            log.data.as_ref(),
+        )
+        .await?;
+    }
+
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: CHAIN.into(),
+            from_block: CLAIM_BLOCK,
+            to_block: CLAIM_BLOCK,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+
+    let reverse: (String, String, Value) = sqlx::query_as(
+        "SELECT source_family, lower(raw_fact_ref ->> 'emitting_address'), after_state
+         FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'ReverseChanged'",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(reverse.0, "ens_v1_reverse_l1");
+    assert_eq!(reverse.1, REVERSE_REGISTRAR.to_ascii_lowercase());
+    assert_eq!(reverse.2["source_event"], "ReverseClaimed", "{}", reverse.2);
+    assert_eq!(reverse.2["address"], WALLET);
+    assert_eq!(reverse.2["coin_type"], "60");
+    assert_eq!(reverse.2["namespace"], "ens");
+    assert_eq!(
+        reverse.2["reverse_name"],
+        format!("{}.addr.reverse", WALLET.trim_start_matches("0x"))
+    );
+    assert_eq!(reverse.2["reverse_node"], reverse_node_hex);
+    assert_eq!(
+        reverse.2["claim_provenance"]["source_family"],
+        "ens_v1_reverse_l1"
+    );
+    assert_eq!(
+        reverse.2["claim_provenance"]["contract_role"],
+        "reverse_registrar"
+    );
+    assert_eq!(
+        reverse.2["claim_provenance"]["emitting_address"]
+            .as_str()
+            .map(str::to_ascii_lowercase),
+        Some(REVERSE_REGISTRAR.to_ascii_lowercase())
+    );
+
+    // The PublicResolver's NameChanged for the reverse node is name-family record history for the
+    // hackathon `ens_v1_resolver_l1` declaration, not an attributed primary-name claim.
+    let name_record: (String, String, bool) = sqlx::query_as(
+        "SELECT source_family, lower(raw_fact_ref ->> 'emitting_address'),
+                after_state ? 'primary_claim_source'
+         FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RecordChanged'
+           AND after_state ->> 'record_family' = 'name'",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        name_record,
+        (
+            "ens_v1_resolver_l1".into(),
+            RESOLVER.to_ascii_lowercase(),
+            false
+        )
+    );
+
+    run_project(
+        scratch.pool(),
+        CHAIN,
+        None,
+        RunMode::Normal,
+        CLAIM_BLOCK,
+        CLAIM_BLOCK,
+    )
+    .await?;
+
+    let primary: (String, Option<String>, Value) = sqlx::query_as(
+        "SELECT claim_status, raw_claim_name, claim_provenance
+         FROM primary_names_current
+         WHERE address = $1 AND coin_type = '60' AND namespace = 'ens'",
+    )
+    .bind(WALLET)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        primary.2["source_family"], "ens_v1_reverse_l1",
+        "{}",
+        primary.2
+    );
+    assert_eq!(primary.2["contract_role"], "reverse_registrar");
+    assert_eq!(primary.2["chain_id"], CHAIN);
+    assert_eq!(primary.2["reverse_node"], reverse_node_hex);
+    assert_eq!(primary.2["resolver_address"], RESOLVER.to_ascii_lowercase());
+    assert_eq!(primary.2["target_block_number"], CLAIM_BLOCK);
+    assert!(primary.2["claim_event_id"].is_number(), "{}", primary.2);
+    assert_eq!(
+        (primary.0.as_str(), primary.1.as_deref()),
+        ("success", Some("bigname-verify.eth"))
+    );
+    scratch.cleanup().await
+}
+
 #[tokio::test]
 async fn declared_v1_shared_resolver_reclassifies_both_v2_pointer_origins_and_converges()
 -> Result<()> {
-    const CHAIN: &str = "project-declared-v1-shared";
-
     let incremental = ScratchDatabase::create("project_declared_v1_shared_incremental").await?;
     let fresh = ScratchDatabase::create("project_declared_v1_shared_fresh").await?;
     let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
@@ -12685,7 +13708,6 @@ async fn declared_v1_node_only_unrelated_record_preserves_inventory_clock() -> R
 
 #[tokio::test]
 async fn declared_v1_node_only_update_rebuilds_retained_pointer_resource() -> Result<()> {
-    const CHAIN: &str = "project-declared-v1-retained-pointer-resource";
     const REPLACEMENT_RESOURCE: &str = "00000000-0000-0000-0000-000000000d03";
     const ALIAS_BINDING: &str = "00000000-0000-0000-0000-000000000d13";
     const REPLACEMENT_BINDING: &str = "00000000-0000-0000-0000-000000000d14";
@@ -12893,8 +13915,6 @@ async fn declared_v1_node_only_update_rebuilds_retained_pointer_resource() -> Re
 
 #[tokio::test]
 async fn foreign_namespace_v2_pointer_matches_fresh_declared_v1_attribution() -> Result<()> {
-    const CHAIN: &str = "project-declared-v1-foreign-pointer";
-
     let incremental = ScratchDatabase::create("project_declared_v1_foreign_incremental").await?;
     let fresh = ScratchDatabase::create("project_declared_v1_foreign_fresh").await?;
     let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
@@ -12964,8 +13984,6 @@ async fn foreign_namespace_v2_pointer_matches_fresh_declared_v1_attribution() ->
 
 #[tokio::test]
 async fn cross_namespace_declared_resolver_collapse_is_deterministic_and_converges() -> Result<()> {
-    const CHAIN: &str = "project-declared-v1-cross-namespace";
-
     let incremental = ScratchDatabase::create("project_declared_v1_cross_ns_incremental").await?;
     let fresh = ScratchDatabase::create("project_declared_v1_cross_ns_fresh").await?;
     let ens_manifests =
@@ -13082,8 +14100,6 @@ async fn cross_namespace_declared_resolver_collapse_is_deterministic_and_converg
 
 #[tokio::test]
 async fn declaration_winner_requires_same_namespace_admission_after_close() -> Result<()> {
-    const CHAIN: &str = "project-declared-v1-same-namespace-close";
-
     let incremental = ScratchDatabase::create("project_declared_v1_same_ns_incremental").await?;
     let fresh = ScratchDatabase::create("project_declared_v1_same_ns_fresh").await?;
     let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
@@ -13211,13 +14227,14 @@ async fn same_namespace_declared_resolver_uses_later_equal_start_role() -> Resul
 }
 
 async fn assert_same_namespace_declared_resolver_role(
-    chain: &str,
+    fixture: &str,
     first_role: (&str, i64),
     second_role: (&str, i64),
     expected_role: &str,
 ) -> Result<()> {
-    let first = ScratchDatabase::create(&format!("{chain}_first")).await?;
-    let second = ScratchDatabase::create(&format!("{chain}_second")).await?;
+    let first = ScratchDatabase::create(&format!("{fixture}_first")).await?;
+    let second = ScratchDatabase::create(&format!("{fixture}_second")).await?;
+    let chain = CHAIN;
     let manifests = seed_declared_v1_shared_pair(first.pool(), second.pool(), chain).await?;
 
     for (pool, manifest_id) in [(first.pool(), manifests.0), (second.pool(), manifests.1)] {
@@ -13331,8 +14348,6 @@ async fn declared_resolver_last_discovery_close_matches_fresh_rebuild() -> Resul
 
 #[tokio::test]
 async fn root_origin_declared_resolver_noop_preserves_clocks_and_converges() -> Result<()> {
-    const CHAIN: &str = "project-declared-v1-root-origin";
-
     let incremental = ScratchDatabase::create("project_declared_v1_root_incremental").await?;
     let fresh = ScratchDatabase::create("project_declared_v1_root_fresh").await?;
     let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
@@ -13898,7 +14913,7 @@ async fn resolver_permission_summary(pool: &PgPool, chain: &str) -> Result<Value
 #[tokio::test]
 async fn interpret_data_repair_redo_cascades_to_project_without_an_operator_step() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_interpret_redo_cascade").await?;
-    let chain = "project-interpret-redo-cascade";
+    let chain = CHAIN;
     seed_raw_registration_fixture(scratch.pool(), chain).await?;
     InterpretEngine::new(scratch.pool().clone())
         .run_batch(InterpretRequest {
@@ -13956,7 +14971,7 @@ async fn interpret_data_repair_redo_cascades_to_project_without_an_operator_step
 #[tokio::test]
 async fn reorg_below_interpret_cursor_rederives_winning_fork_through_project() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_reorg_cascade").await?;
-    let chain = "project-reorg-cascade";
+    let chain = CHAIN;
     seed_raw_registration_fixture(scratch.pool(), chain).await?;
     let alice_node = raw_namehash(&[b"alice", b"eth"]);
     let losing_record = TextChanged {
@@ -17147,7 +18162,7 @@ async fn surviving_reservation_drives_summary_after_other_resource_expires() -> 
     const RESERVED_LINEAGE: &str = "00000000-0000-0000-0000-0000000008a4";
     const BINDING: &str = "00000000-0000-0000-0000-0000000008a3";
     let scratch = ScratchDatabase::create("project_registration_reservation_lifecycle").await?;
-    let chain = "project-registration-reservation-lifecycle";
+    let chain = CHAIN;
     let logical_name_id = "ens:0x8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a";
     seed_lineage(scratch.pool(), chain, 3).await?;
     sqlx::query(
@@ -17362,7 +18377,7 @@ async fn state_derived_expiry_for_another_resource_does_not_delete_the_current_b
     const EXPIRED_RESOURCE: &str = "00000000-0000-0000-0000-0000000008b2";
     const CURRENT_BINDING: &str = "00000000-0000-0000-0000-0000000008b3";
     let scratch = ScratchDatabase::create("project_expiry_other_resource_guard").await?;
-    let chain = "project-expiry-other-resource-guard";
+    let chain = CHAIN;
     let logical_name_id = "ens:0x8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b";
     seed_lineage(scratch.pool(), chain, 2).await?;
     sqlx::query(
@@ -17509,12 +18524,14 @@ async fn expiry_release_redo_restores_deleted_name_like_fresh_rebuild() -> Resul
         seed_expiry_release_redo_fixture(pool).await?;
     }
     publish_and_retract_expiry_fixture(incremental.pool()).await?;
-    assert_eq!(expiry_fixture_counts(incremental.pool()).await?.0, 0);
+    // The path-expired name keeps a released row; the redo below must restore the reopened
+    // (active) row identically to a fresh rebuild.
+    assert_eq!(expiry_fixture_counts(incremental.pool()).await?.0, 1);
     for pool in [incremental.pool(), fresh.pool()] {
         seed_later_expiry_fixture_event(pool).await?;
     }
     advance_expiry_fixture_beyond_redo(incremental.pool()).await?;
-    assert_eq!(expiry_fixture_counts(incremental.pool()).await?.0, 0);
+    assert_eq!(expiry_fixture_counts(incremental.pool()).await?.0, 1);
     for pool in [incremental.pool(), fresh.pool()] {
         orphan_expiry_release_and_reopen_binding(pool).await?;
     }
@@ -17656,12 +18673,15 @@ async fn expiry_release_redo_uses_displaced_branch_timestamps_for_name_scope() -
         3,
     )
     .await?;
-    let expired_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
-            .bind(NAME)
-            .fetch_one(incremental.pool())
-            .await?;
-    assert_eq!(expired_count, 0);
+    let expired: Option<String> = sqlx::query_scalar(
+        "SELECT declared_summary #>> '{registration,status}' FROM name_current
+         WHERE logical_name_id = $1",
+    )
+    .bind(NAME)
+    .fetch_optional(incremental.pool())
+    .await?
+    .flatten();
+    assert_eq!(expired.as_deref(), Some("released"));
 
     for pool in [incremental.pool(), fresh.pool()] {
         sqlx::query(
@@ -18599,18 +19619,18 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
         3,
     )
     .await?;
-    let expired_child_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
-            .bind(CHILD)
-            .fetch_one(incremental.pool())
-            .await?;
-    assert_eq!(expired_child_count, 0);
-    let expired_grandchild_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
-            .bind(GRANDCHILD)
-            .fetch_one(incremental.pool())
-            .await?;
-    assert_eq!(expired_grandchild_count, 0);
+    // Descendants released by the ancestor's path expiry keep released rows.
+    for descendant in [CHILD, GRANDCHILD] {
+        let expired_status: Option<String> = sqlx::query_scalar(
+            "SELECT declared_summary #>> '{registration,status}' FROM name_current
+             WHERE logical_name_id = $1",
+        )
+        .bind(descendant)
+        .fetch_optional(incremental.pool())
+        .await?
+        .flatten();
+        assert_eq!(expired_status.as_deref(), Some("released"));
+    }
 
     for pool in [incremental.pool(), fresh.pool()] {
         sqlx::query(
@@ -19084,12 +20104,19 @@ async fn expiry_release_redo_restores_ownerless_reservation_like_fresh_rebuild()
         2,
     )
     .await?;
-    let expired_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
-            .bind(NAME)
-            .fetch_one(incremental.pool())
-            .await?;
-    assert_eq!(expired_count, 0);
+    let expired: Option<String> = sqlx::query_scalar(
+        "SELECT declared_summary #>> '{registration,status}' FROM name_current
+         WHERE logical_name_id = $1",
+    )
+    .bind(NAME)
+    .fetch_optional(incremental.pool())
+    .await?
+    .flatten();
+    assert_eq!(
+        expired.as_deref(),
+        Some("released"),
+        "a path-expired name keeps a released row instead of disappearing"
+    );
     run_project(
         incremental.pool(),
         CHAIN,
@@ -22036,11 +23063,12 @@ enum DeclaredV1NodeOnlyDelta {
 }
 
 async fn assert_declared_v1_node_only_delta(
-    chain: &str,
+    fixture: &str,
     delta: DeclaredV1NodeOnlyDelta,
 ) -> Result<()> {
-    let incremental = ScratchDatabase::create(&format!("{chain}-incremental")).await?;
-    let fresh = ScratchDatabase::create(&format!("{chain}-fresh")).await?;
+    let incremental = ScratchDatabase::create(&format!("{fixture}-incremental")).await?;
+    let fresh = ScratchDatabase::create(&format!("{fixture}-fresh")).await?;
+    let chain = CHAIN;
     let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), chain).await?;
     let alice_node = format!("{:#x}", raw_namehash(&[b"alice", b"eth"]));
 

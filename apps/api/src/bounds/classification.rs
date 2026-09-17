@@ -8,15 +8,15 @@ pub(super) fn is_verified_execution_request(method: &Method, uri: &Uri) -> bool 
     }
     let segments = uri.path().trim_matches('/').split('/').collect::<Vec<_>>();
     match segments.as_slice() {
-        ["v2", "addresses", _, "primary-name"] => {
+        ["v1", "addresses", _, "primary-name"] => {
             query_absent_blank_or_matches(uri, "source", &["verified"])
         }
-        ["v2", "names", _] => query_matches(uri, "source", &["verified"]),
-        ["v2", "names", _, "records"] => {
+        ["v1", "names", _] => query_matches(uri, "source", &["verified"]),
+        ["v1", "names", _, "records"] => {
             query_matches(uri, "source", &["verified"])
                 || (query_matches(uri, "source", &["auto"]) && query_has_csv_item(uri, "keys"))
         }
-        ["v2", "diagnostics", "names", _, "records"] => true,
+        ["v1", "diagnostics", "names", _, "records"] => true,
         _ => false,
     }
 }

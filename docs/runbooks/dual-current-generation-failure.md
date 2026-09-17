@@ -67,7 +67,7 @@ long-running supervisor. The audit signature is the same in all three cases.
    Exception: after Project returns the invariant error, the runner separately
    records the failed phase. If that write fails, the terminal error appends
    `; additionally failed to record phase failure: [database error]`; the phase
-   row can retain its preceding status and `/v2/status` need not yet show the
+   row can retain its preceding status and `/v1/status` need not yet show the
    direct `stale` mapping below. Capture the terminal error and any audit row,
    file the incident, and hold the chain. Do not edit the phase row or begin a
    redo while its durable state is unknown
@@ -98,7 +98,7 @@ long-running supervisor. The audit signature is the same in all three cases.
    ([`apps/phase-runner/src/project_phase.rs:143-163`](../../apps/phase-runner/src/project_phase.rs#L143-L163),
    [`apps/phase-runner/src/error.rs:60-69`](../../apps/phase-runner/src/error.rs#L60-L69)).
 
-4. `GET /v2/status` reports the affected chain (`data.chains["1"]` for Mainnet
+4. `GET /v1/status` reports the affected chain (`data.chains["1"]` for Mainnet
    or `data.chains["11155111"]` for Sepolia) as
    `status: "stale"` and keeps `indexed_block` at the most recent successful
    Project publication. A failed Project phase maps directly to `stale`
@@ -196,7 +196,7 @@ and API signatures in items 2–4. Determine item 1 from how the redo was invoke
    same evidence-preserving file-and-hold exception; the phase row alone does
    not authorize recovery.
 4. With a fresh phase-runner heartbeat and no other stale condition,
-   `GET /v2/status` reports the chain as `degraded`, because an active Project
+   `GET /v1/status` reports the chain as `degraded`, because an active Project
    redo is an explicit degraded condition. After the one-shot runner exits and
    its heartbeat exceeds the configured maximum age, the chain becomes `stale`;
    another stronger stale condition can also make it stale sooner. This API
@@ -881,7 +881,7 @@ This is why recovery re-derives evidence instead of editing the open interval.
    ([`apps/phase-runner/src/redo_completion.rs:9-19`](../../apps/phase-runner/src/redo_completion.rs#L9-L19),
    [`apps/phase-runner/src/redo_state.rs:498-520`](../../apps/phase-runner/src/redo_state.rs#L498-L520)).
 7. After restart, require Interpret and Project to report `completed`, confirm
-   Project advances past the blocked target, and confirm `/v2/status` is no
+   Project advances past the blocked target, and confirm `/v1/status` is no
    longer stale for this cause. Restore traffic only after the production health
    gates pass.
 
@@ -1042,7 +1042,7 @@ Keep the incident and linked bigname issue updated with:
 - the classification decision and the owners who approved it;
 - the exact redo range or re-derivation-boundary record, image/build SHA, and
   interpreter content hash; and
-- the post-recovery phase rows, new audit query result, and `/v2/status` result.
+- the post-recovery phase rows, new audit query result, and `/v1/status` result.
 
 Close the incident only after the repaired target publishes, the affected chain
 advances beyond it, no dual-current exact-name or child failure with new

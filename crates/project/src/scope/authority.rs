@@ -68,9 +68,13 @@ pub(super) async fn include_topology_dependents(
     target_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO project_scope_names
+        "WITH promoted AS (
          SELECT child.logical_name_id
-         FROM project_scope_children child
+         FROM (
+             SELECT logical_name_id FROM project_scope_children
+             UNION
+             SELECT logical_name_id FROM project_scope_ancestors
+         ) child
          WHERE EXISTS (
              SELECT 1
              FROM normalized_events registration
@@ -96,6 +100,15 @@ pub(super) async fn include_topology_dependents(
                AND current.provenance #>> '{authority_selection,proof_kind}' =
                    'positive_v2_child_registration'
          )
+         ), promoted_names AS (
+             INSERT INTO project_scope_names
+             SELECT logical_name_id FROM promoted
+             ON CONFLICT DO NOTHING
+         )
+         -- A promoted name's authority feeds its children's arm selection, so its edge rows
+         -- rebuild with it.
+         INSERT INTO project_scope_children
+         SELECT logical_name_id FROM promoted
          ON CONFLICT DO NOTHING",
     )
     .bind(chain_id)

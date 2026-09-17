@@ -48,6 +48,7 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
                 ('relation', 'bigname_phase.migration_event_associations'),
                 ('relation', 'bigname_phase.name_current'),
                 ('relation', 'bigname_phase.address_names_current'),
+                ('relation', 'bigname_phase.address_records_current'),
                 ('relation', 'bigname_phase.children_current'),
                 ('relation', 'bigname_phase.permissions_current'),
                 ('relation', 'bigname_phase.permissions_current_resource_summary'),
@@ -62,6 +63,7 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
                 ('relation', 'bigname_phase.service_heartbeats'),
                 ('relation', 'bigname_phase.manifest_versions'),
                 ('relation', 'bigname_phase.manifest_contract_instances'),
+                ('relation', 'bigname_phase.contract_instance_addresses'),
                 ('relation', 'bigname_phase.resolution_divergences'),
                 (
                     'function',

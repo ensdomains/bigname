@@ -26,10 +26,12 @@ async fn healthz_reports_phase_runner_health_from_the_phase_schema() -> Result<(
 }
 
 #[tokio::test]
-async fn healthz_identity_works_with_read_only_api_role_privileges() -> Result<()> {
+async fn health_and_registry_routes_work_with_documented_api_role_privileges() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_expected_phase_chains(&database, &["1"]).await?;
     seed_phase_runner_heartbeat(&database, "1", "now()").await?;
+    seed_registry_fixture(&database).await?;
+    seed_declared_registry(&database).await?;
     let role = format!(
         "bigname_api_reader_{}_{}",
         std::process::id(),
@@ -41,11 +43,18 @@ async fn healthz_identity_works_with_read_only_api_role_privileges() -> Result<(
     sqlx::query(&format!("GRANT USAGE ON SCHEMA bigname_phase TO {role}"))
         .execute(&database.lookup_pool)
         .await?;
-    sqlx::query(&format!(
-        "GRANT SELECT ON ALL TABLES IN SCHEMA bigname_phase TO {role}"
-    ))
-    .execute(&database.lookup_pool)
-    .await?;
+    // Exercise the published allowlist itself: schema-wide grants hide missing dependencies.
+    let deployment = include_str!("../../../docs/deployment.md");
+    let grants = deployment
+        .split_once("GRANT SELECT ON TABLE\n")
+        .context("deployment docs must contain the API SELECT grant")?
+        .1
+        .split_once("TO bigname_api;")
+        .context("deployment docs must terminate the API SELECT grant")?
+        .0;
+    sqlx::query(&format!("GRANT SELECT ON TABLE {grants} TO {role}"))
+        .execute(&database.lookup_pool)
+        .await?;
 
     let config = database.database_config(2)?;
     let options = PgConnectOptions::from_str(
@@ -72,7 +81,9 @@ async fn healthz_identity_works_with_read_only_api_role_privileges() -> Result<(
         bigname_lookup::ChainRpcUrls::default(),
     )
     .with_public_namespaces_for_test(["ens", "basenames"]);
-    let response = app_router(state)
+    let app = app_router(state);
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/healthz")
@@ -82,6 +93,17 @@ async fn healthz_identity_works_with_read_only_api_role_privileges() -> Result<(
         .await?;
     let status = response.status();
     let payload: Value = read_json(response).await?;
+    let mut registry_results = Vec::new();
+    for address in [ROOT_REGISTRY, DECLARED_REGISTRY] {
+        for suffix in ["", "/labels"] {
+            let uri = format!("/v1/registries/1/{address}{suffix}");
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(&uri).body(Body::empty())?)
+                .await?;
+            registry_results.push((uri, response.status(), read_json::<Value>(response).await?));
+        }
+    }
     restricted_pool.close().await;
     sqlx::query(&format!("DROP OWNED BY {role}"))
         .execute(&database.lookup_pool)
@@ -91,6 +113,9 @@ async fn healthz_identity_works_with_read_only_api_role_privileges() -> Result<(
         .await?;
 
     assert_eq!(status, StatusCode::OK);
+    for (uri, status, payload) in registry_results {
+        assert_eq!(status, StatusCode::OK, "{uri}: {payload}");
+    }
     assert!(
         payload["database"]["identity"]
             .as_str()
@@ -276,7 +301,7 @@ async fn v2_namespace_ens_uses_the_checked_in_sepolia_capability_aggregate() -> 
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/namespaces/ens")
+                .uri("/v1/namespaces/ens")
                 .body(Body::empty())
                 .expect("namespace request must build"),
         )
@@ -298,6 +323,51 @@ async fn v2_namespace_ens_uses_the_checked_in_sepolia_capability_aggregate() -> 
         payload["data"]["networks"],
         json!([{ "network": "ethereum-sepolia", "chain_id": 11155111 }])
     );
+    // The checked-in Sepolia profile declares the ENS execution entrypoint and the ENSv1
+    // registry, so both verified capabilities turn on the moment a Sepolia provider is
+    // configured -- and say exactly what is missing until then.
+    for capability in ["verified_records", "verified_primary_name"] {
+        assert_eq!(
+            payload["data"]["capabilities"][capability],
+            json!({
+                "completeness": "unsupported",
+                "unsupported_reason": "execution_provider_not_configured",
+                "chains": {
+                    "11155111": {
+                        "completeness": "unsupported",
+                        "unsupported_reason": "execution_provider_not_configured"
+                    }
+                }
+            }),
+            "{capability}: {payload}"
+        );
+    }
+
+    let configured = database
+        .app_state_with_lookup_chain_rpc_urls(bigname_lookup::ChainRpcUrls::from_entries(&[
+            "ethereum-sepolia=http://rpc.test".to_owned(),
+        ])?)
+        .await?;
+    let response = app_router(configured)
+        .oneshot(
+            Request::builder()
+                .uri("/v1/namespaces/ens")
+                .body(Body::empty())
+                .expect("namespace request must build"),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    for capability in ["verified_records", "verified_primary_name"] {
+        assert_eq!(
+            payload["data"]["capabilities"][capability],
+            json!({
+                "completeness": "full",
+                "chains": { "11155111": { "completeness": "full" } }
+            }),
+            "{capability}: {payload}"
+        );
+    }
 
     database.cleanup().await
 }
@@ -311,6 +381,7 @@ include!("tests/graphql_oracle.rs");
 include!("tests/graphql_oracle_input_scopes.rs");
 include!("tests/graphql_oracle_enum_scopes.rs");
 include!("tests/v2_name_record.rs");
+include!("tests/record_id_resolver.rs");
 include!("tests/v2_diagnostics_names.rs");
 include!("tests/v2_history.rs");
 include!("tests/v2_history_redo.rs");
@@ -318,13 +389,21 @@ include!("tests/v2_history_paging.rs");
 include!("tests/v2_diag_events.rs");
 include!("tests/v2_address_names.rs");
 include!("tests/v2_address_names_budget.rs");
+include!("tests/v2_address_resolves_to.rs");
 include!("tests/v2_permissions.rs");
 include!("tests/v2_resolvers.rs");
+include!("tests/v2_resolver_collections.rs");
+include!("tests/v2_registries.rs");
+include!("tests/v2_registries_manifest_history.rs");
 include!("tests/v2_interpret_redo_loaders.rs");
 include!("tests/v2_primary_name.rs");
 include!("tests/v2_lookup.rs");
 include!("tests/v2_search.rs");
+include!("tests/v2_names.rs");
 include!("tests/v2_query_params.rs");
 include!("tests/v2_status.rs");
+include!("tests/v2_namespaces_hackathon.rs");
 include!("tests/v2_envelope_conformance.rs");
 include!("tests/api_storage_quick_wins.rs");
+
+include!("tests/v2_publication_bindings.rs");

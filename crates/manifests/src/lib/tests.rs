@@ -793,7 +793,11 @@ fn rejects_manifest_version_tag_mismatch() -> Result<()> {
 
 #[test]
 fn checked_in_manifest_trees_pass_repository_validation() -> Result<()> {
-    for profile_root in ["manifests/mainnet", "manifests/sepolia"] {
+    for profile_root in [
+        "manifests/mainnet",
+        "manifests/sepolia",
+        "manifests/sepolia-hackathon",
+    ] {
         let repository = load_repository(checked_in_manifest_root(profile_root))?;
         assert_eq!(
             repository.summary().status,
@@ -801,6 +805,321 @@ fn checked_in_manifest_trees_pass_repository_validation() -> Result<()> {
             "checked-in {profile_root} manifest tree must load"
         );
     }
+    Ok(())
+}
+
+/// The separately evidenced hackathon deployment profile declares its own ENS execution
+/// entrypoint: the hackathon deployment's Universal Resolver proxy, not the canonical Sepolia
+/// proxy, in the shape the lookup engine admits (`ens_execution` on `ethereum-sepolia`, role
+/// `universal_resolver`, shadow rollout with a shadow `verified_resolution` flag) and with a
+/// declared start so the profile's intake floor binding still sees a start on every contract.
+#[test]
+fn checked_in_hackathon_profile_declares_its_own_ens_execution_entrypoint() -> Result<()> {
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia-hackathon"))?;
+    let execution = repository
+        .manifests()
+        .iter()
+        .filter(|loaded| loaded.manifest.source_family == "ens_execution")
+        .collect::<Vec<_>>();
+    assert_eq!(execution.len(), 1, "one hackathon ens_execution manifest");
+    let manifest = &execution[0].manifest;
+    assert_eq!(
+        execution[0].relative_path,
+        std::path::Path::new("ethereum/ens/ens_execution/v1.toml")
+    );
+    assert_eq!(manifest.namespace, "ens");
+    assert_eq!(manifest.chain, "ethereum-sepolia");
+    assert_eq!(manifest.deployment_epoch, "ens_v2_sepolia_hackathon");
+    assert_eq!(manifest.rollout_status, RolloutStatus::Shadow);
+    assert!(matches!(
+        manifest.capability_flags.get("verified_resolution"),
+        Some(flag) if flag.status == CapabilitySupportStatus::Shadow
+    ));
+    assert!(manifest.roots.is_empty());
+    assert!(manifest.discovery_rules.is_empty());
+    assert!(manifest.abi.events.is_empty());
+    assert_eq!(manifest.contracts.len(), 1);
+    let entrypoint = &manifest.contracts[0];
+    assert_eq!(entrypoint.role, "universal_resolver");
+    assert_eq!(
+        entrypoint.address.to_ascii_lowercase(),
+        "0xd26f2040d083af1cd2962ba303f4bea0c4faf142"
+    );
+    assert_ne!(
+        entrypoint.address.to_ascii_lowercase(),
+        "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+        "the canonical Sepolia proxy does not embed the hackathon root registry"
+    );
+    assert_eq!(entrypoint.proxy_kind, "none");
+    assert_eq!(entrypoint.implementation, None);
+    assert_eq!(entrypoint.start_block, Some(11_626_766));
+    assert_eq!(
+        manifest.verified_authority_arms.as_deref(),
+        Some(&["ens_v1".to_owned(), "ens_v2".to_owned()][..]),
+        "the hackathon UniversalResolverV2 admits both ENS arms"
+    );
+    assert_eq!(manifest.verified_authority_arms(), ["ens_v1", "ens_v2"]);
+
+    let earliest_start = repository
+        .manifests()
+        .iter()
+        .flat_map(|loaded| {
+            let manifest = &loaded.manifest;
+            manifest.roots.iter().map(|root| root.start_block).chain(
+                manifest
+                    .contracts
+                    .iter()
+                    .map(|contract| contract.start_block),
+            )
+        })
+        .map(|start| start.expect("every hackathon declaration carries a start block"))
+        .min();
+    assert_eq!(earliest_start, Some(11_626_442));
+    Ok(())
+}
+
+/// The hackathon deployment's own ENSv1 ReverseRegistrar is declared under `ens_v1_reverse_l1`
+/// in the same shape as the Mainnet family: one direct `reverse_registrar` contract, one
+/// `ReverseClaimed` event mapped to `ReverseChanged`, no roots, discovery rules, or capability
+/// flags. It is what keys ENS/60 primary-name tuples for wallets that `setName` on this
+/// deployment. Its start is the contract's creation block, later than the registry it writes
+/// through (the default resolver is configured after construction), so the profile's intake
+/// floor is unchanged.
+#[test]
+fn checked_in_hackathon_profile_declares_the_reverse_registrar() -> Result<()> {
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia-hackathon"))?;
+    let reverse = repository
+        .manifests()
+        .iter()
+        .filter(|loaded| loaded.manifest.source_family == "ens_v1_reverse_l1")
+        .collect::<Vec<_>>();
+    assert_eq!(reverse.len(), 1, "one hackathon ens_v1_reverse_l1 manifest");
+    let manifest = &reverse[0].manifest;
+    assert_eq!(
+        reverse[0].relative_path,
+        std::path::Path::new("ethereum/ens/ens_v1_reverse_l1/v1.toml")
+    );
+    assert_eq!(manifest.namespace, "ens");
+    assert_eq!(manifest.chain, "ethereum-sepolia");
+    assert_eq!(manifest.deployment_epoch, "ens_v1_sepolia_hackathon");
+    assert_eq!(manifest.rollout_status, RolloutStatus::Active);
+    assert!(manifest.capability_flags.is_empty());
+    assert!(manifest.roots.is_empty());
+    assert!(manifest.discovery_rules.is_empty());
+    assert!(manifest.resolver_implementations.is_empty());
+    assert!(manifest.correlation_addresses.is_empty());
+
+    assert_eq!(manifest.contracts.len(), 1);
+    let registrar = &manifest.contracts[0];
+    assert_eq!(registrar.role, "reverse_registrar");
+    assert_eq!(
+        normalize_address(&registrar.address),
+        "0x060d5a54a8751eec63b756e32ef66f5eef418e60"
+    );
+    assert_eq!(registrar.proxy_kind, "none");
+    assert_eq!(registrar.implementation, None);
+    assert_eq!(registrar.start_block, Some(11_626_578));
+
+    let event_surface = |manifest: &SourceManifest| {
+        manifest
+            .abi
+            .events
+            .iter()
+            .map(|event| {
+                (
+                    event.name.clone(),
+                    event.fragment.clone(),
+                    event.emitter_roles.clone(),
+                    event.normalized_events.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        event_surface(manifest),
+        vec![(
+            "ReverseClaimed".to_owned(),
+            "event ReverseClaimed(address indexed addr, bytes32 indexed node)".to_owned(),
+            vec!["reverse_registrar".to_owned()],
+            vec!["ReverseChanged".to_owned()],
+        )]
+    );
+    let mainnet = load_repository(checked_in_manifest_root("manifests/mainnet"))?;
+    let mainnet_reverse = mainnet
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "ens_v1_reverse_l1")
+        .expect("mainnet ens_v1_reverse_l1 manifest");
+    assert_eq!(
+        event_surface(manifest),
+        event_surface(&mainnet_reverse.manifest),
+        "the hackathon reverse family declares the Mainnet event surface"
+    );
+    assert_eq!(
+        mainnet_reverse.manifest.contracts[0].role, registrar.role,
+        "the hackathon reverse family declares the Mainnet contract role"
+    );
+
+    // The registrar's constructor takes the hackathon registry, so the registry is created first;
+    // the default resolver is set after construction and may be created later. The profile's
+    // earliest declared start therefore stays the legacy registry's.
+    let start_of = |family: &str, role: &str| {
+        repository
+            .manifests()
+            .iter()
+            .filter(|loaded| loaded.manifest.source_family == family)
+            .flat_map(|loaded| loaded.manifest.contracts.iter())
+            .find(|contract| contract.role == role)
+            .and_then(|contract| contract.start_block)
+            .unwrap_or_else(|| panic!("hackathon {family} {role} start block"))
+    };
+    assert!(start_of("ens_v1_registry_l1", "registry") < 11_626_578);
+    let earliest_start = repository
+        .manifests()
+        .iter()
+        .flat_map(|loaded| {
+            let manifest = &loaded.manifest;
+            manifest.roots.iter().map(|root| root.start_block).chain(
+                manifest
+                    .contracts
+                    .iter()
+                    .map(|contract| contract.start_block),
+            )
+        })
+        .map(|start| start.expect("every hackathon declaration carries a start block"))
+        .min();
+    assert_eq!(earliest_start, Some(11_626_442));
+    Ok(())
+}
+
+#[test]
+fn checked_in_l1_execution_manifests_admit_only_the_ensv1_arm_by_default() -> Result<()> {
+    for profile in ["manifests/mainnet", "manifests/sepolia"] {
+        let repository = load_repository(checked_in_manifest_root(profile))?;
+        let execution = repository
+            .manifests()
+            .iter()
+            .filter(|loaded| loaded.manifest.source_family == "ens_execution")
+            .collect::<Vec<_>>();
+        assert_eq!(execution.len(), 1, "{profile}: one ens_execution manifest");
+        let manifest = &execution[0].manifest;
+        assert_eq!(manifest.verified_authority_arms, None, "{profile}");
+        assert_eq!(
+            manifest.verified_authority_arms(),
+            DEFAULT_VERIFIED_AUTHORITY_ARMS,
+            "{profile}"
+        );
+        assert_eq!(manifest.verified_authority_arms(), ["ens_v1"], "{profile}");
+        let payload = serde_json::to_value(manifest)?;
+        assert!(
+            payload.get("verified_authority_arms").is_none(),
+            "{profile}: an absent declaration must not appear in the synced payload"
+        );
+    }
+    Ok(())
+}
+
+fn execution_manifest_contents(verified_authority_arms: Option<&str>) -> String {
+    let arms = verified_authority_arms
+        .map(|arms| format!("verified_authority_arms = {arms}\n"))
+        .unwrap_or_default();
+    format!(
+        r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_execution"
+chain = "ethereum-sepolia"
+deployment_epoch = "fixture"
+rollout_status = "shadow"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+discovery_rules = []
+{arms}
+[capability_flags]
+verified_resolution = "shadow"
+
+[[contracts]]
+role = "universal_resolver"
+address = "0x00000000000000000000000000000000000000EE"
+proxy_kind = "none"
+"#
+    )
+}
+
+fn load_execution_manifest(contents: &str) -> Result<ManifestRepository> {
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest_for_chain_combo("ethereum", "ens", "ens_execution", "v1", contents)?;
+    load_repository(&test_dir.path)
+}
+
+#[test]
+fn repository_loader_validates_verified_authority_arms() -> Result<()> {
+    let admitted = load_execution_manifest(&execution_manifest_contents(Some(
+        "[\"ens_v1\", \"ens_v2\"]",
+    )))?;
+    let manifest = &admitted.manifests()[0].manifest;
+    assert_eq!(manifest.verified_authority_arms(), ["ens_v1", "ens_v2"]);
+    assert_eq!(
+        serde_json::to_value(manifest)?["verified_authority_arms"],
+        json!(["ens_v1", "ens_v2"]),
+        "a declaration must reach the synced payload the lookup engine reads"
+    );
+    let round_trip: SourceManifest = serde_json::from_value(serde_json::to_value(manifest)?)?;
+    assert_eq!(&round_trip, manifest);
+
+    let ens_v2_only = load_execution_manifest(&execution_manifest_contents(Some("[\"ens_v2\"]")))?;
+    assert_eq!(
+        ens_v2_only.manifests()[0]
+            .manifest
+            .verified_authority_arms(),
+        ["ens_v2"]
+    );
+
+    let defaulted = load_execution_manifest(&execution_manifest_contents(None))?;
+    assert_eq!(
+        defaulted.manifests()[0].manifest.verified_authority_arms(),
+        ["ens_v1"]
+    );
+
+    for (case, contents, expected) in [
+        (
+            "unknown arm",
+            execution_manifest_contents(Some("[\"ens_v3\"]")),
+            "unknown verified authority arm \"ens_v3\"",
+        ),
+        (
+            "basenames is not an ENS arm",
+            execution_manifest_contents(Some("[\"ens_v1\", \"basenames\"]")),
+            "unknown verified authority arm \"basenames\"",
+        ),
+        (
+            "empty list",
+            execution_manifest_contents(Some("[]")),
+            "declares empty verified_authority_arms",
+        ),
+        (
+            "duplicate arm",
+            execution_manifest_contents(Some("[\"ens_v1\", \"ens_v1\"]")),
+            "duplicates verified authority arm \"ens_v1\"",
+        ),
+    ] {
+        let error = load_execution_manifest(&contents).expect_err(case);
+        assert!(
+            format!("{error:#}").contains(expected),
+            "{case} returned an unexpected error: {error:#}"
+        );
+    }
+
+    let error = load_one(&manifest_contents().replacen(
+        "\n[capability_flags]",
+        "\nverified_authority_arms = [\"ens_v1\"]\n\n[capability_flags]",
+        1,
+    ))
+    .expect_err("a non-execution family must not declare arms");
+    assert!(
+        format!("{error:#}").contains("only source family ens_execution may declare"),
+        "{error:#}"
+    );
     Ok(())
 }
 
@@ -1560,7 +1879,7 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
                 "NameUnwrapped".to_owned(),
                 "event NameUnwrapped(bytes32 indexed node, address owner)".to_owned(),
                 "name_wrapper".to_owned(),
-                "SurfaceUnbound,SurfaceBound,AuthorityEpochChanged,ResolverChanged".to_owned(),
+                "SurfaceUnbound,SurfaceBound,AuthorityEpochChanged,ResolverChanged,PermissionChanged".to_owned(),
             ),
             (
                 "NameWrapped".to_owned(),
@@ -1568,7 +1887,7 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
                  uint64 expiry)"
                     .to_owned(),
                 "name_wrapper".to_owned(),
-                "TokenControlTransferred,ExpiryChanged,PermissionScopeChanged,SurfaceUnbound,\
+                "TokenControlTransferred,ExpiryChanged,PermissionScopeChanged,PermissionChanged,SurfaceUnbound,\
                  SurfaceBound,AuthorityEpochChanged,ResolverChanged,PreimageObserved"
                     .to_owned(),
             ),
@@ -1616,8 +1935,8 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
             "ApprovalForAll|event ApprovalForAll(address indexed owner, address indexed operator, bool approved)|registrar|",
             "ControllerAdded|event ControllerAdded(address indexed controller)|registrar|PermissionChanged",
             "ControllerRemoved|event ControllerRemoved(address indexed controller)|registrar|PermissionChanged",
-            "NameRegistered|event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)|registrar|RegistrationReleased",
-            "NameRenewed|event NameRenewed(uint256 indexed id, uint256 expires)|registrar|RegistrationRenewed,ExpiryChanged",
+            "NameRegistered|event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)|registrar|RegistrationGranted,ExpiryChanged,PermissionChanged,SurfaceUnbound,SurfaceBound,AuthorityEpochChanged,ResolverChanged,RegistrationReleased",
+            "NameRenewed|event NameRenewed(uint256 indexed id, uint256 expires)|registrar|RegistrationGranted,RegistrationRenewed,ExpiryChanged,SurfaceUnbound,SurfaceBound,AuthorityEpochChanged,ResolverChanged",
             "Transfer|event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)|registrar|TokenControlTransferred,PermissionChanged,SurfaceUnbound,SurfaceBound,AuthorityEpochChanged,ResolverChanged",
         ]
     );
@@ -1688,7 +2007,243 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
             "0x7e4b2d59938930168024201752ee5503df402303".to_owned(),
         )]
     );
-    assert!(v2.contracts.is_empty());
+    assert_eq!(
+        v2.contracts
+            .iter()
+            .map(|contract| {
+                (
+                    contract.role.as_str(),
+                    normalize_address(&contract.address),
+                    contract.start_block,
+                )
+            })
+            .collect::<Vec<_>>(),
+        [(
+            ENSV1_MIRROR_RESOLVER_ROLE,
+            "0x5339161a7896ca9841ecc034a49edca40f7b9491".to_owned(),
+            Some(11_163_316),
+        )]
+    );
+    assert_eq!(
+        normalize_address(&v2.correlation_addresses[ENSV1_MIRROR_REGISTRY_CORRELATION_KEY]),
+        "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e"
+    );
+    Ok(())
+}
+
+fn mirror_manifest_pair() -> (String, String) {
+    let registry = manifest_contents()
+        .replacen(
+            "source_family = \"ens_v2_registry_l1\"",
+            "source_family = \"ens_v1_registry_l1\"",
+            1,
+        )
+        .replacen("proxy_kind = \"erc1967\"", "proxy_kind = \"none\"", 1)
+        .replacen(
+            "implementation = \"0x00000000000000000000000000000000000000DD\"\n",
+            "",
+            1,
+        );
+    let mirror = r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v2_resolver_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v2"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+discovery_rules = []
+
+[correlation_addresses]
+ens_v1_registry = "0x00000000000000000000000000000000000000AA"
+
+[capability_flags]
+
+[[contracts]]
+role = "ensv1_mirror_resolver"
+address = "0x0000000000000000000000000000000000000010"
+proxy_kind = "none"
+start_block = 34567
+"#
+    .to_owned();
+    (registry, mirror)
+}
+
+#[test]
+fn repository_loader_accepts_mirror_declaration_matching_the_ensv1_registry() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let (registry, mirror) = mirror_manifest_pair();
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &registry)?;
+    test_dir.write_manifest("ens", "ens_v2_resolver_l1", "v1", &mirror)?;
+    let repository = load_repository(&test_dir.path).context("matching mirror pair must load")?;
+    let declared = repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "ens_v2_resolver_l1")
+        .map(|loaded| &loaded.manifest.contracts[0])
+        .expect("mirror manifest loaded");
+    assert_eq!(declared.role, ENSV1_MIRROR_RESOLVER_ROLE);
+    Ok(())
+}
+
+#[test]
+fn repository_loader_validates_every_mirror_instance_of_a_family() -> Result<()> {
+    let (registry, mirror) = mirror_manifest_pair();
+    let second = r#"
+[[contracts]]
+role = "ensv1_mirror_resolver"
+address = "0x0000000000000000000000000000000000000011"
+proxy_kind = "none"
+start_block = 34560
+"#;
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &registry)?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_resolver_l1",
+        "v1",
+        &format!("{mirror}{second}"),
+    )?;
+    let repository =
+        load_repository(&test_dir.path).context("two mirror instances must load together")?;
+    let declared: Vec<_> = repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "ens_v2_resolver_l1")
+        .expect("mirror manifest loaded")
+        .manifest
+        .contracts
+        .iter()
+        .filter(|contract| contract.role == ENSV1_MIRROR_RESOLVER_ROLE)
+        .map(|contract| contract.address.to_ascii_lowercase())
+        .collect();
+    assert_eq!(
+        declared,
+        [
+            "0x0000000000000000000000000000000000000010",
+            "0x0000000000000000000000000000000000000011"
+        ]
+    );
+
+    // The second instance is validated on its own terms, not skipped after the first.
+    for (label, broken, expected) in [
+        (
+            "proxy second",
+            format!(
+                "{mirror}{}",
+                second.replace("proxy_kind = \"none\"", "proxy_kind = \"erc1967\"")
+            ),
+            "proxy_kind",
+        ),
+        (
+            "duplicate address",
+            format!(
+                "{mirror}{}",
+                second.replace(
+                    "0x0000000000000000000000000000000000000011",
+                    "0x0000000000000000000000000000000000000010"
+                )
+            ),
+            "more than once",
+        ),
+    ] {
+        let test_dir = TestDir::new()?;
+        test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &registry)?;
+        test_dir.write_manifest("ens", "ens_v2_resolver_l1", "v1", &broken)?;
+        let Err(error) = load_repository(&test_dir.path) else {
+            panic!("{label}: second mirror instance must be validated");
+        };
+        assert!(
+            error.to_string().contains(expected),
+            "{label}: unexpected error: {error:#}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn repository_loader_rejects_mirror_declaration_disagreeing_with_the_ensv1_registry() -> Result<()>
+{
+    let test_dir = TestDir::new()?;
+    let (registry, mirror) = mirror_manifest_pair();
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &registry)?;
+    let mismatch = mirror.replacen(
+        "ens_v1_registry = \"0x00000000000000000000000000000000000000AA\"",
+        "ens_v1_registry = \"0x00000000000000000000000000000000000000BB\"",
+        1,
+    );
+    test_dir.write_manifest("ens", "ens_v2_resolver_l1", "v1", &mismatch)?;
+    let error = load_repository(&test_dir.path)
+        .expect_err("a mirror naming another ENSv1 registry must fail manifest load");
+    let message = error.to_string();
+    assert!(
+        message.contains(ENSV1_MIRROR_REGISTRY_CORRELATION_KEY)
+            && message.contains("ens_v1_registry_l1")
+            && message.contains("0x00000000000000000000000000000000000000bb")
+            && message.contains("0x00000000000000000000000000000000000000aa"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn repository_loader_requires_mirror_declarations_to_be_direct_and_correlated() -> Result<()> {
+    let (_, mirror) = mirror_manifest_pair();
+    for (label, broken, expected) in [
+        (
+            "missing correlation",
+            mirror.replacen(
+                "[correlation_addresses]\nens_v1_registry = \"0x00000000000000000000000000000000000000AA\"\n",
+                "",
+                1,
+            ),
+            "without correlation address ens_v1_registry",
+        ),
+        (
+            "proxy declaration",
+            mirror.replacen(
+                "proxy_kind = \"none\"",
+                "proxy_kind = \"erc1967\"\nimplementation = \"0x00000000000000000000000000000000000000DD\"",
+                1,
+            ),
+            "proxy_kind = \"none\" and no read_features",
+        ),
+        (
+            "read features",
+            mirror.replacen(
+                "proxy_kind = \"none\"",
+                "proxy_kind = \"none\"\nread_features = [\"ensip19_default_address\"]",
+                1,
+            ),
+            "proxy_kind = \"none\" and no read_features",
+        ),
+        (
+            "foreign family",
+            mirror.replacen(
+                "source_family = \"ens_v2_resolver_l1\"",
+                "source_family = \"ens_v1_resolver_l1\"",
+                1,
+            ),
+            "outside ens_v2_resolver_l1",
+        ),
+    ] {
+        let test_dir = TestDir::new()?;
+        let family = if label == "foreign family" {
+            "ens_v1_resolver_l1"
+        } else {
+            "ens_v2_resolver_l1"
+        };
+        test_dir.write_manifest("ens", family, "v1", &broken)?;
+        let Err(error) = load_repository(&test_dir.path) else {
+            panic!("{label}: mirror declaration must fail manifest load");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains(expected),
+            "{label}: unexpected error: {error:#}"
+        );
+    }
     Ok(())
 }
 

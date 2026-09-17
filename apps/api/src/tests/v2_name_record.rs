@@ -1,6 +1,6 @@
 #[tokio::test]
 async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
-    let payload = v2_name_record_payload("/v2/names/Alice.eth").await?;
+    let payload = v2_name_record_payload("/v1/names/Alice.eth").await?;
 
     assert!(payload.get("page").is_none());
     assert_eq!(payload["meta"]["source"], json!("indexed"));
@@ -166,7 +166,7 @@ async fn v2_get_subnames_preserves_stored_ensip15_normalized_name_bytes() -> Res
 
     let payload = v2_subnames_payload_for_database(
         &database,
-        "/v2/names/parent.eth/subnames?page_size=20",
+        "/v1/names/parent.eth/subnames?page_size=20",
     )
     .await?;
     let row = payload["data"]
@@ -208,7 +208,7 @@ async fn v2_get_name_preserves_stored_ensip15_normalized_name_bytes() -> Result<
 
     let payload = v2_name_record_payload_for_database(
         &database,
-        "/v2/names/%E1%8F%A3%E1%8E%B3%E1%8E%A9.eth",
+        "/v1/names/%E1%8F%A3%E1%8E%B3%E1%8E%A9.eth",
     )
     .await?;
     assert_eq!(payload["data"]["name"], json!(stored_raw_name));
@@ -222,7 +222,7 @@ async fn v2_get_name_exposes_authority_unsupported_shape() -> Result<()> {
         "conflicting_current_ens_authority",
         "independent_ens_deployments_overlap",
     ] {
-        let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+        let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
             row.coverage = json!({
                 "status": "unsupported",
                 "exhaustiveness": "not_asserted",
@@ -263,7 +263,7 @@ async fn v2_get_name_downgrades_every_unsupported_reason() -> Result<()> {
             "a_reason_this_build_has_never_seen",
         ),
     ] {
-        let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+        let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
             row.coverage = json!({
                 "status": "unsupported",
                 "exhaustiveness": "not_asserted",
@@ -292,7 +292,7 @@ async fn v2_get_name_downgrades_every_unsupported_reason() -> Result<()> {
 
 #[tokio::test]
 async fn v2_get_name_does_not_serve_a_resolver_without_projected_authority() -> Result<()> {
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
         row.coverage = json!({
             "status": "unsupported",
             "exhaustiveness": "not_asserted",
@@ -306,9 +306,65 @@ async fn v2_get_name_does_not_serve_a_resolver_without_projected_authority() -> 
     Ok(())
 }
 
+fn root_registry_tld_row(row: &mut bigname_storage::NameCurrentRow) {
+    // An ENSv2 TLD whose root-registry token has a resolver pointer but no observed registration:
+    // no binding, no selected authority, the pointer's token resource as serving resource.
+    row.coverage = json!({
+        "status": "unsupported",
+        "exhaustiveness": "not_asserted",
+        "unsupported_reason": "current_authority_not_projected"
+    });
+    row.serving_resource_id = row.resource_id.take();
+    row.surface_binding_id = None;
+    row.token_lineage_id = None;
+    row.binding_kind = None;
+    row.declared_summary["registration"] = json!({"status": null, "authority_kind": null});
+    row.declared_summary["control"] = json!({"status": null});
+    row.provenance["read_reachability"] = json!({
+        "basis": "root_registry_resolver_pointer",
+        "serving_resource_id": row.serving_resource_id
+    });
+}
+
+#[tokio::test]
+async fn v2_get_name_serves_a_root_registry_pointer_without_projected_authority() -> Result<()> {
+    let payload =
+        v2_name_record_payload_with_row("/v1/names/Alice.eth", root_registry_tld_row).await?;
+    let data = payload["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("status"), Some(&json!("ok")), "{payload}");
+    assert_eq!(
+        data.get("resolver"),
+        Some(&json!({
+            "chain_id": 1,
+            "address": "0x0000000000000000000000000000000000000abc"
+        })),
+        "{payload}"
+    );
+    assert_eq!(data.get("registration_status"), Some(&json!("unregistered")));
+    assert!(data.get("registration_id").is_none(), "{payload}");
+    assert!(data.get("owner").is_none_or(Value::is_null), "{payload}");
+    assert!(data.get("authority").is_none_or(Value::is_null), "{payload}");
+    assert_eq!(
+        data["addresses"]["60"],
+        json!("0x0000000000000000000000000000000000000def"),
+        "records come from the serving resource's inventory: {payload}"
+    );
+
+    // The same pointer evidence without a serving resource stays withheld.
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
+        root_registry_tld_row(row);
+        row.serving_resource_id = None;
+        row.provenance["read_reachability"] = json!({});
+    })
+    .await?;
+    assert_eq!(payload["data"]["status"], json!("ok"));
+    assert!(payload["data"].get("resolver").is_none(), "{payload}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_get_name_exposes_projected_wrapper_state_and_fuses() -> Result<()> {
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
         row.declared_summary["wrapper_state"] = json!("locked");
         row.declared_summary["wrapper_fuses"] = json!({
             "fuses": 196_609,
@@ -365,7 +421,7 @@ async fn v2_get_name_rejects_unknown_wrapper_fuse_fields() -> Result<()> {
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth")
+                .uri("/v1/names/Alice.eth")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -381,7 +437,7 @@ async fn v2_get_name_rejects_unknown_wrapper_fuse_fields() -> Result<()> {
 
 #[tokio::test]
 async fn v2_get_name_response_omits_banned_v1_spellings() -> Result<()> {
-    let payload = v2_name_record_payload("/v2/names/Alice.eth").await?;
+    let payload = v2_name_record_payload("/v1/names/Alice.eth").await?;
     assert_no_banned_v1_spellings(&payload);
     Ok(())
 }
@@ -484,7 +540,7 @@ async fn v2_get_name_verified_source_basenames_keeps_stale_inventory_before_look
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/alice.base.eth?source=verified")
+                .uri("/v1/names/alice.base.eth?source=verified")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -507,7 +563,7 @@ async fn v2_get_name_verified_source_basenames_keeps_stale_inventory_before_look
 #[tokio::test]
 async fn v2_get_name_verified_source_reports_stale_when_lookup_state_is_unavailable(
 ) -> Result<()> {
-    let payload = v2_name_record_payload("/v2/names/Alice.eth?source=verified").await?;
+    let payload = v2_name_record_payload("/v1/names/Alice.eth?source=verified").await?;
 
     assert_eq!(payload["meta"]["source"], json!("verified"));
     assert_eq!(payload["data"]["status"], json!("stale"));
@@ -535,7 +591,7 @@ async fn v2_get_name_verified_source_reports_stale_when_lookup_state_is_unavaila
 
 #[tokio::test]
 async fn v2_get_name_verified_source_reports_unsupported_without_verified_boundary() -> Result<()> {
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth?source=verified", |row| {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth?source=verified", |row| {
         row.binding_kind = None;
         row.surface_binding_id = None;
         row.resource_id = None;
@@ -558,6 +614,133 @@ async fn v2_get_name_verified_source_reports_unsupported_without_verified_bounda
     assert!(payload["data"].get("content_hash").is_none());
     assert!(payload["data"].get("primary_address").is_none());
 
+    Ok(())
+}
+
+/// A name the projection selected under the ENSv2 arm is refused by an execution manifest that
+/// declares no `verified_authority_arms` (the Mainnet and Sepolia default, `ens_v1` only), with
+/// its own public reason and without a provider call; the same declaration widened to `ens_v2`
+/// executes the direct route through the declared Universal Resolver.
+#[tokio::test]
+async fn v2_verified_reads_follow_the_declared_authority_arms_for_an_ens_v2_name() -> Result<()> {
+    for admits_ens_v2 in [false, true] {
+        let database = TestDatabase::new_with_schemas(false, true).await?;
+        let execution_block_hash =
+            "0x1111111111111111111111111111111111111111111111111111111111111111";
+        let lookup_pool = database.lookup_pool().await?;
+        seed_schema_v2_ens_lookup_head(
+            &lookup_pool,
+            21_000_003,
+            execution_block_hash,
+            "2026-04-17T00:00:03Z",
+        )
+        .await?;
+        let namehash = bigname_lookup::ens_namehash_hex("alice.eth")?;
+        seed_v2_alice_name_record_fixture(
+            &database,
+            |row| {
+                row.namehash = namehash;
+                row.provenance["authority_selection"] = json!({"authority_arm": "ens_v2"});
+                row.chain_positions = json!({
+                    "ethereum": {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": 21_000_003,
+                        "block_hash": execution_block_hash,
+                        "timestamp": "2026-04-17T00:00:03Z"
+                    }
+                });
+            },
+            |_, _, inventory| {
+                inventory.record_version_boundary["chain_position"]["block_hash"] =
+                    json!(execution_block_hash);
+                inventory.chain_positions = json!({
+                    "ethereum-mainnet": {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": 21_000_003,
+                        "block_hash": execution_block_hash,
+                        "timestamp": "2026-04-17T00:00:03Z"
+                    }
+                });
+            },
+        )
+        .await?;
+        if admits_ens_v2 {
+            sqlx::query(
+                "UPDATE bigname_phase.manifest_versions
+                 SET manifest_payload = manifest_payload
+                     || '{\"verified_authority_arms\": [\"ens_v1\", \"ens_v2\"]}'::jsonb
+                 WHERE source_family = 'ens_execution'",
+            )
+            .execute(&database.pool)
+            .await?;
+        }
+        let executed_address = "0x0000000000000000000000000000000000000e0e";
+        let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(if admits_ens_v2 {
+            vec![resolution_universal_resolver_addr60_response(
+                executed_address,
+            )]
+        } else {
+            Vec::new()
+        })
+        .await?;
+        let chain_rpc_urls =
+            bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+        let state = database
+            .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+            .await?;
+
+        let response = app_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/names/Alice.eth/records?source=verified&keys=addr:60")
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .context("ens_v2-arm verified records request failed")?;
+        let status = response.status();
+        let payload: Value = read_json(response).await?;
+        assert_eq!(status, StatusCode::OK, "unexpected response: {payload}");
+        assert_eq!(payload["meta"]["source"], json!("verified"));
+        if admits_ens_v2 {
+            assert_eq!(
+                payload["data"]["records"]["addr:60"],
+                json!({"status": "ok", "value": executed_address}),
+                "{payload}"
+            );
+            assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 1);
+        } else {
+            assert_eq!(
+                payload["data"]["records"]["addr:60"],
+                json!({
+                    "status": "unsupported",
+                    "unsupported_reason": "exact_name_authority_not_verifiable"
+                }),
+                "{payload}"
+            );
+            // Name detail shares the refusal and its reason.
+            let detail = app_router(state)
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/names/Alice.eth?source=verified")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ens_v2-arm verified name detail request failed")?;
+            let detail: Value = read_json(detail).await?;
+            assert_eq!(detail["data"]["status"], json!("unsupported"), "{detail}");
+            assert_eq!(
+                detail["data"]["unsupported_reason"],
+                json!("exact_name_authority_not_verifiable"),
+                "{detail}"
+            );
+            assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 0);
+        }
+
+        lookup_pool.close().await;
+        database.cleanup().await?;
+    }
     Ok(())
 }
 
@@ -659,7 +842,7 @@ async fn v2_get_name_verified_source_accepts_event_linked_ownerless_registry_ser
     let response = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth?source=verified")
+                .uri("/v1/names/Alice.eth?source=verified")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -764,7 +947,7 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     let response = app_router(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth?source=verified")
+                .uri("/v1/names/Alice.eth?source=verified")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -796,7 +979,7 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     let repeated_response = app_router(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth?source=verified")
+                .uri("/v1/names/Alice.eth?source=verified")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -816,7 +999,7 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     let transport_failure_response = app_router(transport_failure_state)
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth?source=verified")
+                .uri("/v1/names/Alice.eth?source=verified")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -937,7 +1120,7 @@ async fn v2_verified_records_return_conflict_when_project_generation_changes_dur
         app_router(state)
             .oneshot(
                 Request::builder()
-                    .uri("/v2/names/Alice.eth/records?source=verified&keys=addr:60")
+                    .uri("/v1/names/Alice.eth/records?source=verified&keys=addr:60")
                     .body(Body::empty())
                     .expect("request must build"),
             )
@@ -1041,7 +1224,7 @@ async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -
     let auto_response = app_router(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth/records?source=auto&keys=text:url,avatar")
+                .uri("/v1/names/Alice.eth/records?source=auto&keys=text:url,avatar")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1065,7 +1248,7 @@ async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -
     let verified_response = app_router(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth/records?source=verified&keys=addr:60")
+                .uri("/v1/names/Alice.eth/records?source=verified&keys=addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1086,7 +1269,7 @@ async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -
     let missing_response = app_router(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth/records?source=verified&keys=text:url")
+                .uri("/v1/names/Alice.eth/records?source=verified&keys=text:url")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1107,7 +1290,7 @@ async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -
     let summary_response = app_router(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth/records?source=auto")
+                .uri("/v1/names/Alice.eth/records?source=auto")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1128,7 +1311,7 @@ async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -
     let no_entrypoint_response = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth/records?source=auto&keys=addr:60")
+                .uri("/v1/names/Alice.eth/records?source=auto&keys=addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1214,7 +1397,7 @@ async fn assert_null_resolver_route_flip_is_stale(source: &str) -> Result<()> {
         .await?;
     let (_guard, control) =
         crate::v2::name_records_auto_fallback_test_hooks::install(&database.pool).await?;
-    let uri = format!("/v2/names/Alice.eth/records?source={source}&keys=addr:60");
+    let uri = format!("/v1/names/Alice.eth/records?source={source}&keys=addr:60");
     let request_task = tokio::spawn(async move {
         app_router(state)
             .oneshot(
@@ -1261,8 +1444,8 @@ async fn assert_null_resolver_route_flip_is_stale(source: &str) -> Result<()> {
 
 #[tokio::test]
 async fn v2_get_name_default_source_matches_explicit_indexed() -> Result<()> {
-    let default_payload = v2_name_record_payload("/v2/names/Alice.eth").await?;
-    let indexed_payload = v2_name_record_payload("/v2/names/Alice.eth?source=indexed").await?;
+    let default_payload = v2_name_record_payload("/v1/names/Alice.eth").await?;
+    let indexed_payload = v2_name_record_payload("/v1/names/Alice.eth?source=indexed").await?;
 
     assert_eq!(default_payload, indexed_payload);
 
@@ -1271,7 +1454,7 @@ async fn v2_get_name_default_source_matches_explicit_indexed() -> Result<()> {
 
 #[tokio::test]
 async fn v2_get_name_omits_record_maps_when_inventory_is_absent() -> Result<()> {
-    let payload = v2_name_payload_without_inventory("/v2/names/Alice.eth").await?;
+    let payload = v2_name_payload_without_inventory("/v1/names/Alice.eth").await?;
 
     assert_eq!(
         payload["data"]["unsupported_fields"],
@@ -1287,7 +1470,7 @@ async fn v2_get_name_omits_record_maps_when_inventory_is_absent() -> Result<()> 
 
 #[tokio::test]
 async fn v2_get_name_classifies_ens_v2_registry_as_registered() -> Result<()> {
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
         row.declared_summary["registration"] = json!({
             "status": "active",
             "authority_kind": "ens_v2_registry",
@@ -1306,7 +1489,7 @@ async fn v2_get_name_classifies_ens_v2_registry_as_registered() -> Result<()> {
 
 #[tokio::test]
 async fn v2_get_name_classifies_released_as_released() -> Result<()> {
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
         row.declared_summary["registration"] = json!({
             "status": "released",
             "authority_kind": "registrar",
@@ -1325,11 +1508,103 @@ async fn v2_get_name_classifies_released_as_released() -> Result<()> {
 }
 
 #[tokio::test]
+async fn storage_name_current_reads_serve_the_released_v1_tombstone_on_its_closed_binding()
+-> Result<()> {
+    // A released v1 authority tombstone selects the lapsed lease binding, which is closed.
+    // Project owns that selection; a later Interpret closure must not hide the row.
+    const SURFACE_BINDING_ID: Uuid = Uuid::from_u128(0x9140);
+    let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        "ens:lapsed-wrapped.eth",
+        "lapsed-wrapped.eth",
+        "lapsed-wrapped.eth",
+        "node:lapsed-wrapped.eth",
+        Uuid::from_u128(0x7140),
+        Uuid::from_u128(0x8140),
+        SURFACE_BINDING_ID,
+        "0x0000000000000000000000000000000000007140",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        90,
+    )
+    .await?;
+    // The migrated seed rekeys the row onto its namehash identity; read the stored id back.
+    let (logical_name_id,): (String,) = sqlx::query_as(
+        "SELECT logical_name_id FROM bigname_phase.name_current WHERE surface_binding_id = $1",
+    )
+    .bind(SURFACE_BINDING_ID)
+    .fetch_one(&database.pool)
+    .await?;
+    let closed = sqlx::query(
+        "UPDATE bigname_phase.surface_bindings SET active_to = active_from + interval '1 day'
+         WHERE surface_binding_id = $1",
+    )
+    .bind(SURFACE_BINDING_ID)
+    .execute(&database.pool)
+    .await?;
+    assert_eq!(closed.rows_affected(), 1, "the lease binding must close");
+    assert_eq!(
+        closed_binding_reads(
+            &database,
+            &logical_name_id,
+            json!({"authority_arm": "ens_v1", "lifecycle_state": "unregistered"}),
+        )
+        .await?,
+        (true, true),
+        "the published selection remains readable until Project replaces it"
+    );
+    assert_eq!(
+        closed_binding_reads(
+            &database,
+            &logical_name_id,
+            json!({
+                "authority_arm": "ens_v1",
+                "lifecycle_state": "unregistered",
+                "resource_authority_context": {
+                    "authority_arm": "ens_v1",
+                    "released_tombstone": "ens_v1"
+                }
+            }),
+        )
+        .await?,
+        (true, true),
+        "the released v1 tombstone reads on its closed lease binding"
+    );
+    database.cleanup().await
+}
+
+/// Stamps `authority_selection` on the seeded row and reports whether the detail and list
+/// loaders still return it.
+async fn closed_binding_reads(
+    database: &TestDatabase,
+    logical_name_id: &str,
+    authority_selection: serde_json::Value,
+) -> Result<(bool, bool)> {
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET provenance = provenance || jsonb_build_object('authority_selection', $2::jsonb)
+         WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .bind(authority_selection)
+    .execute(&database.pool)
+    .await?;
+    let detail = bigname_storage::load_name_current(&database.pool, logical_name_id).await?;
+    let listed = bigname_storage::load_name_current_list_row_by_name(
+        &database.pool,
+        "ens",
+        "lapsed-wrapped.eth",
+    )
+    .await?;
+    Ok((detail.is_some(), listed.is_some()))
+}
+
+#[tokio::test]
 async fn v2_get_name_withholds_retained_inventory_for_released_tombstone() -> Result<()> {
     // The fixture's inventory row and declared resolver stay attached: a
     // released tombstone must not serve them even if projection state loss
     // retains them.
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
         row.declared_summary["registration"]["status"] = json!("released");
         row.declared_summary["registration"]["released_at"] = json!("2026-06-14T00:00:00Z");
     })
@@ -1387,7 +1662,7 @@ async fn v2_get_name_skips_stale_inventory_for_released_tombstone() -> Result<()
     .execute(&database.pool)
     .await?;
 
-    let payload = v2_name_record_payload_for_database(&database, "/v2/names/Alice.eth").await?;
+    let payload = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
     let data = payload["data"].as_object().expect("data must be an object");
     assert_eq!(data.get("registration_status"), Some(&json!("released")));
     assert!(data.get("resolver").is_none());
@@ -1405,7 +1680,7 @@ async fn v2_get_name_withholds_expired_resource_identity_and_inventory_for_reser
 {
     // Model a reservation-selected row with inventory retained for the expired
     // resource. A reservation has no current registration.
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
         row.declared_summary["registration"] = json!({
             "status": "reserved",
             "expiry": 4_000_000_000_u64,
@@ -1429,7 +1704,7 @@ async fn v2_get_name_withholds_expired_resource_identity_and_inventory_for_reser
 #[tokio::test]
 async fn v2_get_name_records_withholds_retained_inventory_for_reservation() -> Result<()> {
     let payload = v2_name_records_payload_with_row_and_setup(
-        "/v2/names/Alice.eth/records?include=inventory",
+        "/v1/names/Alice.eth/records?include=inventory",
         |row| {
             row.declared_summary["registration"] = json!({
                 "status": "reserved",
@@ -1454,7 +1729,7 @@ async fn v2_get_name_records_withholds_retained_inventory_for_reservation() -> R
 #[tokio::test]
 async fn v2_get_name_records_verified_ignores_reservation_audit_selectors() -> Result<()> {
     let payload = v2_name_records_payload_with_row_and_setup(
-        "/v2/names/Alice.eth/records?source=verified&include=inventory",
+        "/v1/names/Alice.eth/records?source=verified&include=inventory",
         |row| {
             row.declared_summary["registration"] = json!({
                 "status": "reserved",
@@ -1493,7 +1768,7 @@ async fn v2_get_name_records_verified_ignores_reservation_audit_selectors() -> R
 #[tokio::test]
 async fn v2_get_name_records_verified_keeps_empty_records_for_active_name() -> Result<()> {
     let payload = v2_name_records_payload_with_row_and_setup(
-        "/v2/names/Alice.eth/records?source=verified",
+        "/v1/names/Alice.eth/records?source=verified",
         |_| {},
         |_, _, inventory| {
             inventory.selectors = json!([]);
@@ -1595,7 +1870,7 @@ async fn v2_get_name_verified_source_withholds_retained_inventory_for_released_t
     let response = app_router(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth?source=verified")
+                .uri("/v1/names/Alice.eth?source=verified")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1638,7 +1913,7 @@ async fn v2_get_name_verified_source_withholds_retained_inventory_for_released_t
     let canonical_response = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth?source=verified")
+                .uri("/v1/names/Alice.eth?source=verified")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1667,7 +1942,7 @@ async fn v2_get_name_verified_source_withholds_retained_inventory_for_released_t
 
 #[tokio::test]
 async fn v2_get_name_classifies_no_binding_as_unregistered() -> Result<()> {
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
         row.surface_binding_id = None;
         row.resource_id = None;
         row.token_lineage_id = None;
@@ -1688,7 +1963,7 @@ async fn v2_get_name_rejects_source_auto() -> Result<()> {
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/alice.eth?source=auto")
+                .uri("/v1/names/alice.eth?source=auto")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1745,7 +2020,7 @@ async fn v2_get_name_infers_exact_base_eth_as_ens() -> Result<()> {
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/base.eth")
+                .uri("/v1/names/base.eth")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1769,7 +2044,7 @@ async fn v2_get_name_rejects_trailing_dot() -> Result<()> {
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/alice.eth.")
+                .uri("/v1/names/alice.eth.")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1792,7 +2067,7 @@ async fn v2_get_name_uses_sepolia_positioned_at_token_on_mixed_phase_heads() -> 
     let at = v2_sepolia_snapshot_token();
     let payload = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_SEPOLIA_SNAPSHOT_NAME}?at={at}"),
+        &format!("/v1/names/{V2_SEPOLIA_SNAPSHOT_NAME}?at={at}"),
     )
     .await?;
 
@@ -1819,14 +2094,14 @@ async fn v2_get_name_at_tokens_round_trip_mainnet_and_sepolia_profiles() -> Resu
 
     let mainnet = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_MAINNET_SNAPSHOT_NAME}"),
+        &format!("/v1/names/{V2_MAINNET_SNAPSHOT_NAME}"),
     )
     .await?;
     let mainnet_at =
         v2_at_token_from_meta_as_of(&mainnet, "1", "ethereum", "ethereum-mainnet")?;
     let mainnet_replay = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_MAINNET_SNAPSHOT_NAME}?at={mainnet_at}"),
+        &format!("/v1/names/{V2_MAINNET_SNAPSHOT_NAME}?at={mainnet_at}"),
     )
     .await?;
     assert_eq!(mainnet_replay["meta"]["as_of"], mainnet["meta"]["as_of"]);
@@ -1835,7 +2110,7 @@ async fn v2_get_name_at_tokens_round_trip_mainnet_and_sepolia_profiles() -> Resu
     let sepolia_at = v2_sepolia_snapshot_token();
     let sepolia = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_SEPOLIA_SNAPSHOT_NAME}?at={sepolia_at}"),
+        &format!("/v1/names/{V2_SEPOLIA_SNAPSHOT_NAME}?at={sepolia_at}"),
     )
     .await?;
     let sepolia_replay_at = v2_at_token_from_meta_as_of(
@@ -1846,7 +2121,7 @@ async fn v2_get_name_at_tokens_round_trip_mainnet_and_sepolia_profiles() -> Resu
     )?;
     let sepolia_replay = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_SEPOLIA_SNAPSHOT_NAME}?at={sepolia_replay_at}"),
+        &format!("/v1/names/{V2_SEPOLIA_SNAPSHOT_NAME}?at={sepolia_replay_at}"),
     )
     .await?;
     assert_eq!(sepolia_replay["meta"]["as_of"], sepolia["meta"]["as_of"]);
@@ -1863,7 +2138,7 @@ async fn v2_get_name_without_at_keeps_mainnet_preference_on_mixed_phase_heads() 
 
     let payload = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_MAINNET_SNAPSHOT_NAME}"),
+        &format!("/v1/names/{V2_MAINNET_SNAPSHOT_NAME}"),
     )
     .await?;
 
@@ -1890,7 +2165,7 @@ async fn v2_get_name_uses_phase_snapshot() -> Result<()> {
 
     let payload = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_MAINNET_SNAPSHOT_NAME}"),
+        &format!("/v1/names/{V2_MAINNET_SNAPSHOT_NAME}"),
     )
     .await?;
     assert_eq!(payload["meta"]["as_of"]["1"]["block_hash"], V2_MAINNET_SNAPSHOT_HASH);
@@ -1905,7 +2180,7 @@ async fn v2_get_name_timestamp_at_uses_sepolia_when_only_sepolia_phase_head_exis
 
     let payload = v2_name_record_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?at=2026-04-17T00:10:30Z"),
+        &format!("/v1/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?at=2026-04-17T00:10:30Z"),
     )
     .await?;
 
@@ -1926,7 +2201,7 @@ async fn v2_get_name_timestamp_at_uses_sepolia_when_only_sepolia_phase_head_exis
 
 #[tokio::test]
 async fn v2_get_name_records_returns_indexed_values() -> Result<()> {
-    let payload = v2_name_records_payload("/v2/names/Alice.eth/records").await?;
+    let payload = v2_name_records_payload("/v1/names/Alice.eth/records").await?;
 
     assert!(payload["data"].get("records").is_none());
     assert_eq!(payload["meta"]["source"], json!("indexed"));
@@ -1959,7 +2234,7 @@ async fn v2_get_name_records_returns_indexed_values() -> Result<()> {
 #[tokio::test]
 async fn v2_get_name_records_keys_filter_values_and_per_key_answers() -> Result<()> {
     let payload =
-        v2_name_records_payload("/v2/names/Alice.eth/records?keys=addr:60,text:description")
+        v2_name_records_payload("/v1/names/Alice.eth/records?keys=addr:60,text:description")
             .await?;
 
     assert_eq!(
@@ -1995,7 +2270,7 @@ async fn v2_get_name_records_keys_filter_values_and_per_key_answers() -> Result<
 #[tokio::test]
 async fn v2_get_name_records_flattens_projected_byte_address_values() -> Result<()> {
     let payload = v2_name_records_payload_with_setup(
-        "/v2/names/Alice.eth/records?keys=addr:0",
+        "/v1/names/Alice.eth/records?keys=addr:0",
         |_, _, inventory| {
             inventory.selectors = json!([{
                 "record_key": "addr:0",
@@ -2078,8 +2353,8 @@ async fn v2_records_and_name_detail_derive_ensip19_default_addresses() -> Result
         .await?;
 
     for uri in [
-        "/v2/names/Alice.eth/records?source=indexed&keys=addr:2147483649",
-        "/v2/names/Alice.eth/records?source=auto&keys=addr:2147483649",
+        "/v1/names/Alice.eth/records?source=indexed&keys=addr:2147483649",
+        "/v1/names/Alice.eth/records?source=auto&keys=addr:2147483649",
     ] {
         let response = app_router(state.clone())
             .oneshot(
@@ -2109,7 +2384,7 @@ async fn v2_records_and_name_detail_derive_ensip19_default_addresses() -> Result
     let response = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth?source=indexed")
+                .uri("/v1/names/Alice.eth?source=indexed")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2200,7 +2475,7 @@ async fn v2_ensip19_zero_default_matches_each_requested_getter() -> Result<()> {
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v2/names/Alice.eth/records?source={source}&keys=addr:60,addr:2147483649"
+                        "/v1/names/Alice.eth/records?source={source}&keys=addr:60,addr:2147483649"
                     ))
                     .body(Body::empty())
                     .expect("request must build"),
@@ -2220,7 +2495,7 @@ async fn v2_ensip19_zero_default_matches_each_requested_getter() -> Result<()> {
     let response = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth?source=indexed")
+                .uri("/v1/names/Alice.eth?source=indexed")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2247,7 +2522,7 @@ async fn v2_ensip19_zero_default_matches_each_requested_getter() -> Result<()> {
 #[tokio::test]
 async fn v2_indexed_records_do_not_derive_for_unflagged_resolvers() -> Result<()> {
     let payload = v2_name_records_payload_with_setup(
-        "/v2/names/Alice.eth/records?source=indexed&keys=addr:2147483649",
+        "/v1/names/Alice.eth/records?source=indexed&keys=addr:2147483649",
         |_, _, inventory| {
             inventory.selectors = json!([{
                 "record_key": "addr:2147483648",
@@ -2312,9 +2587,9 @@ async fn v2_pre_surface_recovered_record_is_authoritative_for_profile_and_record
 
     let mut payloads = Vec::new();
     for uri in [
-        "/v2/names/Alice.eth",
-        "/v2/names/Alice.eth/records?source=indexed&keys=text:pre-surface",
-        "/v2/names/Alice.eth/records?source=auto&keys=text:pre-surface&include=inventory",
+        "/v1/names/Alice.eth",
+        "/v1/names/Alice.eth/records?source=indexed&keys=text:pre-surface",
+        "/v1/names/Alice.eth/records?source=auto&keys=text:pre-surface&include=inventory",
     ] {
         let response = app_router(state.clone())
             .oneshot(
@@ -2409,9 +2684,9 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
     .await?;
 
     for uri in [
-        "/v2/names/Alice.eth",
-        "/v2/names/Alice.eth/records?source=indexed&keys=text:description",
-        "/v2/names/Alice.eth/records?source=auto&keys=text:description&include=inventory",
+        "/v1/names/Alice.eth",
+        "/v1/names/Alice.eth/records?source=indexed&keys=text:description",
+        "/v1/names/Alice.eth/records?source=auto&keys=text:description&include=inventory",
     ] {
         let response = app_router(database.app_state())
             .oneshot(
@@ -2474,7 +2749,7 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
 
 #[tokio::test]
 async fn v2_unclassified_serving_resource_does_not_expose_retained_records() -> Result<()> {
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
         let serving_resource_id = row.resource_id.expect("fixture resource");
         row.surface_binding_id = None;
         row.resource_id = None;
@@ -2505,7 +2780,7 @@ async fn v2_get_name_records_rejects_too_many_keys() -> Result<()> {
         .map(|index| format!("text:key{index}"))
         .collect::<Vec<_>>()
         .join(",");
-    let uri = format!("/v2/names/alice.eth/records?keys={keys}");
+    let uri = format!("/v1/names/alice.eth/records?keys={keys}");
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -2532,7 +2807,7 @@ async fn v2_get_name_records_rejects_too_many_keys() -> Result<()> {
 #[tokio::test]
 async fn v2_get_name_records_reports_unset_and_unsupported_per_key() -> Result<()> {
     let payload = v2_name_records_payload_with_setup(
-        "/v2/names/Alice.eth/records?keys=contenthash,text:email",
+        "/v1/names/Alice.eth/records?keys=contenthash,text:email",
         |_, _, inventory| {
             inventory.selectors = json!([
                 {
@@ -2607,7 +2882,7 @@ async fn v2_get_name_records_reports_unset_and_unsupported_per_key() -> Result<(
 #[tokio::test]
 async fn v2_get_name_records_include_inventory_uses_product_key_lists() -> Result<()> {
     let payload = v2_name_records_payload_with_setup(
-        "/v2/names/Alice.eth/records?keys=contenthash,text:email&include=inventory",
+        "/v1/names/Alice.eth/records?keys=contenthash,text:email&include=inventory",
         |_, _, inventory| {
             inventory.selectors = json!([
                 {
@@ -2677,7 +2952,7 @@ async fn v2_get_name_records_include_inventory_uses_product_key_lists() -> Resul
 #[tokio::test]
 async fn v2_get_name_records_inventory_partitions_unsupported_entries() -> Result<()> {
     let payload = v2_name_records_payload_with_setup(
-        "/v2/names/Alice.eth/records?keys=addr:60,avatar&include=inventory",
+        "/v1/names/Alice.eth/records?keys=addr:60,avatar&include=inventory",
         |_, _, inventory| {
             inventory.selectors = json!([
                 {
@@ -2733,7 +3008,7 @@ async fn v2_get_name_records_inventory_partitions_unsupported_entries() -> Resul
 #[tokio::test]
 async fn v2_get_name_records_inventory_absence_is_unknown_not_unsupported() -> Result<()> {
     let payload =
-        v2_name_payload_without_inventory("/v2/names/Alice.eth/records?keys=addr:60&include=inventory")
+        v2_name_payload_without_inventory("/v1/names/Alice.eth/records?keys=addr:60&include=inventory")
             .await?;
 
     assert_eq!(
@@ -2748,11 +3023,15 @@ async fn v2_get_name_records_inventory_absence_is_unknown_not_unsupported() -> R
     Ok(())
 }
 
+/// A row the projection left without a topology (no admitted absent-topology route either) is
+/// outside every verified class and reports `verified_records_not_supported`; the arm refusal
+/// `exact_name_authority_not_verifiable` is reserved for a topology-bearing row whose selected
+/// arm the execution declaration does not admit.
 #[tokio::test]
 async fn v2_get_name_records_source_verified_reports_unsupported_without_lookup_topology(
 ) -> Result<()> {
     let payload = v2_name_records_payload_with_setup(
-        "/v2/names/Alice.eth/records?source=verified&keys=addr:60",
+        "/v1/names/Alice.eth/records?source=verified&keys=addr:60",
         |_, _, _| {},
     )
     .await?;
@@ -2793,7 +3072,7 @@ async fn v2_get_name_records_withholds_unproven_authority_without_verified_looku
     ] {
         for source in ["indexed", "verified", "auto"] {
             let payload = v2_name_records_payload_with_row_and_setup(
-                &format!("/v2/names/Alice.eth/records?source={source}&keys=addr:60"),
+                &format!("/v1/names/Alice.eth/records?source={source}&keys=addr:60"),
                 |row| {
                     row.coverage = json!({
                         "status":"unsupported",
@@ -2828,9 +3107,39 @@ async fn v2_get_name_records_withholds_unproven_authority_without_verified_looku
 }
 
 #[tokio::test]
+async fn v2_get_name_records_classifies_a_root_registry_pointer_through_its_inventory() -> Result<()> {
+    for source in ["indexed", "auto"] {
+        let payload = v2_name_records_payload_with_row_and_setup(
+            &format!("/v1/names/Alice.eth/records?source={source}&keys=addr:60,text:description"),
+            root_registry_tld_row,
+            |_, _, _| {},
+        )
+        .await?;
+        assert_eq!(
+            payload["data"]["resolver"],
+            json!({
+                "chain_id": 1,
+                "address": "0x0000000000000000000000000000000000000abc"
+            }),
+            "{source}: {payload}"
+        );
+        assert_eq!(
+            payload["data"]["records"]["addr:60"],
+            json!({
+                "status": "ok",
+                "value": "0x0000000000000000000000000000000000000def"
+            }),
+            "{source}: {payload}"
+        );
+        assert_eq!(payload["meta"]["source"], json!("indexed"), "{source}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_unknown_pipeline_unsupported_reason_stays_in_band() -> Result<()> {
     let records = v2_name_records_payload_with_row_and_setup(
-        "/v2/names/Alice.eth/records?keys=addr:60",
+        "/v1/names/Alice.eth/records?keys=addr:60",
         |row| {
             row.coverage = json!({
                 "status": "unsupported",
@@ -2854,7 +3163,7 @@ async fn v2_unknown_pipeline_unsupported_reason_stays_in_band() -> Result<()> {
     );
 
     let verified =
-        v2_name_record_payload_with_row("/v2/names/Alice.eth?source=verified", |row| {
+        v2_name_record_payload_with_row("/v1/names/Alice.eth?source=verified", |row| {
             row.coverage = json!({
                 "status": "unsupported",
                 "unsupported_reason": "future_projection_gap"
@@ -2909,8 +3218,8 @@ async fn v2_verified_name_reads_reject_oversized_inventory_derived_selector_sets
     let state = database.app_state();
 
     for uri in [
-        "/v2/names/Alice.eth/records?source=verified",
-        "/v2/names/Alice.eth?source=verified",
+        "/v1/names/Alice.eth/records?source=verified",
+        "/v1/names/Alice.eth?source=verified",
     ] {
         let response = app_router(state.clone())
             .oneshot(
@@ -2934,7 +3243,7 @@ async fn v2_verified_name_reads_reject_oversized_inventory_derived_selector_sets
     let narrowed = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/names/Alice.eth/records?source=verified&keys=text:key-0")
+                .uri("/v1/names/Alice.eth/records?source=verified&keys=text:key-0")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3020,8 +3329,8 @@ async fn v2_get_basenames_records_source_auto_stays_base_scoped_without_fallback
         .await?;
 
     for uri in [
-        "/v2/names/alice.base.eth/records?source=auto",
-        "/v2/names/alice.base.eth/records?source=auto&keys=addr:60",
+        "/v1/names/alice.base.eth/records?source=auto",
+        "/v1/names/alice.base.eth/records?source=auto&keys=addr:60",
     ] {
         let response = app_router(database.app_state())
             .oneshot(
@@ -3059,7 +3368,7 @@ async fn v2_get_basenames_records_source_auto_retries_when_fallback_disappears_d
             .oneshot(
                 Request::builder()
                     .uri(
-                        "/v2/names/alice.base.eth/records?source=auto&keys=addr:60",
+                        "/v1/names/alice.base.eth/records?source=auto&keys=addr:60",
                     )
                     .body(Body::empty())
                     .expect("request must build"),
@@ -3234,7 +3543,7 @@ async fn v2_get_basenames_records_source_auto_retries_when_authority_reclassifie
             .oneshot(
                 Request::builder()
                     .uri(
-                        "/v2/names/alice.base.eth/records?source=auto&keys=addr:60",
+                        "/v1/names/alice.base.eth/records?source=auto&keys=addr:60",
                     )
                     .body(Body::empty())
                     .expect("request must build"),
@@ -3329,7 +3638,7 @@ async fn v2_get_basenames_records_source_auto_executes_verified_fallback_after_r
     let response = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/names/alice.base.eth/records?source=auto&keys=addr:60")
+                .uri("/v1/names/alice.base.eth/records?source=auto&keys=addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3424,7 +3733,7 @@ async fn v2_get_name_records_source_verified_executes_basenames_with_auxiliary_p
     let response = app_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v2/names/alice.base.eth/records?source=verified&keys=addr:60")
+                .uri("/v1/names/alice.base.eth/records?source=verified&keys=addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3477,7 +3786,7 @@ async fn v2_get_name_records_source_verified_executes_basenames_with_auxiliary_p
 async fn v2_get_name_records_source_verified_reports_unsupported_without_verified_boundary(
 ) -> Result<()> {
     let payload = v2_name_records_payload_with_row_and_setup(
-        "/v2/names/Alice.eth/records?source=verified&keys=avatar",
+        "/v1/names/Alice.eth/records?source=verified&keys=avatar",
         |row| {
             row.binding_kind = None;
             row.surface_binding_id = None;
@@ -3503,7 +3812,7 @@ async fn v2_get_name_records_source_verified_reports_unsupported_without_verifie
 #[tokio::test]
 async fn v2_get_name_records_source_auto_blends_indexed_and_verified_per_key() -> Result<()> {
     let payload = v2_name_records_payload_with_setup(
-        "/v2/names/Alice.eth/records?source=auto&keys=addr:60,text:email",
+        "/v1/names/Alice.eth/records?source=auto&keys=addr:60,text:email",
         |_, _, inventory| {
             inventory.unsupported_families = json!([
                 {
@@ -3539,6 +3848,166 @@ async fn v2_get_name_records_source_auto_blends_indexed_and_verified_per_key() -
     Ok(())
 }
 
+fn unsupported_resolver_inventory(inventory: &mut bigname_storage::RecordInventoryCurrentRow) {
+    // A name behind an ENSv2 resolver whose implementation is not an admitted profile: the
+    // projection keeps the entries it saw for diagnostics but marks the row unsupported.
+    inventory.selectors = json!([
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "cacheable": true
+        },
+        {
+            "record_key": "text:description",
+            "record_family": "text",
+            "selector_key": "description",
+            "cacheable": true
+        }
+    ]);
+    inventory.entries = json!([
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0xfa75ed860000000000000000000000000000abcd"
+            }
+        },
+        {
+            "record_key": "text:description",
+            "record_family": "text",
+            "selector_key": "description",
+            "status": "success",
+            "value": { "value": "served by an unknown resolver implementation" }
+        }
+    ]);
+    inventory.explicit_gaps = json!([]);
+    inventory.unsupported_families = json!([]);
+    inventory.coverage = json!({
+        "status": "unsupported",
+        "exhaustiveness": "not_asserted",
+        "unsupported_reason": "resolver_implementation_unknown"
+    });
+}
+
+#[tokio::test]
+async fn v2_get_name_records_withholds_values_from_unsupported_inventory() -> Result<()> {
+    let payload = v2_name_records_payload_with_setup(
+        "/v1/names/Alice.eth/records?keys=addr:60,text:description,avatar&include=inventory",
+        |_, _, inventory| unsupported_resolver_inventory(inventory),
+    )
+    .await?;
+
+    assert_eq!(payload["meta"]["source"], json!("indexed"));
+    // The declared registry pointer is registry evidence and stays; the values do not.
+    assert_eq!(
+        payload["data"]["resolver"],
+        json!({
+            "chain_id": 1,
+            "address": "0x0000000000000000000000000000000000000abc"
+        })
+    );
+    assert_eq!(payload["data"]["addresses"], json!({}));
+    assert_eq!(payload["data"]["text_records"], json!({}));
+    assert_eq!(payload["data"]["content_hash"], Value::Null);
+    let refused = json!({
+        "status": "unsupported",
+        "unsupported_reason": "resolver_implementation_unknown"
+    });
+    assert_eq!(
+        payload["data"]["records"],
+        json!({
+            "addr:60": refused,
+            "text:description": refused,
+            "avatar": refused
+        })
+    );
+    assert_eq!(
+        payload["data"]["inventory"],
+        json!({
+            "known_keys": [],
+            "unset_keys": [],
+            "unsupported_keys": ["addr:60", "avatar", "text:description"]
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_convenience_maps_skip_unsupported_inventory() -> Result<()> {
+    let payload = v2_name_records_payload_with_setup(
+        "/v1/names/Alice.eth/records",
+        |_, _, inventory| unsupported_resolver_inventory(inventory),
+    )
+    .await?;
+
+    assert!(payload["data"].get("records").is_none());
+    assert_eq!(payload["data"]["addresses"], json!({}));
+    assert_eq!(payload["data"]["text_records"], json!({}));
+    assert_eq!(payload["data"]["content_hash"], Value::Null);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_source_auto_does_not_satisfy_from_unsupported_inventory()
+-> Result<()> {
+    let payload = v2_name_records_payload_with_setup(
+        "/v1/names/Alice.eth/records?source=auto&keys=addr:60",
+        |_, _, inventory| unsupported_resolver_inventory(inventory),
+    )
+    .await?;
+
+    // The retained entry does not satisfy auto; the key goes to verified lookup, which this
+    // fixture cannot execute, so no value is served either way.
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(payload["data"]["addresses"], json!({}));
+    assert_eq!(payload["data"]["records"]["addr:60"]["status"], json!("unsupported"));
+    assert_eq!(
+        payload["data"]["records"]["addr:60"]["unsupported_reason"],
+        json!("verified_records_not_supported")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_withholds_indexed_record_fields_from_unsupported_inventory() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_record_fixture(
+        &database,
+        |_| {},
+        |_, _, inventory| unsupported_resolver_inventory(inventory),
+    )
+    .await?;
+
+    let payload = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
+
+    assert_eq!(payload["data"]["status"], json!("ok"));
+    assert_eq!(
+        payload["data"]["resolver"],
+        json!({
+            "chain_id": 1,
+            "address": "0x0000000000000000000000000000000000000abc"
+        })
+    );
+    assert!(payload["data"].get("addresses").is_none());
+    assert!(payload["data"].get("text_records").is_none());
+    assert!(payload["data"].get("content_hash").is_none());
+    assert!(payload["data"].get("primary_address").is_none());
+    assert_eq!(
+        payload["data"]["unsupported_fields"],
+        json!(["addresses", "content_hash", "primary_address", "text_records"])
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_get_name_records_missing_name_returns_not_found() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
@@ -3547,7 +4016,7 @@ async fn v2_get_name_records_missing_name_returns_not_found() -> Result<()> {
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/missing.eth/records")
+                .uri("/v1/names/missing.eth/records")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3565,7 +4034,7 @@ async fn v2_get_name_records_missing_name_returns_not_found() -> Result<()> {
 #[tokio::test]
 async fn v2_get_name_records_response_omits_banned_v1_spellings() -> Result<()> {
     let payload =
-        v2_name_records_payload("/v2/names/Alice.eth/records?keys=addr:60&include=inventory")
+        v2_name_records_payload("/v1/names/Alice.eth/records?keys=addr:60&include=inventory")
             .await?;
     assert_no_banned_v1_spellings(&payload);
     Ok(())
@@ -3573,7 +4042,7 @@ async fn v2_get_name_records_response_omits_banned_v1_spellings() -> Result<()> 
 
 #[tokio::test]
 async fn v2_get_name_records_uses_envelope_shape() -> Result<()> {
-    let payload = v2_name_records_payload("/v2/names/Alice.eth/records?keys=addr:60").await?;
+    let payload = v2_name_records_payload("/v1/names/Alice.eth/records?keys=addr:60").await?;
 
     assert!(payload.get("page").is_none());
     assert!(payload["data"].is_object());
@@ -3593,7 +4062,7 @@ async fn v2_get_name_records_uses_envelope_shape() -> Result<()> {
 #[tokio::test]
 async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> Result<()> {
     let (database, payload) =
-        v2_subnames_payload("/v2/names/Parent.eth/subnames?page_size=3").await?;
+        v2_subnames_payload("/v1/names/Parent.eth/subnames?page_size=3").await?;
     let stored_owner: Option<String> = sqlx::query_scalar(
         "SELECT owner FROM bigname_phase.children_current
          WHERE decoded_name = 'gamma.parent.eth'",
@@ -3606,9 +4075,9 @@ async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> R
     );
 
     assert_eq!(payload["page"]["page_size"], json!(3));
-    assert_eq!(payload["page"]["total_count"], Value::Null);
+    assert_eq!(payload["page"]["total_count"], json!(3));
     assert_eq!(payload["page"]["has_more"], json!(false));
-    assert_eq!(payload["meta"], json!({}));
+    assert!(payload["meta"]["as_of"].is_object());
 
     let data = payload["data"]
         .as_array()
@@ -3690,7 +4159,7 @@ async fn v2_get_subnames_keeps_zero_owner_for_ownerless_resolver_child() -> Resu
 
     let payload = v2_subnames_payload_for_database(
         &database,
-        "/v2/names/parent.eth/subnames?page_size=10",
+        "/v1/names/parent.eth/subnames?page_size=10",
     )
     .await?;
     let child = payload["data"]
@@ -3710,7 +4179,7 @@ async fn v2_get_subnames_keeps_zero_owner_for_ownerless_resolver_child() -> Resu
 #[tokio::test]
 async fn v2_get_subnames_paginates_with_opaque_cursor_without_overlap() -> Result<()> {
     let (database, first_page) =
-        v2_subnames_payload("/v2/names/parent.eth/subnames?page_size=2").await?;
+        v2_subnames_payload("/v1/names/parent.eth/subnames?page_size=2").await?;
     let next_cursor = first_page["page"]["next_cursor"]
         .as_str()
         .expect("first page must include a next cursor")
@@ -3719,7 +4188,7 @@ async fn v2_get_subnames_paginates_with_opaque_cursor_without_overlap() -> Resul
 
     let second_page = v2_subnames_payload_for_database(
         &database,
-        &format!("/v2/names/parent.eth/subnames?page_size=2&cursor={next_cursor}"),
+        &format!("/v1/names/parent.eth/subnames?page_size=2&cursor={next_cursor}"),
     )
     .await?;
 
@@ -3753,45 +4222,35 @@ async fn v2_get_subnames_paginates_with_opaque_cursor_without_overlap() -> Resul
 async fn v2_get_subnames_uses_current_sepolia_anchor_on_mixed_phase_heads() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_mixed_phase_head_names(&database).await?;
-    let child_logical_name_id = format!("ens:child.{V2_SEPOLIA_SNAPSHOT_NAME}");
-    seed_v2_subnames_bound_child(
-        &database,
-        &child_logical_name_id,
-        "Child.Sepolia-Pin.eth",
-        "namehash:child.sepolia-pin.eth",
-        91,
-        Uuid::from_u128(0x7e23),
-        Uuid::from_u128(0x7e24),
-        Uuid::from_u128(0x7e25),
-        json!({
-            "registration": {
-                "status": "active",
-                "authority_kind": "ens_v2_registry"
-            }
-        }),
-    )
-    .await?;
-    upsert_phase_children_current_rows(
-        &database.pool,
-        &[v2_subnames_declared_child_row(
-            &format!("ens:{V2_SEPOLIA_SNAPSHOT_NAME}"),
-            &child_logical_name_id,
-            "Child.Sepolia-Pin.eth",
-            "namehash:child.sepolia-pin.eth",
-            905,
-            91,
-        )],
-    )
-    .await?;
-
-    let payload = v2_subnames_payload_for_database(
-        &database,
-        &format!("/v2/names/{V2_SEPOLIA_SNAPSHOT_NAME}/subnames"),
-    )
-    .await?;
-    assert_eq!(payload["meta"], json!({}));
-    assert_eq!(payload["data"][0]["name"], json!("child.sepolia-pin.eth"));
-
+    let child_name = format!("child.{V2_SEPOLIA_SNAPSHOT_NAME}");
+    let child_logical_name_id = format!("ens:{child_name}");
+    seed_v2_snapshot_profile_name(&database, &child_name, "Child.Sepolia-Pin.eth",
+        "namehash:child.sepolia-pin.eth", Uuid::from_u128(0x7e23),
+        Uuid::from_u128(0x7e24), Uuid::from_u128(0x7e25),
+        "ethereum-sepolia", "ethereum-sepolia", V2_SEPOLIA_SNAPSHOT_BLOCK,
+        V2_SEPOLIA_SNAPSHOT_HASH, V2_SEPOLIA_SNAPSHOT_TIMESTAMP).await?;
+    let mut child = v2_subnames_declared_child_row(
+        &format!("ens:{V2_SEPOLIA_SNAPSHOT_NAME}"), &child_logical_name_id,
+        "Child.Sepolia-Pin.eth", "namehash:child.sepolia-pin.eth", 905, 10);
+    child.chain_positions = json!({"ethereum-sepolia": {
+        "chain_id": "ethereum-sepolia", "block_number": V2_SEPOLIA_SNAPSHOT_BLOCK,
+        "block_hash": V2_SEPOLIA_SNAPSHOT_HASH, "timestamp": V2_SEPOLIA_SNAPSHOT_TIMESTAMP
+    }});
+    child.canonicality_summary = json!({"state":"canonical_lineage"});
+    upsert_phase_children_current_rows(&database.pool, &[child]).await?;
+    database.insert_manifest("ens", "ens_v2_registry_l1", "ethereum-sepolia",
+        "ens_v2_sepolia_post_audit", 1, "active", "ensip15@ens-normalize-0.1.1").await?;
+    let state = AppState::new_with_rpc_urls(database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default());
+    let response = app_router(state).oneshot(Request::builder()
+        .uri(format!("/v1/names/{V2_SEPOLIA_SNAPSHOT_NAME}/subnames"))
+        .body(Body::empty()).expect("request must build")).await?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload}");
+    assert_eq!(payload["meta"]["as_of"]["11155111"]["block_number"], json!(V2_SEPOLIA_SNAPSHOT_BLOCK));
+    assert!(payload["meta"]["as_of"].get("1").is_none());
+    assert_eq!(payload["data"][0]["name"], json!(child_name));
     database.cleanup().await
 }
 
@@ -3853,7 +4312,7 @@ async fn v2_get_subnames_rejects_cursor_reused_for_different_parent() -> Result<
     .await?;
 
     let first_page =
-        v2_subnames_payload_for_database(&database, "/v2/names/parent.eth/subnames?page_size=2")
+        v2_subnames_payload_for_database(&database, "/v1/names/parent.eth/subnames?page_size=2")
             .await?;
     let next_cursor = first_page["page"]["next_cursor"]
         .as_str()
@@ -3861,7 +4320,7 @@ async fn v2_get_subnames_rejects_cursor_reused_for_different_parent() -> Result<
 
     let response = v2_subnames_response_for_database(
         &database,
-        &format!("/v2/names/other.eth/subnames?page_size=2&cursor={next_cursor}"),
+        &format!("/v1/names/other.eth/subnames?page_size=2&cursor={next_cursor}"),
     )
     .await?;
 
@@ -3877,14 +4336,14 @@ async fn v2_get_subnames_rejects_cursor_reused_for_different_parent() -> Result<
 async fn v2_get_subnames_include_counts_adds_child_subname_count_only_when_requested()
 -> Result<()> {
     let (database, without_counts) =
-        v2_subnames_payload("/v2/names/parent.eth/subnames?page_size=3").await?;
+        v2_subnames_payload("/v1/names/parent.eth/subnames?page_size=3").await?;
     assert!(
         without_counts["data"][0].get("subname_count").is_none(),
         "subname_count must be omitted by default"
     );
 
     let with_counts =
-        v2_subnames_payload_for_database(&database, "/v2/names/parent.eth/subnames?include=counts")
+        v2_subnames_payload_for_database(&database, "/v1/names/parent.eth/subnames?include=counts")
             .await?;
     assert_eq!(with_counts["data"][0]["subname_count"], json!(1));
     assert_eq!(with_counts["data"][1]["subname_count"], json!(0));
@@ -4078,9 +4537,9 @@ async fn v2_get_subnames_paginates_across_a_child_with_no_observed_label() -> Re
     for _ in 0..5 {
         let uri = match cursor.as_deref() {
             Some(cursor) => format!(
-                "/v2/names/parent.eth/subnames?page_size=2&cursor={cursor}"
+                "/v1/names/parent.eth/subnames?page_size=2&cursor={cursor}"
             ),
-            None => "/v2/names/parent.eth/subnames?page_size=2".to_owned(),
+            None => "/v1/names/parent.eth/subnames?page_size=2".to_owned(),
         };
         let payload = v2_subnames_payload_for_database(&database, &uri).await?;
         for row in payload["data"].as_array().expect("subnames data") {
@@ -4106,7 +4565,7 @@ async fn v2_get_subnames_paginates_across_a_child_with_no_observed_label() -> Re
     // escape-encodes it. It is equally not an addressable name, and equally must not fail the page.
     seed_v2_subnames_undecodable_child(&database, "parent.eth", "0xfeed0002").await?;
     let with_undecodable =
-        v2_subnames_payload_for_database(&database, "/v2/names/parent.eth/subnames?page_size=20")
+        v2_subnames_payload_for_database(&database, "/v1/names/parent.eth/subnames?page_size=20")
             .await?;
     let names = with_undecodable["data"]
         .as_array()
@@ -4158,7 +4617,7 @@ async fn v2_get_subnames_gates_decoded_text_on_the_normalization_verdict() -> Re
     seed_v2_subnames_preimage_child(&database, "parent.eth", "Ni\u{200d}ck", false).await?;
 
     let payload =
-        v2_subnames_payload_for_database(&database, "/v2/names/parent.eth/subnames?page_size=20")
+        v2_subnames_payload_for_database(&database, "/v1/names/parent.eth/subnames?page_size=20")
             .await?;
     let rows = payload["data"].as_array().expect("subnames data").clone();
     let row_for_label = |label: &str| {
@@ -4271,7 +4730,7 @@ async fn v2_subname_counts_agree_with_the_page_when_a_child_target_is_orphaned()
 
     let counted = v2_subnames_payload_for_database(
         &database,
-        "/v2/names/parent.eth/subnames?include=counts",
+        "/v1/names/parent.eth/subnames?include=counts",
     )
     .await?;
     assert_eq!(counted["data"][0]["name"], json!("alpha.parent.eth"));
@@ -4318,14 +4777,14 @@ async fn v2_subname_counts_agree_with_the_page_when_a_child_target_is_orphaned()
 
     let page = v2_subnames_payload_for_database(
         &database,
-        "/v2/names/alpha.parent.eth/subnames?page_size=10",
+        "/v1/names/alpha.parent.eth/subnames?page_size=10",
     )
     .await?;
     assert_eq!(page["data"], json!([]));
 
     let recounted = v2_subnames_payload_for_database(
         &database,
-        "/v2/names/parent.eth/subnames?include=counts",
+        "/v1/names/parent.eth/subnames?include=counts",
     )
     .await?;
     assert_eq!(recounted["data"][0]["name"], json!("alpha.parent.eth"));
@@ -4522,7 +4981,7 @@ async fn v2_get_subnames_parent_with_zero_children_returns_empty_page() -> Resul
     seed_v2_subnames_parent(&database, "ens:empty.eth", "empty.eth", "node:empty.eth", 80).await?;
 
     let payload =
-        v2_subnames_payload_for_database(&database, "/v2/names/empty.eth/subnames").await?;
+        v2_subnames_payload_for_database(&database, "/v1/names/empty.eth/subnames").await?;
 
     assert_eq!(payload["data"], json!([]));
     assert_eq!(payload["page"]["has_more"], json!(false));
@@ -4540,7 +4999,7 @@ async fn v2_get_subnames_missing_parent_returns_not_found() -> Result<()> {
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/missing.eth/subnames")
+                .uri("/v1/names/missing.eth/subnames")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -4563,7 +5022,7 @@ async fn v2_get_subnames_rejects_malformed_cursor() -> Result<()> {
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/names/parent.eth/subnames?cursor=not-a-cursor")
+                .uri("/v1/names/parent.eth/subnames?cursor=not-a-cursor")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -4579,7 +5038,7 @@ async fn v2_get_subnames_rejects_malformed_cursor() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_get_subnames_rejects_wrong_sort_but_ignores_legacy_snapshot_component() -> Result<()> {
+async fn v2_get_subnames_requires_restart_for_unbound_legacy_cursors() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_subnames_fixture(&database).await?;
 
@@ -4602,14 +5061,14 @@ async fn v2_get_subnames_rejects_wrong_sort_but_ignores_legacy_snapshot_componen
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/names/parent.eth/subnames?cursor={wrong_sort}"
+                    "/v1/names/parent.eth/subnames?cursor={wrong_sort}"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
         .await
         .context("v2 wrong-sort subnames cursor request failed")?;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 
     let legacy_snapshot = crate::v2::encode(&crate::v2::CursorPayload::new(
         "display_name_asc",
@@ -4633,20 +5092,190 @@ async fn v2_get_subnames_rejects_wrong_sort_but_ignores_legacy_snapshot_componen
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/names/parent.eth/subnames?cursor={legacy_snapshot}"
+                    "/v1/names/parent.eth/subnames?cursor={legacy_snapshot}"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
         .await
         .context("v2 legacy-snapshot subnames cursor request failed")?;
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
     let payload: Value = read_json(response).await?;
-    assert_eq!(payload["data"][0]["name"], json!("beta.parent.eth"));
-    assert_eq!(payload["meta"], json!({}));
+    assert_eq!(payload["error"]["code"], json!("stale"));
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn v2_sepolia_indexed_inventory_serves_name_and_records_at_snapshot() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_sepolia_indexed_inventory(&database).await?;
+    let name = v2_name_record_payload_for_database(
+        &database,
+        &format!("/v1/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?source=indexed"),
+    )
+    .await?;
+    assert_eq!(name["data"]["chain_id"], json!(11155111));
+    assert_eq!(
+        name["data"]["addresses"]["60"],
+        json!("0x0000000000000000000000000000000000000abc")
+    );
+    assert_eq!(
+        name["data"]["text_records"]["com.twitter"],
+        json!("sepolia-record")
+    );
+    let at = name["meta"]["as_of_token"]
+        .as_str()
+        .expect("snapshot token");
+    for source in ["indexed", "auto"] {
+        let records = v2_name_record_payload_for_database(&database, &format!(
+            "/v1/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}/records?source={source}&at={at}&keys=addr:60,text:com.twitter&include=inventory",
+        )).await?;
+        assert_eq!(records["meta"]["source"], json!("indexed"));
+        assert_eq!(records["meta"]["as_of"], name["meta"]["as_of"]);
+        assert_eq!(records["data"]["records"]["addr:60"]["status"], json!("ok"));
+        assert_eq!(
+            records["data"]["records"]["text:com.twitter"]["value"],
+            json!("sepolia-record")
+        );
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_sepolia_verified_inventory_remains_unsupported() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_sepolia_indexed_inventory(&database).await?;
+    let name = v2_name_record_payload_for_database(
+        &database,
+        &format!("/v1/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?source=verified"),
+    )
+    .await?;
+    assert_eq!(name["data"]["status"], json!("unsupported"));
+    assert_eq!(
+        name["data"]["unsupported_reason"],
+        json!("verified_records_not_supported")
+    );
+    let records = v2_name_record_payload_for_database(
+        &database,
+        &format!("/v1/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}/records?source=verified&keys=addr:60",),
+    )
+    .await?;
+    assert_eq!(
+        records["data"]["records"]["addr:60"],
+        json!({
+            "status": "unsupported", "unsupported_reason": "verified_records_not_supported"
+        })
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_sepolia_indexed_inventory_missing_or_wrong_snapshot_is_not_served() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_sepolia_only_phase_head_name(&database).await?;
+    let records_uri =
+        format!("/v1/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}/records?source=indexed&keys=addr:60",);
+    let missing = v2_name_record_payload_for_database(&database, &records_uri).await?;
+    assert_eq!(
+        missing["data"]["records"]["addr:60"],
+        json!({
+            "status": "unsupported", "unsupported_reason": "inventory_not_available"
+        })
+    );
+    let missing_name = v2_name_record_payload_for_database(
+        &database,
+        &format!("/v1/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?source=indexed"),
+    )
+    .await?;
+    assert!(missing_name["data"].get("addresses").is_none());
+    assert!(missing_name["data"]["unsupported_fields"]
+        .as_array()
+        .expect("unsupported fields")
+        .contains(&json!("addresses")));
+    insert_v2_sepolia_indexed_inventory(&database).await?;
+    // Keep the inventory SQL-loadable but ahead of the selected publication snapshot.
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_lineage
+         (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES ('ethereum-sepolia', '0xfuture-inventory', $1,
+                 '2026-04-17T00:10:21Z', 'canonical'::bigname_phase.canonicality_state)",
+    )
+    .bind(V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK + 1)
+    .execute(&database.pool)
+    .await?;
+    let future_target = json!({
+        "block_number": V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK + 1,
+        "block_hash": "0xfuture-inventory",
+        "target_block_number": V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK + 1,
+        "target_block_hash": "0xfuture-inventory",
+    });
+    sqlx::query(
+        "UPDATE bigname_phase.record_inventory_current
+         SET chain_positions = $2, canonicality_summary = $3
+         WHERE resource_id = $1",
+    )
+    .bind(Uuid::from_u128(0x7e30))
+    .bind(future_target)
+    .bind(json!({
+        "state": "canonical_lineage",
+        "target_block_number": V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK + 1,
+        "target_block_hash": "0xfuture-inventory",
+    }))
+    .execute(&database.pool)
+    .await?;
+    for uri in [
+        format!("/v1/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?source=indexed"),
+        records_uri,
+    ] {
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+    database.cleanup().await
+}
+
+async fn seed_v2_sepolia_indexed_inventory(database: &TestDatabase) -> Result<()> {
+    seed_v2_sepolia_only_phase_head_name(database).await?;
+    insert_v2_sepolia_indexed_inventory(database).await
+}
+
+async fn insert_v2_sepolia_indexed_inventory(database: &TestDatabase) -> Result<()> {
+    let logical_name_id =
+        bigname_storage::logical_name_id_for_name("ens", V2_SEPOLIA_ONLY_SNAPSHOT_NAME);
+    let row = bigname_storage::load_name_current(&database.pool, &logical_name_id)
+        .await?
+        .expect("seeded Sepolia name");
+    let resource_id = row
+        .record_serving_resource_id()
+        .expect("declared serving resource");
+    let mut inventory = record_inventory_current_row(&logical_name_id, resource_id);
+    inventory.record_version_boundary = json!({
+        "logical_name_id": logical_name_id, "resource_id": resource_id,
+        "normalized_event_id": null, "event_kind": null,
+        "chain_position": row.chain_positions["ethereum-sepolia"],
+    });
+    inventory.chain_positions = row.chain_positions;
+    inventory.last_change = None;
+    for selector in inventory.selectors.as_array_mut().expect("selectors array") {
+        if selector["record_key"] == "text:com.twitter" {
+            selector["cacheable"] = json!(true);
+        }
+    }
+    inventory.entries.as_array_mut().expect("entries array").push(json!({
+        "record_key": "text:com.twitter", "record_family": "text", "selector_key": "com.twitter",
+        "status": "success", "value": {"value": "sepolia-record"},
+    }));
+    database
+        .insert_record_inventory_current_row(inventory)
+        .await
 }
 
 const V2_MAINNET_SNAPSHOT_NAME: &str = "mainnet-pin.eth";
@@ -5399,6 +6028,295 @@ async fn seed_v2_alice_name_records_fixture_with_row(
     Ok(())
 }
 
+fn v2_subname_names(payload: &Value) -> Vec<String> {
+    payload["data"]
+        .as_array()
+        .expect("subnames data must be an array")
+        .iter()
+        .map(|row| {
+            row["name"]
+                .as_str()
+                .expect("subname name must be a string")
+                .to_owned()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn v2_get_subnames_q_filters_by_normalized_label_prefix() -> Result<()> {
+    let (database, payload) = v2_subnames_payload("/v1/names/Parent.eth/subnames?q=AL").await?;
+    assert_eq!(v2_subname_names(&payload), vec!["alpha.parent.eth"]);
+    assert_eq!(
+        payload["page"]["total_count"],
+        json!(1),
+        "a filtered page reports its exact total"
+    );
+    assert_eq!(payload["page"]["has_more"], json!(false));
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v1/names/Parent.eth/subnames?q=alpha.")
+            .await?;
+    assert_eq!(v2_subname_names(&payload), vec!["alpha.parent.eth"]);
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v1/names/Parent.eth/subnames?q=alph.")
+            .await?;
+    assert!(v2_subname_names(&payload).is_empty());
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v1/names/Parent.eth/subnames?q=x").await?;
+    assert!(v2_subname_names(&payload).is_empty());
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v1/names/Parent.eth/subnames?q=").await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["alpha.parent.eth", "beta.parent.eth", "gamma.parent.eth"]
+    );
+    assert_eq!(payload["page"]["total_count"], json!(3));
+
+    let response =
+        v2_subnames_response_for_database(&database, "/v1/names/Parent.eth/subnames?q=a..b")
+            .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = read_json(response).await?;
+    assert_eq!(body["error"]["code"], json!("invalid_input"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_subnames_sorts_by_timestamps_and_binds_cursors_to_sort_and_order() -> Result<()> {
+    let (database, payload) = v2_subnames_payload(
+        "/v1/names/Parent.eth/subnames?sort=expires_at&order=asc&page_size=1",
+    )
+    .await?;
+    assert_eq!(v2_subname_names(&payload), vec!["alpha.parent.eth"]);
+    assert_eq!(payload["page"]["total_count"], json!(3));
+    assert_eq!(payload["page"]["has_more"], json!(true));
+    let first_cursor = payload["page"]["next_cursor"]
+        .as_str()
+        .expect("first page must carry a cursor")
+        .to_owned();
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        &format!(
+            "/v1/names/Parent.eth/subnames?sort=expires_at&order=asc&page_size=1&cursor={first_cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["beta.parent.eth"],
+        "rows without an expiry sort after every dated row, ties broken by name"
+    );
+    let second_cursor = payload["page"]["next_cursor"]
+        .as_str()
+        .expect("second page must carry a cursor")
+        .to_owned();
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        &format!(
+            "/v1/names/Parent.eth/subnames?sort=expires_at&order=asc&page_size=1&cursor={second_cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(v2_subname_names(&payload), vec!["gamma.parent.eth"]);
+    assert_eq!(payload["page"]["has_more"], json!(false));
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?sort=expires_at&order=desc",
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["beta.parent.eth", "gamma.parent.eth", "alpha.parent.eth"],
+        "descending timestamp order lists rows without an expiry first"
+    );
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?sort=registered_at",
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["alpha.parent.eth", "beta.parent.eth", "gamma.parent.eth"]
+    );
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?sort=registered_at&order=desc",
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["beta.parent.eth", "gamma.parent.eth", "alpha.parent.eth"]
+    );
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?sort=name&order=desc",
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["gamma.parent.eth", "beta.parent.eth", "alpha.parent.eth"]
+    );
+
+    for uri in [
+        format!("/v1/names/Parent.eth/subnames?sort=name&page_size=1&cursor={first_cursor}"),
+        format!(
+            "/v1/names/Parent.eth/subnames?sort=expires_at&order=desc&page_size=1&cursor={first_cursor}"
+        ),
+        format!(
+            "/v1/names/Parent.eth/subnames?sort=registered_at&page_size=1&cursor={first_cursor}"
+        ),
+        format!("/v1/names/Parent.eth/subnames?sort=expires_at&q=al&cursor={first_cursor}"),
+        "/v1/names/Parent.eth/subnames?sort=expiry".to_owned(),
+        "/v1/names/Parent.eth/subnames?order=sideways".to_owned(),
+    ] {
+        let response = v2_subnames_response_for_database(&database, &uri).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{uri} must be rejected"
+        );
+        let body: Value = read_json(response).await?;
+        assert_eq!(body["error"]["code"], json!("invalid_input"));
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_subnames_include_expired_false_omits_released_and_past_expiry_rows() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+    seed_v2_subnames_bound_child(
+        &database,
+        "ens:epsilon.parent.eth",
+        "epsilon.parent.eth",
+        "node:epsilon.parent.eth",
+        85,
+        Uuid::from_u128(0x4030),
+        Uuid::from_u128(0x5030),
+        Uuid::from_u128(0x6030),
+        json!({
+            "registration": {
+                "status": "active",
+                "authority_kind": "registrar",
+                "registrant": "0x00000000000000000000000000000000000000eB",
+                "registered_at": "2019-01-02T03:04:05Z",
+                "expiry": "2020-01-02T03:04:05Z"
+            },
+            "control": {
+                "registry_owner": "0x00000000000000000000000000000000000000eA"
+            }
+        }),
+    )
+    .await?;
+    upsert_phase_children_current_rows(
+        &database.pool,
+        &[v2_subnames_declared_child_row(
+            "ens:parent.eth",
+            "ens:epsilon.parent.eth",
+            "epsilon.parent.eth",
+            "node:epsilon.parent.eth",
+            905,
+            85,
+        )],
+    )
+    .await?;
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v1/names/Parent.eth/subnames").await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec![
+            "alpha.parent.eth",
+            "beta.parent.eth",
+            "epsilon.parent.eth",
+            "gamma.parent.eth"
+        ],
+        "the default keeps released and past-expiry rows"
+    );
+    assert_eq!(payload["page"]["total_count"], json!(4));
+    assert_eq!(payload["data"][2]["registration_status"], json!("active"));
+    assert_eq!(
+        payload["data"][2]["expires_at"],
+        json!("2020-01-02T03:04:05Z")
+    );
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?include_expired=true",
+    )
+    .await?;
+    assert_eq!(v2_subname_names(&payload).len(), 4);
+    assert_eq!(payload["page"]["total_count"], json!(4));
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?include_expired=false",
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["alpha.parent.eth", "gamma.parent.eth"],
+        "released rows and rows whose expires_at has passed are omitted; unregistered rows stay"
+    );
+    assert_eq!(payload["page"]["total_count"], json!(2));
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?include_expired=false&sort=expires_at&order=desc",
+    )
+    .await?;
+    assert_eq!(
+        v2_subname_names(&payload),
+        vec!["gamma.parent.eth", "alpha.parent.eth"]
+    );
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v1/names/Parent.eth/subnames?include_expired=false&page_size=1",
+    )
+    .await?;
+    assert_eq!(v2_subname_names(&payload), vec!["alpha.parent.eth"]);
+    assert_eq!(payload["page"]["has_more"], json!(true));
+    let cursor = payload["page"]["next_cursor"]
+        .as_str()
+        .expect("filtered page must carry a cursor")
+        .to_owned();
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        &format!("/v1/names/Parent.eth/subnames?include_expired=false&page_size=1&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(v2_subname_names(&payload), vec!["gamma.parent.eth"]);
+    assert_eq!(payload["page"]["has_more"], json!(false));
+
+    for uri in [
+        format!("/v1/names/Parent.eth/subnames?page_size=1&cursor={cursor}"),
+        format!("/v1/names/Parent.eth/subnames?include_expired=true&page_size=1&cursor={cursor}"),
+        "/v1/names/Parent.eth/subnames?include_expired=maybe".to_owned(),
+    ] {
+        let response = v2_subnames_response_for_database(&database, &uri).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{uri} must be rejected"
+        );
+        let body: Value = read_json(response).await?;
+        assert_eq!(body["error"]["code"], json!("invalid_input"));
+    }
+
+    Ok(())
+}
+
 async fn v2_subnames_payload(uri: &str) -> Result<(TestDatabase, Value)> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_subnames_fixture(&database).await?;
@@ -6019,4 +6937,339 @@ fn assert_no_banned_v1_spellings(value: &Value) {
         }
         _ => {}
     }
+}
+
+/// Stamps the seeded ENSv2 migration proof on the Alice row: a `MigrationApplied`
+/// normalized event at `block_number` plus the matching `authority_selection`.
+async fn stamp_v2_alice_migration_transition(
+    database: &TestDatabase,
+    block_number: i64,
+    block_timestamp: i64,
+) -> Result<()> {
+    let block_hash = format!("0xmigration{block_number}");
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[raw_block(
+            "ethereum-mainnet",
+            &block_hash,
+            None,
+            block_number,
+            block_timestamp,
+        )],
+    )
+    .await?;
+    let event_identity = format!(
+        "ens_v2_migration_l1:1:ethereum-mainnet:{block_hash}:0xtxmigration:0:MigrationApplied:0"
+    );
+    let mut event = history_event(
+        &event_identity,
+        None,
+        None,
+        Some("ethereum-mainnet"),
+        Some(block_number),
+        Some(&block_hash),
+        Some("0xtxmigration"),
+        Some(0),
+        CanonicalityState::Canonical,
+    );
+    event.event_kind = "MigrationApplied".to_owned();
+    event.source_family = "ens_v2_migration_l1".to_owned();
+    event.derivation_kind = "ens_v2_migration".to_owned();
+    event.before_state = json!({});
+    event.after_state = json!({});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    let proof_event_id: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM bigname_phase.normalized_events WHERE event_identity = $1",
+    )
+    .bind(&event_identity)
+    .fetch_one(&database.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET provenance = provenance || jsonb_build_object('authority_selection', $1::jsonb)
+         WHERE namespace = 'ens' AND lower(raw_name) = 'alice.eth'",
+    )
+    .bind(json!({
+        "authority_arm": "ens_v2",
+        "proof_kind": "migration_authority_transition",
+        "proof_event_id": proof_event_id,
+        "lifecycle_state": "registered",
+    }))
+    .execute(&database.pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_reports_authority_arm_without_migration_transition() -> Result<()> {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
+        row.provenance["authority_selection"] = json!({
+            "authority_arm": "ens_v1",
+            "lifecycle_state": "registered",
+        });
+    })
+    .await?;
+
+    let data = payload["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("authority"), Some(&json!("ens_v1")));
+    assert!(data.get("migrated_at").is_none());
+
+    let unstamped = v2_name_record_payload("/v1/names/Alice.eth").await?;
+    assert!(unstamped["data"].get("authority").is_none());
+    assert!(unstamped["data"].get("migrated_at").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_and_lookup_report_migrated_at_from_the_migration_proof() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_record_fixture(&database, |_| {}, |_, _, _| {}).await?;
+    stamp_v2_alice_migration_transition(&database, 21_000_002, 1_717_171_699).await?;
+
+    let payload = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
+    let data = payload["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("authority"), Some(&json!("ens_v2")));
+    assert_eq!(data.get("migrated_at"), Some(&json!("2024-05-31T16:08:19Z")));
+
+    let response = v2_lookup_response_for_database(
+        &database,
+        "/v1/lookup",
+        json!({"inputs": [{"id": "alice", "name": "alice.eth"}]}),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let lookup: Value = read_json(response).await?;
+    let record = &lookup["data"][0]["record"];
+    assert_eq!(record["authority"], json!("ens_v2"));
+    assert_eq!(record["migrated_at"], json!("2024-05-31T16:08:19Z"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_name_include_counts_reports_subname_and_record_counts() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_record_fixture(&database, |_| {}, |_, _, _| {}).await?;
+
+    let plain = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
+    assert!(plain["data"].get("subname_count").is_none());
+    assert!(plain["data"].get("record_count").is_none());
+
+    let counted =
+        v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth?include=counts")
+            .await?;
+    assert_eq!(counted["data"]["subname_count"], json!(0));
+    assert_eq!(counted["data"]["record_count"], json!(4));
+    assert!(counted["data"].get("event_count").is_none());
+
+    let rejected = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/Alice.eth?include=records")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await?;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_name_include_counts_counts_direct_subnames_of_the_parent() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+
+    let parent =
+        v2_name_record_payload_for_database(&database, "/v1/names/parent.eth?include=counts")
+            .await?;
+    assert_eq!(parent["data"]["subname_count"], json!(3));
+
+    let subnames =
+        v2_subnames_payload_for_database(&database, "/v1/names/parent.eth/subnames?page_size=2")
+            .await?;
+    assert_eq!(subnames["page"]["total_count"], json!(3));
+    assert_eq!(subnames["page"]["has_more"], json!(true));
+    assert_eq!(subnames["data"].as_array().map(Vec::len), Some(2));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_name_records_serves_inventory_mirrored_from_ensv1() -> Result<()> {
+    // Project publishes a name bound to a declared ENSv1 mirror resolver with the same name's
+    // ENSv1 inventory and `provenance.mirror`; the route serves it like any supported inventory.
+    const MIRROR: &str = "0x1010101010101010101010101010101010101010";
+    let payload = v2_name_records_payload_with_row_and_setup(
+        "/v1/names/alice.eth/records?keys=addr:60,text:description&include=inventory",
+        |row| {
+            row.declared_summary["resolver"]["address"] = json!(MIRROR);
+        },
+        |_, _, inventory| {
+            inventory.provenance["resolver_address"] = json!(MIRROR);
+            inventory.provenance["mirror"] = json!({
+                "resolver_address": MIRROR,
+                "mirrored_source_family": "ens_v1_resolver_l1",
+                "mirrored_registry_source_family": "ens_v1_registry_l1",
+                "mirrored_registry_address": "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e",
+                "mirrored_resolver_address": "0x0000000000000000000000000000000000000abc",
+                "mirrored_resource_id": "00000000-0000-0000-0000-000000000b100",
+                "mirrored_pointer_event_id": 77,
+                "mirrored_pointer_source_family": "ens_v1_registry_l1"
+            });
+        },
+    )
+    .await?;
+    assert_eq!(payload["meta"]["source"], json!("indexed"));
+    assert_eq!(payload["data"]["resolver"]["address"], json!(MIRROR));
+    assert_eq!(payload["data"]["records"]["addr:60"]["status"], json!("ok"));
+    assert_eq!(
+        payload["data"]["records"]["addr:60"]["value"],
+        json!("0x0000000000000000000000000000000000000def")
+    );
+    assert_eq!(
+        payload["data"]["records"]["text:description"],
+        json!({"status": "ok", "value": "Alice profile"})
+    );
+    assert_eq!(
+        payload["data"]["addresses"],
+        json!({"60": "0x0000000000000000000000000000000000000def"})
+    );
+    let known = payload["data"]["inventory"]["known_keys"]
+        .as_array()
+        .expect("inventory known keys");
+    assert!(known.contains(&json!("addr:60")) && known.contains(&json!("text:description")));
+    assert!(payload["data"].get("mirror").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_subname_filtered_totals_match_every_page_and_fixed_expiry_time() -> Result<()> {
+    let (database, _) = v2_subnames_payload("/v1/names/parent.eth/subnames").await?;
+    for filter in [
+        "q=a",
+        "q=missing",
+        "include_expired=false",
+        "q=b&include_expired=false",
+    ] {
+        let base = format!("/v1/names/parent.eth/subnames?{filter}");
+        let all = v2_subnames_payload_for_database(&database, &base).await?;
+        let expected = all["data"].as_array().unwrap().len();
+        let mut seen = Vec::new();
+        let mut uri = format!("{base}&page_size=1");
+        loop {
+            let page = v2_subnames_payload_for_database(&database, &uri).await?;
+            assert_eq!(page["page"]["total_count"], json!(expected));
+            seen.extend(v2_subname_names(&page));
+            let Some(cursor) = page["page"]["next_cursor"].as_str() else {
+                break;
+            };
+            uri = format!("{base}&page_size=1&cursor={cursor}");
+        }
+        assert_eq!(seen.len(), expected);
+    }
+    let at = bigname_storage::parse_rfc3339_utc_timestamp("2026-01-01T00:00:00Z")?;
+    let filter = bigname_storage::ChildrenCurrentPageFilter {
+        include_expired: false,
+        evaluated_at: Some(at),
+        ..Default::default()
+    };
+    let first = bigname_storage::load_children_current_page_filtered(
+        &database.pool,
+        "ens:parent.eth",
+        &filter,
+        None,
+        1,
+    )
+    .await?;
+    let next = bigname_storage::load_children_current_page_filtered(
+        &database.pool,
+        "ens:parent.eth",
+        &filter,
+        first.next_cursor.as_ref(),
+        1,
+    )
+    .await?;
+    assert_eq!(first.total_count, next.total_count);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_name_include_counts_rejects_same_height_republication() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_alice_name_record_fixture(&database, |_| {}, |_, _, _| {}).await?;
+    let baseline = v2_name_record_payload_for_database(&database, "/v1/names/alice.eth").await?;
+    let position = &baseline["meta"]["as_of"]["1"];
+    let block = position["block_number"].as_i64().expect("block number");
+    let hash = position["block_hash"].as_str().expect("block hash");
+    let time = position["timestamp"].as_str().expect("timestamp");
+    let (_guard, control) =
+        crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
+    let state = database.app_state();
+    let request = tokio::spawn(async move {
+        app_router(state).oneshot(Request::builder()
+            .uri("/v1/names/alice.eth?include=counts")
+            .body(Body::empty()).expect("request must build")).await
+    });
+    control.wait_until_reached().await;
+    seed_schema_v2_ens_lookup_head(&database.pool, block, hash, time).await?;
+    control.resume().await;
+    let response = request.await??;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], "stale");
+    assert!(payload.get("data").is_none());
+    let fresh = v2_name_record_payload_for_database(&database,
+        "/v1/names/alice.eth?include=counts").await?;
+    assert_eq!(fresh["data"]["record_count"], json!(4));
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_name_include_counts_rejects_historical_count_mismatch() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_alice_name_record_fixture(&database, |_| {}, |_, _, _| {}).await?;
+    let baseline = v2_name_record_payload_for_database(&database, "/v1/names/alice.eth").await?;
+    let token = baseline["meta"]["as_of_token"].as_str().expect("snapshot token");
+    let position = &baseline["meta"]["as_of"]["1"];
+    let block = position["block_number"].as_i64().expect("block number");
+    let time = bigname_storage::parse_rfc3339_utc_timestamp(
+        position["timestamp"].as_str().expect("timestamp"))?;
+    let later = crate::v2::format_timestamp(time + std::time::Duration::from_secs(1));
+    seed_schema_v2_ens_lookup_head(&database.pool, block + 1, "0xcounts-new-publication", &later).await?;
+    let old = v2_name_record_payload_for_database(&database,
+        &format!("/v1/names/alice.eth?at={token}")).await?;
+    assert_eq!(old["data"]["name"], "alice.eth");
+    let response = app_router(database.app_state()).oneshot(Request::builder()
+        .uri(format!("/v1/names/alice.eth?at={token}&include=counts"))
+        .body(Body::empty()).expect("request must build")).await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], "stale");
+    assert!(payload["error"]["message"].as_str().expect("message").contains("counts"));
+    assert!(payload.get("data").is_none());
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_subname_continuation_excludes_unpublished_subregistry_pointer() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    let first = v2_subnames_payload_for_database(&database, "/v1/names/alpha.eth/subnames?page_size=1").await?;
+    let cursor = first["page"]["next_cursor"].as_str().unwrap();
+    upsert_phase_raw_blocks(&database.pool, &[raw_block(REGISTRY_CHAIN_ID,
+        "0xregistry84", None, 84, 1_700_000_084)]).await?;
+    let event = registry_event("unpublished-child-pointer", Some(&registry_logical_name_id("two.alpha.eth")),
+        "SubregistryChanged", 84, ALPHA_REGISTRY,
+        json!({"source_event":"SubregistryUpdated", "subregistry":ONE_REGISTRY}));
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    let next = v2_subnames_payload_for_database(&database,
+        &format!("/v1/names/alpha.eth/subnames?page_size=1&cursor={cursor}")).await?;
+    assert_eq!(next["data"][0]["name"], json!("two.alpha.eth"));
+    assert!(next["data"][0].get("subregistry").is_none());
+    assert_eq!(next["page"]["total_count"], first["page"]["total_count"]);
+    seed_schema_v2_ens_lookup_head(&database.pool, 84, "0xregistry84", "2023-11-14T22:14:44Z").await?;
+    let published = v2_subnames_payload_for_database(&database,
+        "/v1/names/alpha.eth/subnames?q=two").await?;
+    assert_eq!(published["data"][0]["subregistry"]["address"], json!(ONE_REGISTRY));
+    database.cleanup().await
 }

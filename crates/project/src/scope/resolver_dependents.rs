@@ -57,3 +57,34 @@ pub(super) async fn include(
     .map_err(|error| ProjectError::database("failed to scope resolver names", error))?;
     Ok(())
 }
+
+pub(super) async fn seed(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO project_scope_resolver_dependents
+         SELECT lower(address)
+         FROM (
+             SELECT after_state ->> 'proxy_address' AS address
+             FROM project_changed_events WHERE event_kind = 'Upgraded'
+             UNION ALL
+             SELECT before_state ->> 'proxy_address'
+             FROM project_changed_events WHERE event_kind = 'Upgraded'
+             UNION ALL
+             SELECT COALESCE(after_state ->> 'resolver', raw_fact_ref ->> 'emitting_address')
+             FROM project_changed_events
+             WHERE event_kind = 'ResolverRecordLinked'
+                OR (event_kind = 'RecordChanged'
+                    AND after_state ->> 'storage_model' = 'resolver_record_id')
+         ) candidate
+         WHERE address IS NOT NULL AND btrim(address) <> ''
+           AND lower(address) <>
+               '0x0000000000000000000000000000000000000000'
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to derive resolver-entity dependent scope", error)
+    })?;
+
+    Ok(())
+}

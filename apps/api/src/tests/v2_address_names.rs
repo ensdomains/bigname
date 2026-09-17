@@ -35,7 +35,7 @@ async fn v2_get_address_names_preserves_stored_ensip15_normalized_name_bytes() -
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
     )
     .await?;
     let rows = payload["data"]
@@ -48,7 +48,7 @@ async fn v2_get_address_names_preserves_stored_ensip15_normalized_name_bytes() -
     let prefix_payload = v2_address_names_payload_for_database(
         &database,
         &format!(
-            "/v2/addresses/{V2_ADDRESS}/names?q=%E1%8F%A3%E1%8E%B3"
+            "/v1/addresses/{V2_ADDRESS}/names?q=%E1%8F%A3%E1%8E%B3"
         ),
     )
     .await?;
@@ -59,7 +59,7 @@ async fn v2_get_address_names_preserves_stored_ensip15_normalized_name_bytes() -
     let boundary_payload = v2_address_names_payload_for_database(
         &database,
         &format!(
-            "/v2/addresses/{V2_ADDRESS}/names?q=%E1%8F%A3%E1%8E%B3%E1%8E%A9."
+            "/v1/addresses/{V2_ADDRESS}/names?q=%E1%8F%A3%E1%8E%B3%E1%8E%A9."
         ),
     )
     .await?;
@@ -75,12 +75,12 @@ async fn v2_get_address_names_preserves_stored_ensip15_normalized_name_bytes() -
 #[tokio::test]
 async fn v2_get_address_names_returns_record_rows_with_relations_and_primary_flag() -> Result<()> {
     let (database, payload) =
-        v2_address_names_payload(&format!("/v2/addresses/{V2_ADDRESS}/names")).await?;
+        v2_address_names_payload(&format!("/v1/addresses/{V2_ADDRESS}/names")).await?;
 
     assert_eq!(payload["page"]["page_size"], json!(50));
-    assert_eq!(payload["page"]["total_count"], Value::Null);
+    assert_eq!(payload["page"]["total_count"], json!(5));
     assert_eq!(payload["page"]["has_more"], json!(false));
-    assert_eq!(payload["meta"], json!({}));
+    assert_eq!(payload["meta"]["as_of"]["1"]["block_number"], json!(105));
 
     let data = payload["data"]
         .as_array()
@@ -130,7 +130,7 @@ async fn v2_get_address_names_returns_record_rows_with_relations_and_primary_fla
 #[tokio::test]
 async fn v2_get_address_names_filters_owner_relation_and_q_prefix() -> Result<()> {
     let (database, owner_payload) =
-        v2_address_names_payload(&format!("/v2/addresses/{V2_ADDRESS}/names?relation=owner"))
+        v2_address_names_payload(&format!("/v1/addresses/{V2_ADDRESS}/names?relation=owner"))
             .await?;
 
     let owner_rows = owner_payload["data"]
@@ -145,7 +145,7 @@ async fn v2_get_address_names_filters_owner_relation_and_q_prefix() -> Result<()
 
     let q_payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=ga"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=ga"),
     )
     .await?;
     let q_rows = q_payload["data"]
@@ -160,12 +160,12 @@ async fn v2_get_address_names_filters_owner_relation_and_q_prefix() -> Result<()
 #[tokio::test]
 async fn v2_get_address_names_normalizes_ascii_mixed_case_q_prefix() -> Result<()> {
     let (database, lowercase_payload) = v2_address_names_payload(&format!(
-        "/v2/addresses/{V2_ADDRESS}/names?q=al"
+        "/v1/addresses/{V2_ADDRESS}/names?q=al"
     ))
     .await?;
     let mixed_case_payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=AL"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=AL"),
     )
     .await?;
 
@@ -185,10 +185,10 @@ async fn v2_get_address_names_normalizes_ascii_mixed_case_q_prefix() -> Result<(
 #[tokio::test]
 async fn v2_get_address_names_treats_empty_q_as_absent() -> Result<()> {
     let (database, unfiltered_payload) =
-        v2_address_names_payload(&format!("/v2/addresses/{V2_ADDRESS}/names")).await?;
+        v2_address_names_payload(&format!("/v1/addresses/{V2_ADDRESS}/names")).await?;
     let empty_q_payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q="),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q="),
     )
     .await?;
 
@@ -208,7 +208,7 @@ async fn v2_get_address_names_trailing_dot_q_matches_label_boundary() -> Result<
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=alice."),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=alice."),
     )
     .await?;
     let rows = payload["data"]
@@ -218,14 +218,14 @@ async fn v2_get_address_names_trailing_dot_q_matches_label_boundary() -> Result<
 
     let mixed_case_payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=ALICE."),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=ALICE."),
     )
     .await?;
     assert_eq!(mixed_case_payload, payload);
 
     let interior_dot_payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=alice.e"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=alice.e"),
     )
     .await?;
     assert_eq!(interior_dot_payload, payload);
@@ -244,7 +244,7 @@ async fn v2_get_address_names_rejects_invalid_q_dot_shapes() -> Result<()> {
     for q in ["alice..", ".", "alice..x"] {
         let response = v2_address_names_response_for_database(
             &database,
-            &format!("/v2/addresses/{V2_ADDRESS}/names?q={q}"),
+            &format!("/v1/addresses/{V2_ADDRESS}/names?q={q}"),
         )
         .await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "q={q}");
@@ -270,12 +270,12 @@ async fn v2_get_address_names_rejects_invalid_q_dot_shapes() -> Result<()> {
 #[tokio::test]
 async fn v2_get_address_names_filters_relation_sets_and_any() -> Result<()> {
     let (database, set_payload) = v2_address_names_payload(&format!(
-        "/v2/addresses/{V2_ADDRESS}/names?relation=registrant,manager"
+        "/v1/addresses/{V2_ADDRESS}/names?relation=registrant,manager"
     ))
     .await?;
     let any_payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?relation=any"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?relation=any"),
     )
     .await?;
 
@@ -333,7 +333,7 @@ async fn v2_get_address_names_marks_primary_for_a_successful_non_normalized_clai
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
     )
     .await?;
     let rows = payload["data"]
@@ -384,7 +384,7 @@ async fn v2_get_address_names_serves_the_page_when_a_primary_claim_no_longer_nor
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
     )
     .await?;
     let rows = payload["data"]
@@ -423,7 +423,7 @@ async fn v2_get_address_names_non_success_primary_claim_does_not_mark_primary() 
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
     )
     .await?;
     let rows = payload["data"]
@@ -457,7 +457,7 @@ async fn v2_get_address_names_scopes_primary_claim_by_row_namespace() -> Result<
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=alpha"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=alpha"),
     )
     .await?;
     let rows = payload["data"]
@@ -482,10 +482,10 @@ async fn v2_get_address_names_scopes_primary_claim_by_row_namespace() -> Result<
 #[tokio::test]
 async fn v2_get_address_names_dedupe_name_vs_registration() -> Result<()> {
     let (database, dedupe_name) =
-        v2_address_names_payload(&format!("/v2/addresses/{V2_ADDRESS}/names?dedupe=name")).await?;
+        v2_address_names_payload(&format!("/v1/addresses/{V2_ADDRESS}/names?dedupe=name")).await?;
     let dedupe_registration = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?dedupe=registration"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?dedupe=registration"),
     )
     .await?;
 
@@ -577,7 +577,7 @@ async fn v2_address_names_registration_dedupe_preserves_role_summary() -> Result
     let payload = v2_address_names_payload_for_database(
         &database,
         &format!(
-            "/v2/addresses/{V2_ADDRESS}/names?dedupe=registration&include=role_summary"
+            "/v1/addresses/{V2_ADDRESS}/names?dedupe=registration&include=role_summary"
         ),
     )
     .await?;
@@ -625,17 +625,17 @@ async fn v2_address_names_registration_dedupe_preserves_role_summary() -> Result
 #[tokio::test]
 async fn v2_get_address_names_sorts_by_expiry_and_registered_at() -> Result<()> {
     let (database, expires_asc) = v2_address_names_payload(&format!(
-        "/v2/addresses/{V2_ADDRESS}/names?sort=expires_at&order=asc"
+        "/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&order=asc"
     ))
     .await?;
     let expires_desc = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?sort=expires_at&order=desc"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&order=desc"),
     )
     .await?;
     let registered = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?sort=registered_at"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?sort=registered_at"),
     )
     .await?;
 
@@ -677,14 +677,14 @@ async fn v2_get_address_names_sorts_by_expiry_and_registered_at() -> Result<()> 
 #[tokio::test]
 async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Result<()> {
     let (database, first_page) =
-        v2_address_names_payload(&format!("/v2/addresses/{V2_ADDRESS}/names?page_size=2")).await?;
+        v2_address_names_payload(&format!("/v1/addresses/{V2_ADDRESS}/names?page_size=2")).await?;
     let next_cursor = first_page["page"]["next_cursor"]
         .as_str()
         .expect("first page must include a cursor")
         .to_owned();
     let second_page = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?page_size=2&cursor={next_cursor}"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?page_size=2&cursor={next_cursor}"),
     )
     .await?;
 
@@ -697,7 +697,7 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
 
     let cross_address = v2_address_names_response_for_database(
         &database,
-        &format!("/v2/addresses/{V2_OTHER_ADDRESS}/names?page_size=2&cursor={next_cursor}"),
+        &format!("/v1/addresses/{V2_OTHER_ADDRESS}/names?page_size=2&cursor={next_cursor}"),
     )
     .await?;
     assert_eq!(cross_address.status(), StatusCode::BAD_REQUEST);
@@ -709,7 +709,7 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
     let cross_sort = v2_address_names_response_for_database(
         &database,
         &format!(
-            "/v2/addresses/{V2_ADDRESS}/names?sort=expires_at&page_size=2&cursor={next_cursor}"
+            "/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&page_size=2&cursor={next_cursor}"
         ),
     )
     .await?;
@@ -717,7 +717,7 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
 
     let expires_page = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?sort=expires_at&page_size=1"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&page_size=1"),
     )
     .await?;
     let expires_cursor = expires_page["page"]["next_cursor"]
@@ -726,7 +726,7 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
     let cross_timestamp_sort = v2_address_names_response_for_database(
         &database,
         &format!(
-            "/v2/addresses/{V2_ADDRESS}/names?sort=registered_at&page_size=1&cursor={expires_cursor}"
+            "/v1/addresses/{V2_ADDRESS}/names?sort=registered_at&page_size=1&cursor={expires_cursor}"
         ),
     )
     .await?;
@@ -734,7 +734,7 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
 
     let relation_set_page = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?relation=manager,owner&page_size=1"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?relation=manager,owner&page_size=1"),
     )
     .await?;
     let relation_set_cursor = relation_set_page["page"]["next_cursor"]
@@ -743,7 +743,7 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
     let reordered_relation_set = v2_address_names_response_for_database(
         &database,
         &format!(
-            "/v2/addresses/{V2_ADDRESS}/names?relation=owner,manager&page_size=1&cursor={relation_set_cursor}"
+            "/v1/addresses/{V2_ADDRESS}/names?relation=owner,manager&page_size=1&cursor={relation_set_cursor}"
         ),
     )
     .await?;
@@ -751,7 +751,7 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
     let changed_relation_set = v2_address_names_response_for_database(
         &database,
         &format!(
-            "/v2/addresses/{V2_ADDRESS}/names?relation=owner&page_size=1&cursor={relation_set_cursor}"
+            "/v1/addresses/{V2_ADDRESS}/names?relation=owner&page_size=1&cursor={relation_set_cursor}"
         ),
     )
     .await?;
@@ -773,7 +773,7 @@ async fn v2_address_role_summary_missing_support_is_partial() -> Result<()> {
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"),
     )
     .await?;
 
@@ -809,12 +809,13 @@ async fn v2_address_role_summary_marks_wrapper_empty_as_non_authoritative() -> R
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=beta&include=role_summary"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=beta&include=role_summary"),
     )
     .await?;
 
     assert_eq!(payload["data"][0]["name"], json!("beta.eth"));
     assert_eq!(payload["data"][0]["role_summary"], json!([]));
+    assert!(payload["data"][0].get("restrictions").is_none());
     assert_eq!(payload["meta"]["completeness"], json!("partial"));
     assert_eq!(
         payload["meta"]["unsupported_fields"],
@@ -822,8 +823,59 @@ async fn v2_address_role_summary_marks_wrapper_empty_as_non_authoritative() -> R
     );
     assert_eq!(
         payload["meta"]["unsupported_reason"],
-        json!("registrar_erc721_approvals_resolver_approvals_delegates_and_wrapper_permissions_not_supported")
+        json!("parent_and_resolver_delegation_permissions_not_supported")
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_address_role_summary_serves_restrictions_per_row() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let resource_id = Uuid::from_u128(0xb100);
+    let mut summary = permission_current_resource_summary(resource_id, Some("wrapper"));
+    summary.resource_restrictions = Some(json!({
+        "kind": "ens_v1_wrapper",
+        "wrapper_state": "emancipated",
+        "fuses": 65_536,
+        "expiry_seconds": 1_900_000_000,
+    }));
+    upsert_phase_permissions_current_resource_summary(&database.pool, &summary).await?;
+
+    let with_summary = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=beta&include=role_summary"),
+    )
+    .await?;
+    assert_eq!(with_summary["data"][0]["name"], json!("beta.eth"));
+    assert_eq!(
+        with_summary["data"][0]["restrictions"]["kind"],
+        json!("ens_v1_wrapper")
+    );
+    assert_eq!(
+        with_summary["data"][0]["restrictions"]["registration_id"],
+        json!(resource_id.to_string())
+    );
+    assert_eq!(
+        with_summary["data"][0]["restrictions"]["wrapper_state"],
+        json!("emancipated")
+    );
+    assert_eq!(
+        with_summary["data"][0]["restrictions"]["wrapper_fuses"]["parent_cannot_control"],
+        json!(true)
+    );
+    assert_eq!(
+        with_summary["data"][0]["restrictions"]["wrapper_expires_at"],
+        json!("2030-03-17T17:46:40Z")
+    );
+
+    let without_summary = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=beta"),
+    )
+    .await?;
+    assert!(without_summary["data"][0].get("restrictions").is_none());
 
     database.cleanup().await
 }
@@ -841,7 +893,7 @@ async fn v2_address_role_summary_marks_uningested_approvals_non_authoritative() 
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"),
     )
     .await?;
 
@@ -906,7 +958,7 @@ async fn v2_get_address_names_include_role_summary_groups_permissions_by_address
         .await?;
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?include=role_summary&page_size=1"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?include=role_summary&page_size=1"),
     )
     .await?;
 
@@ -993,7 +1045,7 @@ async fn v2_address_role_summary_includes_registry_operator_grant() -> Result<()
     seed_v2_address_registry_operator(&database).await?;
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"),
     ).await?;
     let grants = payload["data"][0]["role_summary"].as_array().unwrap();
     assert!(grants.iter().flat_map(|role| role["grants"].as_array().unwrap()).any(|grant| {
@@ -1007,7 +1059,7 @@ async fn v2_address_role_summary_includes_registry_operator_grant() -> Result<()
 async fn v2_address_role_summary_does_not_change_address_membership() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
-    let uri = format!("/v2/addresses/{V2_ADDRESS}/names");
+    let uri = format!("/v1/addresses/{V2_ADDRESS}/names");
     let before = v2_address_names_payload_for_database(&database, &uri).await?;
     seed_v2_address_registry_operator(&database).await?;
     let after = v2_address_names_payload_for_database(&database, &uri).await?;
@@ -1018,7 +1070,7 @@ async fn v2_address_role_summary_does_not_change_address_membership() -> Result<
 #[tokio::test]
 async fn v2_address_role_summary_omits_relation_for_direct_grants() -> Result<()> {
     let (database, payload) = v2_address_names_payload(&format!(
-        "/v2/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"
+        "/v1/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"
     )).await?;
     assert!(payload["data"][0]["role_summary"].as_array().unwrap().iter()
         .flat_map(|role| role["grants"].as_array().unwrap())
@@ -1027,7 +1079,7 @@ async fn v2_address_role_summary_omits_relation_for_direct_grants() -> Result<()
 }
 
 #[tokio::test]
-async fn v2_address_role_summary_uses_combined_reason_for_wrapper_page() -> Result<()> {
+async fn v2_address_role_summary_uses_wrapper_reason_for_wrapper_page() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
     upsert_phase_permissions_current_resource_summary(
@@ -1036,10 +1088,10 @@ async fn v2_address_role_summary_uses_combined_reason_for_wrapper_page() -> Resu
     ).await?;
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=beta&include=role_summary"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=beta&include=role_summary"),
     ).await?;
     assert_eq!(payload["meta"]["unsupported_reason"], json!(
-        "registrar_erc721_approvals_resolver_approvals_delegates_and_wrapper_permissions_not_supported"
+        "parent_and_resolver_delegation_permissions_not_supported"
     ));
     database.cleanup().await
 }
@@ -1052,7 +1104,7 @@ async fn v2_get_address_names_rejects_bad_address_and_unknown_include() -> Resul
         .await?;
 
     let bad_address =
-        v2_address_names_response_for_database(&database, "/v2/addresses/not-an-address/names")
+        v2_address_names_response_for_database(&database, "/v1/addresses/not-an-address/names")
             .await?;
     assert_eq!(bad_address.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
@@ -1062,7 +1114,7 @@ async fn v2_get_address_names_rejects_bad_address_and_unknown_include() -> Resul
 
     let bad_include = v2_address_names_response_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?include=counts"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names?include=events"),
     )
     .await?;
     assert_eq!(bad_include.status(), StatusCode::BAD_REQUEST);
@@ -1082,13 +1134,16 @@ async fn v2_get_address_names_empty_returns_200_empty_page() -> Result<()> {
         .seed_default_ens_snapshot_selector_position()
         .await?;
 
+    seed_v2_address_name_storage(&database, &[]).await?;
+
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
     )
     .await?;
 
     assert_eq!(payload["data"], json!([]));
+    assert_eq!(payload["page"]["total_count"], json!(0));
     assert_eq!(payload["page"]["has_more"], json!(false));
     assert_eq!(payload["page"]["next_cursor"], Value::Null);
 
@@ -1136,7 +1191,7 @@ async fn v2_address_name_collections_exclude_orphaned_phase_lineage_before_proje
 
     let payload = v2_address_names_payload_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names"),
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
     )
     .await?;
     let rows = payload["data"]
@@ -1414,8 +1469,10 @@ async fn v2_address_names_payload_for_database(
     uri: &str,
 ) -> Result<Value> {
     let response = v2_address_names_response_for_database(database, uri).await?;
-    assert_eq!(response.status(), StatusCode::OK);
-    read_json(response).await
+    let status = response.status();
+    let payload = read_json::<Value>(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload}");
+    Ok(payload)
 }
 
 async fn v2_address_names_response_for_database(
@@ -1471,6 +1528,15 @@ async fn seed_v2_address_name_storage(
     database: &TestDatabase,
     specs: &[V2AddressNameSpec],
 ) -> Result<()> {
+    // This fixture advertises both public namespaces; the empty Base index is also published.
+    database.seed_snapshot_selector_chain_positions(&json!({
+        "base": {
+            "chain_id": "base-mainnet",
+            "block_number": 1,
+            "block_hash": "0xcount-base-empty",
+            "timestamp": "2024-01-01T00:00:00Z"
+        }
+    })).await?;
     let surfaces = specs
         .iter()
         .map(|spec| {
@@ -1876,4 +1942,231 @@ fn address_name_record_inventory_chain_position(spec: &V2AddressNameSpec) -> Val
         "block_hash": format!("0xname{:02x}", spec.block_number),
         "timestamp": format!("2026-04-17T00:00:{:02}Z", spec.block_number % 60)
     })
+}
+
+#[tokio::test]
+async fn v2_get_address_names_filters_by_authority_and_reports_migration() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[raw_block("ethereum-mainnet", "0xmigration7", None, 7, 1_717_180_007)],
+    )
+    .await?;
+    let event_identity =
+        "ens_v2_migration_l1:1:ethereum-mainnet:0xmigration7:0xtxmigration7:0:MigrationApplied:0";
+    let mut event = history_event(
+        event_identity,
+        None,
+        None,
+        Some("ethereum-mainnet"),
+        Some(7),
+        Some("0xmigration7"),
+        Some("0xtxmigration7"),
+        Some(0),
+        CanonicalityState::Canonical,
+    );
+    event.event_kind = "MigrationApplied".to_owned();
+    event.source_family = "ens_v2_migration_l1".to_owned();
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    let proof_event_id: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM bigname_phase.normalized_events WHERE event_identity = $1",
+    )
+    .bind(event_identity)
+    .fetch_one(&database.pool)
+    .await?;
+    for (name, authority_selection) in [
+        (
+            "alpha.eth",
+            json!({
+                "authority_arm": "ens_v2",
+                "proof_kind": "migration_authority_transition",
+                "proof_event_id": proof_event_id,
+            }),
+        ),
+        ("beta.eth", json!({"authority_arm": "ens_v1"})),
+    ] {
+        sqlx::query(
+            "UPDATE bigname_phase.name_current
+             SET provenance = provenance || jsonb_build_object('authority_selection', $2::jsonb)
+             WHERE namespace = 'ens' AND raw_name = $1",
+        )
+        .bind(name)
+        .bind(authority_selection)
+        .execute(&database.pool)
+        .await?;
+    }
+
+    let all = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
+    )
+    .await?;
+    let rows = all["data"].as_array().expect("data must be an array");
+    assert_eq!(rows[0]["name"], json!("alpha.eth"));
+    assert_eq!(rows[0]["authority"], json!("ens_v2"));
+    assert_eq!(rows[0]["migrated_at"], json!("2024-05-31T18:26:47Z"));
+    assert_eq!(rows[1]["name"], json!("beta.eth"));
+    assert_eq!(rows[1]["authority"], json!("ens_v1"));
+    assert!(rows[1].get("migrated_at").is_none());
+    assert!(rows[2].get("authority").is_none());
+
+    let v2_only = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?authority=ens_v2"),
+    )
+    .await?;
+    assert_eq!(
+        names(v2_only["data"].as_array().expect("v2 data")),
+        vec!["alpha.eth"]
+    );
+    let v1_only = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?authority=ens_v1&page_size=1"),
+    )
+    .await?;
+    assert_eq!(
+        names(v1_only["data"].as_array().expect("v1 data")),
+        vec!["beta.eth"]
+    );
+
+    // Native ENSv2 authority alone does not prove migration.
+    sqlx::query(r#"UPDATE bigname_phase.name_current SET provenance = provenance || jsonb_build_object('authority_selection', '{"authority_arm":"ens_v2","proof_kind":"direct_registration"}'::jsonb) WHERE raw_name = 'beta.eth'"#)
+        .execute(&database.pool).await?;
+    for (filter, expected) in [
+        ("is_migrated=true", vec!["alpha.eth"]),
+        (
+            "is_migrated=false",
+            vec!["beta.eth", "gamma.eth", "shared-one.eth", "shared-two.eth"],
+        ),
+        ("authority=ens_v2", vec!["alpha.eth", "beta.eth"]),
+        ("is_migrated=true&q=beta", vec![]),
+    ] {
+        let payload = v2_address_names_payload_for_database(
+            &database,
+            &format!("/v1/addresses/{V2_ADDRESS}/names?{filter}"),
+        )
+        .await?;
+        assert_eq!(names(payload["data"].as_array().unwrap()), expected);
+        assert_eq!(payload["page"]["total_count"], json!(expected.len()));
+    }
+
+    let invalid = v2_address_names_response_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?authority=basenames"),
+    )
+    .await?;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    let first_page = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?page_size=1"),
+    )
+    .await?;
+    let cursor = first_page["page"]["next_cursor"]
+        .as_str()
+        .expect("first page must include a cursor");
+    let rebound = v2_address_names_response_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?page_size=1&authority=ens_v1&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(rebound.status(), StatusCode::BAD_REQUEST);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_address_names_include_counts_adds_subname_and_record_counts() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let alpha = v2_address_name_specs()
+        .into_iter()
+        .find(|spec| spec.name == "alpha.eth")
+        .expect("alpha address-name fixture must exist");
+    database
+        .insert_record_inventory_current_row(address_name_record_inventory_current_row(&alpha))
+        .await?;
+
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?include=counts"),
+    )
+    .await?;
+    let rows = payload["data"].as_array().expect("data must be an array");
+    assert_eq!(rows[0]["name"], json!("alpha.eth"));
+    assert_eq!(rows[0]["subname_count"], json!(0));
+    assert_eq!(rows[0]["record_count"], json!(3));
+    assert!(rows[0].get("role_summary").is_none());
+    assert!(rows[0].get("event_count").is_none());
+    assert_eq!(rows[1]["name"], json!("beta.eth"));
+    assert_eq!(rows[1]["subname_count"], json!(0));
+    assert!(rows[1].get("record_count").is_none());
+
+    let plain = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
+    )
+    .await?;
+    assert!(plain["data"][0].get("subname_count").is_none());
+    assert!(plain["data"][0].get("record_count").is_none());
+
+    let both = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?include=counts,role_summary"),
+    )
+    .await?;
+    assert_eq!(both["data"][0]["record_count"], json!(3));
+    assert!(both["data"][0].get("role_summary").is_some());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_address_name_totals_match_filtered_deduplicated_pages() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    for filter in [
+        "relation=owner",
+        "relation=registrant&dedupe=registration",
+        "relation=owner,registrant",
+        "dedupe=registration",
+        "q=shared",
+        "q=missing",
+    ] {
+        let base = format!("/v1/addresses/{V2_ADDRESS}/names?{filter}");
+        let all = v2_address_names_payload_for_database(&database, &base).await?;
+        let expected = all["data"].as_array().unwrap().len();
+        assert_eq!(all["page"]["total_count"], json!(expected), "{filter}");
+        let mut seen = Vec::new();
+        let mut uri = format!("{base}&page_size=1");
+        loop {
+            let page = v2_address_names_payload_for_database(&database, &uri).await?;
+            assert_eq!(page["page"]["total_count"], json!(expected), "{filter}");
+            seen.extend(
+                page["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| row["name"].clone()),
+            );
+            let Some(cursor) = page["page"]["next_cursor"].as_str() else {
+                break;
+            };
+            uri = format!("{base}&page_size=1&cursor={cursor}");
+        }
+        assert_eq!(seen.len(), expected);
+        assert_eq!(
+            seen,
+            all["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["name"].clone())
+                .collect::<Vec<_>>()
+        );
+    }
+    database.cleanup().await
 }

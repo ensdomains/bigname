@@ -1,12 +1,15 @@
 mod address_history;
 mod address_names;
+mod cache_headers;
 mod chains;
+pub(crate) mod collection_snapshot;
 mod cursor;
 mod diag_events;
 mod diag_namespace_manifests;
 mod diagnostics;
 mod envelope;
 mod error;
+mod event_data;
 mod events;
 mod history;
 pub(crate) mod lookup;
@@ -16,13 +19,16 @@ mod name_records;
 #[cfg(test)]
 pub(crate) use name_records::auto_fallback_test_hooks as name_records_auto_fallback_test_hooks;
 mod name_records_inventory;
+mod names;
 mod namespaces;
 mod params;
 mod permission_support;
 mod permission_values;
 mod permissions;
 mod primary_name;
+mod registries;
 mod resolvers;
+mod restrictions;
 mod router;
 mod search;
 mod snapshots;
@@ -35,8 +41,10 @@ mod vocab;
 pub(crate) use address_history::get_address_history;
 #[cfg(test)]
 pub(crate) use address_history::{AddressHistoryCursorBinding, address_history_cursor_payload};
-pub(crate) use address_names::{AddressNameGrant, get_address_names};
-pub(crate) use chains::{numeric_to_slug, slug_to_numeric, snapshot_slot_for_slug};
+pub(crate) use address_names::{AddressNameGrant, AddressNameResolution, get_address_names};
+pub(crate) use chains::{
+    all_chain_slugs, numeric_to_slug, slug_to_numeric, snapshot_slot_for_slug,
+};
 pub(crate) use cursor::{Payload as CursorPayload, decode, encode};
 pub(crate) use diag_events::get_diagnostic_events;
 pub(crate) use diag_namespace_manifests::get_diagnostic_namespace_manifests;
@@ -48,16 +56,21 @@ pub(crate) use envelope::{AsOfCompleteness, Envelope, Meta, Page};
 #[cfg(test)]
 pub(crate) use error::ErrorCode;
 pub(crate) use error::{V2Error, V2Result};
+pub(crate) use event_data::{
+    EventDetail, HistoryInclude, build_event_detail, history_include, raw_event_kind,
+};
 pub(crate) use events::{
     Event, build_event, events_cursor_payload, events_storage_cursor, get_events,
 };
-#[cfg(test)]
-pub(crate) use history::history_cursor_payload;
 pub(crate) use history::{
-    format_timestamp, get_history, history_event_type, history_storage_scope,
-    map_history_page_error, product_history_event_kinds, v2_exact_name_snapshot_scope,
+    HISTORY_TOTAL_COUNT_CAP, format_timestamp, get_history, history_event_type,
+    history_page_options, history_sort_token, history_storage_order, history_storage_scope,
+    history_total_count, insert_history_filter_keys, map_history_page_error,
+    product_history_event_kinds, resolve_history_block_window, v2_exact_name_snapshot_scope,
     v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
+#[cfg(test)]
+pub(crate) use history::{HistoryCursorBinding, history_cursor_payload};
 pub(crate) use lookup::get_lookup;
 #[cfg(test)]
 pub(crate) use lookup::served_head_initial_validation_test_hooks as lookup_served_head_initial_validation_test_hooks;
@@ -69,20 +82,31 @@ pub(crate) use name_records::{
     load_ephemeral_verified_record_lookup, parse_record_keys,
 };
 pub(crate) use name_records_inventory::{default_requested_records, validate_product_record};
+pub(crate) use names::get_names;
 pub(crate) use namespaces::get_namespace;
 pub(crate) use params::{
     AtSelector, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, QueryParams, RawQueryParams, RequestSource,
     SortOrder, parse_relation_set_param, validate_latest_collection_selectors,
 };
-pub(crate) use permission_values::{effective_permission_scope_value, permission_powers_value};
+pub(crate) use permission_values::{
+    GrantRelation, effective_permission_scope_value, permission_grant_relation,
+    permission_powers_value,
+};
 pub(crate) use permissions::get_permissions;
 pub(crate) use primary_name::get_primary_name;
-pub(crate) use resolvers::get_resolver;
+pub(crate) use registries::{
+    RegistryRef, get_registry, get_registry_labels, load_subregistry_refs, name_chain_id,
+    snapshot_block_for_chain,
+};
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use resolvers::{
     BoundNames, BoundNamesCursorBinding, bound_names_cursor_payload, bound_names_storage_cursor,
     build_resolver_overview, resolver_overview_include,
+};
+pub(crate) use resolvers::{
+    get_resolver, get_resolver_aliases, get_resolver_roles, parse_numeric_chain_id,
+    resolver_snapshot_scope,
 };
 pub(crate) use search::get_search;
 #[cfg(test)]
@@ -101,7 +125,7 @@ pub(crate) use subnames::get_subnames;
 #[allow(unused_imports)]
 pub(crate) use vocab::matched_boundary_vocabulary_terms;
 pub(crate) use vocab::{
-    AddressNamesDedupe, AddressNamesSort, Completeness, Finality, GrantRelation, HistoryEventType,
+    AddressNamesDedupe, AddressNamesSort, Authority, Completeness, Finality, HistoryEventType,
     HistoryScope, OpsStatus, PRODUCT_PIPELINE_TERMS, RegistrationStatus, Relation, RelationSet,
     Resolver, Source, Status, contains_boundary_vocabulary, shared_product_reason,
 };

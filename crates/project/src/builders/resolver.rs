@@ -1,6 +1,7 @@
 mod alias_summary;
 mod binding_summary;
 mod declaration_precedence;
+mod mirror;
 mod permission_summary;
 mod read_features;
 
@@ -10,6 +11,7 @@ use crate::{
     Marker, ProjectError, Result, resolver_address::PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES,
 };
 use declaration_precedence::DISCOVERY_CTES;
+use mirror::{DIRECT_MIRROR_DECLARED, MIRROR_CLASSIFICATION, MIRROR_ROLE};
 use read_features::{DECLARED_READ_FEATURES, IMPLEMENTATION_READ_FEATURES};
 
 const SUMMARY_SAMPLE_LIMIT: i32 = 100;
@@ -364,11 +366,19 @@ pub(super) async fn build(
                            manifest.manifest_payload -> 'contracts', '[]'::jsonb
                        )) declaration
                        WHERE lower(declaration ->> 'address') = candidate.resolver_address
+                         AND (declaration ->> 'role' <> 'public_resolver_v2'
+                              OR declaration ->> 'proxy_kind' = 'none')
                          AND (
                              declaration ->> 'start_block' IS NULL
                              OR (declaration ->> 'start_block')::bigint <= $2
                          )
                    ) AS exact_declared,
+                   EXISTS (SELECT 1 FROM project_declared_resolver_addresses direct
+                           WHERE direct.manifest_id = manifest.manifest_id
+                             AND direct.resolver_address = candidate.resolver_address
+                             AND direct.classification_role = 'public_resolver_v2'
+                             AND direct.source_family = 'ens_v2_resolver_l1') AS direct_public_v2,
+                   {DIRECT_MIRROR_DECLARED} AS direct_mirror,
                    EXISTS (
                        SELECT 1
                        FROM jsonb_array_elements(COALESCE(
@@ -394,11 +404,22 @@ pub(super) async fn build(
         supported AS (
             SELECT classified.*,
                    CASE WHEN source_family = 'ens_v2_resolver_l1'
+                             AND classification_role = 'public_resolver_v2'
+                            THEN direct_public_v2
+                        WHEN source_family = 'ens_v2_resolver_l1'
+                             AND classification_role = '{MIRROR_ROLE}' THEN direct_mirror
+                        WHEN source_family = 'ens_v2_resolver_l1'
                         THEN upgraded_to_declared ELSE exact_declared END AS supported,
                    CASE
                        WHEN source_family = 'ens_v2_resolver_l1'
+                        AND classification_role = 'public_resolver_v2'
+                           THEN CASE WHEN NOT direct_public_v2 THEN 'resolver_not_declared' END
+                       WHEN source_family = 'ens_v2_resolver_l1'
+                        AND classification_role = '{MIRROR_ROLE}'
+                           THEN CASE WHEN NOT direct_mirror THEN 'resolver_not_declared' END
+                       WHEN source_family = 'ens_v2_resolver_l1'
                         AND upgrade_event_id IS NULL
-                           THEN 'resolver_upgrade_not_observed'
+                           THEN 'resolver_implementation_unknown'
                        WHEN source_family = 'ens_v2_resolver_l1'
                         AND NOT upgraded_to_declared
                            THEN 'resolver_implementation_not_declared'
@@ -412,10 +433,12 @@ pub(super) async fn build(
             SELECT supported.*,
                    supported.supported
                        AND supported.source_family <> 'ens_v1_resolver_l1'
+                       AND supported.classification_role IS DISTINCT FROM 'public_resolver_v2'
                            AS enumeration_supported,
                    CASE
                        WHEN supported.supported
-                        AND supported.source_family = 'ens_v1_resolver_l1'
+                        AND (supported.source_family = 'ens_v1_resolver_l1'
+                             OR supported.classification_role = 'public_resolver_v2')
                            THEN 'resolver_binding_enumeration_not_projected'
                        ELSE support_reason
                    END AS enumeration_reason,
@@ -453,15 +476,18 @@ pub(super) async fn build(
                        'source_family', source_family,
                        'role', classification_role,
                        'basis', CASE WHEN source_family = 'ens_v2_resolver_l1'
+                            AND COALESCE(classification_role, '') NOT IN ('public_resolver_v2', '{MIRROR_ROLE}')
                            THEN 'erc1967_upgraded_history'
                            ELSE 'manifest_declared_address' END,
                        'implementation', implementation,
                        'read_features', CASE
                            WHEN NOT supported THEN '[]'::jsonb
                            WHEN source_family = 'ens_v2_resolver_l1'
+                            AND COALESCE(classification_role, '') NOT IN ('public_resolver_v2', '{MIRROR_ROLE}')
                                THEN implementation_read_features
                            ELSE declared_read_features
-                       END
+                       END,
+                       'mirror', {MIRROR_CLASSIFICATION}
                    )),
                    'bindings', CASE WHEN enumeration_supported THEN jsonb_build_object(
                        'status', 'supported', 'count', binding_count,

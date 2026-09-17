@@ -250,21 +250,26 @@ async fn transient_provider_faults_and_partial_receipts_recover_to_control() -> 
     );
 
     // The structurally malformed response ends that command before it reaches
-    // receipt hydration. A second command traverses the remaining partial-
-    // receipt injection; the final clean redo is the explicit repair boundary.
+    // receipt hydration. A temporarily missing selected receipt is retryable:
+    // the second command must refetch it and finish without an explicit repair.
+    ensure!(
+        raw_receipt_count(&faulted.db.pool, &fixture.receipt.tx_hash).await? == 0,
+        "the malformed-response attempt unexpectedly retained the target receipt"
+    );
+    let receipt_requests = proxy.transaction_receipt_request_count(&fixture.receipt.tx_hash);
     proxy.add_fault(FaultSpec::drop_receipts_once(&fixture.receipt.tx_hash, 1));
-    let receipt_attempt = rpc_ingest(&faulted, &proxy.url, head).await;
+    rpc_ingest(&faulted, &proxy.url, head).await?;
     ensure!(
         proxy.hit_count(FaultKind::DropReceipts) == 1,
-        "phase-runner ingest observed {} DropReceipts hits instead of one; second attempt: {:?}",
-        proxy.hit_count(FaultKind::DropReceipts),
-        receipt_attempt.as_ref().err()
+        "phase-runner ingest observed {} DropReceipts hits instead of one",
+        proxy.hit_count(FaultKind::DropReceipts)
     );
     ensure!(
-        receipt_attempt.is_err()
-            || raw_receipt_count(&faulted.db.pool, &fixture.receipt.tx_hash).await? == 0,
-        "partial receipt injection unexpectedly produced a complete target receipt"
+        proxy.transaction_receipt_request_count(&fixture.receipt.tx_hash) >= receipt_requests + 2
+            && raw_receipt_count(&faulted.db.pool, &fixture.receipt.tx_hash).await? == 1,
+        "the missing receipt was not refetched and retained by the same redo"
     );
+    // A subsequent clean redo must preserve that recovery result.
     rpc_ingest(&faulted, &anvil.url, head).await?;
     ensure!(
         raw_log_count(&faulted.db.pool, &fixture.receipt.tx_hash).await? == 1

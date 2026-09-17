@@ -8,36 +8,74 @@ Wire format and route details live in [`api-v2.md`](api-v2.md) and
 
 | Set | Routes | Intended use |
 | --- | --- | --- |
-| Lookup | `POST /v2/lookup`, `GET /v2/status` | Batched name/address lookup and indexing readiness. |
-| Product reads | `/v2/names/*`, `/v2/addresses/*`, `/v2/permissions`, `/v2/search`, `/v2/events`, `/v2/resolvers/*`, `/v2/namespaces/*` | Name, record, address, permission, event, resolver, and namespace reads. |
-| Diagnostics | `/v2/diagnostics/*` | Coverage, binding, authority, record, manifest, and event inspection. |
+| Lookup | `POST /v1/lookup`, `GET /v1/status` | Batched name/address lookup and indexing readiness. |
+| Product reads | `/v1/names/*`, `/v1/addresses/*`, `/v1/permissions`, `/v1/search`, `/v1/events`, `/v1/resolvers/*`, `/v1/namespaces/*` | Name, record, address, permission, event, resolver, and namespace reads. |
+| Diagnostics | `/v1/diagnostics/*` | Coverage, binding, authority, record, manifest, and event inspection. |
 | GraphQL compatibility | `POST /graphql` | The subgraph-shaped compatibility surface described below. |
 | Operator health | `GET /healthz` | API process, opaque running-database-instance identity, and phase-runner heartbeat readiness. This is not a product route. |
 
 The v1 REST surface has been removed. In particular,
 `POST /v1/identity:lookup` no longer serves the native identity capability.
-`POST /v2/lookup` owns batched forward and reverse lookup with the v2 envelope;
+`POST /v1/lookup` owns batched forward and reverse lookup with the v2 envelope;
 it does not preserve the deleted v1 DTOs.
 
 ## Capability mapping
 
 | Capability | Route owner | Notes |
 | --- | --- | --- |
-| Batched forward and reverse lookup | `POST /v2/lookup` | `profile=feed` is the field-budgeted path; `profile=detail` returns the documented full record shape. |
-| Indexing readiness | `GET /v2/status` | Per-chain projection progress, stored head, indexing-process liveness, network-head readiness, and required Sepolia completed-Ingest state plus [verification-level evidence](glossary.md#verification-level). |
-| Exact name profile | `GET /v2/names/{name}` | Indexed or verified name and record fields, plus [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper lifecycle and fuse data when backed, subject to the route's source rules. |
-| Resolver records | `GET /v2/names/{name}/records` | Key-selected record reads plus inventory metadata. |
-| Direct subnames | `GET /v2/names/{name}/subnames` | Latest-state direct-subname collection. |
-| Name history | `GET /v2/names/{name}/history` | Name, registration, or combined history scope. |
-| Names by address | `GET /v2/addresses/{address}/names` | Owner, manager, and registrant relations with optional expansions. Inline role summaries allow 1,000 total grant rows; overflow returns 422. Each row exposes `permission_resource_id` for existing cursor-paginated permissions reads, including when the include is omitted. |
-| Primary name | `GET /v2/addresses/{address}/primary-name` | Indexed tuples and verified ENS coin-type 60 lookup as documented. |
-| Address history | `GET /v2/addresses/{address}/history` | Latest-state address-anchored event history. |
-| Permission holders | `GET /v2/permissions` | Known current direct permission rows plus effective ENSv1 and Basenames registry operators that apply to each resource. Registry `ApprovalForAll` is served for `address`, `name`, and `registration_id` filters and role-summary expansion. Registrar ERC-721 approvals, resolver approvals/delegates, NameWrapper permissions, and ENSv2 registry operators remain explicitly unsupported, so coverage stays request-relative partial even for zero rows. An empty name-filter result reports `permission_support_unknown` when the name is missing or unrecognized, its current name is marked unsupported, or its current name is not bound to a registration resource. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L155-L158 @ basenames@1809bbc) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) Returned current wrapper registrations still carry [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) lifecycle and fuse data when backed. |
-| Search | `GET /v2/search` | Name search only; no registration, pricing, or availability workflow. |
-| Events | `GET /v2/events` | Product event collection. |
-| Resolver overview | `GET /v2/resolvers/{chain_id}/{address}` | Resolver metadata, total section counts with deterministic samples capped at 100 items, and a separately paginated record-shaped bound-name collection, including [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper metadata when backed. |
-| Namespace metadata | `GET /v2/namespaces/{namespace}` | Product-facing namespace and capability metadata. |
-| Pipeline diagnostics | `/v2/diagnostics/*` | Explicit diagnostic tier, separate from product reads. |
+| Batched forward and reverse lookup | `POST /v1/lookup` | `profile=feed` is the field-budgeted path; `profile=detail` returns the documented full record shape. |
+| Indexing readiness | `GET /v1/status` | Per-chain projection progress, stored head, indexing-process liveness, network-head readiness, and required Sepolia completed-Ingest state plus [verification-level evidence](glossary.md#verification-level). |
+| Exact name profile | `GET /v1/names/{name}` | Indexed or verified name and record fields, plus [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper lifecycle and fuse data when backed, subject to the route's source rules. |
+| Resolver records | `GET /v1/names/{name}/records` | Key-selected record reads plus inventory metadata. |
+| Direct subnames | `GET /v1/names/{name}/subnames` | Latest-state direct-subname collection. |
+| Name history | `GET /v1/names/{name}/history` | Name, registration, or combined history scope. |
+| Names by address | `GET /v1/addresses/{address}/names` | Owner, manager, and registrant relations with optional expansions. Inline role summaries allow 1,000 total grant rows; overflow returns 422. Each row exposes `permission_resource_id` for existing cursor-paginated permissions reads, including when the include is omitted. |
+| Primary name | `GET /v1/addresses/{address}/primary-name` | Indexed tuples and verified ENS coin-type 60 lookup as documented. |
+| Address history | `GET /v1/addresses/{address}/history` | Latest-state address-anchored event history. |
+| Permission holders | `GET /v1/permissions` | Known current direct permission rows plus effective ENSv1 and Basenames registry operators that apply to each resource. Registry `ApprovalForAll` is served for `address`, `name`, and `registration_id` filters and role-summary expansion. ENSv1 NameWrapper holders, operators, and per-token delegates are direct rows. Registrar ERC-721 approvals, resolver approvals/delegates, parent control of a wrapped subname, and ENSv2 registry operators remain explicitly unsupported, so coverage stays request-relative partial even for zero rows. An empty name-filter result reports `permission_support_unknown` when the name is missing or unrecognized, its current name is marked unsupported, or its current name is not bound to a registration resource. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L155-L158 @ basenames@1809bbc) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) Returned current wrapper registrations still carry [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) lifecycle and fuse data when backed. |
+| Search | `GET /v1/search` | Name search only; no registration, pricing, or availability workflow. |
+| Events | `GET /v1/events` | Product event collection. |
+| Resolver overview | `GET /v1/resolvers/{chain_id}/{address}` | Resolver metadata, total section counts with deterministic samples capped at 100 items, and separately paginated complete alias, per-registration role, and record-shaped bound-name collections, including [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper metadata when backed. |
+| Namespace metadata | `GET /v1/namespaces/{namespace}` | Product-facing namespace and capability metadata. |
+| Registry overview and labels | `GET /v1/registries/{chain_id}/{address}` and `/labels` | Current labels and exact declared registry assignment/per-label distinct holder counts with `include=counts`. Historical overview label totals are null; declared assignment counts do not imply complete effective-permission coverage. |
+| Pipeline diagnostics | `/v1/diagnostics/*` | Explicit diagnostic tier, separate from product reads. |
+
+The [record-ID resolver generation](architecture.md) supplies declared records
+and resolver permissions through the existing routes and response shapes once
+its manifest and end-to-end implementation are admitted. Record sharing, link
+replacement, zero-link default selection, and empty values are part of that
+capability. Ownership-only ingestion does not establish this capability, and a
+source pin or successful decode alone is not replacement evidence.
+
+## Direct PublicResolverV2 record support
+
+For an owned local chain or the separately evidenced `sepolia-hackathon`
+candidate, the exact `public_resolver_v2` declaration described in
+[`manifests.md`](manifests.md#direct-publicresolverv2-declarations-on-an-owned-local-chain)
+permits the existing record reads to use canonical address, text, and contenthash
+observations plus node record-version boundaries. Attribution requires the
+current ENSv2 pointer, matching namespace, node, and exact resolver emitter.
+A supported record classification does not prove exhaustive selector history,
+resolver binding enumeration, aliases, or permission-holder enumeration;
+coverage remains limited to the retained observations and admitted capabilities.
+No new REST route, schema, or record-ID interpretation is implied.
+
+Empty address bytes, empty text, and empty contenthash remain explicit write
+observations. Twenty zero address bytes remain distinct from empty bytes in the
+stored observation; public reads retain their existing decode rules. The
+inherited setters store values under `recordVersions[node]`, and `clearRecords`
+increments that version and emits `VersionChanged`.
+(upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/AddrResolver.sol:L47-L65 @ ens_v1_publicresolver_5141a2a@5141a2a)
+(upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/TextResolver.sol:L15-L21 @ ens_v1_publicresolver_5141a2a@5141a2a)
+(upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/ContentHashResolver.sol:L14-L19 @ ens_v1_publicresolver_5141a2a@5141a2a)
+(upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/ResolverBase.sol:L20-L22 @ ens_v1_publicresolver_5141a2a@5141a2a)
+
+Later writes contribute only within the current version; old-version values do
+not return after a reset. Contract source establishes reachability, not runtime
+acceptance of these reads or transactions. The source support alone does not establish public-chain deployment
+provenance; the hackathon candidate uses its separate manifest evidence. Zero pointers, undeclared/custom resolver addresses,
+and unsupported roles preserve their explicit unsupported behavior. Existing
+ENSv1 resolver support and PermissionedResolver proxy classification stay intact.
 
 ## Resolver address read modes
 
@@ -72,12 +110,24 @@ The admitted archived-Sepolia implementation exposes the same two getter shapes
 | Default source unavailable or inventory non-authoritative | Explicit `unsupported` | Request-scoped verified fallback | Chain result |
 | Ineligible coin type or unflagged resolver generation | Exact-key behavior; no derivation | Existing exact-key fallback policy | Chain result |
 
-The auto column's exact-answer rule has one exception: for an Ethereum Mainnet
+The auto column's exact-answer rule has one exception: for an Ethereum Mainnet or Sepolia
 ENS name whose projected exact resolver is null and whose ordinary direct row
 admits [Universal Resolver ancestor
 discovery](glossary.md#universal-resolver-ancestor-discovery), all requested
 keys execute through verified lookup. Retained exact inventory predates the
-resolver-clear boundary and does not satisfy auto for that route.
+resolver-clear boundary and does not satisfy auto for that route. The selected
+execution manifest must still admit the name's authority arm; discovery does not
+bypass deployment-profile or topology restrictions.
+
+The verified column is additionally scoped by [authority
+arm](glossary.md#authority-epoch): a bound ENS name of either arm with a
+non-null exact resolver carries a direct topology, and the verified read
+executes only when the deployment profile's `ens_execution` manifest lists the
+name's selected arm in `verified_authority_arms` (`manifests.md` §
+`verified_authority_arms`). Mainnet and Sepolia admit `ens_v1` only, so an
+`ens_v2`-selected name there reports `exact_name_authority_not_verifiable`
+under `source=verified` (and its indexed answer under `source=auto`); the
+`sepolia-hackathon` profile admits both arms.
 
 The flagged deployments are the current ENS PublicResolver on mainnet, the
 current Sepolia PublicResolver at `0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5`,
@@ -131,13 +181,30 @@ summaries. A superseded ENSv1 registration is therefore never selected, while a
 current registration queried by resource can still contribute in a separate
 name-scoped view.
 
+For the post-audit Sepolia profile, an exact-name read may qualify through
+an activated migration instead of a V2 registrar event. The existing ordinary
+registry-plus-registrar qualification remains unchanged. The migration alternative
+requires the selected current ENSv2 binding and resource to match the exact
+successor of the selected `MigrationApplied` proof, with no authority-selection
+refusal. The boundary and successor-resource registry evidence must identify the
+same ENS name and chain and join their admitted active manifests. The registry
+must be explicitly declared for the post-audit Sepolia profile at that evidence
+position. This does not admit the historical registry model, custom undeclared
+registries, candidate or orphaned boundaries, mismatched successors, or a stale
+migration proof whose successor is no longer current. It does not fabricate a
+registrar registration or grant resolver read features; resolver-specific feature
+admission is unchanged. Later ordinary registrations continue to use the existing
+registrar qualification. Runtime acceptance of this alternative is tracked with
+the connected #822 proof and is not implied by this contract statement.
+
 The final activation re-derives a [complete
 group](glossary.md#complete-group) through
 the production interpreter and records `MigrationApplied` as an activated
-authority boundary, except that registrar-token `unwrapped` groups carrying the
-controller's ENSv1 registry cleanup currently stop at predecessor resolution
-under [issue #822](https://github.com/ensdomains/bigname/issues/822) and do not
-reach Project. Every normalized effect whose existence depends on the per-name
+authority boundary. In the recorded [issue #822](https://github.com/ensdomains/bigname/issues/822)
+baseline, registrar-token `unwrapped` groups stopped at predecessor resolution.
+The adapter correction reconciles complete existing-token transactions before
+ENSv1 state folding, as specified in [storage](storage.md); runtime acceptance
+through Project remains unproven. Every normalized effect whose existence depends on the per-name
 [migration correlation group](glossary.md#migration-correlation-group) carries
 the completed group's visibility. The `migration_candidate_*_effects` tables
 remain candidate-only diagnostic source records and are never Project input.
@@ -236,7 +303,11 @@ verified and auto records follow the ordinary lookup capability; direct
 subnames include a read-only row only while a current nonzero event-linked
 resolver exists; and resolver `bound_names` remains subject to the resolver
 family's existing binding-enumeration capability. Registration/control fields,
-address-name relations, and owner-derived permissions stay absent. When the
+address-name relations, and owner-derived permissions stay absent. An ENSv2 TLD
+whose root-registry token is reserved, or whose registration is not observed,
+reads the same way from its
+[root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
+while staying `current_authority_not_projected`. When the
 latest nonzero registry resolver selection predates the [name surface](glossary.md#surface-name-surface), the event that first makes the surface active
 links it to the retained serving resource without
 requiring a repeated selection; a latest zero-address selection remains a
@@ -273,7 +344,7 @@ statements that complete migration groups remain candidate-only.
 | 2E. Post-rollback generation-failure audit | Enforce the reconciled dual-current invariant on both configured ENS deployment profiles (Mainnet and Sepolia) and persist the rolled-back generation failure in a separate append-only diagnostic transaction. | To be scoped |
 | 3A. Direct-child correlation | Derive the deferred child-migration shapes that reach no migration controller, where the already-migrated parent's own [migration registry](glossary.md#migration-registry-wrapperregistry) registers the child into itself through the self-call that definition cites; admit the registry a locked child receives from its parent registry so admitted depth is unbounded; derive the child's ENSv1 predecessor from the parent registry's own migration evidence and the registered labelhash rather than inheriting the `.eth` second-level rule, under the separate `wrapper_backed_child_control` anchor defined at [child migration boundary](glossary.md#child-migration-boundary), selected against the child's ENSv1 cleanup rather than the registration; admit both cleanup shapes that definition cites — the `locked_child` path, whose wrapper token is parked in the Graveyard, and the `emancipated_child` path, whose node is unwrapped into it — each only with that ENSv1 predecessor cleanup present, earlier in the registration's own transaction; and reject the clobbered registration, the unmigrated child, factory-only evidence, incomplete parent discovery, and any self-claim lacking ENSv1 predecessor cleanup as non-boundaries, `MigrationHelper` participation being unobservable for the reason cited there and so never a correlation key at all. Correlation reuses `authority_transition`; every child boundary and effect is candidate-only, so no child state, projection, or product row changes — though an admitted child registry does widen Project's delete-and-rebuild scope — and activating a child transition remains an explicit refusal until slice 3B. | 4 |
 | 3B. Children publication invariant | Stage the parent-child relation each authority arm states, first filtering ENSv1 relations by the parent's activated ENSv1→ENSv2 migration path: unwrapped, unlocked-wrapped, and emancipated-child parents retain none, while locked-wrapped and locked-child parents retain only [migratable children](glossary.md#migratable-child). Then publish the arm the child's own staged authority selects, so recency orders only within that arm; a released ENSv2 child publishes nothing and does not fall back, and a pair whose surviving arms disagree with no authority proof is omitted as unsupported rather than ranked. On either configured ENS deployment profile (Mainnet or Sepolia), the ordered child assertion fails an ENS [projection generation](glossary.md#projection-generation) with `dual_current_child_authority` only when a post-epoch ENSv1 relation survives that parent filter; positive registration in a locked parent's migration registry is itself disqualifying entry history, so it is filtered before the assertion. | 4 (children projection builder, Project integrity assertion, child transition writer, redo reopen) plus one reviewed schema-migration file for the failure-kind vocabulary |
-| Final activation. Production [complete groups](glossary.md#complete-group) | Run the already-proven activation function after all batch correlation paths finish; activate the authority paths that pass predecessor resolution and complete non-boundary normalized rows while retaining candidate-only diagnostic effect records; keep registrar-token `unwrapped` groups with the controller's ENSv1 registry cleanup blocked on issue #822 until their production writer path is repaired; preserve named refusals, ordinary events, exact predecessor selection, and Sepolia's refusal of ordinary no-proof overlap; rotate the [interpreter content hash](glossary.md#interpreter-content-hash) and require the full Interpret→Project walk before publication. Coverage is enumerated in [`migration-activation-coverage.md`](migration-activation-coverage.md). | 4 adapter production files, one of which deletes the superseded helper; no schema, manifest, API, or Project vocabulary change |
+| Final activation. Production [complete groups](glossary.md#complete-group) | Run the already-proven activation function after all batch correlation paths finish; activate the authority paths that pass predecessor resolution and complete non-boundary normalized rows while retaining candidate-only diagnostic effect records; reconcile complete registrar-token `unwrapped` transactions before the ENSv1 state fold while retaining their recorded issue #822 coverage status pending runtime acceptance; preserve named refusals, ordinary events, exact predecessor selection, and Sepolia's refusal of ordinary no-proof overlap; rotate the [interpreter content hash](glossary.md#interpreter-content-hash) and require the full Interpret→Project walk before publication. Coverage is enumerated in [`migration-activation-coverage.md`](migration-activation-coverage.md). | 4 adapter production files, one of which deletes the superseded helper; no schema, manifest, API, or Project vocabulary change |
 
 Issues [#348](https://github.com/ensdomains/bigname/issues/348) and
 [#529](https://github.com/ensdomains/bigname/issues/529) ship together at one
@@ -332,8 +403,8 @@ not a comparison between the actual pre-boundary production publication and the
 activated Project publication deployed after the shared boundary. It proves identical
 product-visible row membership
 and every DTO field for `name_current`, `children_current`,
-`address_names_current`, both permission projections and `/v2/permissions`,
-resolver and record reads, primary-name and search reads, `/v2/events`, and
+`address_names_current`, both permission projections and `/v1/permissions`,
+resolver and record reads, primary-name and search reads, `/v1/events`, and
 name- and address-history reads, plus every GraphQL compatibility operation.
 The comparison covers ordered pages, page membership, every REST and Manager
 DTO field, summary/count fields, `has_more`, and point responses. Before the
@@ -341,13 +412,13 @@ test-only slice-1 re-walk, each normalized-event-backed cursor surface reads a
 page and saves its `next_cursor`. After the full Interpret and Project re-walk
 publishes, that pre-rewalk cursor is submitted to the post-rewalk test
 publication.
-For `/v2/events`, name history, address history, and every other product cursor
+For `/v1/events`, name history, address history, and every other product cursor
 surface backed by normalized-event row identity, it must resume from the same
 normalized-event keyset anchor with identical remaining product rows, pages,
 fields, `has_more`, and summary behavior. The anchor may be an unmapped event
 absent from the product response, so the corpus interleaves an unmapped event at
 a product-page boundary and proves that no visible row is skipped or duplicated.
-`/v2/diagnostics/events` must accept its old cursor and continue from the same
+`/v1/diagnostics/events` must accept its old cursor and continue from the same
 stable normalized-event anchor, but its remaining rows and fields may include
 the expected new candidate diagnostics. A pre-existing diagnostic row's numeric
 `normalized_event_id` may change, while its `event_identity` and pre-existing
@@ -877,6 +948,21 @@ has no direct `Domain.registrationDate` field and instead exposes the nested
 (upstream: .refs/ens_subgraph/schema.graphql:L184-L190 @ ens_subgraph@723f1b6), and Graph Node generates child order
 values as `<parent>__<child>` (upstream: .refs/graph_node/graph/src/schema/api.rs:L531-L603 @ graph_node@aefe1737).
 
+Of the declared `DomainFilter` arguments, `owner`, `owner_in`, `name`, and
+`name_contains` filter storage. `isMigrated` filters only on `true`, and it
+answers a different question than the upstream field of the same name: the
+subgraph sets that field in its current-registry `NewOwner` handler, recording
+the 2019 ENS registry migration
+(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L131-L135 @ ens_subgraph@723f1b6),
+while this filter selects names whose declared registration authority is the
+ENSv2 registry — see the
+[subgraph `isMigrated` divergence](upstream.md#known-divergences). `id` is
+accepted and applies no predicate; `domain(id:)` is the namehash lookup. The two
+inert cases are declared so subgraph-shaped variables validate against the
+schema, not because this surface implements them; a caller that needs either
+constraint enforced should not read a filtered `domains` result as
+authoritative for it.
+
 The schema includes graph-node-compatible `BigInt` and `Bytes` scalars,
 `Block_height`, `_SubgraphErrorPolicy_`, and `_meta`/`_Meta_`/`_Block_` shapes.
 `BigInt` is a decimal string of arbitrary width and `Bytes` is an even-length,
@@ -936,9 +1022,8 @@ to the routes and selectors documented in [`api-v2-routes.md`](api-v2-routes.md)
 
 ## Replacement boundary
 
-The v2 route set is the current internal API contract. This document records
-local route ownership only; it does not claim that an external application has
-changed its call sites or that the production public edge exposes v2. The
-checked-in Caddy configuration remains on the pre-C3 routing policy, so the v2
-REST surface is not publicly reachable until the maintainer-gated C3 edge
-flip.
+The `/v1` route set is the current API contract. This document records local
+route ownership only; it does not claim that an external application has
+changed its call sites. The checked-in Caddy configuration admits `/v1` reads,
+`POST /v1/lookup`, and GraphQL (#315); see
+[`production.md`](production.md#public-edge).

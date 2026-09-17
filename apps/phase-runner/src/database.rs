@@ -288,5 +288,12 @@ pub fn stamp_interpreter_content_hash(options: PgConnectOptions) -> PgConnectOpt
             bigname_content_hash::INTERPRETER_CONTENT_HASH,
         ),
         ("search_path", PHASE_SEARCH_PATH),
+        // The project builders' statements price far above jit_above_cost (the resolver build
+        // alone carries well over a hundred subplans), so PostgreSQL JIT-compiles them on every
+        // pass: measured at 7.8 s of a 7.9 s live-follow pass on Sepolia against indexed work
+        // that completes in tens of milliseconds. Keep JIT off on every runner connection. This
+        // lives here rather than in the project crate so it does not rotate the interpreter
+        // content hash.
+        ("jit", "off"),
     ])
 }

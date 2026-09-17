@@ -82,11 +82,20 @@ impl PhaseRunner {
         };
         let commands = recovery
             .iter()
-            .map(|(_, phase, range)| {
+            .map(|(phase, phase_argument, range)| {
+                let rerun = match phase.parse::<PhaseName>() {
+                    _ if phase_argument == "recompute-flags" => {
+                        crate::transitions::RedoRerun::RecomputeFlags
+                    }
+                    Ok(phase) => crate::transitions::RedoRerun::Phase(phase),
+                    Err(_) => crate::transitions::RedoRerun::All,
+                };
                 format!(
-                    "rerun `phase-runner redo --chain {chain_id} --phase {phase} --from-block {} \
-                     --to-block {}`",
-                    range.from, range.to
+                    "rerun `phase-runner redo --chain {chain_id} --phase {phase_argument} \
+                     --from-block {} --to-block {}`{}",
+                    range.from,
+                    range.to,
+                    crate::transitions::redo_rerun_options(rerun)
                 )
             })
             .collect::<Vec<_>>()
@@ -95,8 +104,10 @@ impl PhaseRunner {
         Err(RunnerError::data_integrity(format!(
             "cannot redo all phases for chain {chain_id}: a pending {first_phase} redo must be \
              completed first; {commands}, then rerun `phase-runner redo --chain {chain_id} \
-             --phase all --from-block {} --to-block {}`",
-            rerun_range.from, rerun_range.to
+             --phase all --from-block {} --to-block {}`{}",
+            rerun_range.from,
+            rerun_range.to,
+            crate::transitions::redo_rerun_options(crate::transitions::RedoRerun::All)
         )))
     }
 }

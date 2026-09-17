@@ -15,7 +15,7 @@ outcomes or durable [execution traces](docs/glossary.md).
 
 ## What's here
 
-- `apps/api` — the read API (`/v2/...`, `/graphql`, `/healthz`)
+- `apps/api` — the read API (`/v1/...`, `/graphql`, `/healthz`)
 - `apps/phase-runner` — the ingest, interpret, project, verify, and live phase
   supervisor
 - `crates/` — domain types, storage, manifests, schema-v2 adapters, ingest,
@@ -34,7 +34,7 @@ cargo phase -- init-schema                 # initialize bigname_phase once
 ./scripts/dev-up                           # boot api + configured phase runner
 ```
 
-The API binds to `127.0.0.1:3000` by default. Use `/v2` routes for REST,
+The API binds to `127.0.0.1:3000` by default. Use `/v1` routes for REST,
 `POST /graphql` for the narrow compatibility surface, and `/healthz` for
 readiness. The API and phase runner use `bigname_phase` in the same database.
 Initialize that namespace once with `cargo phase -- init-schema`.

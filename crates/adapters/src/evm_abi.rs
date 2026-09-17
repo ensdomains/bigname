@@ -164,6 +164,13 @@ pub(crate) fn u256_i64(value: U256, label: &str) -> Result<i64> {
     i64::try_from(value).with_context(|| format!("{label} exceeds i64"))
 }
 
+pub(crate) fn saturating_u256_i64(value: U256) -> i64 {
+    u64::try_from(value)
+        .ok()
+        .and_then(|value| i64::try_from(value).ok())
+        .unwrap_or(i64::MAX)
+}
+
 /// Saturating `u64` -> `i64` for non-date second counts (e.g. registration durations). Decode stays
 /// faithful to the on-chain value; this only guards against a pathological `> i64::MAX` duration
 /// aborting the decode on a strict `try_from`. Timestamp/expiry fields are NOT converted here — they

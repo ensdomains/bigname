@@ -73,6 +73,24 @@ authoritative_for = [
   "ENSv2-specific rules in docs/adrs/0002-surface-resource-identity.md § ENSv2 linked surfaces",
 ]
 
+[refs.ens_v2_sepolia_20260903]
+repo = "https://github.com/ensdomains/contracts-v2"
+commit = "5da83f6a4823864af39e0873686f1a53c8e393cc"
+purpose = "Supplementary record-ID PermissionedResolver and direct PublicResolverV2 source evidence; not whole-build or deployment-address authority."
+authoritative_for = [
+  "PermissionedResolver, AbstractRecordResolver, resolver interfaces and PermissionedResolverLib record-ID behavior",
+  "PublicResolverV2 node-profile composition and write authorization for exact direct declarations",
+]
+
+[refs.ens_v1_publicresolver_5141a2a]
+repo = "https://github.com/ensdomains/ens-contracts"
+commit = "5141a2acdf77cf49f5134d674c2792b30f5ee0db"
+purpose = "ENS submodule pinned by contracts-v2@5da83f6; inherited PublicResolverV2 node-record evidence only, not general ENSv1 admission authority."
+authoritative_for = [
+  "Inherited PublicResolverV2 AddrChanged, AddressChanged, TextChanged, ContenthashChanged, and VersionChanged ABI layouts",
+  "Inherited PublicResolverV2 node-address, text, contenthash, empty-write, and record-version setter/getter/reset semantics",
+]
+
 [refs.ens_v2_sepolia_20260629]
 repo = "https://github.com/ensdomains/contracts-v2"
 commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
@@ -160,4 +178,13 @@ purpose = "Reference Ethereum execution client. Not authoritative for ENS, ENSv2
 authoritative_for = [
   "cross-check scope for block-hash-first intake and RPC block selection in docs/chain-intake.md",
   "comparison source for execution-client storage and canonical head behavior",
+]
+
+[refs.zigens]
+optional = true
+repo = "https://github.com/ensdomains/zigens"
+commit = "77d106e9a4ba3852da5d21461851f1630868ce0d"
+purpose = "Reference indexer: registry assignment-count and label role-holder-count comparison only."
+authoritative_for = [
+  "Reference-indexer registry role count and per-label holder count comparison",
 ]
