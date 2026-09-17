@@ -362,28 +362,30 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                 NULL::text AS owner_getter_reason
          FROM project_name_authority authority
          JOIN LATERAL (
-             SELECT event.*
-             FROM project_events event
-             WHERE event.event_kind = 'ResolverChanged'
-               AND event.source_family = 'ens_v2_root_l1'
-               AND event.resource_id IS NOT NULL
-               AND (
-                   event.logical_name_id = authority.logical_name_id
-                   OR (
-                       event.logical_name_id IS NULL
-                       AND EXISTS (
-                           SELECT 1 FROM project_events linked
-                           WHERE linked.logical_name_id = authority.logical_name_id
-                             AND linked.resource_id = event.resource_id
-                             AND linked.source_family = 'ens_v2_root_l1'
-                             AND linked.event_kind = 'ResolverChanged'
-                       )
-                   )
-               )
-             ORDER BY event.block_number DESC NULLS LAST,
-                      event.transaction_index DESC NULLS LAST,
-                      event.log_index DESC NULLS LAST,
-                      event.event_identity DESC
+             SELECT candidates.* FROM (
+                 SELECT event.* FROM project_events event
+                 WHERE event.logical_name_id = authority.logical_name_id
+                   AND event.event_kind = 'ResolverChanged'
+                   AND event.source_family = 'ens_v2_root_l1'
+                   AND event.resource_id IS NOT NULL
+                 UNION ALL
+                 SELECT event.* FROM (
+                     SELECT DISTINCT linked.resource_id FROM project_events linked
+                     WHERE linked.logical_name_id = authority.logical_name_id
+                       AND linked.source_family = 'ens_v2_root_l1'
+                       AND linked.event_kind = 'ResolverChanged'
+                       AND linked.resource_id IS NOT NULL
+                 ) linked
+                 JOIN project_events event ON event.resource_id = linked.resource_id
+                 WHERE event.logical_name_id IS NULL
+                   AND event.event_kind = 'ResolverChanged'
+                   AND event.source_family = 'ens_v2_root_l1'
+                   AND event.resource_id IS NOT NULL
+             ) candidates
+             ORDER BY candidates.block_number DESC NULLS LAST,
+                      candidates.transaction_index DESC NULLS LAST,
+                      candidates.log_index DESC NULLS LAST,
+                      candidates.event_identity DESC
              LIMIT 1
          ) pointer ON TRUE
          WHERE authority.unsupported_reason = 'current_authority_not_projected'
