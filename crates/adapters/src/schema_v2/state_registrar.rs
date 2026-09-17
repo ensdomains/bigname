@@ -1,7 +1,9 @@
 use super::State;
 
 pub(in crate::schema_v2) fn v1_key(namespace: &str, namehash: &str) -> String {
-    format!("{namespace}:{}", namehash.to_ascii_lowercase())
+    let key = format!("{namespace}:{}", namehash.to_ascii_lowercase());
+    super::super::lookahead::observe_node(&key);
+    key
 }
 
 impl State {

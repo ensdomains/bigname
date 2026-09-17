@@ -267,6 +267,7 @@ impl ChainConfig {
 
 #[derive(Clone, Debug)]
 pub struct CapacityConfig {
+    pub experimental_v1_lookahead: bool,
     pub database_max_bytes: Option<u64>,
     pub minimum_free_disk_bytes: u64,
     pub writable_path: PathBuf,
@@ -277,6 +278,7 @@ pub struct CapacityConfig {
 impl Default for CapacityConfig {
     fn default() -> Self {
         Self {
+            experimental_v1_lookahead: false,
             database_max_bytes: None,
             minimum_free_disk_bytes: 0,
             writable_path: PathBuf::from("."),

@@ -41,6 +41,7 @@ pub struct BatchOutcome {
 pub struct Engine {
     pool: PgPool,
     state_cache_capacity: StateCacheCapacity,
+    experimental_v1_lookahead: bool,
     prior_sessions: Mutex<HashMap<String, PriorSession>>,
 }
 
@@ -67,8 +68,14 @@ impl Engine {
         Self {
             pool,
             state_cache_capacity: StateCacheCapacity::Entries(entries),
+            experimental_v1_lookahead: false,
             prior_sessions: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn with_experimental_v1_lookahead(mut self, enabled: bool) -> Self {
+        self.experimental_v1_lookahead = enabled;
+        self
     }
 
     pub async fn run_batch(&self, request: BatchRequest) -> Result<BatchOutcome> {
@@ -145,19 +152,33 @@ impl Engine {
             self.take_prior_session(&session_key, *batch_from, request.resume_current.is_some())?;
         profile_phase(profile, "take_prior_session", phase_started, None);
         let phase_started = Instant::now();
-        let loaded = load::batch_input(
-            &self.pool,
-            &request.chain_id,
-            *batch_from,
-            *batch_to,
-            request
-                .resume_current
-                .as_ref()
-                .map(|marker| (marker.number, marker.hash.as_str())),
-            cached_prior,
-            self.state_cache_capacity,
-        )
-        .await?;
+        let resume_marker = request
+            .resume_current
+            .as_ref()
+            .map(|marker| (marker.number, marker.hash.as_str()));
+        let loaded = if self.experimental_v1_lookahead {
+            drop(cached_prior);
+            load::lookahead::batch_input(
+                &self.pool,
+                &request.chain_id,
+                *batch_from,
+                *batch_to,
+                resume_marker,
+                self.state_cache_capacity,
+            )
+            .await?
+        } else {
+            load::batch_input(
+                &self.pool,
+                &request.chain_id,
+                *batch_from,
+                *batch_to,
+                resume_marker,
+                cached_prior,
+                self.state_cache_capacity,
+            )
+            .await?
+        };
         let restored_event_count = loaded.restored_event_count;
         profile_phase(
             profile,
@@ -184,12 +205,21 @@ impl Engine {
         }
         write_lineage.extend(loaded_markers.iter().cloned());
         let phase_started = Instant::now();
-        let prepared = bigname_adapters::prepare_schema_v2_batch_incremental_with_provenance(
-            input,
-            provenance_manifests,
-            adapter_session,
-            self.state_cache_capacity,
-        )
+        let prepared = match loaded.lookahead_nodes {
+            Some(nodes) => bigname_adapters::schema_v2::prepare_schema_v2_batch_lookahead(
+                input,
+                provenance_manifests,
+                adapter_session.expect("lookahead supplies a restored session"),
+                &nodes,
+                self.state_cache_capacity,
+            ),
+            None => bigname_adapters::prepare_schema_v2_batch_incremental_with_provenance(
+                input,
+                provenance_manifests,
+                adapter_session,
+                self.state_cache_capacity,
+            ),
+        }
         .map_err(|error| {
             InterpretError::data_integrity(format!(
                 "hash-covered adapter interpretation failed: {error:#}"
@@ -240,13 +270,15 @@ impl Engine {
         .await?;
         profile_phase(profile, "write_batch", phase_started, None);
         let phase_started = Instant::now();
-        self.store_prior_session(
-            session_key,
-            batch_to.saturating_add(1),
-            next_prior_cache,
-            adapter_session,
-            complete,
-        )?;
+        if !self.experimental_v1_lookahead {
+            self.store_prior_session(
+                session_key,
+                batch_to.saturating_add(1),
+                next_prior_cache,
+                adapter_session,
+                complete,
+            )?;
+        }
         profile_phase(
             profile,
             "store_prior_session",

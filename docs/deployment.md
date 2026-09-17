@@ -138,6 +138,19 @@ values reduce process memory and cause more indexed reads from
 through that read path. The setting does not change stored output or the
 [interpreter content hash](glossary.md#interpreter-content-hash).
 
+`BIGNAME_EXPERIMENTAL_V1_LOOKAHEAD=true` enables the experimental ENSv1
+batch loader for the isolated blue-brain deployment. It defaults to false.
+Install and verify the two indexes in
+[`ops/experimental/v1-lookahead-indexes.sql`](../ops/experimental/v1-lookahead-indexes.sql)
+first; they are not part of the normal baseline upgrade. The loader selects
+the batch's explicit name and resource dependencies plus registrations due to
+expire, restores their canonical prior state, and discards the adapter session
+after each committed batch. It preserves the existing publication and reorg
+checks. Unsupported protocol families, incomplete dependencies, or exceeded
+read limits stop the experiment before publication; it does not silently switch
+back to a full-history restore. The deployment procedure and rollback limits are
+in [`ops/experimental/README.md`](../ops/experimental/README.md).
+
 `BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR` configures the Prometheus listener for
 a directly launched runner and defaults to `127.0.0.1:9465`. The server Compose
 file fixes the container listener at `0.0.0.0:9465` and publishes it on host

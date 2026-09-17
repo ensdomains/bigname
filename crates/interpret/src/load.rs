@@ -9,6 +9,8 @@ use sqlx::{PgConnection, PgPool, types::Uuid};
 use crate::{InterpretError, Result};
 
 mod cache;
+pub(crate) mod lookahead;
+mod lookahead_query;
 mod manifests;
 mod migration;
 mod prior;
@@ -28,6 +30,8 @@ pub(crate) struct LoadedBatch {
     pub prior_cache: PriorCache,
     pub adapter_session: Option<SchemaV2AdapterSession>,
     pub restored_event_count: usize,
+    pub lookahead_nodes:
+        Option<std::collections::BTreeSet<bigname_adapters::schema_v2::V1NodeRequest>>,
 }
 
 type RawLogRow = (
@@ -136,6 +140,7 @@ pub(crate) async fn batch_input(
         prior_cache,
         adapter_session: Some(adapter_session),
         restored_event_count,
+        lookahead_nodes: None,
     })
 }
 

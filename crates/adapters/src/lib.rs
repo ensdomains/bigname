@@ -9,7 +9,8 @@ pub use schema_v2::{
     BatchInput as SchemaV2BatchInput, BatchOutput as SchemaV2BatchOutput, DiscoveryRuleInput,
     InterpreterStateRequest, ManifestInput as SchemaV2ManifestInput,
     NormalizedEvent as SchemaV2NormalizedEvent, PriorEventInput,
-    RawLogInput as SchemaV2RawLogInput, StateCacheCapacity, begin_schema_v2_adapter_restore,
-    begin_schema_v2_adapter_restore_with_provenance, interpret_schema_v2_batch,
-    prepare_schema_v2_batch_incremental, prepare_schema_v2_batch_incremental_with_provenance,
+    RawLogInput as SchemaV2RawLogInput, StateCacheCapacity, V1BatchDependencies, V1NodeRequest,
+    begin_schema_v2_adapter_restore, begin_schema_v2_adapter_restore_with_provenance,
+    collect_v1_batch_dependencies, interpret_schema_v2_batch, prepare_schema_v2_batch_incremental,
+    prepare_schema_v2_batch_incremental_with_provenance, prepare_schema_v2_batch_lookahead,
 };
