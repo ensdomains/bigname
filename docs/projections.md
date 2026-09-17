@@ -352,6 +352,57 @@ not the resource on its active binding: retracting the latest disqualifying
 `PermissionScopeChanged` or `ExpiryChanged` event must still rebuild the child
 from the surviving wrapper history.
 
+ENSv1 BaseRegistrar lifecycle rows (`RegistrationGranted`, `RegistrationRenewed`,
+`ExpiryChanged`, `RegistrationReleased`) can carry no `logical_name_id`, because the registrar's
+own events identify a lease by labelhash only. Project attaches them to a name by exact identity
+and never by label or time:
+
+- **Through the lease's own binding.** A name-less row whose `resource_id` has a binding
+  candidate to a surface with the row's namehash is staged with that name. This is what a
+  controller event that names the lease later, or a registrar surface snapshot, makes possible.
+  A row on the same resource with a different namehash is not attached.
+- **Through a wrap.** A wrapped `.eth` name is bound to its NameWrapper resource, so the lease is
+  reached from the selected wrapper binding's `SurfaceBound` row by one of two rules:
+  1. *A named grant in the wrap's own transaction.* When a controller event creates the lease
+     (today's mainnet manifest), that event follows `NameWrapped` in the registration
+     transaction, so the wrap could not record the lease and
+     `wrapped_registrar_resource_id` is `null`. The grant carries the name, and sharing the
+     wrap's transaction identifies it.
+  2. *The recorded link.* When the BaseRegistrar's own event creates the lease, or the name is
+     wrapped in a later transaction, the lease exists before `NameWrapped` and the wrap records
+     its `resource_id` in `wrapped_registrar_resource_id`. The registrar rows are name-less, so
+     there is nothing else to match on; the link plus equality of the wrap's node and the row's
+     namehash identifies them.
+
+  Both rules stay because both shapes exist in stored events: rule 1 alone cannot see name-less
+  registrar rows, and rule 2 alone would drop the registrar lease, and with it `registered_at`
+  and the registrar expiry, from every name registered through the NameWrapper under a manifest
+  where the controller event grants the lease.
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L305 @ ens_v1@91c966f)
+
+The served registrant of a wrapped name follows the chain: the `NameWrapped` owner, then each
+later NameWrapper transfer. The registrar `Transfer` that moves the token into the NameWrapper
+during a later wrap names the NameWrapper contract, not a registrant, and is left out of the
+registrant fold. `declared_summary.registration.resource_id` names the registration. It is the
+selected registration's own resource, or the registrar lease the current wrapper binding
+recorded; when that lease was granted in the same transaction as a wrap that recorded it, it is
+the resource of that first wrapper binding, which stays the same through unwrap and rewrap.
+
+Incremental scope follows the same recorded link in both directions. A scoped wrapper resource
+or name adds the exact registrar resource its canonical `SurfaceBound` row names, and a changed
+registrar row adds the name and wrapper resource only when a canonical wrapper binding names that
+registrar resource. The closure runs for normal publication and for redo, so a wrapper-only
+transfer, resolver update, fuse change, retraction or registrar renewal stages the same
+registration rows, and serves the same `created_at` and `registered_at`, as a rebuild from block
+zero.
+
+Known gap: a lease registered through the NameWrapper that lapses past grace without renewal does
+not yet select the [released v1 authority](glossary.md#released-v1-authority) tombstone. That
+rule looks for a binding on the released registrar resource, and such a lease never had one, so
+the name is served as `current_authority_not_projected`. The gap predates the join above and is
+the same under either wrapper rule.
+
 A pre-existing owner-retraction gap remains: if an owner-zeroing ENSv1 or Basenames registry
 `AuthorityTransferred` event hides a child that has no current child or exact-name row, later retracting that
 event does not restore the child incrementally because no current child or
