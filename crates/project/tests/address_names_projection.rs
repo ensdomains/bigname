@@ -3545,10 +3545,9 @@ async fn later_wrapper_deltas_project_identically_incrementally_and_from_zero() 
                 Some("0x7777777777777777777777777777777777777777"),
                 "the registrar release replaced the last wrapper holder with NameWrapper custody"
             );
-            assert_eq!(
-                incremental.registrant_event_identity.as_deref(),
-                Some("fixture:release-wrapper-holder-transfer")
-            );
+            // After the release the name is bound to a registry-only resource, which lists
+            // nobody under the registrant address relation.
+            assert_eq!(incremental.registrant_event_identity, None);
         }
         assert_eq!(
             incremental.registration_resource_id.as_deref(),
@@ -3581,10 +3580,17 @@ async fn later_wrapper_deltas_project_identically_incrementally_and_from_zero() 
             Some(expected_registrant.as_str()),
             "{delta:?} did not serve the current NameWrapper holder as registrant"
         );
-        assert_eq!(
-            incremental.registrant, incremental.address_registrant,
-            "{delta:?} made name_current disagree with the address-name registrant fold"
-        );
+        if matches!(delta, LaterWrapperDelta::RegistrarRelease) {
+            assert_eq!(
+                incremental.address_registrant, None,
+                "a registry-only binding lists nobody under relation=registrant"
+            );
+        } else {
+            assert_eq!(
+                incremental.registrant, incremental.address_registrant,
+                "{delta:?} made name_current disagree with the address-name registrant fold"
+            );
+        }
         assert_ne!(
             incremental.registrant_event_identity.as_deref(),
             Some("fixture:incremental-old-registration"),
@@ -3611,7 +3617,7 @@ async fn born_wrapped_release_keeps_the_wrapper_registration_identity() -> Resul
     let incremental = project_later_wrapper_delta(LaterWrapperDelta::RegistrarRelease, true, false, true).await?;
     let from_zero = project_later_wrapper_delta(LaterWrapperDelta::RegistrarRelease, false, false, true).await?;
     assert_eq!(incremental, from_zero); assert_eq!(incremental.registration_status.as_deref(), Some("released"));
-    assert_eq!(incremental.registration_resource_id.as_deref(), Some(CONTROL_RESOURCE)); assert_eq!(incremental.registrant, incremental.address_registrant); Ok(())
+    assert_eq!(incremental.registration_resource_id.as_deref(), Some(CONTROL_RESOURCE)); assert_eq!(incremental.address_registrant, None, "a registry-only binding lists nobody under relation=registrant"); Ok(())
 }
 
 #[tokio::test]
@@ -3658,7 +3664,10 @@ async fn registry_update_after_wrapper_release_preserves_registration_history() 
             incremental.registrant.as_deref(),
             Some("0x7777777777777777777777777777777777777777")
         );
-        assert_eq!(incremental.registrant, incremental.address_registrant);
+        assert_eq!(
+            incremental.address_registrant, None,
+            "a registry-only binding lists nobody under relation=registrant"
+        );
         assert_ne!(
             incremental.registrant_event_identity.as_deref(),
             Some("fixture:incremental-old-registration"),
@@ -3724,9 +3733,36 @@ async fn project_enriched_registry_only(controller_registered: bool, incremental
 async fn enrich_later_registration_keeps_lease_through_registry_only_fallback() -> Result<()> {
     let incremental = project_enriched_registry_only(false, true).await?; let from_zero = project_enriched_registry_only(false, false).await?;
     assert_eq!(incremental, from_zero); assert_eq!(incremental.expiry, Some(1_700_001_100), "plaintext enrichment left the live registrar expiry behind its binding");
-    assert_eq!(incremental.registration_resource_id.as_deref(), Some(OWNERLESS_RESOURCE)); assert_eq!(incremental.registrant.as_deref(), Some("0x6666666666666666666666666666666666666666")); assert_eq!(incremental.registrant, incremental.address_registrant);
+    assert_eq!(incremental.registration_resource_id.as_deref(), Some(OWNERLESS_RESOURCE)); assert_eq!(incremental.registrant.as_deref(), Some("0x6666666666666666666666666666666666666666")); assert_eq!(incremental.address_registrant, None, "a registry-only binding lists nobody under relation=registrant");
     let controller_control = project_enriched_registry_only(true, false).await?;
     assert_eq!(controller_control.expiry, incremental.expiry); assert_eq!(controller_control.registration_resource_id, incremental.registration_resource_id); assert_eq!(controller_control.registrant, incremental.registrant); assert_eq!(controller_control.address_registrant, incremental.address_registrant); Ok(())
+}
+
+/// A BaseRegistrar token transferred without `reclaim` leaves the registry owner behind, so the
+/// name is bound to a registry-only resource while the lease stays on the registrar's. The new
+/// token holder is served as the registration's registrant, but a registry-only binding lists
+/// nobody under the `registrant` or `token_holder` address relations. Seeded the way today's
+/// mainnet manifest produces events (named, controller-granted); this is what Project served
+/// before registrar rows were joined by resource identity, and the end-to-end scenario
+/// `transfer_without_reclaim_keeps_registry_owner_divergent` asserts the same.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
+#[tokio::test]
+async fn unreclaimed_transfer_serves_the_holder_without_a_registrant_relation() -> Result<()> {
+    for incremental in [false, true] {
+        let projection = project_enriched_registry_only(true, incremental).await?;
+        assert_eq!(
+            projection.registrant.as_deref(),
+            Some("0x6666666666666666666666666666666666666666"),
+            "incremental={incremental}"
+        );
+        assert_eq!(projection.expiry, Some(1_700_001_100));
+        assert_eq!(
+            projection.address_registrant, None,
+            "incremental={incremental}: a registry-only binding listed the token holder under \
+             relation=registrant"
+        );
+    }
+    Ok(())
 }
 
 // The two tests below seed events in the shape today's mainnet manifest produces: a controller

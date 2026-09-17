@@ -395,32 +395,6 @@ pub(super) async fn build(
                    state.registration_manifest_version AS manifest_version
             FROM binding_state state
             WHERE state.token_lineage_id IS NOT NULL
-               -- A registry-only authority can still serve a registration that lives on
-               -- another resource: the registrar lease it fell back from, or the lease a
-               -- NameWrapper binding recorded. Its registrant keeps the relation.
-               OR (
-                   state.declared_summary #>> '{registration,authority_kind}' = 'registry_only'
-                   AND state.declared_summary #>> '{registration,resource_id}' IS NOT NULL
-                   AND state.declared_summary #>> '{registration,resource_id}'
-                       <> state.resource_id::text
-                   AND (
-                       state.declared_summary #>> '{registration,status}' <> 'released'
-                       OR EXISTS (
-                           SELECT 1
-                           FROM project_events wrapper_binding
-                           WHERE wrapper_binding.logical_name_id = state.logical_name_id
-                             AND wrapper_binding.source_family = 'ens_v1_wrapper_l1'
-                             AND wrapper_binding.event_kind = 'SurfaceBound'
-                             AND (
-                                 wrapper_binding.resource_id::text =
-                                     state.declared_summary #>> '{registration,resource_id}'
-                                 OR wrapper_binding.after_state ->>
-                                     'wrapped_registrar_resource_id' =
-                                     state.declared_summary #>> '{registration,resource_id}'
-                             )
-                       )
-                   )
-               )
             UNION ALL
             SELECT lower(COALESCE(state.token_holder, state.registrant)),
                    state.logical_name_id,
