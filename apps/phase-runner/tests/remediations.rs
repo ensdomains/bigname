@@ -598,6 +598,12 @@ async fn cancelled_redo_is_incomplete_and_returns_the_required_rerun_command() -
     assert!(error_message.contains("is incomplete"));
     assert!(error_message.contains("the phase remains blocked from normal restart"));
     assert!(error_message.contains(instruction));
+    // The stamp carries neither sources nor the hydration RPC, and an Interpret
+    // redo cascades into Project, so the instruction names both.
+    assert!(error_message.contains(
+        "` with the chain's configured sources as --source options and --hydration-rpc for \
+         the chain (or BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS)"
+    ));
 
     let state: (String, bool, Option<String>) = sqlx::query_as(
         "
