@@ -168,8 +168,8 @@ Since #849 `apply-check.sh` applies every schema-migration that names a
 `bigname_phase` object and fails on one it does not list. Its inventory is
 that literal token, so a schema-migration written against the connection's
 search path would not be in it; the same script therefore closes that door
-by rule rather than by parsing: a schema-migration outside the historical
-set that names no `bigname_phase` object may consist only of `DROP`
+by rule rather than by parsing: a schema-migration newer than the
+legacy-schema drop that names no `bigname_phase` object may consist only of `DROP`
 statements for indexes, sequences, views, materialized views, functions, and
 procedures whose every target is `schema.name`, written with plain
 identifiers and nothing quoted — no strings, quoted identifiers, dollar
@@ -182,21 +182,31 @@ PostgreSQL drops it without complaint, taking the rows visible through the
 phase parent. Any other statement, any expression, any routine
 call, and any spelling of the phase schema other than `bigname_phase` is
 refused, so a search-path-relative name cannot be written outside the
-inventory whatever statement carries it. The historical set is the explicit
-list in `schema-v2/historical-migrations.txt`, not a filename cutoff: sqlx
-applies whichever versions a database has not recorded, so a new file named
-to sort among the historical ones would run on an initialized database
-while looking historical, and the check refuses it. Inside the inventory the
+inventory whatever statement carries it. `schema-v2/migration-inventory.txt`
+lists every schema-migration file in order, and the directory must equal it
+exactly: sqlx applies whichever versions a database has not recorded, so a
+new file named to sort anywhere below the head would run on an initialized
+database while looking historical or already frozen, and the check refuses
+it — a schema-migration lands by joining the inventory and advancing the
+head in the same change. Inside the inventory the
 rewrite is textual — the literal `bigname_phase` becomes the scratch schema —
 so it cannot see a name a migration assembles at run time (`'bigname_' ||
 'phase.…'` inside `EXECUTE`, or a search-path-relative name in a `DO` body).
-The check therefore applies every batch as a per-run role that owns the
-scratch schema and holds no privilege on `bigname_phase`: whatever the
-rewrite misses fails on the production schema instead of changing it
-unobserved. The check proves itself on every run against a planted set of
-the forms it refuses and the one it accepts, including an assembled
-production name that must be refused and its rewritten twin that must
-succeed.
+The check therefore applies every batch on a connection of its own, a
+per-run login that owns the scratch schema and holds no privilege on
+`bigname_phase` and no `CREATE` on the database: whatever the rewrite misses
+fails on the production schema instead of changing it unobserved. The check
+proves itself on every run against a planted set of the forms it refuses and
+the one it accepts, including an assembled production name that must be
+refused — after `RESET ROLE` too — and its rewritten twin that must succeed.
+Finally the frozen artifact itself is a checked-in catalog:
+`schema-v2/frozen-schema.txt` is every relation, column, default, constraint,
+index, view, routine, trigger, sequence, type and comment of the baseline
+plus the inventoried schema-migrations, built into a fresh schema on every
+run and compared line for line, so a change to a baseline file or a
+schema-migration that moves the schema fails until the catalog is
+regenerated (`SCHEMA_V2_APPLY_CHECK_WRITE_FINGERPRINT=1`) in the same
+change — whatever the object is called.
 From acceptance on, a
 schema-migration of any of these kinds cannot land without moving the
 conformance test, which is where the carve-out or amendment is checked for.
@@ -210,8 +220,9 @@ any moment is therefore the baseline tree plus the head this line names.
 
 `schema-v2/apply-check.sh` is the conformance test for that contract. It already
 gates its own CI job and asserts table inventory, column presence, constraint
-shape, and a forbidden-name policy. **A change to the schema that does not also
-change `apply-check.sh` is out of contract.** That coupling is what makes the
+shape, a forbidden-name policy, and the frozen catalog. **A change to the
+schema that does not also change `apply-check.sh` and regenerate
+`schema-v2/frozen-schema.txt` is out of contract.** That coupling is what makes the
 freeze observable rather than aspirational.
 
 ### What the freeze promises
@@ -494,11 +505,13 @@ stable/unstable identifier split gives downstream authors a rule they can follow
 without understanding the whole replay model.
 
 **Negative.** Tooling enforces only the mechanics of the freeze: `apply-check.sh`
-fails CI when a schema change lands without moving the conformance test, and
-when a schema-migration lands without advancing the head this ADR and
-`storage.md` name. Whether a change is an authorized carve-out or a substantive
-amendment is still decided by review — nothing fails CI when the head is
-advanced but the ADR's decision is not recorded. It also front-loads decisions
+fails CI when the schema the baseline and inventoried schema-migrations build
+no longer matches the checked-in frozen catalog, when the migration directory
+differs from the inventory, and when a schema-migration lands without
+advancing the head this ADR and `storage.md` name. Whether a change is an
+authorized carve-out or a substantive amendment is still decided by review —
+nothing fails CI when the catalog and head are regenerated but the ADR's
+decision is not recorded. It also front-loads decisions
 that would otherwise be made inside the slices, which costs time now.
 
 **Newly possible failure mode.** A carve-out landing without its `apply-check.sh`

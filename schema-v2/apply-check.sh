@@ -123,12 +123,14 @@ phase_migration_uses_production_schema() {
 # table), quoted or not; the check prints what carries no schema qualifier and
 # any statement it cannot read.
 legacy_public_schema_drop="20260806120000_drop_legacy_public_schema.sql"
-# The schema-migrations that sort at or before the legacy-schema drop are the
-# fixed historical set listed in historical-migrations.txt; sqlx applies any
-# version a database has not recorded, whatever its position, so a new file
-# named to sort among them would run on an initialized database while looking
-# historical. The rule below therefore exempts the list, not the name order.
-historical_migrations_list="$ROOT/schema-v2/historical-migrations.txt"
+# migration-inventory.txt lists every schema-migration file, in order, up to
+# the documented head. sqlx applies any version a database has not recorded,
+# whatever its position, so a file named to sort anywhere below the head would
+# run on an initialized database while looking historical or already frozen;
+# the directory must therefore equal the inventory exactly, and a new
+# schema-migration lands by joining the inventory and advancing the head in
+# the same change.
+migration_inventory="$ROOT/schema-v2/migration-inventory.txt"
 # A post-cutoff schema-migration that names no bigname_phase object is never
 # applied by this check, so the rule for one is closed rather than parsed: it
 # may consist only of `DROP INDEX|SEQUENCE|VIEW|MATERIALIZED VIEW|FUNCTION|
@@ -199,8 +201,114 @@ migration_is_closed_form_drop() {
 migration_uses_unicode_escape() {
     grep -qiE "U&[\"']" "$1"
 }
-# The frozen artifact is the baseline plus the schema-migration head that
-# ADR 0007 and storage.md name; a merge that brings a newer file moves the
+# The frozen artifact is the baseline plus the inventoried schema-migrations
+# through the documented head. schema-v2/frozen-schema.txt is that artifact's
+# catalog -- every relation, column, default, constraint, index, view, routine,
+# trigger, sequence, type and comment, with the schema name normalized -- built
+# here into its own schema and compared line for line, so a change to a
+# baseline file or a migration that moves the schema without moving the
+# frozen catalog fails, whatever its name. Regenerate deliberately with
+# SCHEMA_V2_APPLY_CHECK_WRITE_FINGERPRINT=1 in the change that moves the schema.
+frozen_schema_catalog_sql='
+SELECT line FROM (
+    SELECT 1 AS section, c.relname AS a, lpad(a.attnum::text, 4, '"'"'0'"'"') AS b,
+           format('"'"'column %s.%s %s %s %s'"'"', c.relname, a.attname,
+                  format_type(a.atttypid, a.atttypmod),
+                  CASE WHEN a.attnotnull THEN '"'"'not null'"'"' ELSE '"'"'null'"'"' END,
+                  COALESCE(pg_get_expr(d.adbin, d.adrelid), '"'"'-'"'"')) AS line
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+    LEFT JOIN pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum
+    WHERE n.nspname = current_schema() AND c.relkind IN ('"'"'r'"'"', '"'"'p'"'"', '"'"'v'"'"', '"'"'m'"'"')
+    UNION ALL
+    SELECT 2, c.relname, con.conname,
+           format('"'"'constraint %s.%s %s'"'"', c.relname, con.conname, pg_get_constraintdef(con.oid))
+    FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = current_schema()
+    UNION ALL
+    SELECT 3, tablename, indexname, format('"'"'index %s.%s %s'"'"', tablename, indexname, indexdef)
+    FROM pg_indexes WHERE schemaname = current_schema()
+    UNION ALL
+    SELECT 4, c.relname, '"'"''"'"', format('"'"'view %s %s'"'"', c.relname, pg_get_viewdef(c.oid, true))
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = current_schema() AND c.relkind IN ('"'"'v'"'"', '"'"'m'"'"')
+    UNION ALL
+    SELECT 5, p.proname, pg_get_function_identity_arguments(p.oid),
+           format('"'"'routine %s(%s) returns %s kind=%s volatile=%s secdef=%s config=%s body=%s'"'"',
+                  p.proname, pg_get_function_identity_arguments(p.oid),
+                  pg_get_function_result(p.oid), p.prokind, p.provolatile, p.prosecdef,
+                  COALESCE(array_to_string(p.proconfig, '"'"';'"'"'), '"'"'-'"'"'),
+                  md5(replace(p.prosrc, current_schema(), '"'"'bigname_phase'"'"')))
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = current_schema()
+    UNION ALL
+    SELECT 6, c.relname, t.tgname, format('"'"'trigger %s.%s %s'"'"', c.relname, t.tgname, pg_get_triggerdef(t.oid))
+    FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = current_schema() AND NOT t.tgisinternal
+    UNION ALL
+    SELECT 7, sequencename, '"'"''"'"',
+           format('"'"'sequence %s %s start=%s increment=%s'"'"', sequencename, data_type, start_value, increment_by)
+    FROM pg_sequences WHERE schemaname = current_schema()
+    UNION ALL
+    SELECT 8, t.typname, '"'"''"'"',
+           format('"'"'type %s %s %s'"'"', t.typname, t.typtype,
+                  COALESCE((SELECT string_agg(e.enumlabel, '"'"','"'"' ORDER BY e.enumsortorder)
+                            FROM pg_enum e WHERE e.enumtypid = t.oid), '"'"'-'"'"'))
+    FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+    WHERE n.nspname = current_schema() AND t.typtype IN ('"'"'e'"'"', '"'"'d'"'"', '"'"'c'"'"')
+      AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.reltype = t.oid)
+    UNION ALL
+    SELECT 9, COALESCE(c.relname, p.proname), lpad(COALESCE(d.objsubid, 0)::text, 4, '"'"'0'"'"'),
+           format('"'"'comment %s %s %s'"'"', COALESCE(c.relname, p.proname), d.objsubid, d.description)
+    FROM pg_description d
+    LEFT JOIN pg_class c ON d.classoid = '"'"'pg_class'"'"'::regclass AND c.oid = d.objoid
+    LEFT JOIN pg_proc p ON d.classoid = '"'"'pg_proc'"'"'::regclass AND p.oid = d.objoid
+    JOIN pg_namespace n ON n.oid = COALESCE(c.relnamespace, p.pronamespace)
+    WHERE n.nspname = current_schema()
+) catalog
+ORDER BY section, a, b, line;
+'
+frozen_schema_catalog="$ROOT/schema-v2/frozen-schema.txt"
+build_frozen_artifact() {
+    local scratch_schema="$frozen_schema"
+    local migration_file
+    apply_baseline
+    for migration_file in "$ROOT"/migrations/*.sql; do
+        if phase_migration_uses_production_schema "$migration_file"; then
+            render_phase_migration "$migration_file" | run_psql
+        fi
+    done
+}
+assert_frozen_schema_fingerprint() {
+    local observed
+    observed="$(mktemp "${TMPDIR:-/tmp}/schema-v2-frozen-catalog.XXXXXX")"
+    build_frozen_artifact
+    {
+        printf '\\pset format unaligned\n\\pset tuples_only on\n'
+        printf 'SET search_path TO "%s";\n' "$frozen_schema"
+        printf '%s\n' "$frozen_schema_catalog_sql"
+    } | run_psql | sed "s/$frozen_schema/bigname_phase/g" > "$observed"
+    if [ ! -s "$observed" ]; then
+        printf '%s\n' "the frozen artifact produced an empty catalog" >&2
+        exit 1
+    fi
+    if [ "${SCHEMA_V2_APPLY_CHECK_WRITE_FINGERPRINT:-0}" = 1 ]; then
+        cp "$observed" "$frozen_schema_catalog"
+        printf '%s\n' "wrote $(basename "$frozen_schema_catalog") ($(wc -l < "$observed" | tr -d ' ') lines)"
+    elif ! diff -u "$frozen_schema_catalog" "$observed" >&2; then
+        printf '%s\n' \
+            "the frozen artifact's catalog differs from $(basename "$frozen_schema_catalog") (diff above); a schema change lands with SCHEMA_V2_APPLY_CHECK_WRITE_FINGERPRINT=1 regenerating it in the same change, under an ADR 0007 carve-out or amendment" >&2
+        rm -f -- "$observed"
+        exit 1
+    fi
+    rm -f -- "$observed"
+}
+# The documented head is checked separately from the catalog: the head names
+# the artifact, the catalog is the artifact; a merge that brings a newer file moves the
 # artifact without moving the contract. Both documents name the head once as
 # `migrations/<file>.sql`; each must be the newest file, and they must agree.
 assert_documented_head_is_newest_migration() {
@@ -270,29 +378,14 @@ assert_uninventoried_migrations_are_schema_qualified() {
         printf '%s\n' "closed-form check refused the closed form" >&2
         exit 1
     fi
-    local -A historical_lookup=()
-    while IFS= read -r migration_basename; do
-        [ -n "$migration_basename" ] || continue
-        if [ ! -f "$ROOT/migrations/$migration_basename" ]; then
-            printf '%s\n' "historical schema-migration listed in $(basename "$historical_migrations_list") is missing: $migration_basename" >&2
-            exit 1
-        fi
-        if [[ "$migration_basename" > "$legacy_public_schema_drop" ]]; then
-            printf '%s\n' "$(basename "$historical_migrations_list") lists a schema-migration newer than the legacy-schema drop: $migration_basename" >&2
-            exit 1
-        fi
-        historical_lookup["$migration_basename"]=1
-    done < "$historical_migrations_list"
+    if ! diff -u "$migration_inventory" <(ls "$ROOT"/migrations/*.sql | xargs -n1 basename | sort) >&2; then
+        printf '%s\n' \
+            "migrations/ differs from $(basename "$migration_inventory") (see the diff above); a schema-migration lands by joining the inventory and advancing the documented head in the same change, and cannot be named to sort below the head" >&2
+        exit 1
+    fi
     for migration_file in "$ROOT"/migrations/*.sql; do
         migration_basename="$(basename "$migration_file")"
-        if [ -n "${historical_lookup[$migration_basename]:-}" ]; then
-            continue
-        fi
-        if ! [[ "$migration_basename" > "$legacy_public_schema_drop" ]]; then
-            printf '%s\n' \
-                "$migration_basename sorts among the historical schema-migrations but is not one of them; a schema-migration cannot be backdated, name it after the current head" >&2
-            exit 1
-        fi
+        [[ "$migration_basename" > "$legacy_public_schema_drop" ]] || continue
         # PostgreSQL folds an unquoted BIGNAME_PHASE to the production schema, but
         # the inventory and the scratch-schema rewrite match the lowercase literal
         # only, so any other spelling anywhere -- even beside a lowercase one --
@@ -617,7 +710,7 @@ wait_for_schema_v2_race_session() {
                     "      AND wait_event = 'PgSleep'" \
                     ") THEN 'schema_v2_race_ready'" \
                     "ELSE 'schema_v2_race_waiting' END;"
-            } | run_psql
+            } | run_psql_as_owner
         )"
         if [[ "$status" == *schema_v2_race_ready* ]]; then
             return 0
@@ -679,21 +772,27 @@ cleanup() {
     fi
     {
         printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\n' "$scratch_schema"
+        printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\n' "${scratch_schema}_frozen"
         printf 'DROP OWNED BY "%s";\n' "$apply_check_role"
         printf 'DROP ROLE IF EXISTS "%s";\n' "$apply_check_role"
     } | run_psql_as_owner >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-# pg_read_all_stats lets the race probe below see another session's wait event.
+# The owner keeps the race probe (another session's wait event is not visible
+# to an ordinary login) and installs the baseline's extensions, which need the
+# database CREATE the login loses below.
 {
-    printf "CREATE ROLE \"%s\" LOGIN PASSWORD '%s' IN ROLE pg_read_all_stats;\n" \
+    printf "CREATE ROLE \"%s\" LOGIN PASSWORD '%s';\n" \
         "$apply_check_role" "$apply_check_role_password"
+    printf 'CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public;\n'
+    printf 'CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;\n'
     printf "SELECT format('GRANT CREATE ON DATABASE %%I TO %%I', current_database(), '%s') \\gexec\n" "$apply_check_role"
 } | run_psql_as_owner
 
-printf 'CREATE SCHEMA "%s";\n' "$scratch_schema" | run_psql
-# The scratch schema exists; from here the login may create nothing else in the
+frozen_schema="${scratch_schema}_frozen"
+printf 'CREATE SCHEMA "%s"; CREATE SCHEMA "%s";\n' "$scratch_schema" "$frozen_schema" | run_psql
+# Both schemas exist; from here the login may create nothing else in the
 # database, so an assembled CREATE SCHEMA bigname_phase fails where the
 # production schema does not yet exist.
 printf "SELECT format('REVOKE CREATE ON DATABASE %%I FROM %%I', current_database(), '%s') \\gexec\n" "$apply_check_role" \
@@ -7934,6 +8033,7 @@ report_timing specialized-predecessor "$refusal_probe_seconds"
 if [ "${SCHEMA_V2_APPLY_CHECK_TIMING:-0}" = 1 ]; then printf 'schema-v2 timing: refusal-probes=%ss\n' "$refusal_probe_seconds"; fi
 assert_uninventoried_migrations_are_schema_qualified
 assert_documented_head_is_newest_migration
+assert_frozen_schema_fingerprint
 assert_reviewed_phase_migrations_applied
 if [ "$refusal_assertions_passed" -ne "$expected_refusal_assertions" ]; then
     printf '%s\n' \
