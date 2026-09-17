@@ -227,6 +227,10 @@ async fn create_events(
         "CREATE INDEX ON project_events (resource_id, normalized_event_id)",
         "CREATE INDEX ON project_events (event_kind, normalized_event_id)",
         "CREATE INDEX ON project_events (event_kind, chain_id, normalized_event_id)",
+        // Resolver pointers and records are looked up by node, once per reverse claim in primary
+        // names. The index covers every row: the planner reads expression statistics only from
+        // a complete index, and with a partial one it guessed hundreds of rows per node.
+        "CREATE INDEX ON project_events (lower(after_state ->> 'node'))",
     ] {
         sqlx::query(statement)
             .execute(&mut **transaction)
