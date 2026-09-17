@@ -375,7 +375,11 @@ filter admits for that block must have been present in the range-query result.
 The range query and the receipt are two independent reads of the same
 transaction; a watched log that only one of them reports means one read is
 wrong and the window would silently store less than it should. That is a
-data-integrity failure, not a retry.
+data-integrity failure. Like the other data-integrity failures in this section,
+it does not stop ingest on first sight: RPC ingest re-fetches the complete
+window at most twice, every attempt must pass the same checks, and a
+disagreement that outlasts both re-fetches is terminal
+([Intake architecture](architecture.md#intake-architecture)).
 
 **Receipt sanity.** Log indices strictly increase within a receipt, every
 receipt log belongs to the requested transaction and its block, and a receipt

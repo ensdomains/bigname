@@ -8,6 +8,7 @@ use crate::harness::{
     anvil::Anvil,
     db::HarnessDb,
     ens_v1::{self, EnsV1Deployment},
+    facts,
     fault_proxy::{FaultKind, FaultProxy, FaultSpec},
     manifests::{self, LocalProfile},
     pipeline, repo_root,
@@ -126,6 +127,121 @@ async fn raw_receipt_count(pool: &sqlx::PgPool, transaction_hash: &str) -> Resul
     .await?)
 }
 
+/// Progress an ingest redo command is able to move: the redo's own position,
+/// the ordinary ingest position the harness seeds before the command, the
+/// per-source cursor, and the published chain head. Timestamps and error text
+/// are left out so a failed command that only records its failure compares equal.
+#[derive(Debug, PartialEq)]
+struct IngestProgress {
+    redo_in_progress: bool,
+    redo_current_block_number: Option<i64>,
+    ordinary: Value,
+    source_cursor: Value,
+    published_head: Option<Value>,
+}
+
+async fn ingest_progress(pool: &sqlx::PgPool) -> Result<IngestProgress> {
+    let (redo_in_progress, redo_current_block_number, ordinary): (bool, Option<i64>, Value) =
+        sqlx::query_as(
+            "SELECT redo_in_progress, redo_current_block_number,
+                    jsonb_build_object(
+                        'current_block_number', current_block_number,
+                        'current_block_hash', current_block_hash,
+                        'target_block_number', target_block_number,
+                        'target_block_hash', target_block_hash,
+                        'live_handoff_block_number', live_handoff_block_number,
+                        'live_handoff_block_hash', live_handoff_block_hash)
+             FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'ingest'",
+        )
+        .bind(INGEST_CHAIN)
+        .fetch_one(pool)
+        .await
+        .context("load ingest phase progress")?;
+    let source_cursor = sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+                    'next_block_number', next_block_number,
+                    'target_block_number', target_block_number,
+                    'last_processed_block_number', last_processed_block_number,
+                    'last_processed_block_hash', last_processed_block_hash)
+         FROM ingest_cursors WHERE chain_id = $1 AND source_key = 'e2e-rpc'",
+    )
+    .bind(INGEST_CHAIN)
+    .fetch_one(pool)
+    .await
+    .context("load ingest source cursor")?;
+    let published_head = sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+                    'latest_block_number', latest_block_number,
+                    'latest_block_hash', latest_block_hash)
+         FROM chain_heads WHERE chain_id = $1",
+    )
+    .bind(INGEST_CHAIN)
+    .fetch_optional(pool)
+    .await
+    .context("load published chain head")?;
+    Ok(IngestProgress {
+        redo_in_progress,
+        redo_current_block_number,
+        ordinary,
+        source_cursor,
+        published_head,
+    })
+}
+
+/// Every stored transaction, receipt, and log on a canonical block, identified
+/// by chain data only: block hash and number, transaction hash and index, the
+/// log's own `log_index`, emitter, topics, and data. Generated ids and
+/// observation timestamps are left out so two corpora can be compared.
+async fn canonical_raw_rows(pool: &sqlx::PgPool) -> Result<Value> {
+    sqlx::query_scalar(
+        "WITH canonical AS (
+             SELECT block_hash FROM chain_lineage
+             WHERE chain_id = $1
+               AND canonicality_state IN ('canonical', 'safe', 'finalized')
+         )
+         SELECT jsonb_build_object(
+             'transactions', (
+                 SELECT coalesce(jsonb_agg(jsonb_build_array(
+                            block_number, block_hash, transaction_index, transaction_hash,
+                            from_address, to_address, encode(input, 'hex'))
+                        ORDER BY block_number, transaction_index), '[]'::jsonb)
+                 FROM raw_transactions JOIN canonical USING (block_hash)
+                 WHERE chain_id = $1),
+             'receipts', (
+                 SELECT coalesce(jsonb_agg(jsonb_build_array(
+                            block_number, block_hash, transaction_index, transaction_hash,
+                            status, contract_address)
+                        ORDER BY block_number, transaction_index), '[]'::jsonb)
+                 FROM raw_receipts JOIN canonical USING (block_hash)
+                 WHERE chain_id = $1),
+             'logs', (
+                 SELECT coalesce(jsonb_agg(jsonb_build_array(
+                            block_number, block_hash, transaction_index, transaction_hash,
+                            log_index, emitting_address, to_jsonb(topics), encode(data, 'hex'))
+                        ORDER BY block_number, log_index), '[]'::jsonb)
+                 FROM raw_logs JOIN canonical USING (block_hash)
+                 WHERE chain_id = $1))",
+    )
+    .bind(INGEST_CHAIN)
+    .fetch_one(pool)
+    .await
+    .context("load canonical raw rows")
+}
+
+fn ensure_raw_rows_match_control(faulted: &Value, control: &Value, stage: &str) -> Result<()> {
+    ensure!(
+        control["logs"]
+            .as_array()
+            .is_some_and(|logs| !logs.is_empty()),
+        "the clean control stored no canonical raw logs to compare against"
+    );
+    ensure!(
+        faulted == control,
+        "canonical raw rows {stage} differ from the clean control\nfaulted: {faulted}\ncontrol: {control}"
+    );
+    Ok(())
+}
+
 async fn projected_text(pool: &sqlx::PgPool, name: &str) -> Result<Value> {
     let entries: Value = sqlx::query_scalar(
         "SELECT inventory.entries FROM name_current name \
@@ -236,6 +352,11 @@ async fn transient_provider_faults_and_partial_receipts_recover_to_control() -> 
 
     // Leg 1: truncation that outlasts ingest's bounded window re-fetch is terminal.
     let faulted = prepare_corpus(&fixture.deployment).await?;
+    // The redo helper records ordinary ingest progress at `head` before it runs
+    // the command, so that seeded state is the baseline, not "below the fault".
+    // Seeding here first writes the same rows the helper writes again.
+    facts::seed_anvil_rpc_redo_extent(&faulted.db.pool, INGEST_CHAIN, &anvil.url, head).await?;
+    let baseline = ingest_progress(&faulted.db.pool).await?;
     let first_attempt = rpc_ingest(&faulted, &proxy.url, head).await;
     for (kind, expected) in [
         (FaultKind::ErrorOnce, 1),
@@ -260,6 +381,26 @@ async fn transient_provider_faults_and_partial_receipts_recover_to_control() -> 
             && raw_receipt_count(&faulted.db.pool, &fixture.receipt.tx_hash).await? == 0,
         "the persistently truncated window unexpectedly retained target facts"
     );
+    let failed = ingest_progress(&faulted.db.pool).await?;
+    let fault_block = i64::try_from(fixture.receipt.block_number)?;
+    ensure!(
+        failed.redo_in_progress,
+        "the failed redo reported completion instead of staying open: {failed:?}"
+    );
+    ensure!(
+        failed
+            .redo_current_block_number
+            .is_none_or(|block| block < fault_block),
+        "redo progress advanced through the failed window at block {fault_block}: {failed:?}"
+    );
+    ensure!(
+        failed.ordinary == baseline.ordinary && failed.source_cursor == baseline.source_cursor,
+        "the failed redo moved ordinary ingest progress\nbefore: {baseline:?}\nafter: {failed:?}"
+    );
+    ensure!(
+        failed.published_head == baseline.published_head,
+        "the failed redo published a chain head\nbefore: {baseline:?}\nafter: {failed:?}"
+    );
 
     // Leg 2: a one-off truncated response is rejected, the window is read again by
     // the same command, and the re-fetch is visible to the operator.
@@ -283,6 +424,25 @@ async fn transient_provider_faults_and_partial_receipts_recover_to_control() -> 
             && raw_receipt_count(&faulted.db.pool, &fixture.receipt.tx_hash).await? == 1,
         "the re-fetched window did not retain the target log and receipt"
     );
+    // What the recovered redo stored, and what the rest of the pipeline derives
+    // from it, must equal a corpus that never saw a fault. Compare now, before
+    // any later redo could repair a difference.
+    let control = ingest_clean_control(&fixture, &anvil, head).await?;
+    let control_raw_rows = canonical_raw_rows(&control.db.pool).await?;
+    ensure_raw_rows_match_control(
+        &canonical_raw_rows(&faulted.db.pool).await?,
+        &control_raw_rows,
+        "after the in-place window re-fetch",
+    )?;
+    finish_spine(&faulted, &anvil.url, head).await?;
+    assert_eq!(
+        normalized_text(&faulted.db.pool, &fixture.receipt).await?,
+        normalized_text(&control.db.pool, &fixture.receipt).await?
+    );
+    assert_eq!(
+        projected_text(&faulted.db.pool, &fixture.name).await?,
+        projected_text(&control.db.pool, &fixture.name).await?
+    );
 
     // Leg 3: a temporarily missing selected receipt is retryable: the same
     // command must refetch it and finish without an explicit repair.
@@ -299,24 +459,25 @@ async fn transient_provider_faults_and_partial_receipts_recover_to_control() -> 
             && raw_receipt_count(&faulted.db.pool, &fixture.receipt.tx_hash).await? == 1,
         "the missing receipt was not refetched and retained by the same redo"
     );
-    // A subsequent clean redo must preserve that recovery result.
+    ensure_raw_rows_match_control(
+        &canonical_raw_rows(&faulted.db.pool).await?,
+        &control_raw_rows,
+        "after the missing receipt was refetched",
+    )?;
+    // Idempotence, checked separately from recovery: a clean redo over the
+    // recovered range changes no stored raw row. Interpret and Project already
+    // ran above, on exactly the rows the recovery left.
     rpc_ingest(&faulted, &anvil.url, head).await?;
     ensure!(
         raw_log_count(&faulted.db.pool, &fixture.receipt.tx_hash).await? == 1
             && raw_receipt_count(&faulted.db.pool, &fixture.receipt.tx_hash).await? == 1,
         "clean recovery did not retain the target log and receipt"
     );
-    finish_spine(&faulted, &anvil.url, head).await?;
-
-    let control = ingest_clean_control(&fixture, &anvil, head).await?;
-    assert_eq!(
-        normalized_text(&faulted.db.pool, &fixture.receipt).await?,
-        normalized_text(&control.db.pool, &fixture.receipt).await?
-    );
-    assert_eq!(
-        projected_text(&faulted.db.pool, &fixture.name).await?,
-        projected_text(&control.db.pool, &fixture.name).await?
-    );
+    ensure_raw_rows_match_control(
+        &canonical_raw_rows(&faulted.db.pool).await?,
+        &control_raw_rows,
+        "after the clean redo",
+    )?;
     proxy.assert_healthy()?;
     faulted.db.cleanup().await?;
     control.db.cleanup().await?;
