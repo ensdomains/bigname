@@ -259,7 +259,9 @@ that epoch's binding and resources at the requested position. An activated
 ENSv1→ENSv2 authority proof may select a closed ENSv2 binding after release;
 that [released v2 authority](glossary.md#released-v2-authority) does not fall
 back to an active retained ENSv1 binding. A released ENSv1 lease with no
-revived custody and no open binding likewise selects its closed lease binding
+revived custody and no open binding likewise selects its closed lease binding,
+or the closed NameWrapper binding that stands for a lease registered through
+the NameWrapper,
 as a [released v1 authority](glossary.md#released-v1-authority) tombstone. The exact
 [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) no-proof
 exception selects a current ENSv2 arm when ENSv1 evidence is current or
@@ -383,8 +385,10 @@ and never by label or time:
 
 The served registrant of a wrapped name follows the chain: the `NameWrapped` owner, then each
 later NameWrapper transfer. The registrar `Transfer` that moves the token into the NameWrapper
-during a later wrap names the NameWrapper contract, not a registrant, and is left out of the
-registrant fold. `declared_summary.registration.resource_id` names the registration. It is the
+during a later wrap is left out of the registrant fold: it is custody moving to the wrapper
+contract, not a change of holder, and the person who holds the name afterwards is the
+`NameWrapped` owner recorded next in the same transaction.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f) `declared_summary.registration.resource_id` names the registration. It is the
 selected registration's own resource, or the registrar lease the current wrapper binding
 recorded; when that lease was granted in the same transaction as a wrap that recorded it, it is
 the resource of that first wrapper binding, which stays the same through unwrap and rewrap.
@@ -397,11 +401,17 @@ transfer, resolver update, fuse change, retraction or registrar renewal stages t
 registration rows, and serves the same `created_at` and `registered_at`, as a rebuild from block
 zero.
 
-Known gap: a lease registered through the NameWrapper that lapses past grace without renewal does
-not yet select the [released v1 authority](glossary.md#released-v1-authority) tombstone. That
-rule looks for a binding on the released registrar resource, and such a lease never had one, so
-the name is served as `current_authority_not_projected`. The gap predates the join above and is
-the same under either wrapper rule.
+A lease registered through the NameWrapper that lapses past grace is released like any other:
+the registrar's `ownerOf` reverts and the name is available again. Its registrar resource never
+had a binding, so the [released v1 authority](glossary.md#released-v1-authority) tombstone
+selects the closed NameWrapper binding that stands for the lease, found by the same two rules as
+above: the recorded `wrapped_registrar_resource_id`, or a named grant in the wrap's transaction.
+The rule starts from a registrar `RegistrationReleased`, so it does not fire when only the
+NameWrapper's own expiry has passed and the registrar lease, renewed on the BaseRegistrar
+directly, is still live; that name is not released.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
 
 A pre-existing owner-retraction gap remains: if an owner-zeroing ENSv1 or Basenames registry
 `AuthorityTransferred` event hides a child that has no current child or exact-name row, later retracting that

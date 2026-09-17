@@ -3788,11 +3788,36 @@ async fn controller_granted_later_wrapped_name_serves_the_same_registrant_as_bef
     database.cleanup().await?; Ok(())
 }
 
-/// A name registered through the NameWrapper and never renewed, in the shape the adapters emit
-/// when the BaseRegistrar's own events carry the lease: the grant is keyed by the registrar
-/// resource and carries no name, the only binding is the wrapper's, and the release at the end of
-/// grace is on the registrar resource while the unbind and the closing epoch are on the wrapper's.
-async fn lapsed_born_wrapped_projection(incremental: bool) -> Result<serde_json::Value> {
+#[derive(Clone, Copy, PartialEq)]
+enum BornWrappedShape {
+    /// The BaseRegistrar's own event granted the lease before `NameWrapped`: registrar rows carry
+    /// no name and the wrap recorded the lease in `wrapped_registrar_resource_id`.
+    LinkRecorded,
+    /// A controller event granted the lease after `NameWrapped` in the same transaction (today's
+    /// mainnet manifest): registrar rows carry the name and the wrap recorded no lease.
+    ControllerGranted,
+    /// The registrar lease was renewed on the BaseRegistrar directly, so only the NameWrapper's
+    /// own expiry has passed (issue #908). The lease is live and nothing was released.
+    WrapperExpiryOnly,
+}
+
+/// A name registered through the NameWrapper. The only binding is the wrapper's; the registrar
+/// lease lives on its own resource, which never has a binding. When the lease lapses past grace
+/// the release is on the registrar resource while the unbind and the closing epoch are on the
+/// wrapper's.
+async fn born_wrapped_projection(
+    shape: BornWrappedShape,
+    incremental: bool,
+) -> Result<serde_json::Value> {
+    let controller_granted = shape == BornWrappedShape::ControllerGranted;
+    let registrar_name = controller_granted.then_some(OWNERLESS_LOGICAL);
+    let link = if controller_granted {
+        serde_json::Value::Null
+    } else {
+        json!(OWNERLESS_RESOURCE)
+    };
+    // The numeric grant precedes NameWrapped; a controller grant follows it.
+    let registrar_log = if controller_granted { 3 } else { 1 };
     const WRAPPER_CONTRACT: &str = "0x9999999999999999999999999999999999999999";
     let (database, pool) = migrated_pool().await?;
     seed_chain(&pool).await?;
@@ -3831,24 +3856,24 @@ async fn lapsed_born_wrapped_projection(incremental: bool) -> Result<serde_json:
         .execute(&pool)
         .await?;
     let registrar = json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:born","registrant":WRAPPER_CONTRACT,"expiry":4242,"namehash":OWNERLESS_NAMEHASH});
-    let wrapper = json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"authority_kind":"wrapper","authority_key":"wrapper:born","wrapped_registrar_resource_id":OWNERLESS_RESOURCE,"wrapper_state":"wrapped","fuses":0,"expiry":7_780_242});
+    let wrapper = json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"authority_kind":"wrapper","authority_key":"wrapper:born","wrapped_registrar_resource_id":link,"wrapper_state":"wrapped","fuses":0,"expiry":7_780_242});
     for (identity, logical, resource, kind, family, log, state) in [
         (
             "fixture:lapsed-grant",
-            None,
+            registrar_name,
             OWNERLESS_RESOURCE,
             "RegistrationGranted",
             "ens_v1_registrar_l1",
-            1,
+            registrar_log,
             registrar.clone(),
         ),
         (
             "fixture:lapsed-expiry",
-            None,
+            registrar_name,
             OWNERLESS_RESOURCE,
             "ExpiryChanged",
             "ens_v1_registrar_l1",
-            1,
+            registrar_log,
             registrar.clone(),
         ),
         (
@@ -3858,7 +3883,7 @@ async fn lapsed_born_wrapped_projection(incremental: bool) -> Result<serde_json:
             "TokenControlTransferred",
             "ens_v1_wrapper_l1",
             2,
-            json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"to":CONTROL_OWNER,"wrapped_registrar_resource_id":OWNERLESS_RESOURCE}),
+            json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"to":CONTROL_OWNER,"wrapped_registrar_resource_id":link}),
         ),
         (
             "fixture:lapsed-wrapper-expiry",
@@ -3930,7 +3955,30 @@ async fn lapsed_born_wrapped_projection(incremental: bool) -> Result<serde_json:
         assert_eq!(live, (Some("active".to_owned()), Some(4242)));
     }
 
-    // The lease lapses past grace at a block boundary, so these rows carry no log position.
+    if shape == BornWrappedShape::WrapperExpiryOnly {
+        // Renewing on the BaseRegistrar directly extends the lease but not the NameWrapper's
+        // own expiry.
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
+        for (kind, log) in [("RegistrationRenewed", 1), ("ExpiryChanged", 2)] {
+            seed_normalized_event(
+                &pool,
+                &format!("fixture:direct-renewal-{kind}"),
+                registrar_name,
+                Some(OWNERLESS_RESOURCE),
+                kind,
+                "ens_v1_registrar_l1",
+                10,
+                log,
+                json!({"source_event":"NameRenewed","authority_kind":"registrar","expiry":99_999_999,"namehash":OWNERLESS_NAMEHASH}),
+                json!({}),
+            )
+            .await?;
+        }
+    }
+    // The boundary rows carry no log position. When the lease lapses past grace the registrar
+    // releases it. When only the NameWrapper's expiry passed there is no release; whatever the
+    // interpreter emits for that state, the hardest case for the tombstone rule is the same
+    // closed wrapper binding with no open binding left.
     for (identity, resource, kind, family, state) in [
         (
             "fixture:lapsed-release",
@@ -3954,6 +4002,9 @@ async fn lapsed_born_wrapped_projection(incremental: bool) -> Result<serde_json:
             json!({"source_event":"RegistrationReleased","authority_kind":null,"authority_key":null,"owner":null}),
         ),
     ] {
+        if shape == BornWrappedShape::WrapperExpiryOnly && identity == "fixture:lapsed-release" {
+            continue;
+        }
         seed_normalized_event(
             &pool,
             identity,
@@ -4004,36 +4055,67 @@ async fn lapsed_born_wrapped_projection(incremental: bool) -> Result<serde_json:
     Ok(row)
 }
 
-// Not yet served: the released-tombstone rule looks for a binding on the released resource, and a
-// lease registered through the NameWrapper has none (the name is bound to the wrapper resource).
-// origin/main serves the same `current_authority_not_projected` result for this shape today, so
-// this is not a regression; the rule that closes it needs a maintainer decision.
-#[tokio::test]
-#[ignore = "needs a rule for the tombstone binding of a lease registered through the NameWrapper"]
-async fn lapsed_born_wrapped_lease_serves_a_released_tombstone() -> Result<()> {
-    let incremental = lapsed_born_wrapped_projection(true).await?;
-    let from_zero = lapsed_born_wrapped_projection(false).await?;
-    assert_eq!(incremental, from_zero);
+fn assert_released_tombstone(row: &serde_json::Value) {
+    assert_eq!(row["support_status"], "supported", "{row:#}");
+    assert!(row["unsupported_reason"].is_null(), "{row:#}");
+    let registration = &row["declared_summary"]["registration"];
+    assert_eq!(registration["status"], "released", "{row:#}");
+    assert!(registration["registrant"].is_null(), "{row:#}");
+    assert!(registration["authority_kind"].is_null(), "{row:#}");
+    assert!(registration["expiry"].is_null(), "{row:#}");
     assert_eq!(
-        incremental["support_status"], "supported",
-        "{incremental:#}"
-    );
-    assert!(
-        incremental["unsupported_reason"].is_null(),
-        "{incremental:#}"
-    );
-    let registration = &incremental["declared_summary"]["registration"];
-    assert_eq!(registration["status"], "released", "{incremental:#}");
-    assert!(registration["registrant"].is_null(), "{incremental:#}");
-    assert!(registration["authority_kind"].is_null(), "{incremental:#}");
-    assert!(registration["expiry"].is_null(), "{incremental:#}");
-    assert_eq!(
-        incremental["declared_summary"]["control"],
+        row["declared_summary"]["control"],
         json!({"status": "unregistered"})
     );
     assert_eq!(
-        incremental["authority_selection"]["resource_authority_context"]["released_tombstone"],
+        row["authority_selection"]["resource_authority_context"]["released_tombstone"],
         "ens_v1"
+    );
+}
+
+/// Once the registrar lease lapses past grace the name is available again: `ownerOf` reverts and
+/// `available` is true. The wrapper binding stands for the released lease.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
+#[tokio::test]
+async fn lapsed_born_wrapped_lease_serves_a_released_tombstone() -> Result<()> {
+    let incremental = born_wrapped_projection(BornWrappedShape::LinkRecorded, true).await?;
+    let from_zero = born_wrapped_projection(BornWrappedShape::LinkRecorded, false).await?;
+    assert_eq!(incremental, from_zero);
+    assert_released_tombstone(&incremental);
+    Ok(())
+}
+
+/// The same lapse where a controller event granted the lease after `NameWrapped`, so the wrap
+/// recorded no lease and the named grant in the wrap's transaction identifies it.
+#[tokio::test]
+async fn lapsed_controller_granted_born_wrapped_lease_serves_a_released_tombstone() -> Result<()> {
+    let incremental = born_wrapped_projection(BornWrappedShape::ControllerGranted, true).await?;
+    let from_zero = born_wrapped_projection(BornWrappedShape::ControllerGranted, false).await?;
+    assert_eq!(incremental, from_zero);
+    assert_released_tombstone(&incremental);
+    Ok(())
+}
+
+/// Issue #908: only the NameWrapper's own expiry has passed; the registrar lease was renewed and
+/// is live. Nothing was released, so the wrapper binding must not become a released tombstone.
+#[tokio::test]
+async fn wrapper_expiry_alone_does_not_select_a_released_tombstone() -> Result<()> {
+    let incremental = born_wrapped_projection(BornWrappedShape::WrapperExpiryOnly, true).await?;
+    let from_zero = born_wrapped_projection(BornWrappedShape::WrapperExpiryOnly, false).await?;
+    assert_eq!(incremental, from_zero);
+    assert!(
+        incremental["authority_selection"]["resource_authority_context"]["released_tombstone"]
+            .is_null(),
+        "{incremental:#}"
+    );
+    assert_ne!(
+        incremental["declared_summary"]["registration"]["status"], "released",
+        "{incremental:#}"
+    );
+    assert!(
+        incremental["declared_summary"]["registration"]["released_at"].is_null(),
+        "{incremental:#}"
     );
     Ok(())
 }

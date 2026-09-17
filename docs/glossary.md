@@ -1934,7 +1934,13 @@ released lease binding, serves the registration as `released` with its
 identity and timestamps, and serves no current registrant, authority, expiry,
 owner, control, resolver or records. It is positive proof that the
 registration is absent, so the row is supported rather than
-`current_authority_not_projected`. A release whose registry owner was revived
+`current_authority_not_projected`. A lease registered through the NameWrapper
+never has a binding of its own, so its released lease binding is the closed
+NameWrapper binding that stands for it: the one whose `NameWrapped` rows recorded
+the lease in `wrapped_registrar_resource_id`, or, where a controller event granted
+the lease after `NameWrapped`, the one whose wrap shares the named grant's
+transaction. Only a registrar release selects a tombstone; a NameWrapper expiry
+that passes while the registrar lease is still live releases nothing. A release whose registry owner was revived
 is not a tombstone; it selects the revived registry-only binding. A registry
 owner proven zero stays the supported ownerless-registry profile.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f)

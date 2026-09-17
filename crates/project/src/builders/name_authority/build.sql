@@ -481,7 +481,35 @@
                 FROM project_binding_candidates candidate
                 WHERE candidate.logical_name_id = lifecycle.logical_name_id
                   AND candidate.authority_arm = 'ens_v1'
-                  AND candidate.resource_id = lifecycle.resource_id
+                  AND (
+                      candidate.resource_id = lifecycle.resource_id
+                      -- A lease registered through the NameWrapper never has a binding of its
+                      -- own: the name is bound to the wrapper resource. That binding stands for
+                      -- the released lease when the wrap recorded the lease, or, where a
+                      -- controller event granted the lease after NameWrapped and the wrap
+                      -- recorded nothing, when the named grant shares the wrap's transaction.
+                      OR EXISTS (
+                          SELECT 1 FROM project_events wrapper_binding
+                          WHERE wrapper_binding.logical_name_id = lifecycle.logical_name_id
+                            AND wrapper_binding.resource_id = candidate.resource_id
+                            AND wrapper_binding.source_family = 'ens_v1_wrapper_l1'
+                            AND wrapper_binding.event_kind = 'SurfaceBound'
+                            AND (
+                                wrapper_binding.after_state ->> 'wrapped_registrar_resource_id' =
+                                    lifecycle.resource_id::text
+                                OR EXISTS (
+                                    SELECT 1 FROM project_events registration
+                                    WHERE registration.resource_id = lifecycle.resource_id
+                                      AND registration.source_family = 'ens_v1_registrar_l1'
+                                      AND registration.event_kind = 'RegistrationGranted'
+                                      AND registration.logical_name_id =
+                                          wrapper_binding.logical_name_id
+                                      AND registration.transaction_hash =
+                                          wrapper_binding.transaction_hash
+                                )
+                            )
+                      )
+                  )
                   AND (
                       candidate.block_number,
                       COALESCE((candidate.provenance ->> 'transaction_index')::bigint, -1),
