@@ -44,10 +44,12 @@ definition is not the reviewed one, or a table, view, or other relation that is
 not an index. Names that resolve to nothing pass this first check. After the
 builds it makes the same check and also requires all eight indexes to exist. It
 prints the index rows before the last check, so the receipt shows the flags and
-definitions either way. The definition is compared as `pg_get_indexdef` prints
-it, with the schema name removed and runs of whitespace collapsed, with how the
-fresh baseline index prints, so key order, expressions, the included column, and
-the predicate are all covered. On a mismatch the error prints the definition it
+definitions either way. The definition is compared exactly as `pg_get_indexdef`
+prints it, read with `search_path` set to `pg_catalog` so every schema name is
+printed and nothing in the text has to be rewritten, with how the fresh baseline
+index prints, so key order, expressions, JSON keys, the included column, and the
+predicate are all covered. The check function carries its own `search_path`, so
+the session's is unchanged. On a mismatch the error prints the definition it
 found beside the expected one.
 
 An interrupted concurrent build, for example one cancelled or stopped by the

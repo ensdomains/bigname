@@ -14,12 +14,22 @@
 -- The definition is compared as PostgreSQL prints it with pg_get_indexdef, so
 -- key order, expressions, the included column, and the predicate are all
 -- covered. PostgreSQL adds the schema name to the table always and to the enum
--- type only when the session search_path does not include it, so the schema
--- name is removed before comparing. Runs of whitespace are collapsed to one
--- space, because PostgreSQL prints some expressions over several lines. The
--- expected text is how the fresh baseline index prints;
--- schema-v2/apply-check.sh proves it for the baseline, the earlier
--- schema-migration, and install.sql.
+-- type only when the session search_path does not include it. The printed text
+-- is never rewritten to even that out, because a text replacement cannot tell
+-- a schema name from the same characters inside a string literal: an index on
+-- after_state ->> 'bigname_phase.node' would then compare equal to the
+-- reviewed one on after_state ->> 'node'. Instead search_path is set to
+-- pg_catalog while the definitions are read, so PostgreSQL always prints both
+-- schema names, and the expected text keeps them. Whitespace is compared as
+-- printed too: PostgreSQL 16 prints each of these definitions on one line.
+-- The expected text is how the fresh baseline index prints under that
+-- search_path; schema-v2/apply-check.sh proves it for the baseline, the
+-- earlier schema-migration, and install.sql.
+--
+-- The search_path change is transaction-local, and the block puts the previous
+-- value back before it returns, so later statements in the same transaction
+-- see the search_path they would have seen without this file. When the block
+-- raises, the transaction, or the savepoint around it, rolls the change back.
 --
 -- To recover, follow ops/project-scoped-history/README.md: confirm no build is
 -- running, drop only the named index with DROP INDEX CONCURRENTLY, rerun
@@ -42,29 +52,34 @@ DECLARE
     expected_definition text;
     found_definition text;
     found_kind text;
+    previous_search_path text;
 BEGIN
     IF to_regclass('bigname_phase.normalized_events') IS NULL THEN
         RETURN;
     END IF;
 
+    -- Every name below is schema-qualified or lives in pg_catalog.
+    previous_search_path := current_setting('search_path');
+    PERFORM set_config('search_path', 'pg_catalog', true);
+
     FOR checked_index, expected_definition IN
         SELECT * FROM (VALUES
             ('normalized_events_project_name_node_idx',
-             $def$CREATE INDEX normalized_events_project_name_node_idx ON normalized_events USING btree (chain_id, (((namespace || ':'::text) || lower((after_state ->> 'node'::text)))), block_number) INCLUDE (normalized_event_id) WHERE (((event_kind = ANY (ARRAY['SubregistryChanged'::text, 'AliasChanged'::text])) OR ((event_kind = 'AuthorityTransferred'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'basenames_base_registry'::text])))) AND (canonicality_state = ANY (ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state])) AND (((namespace || ':'::text) || lower((after_state ->> 'node'::text))) IS NOT NULL))$def$),
+             $def$CREATE INDEX normalized_events_project_name_node_idx ON bigname_phase.normalized_events USING btree (chain_id, (((namespace || ':'::text) || lower((after_state ->> 'node'::text)))), block_number) INCLUDE (normalized_event_id) WHERE (((event_kind = ANY (ARRAY['SubregistryChanged'::text, 'AliasChanged'::text])) OR ((event_kind = 'AuthorityTransferred'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'basenames_base_registry'::text])))) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (((namespace || ':'::text) || lower((after_state ->> 'node'::text))) IS NOT NULL))$def$),
             ('normalized_events_project_name_child_idx',
-             $def$CREATE INDEX normalized_events_project_name_child_idx ON normalized_events USING btree (chain_id, (((namespace || ':'::text) || lower((after_state ->> 'child_node'::text)))), block_number) INCLUDE (normalized_event_id) WHERE (((event_kind = ANY (ARRAY['SubregistryChanged'::text, 'AliasChanged'::text])) OR ((event_kind = 'AuthorityTransferred'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'basenames_base_registry'::text])))) AND (canonicality_state = ANY (ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state])) AND (((namespace || ':'::text) || lower((after_state ->> 'child_node'::text))) IS NOT NULL))$def$),
+             $def$CREATE INDEX normalized_events_project_name_child_idx ON bigname_phase.normalized_events USING btree (chain_id, (((namespace || ':'::text) || lower((after_state ->> 'child_node'::text)))), block_number) INCLUDE (normalized_event_id) WHERE (((event_kind = ANY (ARRAY['SubregistryChanged'::text, 'AliasChanged'::text])) OR ((event_kind = 'AuthorityTransferred'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'basenames_base_registry'::text])))) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (((namespace || ':'::text) || lower((after_state ->> 'child_node'::text))) IS NOT NULL))$def$),
             ('normalized_events_project_name_after_target_idx',
-             $def$CREATE INDEX normalized_events_project_name_after_target_idx ON normalized_events USING btree (chain_id, ((after_state ->> 'to_logical_name_id'::text)), block_number) INCLUDE (normalized_event_id) WHERE (((event_kind = ANY (ARRAY['SubregistryChanged'::text, 'AliasChanged'::text])) OR ((event_kind = 'AuthorityTransferred'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'basenames_base_registry'::text])))) AND (canonicality_state = ANY (ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state])) AND ((after_state ->> 'to_logical_name_id'::text) IS NOT NULL))$def$),
+             $def$CREATE INDEX normalized_events_project_name_after_target_idx ON bigname_phase.normalized_events USING btree (chain_id, ((after_state ->> 'to_logical_name_id'::text)), block_number) INCLUDE (normalized_event_id) WHERE (((event_kind = ANY (ARRAY['SubregistryChanged'::text, 'AliasChanged'::text])) OR ((event_kind = 'AuthorityTransferred'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'basenames_base_registry'::text])))) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND ((after_state ->> 'to_logical_name_id'::text) IS NOT NULL))$def$),
             ('normalized_events_project_name_before_target_idx',
-             $def$CREATE INDEX normalized_events_project_name_before_target_idx ON normalized_events USING btree (chain_id, ((before_state ->> 'to_logical_name_id'::text)), block_number) INCLUDE (normalized_event_id) WHERE (((event_kind = ANY (ARRAY['SubregistryChanged'::text, 'AliasChanged'::text])) OR ((event_kind = 'AuthorityTransferred'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'basenames_base_registry'::text])))) AND (canonicality_state = ANY (ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state])) AND ((before_state ->> 'to_logical_name_id'::text) IS NOT NULL))$def$),
+             $def$CREATE INDEX normalized_events_project_name_before_target_idx ON bigname_phase.normalized_events USING btree (chain_id, ((before_state ->> 'to_logical_name_id'::text)), block_number) INCLUDE (normalized_event_id) WHERE (((event_kind = ANY (ARRAY['SubregistryChanged'::text, 'AliasChanged'::text])) OR ((event_kind = 'AuthorityTransferred'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'basenames_base_registry'::text])))) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND ((before_state ->> 'to_logical_name_id'::text) IS NOT NULL))$def$),
             ('normalized_events_project_primary_after_idx',
-             $def$CREATE INDEX normalized_events_project_primary_after_idx ON normalized_events USING btree (chain_id, lower((after_state ->> 'address'::text)), ((after_state ->> 'coin_type'::text)), ((after_state ->> 'namespace'::text)), block_number) INCLUDE (normalized_event_id) WHERE ((event_kind = ANY (ARRAY['ReverseChanged'::text, 'RecordChanged'::text])) AND (canonicality_state = ANY (ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state])) AND (lower((after_state ->> 'address'::text)) IS NOT NULL) AND ((after_state ->> 'coin_type'::text) IS NOT NULL) AND ((after_state ->> 'namespace'::text) IS NOT NULL))$def$),
+             $def$CREATE INDEX normalized_events_project_primary_after_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'address'::text)), ((after_state ->> 'coin_type'::text)), ((after_state ->> 'namespace'::text)), block_number) INCLUDE (normalized_event_id) WHERE ((event_kind = ANY (ARRAY['ReverseChanged'::text, 'RecordChanged'::text])) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (lower((after_state ->> 'address'::text)) IS NOT NULL) AND ((after_state ->> 'coin_type'::text) IS NOT NULL) AND ((after_state ->> 'namespace'::text) IS NOT NULL))$def$),
             ('normalized_events_project_primary_before_idx',
-             $def$CREATE INDEX normalized_events_project_primary_before_idx ON normalized_events USING btree (chain_id, lower((before_state ->> 'address'::text)), ((before_state ->> 'coin_type'::text)), ((before_state ->> 'namespace'::text)), block_number) INCLUDE (normalized_event_id) WHERE ((event_kind = ANY (ARRAY['ReverseChanged'::text, 'RecordChanged'::text])) AND (canonicality_state = ANY (ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state])) AND (lower((before_state ->> 'address'::text)) IS NOT NULL) AND ((before_state ->> 'coin_type'::text) IS NOT NULL) AND ((before_state ->> 'namespace'::text) IS NOT NULL))$def$),
+             $def$CREATE INDEX normalized_events_project_primary_before_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((before_state ->> 'address'::text)), ((before_state ->> 'coin_type'::text)), ((before_state ->> 'namespace'::text)), block_number) INCLUDE (normalized_event_id) WHERE ((event_kind = ANY (ARRAY['ReverseChanged'::text, 'RecordChanged'::text])) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (lower((before_state ->> 'address'::text)) IS NOT NULL) AND ((before_state ->> 'coin_type'::text) IS NOT NULL) AND ((before_state ->> 'namespace'::text) IS NOT NULL))$def$),
             ('normalized_events_project_primary_after_source_idx',
-             $def$CREATE INDEX normalized_events_project_primary_after_source_idx ON normalized_events USING btree (chain_id, lower(((after_state -> 'primary_claim_source'::text) ->> 'address'::text)), (((after_state -> 'primary_claim_source'::text) ->> 'coin_type'::text)), (((after_state -> 'primary_claim_source'::text) ->> 'namespace'::text)), block_number) INCLUDE (normalized_event_id) WHERE ((event_kind = ANY (ARRAY['ReverseChanged'::text, 'RecordChanged'::text])) AND (canonicality_state = ANY (ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state])) AND (lower(((after_state -> 'primary_claim_source'::text) ->> 'address'::text)) IS NOT NULL) AND (((after_state -> 'primary_claim_source'::text) ->> 'coin_type'::text) IS NOT NULL) AND (((after_state -> 'primary_claim_source'::text) ->> 'namespace'::text) IS NOT NULL))$def$),
+             $def$CREATE INDEX normalized_events_project_primary_after_source_idx ON bigname_phase.normalized_events USING btree (chain_id, lower(((after_state -> 'primary_claim_source'::text) ->> 'address'::text)), (((after_state -> 'primary_claim_source'::text) ->> 'coin_type'::text)), (((after_state -> 'primary_claim_source'::text) ->> 'namespace'::text)), block_number) INCLUDE (normalized_event_id) WHERE ((event_kind = ANY (ARRAY['ReverseChanged'::text, 'RecordChanged'::text])) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (lower(((after_state -> 'primary_claim_source'::text) ->> 'address'::text)) IS NOT NULL) AND (((after_state -> 'primary_claim_source'::text) ->> 'coin_type'::text) IS NOT NULL) AND (((after_state -> 'primary_claim_source'::text) ->> 'namespace'::text) IS NOT NULL))$def$),
             ('normalized_events_project_primary_before_source_idx',
-             $def$CREATE INDEX normalized_events_project_primary_before_source_idx ON normalized_events USING btree (chain_id, lower(((before_state -> 'primary_claim_source'::text) ->> 'address'::text)), (((before_state -> 'primary_claim_source'::text) ->> 'coin_type'::text)), (((before_state -> 'primary_claim_source'::text) ->> 'namespace'::text)), block_number) INCLUDE (normalized_event_id) WHERE ((event_kind = ANY (ARRAY['ReverseChanged'::text, 'RecordChanged'::text])) AND (canonicality_state = ANY (ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state])) AND (lower(((before_state -> 'primary_claim_source'::text) ->> 'address'::text)) IS NOT NULL) AND (((before_state -> 'primary_claim_source'::text) ->> 'coin_type'::text) IS NOT NULL) AND (((before_state -> 'primary_claim_source'::text) ->> 'namespace'::text) IS NOT NULL))$def$)
+             $def$CREATE INDEX normalized_events_project_primary_before_source_idx ON bigname_phase.normalized_events USING btree (chain_id, lower(((before_state -> 'primary_claim_source'::text) ->> 'address'::text)), (((before_state -> 'primary_claim_source'::text) ->> 'coin_type'::text)), (((before_state -> 'primary_claim_source'::text) ->> 'namespace'::text)), block_number) INCLUDE (normalized_event_id) WHERE ((event_kind = ANY (ARRAY['ReverseChanged'::text, 'RecordChanged'::text])) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (lower(((before_state -> 'primary_claim_source'::text) ->> 'address'::text)) IS NOT NULL) AND (((before_state -> 'primary_claim_source'::text) ->> 'coin_type'::text) IS NOT NULL) AND (((before_state -> 'primary_claim_source'::text) ->> 'namespace'::text) IS NOT NULL))$def$)
         ) AS reviewed(index_name, definition)
     LOOP
         SELECT CASE relkind
@@ -106,9 +121,7 @@ BEGIN
                 checked_index;
         END IF;
 
-        SELECT regexp_replace(
-                   replace(pg_get_indexdef(indexrelid), 'bigname_phase.', ''),
-                   '\s+', ' ', 'g')
+        SELECT pg_get_indexdef(indexrelid)
         INTO found_definition
         FROM pg_index
         WHERE indexrelid = to_regclass('bigname_phase.' || checked_index);
@@ -118,5 +131,7 @@ BEGIN
                 checked_index, found_definition, expected_definition;
         END IF;
     END LOOP;
+
+    PERFORM set_config('search_path', previous_search_path, true);
 END
 $migration$;

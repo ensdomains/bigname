@@ -222,9 +222,21 @@ async fn verify_index_migration(transaction: &mut Transaction<'_, Postgres>) -> 
             .await?
     );
     raw_sql(VALIDITY_CHECK).execute(&mut **transaction).await?;
+    // The check reads definitions under its own search_path and must put this one back.
+    let search_path: String = sqlx::query_scalar("SELECT current_setting('search_path')")
+        .fetch_one(&mut **transaction)
+        .await?;
+    ensure!(
+        search_path == "bigname_phase, public",
+        "validity check left search_path as {search_path}"
+    );
     // IF NOT EXISTS adopts a relation by name alone. An interrupted concurrent build leaves an
     // invalid index, and a wrong manual build leaves other keys; the later check must refuse both.
-    for name in &names {
+    for (name, reviewed) in &baseline {
+        // A valid, ready index whose JSON key literals start with the schema name indexes other
+        // values, yet prints like the reviewed one once the schema name is stripped from the text.
+        let schema_in_literal = reviewed.replace("->> '", "->> 'bigname_phase.");
+        ensure!(&schema_in_literal != reviewed, "{name} has no JSON key");
         for (broken_shape, refusal) in [
             (
                 format!(
@@ -238,6 +250,10 @@ async fn verify_index_migration(transaction: &mut Transaction<'_, Postgres>) -> 
                     "DROP INDEX bigname_phase.{name};
                      CREATE INDEX {name} ON bigname_phase.normalized_events (block_number, chain_id)"
                 ),
+                "exists but does not have the reviewed definition",
+            ),
+            (
+                format!("DROP INDEX bigname_phase.{name}; {schema_in_literal}"),
                 "exists but does not have the reviewed definition",
             ),
             (
