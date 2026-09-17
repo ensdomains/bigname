@@ -319,6 +319,79 @@ pub struct PermissionsCurrentAccountResourcePage {
     pub summary: PermissionsCurrentFullFilterSummary,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PermissionGrantRelation {
+    Operator,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EffectivePermissionScope {
+    Direct(PermissionScope),
+    Account {
+        chain_id: String,
+        authority_kind: String,
+        authority_contract: String,
+        owner: String,
+    },
+}
+
+impl EffectivePermissionScope {
+    pub fn storage_key(&self) -> String {
+        match self {
+            Self::Direct(scope) => scope.storage_key(),
+            Self::Account {
+                chain_id,
+                authority_kind,
+                authority_contract,
+                owner,
+            } => format!(
+                "account:{chain_id}:{authority_kind}:{}:{}",
+                authority_contract.to_ascii_lowercase(),
+                owner.to_ascii_lowercase()
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffectivePermissionRow {
+    pub resource_id: Uuid,
+    pub subject: String,
+    pub scope: EffectivePermissionScope,
+    /// As on [`PermissionsCurrentRow`]: the decoded setter argument of a grant on an
+    /// ENSv2 record-ID resolver, absent on every other scope and on operator rows.
+    pub record_resource_selector: Option<Value>,
+    pub grant_relation: Option<PermissionGrantRelation>,
+    pub effective_powers: Value,
+    pub grant_source: Value,
+    pub revocation_source: Option<Value>,
+    pub inheritance_path: Value,
+    pub transfer_behavior: Value,
+    pub provenance: Value,
+    pub coverage: Value,
+    pub chain_positions: Value,
+    pub canonicality_summary: Value,
+    pub manifest_version: i64,
+    pub last_recomputed_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffectivePermissionsAccountResourcePage {
+    pub rows: Vec<EffectivePermissionRow>,
+    pub next_cursor: Option<PermissionsCurrentAccountResourceCursor>,
+    pub summary: Option<PermissionsCurrentFullFilterSummary>,
+}
+
+impl From<&EffectivePermissionRow> for PermissionsCurrentAccountResourceCursor {
+    fn from(row: &EffectivePermissionRow) -> Self {
+        Self {
+            subject: row.subject.clone(),
+            resource_id: row.resource_id,
+            scope: row.scope.storage_key(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
