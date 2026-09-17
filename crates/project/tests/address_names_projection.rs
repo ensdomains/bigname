@@ -4200,6 +4200,8 @@ async fn later_wrapper_retraction_projects_identically_incrementally_and_from_ze
 #[derive(Debug, PartialEq)]
 struct EnrichedRegistryOnlyProjection {
     expiry: Option<i64>,
+    registered_at: Option<String>,
+    serving: Vec<(String, serde_json::Value)>,
     registration_resource_id: Option<String>,
     registrant: Option<String>,
     address_registrant: Option<String>,
@@ -4208,6 +4210,23 @@ struct EnrichedRegistryOnlyProjection {
 async fn project_enriched_registry_only(
     controller_registered: bool,
     incremental: bool,
+) -> Result<EnrichedRegistryOnlyProjection> {
+    project_enriched_registry_only_batches(controller_registered, incremental, None).await
+}
+
+/// A batch at block 11, after the registrar resource's binding has closed.
+#[derive(Clone, Copy)]
+enum LaterBatch {
+    /// Touches only the registry-only resource.
+    RegistryOwner,
+    /// Touches only the registrar resource, with a renewal that carries no name.
+    RenewalWithoutName,
+}
+
+async fn project_enriched_registry_only_batches(
+    controller_registered: bool,
+    incremental: bool,
+    later_batch: Option<LaterBatch>,
 ) -> Result<EnrichedRegistryOnlyProjection> {
     const ALICE: &str = "0x5555555555555555555555555555555555555555";
     const BOB: &str = "0x6666666666666666666666666666666666666666";
@@ -4327,15 +4346,70 @@ async fn project_enriched_registry_only(
         json!({}),
     )
     .await?;
-    run_project(
-        &pool,
-        10,
-        if incremental { 10 } else { 8 },
-        incremental.then_some(9),
-    )
-    .await?;
-    let (expiry, registration_resource_id, registrant) = sqlx::query_as(
+    if incremental || later_batch.is_none() {
+        run_project(
+            &pool,
+            10,
+            if incremental { 10 } else { 8 },
+            incremental.then_some(9),
+        )
+        .await?;
+    }
+    if let Some(later_batch) = later_batch {
+        seed_blocks(&pool, [11]).await?;
+        match later_batch {
+            LaterBatch::RegistryOwner => {
+                seed_authority_transferred(
+                    &pool,
+                    "fixture:enriched-later-registry-owner",
+                    OWNERLESS_NAMEHASH,
+                    REGISTRY_RESOURCE,
+                    11,
+                    1,
+                    json!({
+                        "node": OWNERLESS_NAMEHASH,
+                        "owner": ALICE,
+                        "owner_getter": ALICE,
+                        "authority_kind": "registry_only",
+                    }),
+                )
+                .await?;
+            }
+            LaterBatch::RenewalWithoutName => {
+                for (kind, log) in [("RegistrationRenewed", 1), ("ExpiryChanged", 2)] {
+                    seed_normalized_event(
+                        &pool,
+                        &format!("fixture:enriched-later-{kind}"),
+                        None,
+                        Some(OWNERLESS_RESOURCE),
+                        kind,
+                        "ens_v1_registrar_l1",
+                        11,
+                        log,
+                        json!({
+                            "source_event": "NameRenewed",
+                            "authority_kind": "registrar",
+                            "registrant": BOB,
+                            "expiry": EXPIRY + 1_000,
+                            "namehash": OWNERLESS_NAMEHASH,
+                        }),
+                        json!({}),
+                    )
+                    .await?;
+                }
+            }
+        }
+        run_project(
+            &pool,
+            11,
+            if incremental { 11 } else { 8 },
+            incremental.then_some(10),
+        )
+        .await?;
+    }
+    let (expiry, registered_at, registration_resource_id, registrant) = sqlx::query_as(
         "SELECT (declared_summary #>> '{registration,expiry}')::bigint,
+             declared_summary #>> '{registration,registered_at}',
              declared_summary #>> '{registration,resource_id}',
              declared_summary #>> '{registration,registrant}'
          FROM name_current
@@ -4353,9 +4427,12 @@ async fn project_enriched_registry_only(
     .bind(OWNERLESS_LOGICAL)
     .fetch_optional(&pool)
     .await?;
+    let serving = serving_projection_snapshot(&pool).await?;
     database.cleanup().await?;
     Ok(EnrichedRegistryOnlyProjection {
         expiry,
+        registered_at,
+        serving,
         registration_resource_id,
         registrant,
         address_registrant,
@@ -4394,6 +4471,213 @@ async fn enrich_later_registration_keeps_lease_through_registry_only_fallback() 
     assert_eq!(
         controller_control.address_registrant,
         incremental.address_registrant
+    );
+    Ok(())
+}
+
+/// Once the registry-only binding is selected the registrar resource's binding is closed. A later
+/// batch that touches only the registry resource must still stage the lease rows that carry no
+/// name, as a rebuild does; otherwise the name loses its expiry and registration date until the
+/// next rebuild.
+#[tokio::test]
+async fn closed_registrar_binding_keeps_its_lease_in_a_later_incremental_batch() -> Result<()> {
+    let later = Some(LaterBatch::RegistryOwner);
+    let incremental = project_enriched_registry_only_batches(false, true, later).await?;
+    let from_zero = project_enriched_registry_only_batches(false, false, later).await?;
+    assert_eq!(
+        (incremental.expiry, &incremental.registered_at),
+        (from_zero.expiry, &from_zero.registered_at),
+        "a batch that touched only the registry resource dropped the closed binding's lease"
+    );
+    assert_eq!(incremental, from_zero);
+    assert_eq!(from_zero.expiry, Some(1_700_001_100));
+    assert!(from_zero.registered_at.is_some());
+    Ok(())
+}
+
+/// The other direction: a renewal without a name arrives on the registrar resource after its
+/// binding closed. A rebuild names the row through the closed binding, so the batch must rebuild
+/// the name too.
+#[tokio::test]
+async fn renewal_without_a_name_on_a_closed_binding_rebuilds_its_name() -> Result<()> {
+    let later = Some(LaterBatch::RenewalWithoutName);
+    let incremental = project_enriched_registry_only_batches(false, true, later).await?;
+    let from_zero = project_enriched_registry_only_batches(false, false, later).await?;
+    assert_eq!(incremental, from_zero);
+    Ok(())
+}
+
+/// Today's mainnet manifest shape: controller events grant leases, so registrar rows carry the
+/// name, while the registry adapter may have written rows without one before the label was known.
+/// A name is released and registered again on a new resource; a later batch touches only the new
+/// resource. The closed binding's resource is out of that batch's scope, so anything a rebuild
+/// attached through it would be missing incrementally.
+async fn project_released_then_reregistered(
+    incremental: bool,
+) -> Result<Vec<(String, serde_json::Value)>> {
+    const SECOND_RESOURCE: &str = "50000000-0000-0000-0000-000000000001";
+    const SECOND_BINDING: &str = "50000000-0000-0000-0000-000000000011";
+    let (database, pool) = migrated_pool().await?;
+    seed_blocks(&pool, [8, 9, 10, 11]).await?;
+    seed_surface(
+        &pool,
+        OWNERLESS_NAMEHASH,
+        "registered-twice.eth",
+        OWNERLESS_RESOURCE,
+        OWNERLESS_BINDING,
+    )
+    .await?;
+    seed_binding_provenance(&pool, OWNERLESS_BINDING, 0, 1).await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:twice-registry-row-before-label",
+        None,
+        Some(OWNERLESS_RESOURCE),
+        "AuthorityTransferred",
+        "ens_v1_registry_l1",
+        8,
+        0,
+        json!({
+            "node": OWNERLESS_NAMEHASH,
+            "owner": CONTROL_OWNER,
+            "owner_getter": CONTROL_OWNER,
+            "authority_kind": "registrar",
+        }),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:twice-registry-resolver-before-label",
+        None,
+        Some(OWNERLESS_RESOURCE),
+        "ResolverChanged",
+        "ens_v1_registry_l1",
+        8,
+        3,
+        json!({
+            "source_event": "NewResolver",
+            "node": OWNERLESS_NAMEHASH,
+            "resolver": RESOLVER_ADDRESS,
+        }),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    let lease = |registrant: &str, expiry: i64| {
+        json!({
+            "source_event": "NameRegistered",
+            "authority_kind": "registrar",
+            "registrant": registrant,
+            "expiry": expiry,
+            "namehash": OWNERLESS_NAMEHASH,
+        })
+    };
+    for (kind, log) in [("RegistrationGranted", 1), ("ExpiryChanged", 2)] {
+        seed_normalized_event(
+            &pool,
+            &format!("fixture:twice-first-{kind}"),
+            Some(OWNERLESS_LOGICAL),
+            Some(OWNERLESS_RESOURCE),
+            kind,
+            "ens_v1_registrar_l1",
+            8,
+            log,
+            lease(CONTROL_OWNER, 4242),
+            json!({}),
+        )
+        .await?;
+    }
+    seed_normalized_event(
+        &pool,
+        "fixture:twice-release",
+        Some(OWNERLESS_LOGICAL),
+        Some(OWNERLESS_RESOURCE),
+        "RegistrationReleased",
+        "ens_v1_registrar_l1",
+        9,
+        1,
+        json!({
+            "source_event": "NameReleased",
+            "authority_kind": "registrar",
+            "status": "released",
+            "namehash": OWNERLESS_NAMEHASH,
+        }),
+        json!({}),
+    )
+    .await?;
+    if incremental {
+        run_project(&pool, 9, 8, None).await?;
+    }
+    seed_next_binding(
+        &pool,
+        OWNERLESS_NAMEHASH,
+        SECOND_RESOURCE,
+        SECOND_BINDING,
+        10,
+        "2026-08-01T00:00:10Z",
+    )
+    .await?;
+    seed_binding_provenance(&pool, SECOND_BINDING, 0, 1).await?;
+    for (kind, log) in [("RegistrationGranted", 1), ("ExpiryChanged", 2)] {
+        seed_normalized_event(
+            &pool,
+            &format!("fixture:twice-second-{kind}"),
+            Some(OWNERLESS_LOGICAL),
+            Some(SECOND_RESOURCE),
+            kind,
+            "ens_v1_registrar_l1",
+            10,
+            log,
+            lease(PRIOR_CONTROLLER, 9_999_999_999),
+            json!({}),
+        )
+        .await?;
+    }
+    if incremental {
+        run_project(&pool, 10, 10, Some(9)).await?;
+    }
+    for (kind, log) in [("RegistrationRenewed", 1), ("ExpiryChanged", 2)] {
+        seed_normalized_event(
+            &pool,
+            &format!("fixture:twice-renewal-{kind}"),
+            Some(OWNERLESS_LOGICAL),
+            Some(SECOND_RESOURCE),
+            kind,
+            "ens_v1_registrar_l1",
+            11,
+            log,
+            lease(PRIOR_CONTROLLER, 19_999_999_999),
+            json!({}),
+        )
+        .await?;
+    }
+    run_project(
+        &pool,
+        11,
+        if incremental { 11 } else { 8 },
+        incremental.then_some(10),
+    )
+    .await?;
+    // The first resource's permission summary row is left out: a resource that no later batch
+    // touches keeps the target block of the batch that last projected it, with or without
+    // resource-keyed registrar rows.
+    let mut serving = serving_projection_snapshot(&pool).await?;
+    serving.retain(|(table, _)| table != "permissions_current_resource_summary");
+    database.cleanup().await?;
+    Ok(serving)
+}
+
+#[tokio::test]
+async fn released_then_reregistered_name_projects_identically_incrementally_and_from_zero()
+-> Result<()> {
+    let incremental = project_released_then_reregistered(true).await?;
+    let from_zero = project_released_then_reregistered(false).await?;
+    assert_eq!(incremental, from_zero);
+    let name_current = &from_zero[0].1[0];
+    assert_eq!(
+        name_current["declared_summary"]["registration"]["expiry"],
+        json!(19_999_999_999_i64),
+        "{name_current}"
     );
     Ok(())
 }

@@ -15,6 +15,12 @@ pub(super) async fn close_binding_scope(
         target.number,
     )
     .await?;
+    super::registrar_bindings::include_names_for_scoped_unnamed_lease_rows(
+        transaction,
+        chain_id,
+        target.number,
+    )
+    .await?;
     sqlx::query(
         "INSERT INTO project_scope_resources
          SELECT binding.resource_id
@@ -48,6 +54,12 @@ pub(super) async fn close_binding_scope(
     .map_err(|error| ProjectError::database("failed to close resource binding scope", error))?;
 
     super::wrapper_registrar::include_registrars_for_scoped_wrappers(
+        transaction,
+        chain_id,
+        target.number,
+    )
+    .await?;
+    super::registrar_bindings::include_unnamed_lease_resources_for_scoped_names(
         transaction,
         chain_id,
         target.number,
