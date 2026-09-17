@@ -188,7 +188,8 @@ WHERE known AND shape <> 'v2' AND (kind <> 'AuthorityEpochChanged' OR shape = 'r
 
 -- ENSv2 registry rows. The label row names the registration but no resource; the token row names
 -- both. Every third registration is later released by a state-derived path expiry that names the
--- resource but no name, and every fourth of those is registered again.
+-- resource but no name, and every fourth of those is registered again. Every seventh registration
+-- is unregistered at the end.
 INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id,
     event_kind, source_family, manifest_version, chain_id, block_number, block_hash,
     transaction_hash, transaction_index, log_index, derivation_kind, canonicality_state,
@@ -208,6 +209,9 @@ SELECT 'seed:v2:' || tag || ':' || i, 'ens',
            WHEN 'transfer' THEN jsonb_build_object('source_event', 'TransferSingle',
                'from', owner, 'to', later_owner, 'token_id', token_id,
                'registry_contract_instance_id', '00000000-0000-0000-0000-000000000001')
+           WHEN 'unregistered' THEN jsonb_build_object('source_event', 'LabelUnregistered',
+               'status', 'released', 'sender', later_owner, 'token_id', token_id,
+               'registry_contract_instance_id', '00000000-0000-0000-0000-000000000001')
            WHEN 'expired' THEN jsonb_build_object('source_event', 'RegistryPathExpired',
                'derived_from', 'interpreter_state',
                'terminal_reason', 'registry_name_binding_expired', 'token_id', token_id,
@@ -225,11 +229,13 @@ FROM seed
 CROSS JOIN (VALUES ('label', 'RegistrationGranted', 0, 0), ('token', 'RegistrationGranted', 0, 1),
     ('resolver', 'ResolverChanged', 0, 3), ('renewed', 'RegistrationRenewed', 10, 2),
     ('transfer', 'TokenControlTransferred', 15, 4), ('expired', 'RegistrationReleased', 20, 0),
-    ('again', 'RegistrationGranted', 25, 1)) kinds(tag, kind, later, log)
+    ('again', 'RegistrationGranted', 25, 1), ('unregistered', 'RegistrationReleased', 30, 5)
+) kinds(tag, kind, later, log)
 WHERE known AND shape = 'v2'
   AND (tag NOT IN ('transfer') OR i % 2 = 0)
   AND (tag NOT IN ('expired', 'again') OR i % 3 = 0)
-  AND (tag <> 'again' OR i % 4 = 0);
+  AND (tag <> 'again' OR i % 4 = 0)
+  AND (tag <> 'unregistered' OR i % 7 = 0);
 
 -- ENSv2 role grants: a holder role on every registration, an admin role on every second one, and
 -- one admin role on the registry root.
