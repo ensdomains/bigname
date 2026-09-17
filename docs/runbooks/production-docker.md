@@ -69,10 +69,15 @@ host measurement, and changes no direct CLI defaults or backup policy (#329).
    which is what `POSTGRES_EFFECTIVE_CACHE_SIZE` tells the planner it has.
    Lower `effective_cache_size` to fit the ceiling rather than the other way
    round; the Compose default of `96GB` is not a fit for a `24g` ceiling. The
-   four ceilings plus what the co-resident archive node is limited to or
-   observed using must sum to less than the host's total RAM (`free -b`),
-   with nothing reserved outside them. An OOM kill of one backend makes the
-   postmaster restart every session. For the runner and the API, take the
+   budget is the host's total RAM (`free -b`) minus an explicit host reserve
+   for what runs outside any ceiling — kernel, Docker daemon, monitoring,
+   shells — of at least 2 GiB or 5%, whichever is larger, minus an allowance
+   for the co-resident archive node that is its own ceiling if it has one and
+   otherwise a worst case, never its observed usage, which is not a bound.
+   The four ceilings must sum to no more than that budget; a budget that
+   forces a ceiling below its floor above means the host is too small for
+   both workloads, not that the reserve can be spent. An OOM kill of one
+   backend makes the postmaster restart every session. For the runner and the API, take the
    peak RSS observed on this host under catch-up and under load respectively
    and add headroom; where no observation exists yet, record that the ceiling
    is provisional and revisit it after the first catch-up. A container that
@@ -210,21 +215,33 @@ until it is recreated, so recreating only the runner leaves PostgreSQL, the API
 and the proxy unlimited and unrotated. Pause indexing first
 ([§ Pause and resume indexing](#pause-and-resume-indexing)), then recreate in
 dependency order — PostgreSQL (a short outage for every client), the API, the
-proxy, the runner — and inspect each created container before moving on:
+proxy where the public overlay is active, the runner — and inspect each created
+container before moving on. Build the command from the deployment's exact
+overlay set, the same `-f` list every other command in this runbook uses for
+it: `docker-compose.server.yml` always, `docker-compose.public.yml` only where
+the proxy runs, `docker-compose.reth-db.yml` only where the runner reads Reth.
+Recreating with an overlay missing rebuilds the container without that
+overlay's wiring — the runner loses its `eth_archive_node` network and the
+read-only `RETH_DATA_DIR` bind — and an overlay added that the deployment does
+not run demands variables it never set.
 
 ```sh
-compose=(docker compose --env-file .env.server -f docker-compose.server.yml -f docker-compose.public.yml)
+# Server + public + Reth shown; drop the overlays and services this deployment does not run.
+compose=(docker compose --env-file .env.server \
+  -f docker-compose.server.yml -f docker-compose.public.yml -f docker-compose.reth-db.yml)
+scripts/check-compose-memory-limits "${compose[@]:2}"
 "${compose[@]}" up -d --no-deps --force-recreate postgres
 "${compose[@]}" up -d --no-deps --force-recreate api public-proxy
 "${compose[@]}" up -d --no-deps --force-recreate phase-runner
 for service in postgres api public-proxy phase-runner; do
   docker inspect "$("${compose[@]}" ps -q "$service")" \
-    --format "$service {{.HostConfig.Memory}} {{json .HostConfig.LogConfig}}"
+    --format "$service {{.HostConfig.Memory}} {{json .HostConfig.LogConfig}} {{json .HostConfig.Binds}}"
 done
 ```
 
 Every line must show a memory value greater than zero and a `json-file` config
-with `max-size` and `max-file`. Settings are read at startup. Changing the
+with `max-size` and `max-file`; the runner's line must still show the Reth
+bind where that overlay is active. Settings are read at startup. Changing the
 floor/ceiling does not require phase-row edits; genuine capacity breaches
 resume automatically after capacity recovers. Preserve the PostgreSQL volume during rollback: never use
 `down -v`. Restore the reviewed configuration/image and inspect the effective

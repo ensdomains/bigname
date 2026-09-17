@@ -8,10 +8,9 @@
 #   e.g. scripts/check-compose-memory-limits --env-file .env.server \
 #            -f docker-compose.server.yml -f docker-compose.public.yml
 set -euo pipefail
-rendered="$(docker compose "$@" config --format json)"
-python3 - "$rendered" <<'PY'
-import json, sys
-config = json.loads(sys.argv[1])
+checker="$(cat <<'PY'
+import json, re, sys
+config = json.load(sys.stdin)
 failures = []
 for name, service in sorted(config.get("services", {}).items()):
     # Compose renders the ceiling as a byte count string and drops a zero one.
@@ -22,13 +21,21 @@ for name, service in sorted(config.get("services", {}).items()):
         memory_bytes = 0
     if memory_bytes <= 0:
         failures.append(f"{name}: deploy.resources.limits.memory is {memory!r}; a positive ceiling is required (0 renders as unlimited)")
+    # json-file reads max-size "-1" as unlimited and max-file must be a positive count.
     logging = service.get("logging") or {}
     options = logging.get("options") or {}
-    if logging.get("driver") != "json-file" or not options.get("max-size") or not options.get("max-file"):
-        failures.append(f"{name}: logging must be json-file with max-size and max-file, got {logging!r}")
+    size = str(options.get("max-size", ""))
+    size_ok = re.fullmatch(r"[1-9][0-9]*[kmgKMG]?", size) is not None
+    files = str(options.get("max-file", ""))
+    files_ok = re.fullmatch(r"[1-9][0-9]*", files) is not None
+    if logging.get("driver") != "json-file" or not size_ok or not files_ok:
+        failures.append(f"{name}: logging must be json-file with a positive finite max-size and a positive max-file, got {logging!r}")
 if failures:
     print("\n".join(failures), file=sys.stderr)
     sys.exit(1)
 for name, service in sorted(config.get("services", {}).items()):
     print(f"{name}: memory {service['deploy']['resources']['limits']['memory']} bytes, logging {service['logging']['options']}")
 PY
+)"
+# The rendered model carries credentials; it reaches the checker on stdin, never argv.
+docker compose "$@" config --format json | python3 -c "$checker"
