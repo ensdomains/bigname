@@ -7,8 +7,10 @@ mod block_window;
 mod decoders;
 mod duplicates;
 mod event_page;
+mod filters;
 #[cfg(any(test, feature = "test-support"))]
 pub mod history_anchor_read_test_hooks;
+mod options;
 mod paging;
 mod redo;
 mod registration_identity;
@@ -29,73 +31,14 @@ use selectors::{name_history_selector, resource_history_selector};
 
 pub use block_window::resolve_chain_block_ranges;
 pub use event_page::{load_event_history_page, load_event_history_page_with_redo_policy};
+pub use options::{
+    ChainBlockRange, HistoryBlockWindow, HistoryOrder, HistoryPageOptions, HistoryScope,
+};
 pub use redo::{
     InterpretRedoFence, InterpretRedoInProgress, capture_interpret_redo_fence,
     revalidate_interpret_redo_fence,
 };
 pub use redo::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
-
-/// Anchor selection for normalized-event history reads.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HistoryScope {
-    Surface,
-    Resource,
-    Both,
-}
-
-impl HistoryScope {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Surface => "surface",
-            Self::Resource => "resource",
-            Self::Both => "both",
-        }
-    }
-}
-
-/// Keyset direction over the shared chain-position sort. `Asc` is the exact
-/// reverse of `Desc`, so both directions page over the same total order.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum HistoryOrder {
-    #[default]
-    Desc,
-    Asc,
-}
-
-impl HistoryOrder {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Desc => "desc",
-            Self::Asc => "asc",
-        }
-    }
-}
-
-/// Inclusive block-number bounds for one chain, resolved from lineage timestamps.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ChainBlockRange {
-    pub chain_id: String,
-    pub from_block: Option<i64>,
-    pub to_block: Option<i64>,
-}
-
-/// Per-chain block windows applied as one disjunction; an empty window matches
-/// no row, which is what a timestamp range after the last known block means.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct HistoryBlockWindow {
-    pub ranges: Vec<ChainBlockRange>,
-}
-
-/// Read-side options shared by the anchored history page loaders.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct HistoryPageOptions {
-    pub order: HistoryOrder,
-    pub event_kinds: Vec<String>,
-    pub bind_cursor_anchor_to_event_kinds: bool,
-    pub block_window: Option<HistoryBlockWindow>,
-    /// Publication upper bounds for expanding bindings and historical ownership anchors.
-    pub publication_block_bounds: Option<std::collections::BTreeMap<String, i64>>,
-}
 
 /// Replay-stable normalized event exposed to history readers.
 #[derive(Clone, Debug, Eq, PartialEq)]

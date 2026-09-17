@@ -67,13 +67,8 @@ justification = "The inventory build retains pointer eligibility, value selectio
 
 [[files]]
 path = "crates/storage/src/history.rs"
-loc = 660
-justification = "History read facade gained HistoryOrder, HistoryBlockWindow, HistoryPageOptions, the resolver filter, and the registry-route `contract_address` emitter filter while keeping every loader signature in one place; move the option types into a sibling module on the next substantive touch."
-
-[[files]]
-path = "crates/storage/src/history/paging.rs"
-loc = 694
-justification = "Keyset paging gained the reversible order predicate, per-chain block windows, and the resolver filter, which share one SQL builder; split the filter pushers from the cursor predicate on the next substantive touch."
+loc = 603
+justification = "History read facade keeps every loader signature and the public row, cursor, summary and filter types in one place; the order, block-window and page-option types already live in `history/options.rs`. Move the row and summary types out next."
 
 [[files]]
 path = "crates/storage/src/record_inventory/snapshot_reads.rs"
