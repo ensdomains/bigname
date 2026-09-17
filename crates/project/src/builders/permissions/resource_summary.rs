@@ -13,7 +13,19 @@ pub(super) async fn build(
     target: &Marker,
     full_rebuild: bool,
 ) -> Result<()> {
-    let resource_summary_query = [
+    sqlx::query(&query())
+        .bind(chain_id)
+        .bind(target.number)
+        .bind(&target.hash)
+        .bind(full_rebuild)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to build resource permissions", error))?;
+    Ok(())
+}
+
+pub(in crate::builders) fn query() -> String {
+    [
         r#"
         WITH target_time AS (
             SELECT extract(epoch FROM lineage.block_timestamp) AS epoch_seconds
@@ -239,7 +251,9 @@ pub(super) async fn build(
                   WHERE scope.resource_id = live.resource_id
               )
         ),
-        v2_admin_powers AS (
+        -- One row per resource that has an admin holder. It is joined twice below, for the
+        -- resource and for its registry root, so it is computed once.
+        v2_admin_powers AS MATERIALIZED (
             SELECT row.resource_id, array_agg(DISTINCT power.value) AS admins
             FROM admin_rows row
             CROSS JOIN LATERAL jsonb_array_elements_text(row.effective_powers) power
@@ -345,6 +359,9 @@ pub(super) async fn build(
           ON resource.authority_kind = 'ens_v2_registry'
          AND root_resource.registry = resource.provenance ->> 'registry_contract_instance_id'
         LEFT JOIN target_time ON TRUE
+        LEFT JOIN v2_admin_powers own_admins ON own_admins.resource_id = resource.resource_id
+        LEFT JOIN v2_admin_powers root_admins
+          ON root_admins.resource_id = root_resource.resource_id
         CROSS JOIN LATERAL (
             SELECT CASE
                        WHEN resource.wrapper_fuses IS NULL
@@ -380,23 +397,11 @@ pub(super) async fn build(
                 (4, 'set_resolver', 'admin_set_resolver'),
                 (5, 'transfer', 'can_transfer_admin')
             ) role(ordinality, name, admin)
-            WHERE NOT EXISTS (
-                SELECT 1 FROM v2_admin_powers admins
-                WHERE admins.resource_id IN (resource.resource_id, root_resource.resource_id)
-                  AND role.admin = ANY(admins.admins)
-            )
+            WHERE NOT COALESCE(role.admin = ANY(own_admins.admins), false)
+              AND NOT COALESCE(role.admin = ANY(root_admins.admins), false)
         ) locks
         ORDER BY resource.resource_id
         "#,
     ]
-    .concat();
-    sqlx::query(&resource_summary_query)
-        .bind(chain_id)
-        .bind(target.number)
-        .bind(&target.hash)
-        .bind(full_rebuild)
-        .execute(&mut **transaction)
-        .await
-        .map_err(|error| ProjectError::database("failed to build resource permissions", error))?;
-    Ok(())
+    .concat()
 }
