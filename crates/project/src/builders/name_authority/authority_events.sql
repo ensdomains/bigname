@@ -90,6 +90,7 @@ WHERE (
                                -- Rule 1: a named grant in the wrap's own transaction. When a
                                -- controller event grants the lease it follows NameWrapped in
                                -- the transaction, so the wrap could not record the lease.
+                               -- (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
                                (registration.logical_name_id =
                                     selected_wrapper.logical_name_id
                                 AND registration.transaction_hash =
@@ -238,17 +239,41 @@ WHERE (
                             )
                         )
                         AND (
-                            event.block_number,
-                            COALESCE(event.transaction_index, -1),
-                            COALESCE(event.log_index, -1)
-                        ) <= (
-                            selected_binding.block_number,
-                            COALESCE(
-                                (selected_binding.provenance ->> 'transaction_index')::bigint,
-                                -1
-                            ),
-                            COALESCE(
-                                (selected_binding.provenance ->> 'log_index')::bigint, -1
+                            (
+                                event.block_number,
+                                COALESCE(event.transaction_index, -1),
+                                COALESCE(event.log_index, -1)
+                            ) <= (
+                                selected_binding.block_number,
+                                COALESCE(
+                                    (selected_binding.provenance ->> 'transaction_index')::bigint,
+                                    -1
+                                ),
+                                COALESCE(
+                                    (selected_binding.provenance ->> 'log_index')::bigint, -1
+                                )
+                            )
+                            -- The window above bounds what can decide control. The lease the
+                            -- name kept is not bounded by it: a registrar token transferred
+                            -- without `reclaim` leaves the registry owner as it was, and a
+                            -- later `renew` writes only the lease's expiry, so the retained
+                            -- lease goes on being renewed, and lapses, under the registry-only
+                            -- binding. Only those lifecycle rows of that exact lease pass; no
+                            -- control fold reads their kinds.
+                            -- (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
+                            -- (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L174 @ ens_v1@91c966f)
+                            OR (
+                                authority.selected_authority_arm = 'ens_v1'
+                                AND event.source_family = 'ens_v1_registrar_l1'
+                                AND event.event_kind IN (
+                                    'RegistrationRenewed', 'ExpiryChanged',
+                                    'RegistrationReleased'
+                                )
+                                AND COALESCE(
+                                    NULLIF(event.after_state ->> 'authority_kind', ''),
+                                    'registrar'
+                                ) = 'registrar'
+                                AND predecessor.resource_id = event.resource_id
                             )
                         )
                   )

@@ -488,7 +488,8 @@ mod v1_registrar {
             .iter()
             .find(|e| e.event_kind == "RegistrationGranted" && e.log_index == Some(1))
             .unwrap();
-        // Every NameWrapped-derived row records which registrar lease was wrapped.
+        // The NameWrapped-derived rows built from the shared observation object record which
+        // registrar lease was wrapped; permission and preimage rows do not carry the key.
         let wrap_rows = first
             .normalized_events
             .iter()

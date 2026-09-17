@@ -1902,7 +1902,7 @@ optional display name does not turn them into current-name results. Superseded
 ENSv1 resources remain queryable in resource audit context after ENSv2 becomes
 authoritative.
 
-<a id="released-v2-authority"></a>
+<a id="registrar-surface-snapshot"></a>
 ## Registrar surface snapshot
 
 the named, [state-derived](#state-derived-normalized-event) `RegistrationGranted` (with its
@@ -1915,6 +1915,7 @@ lease's original registration time and current state. The lease's original rows 
 [projections](projections.md#exact-name-projection)), and both describe one registration. See
 [storage semantics](storage.md).
 
+<a id="released-v2-authority"></a>
 ## Released v2 authority
 
 the authority tombstone left when an
@@ -1958,6 +1959,7 @@ that passes while the registrar lease is still live releases nothing. A release 
 is not a tombstone; it selects the revived registry-only binding. A registry
 owner proven zero stays the supported ownerless-registry profile.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L143-L154 @ ens_v1@91c966f)
 
 ## Retained-history proof
