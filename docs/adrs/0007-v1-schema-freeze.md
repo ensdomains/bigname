@@ -212,14 +212,16 @@ proves itself on every run against a planted set of the forms it refuses and
 the one it accepts, including an assembled production name that must be
 refused — after `RESET ROLE` too — and its rewritten twin that must succeed.
 Finally the frozen artifact itself is a checked-in catalog:
-`schema-v2/frozen-schema.txt` is every relation (with its privileges, storage
-parameters, row-level-security flags, replica identity, partitioning and
-parents), column (type, nullability, default, identity, generation,
-collation, storage, compression, privileges), constraint, index (with its
-validity), view, routine (with its execution modes, privileges and a digest
-of its body), trigger (with its firing state), sequence (its whole range,
-cache, cycle and owning column), type, domain, comment, row-security policy,
-rule, extended-statistics object and the schema's own privileges, of the
+`schema-v2/frozen-schema.txt` is the baseline's extension declarations and
+every relation (with its privileges, storage parameters, row-level-security
+flags, replica identity, partitioning and parents), column (type,
+nullability, default, identity, generation, collation, storage, compression,
+statistics target, privileges), constraint, index (with its validity), view,
+routine (its full argument list with defaults, execution modes, planner cost
+and rows, privileges and a digest of its body), trigger (with its firing
+state), sequence (its whole range, cache, cycle and owning column), type,
+domain, comment, row-security policy, rule, extended-statistics object and
+the schema's own privileges, of the
 baseline plus the inventoried schema-migrations, built into a fresh schema on every
 run and compared line for line, so a change to a baseline file or a
 schema-migration that moves the schema fails until the catalog is

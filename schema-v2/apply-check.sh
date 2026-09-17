@@ -206,12 +206,13 @@ migration_uses_unicode_escape() {
 }
 # The frozen artifact is the baseline plus the inventoried schema-migrations
 # through the documented head. schema-v2/frozen-schema.txt is that artifact's
-# catalog -- every relation with its storage options, row-security flags,
-# replica identity and partitioning, every column with its storage and
-# privileges, constraint, index, view, routine, trigger with its firing state,
-# sequence with its full range, type, domain, comment, policy, rule, extended
-# statistics object and the schema's own privileges, with the schema name
-# normalized -- built
+# catalog -- the baseline's extension declarations, then every relation with
+# its storage options, row-security flags, replica identity and partitioning,
+# every column with its storage, statistics target and privileges, constraint,
+# index, view, routine with its full argument list, trigger with its firing
+# state, sequence with its full range, type, domain, comment, policy, rule,
+# extended statistics object and the schema's own privileges, with the schema
+# name normalized -- built
 # here into its own schema and compared line for line, so a change to a
 # baseline file or a migration that moves the schema without moving the
 # frozen catalog fails, whatever its name. Regenerate deliberately with
@@ -234,7 +235,7 @@ SELECT line FROM (
     WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
     UNION ALL
     SELECT 1, c.relname, lpad(a.attnum::text, 4, '0'),
-           format('column %s.%s %s %s default=%s identity=%s generated=%s collation=%s storage=%s compression=%s acl=%s options=%s',
+           format('column %s.%s %s %s default=%s identity=%s generated=%s collation=%s storage=%s compression=%s statistics=%s acl=%s options=%s',
                   c.relname, a.attname,
                   format_type(a.atttypid, a.atttypmod),
                   CASE WHEN a.attnotnull THEN 'not null' ELSE 'null' END,
@@ -244,6 +245,8 @@ SELECT line FROM (
                   COALESCE((SELECT quote_ident(col.collname) FROM pg_collation col
                             WHERE col.oid = a.attcollation AND a.attcollation <> 0), '-'),
                   a.attstorage, COALESCE(NULLIF(a.attcompression, ''), '-'),
+                  CASE WHEN a.attstattarget IS NULL OR a.attstattarget < 0 THEN 'default'
+                       ELSE a.attstattarget::text END,
                   COALESCE(replace(array_to_string(a.attacl, ','), current_user, 'owner'), 'default'),
                   COALESCE((SELECT string_agg(o, ',' ORDER BY o) FROM unnest(a.attoptions) o), '-'))
     FROM pg_class c
@@ -272,11 +275,12 @@ SELECT line FROM (
     WHERE n.nspname = current_schema() AND c.relkind IN ('v', 'm')
     UNION ALL
     SELECT 5, p.proname, pg_get_function_identity_arguments(p.oid),
-           format('routine %s(%s) returns %s kind=%s lang=%s volatile=%s strict=%s leakproof=%s parallel=%s secdef=%s config=%s acl=%s body=%s',
-                  p.proname, pg_get_function_identity_arguments(p.oid),
+           format('routine %s(%s) returns %s kind=%s lang=%s volatile=%s strict=%s leakproof=%s parallel=%s secdef=%s cost=%s rows=%s config=%s acl=%s body=%s',
+                  p.proname, pg_get_function_arguments(p.oid),
                   pg_get_function_result(p.oid), p.prokind,
                   (SELECT l.lanname FROM pg_language l WHERE l.oid = p.prolang),
                   p.provolatile, p.proisstrict, p.proleakproof, p.proparallel, p.prosecdef,
+                  p.procost, p.prorows,
                   COALESCE(array_to_string(p.proconfig, ';'), '-'),
                   COALESCE(replace(array_to_string(p.proacl, ','), current_user, 'owner'), 'default'),
                   md5(replace(p.prosrc, current_schema(), 'bigname_phase')))
@@ -372,6 +376,12 @@ frozen_schema_catalog="$ROOT/schema-v2/frozen-schema.txt"
 # is taken twice -- after the baseline, and again after the schema-migrations
 # -- and the two must agree before either is compared with the frozen file.
 frozen_schema_catalog() {
+    # An extension lives outside the schema (its objects usually in public), so
+    # the declarations the baseline carries head the catalog as written, one
+    # per line with whitespace collapsed: a new or changed CREATE EXTENSION is
+    # a schema change like any other.
+    printf '%s\n' "$baseline_extension_statements" \
+        | sed -E 's/[[:space:]]+/ /g; s/ *; *$//; s/^ //' | sort | sed 's/^/extension /'
     {
         printf '\\pset format unaligned\n\\pset tuples_only on\n'
         printf 'SET search_path TO "%s";\n' "$frozen_schema"
@@ -1069,9 +1079,9 @@ trap cleanup EXIT
 # (btree_gist for its exclusion constraints, pgcrypto for public.digest) must
 # still be declared there: a real init-schema on an empty database has only
 # the baseline to install them.
-baseline_extension_statements="$(grep -hE '^CREATE EXTENSION IF NOT EXISTS ' "$ROOT"/schema-v2/baseline/*.sql || true)"
+baseline_extension_statements="$(grep -hiE '^[[:space:]]*CREATE EXTENSION ' "$ROOT"/schema-v2/baseline/*.sql | sed -E 's/^[[:space:]]+//' || true)"
 for required_extension in btree_gist pgcrypto; do
-    if ! printf '%s\n' "$baseline_extension_statements" | grep -qE "^CREATE EXTENSION IF NOT EXISTS ${required_extension}( |;)"; then
+    if ! printf '%s\n' "$baseline_extension_statements" | grep -qiE "^CREATE EXTENSION (IF NOT EXISTS )?${required_extension}( |;)"; then
         printf '%s\n' "schema-v2/baseline no longer declares CREATE EXTENSION IF NOT EXISTS $required_extension; init-schema on an empty database needs it" >&2
         exit 1
     fi
