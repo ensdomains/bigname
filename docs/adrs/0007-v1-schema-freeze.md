@@ -179,9 +179,17 @@ inventory whatever statement carries it. The historical set is the explicit
 list in `schema-v2/historical-migrations.txt`, not a filename cutoff: sqlx
 applies whichever versions a database has not recorded, so a new file named
 to sort among the historical ones would run on an initialized database
-while looking historical, and the check refuses it. The check proves itself
-on every run against a planted set of the forms it refuses and the one it
-accepts.
+while looking historical, and the check refuses it. Inside the inventory the
+rewrite is textual — the literal `bigname_phase` becomes the scratch schema —
+so it cannot see a name a migration assembles at run time (`'bigname_' ||
+'phase.…'` inside `EXECUTE`, or a search-path-relative name in a `DO` body).
+The check therefore applies every batch as a per-run role that owns the
+scratch schema and holds no privilege on `bigname_phase`: whatever the
+rewrite misses fails on the production schema instead of changing it
+unobserved. The check proves itself on every run against a planted set of
+the forms it refuses and the one it accepts, including an assembled
+production name that must be refused and its rewritten twin that must
+succeed.
 From acceptance on, a
 schema-migration of any of these kinds cannot land without moving the
 conformance test, which is where the carve-out or amendment is checked for.

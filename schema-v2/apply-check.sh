@@ -37,7 +37,12 @@ else
     exit 1
 fi
 
-run_psql() {
+# Every batch after set-up runs as a per-run role that owns the scratch schema
+# and holds no privilege on bigname_phase, so whatever a migration reaches for
+# outside the rewritten text -- an identifier assembled inside EXECUTE, a
+# search-path-relative name in a DO body -- fails on the production schema
+# instead of changing it unobserved. Only role set-up and teardown bypass it.
+run_psql_as_owner() {
     case "$psql_mode" in
         database-container)
             docker exec -i "$container" \
@@ -51,6 +56,9 @@ run_psql() {
                 psql -X -q -v ON_ERROR_STOP=1 "$BIGNAME_DATABASE_URL"
             ;;
     esac
+}
+run_psql() {
+    { printf 'SET ROLE "%s";\n' "$apply_check_role"; cat; } | run_psql_as_owner
 }
 
 render_phase_migration() {
@@ -501,12 +509,16 @@ END \$\$;"
         render_phase_migration "$install_file"
         render_phase_migration "$install_file"
         printf '%s\n' "$matches_baseline_sql"
-        # An interrupted concurrent build leaves an invalid index under this
-        # name. Mark this scratch index invalid to stand in for one.
+    } | run_psql >/dev/null
+    # An interrupted concurrent build leaves an invalid index under this
+    # name. Mark this scratch index invalid to stand in for one; the catalog
+    # write is the harness's own and needs the owner, not the migration role.
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
         printf '%s\n' \
             "UPDATE pg_index SET indisvalid = false" \
             "WHERE indexrelid = '$index_name'::regclass;"
-    } | run_psql >/dev/null
+    } | run_psql_as_owner >/dev/null
     assert_index_install_refusal "$label-invalid-prebuild" "$install_file" \
         "$index_name is missing from $scratch_schema.discovery_edges or is not valid and ready; follow the recovery steps in $readme_path before retrying"
     {
@@ -582,6 +594,7 @@ wait_for_schema_v2_race_session() {
 }
 
 scratch_schema="schema_v2_apply_check_${PPID}_$$"
+apply_check_role="${scratch_schema}_role"
 if [[ ! "$scratch_schema" =~ ^[a-z0-9_]+$ ]]; then
     printf '%s\n' "invalid scratch schema name" >&2
     exit 1
@@ -592,7 +605,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=8
+expected_refusal_assertions=9
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=32
 refusal_probe_seconds=0
@@ -610,12 +623,61 @@ cleanup() {
     if [ -n "${migration_application_log:-}" ]; then
         rm -f -- "$migration_application_log"
     fi
-    printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\n' "$scratch_schema" \
-        | run_psql >/dev/null 2>&1 || true
+    {
+        printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\n' "$scratch_schema"
+        printf 'DROP OWNED BY "%s";\n' "$apply_check_role"
+        printf 'DROP ROLE IF EXISTS "%s";\n' "$apply_check_role"
+    } | run_psql_as_owner >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
+# pg_read_all_stats lets the race probe below see another session's wait event.
+{
+    printf 'CREATE ROLE "%s" NOLOGIN IN ROLE pg_read_all_stats;\n' "$apply_check_role"
+    printf "SELECT format('GRANT CREATE ON DATABASE %%I TO %%I', current_database(), '%s') \\gexec\n" "$apply_check_role"
+} | run_psql_as_owner
+
 printf 'CREATE SCHEMA "%s";\n' "$scratch_schema" | run_psql
+# Prove the role boundary on every run: an identifier the rewrite cannot see,
+# assembled inside EXECUTE, must fail on the production schema whether or not
+# that schema exists in this database, while the same statement against the
+# rewritten literal succeeds in the scratch schema.
+assert_dynamic_production_name_is_refused() {
+    local probe_stderr statement
+    for statement in \
+        "CREATE TABLE bigname_' || 'phase.apply_check_probe (a int)" \
+        "INSERT INTO bigname_' || 'phase.chain_phase_state (chain_id, phase_name) VALUES (''probe'', ''ingest'')"
+    do
+        if probe_stderr="$({
+            printf 'SET search_path TO "%s";\n' "$scratch_schema"
+            printf "DO \$\$ BEGIN EXECUTE '%s'; END \$\$;\n" "$statement"
+        } | run_psql 2>&1 >/dev/null)"; then
+            printf '%s\n' "dynamic production schema name was not refused: $statement" >&2
+            exit 1
+        fi
+        case "$probe_stderr" in
+            *"permission denied for schema bigname_phase"* \
+                | *'schema "bigname_phase" does not exist'* \
+                | *'relation "bigname_phase.'*'does not exist'*) ;;
+            *)
+                printf '%s\n' "dynamic production schema name failed for another reason:" "$probe_stderr" >&2
+                exit 1
+                ;;
+        esac
+    done
+    if ! {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf 'BEGIN;\n'
+        printf "DO \$\$ BEGIN EXECUTE 'CREATE TABLE bigname_phase.apply_check_probe (a int)'; END \$\$;\n" \
+            | sed "s/bigname_phase/$scratch_schema/g"
+        printf 'ROLLBACK;\n'
+    } | run_psql >/dev/null 2>&1; then
+        printf '%s\n' "rewritten dynamic scratch schema name was refused" >&2
+        exit 1
+    fi
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
+}
+assert_dynamic_production_name_is_refused
 
 apply_baseline() {
     local sql_file
