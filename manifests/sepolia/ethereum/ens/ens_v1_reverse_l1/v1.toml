@@ -11,6 +11,8 @@ discovery_rules = []
 
 [capability_flags]
 
+# Address from the ENSv1 Sepolia deployment artifact.
+# (upstream: .refs/ens_v1/deployments/sepolia/ReverseRegistrar.json:L2 @ ens_v1@91c966f)
 [[contracts]]
 role = "reverse_registrar"
 address = "0xA0a1AbcDAe1a2a4A2EF8e9113Ff0e02DD81DC0C6"

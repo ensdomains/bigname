@@ -35,6 +35,9 @@ pub(crate) enum Tamper {
     ReceiptLogDiffers(i64),
     /// Wrong range-log indices for the first N queries, with correct receipt logs.
     RangeLogIndexDiffers(usize),
+    /// The first N range queries report the watched address's logs as emitted by the noise
+    /// address, with correct receipt logs.
+    RangeLogEmitterDiffers(usize),
     /// A receipt log the range query never reported, though the filter admits it.
     RangeQueryDropsWatchedLog(i64),
     /// A receipt that claims a block this window did not resolve.
@@ -452,6 +455,9 @@ impl TestNode {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        for address in &addresses {
+            self.counts.record(&format!("eth_getLogs({address})"));
+        }
         let topic0s = filter
             .pointer("/topics/0")
             .and_then(Value::as_array)
@@ -510,6 +516,13 @@ impl TestNode {
                             if self.counts.get("eth_getLogs") <= attempts)
                     {
                         value["logIndex"] = json!(format!("0x{:x}", log.log_index + 10_000));
+                    }
+                    if !exact_block
+                        && log.address == WATCHED_ADDRESS
+                        && matches!(self.tamper, Tamper::RangeLogEmitterDiffers(attempts)
+                            if self.counts.get("eth_getLogs") <= attempts)
+                    {
+                        value["address"] = json!(NOISE_ADDRESS);
                     }
                     values.push(value);
                 }

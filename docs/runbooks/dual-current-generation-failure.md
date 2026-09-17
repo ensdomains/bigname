@@ -994,11 +994,13 @@ Ethereum Sepolia carries distinct ENSv1 and ENSv2 test deployments on the same
 chain: the pinned ENSv1 registry is
 `0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e`
 (upstream: .refs/ens_v1/deployments/sepolia/ENSRegistry.json:L2 @ ens_v1@91c966f),
-while the pinned ENSv2 RootRegistry and ETHRegistry are
-`0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c` and
-`0x67b728a792e789a8978b30cf1b3b641f19354b43`
-(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/RootRegistry.json:L2 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRegistry.json:L2 @ ens_v2@a971bd64).
+while the pinned ENSv2 RootRegistry and ETHRegistry of the
+[official 2026-09-15 deployment](../sepolia-deployment.md) are
+`0x9703dbd26dab89504490994138cf2c575251a9ce` and
+`0x657ea849311d3d5823348dded7c2aaafb3ede09e`
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L2 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2_sepolia_20260916@366de741).
+The removed June deployment's `0x11b5…` and `0x67b7…` registries are not in the current corpus.
 
 Genuine Sepolia overlap therefore means that the same logical name has readable
 ENSv1 and ENSv2 evidence **without** an
