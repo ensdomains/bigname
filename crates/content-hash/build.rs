@@ -1,8 +1,12 @@
 use std::{env, path::PathBuf};
 
+const COMPATIBILITY_ENV: &str = "BIGNAME_BLUE_BRAIN_LOOKAHEAD_COMPATIBILITY";
+
 const E2E_MANIFEST_PROFILE_ENV: &str = "BIGNAME_E2E_MANIFEST_PROFILE_ROOT";
 const E2E_MANIFEST_PROFILE_PREFIX: &str = ".bigname-e2e-runtime-profile-";
 
+#[path = "src/compatibility.rs"]
+mod compatibility;
 #[path = "src/compute.rs"]
 mod compute;
 #[path = "src/lockfile.rs"]
@@ -33,14 +37,28 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
     println!("cargo:rerun-if-env-changed={E2E_MANIFEST_PROFILE_ENV}");
+    println!("cargo:rerun-if-env-changed={}", COMPATIBILITY_ENV);
+    println!("cargo:rerun-if-changed=src/compatibility.rs");
 
-    let hash =
+    let source_hash =
         compute::compute(workspace_root).expect("interpreter content hash must be computable");
+    let requested = env::var(COMPATIBILITY_ENV).ok();
+    let hash = compatibility::effective_hash(&source_hash, requested.as_deref())
+        .expect("interpretation compatibility exception must be explicitly reviewed");
+    if requested.is_some() {
+        println!(
+            "cargo:warning=blue-brain retains interpretation version {hash}; source hash {source_hash}"
+        );
+    }
     let mut profiles = manifest_profile_hashes(workspace_root);
     if let Some(profile) = e2e_manifest_profile_hash(workspace_root) {
         profiles.push(profile);
     }
     let mut generated = format!("pub const INTERPRETER_CONTENT_HASH: &str = {hash:?};\n");
+    generated.push_str(&format!(
+        "pub const INTERPRETER_SOURCE_HASH: &str = {source_hash:?};\n\
+         pub const INTERPRETER_COMPATIBILITY_EXCEPTION: Option<&str> = {requested:?};\n"
+    ));
     generated.push_str("pub const HASHED_MANIFEST_PROFILES: &[(&str, &str)] = &[\n");
     for (profile, profile_hash) in profiles {
         generated.push_str(&format!("    ({profile:?}, {profile_hash:?}),\n"));

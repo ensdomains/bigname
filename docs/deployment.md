@@ -391,6 +391,10 @@ not facts required by a later watch plan.
 The [manifest-authority marker](glossary.md#manifest-authority-marker) records
 the active authority set's fingerprint.
 The interpreter content hash and the manifest-authority fingerprint are independent deploy gates.
+For the isolated blue-brain loader only, the explicitly approved
+[compatibility build](../ops/experimental/README.md#approved-blue-brain-compatibility-exception)
+retains the previous interpretation version and resumes its existing checkpoint.
+This source-pinned exception does not change manifest-authority checks.
 The interpreter hash covers inputs that can change
 Interpret or Project output, including manifest `[[abi.events]]` declarations;
 when it changes, complete the full-history Interpret redo and the stamped

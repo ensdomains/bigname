@@ -1393,6 +1393,12 @@ rather than by a rotation:
 Treat a change to any of them as a re-derivation decision and follow the
 [planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
 
+The isolated blue-brain loader experiment has one explicitly approved
+[compatibility exception](../ops/experimental/README.md#approved-blue-brain-compatibility-exception).
+That dedicated build retains its existing interpretation version while recording
+the actual source fingerprint separately. It does not rotate stored hashes or
+reset progress. All other builds follow the hash-rotation rule below.
+
 An interpreter content hash rotation requires a planned full-history
 interpretation and projection walk; the system refuses to mix generations from
 different hashes. Interpret accepts the full finite-ingest range and extends

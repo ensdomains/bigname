@@ -6,8 +6,8 @@ use std::{
 };
 
 use super::{
-    HASHED_MANIFEST_PROFILES, INTERPRETER_CONTENT_HASH, interpreter_content_hash,
-    manifest_profile_hash,
+    HASHED_MANIFEST_PROFILES, INTERPRETER_COMPATIBILITY_EXCEPTION, INTERPRETER_CONTENT_HASH,
+    INTERPRETER_SOURCE_HASH, interpreter_content_hash, manifest_profile_hash,
 };
 use crate::compute::{
     cfg_test_source_exclusions, excluded_source_reason, hashed_source_paths, semantic_source_files,
@@ -51,7 +51,19 @@ fn build_time_hash_matches_checked_in_sources() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     assert_eq!(
         interpreter_content_hash(workspace_root).expect("source hash must compute"),
+        INTERPRETER_SOURCE_HASH
+    );
+    assert_eq!(
+        super::compatibility::effective_hash(
+            INTERPRETER_SOURCE_HASH,
+            INTERPRETER_COMPATIBILITY_EXCEPTION
+        )
+        .expect("compiled exception must be valid"),
         INTERPRETER_CONTENT_HASH
+    );
+    assert_eq!(
+        option_env!("BIGNAME_BLUE_BRAIN_LOOKAHEAD_COMPATIBILITY"),
+        INTERPRETER_COMPATIBILITY_EXCEPTION
     );
 }
 

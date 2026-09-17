@@ -279,6 +279,9 @@ async fn start_metrics<'a>(
         version = phase_runner::SOFTWARE_VERSION,
         build_sha = phase_runner::BUILD_SHA,
         interpreter_content_hash = phase_runner::INTERPRETER_CONTENT_HASH,
+        interpreter_source_hash = bigname_content_hash::INTERPRETER_SOURCE_HASH,
+        interpretation_compatibility_exception =
+            bigname_content_hash::INTERPRETER_COMPATIBILITY_EXCEPTION.unwrap_or("none"),
         "phase-runner metrics listener started"
     );
     Ok((loop_heartbeat, phase_progress))

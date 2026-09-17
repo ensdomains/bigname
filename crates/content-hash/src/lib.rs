@@ -6,6 +6,9 @@ mod compute;
 mod lockfile;
 mod source_paths;
 
+#[cfg(test)]
+mod compatibility;
+
 include!(concat!(env!("OUT_DIR"), "/interpreter_content_hash.rs"));
 
 /// Compute the source-input hash for a workspace tree.
