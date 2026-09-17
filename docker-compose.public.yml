@@ -4,6 +4,15 @@ services:
   public-proxy:
     image: caddy:2-alpine
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: ${BIGNAME_LOG_MAX_SIZE:-100m}
+        max-file: "${BIGNAME_LOG_MAX_FILE:-5}"
+    deploy:
+      resources:
+        limits:
+          memory: ${BIGNAME_PUBLIC_PROXY_MEMORY_LIMIT:?set BIGNAME_PUBLIC_PROXY_MEMORY_LIMIT}
     depends_on:
       api:
         condition: service_healthy

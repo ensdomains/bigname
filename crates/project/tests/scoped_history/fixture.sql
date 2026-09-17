@@ -40,6 +40,7 @@ INSERT INTO history_fixture VALUES
     ('name:before-node-not-selected', 'ens', 'SubregistryChanged', 'ens_v1_registry_l1', 'project-history-test', 10, 'canonical', 'activated', '{"node":"0XAA","child_node":"0XAA"}', '{}', FALSE, FALSE),
     ('name:missing-keys', 'ens', 'SubregistryChanged', 'ens_v1_registry_l1', 'project-history-test', 10, 'canonical', 'activated', '{}', '{}', FALSE, FALSE),
     ('name:json-null', 'ens', 'SubregistryChanged', 'ens_v1_registry_l1', 'project-history-test', 10, 'canonical', 'activated', '{}', '{"node":null,"to_logical_name_id":null}', FALSE, FALSE),
+    ('name:object-valued-node', 'ens', 'SubregistryChanged', 'ens_v1_registry_l1', 'project-history-test', 10, 'canonical', 'activated', '{}', '{"node":{"value":"0xaa"},"to_logical_name_id":["ens:0xaa"]}', FALSE, FALSE),
     ('name:namespace-mismatch', 'basenames', 'SubregistryChanged', 'ens_v1_registry_l1', 'project-history-test', 10, 'canonical', 'activated', '{}', '{"node":"0XAA"}', FALSE, FALSE),
     ('name:state:canonical', 'ens', 'SubregistryChanged', 'ens_v1_registry_l1', 'project-history-test', 10, 'canonical', 'activated', '{}', '{"node":"0XAA"}', TRUE, FALSE),
     ('name:state:safe', 'ens', 'SubregistryChanged', 'ens_v1_registry_l1', 'project-history-test', 10, 'safe', 'activated', '{}', '{"node":"0XAA"}', TRUE, FALSE),
@@ -76,6 +77,13 @@ INSERT INTO history_fixture VALUES
     ('primary:after-boundary', 'ens', 'RecordChanged', 'ens_v1_registry_l1', 'project-history-test', 11, 'canonical', 'activated', '{}', '{"address":"0XABC","coin_type":"60","namespace":"ens"}', FALSE, FALSE),
     ('primary:null-block', 'ens', 'RecordChanged', 'ens_v1_registry_l1', 'project-history-test', NULL, 'canonical', 'activated', '{}', '{"address":"0XABC","coin_type":"60","namespace":"ens"}', FALSE, FALSE),
     ('primary:other-chain', 'ens', 'RecordChanged', 'ens_v1_registry_l1', 'project-history-other', 10, 'canonical', 'activated', '{}', '{"address":"0XABC","coin_type":"60","namespace":"ens"}', FALSE, FALSE),
+    ('primary:handoff-between-scoped-tuples', 'ens', 'ReverseChanged', 'ens_v1_registry_l1', 'project-history-test', 10, 'canonical', 'activated', '{"address":"0XABC","coin_type":"60","namespace":"ens"}', '{"address":"0XABC","coin_type":"0","namespace":"basenames"}', FALSE, TRUE),
+    ('primary:partial-top-level-complete-source', 'ens', 'ReverseChanged', 'ens_v1_registry_l1', 'project-history-test', 10, 'canonical', 'activated', '{}', '{"address":"0XABC","primary_claim_source":{"address":"0XABC","coin_type":"60","namespace":"ens"}}', FALSE, TRUE),
+    ('primary:conflicting-top-level-and-source', 'ens', 'ReverseChanged', 'ens_v1_registry_l1', 'project-history-test', 10, 'canonical', 'activated', '{}', '{"address":"0XABC","coin_type":"61","namespace":"ens","primary_claim_source":{"address":"0XDEF","coin_type":"60","namespace":"ens"}}', FALSE, FALSE),
+    ('primary:no-cross-location-tuple', 'ens', 'ReverseChanged', 'ens_v1_registry_l1', 'project-history-test', 10, 'canonical', 'activated', '{}', '{"address":"0XABC","primary_claim_source":{"coin_type":"60","namespace":"ens"}}', FALSE, FALSE),
+    ('primary:scalar-source', 'ens', 'ReverseChanged', 'ens_v1_registry_l1', 'project-history-test', 10, 'canonical', 'activated', '{}', '{"primary_claim_source":"0xabc"}', FALSE, FALSE),
+    ('primary:array-source', 'ens', 'ReverseChanged', 'ens_v1_registry_l1', 'project-history-test', 10, 'canonical', 'activated', '{}', '{"primary_claim_source":["0xabc","60","ens"]}', FALSE, FALSE),
+    ('primary:object-valued-address', 'ens', 'ReverseChanged', 'ens_v1_registry_l1', 'project-history-test', 10, 'canonical', 'activated', '{}', '{"address":{"value":"0xabc"},"coin_type":"60","namespace":"ens"}', FALSE, FALSE),
     ('primary:candidate-visible-to-scope', 'ens', 'RecordChanged', 'ens_v1_registry_l1', 'project-history-test', 10, 'canonical', 'candidate', '{}', '{"address":"0XABC","coin_type":"60","namespace":"ens"}', FALSE, TRUE);
 INSERT INTO normalized_events (
     event_identity, namespace, event_kind, source_family, manifest_version,
