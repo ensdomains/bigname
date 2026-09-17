@@ -323,6 +323,10 @@ async fn resolver_links_summary_picks_up_a_name_discovered_later() -> Result<()>
     )
     .await?;
     event(&pool,"link-late",11,5,"ResolverRecordLinked",None,json!({"source_event":"Linked","storage_model":"resolver_record_id","resolver":OTHER,"node":late_node,"resolver_record_id":"1","dns_encoded_name":"0x00"})).await?;
+    // The root surface -- the empty name at the all-zero node -- exists on every ENS
+    // chain; the default record's link must not pick it up as a name.
+    sqlx::query("INSERT INTO name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state) VALUES ($1,'ens','',ARRAY[]::text[],'\\x00'::bytea,$2,ARRAY[]::text[],'fixture','active',$3,$4,10,'canonical')")
+        .bind(format!("ens:{}", hash(0))).bind(hash(0)).bind(CHAIN).bind(hash(10)).execute(&pool).await?;
     // The node's surface does not exist yet, so the link is served by namehash alone.
     run(&pool, 12, None, RunMode::Normal).await?;
     let item = |links: &Value| {
@@ -336,6 +340,14 @@ async fn resolver_links_summary_picks_up_a_name_discovered_later() -> Result<()>
     };
     let links = links_summary(&pool, OTHER).await?;
     assert!(item(&links).get("name").is_none(), "{links}");
+    let default = links_summary(&pool, RESOLVER).await?;
+    let default = default["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["default"] == true)
+        .unwrap();
+    assert!(default.get("name").is_none(), "{default}");
     // Block 13 observes the name: a surface plus the event that carries its logical name.
     sqlx::query("INSERT INTO name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state) VALUES ($1,'ens','record9.eth',ARRAY['record9','eth'],$2,$3,ARRAY['a','b'],'fixture','active',$4,$5,13,'canonical')")
         .bind(format!("ens:{late_node}")).bind(late.dns_encoded_name.clone()).bind(&late_node).bind(CHAIN).bind(hash(13)).execute(&pool).await?;

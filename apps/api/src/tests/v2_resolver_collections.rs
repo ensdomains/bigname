@@ -257,9 +257,11 @@ async fn v2_resolver_collection_links_pages_latest_link_per_node_in_record_order
         .execute(&database.pool).await?;
     // Only node 4 has an active name surface; every other node is served by namehash
     // alone. Node 5's surface is shadow -- withheld from readers, and its raw name is
-    // not even normalizable -- so it must neither be shown nor break the page.
-    sqlx::query("INSERT INTO bigname_phase.name_surfaces (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state, deactivation_reason, deactivated_at, chain_id, block_hash, block_number, canonicality_state) VALUES ('ens:' || $1, 'ens', 'Linked.eth', ARRAY['linked','eth'], '\\x066c696e6b656403657468'::bytea, $1, ARRAY['labelhash:linked','labelhash:eth'], 'fixture', 'active', NULL, NULL, 'ethereum-mainnet', '0xlinks150', 150, 'canonical'), ('ens:' || $2, 'ens', 'bad..name', ARRAY['bad','','name'], '\\x00'::bytea, $2, ARRAY['a','b','c'], 'fixture', 'shadow', 'fixture', now(), 'ethereum-mainnet', '0xlinks150', 150, 'canonical')")
-        .bind(node(4)).bind(node(5)).execute(&database.pool).await?;
+    // not even normalizable -- so it must neither be shown nor break the page. The
+    // root surface (the empty name at the all-zero node) exists on every ENS chain and
+    // must not attach to the default record's link.
+    sqlx::query("INSERT INTO bigname_phase.name_surfaces (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state, deactivation_reason, deactivated_at, chain_id, block_hash, block_number, canonicality_state) VALUES ('ens:' || $1, 'ens', 'Linked.eth', ARRAY['linked','eth'], '\\x066c696e6b656403657468'::bytea, $1, ARRAY['labelhash:linked','labelhash:eth'], 'fixture', 'active', NULL, NULL, 'ethereum-mainnet', '0xlinks150', 150, 'canonical'), ('ens:' || $2, 'ens', 'bad..name', ARRAY['bad','','name'], '\\x00'::bytea, $2, ARRAY['a','b','c'], 'fixture', 'shadow', 'fixture', now(), 'ethereum-mainnet', '0xlinks150', 150, 'canonical'), ('ens:' || $3, 'ens', '', ARRAY[]::text[], '\\x00'::bytea, $3, ARRAY[]::text[], 'fixture', 'active', NULL, NULL, 'ethereum-mainnet', '0xlinks150', 150, 'canonical')")
+        .bind(node(4)).bind(node(5)).bind("0x0000000000000000000000000000000000000000000000000000000000000000").execute(&database.pool).await?;
 
     let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/links?page_size=40");
     let first = v2_resolver_payload_for_database(&database, &base).await?;

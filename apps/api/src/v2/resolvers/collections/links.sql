@@ -22,9 +22,11 @@ WITH latest_links AS (
         event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
         event.normalized_event_id DESC
 ), named_nodes AS (
-    -- Only an active surface is a name to show; a shadow surface is withheld from readers.
+    -- Only an active surface is a name to show; a shadow surface is withheld from readers,
+    -- and the default node's surface is the root name, not a name.
     SELECT link.node, surface.logical_name_id, surface.raw_name, surface.namespace
-    FROM (SELECT DISTINCT node FROM latest_links) link
+    FROM (SELECT DISTINCT node FROM latest_links
+          WHERE node <> '0x0000000000000000000000000000000000000000000000000000000000000000') link
     JOIN bigname_phase.name_surfaces surface
       ON surface.logical_name_id = $7 || ':' || link.node
      AND surface.chain_id = $1 AND surface.block_number <= $3

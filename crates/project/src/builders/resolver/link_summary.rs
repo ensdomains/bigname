@@ -68,7 +68,9 @@ pub(super) async fn stage(
                    surface.logical_name_id,
                    surface.raw_name,
                    surface.namespace
-            FROM (SELECT DISTINCT node FROM active_links) link
+            -- The default node is namehash(''), whose surface is the root name: not a
+            -- name to show, and not a name at all to normalize.
+            FROM (SELECT DISTINCT node FROM active_links WHERE node <> $3) link
             CROSS JOIN (SELECT DISTINCT namespace FROM project_manifests) manifest
             JOIN name_surfaces surface
               ON surface.logical_name_id = manifest.namespace || ':' || link.node
