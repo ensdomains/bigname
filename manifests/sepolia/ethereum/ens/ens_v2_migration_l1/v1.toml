@@ -97,7 +97,16 @@ address = "0xbe68ff9afc7d5a1864ffef5c82de0a1c13e6b529"
 proxy_kind = "none"
 start_block = 11709091
 
+# ABI layout:
 # (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/VerifiableFactory.json:L48 @ ens_v2_sepolia_20260916@366de741)
+# Meaning the interpreter relies on: `sender` is the contract that called the factory and `salt` is
+# the migrated name's namehash. The receiver passes `uint256(node)` as the salt after checking the
+# node is the name's namehash, and the factory emits `ProxyDeployed(msg.sender, proxy, salt, ...)`
+# (the build-info line holds the factory's whole source from this deployment's compiler input).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/LockedWrapperReceiver.sol:L117-L121 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/LockedWrapperReceiver.sol:L149-L153 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/VerifiableFactory.json:L132 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/build-info/solc-0_8_25-555a61bb0e64a1101beb8cd0cb29f27cfbefb775.json:L1513 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
 name = "ProxyDeployed"
 fragment = "event ProxyDeployed(address indexed sender, address indexed proxyAddress, uint256 salt, address implementation)"

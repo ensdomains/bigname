@@ -858,11 +858,21 @@ address in the family-wide watch plan. (upstream: .refs/ens_v2_sepolia_20260916/
 
 Consumer slice 3A admits the same shape at any depth. The registry created for a
 locked child is deployed by its parent's registry, not by the locked migration
-controller, because `WrapperRegistry` inherits the same wrapper receiver, and the
-CREATE2 salt is the child's namehash.
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L32 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2_sepolia_20260629@ccaeb58)
-(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L151 @ ens_v2_sepolia_20260629@ccaeb58)
+controller, because `WrapperRegistry` inherits the same wrapper receiver.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/WrapperRegistry.sol:L29-L33 @ ens_v2_sepolia_20260916@366de741)
+The receiver checks that the migrated token ID is the child's namehash and passes that value to
+the factory as the `salt` argument.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/LockedWrapperReceiver.sol:L117-L121 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/LockedWrapperReceiver.sol:L149-L153 @ ens_v2_sepolia_20260916@366de741)
+The official Sepolia factory emits `ProxyDeployed(msg.sender, proxy, salt, implementation)`, so the
+log's `sender` is the contract that called the factory (the locked migration controller for a
+second-level name, the parent's `WrapperRegistry` for a deeper one) and its `salt` is the migrated
+name's namehash. The CREATE2 salt the factory actually uses is the hash of that caller and `salt`,
+not the namehash alone. The factory is a library contract with no source file in the pin; the cited
+build-info line holds its whole source in the deployment's compiler input.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/VerifiableFactory.json:L48 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/VerifiableFactory.json:L132 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/build-info/solc-0_8_25-555a61bb0e64a1101beb8cd0cb29f27cfbefb775.json:L1513 @ ens_v2_sepolia_20260916@366de741)
 Such a registry is admitted exactly as a controller-deployed one is — from the
 registry's own `RegistryCreated` announcement plus the factory log naming that
 registry — so admitted depth is unbounded: second level, third level, fourth
@@ -873,23 +883,23 @@ unchanged.
 
 A direct child never reaches a migration controller: the already-migrated
 parent's registry is itself the receiver and registers the child into itself.
-(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/MigrationHelper.sol:L124 @ ens_v2_sepolia_20260629@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L32 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/MigrationHelper.sol:L134 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/WrapperRegistry.sol:L29-L33 @ ens_v2_sepolia_20260916@366de741)
 The observable discriminator is that the child's `LabelRegistered` is emitted by
 the parent registry and its `sender` field equals that same emitting registry
 address, because the receiver re-enters through an external self-call restricted
 to itself; a second-level migration instead names a separate migration
 controller as `sender`.
-(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L149 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L167 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L467 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/AbstractWrapperReceiver.sol:L149 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/AbstractWrapperReceiver.sol:L167 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L493 @ ens_v2_sepolia_20260916@366de741)
 A child boundary additionally requires the child's own ENSv1 predecessor cleanup
 in the registration's transaction, which is what shows ENSv1 authority ended
 rather than merely that an ENSv2 registration happened. `locked_child` parks the
 child's wrapper token in the Graveyard without unwrapping it
-(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58);
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/LockedWrapperReceiver.sol:L146 @ ens_v2_sepolia_20260916@366de741);
 `emancipated_child` unwraps the child's node into the Graveyard
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64).
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2_sepolia_20260916@366de741).
 Both are emitted by the ENSv1 NameWrapper the ENSv1→ENSv2 migration manifest declares as a
 correlation address, so the requirement is manifest-anchored. A self-claim
 carrying neither derives no boundary.
@@ -1640,7 +1650,7 @@ it, or its factory, announces a declared implementation:
   signature set — but narrowed by `topic1` to the declared implementation
   addresses, both in the [compiled watch plan](glossary.md#compiled-watch-plan)
   and in Interpret selection. `Upgraded` naming an undeclared implementation from
-  an unadmitted emitter is neither fetched nor selected. (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L627-L637 @ ens_v2@a971bd64) (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/interfaces/IERC1967.sol:L13 @ basenames@1809bbc)
+  an unadmitted emitter is neither fetched nor selected. (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L514-L526 @ ens_v2_sepolia_20260916@366de741) (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/interfaces/IERC1967.sol:L13 @ basenames@1809bbc)
 - `ProxyDeployed(sender, proxyAddress, salt, implementation)` from a declared
   `ens_v2_migration_l1` `verifiable_factory` whose `implementation` is declared
   the same way admits `proxyAddress` as an `ens_v2_resolver_l1` instance from
@@ -1648,7 +1658,7 @@ it, or its factory, announces a declared implementation:
   implementation observation: an `Upgraded` normalized event on the proxy's own
   `Upgraded` stream with `after_state.source_event = "ProxyDeployed"`, written
   under the resolver manifest when that manifest declares `Upgraded`. No extra
-  fetch is involved; the factory's logs are already watched. (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/VerifiableFactory.json:L48 @ ens_v2@a971bd64)
+  fetch is involved; the factory's logs are already watched. (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/VerifiableFactory.json:L48 @ ens_v2_sepolia_20260916@366de741)
 
 Both announcements write a `resolver` discovery edge with `discovery_source`
 `Upgraded` or `ProxyDeployed`, `admission_basis`
