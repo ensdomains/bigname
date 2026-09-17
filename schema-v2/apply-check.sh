@@ -226,6 +226,38 @@ assert_migration_refusal() {
     refusal_assertions_passed=$((refusal_assertions_passed + 1))
     refusal_probe_seconds=$((refusal_probe_seconds + SECONDS - refusal_started))
 }
+# Run a concurrent index installer from ops/ against the scratch schema and
+# require it to stop with exactly this error. CREATE INDEX CONCURRENTLY cannot
+# run inside a transaction, so the caller commits its setup and undoes it.
+assert_index_install_refusal() {
+    local label="$1"
+    local install_file="$2"
+    local exact_message="$3"
+    local refusal_stderr
+    local observed_error
+    local refusal_started=$SECONDS
+    if refusal_stderr="$(
+        render_phase_migration "$install_file" | run_psql 2>&1 >/dev/null
+    )"; then
+        printf '%s\n' "$label: index installer unexpectedly succeeded" >&2
+        exit 1
+    fi
+    observed_error="$(
+        printf '%s\n' "$refusal_stderr" \
+            | sed -n 's/^ERROR:[[:space:]]*//p' \
+            | sed -n '1p'
+    )"
+    if [ "$observed_error" != "$exact_message" ]; then
+        printf '%s\n' \
+            "$label: expected PostgreSQL error: $exact_message" \
+            "$label: observed PostgreSQL error: $observed_error" \
+            "$label: complete stderr:" \
+            "$refusal_stderr" >&2
+        exit 1
+    fi
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    refusal_probe_seconds=$((refusal_probe_seconds + SECONDS - refusal_started))
+}
 assert_unconfigured_settlement_constraint() {
     local provenance="$1"
     local false_error
@@ -302,7 +334,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=7
+expected_refusal_assertions=8
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=31
 refusal_probe_seconds=0
@@ -756,6 +788,54 @@ END $$;
 DROP TABLE expected_discovery_history_index;
 SQL
 } | run_psql
+# The live prebuild in ops/discovery-history-index/install.sql must build the
+# same definition, pass its own validity check, and stay a no-op when rerun.
+discovery_history_install="$ROOT/ops/discovery-history-index/install.sql"
+discovery_history_index_matches_baseline_sql="$(cat <<'SQL'
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index, expected_discovery_history_index expected
+        WHERE indexrelid = 'discovery_edges_observation_history_idx'::regclass
+          AND indisvalid AND indisready AND indpred IS NOT NULL
+          AND pg_get_indexdef(indexrelid) = expected.definition
+    ) THEN
+        RAISE EXCEPTION 'discovery observation-history index prebuild differs from the baseline';
+    END IF;
+END $$;
+SQL
+)"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TABLE expected_discovery_history_index AS
+SELECT pg_get_indexdef(indexrelid) AS definition
+FROM pg_index
+WHERE indexrelid = 'discovery_edges_observation_history_idx'::regclass;
+DROP INDEX discovery_edges_observation_history_idx;
+SQL
+    render_phase_migration "$discovery_history_install"
+    render_phase_migration "$discovery_history_install"
+    printf '%s\n' "$discovery_history_index_matches_baseline_sql"
+    # An interrupted concurrent build leaves an invalid index under this name.
+    # Mark this scratch index invalid to stand in for one.
+    cat <<'SQL'
+UPDATE pg_index SET indisvalid = false
+WHERE indexrelid = 'discovery_edges_observation_history_idx'::regclass;
+SQL
+} | run_psql >/dev/null
+assert_index_install_refusal discovery-history-invalid-prebuild \
+    "$discovery_history_install" \
+    "discovery_edges_observation_history_idx is missing from $scratch_schema.discovery_edges or is not valid and ready; follow the recovery steps in ops/discovery-history-index/README.md before retrying"
+# The documented recovery: drop only the invalid index, then rerun the installer.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' 'DROP INDEX discovery_edges_observation_history_idx;'
+    render_phase_migration "$discovery_history_install"
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' "$discovery_history_index_matches_baseline_sql"
+    printf '%s\n' 'DROP TABLE expected_discovery_history_index;'
+} | run_psql >/dev/null
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor
 # shape, then validate the additive tuple invariant independently. Both files
 # must remain idempotent after the upgrade completes.

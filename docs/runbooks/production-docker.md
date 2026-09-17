@@ -329,6 +329,24 @@ to perform the first build against a populated production `normalized_events`
 table.
 
 The release containing
+`20260917120000_discovery_edges_observation_history_idx.sql` adds the lookup
+Interpret uses to find earlier and later observations of one discovery
+relationship, including closed ones. On an initialized production namespace,
+build `discovery_edges_observation_history_idx` concurrently in step 3. This
+runbook does not repeat the statement: follow
+[the index runbook](../../ops/discovery-history-index/README.md) and run its
+[`install.sql`](../../ops/discovery-history-index/install.sql), which exits
+non-zero unless the index is valid and ready. Also confirm the definition as
+that runbook describes. The concurrent build permits writes, so it can be
+completed while the existing runner is still processing, before the stop/start
+window opens; step 3 then only re-checks the result. Then apply the
+schema-migration in step 4; its `IF NOT EXISTS` build is a no-op when the
+concurrent index is already valid. Do not allow the versioned schema-migration
+to perform the first build against a populated production `discovery_edges`
+table: an ordinary index build blocks writes to the table until the
+schema-migration's transaction ends.
+
+The release containing
 `20260904120000_project_redo_child_registration_history.sql` adds the bounded
 Interpret-to-Project handoff for child and registry identifiers from deleted
 ENSv1→ENSv2 [migration-registry](../glossary.md#migration-registry-wrapperregistry)
@@ -645,6 +663,7 @@ indexes are additive; rollback may leave them in place.
    `20260831150000_normalized_events_v2_expiry_scope_idx.sql`, or
    `20260902120000_normalized_events_basenames_record_node_resolver_idx.sql`,
    or `20260911120000_normalized_events_emitter_history_idx.sql`,
+   or `20260917120000_discovery_edges_observation_history_idx.sql`,
    apply and validate the applicable concurrent baseline indexes above;
    otherwise skip this step;
    For the release containing
