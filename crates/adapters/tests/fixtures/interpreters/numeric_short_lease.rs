@@ -36,7 +36,7 @@ fn integer(value: &Value) -> anyhow::Result<i64> {
     })
 }
 
-/// Uses shipped hackathon ABI/event admission, with disposable addresses and zero start blocks
+/// Uses shipped Sepolia ABI/event admission, with disposable addresses and zero start blocks
 /// from the retained fixture. It introduces no controller logs or registrar predecessor state.
 pub fn input() -> anyhow::Result<BatchInput> {
     let fixture = fixture()?;
