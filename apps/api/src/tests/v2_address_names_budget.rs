@@ -449,6 +449,29 @@ async fn v2_address_names_grant_budget_maximum_page_operators_and_default_plan()
         v2_address_names_response_for_database(&database, &format!("{uri}&include=role_summary"))
             .await?;
     assert_eq!(over.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    // The default plan depends on table statistics, and autovacuum may or may not have
+    // analyzed this database yet. With only the fixture's ~200 lineage rows, fresh
+    // statistics make a sequential lineage scan per grant the cheapest plan, which is not
+    // what a deployment with a real block history gets. Seed unrelated block heights so the
+    // lineage table has a realistic shape, then analyze every relation in the plan so the
+    // planner always sees the same statistics.
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_lineage \
+         (chain_id, block_hash, block_number, block_timestamp, canonicality_state) \
+         SELECT 'ethereum-mainnet', '0xunrelated' || to_hex(i), 100000 + i, \
+         '2026-04-17T00:00:00Z'::timestamptz + make_interval(secs => i), \
+         'canonical'::bigname_phase.canonicality_state FROM generate_series(1, 20000) i",
+    )
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        "ANALYZE bigname_phase.chain_lineage, bigname_phase.resources, \
+         bigname_phase.permissions_current, \
+         bigname_phase.permissions_current_resource_summary, \
+         bigname_phase.account_permission_state_current",
+    )
+    .execute(&database.pool)
+    .await?;
     let plan = bigname_storage::explain_bounded_effective_permissions_by_resource_ids(
         &database.pool,
         &ids,
