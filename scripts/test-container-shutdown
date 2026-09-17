@@ -9,6 +9,10 @@ if [[ "${1:-}" == --serve ]]; then
   export BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL="$database"
   export BIGNAME_PHASE_RUNNER_CHAINS=ethereum-mainnet BIGNAME_PHASE_RUNNER_SOURCES=unused
   # Required for full Compose interpolation; this fixture starts only the API.
+  # The compose file has no defaults for the writer login or the database
+  # password, so the render needs values even though neither service is started.
+  export BIGNAME_DATABASE_URL="$database"
+  export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-container-shutdown-fixture}"
   export BIGNAME_PHASE_RUNNER_MINIMUM_FREE_DISK_BYTES=1
   export BIGNAME_PHASE_RUNNER_WRITABLE_PATH="$evidence/unused-capacity-probe"
   override="$evidence/override.yml"; rendered="$evidence/compose.json"
@@ -22,8 +26,16 @@ PY
 import json,sys,os
 c=json.load(open(sys.argv[1])); a=c['services']['api']; r=c['services']['phase-runner']
 valid=a.get('stop_signal')=='SIGTERM' and a.get('stop_grace_period')==('1m15s' if os.environ.get('BIGNAME_E2E_SHUTDOWN_EXTENDED') else '45s')
-json.dump({'api_contract_present':valid,'api_signal':a.get('stop_signal'),'api_grace':a.get('stop_grace_period'),'runner_unchanged':not any(k in r for k in ['stop_signal','stop_grace_period'])},open(sys.argv[2],'w'))
-assert not any(k in r for k in ['stop_signal','stop_grace_period'])
+# The runner carries its own stop grace (docker-compose.server.yml, default 120s,
+# which Compose renders as 2m0s). An operator override is checked for presence
+# only; its rendering is not predictable here. No stop_signal is expected on the
+# runner: tini forwards Docker's SIGTERM unchanged.
+runner_grace=r.get('stop_grace_period')
+runner_expected=None if os.environ.get('BIGNAME_PHASE_RUNNER_STOP_GRACE_PERIOD') else '2m0s'
+runner_valid=runner_grace is not None and (runner_expected is None or runner_grace==runner_expected)
+json.dump({'api_contract_present':valid,'api_signal':a.get('stop_signal'),'api_grace':a.get('stop_grace_period'),'runner_contract_present':runner_valid,'runner_signal':r.get('stop_signal'),'runner_grace':runner_grace},open(sys.argv[2],'w'))
+assert runner_valid, f'phase-runner Compose stop grace missing or unexpected: {runner_grace!r}'
+assert 'stop_signal' not in r, r.get('stop_signal')
 assert valid or sys.argv[3], 'API Compose stop contract missing'
 PY
   compose=(docker compose -p "$project" -f "$rendered")
@@ -105,8 +117,33 @@ printf '%s\n' 'fn main() {}' > "$scratch/src/main.rs"
 printf '%s\n' 'fn main() { assert_eq!(std::env::var("NUM_JOBS").unwrap(),"1"); assert_eq!(std::thread::available_parallelism().unwrap().get(),1); }' > "$scratch/build.rs"
 printf '%s\n' 'FROM rust:1.93.1-bookworm' 'WORKDIR /probe' 'COPY . .' 'RUN cargo build --offline -vv' > "$scratch/Dockerfile"
 docker buildx build --builder "$builder" --load -t "bigname-shutdown-probe:$$" "$scratch"
-export CARGO_BUILD_JOBS=1 BIGNAME_BUILD_SHA="$sha"
-docker buildx build --builder "$builder" --load --build-arg "BIGNAME_BUILD_SHA=$sha" -t "$BIGNAME_E2E_SHUTDOWN_IMAGE" "$source_root"
+# Only BIGNAME_BUILD_SHA is exported: the image build takes its single-job
+# constraint from the builder's pinned CPU above, which the probe verifies, and
+# buildx forwards no host environment into it. Exporting CARGO_BUILD_JOBS here
+# would only throttle the host test build below.
+export BIGNAME_BUILD_SHA="$sha"
+# The builder is created and destroyed per run, so its `--mount=type=cache` mounts
+# start empty every time and the release build recompiles the whole workspace. When
+# a cache directory is supplied, carry the layers across runs instead. This changes
+# only layer reuse: the source tree, the Dockerfile, the single-CPU builder, and the
+# `-j1` build above are all unchanged, and buildx reuses a layer only when its own
+# inputs hash identically. Unset, the build behaves exactly as before.
+cache_args=()
+if [[ -n "${BIGNAME_E2E_SHUTDOWN_BUILD_CACHE:-}" ]]; then
+  cache_out="${BIGNAME_E2E_SHUTDOWN_BUILD_CACHE}-next"
+  rm -rf "$cache_out"
+  if [[ -d "$BIGNAME_E2E_SHUTDOWN_BUILD_CACHE" ]]; then
+    cache_args+=(--cache-from "type=local,src=$BIGNAME_E2E_SHUTDOWN_BUILD_CACHE")
+  fi
+  cache_args+=(--cache-to "type=local,dest=$cache_out,mode=max")
+fi
+docker buildx build --builder "$builder" --load "${cache_args[@]}" --build-arg "BIGNAME_BUILD_SHA=$sha" -t "$BIGNAME_E2E_SHUTDOWN_IMAGE" "$source_root"
+if [[ -n "${BIGNAME_E2E_SHUTDOWN_BUILD_CACHE:-}" && -d "$cache_out" ]]; then
+  # Replace rather than append: the local exporter never prunes, so writing in place
+  # would grow without bound across runs.
+  rm -rf "$BIGNAME_E2E_SHUTDOWN_BUILD_CACHE"
+  mv "$cache_out" "$BIGNAME_E2E_SHUTDOWN_BUILD_CACHE"
+fi
 export BIGNAME_E2E_SHUTDOWN_MODE=compose
 cd "$ROOT"
 cargo test --locked --manifest-path tests/e2e/Cargo.toml scenarios::service_shutdown::api_signals_drain_accepted_indexed_name_read -- --exact --nocapture

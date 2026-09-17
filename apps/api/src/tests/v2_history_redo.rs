@@ -2,13 +2,13 @@
 async fn v2_history_routes_refuse_while_interpret_redo_is_in_progress() -> Result<()> {
     const ADDRESS: &str = "0x00000000000000000000000000000000000000cc";
     const MESSAGE: &str =
-        "history is temporarily unavailable while Interpret redo is in progress";
+        "collection publication is not available; retry after indexing is ready";
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
     let routes = [
-        "/v2/events?name=history.eth&page_size=2".to_owned(),
-        "/v2/names/history.eth/history?page_size=2".to_owned(),
-        format!("/v2/addresses/{ADDRESS}/history?page_size=2"),
+        "/v1/events?name=history.eth&page_size=2".to_owned(),
+        "/v1/names/history.eth/history?page_size=2".to_owned(),
+        format!("/v1/addresses/{ADDRESS}/history?page_size=2"),
     ];
 
     for route in &routes {
@@ -52,7 +52,7 @@ async fn v2_name_history_rejects_malformed_cursor_before_active_redo_fence() -> 
 
     let response = v2_history_response_for_database(
         &database,
-        "/v2/names/history.eth/history?cursor=garbage",
+        "/v1/names/history.eth/history?cursor=garbage",
     )
     .await?;
     let status = response.status();
@@ -67,7 +67,7 @@ async fn v2_name_history_rejects_malformed_cursor_before_active_redo_fence() -> 
 async fn v2_name_history_returns_stale_not_404_when_redo_orphans_the_surface() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
-    let route = "/v2/names/history.eth/history?page_size=2";
+    let route = "/v1/names/history.eth/history?page_size=2";
 
     assert_eq!(
         v2_history_response_for_database(&database, route)
@@ -102,9 +102,9 @@ async fn v2_history_routes_refuse_when_redo_finishes_after_anchor_resolution() -
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
     let routes = [
-        "/v2/events?name=history.eth&page_size=2".to_owned(),
-        "/v2/names/history.eth/history?page_size=2".to_owned(),
-        format!("/v2/addresses/{ADDRESS}/history?page_size=2"),
+        "/v1/events?name=history.eth&page_size=2".to_owned(),
+        "/v1/names/history.eth/history?page_size=2".to_owned(),
+        format!("/v1/addresses/{ADDRESS}/history?page_size=2"),
     ];
 
     for route in routes {
@@ -114,7 +114,7 @@ async fn v2_history_routes_refuse_when_redo_finishes_after_anchor_resolution() -
                 bigname_storage::history_anchor_read_test_hooks::HistoryReadHookPoint::AfterAnchors,
             )
             .await?;
-        let state = database.app_state();
+        let state = database.app_state_with_public_namespaces(&["ens"]);
         let request_task = tokio::spawn(async move {
             app_router(state)
                 .oneshot(
@@ -126,7 +126,8 @@ async fn v2_history_routes_refuse_when_redo_finishes_after_anchor_resolution() -
                 .await
         });
 
-        control.wait_until_reached().await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), control.wait_until_reached()).await
+            .context("history request did not reach its read hook")?;
         database
             .simulate_interpret_redo_begin("ethereum-mainnet", "recompute_flags")
             .await?;
@@ -156,8 +157,8 @@ async fn v2_event_and_address_history_refuse_redo_before_name_enrichment() -> Re
     seed_v2_history_fixture(&database).await?;
 
     for route in [
-        "/v2/events?name=history.eth&page_size=2".to_owned(),
-        format!("/v2/addresses/{ADDRESS}/history?page_size=2"),
+        "/v1/events?name=history.eth&page_size=2".to_owned(),
+        format!("/v1/addresses/{ADDRESS}/history?page_size=2"),
     ] {
         let (_guard, control) =
             bigname_storage::history_anchor_read_test_hooks::install(
@@ -165,7 +166,7 @@ async fn v2_event_and_address_history_refuse_redo_before_name_enrichment() -> Re
                 bigname_storage::history_anchor_read_test_hooks::HistoryReadHookPoint::AfterPage,
             )
             .await?;
-        let state = database.app_state();
+        let state = database.app_state_with_public_namespaces(&["ens"]);
         let request_task = tokio::spawn(async move {
             app_router(state)
                 .oneshot(
@@ -177,7 +178,8 @@ async fn v2_event_and_address_history_refuse_redo_before_name_enrichment() -> Re
                 .await
         });
 
-        control.wait_until_reached().await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), control.wait_until_reached()).await
+            .context("history request did not reach its read hook")?;
         database
             .simulate_interpret_redo_begin("ethereum-mainnet", "recompute_flags")
             .await?;

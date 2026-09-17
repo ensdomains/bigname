@@ -745,3 +745,6 @@ async fn token_owner_selection_preserves_authority_and_lifecycle_boundaries() ->
     db.cleanup().await?;
     Ok(())
 }
+
+#[path = "issue_503/migration_profile.rs"]
+mod migration_profile;

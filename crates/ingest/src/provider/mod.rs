@@ -9,6 +9,7 @@ use std::{
 use anyhow::{Result, bail};
 use reqwest::Url;
 
+mod bloom;
 mod decode;
 mod http_client;
 mod request;
@@ -16,7 +17,10 @@ mod reth_db;
 mod rpc;
 mod types;
 
-pub use types::{Block, BlockBundle, HeadSnapshot, Log, Receipt, ResolvedBlock, Transaction};
+pub use bloom::bloom_contains;
+pub use types::{
+    Block, BlockBundle, HeadSnapshot, Log, Receipt, ResolvedBlock, Transaction, TransactionPayload,
+};
 
 use http_client::RecoveringHttpClient;
 use request::validate_endpoint;
@@ -26,10 +30,23 @@ use reth_db::RethDbProvider;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// How many JSON-RPC batches or range log queries a provider keeps in flight.
+///
+/// Remote endpoints answer one round trip at a time; a window's hash lookups, header
+/// lookups, range queries and per-transaction fetches are independent, so they overlap up
+/// to this bound rather than running strictly in sequence.
+pub const PROVIDER_PARALLELISM: usize = 8;
+
 #[derive(Clone)]
 pub enum ChainProvider {
     JsonRpc(JsonRpcProvider),
     RethDb(RethDbProvider),
+}
+
+/// Payload reads already selected by block density, with whole-block work left for fetching.
+pub(crate) struct SelectedPayloads {
+    pub transactions: Vec<TransactionPayload>,
+    pub bundle_blocks: Vec<ResolvedBlock>,
 }
 
 #[derive(Clone)]
@@ -94,22 +111,91 @@ impl ChainProvider {
         }
     }
 
-    pub async fn logs(
-        &self,
-        blocks: &[ResolvedBlock],
-        addresses: &[String],
-        topics: &[String],
-    ) -> Result<Vec<Log>> {
-        match self {
-            Self::JsonRpc(provider) => provider.logs(blocks, addresses, topics).await,
-            Self::RethDb(provider) => provider.logs(blocks, addresses, topics).await,
-        }
-    }
-
     pub async fn bundles(&self, blocks: &[ResolvedBlock]) -> Result<Vec<BlockBundle>> {
         match self {
             Self::JsonRpc(provider) => provider.bundles(blocks).await,
             Self::RethDb(provider) => provider.bundles(blocks).await,
+        }
+    }
+
+    /// Range log lookup that does not re-resolve the blocks it touched.
+    ///
+    /// Returned logs are pinned to the hashes in `resolved`; the caller re-checks the
+    /// whole window once more while loading [`Self::headers`].
+    pub(crate) async fn range_logs(
+        &self,
+        resolved: &[ResolvedBlock],
+        from: i64,
+        to: i64,
+        addresses: &[String],
+        topics: &[String],
+        topic1s: &[String],
+    ) -> Result<Vec<Log>> {
+        if from > to || topics.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self {
+            Self::JsonRpc(provider) => {
+                let logs = provider
+                    .range_logs(from, to, addresses, topics, topic1s)
+                    .await?;
+                rpc::pin_logs_to_resolved(resolved, logs)
+            }
+            Self::RethDb(provider) => {
+                let blocks = resolved
+                    .iter()
+                    .filter(|block| (from..=to).contains(&block.number))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                provider.logs(&blocks, addresses, topics, topic1s).await
+            }
+        }
+    }
+
+    /// Wide-range log lookup whose results are not yet pinned to any resolved window.
+    ///
+    /// Only the JSON-RPC provider prefetches: the datadir reader answers a window-sized
+    /// query from local storage, so there is no round trip to amortise.
+    pub(crate) async fn prefetch_range_logs(
+        &self,
+        from: i64,
+        to: i64,
+        addresses: &[String],
+        topics: &[String],
+        topic1s: &[String],
+    ) -> Result<Option<Vec<Log>>> {
+        match self {
+            Self::JsonRpc(provider) => provider
+                .range_logs(from, to, addresses, topics, topic1s)
+                .await
+                .map(Some),
+            Self::RethDb(_) => Ok(None),
+        }
+    }
+
+    /// Returns sparse payloads and the dense blocks that should retain bundle assembly.
+    pub(crate) async fn transaction_payloads(
+        &self,
+        resolved: &[ResolvedBlock],
+        logs: &[Log],
+    ) -> Result<SelectedPayloads> {
+        match self {
+            Self::JsonRpc(provider) => {
+                let hashes = logs
+                    .iter()
+                    .map(|log| log.transaction_hash.clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                provider
+                    .transaction_payloads(&hashes)
+                    .await
+                    .map(|transactions| SelectedPayloads {
+                        transactions,
+                        bundle_blocks: Vec::new(),
+                    })
+            }
+            Self::RethDb(provider) => provider.transaction_payloads(resolved, logs).await,
         }
     }
 
@@ -134,11 +220,12 @@ impl ChainProvider {
         to_block: i64,
         addresses: &[String],
         topics: &[String],
+        topic1s: &[String],
     ) -> Result<Vec<Log>> {
         match self {
             Self::JsonRpc(provider) => {
                 provider
-                    .verification_logs(from_block, to_block, addresses, topics)
+                    .verification_logs(from_block, to_block, addresses, topics, topic1s)
                     .await
             }
             Self::RethDb(provider) => {
@@ -147,7 +234,7 @@ impl ChainProvider {
                     .filter(|block| (from_block..=to_block).contains(&block.number))
                     .cloned()
                     .collect::<Vec<_>>();
-                provider.logs(&blocks, addresses, topics).await
+                provider.logs(&blocks, addresses, topics, topic1s).await
             }
         }
     }

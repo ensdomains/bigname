@@ -1,17 +1,17 @@
 use anyhow::{Context, Result};
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder};
-use uuid::Uuid;
 
 use super::redo::{InterpretRedoFence, ensure_interpret_redo_fence};
 use super::{
-    EventHistoryReadFilter, HistoryCursor, HistoryEvent, HistoryPage, HistorySummaryMode,
-    InvalidHistoryCursor,
+    EventHistoryReadFilter, HistoryBlockWindow, HistoryCursor, HistoryEvent, HistoryOrder,
+    HistoryPage, HistorySummaryMode, InvalidHistoryCursor,
     decoders::decode_history_event,
     duplicates::push_product_history_duplicate_filter,
     registration_identity::{
         push_product_event_kind_predicate, push_product_registration_id,
         push_registration_binding_at_event,
     },
+    selector_filter::{push_selector_filter, push_string_filter},
     selectors::HistorySelector,
     source::{push_history_canonicality_filter, push_history_source_for_filter},
     summary::load_history_summary,
@@ -149,10 +149,10 @@ pub(super) async fn load_history_page(
 
     if cursor.is_some() {
         builder.push(" AND ");
-        push_history_cursor_after(&mut builder);
+        push_history_cursor_after(&mut builder, filter.order);
     }
 
-    push_history_order(&mut builder);
+    push_history_order(&mut builder, filter.order);
     builder.push(" LIMIT ");
     builder.push_bind(page_limit);
 
@@ -198,7 +198,7 @@ async fn load_history_internal(
     push_history_select(&mut builder, &filter, canonical_only, false, false);
     push_history_filters(&mut builder, &filter, canonical_only);
     push_product_history_duplicate_filter(&mut builder, &filter, canonical_only);
-    push_history_order(&mut builder);
+    push_history_order(&mut builder, filter.order);
 
     if head_only {
         builder.push(" LIMIT 1");
@@ -334,6 +334,11 @@ pub(super) fn push_history_filters<'a>(
         builder.push_bind(namespace);
     }
 
+    if let Some(contract_address) = filter.contract_address.as_ref() {
+        builder.push(" AND lower(ne.raw_fact_ref ->> 'emitting_address') = ");
+        builder.push_bind(contract_address);
+    }
+
     if let Some(registration_id) = filter.registration_id.as_ref() {
         builder.push(" AND ");
         builder.push_bind(filter.registration_id_is_public);
@@ -369,17 +374,98 @@ pub(super) fn push_history_filters<'a>(
         builder.push_bind(to_block);
     }
 
+    if let Some(window) = filter.block_window.as_ref() {
+        push_history_block_window(builder, window);
+    }
+
+    if let Some(resolver) = filter.resolver.as_ref() {
+        builder.push(" AND ne.chain_id = ");
+        builder.push_bind(&resolver.chain_id);
+        builder.push(" AND (lower(ne.raw_fact_ref ->> 'emitting_address') = ");
+        builder.push_bind(&resolver.address);
+        builder.push(
+            " OR (ne.event_kind = 'ResolverChanged' AND (lower(ne.after_state ->> 'resolver') = ",
+        );
+        builder.push_bind(&resolver.address);
+        builder.push(" OR lower(ne.before_state ->> 'resolver') = ");
+        builder.push_bind(&resolver.address);
+        builder.push(")))");
+    }
+
     push_history_canonicality_filter(builder, canonical_only);
 }
 
-pub(super) fn push_history_order(builder: &mut QueryBuilder<'_, Postgres>) {
-    builder.push(" ORDER BY ");
-    push_history_order_terms(builder);
+pub(super) async fn load_history_events_by_ids(
+    pool: &PgPool,
+    ids: &[i64],
+) -> Result<Vec<HistoryEvent>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    let filter = EventHistoryReadFilter::default();
+    push_history_select(&mut builder, &filter, true, false, false);
+    builder.push(" AND ne.normalized_event_id = ANY(");
+    builder.push_bind(ids);
+    builder.push("::bigint[])");
+    push_history_canonicality_filter(&mut builder, true);
+    push_history_order(&mut builder, HistoryOrder::Desc);
+
+    let rows = builder
+        .build()
+        .fetch_all(pool)
+        .await
+        .context("failed to fetch normalized events by id")?;
+    rows.into_iter().map(decode_history_event).collect()
 }
 
-pub(super) fn push_history_order_terms(builder: &mut QueryBuilder<'_, Postgres>) {
-    builder.push(
-        r#"
+/// One inclusive block range per chain; a window without ranges matches nothing.
+fn push_history_block_window<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    window: &'a HistoryBlockWindow,
+) {
+    if window.ranges.is_empty() {
+        builder.push(" AND FALSE");
+        return;
+    }
+    builder.push(" AND (");
+    for (index, range) in window.ranges.iter().enumerate() {
+        if index > 0 {
+            builder.push(" OR ");
+        }
+        builder.push("(ne.chain_id = ");
+        builder.push_bind(&range.chain_id);
+        if let Some(from_block) = range.from_block {
+            builder.push(" AND ne.block_number >= ");
+            builder.push_bind(from_block);
+        }
+        if let Some(to_block) = range.to_block {
+            builder.push(" AND ne.block_number <= ");
+            builder.push_bind(to_block);
+        }
+        if range.from_block.is_none() && range.to_block.is_none() {
+            builder.push(" AND ne.block_number IS NOT NULL");
+        }
+        builder.push(")");
+    }
+    builder.push(")");
+}
+
+pub(super) fn push_history_order(builder: &mut QueryBuilder<'_, Postgres>, order: HistoryOrder) {
+    builder.push(" ORDER BY ");
+    push_history_order_terms(builder, order);
+}
+
+/// `Asc` is the exact reverse of the canonical `Desc` sort, including null
+/// placement, so a backward scan of the same index serves it and the keyset
+/// predicate can be derived by swapping the compared rows.
+pub(super) fn push_history_order_terms(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    order: HistoryOrder,
+) {
+    match order {
+        HistoryOrder::Desc => builder.push(
+            r#"
             ne.block_number DESC NULLS LAST,
             ne.chain_id ASC NULLS LAST,
             ne.block_hash DESC NULLS LAST,
@@ -387,7 +473,18 @@ pub(super) fn push_history_order_terms(builder: &mut QueryBuilder<'_, Postgres>)
             ne.log_index DESC NULLS LAST,
             ne.event_identity DESC
         "#,
-    );
+        ),
+        HistoryOrder::Asc => builder.push(
+            r#"
+            ne.block_number ASC NULLS FIRST,
+            ne.chain_id DESC NULLS FIRST,
+            ne.block_hash ASC NULLS FIRST,
+            ne.transaction_hash ASC NULLS FIRST,
+            ne.log_index ASC NULLS FIRST,
+            ne.event_identity ASC
+        "#,
+        ),
+    };
 }
 
 async fn ensure_history_cursor_exists(
@@ -457,54 +554,61 @@ fn push_history_cursor_cte<'a>(
     builder.push(") ");
 }
 
-fn push_history_cursor_after(builder: &mut QueryBuilder<'_, Postgres>) {
-    builder.push(
+/// Keyset continuation predicate. `later` sorts after `earlier` in the canonical
+/// descending order; the ascending direction swaps the two rows because it is
+/// the exact reverse of that order.
+fn push_history_cursor_after(builder: &mut QueryBuilder<'_, Postgres>, order: HistoryOrder) {
+    let (later, earlier) = match order {
+        HistoryOrder::Desc => ("ne", "cursor_row"),
+        HistoryOrder::Asc => ("cursor_row", "ne"),
+    };
+    builder.push(format!(
         r#"
         (
-            CASE WHEN ne.block_number IS NULL THEN 1 ELSE 0 END
-                > CASE WHEN cursor_row.block_number IS NULL THEN 1 ELSE 0 END
+            CASE WHEN {later}.block_number IS NULL THEN 1 ELSE 0 END
+                > CASE WHEN {earlier}.block_number IS NULL THEN 1 ELSE 0 END
             OR (
-                CASE WHEN ne.block_number IS NULL THEN 1 ELSE 0 END
-                    = CASE WHEN cursor_row.block_number IS NULL THEN 1 ELSE 0 END
+                CASE WHEN {later}.block_number IS NULL THEN 1 ELSE 0 END
+                    = CASE WHEN {earlier}.block_number IS NULL THEN 1 ELSE 0 END
                 AND (
-                    ne.block_number < cursor_row.block_number
+                    {later}.block_number < {earlier}.block_number
                     OR (
-                        ne.block_number IS NOT DISTINCT FROM cursor_row.block_number
+                        {later}.block_number IS NOT DISTINCT FROM {earlier}.block_number
                         AND (
-                            CASE WHEN ne.chain_id IS NULL THEN 1 ELSE 0 END
-                                > CASE WHEN cursor_row.chain_id IS NULL THEN 1 ELSE 0 END
+                            CASE WHEN {later}.chain_id IS NULL THEN 1 ELSE 0 END
+                                > CASE WHEN {earlier}.chain_id IS NULL THEN 1 ELSE 0 END
                             OR (
-                                CASE WHEN ne.chain_id IS NULL THEN 1 ELSE 0 END
-                                    = CASE WHEN cursor_row.chain_id IS NULL THEN 1 ELSE 0 END
+                                CASE WHEN {later}.chain_id IS NULL THEN 1 ELSE 0 END
+                                    = CASE WHEN {earlier}.chain_id IS NULL THEN 1 ELSE 0 END
                                 AND (
-                                    ne.chain_id > cursor_row.chain_id
+                                    {later}.chain_id > {earlier}.chain_id
                                     OR (
-                                        ne.chain_id IS NOT DISTINCT FROM cursor_row.chain_id
+                                        {later}.chain_id IS NOT DISTINCT FROM {earlier}.chain_id
                                         AND (
-                                            CASE WHEN ne.block_hash IS NULL THEN 1 ELSE 0 END
-                                                > CASE WHEN cursor_row.block_hash IS NULL THEN 1 ELSE 0 END
+                                            CASE WHEN {later}.block_hash IS NULL THEN 1 ELSE 0 END
+                                                > CASE WHEN {earlier}.block_hash IS NULL THEN 1 ELSE 0 END
                                             OR (
-                                                CASE WHEN ne.block_hash IS NULL THEN 1 ELSE 0 END
-                                                    = CASE WHEN cursor_row.block_hash IS NULL THEN 1 ELSE 0 END
+                                                CASE WHEN {later}.block_hash IS NULL THEN 1 ELSE 0 END
+                                                    = CASE WHEN {earlier}.block_hash IS NULL THEN 1 ELSE 0 END
                                                 AND (
-                                                    ne.block_hash < cursor_row.block_hash
+                                                    {later}.block_hash < {earlier}.block_hash
                                                     OR (
-                                                        ne.block_hash IS NOT DISTINCT FROM cursor_row.block_hash
+                                                        {later}.block_hash IS NOT DISTINCT FROM {earlier}.block_hash
                                                         AND (
-                                                            CASE WHEN ne.transaction_hash IS NULL THEN 1 ELSE 0 END
-                                                                > CASE WHEN cursor_row.transaction_hash IS NULL THEN 1 ELSE 0 END
+                                                            CASE WHEN {later}.transaction_hash IS NULL THEN 1 ELSE 0 END
+                                                                > CASE WHEN {earlier}.transaction_hash IS NULL THEN 1 ELSE 0 END
                                                             OR (
-                                                                CASE WHEN ne.transaction_hash IS NULL THEN 1 ELSE 0 END
-                                                                    = CASE WHEN cursor_row.transaction_hash IS NULL THEN 1 ELSE 0 END
+                                                                CASE WHEN {later}.transaction_hash IS NULL THEN 1 ELSE 0 END
+                                                                    = CASE WHEN {earlier}.transaction_hash IS NULL THEN 1 ELSE 0 END
                                                                 AND (
-                                                                    ne.transaction_hash < cursor_row.transaction_hash
+                                                                    {later}.transaction_hash < {earlier}.transaction_hash
                                                                     OR (
-                                                                        ne.transaction_hash IS NOT DISTINCT FROM cursor_row.transaction_hash
+                                                                        {later}.transaction_hash IS NOT DISTINCT FROM {earlier}.transaction_hash
                                                                         AND (
-                                                                            COALESCE(ne.log_index, -1) < COALESCE(cursor_row.log_index, -1)
+                                                                            COALESCE({later}.log_index, -1) < COALESCE({earlier}.log_index, -1)
                                                                             OR (
-                                                                                COALESCE(ne.log_index, -1) = COALESCE(cursor_row.log_index, -1)
-                                                                                AND ne.event_identity < cursor_row.event_identity
+                                                                                COALESCE({later}.log_index, -1) = COALESCE({earlier}.log_index, -1)
+                                                                                AND {later}.event_identity < {earlier}.event_identity
                                                                             )
                                                                         )
                                                                     )
@@ -524,7 +628,7 @@ fn push_history_cursor_after(builder: &mut QueryBuilder<'_, Postgres>) {
             )
         )
         "#,
-    );
+    ));
 }
 
 fn history_cursor_from_row(row: &HistoryEvent) -> HistoryCursor {
@@ -532,67 +636,4 @@ fn history_cursor_from_row(row: &HistoryEvent) -> HistoryCursor {
         normalized_event_id: row.normalized_event_id,
         event_identity: row.event_identity.clone(),
     }
-}
-
-fn push_selector_filter<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    selector: &'a HistorySelector,
-) {
-    match selector {
-        HistorySelector::LogicalNames(logical_name_ids) => {
-            push_string_filter(builder, "ne.logical_name_id", logical_name_ids);
-        }
-        HistorySelector::Resources(resource_ids) => {
-            push_uuid_filter(builder, "ne.resource_id", resource_ids);
-        }
-        HistorySelector::LogicalNamesOrResources {
-            logical_name_ids,
-            resource_ids,
-        } => {
-            builder.push("(");
-            push_string_filter(builder, "ne.logical_name_id", logical_name_ids);
-            builder.push(" OR ");
-            push_uuid_filter(builder, "ne.resource_id", resource_ids);
-            builder.push(")");
-        }
-        HistorySelector::ProductRegistration {
-            logical_name_ids: _,
-            resource_ids: _,
-        } => {
-            builder.push("TRUE");
-        }
-        HistorySelector::None => {
-            builder.push("FALSE");
-        }
-    }
-}
-
-fn push_string_filter<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    column: &str,
-    values: &'a [String],
-) {
-    builder.push(column);
-    push_string_filter_tail(builder, values);
-}
-
-fn push_string_filter_tail<'a>(builder: &mut QueryBuilder<'a, Postgres>, values: &'a [String]) {
-    builder.push(" = ANY(");
-    builder.push_bind(values);
-    builder.push("::text[])");
-}
-
-fn push_uuid_filter<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    column: &str,
-    values: &'a [Uuid],
-) {
-    builder.push(column);
-    push_uuid_filter_tail(builder, values);
-}
-
-fn push_uuid_filter_tail<'a>(builder: &mut QueryBuilder<'a, Postgres>, values: &'a [Uuid]) {
-    builder.push(" = ANY(");
-    builder.push_bind(values);
-    builder.push("::uuid[])");
 }

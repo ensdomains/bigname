@@ -9,8 +9,8 @@ use super::{
     DECLARED_SURFACE_CLASS, DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS,
     DEFAULT_CHILDREN_CURRENT_READ_FILTER,
     types::{
-        ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentRow,
-        ChildrenCurrentSummary,
+        ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentPageFilter,
+        ChildrenCurrentRow, ChildrenCurrentSortValue, ChildrenCurrentSummary, RegistryChildrenPage,
     },
 };
 
@@ -34,7 +34,7 @@ use super::{
 /// `visibility_state = 'shadow'` and both children projection arms admit active parents only. No
 /// route can address the empty name, so the trailing-dot string that root would produce never
 /// reaches a served page.
-const CHILD_DISPLAY_NAME_EXPR: &str = r#"COALESCE(
+pub(super) const CHILD_DISPLAY_NAME_EXPR: &str = r#"COALESCE(
     cc.decoded_name,
     encode(cc.raw_name, 'escape'),
     '[' || substring(lower(cc.labelhash) FROM 3) || '].' || display_parent.raw_name
@@ -44,10 +44,15 @@ const CHILD_DISPLAY_NAME_EXPR: &str = r#"COALESCE(
 /// of once per evaluation, and so the audit path — which omits the canonicality identity joins —
 /// still resolves the parent portion. `logical_name_id` is the primary key, so this cannot
 /// multiply rows.
-const CHILD_DISPLAY_PARENT_JOIN: &str = r#"
+pub(super) const CHILD_DISPLAY_PARENT_JOIN: &str = r#"
   LEFT JOIN bigname_phase.name_surfaces display_parent
     ON display_parent.logical_name_id = cc.parent_logical_name_id
 "#;
+
+/// ENSv2 child rows keep the registration event's raw-log reference first in their provenance;
+/// its emitter is the registry contract that holds the label.
+const REGISTRY_CHILD_FILTER: &str =
+    " AND lower(cc.provenance #>> '{raw_fact_refs,0,registration,emitting_address}') = ";
 
 fn child_select() -> String {
     format!(
@@ -85,6 +90,27 @@ pub async fn load_children_current_page(
     cursor: Option<&ChildrenCurrentKeysetCursor>,
     page_size: u64,
 ) -> Result<ChildrenCurrentPage> {
+    super::page::load_children_current_page_filtered(
+        pool,
+        parent_logical_name_id,
+        &ChildrenCurrentPageFilter::default(),
+        cursor,
+        page_size,
+    )
+    .await
+}
+
+/// A page of the declared children of `parent_logical_name_id` whose ENSv2 registration was
+/// emitted by `registry_address`: the labels one registry contract currently holds under the
+/// name it serves. `label_count` counts every such child, not just the page.
+pub async fn load_registry_children_current_page(
+    pool: &PgPool,
+    parent_logical_name_id: &str,
+    registry_address: &str,
+    cursor: Option<&ChildrenCurrentKeysetCursor>,
+    page_size: u64,
+) -> Result<RegistryChildrenPage> {
+    let registry_address = registry_address.to_ascii_lowercase();
     let limit = checked_page_limit_i64(
         page_size,
         "children_current page_size must be positive",
@@ -102,6 +128,8 @@ pub async fn load_children_current_page(
     builder.push(" AND cc.surface_class = ");
     builder.push_bind(DECLARED_SURFACE_CLASS);
     builder.push(DEFAULT_CHILDREN_CURRENT_READ_FILTER);
+    builder.push(REGISTRY_CHILD_FILTER);
+    builder.push_bind(&registry_address);
     if let Some(cursor) = cursor {
         builder.push(format!(
             " AND ({CHILD_DISPLAY_NAME_EXPR}, cc.child_logical_name_id) > ("
@@ -119,19 +147,49 @@ pub async fn load_children_current_page(
         .build()
         .fetch_all(pool)
         .await
-        .context("failed to load phase children_current page")?
+        .context("failed to load phase registry children_current page")?
         .into_iter()
         .map(decode_children_current_row)
         .collect::<Result<Vec<_>>>()?;
-    let (rows, next_cursor) = split_keyset_page(rows, page_size, |row| {
-        ChildrenCurrentKeysetCursor::from(row)
-    });
-    let summary = load_children_current_summary(pool, parent_logical_name_id).await?;
-    Ok(ChildrenCurrentPage {
+    let (rows, next_cursor) =
+        split_keyset_page(rows, page_size, |row| ChildrenCurrentKeysetCursor {
+            sort_value: ChildrenCurrentSortValue::Name,
+            canonical_display_name: row.canonical_display_name.clone(),
+            child_logical_name_id: row.child_logical_name_id.clone(),
+        });
+    let label_count =
+        count_registry_children_current(pool, parent_logical_name_id, &registry_address).await?;
+    Ok(RegistryChildrenPage {
         rows,
         next_cursor,
-        summary,
+        label_count,
     })
+}
+
+/// Exact count of the declared children of `parent_logical_name_id` whose ENSv2 registration
+/// was emitted by `registry_address`.
+pub async fn count_registry_children_current(
+    pool: &PgPool,
+    parent_logical_name_id: &str,
+    registry_address: &str,
+) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(&format!(
+        r#"
+        SELECT count(*)::bigint
+        FROM bigname_phase.children_current cc
+        {DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS}
+        WHERE cc.parent_logical_name_id = $1
+          AND cc.surface_class = $2
+        {DEFAULT_CHILDREN_CURRENT_READ_FILTER}
+        {REGISTRY_CHILD_FILTER} $3
+        "#
+    ))
+    .bind(parent_logical_name_id)
+    .bind(DECLARED_SURFACE_CLASS)
+    .bind(registry_address.to_ascii_lowercase())
+    .fetch_one(pool)
+    .await
+    .context("failed to count phase registry children_current rows")
 }
 
 pub async fn load_children_current_summaries(
@@ -188,7 +246,7 @@ pub async fn load_children_current_summaries(
         .collect()
 }
 
-async fn load_children_current_summary(
+pub(super) async fn load_children_current_summary(
     pool: &PgPool,
     parent_logical_name_id: &str,
 ) -> Result<ChildrenCurrentSummary> {
@@ -224,7 +282,7 @@ async fn load_children_current_internal(
     rows.into_iter().map(decode_children_current_row).collect()
 }
 
-fn decode_children_current_row(row: PgRow) -> Result<ChildrenCurrentRow> {
+pub(super) fn decode_children_current_row(row: PgRow) -> Result<ChildrenCurrentRow> {
     let surface_class: String = crate::sql_row::get(&row, "surface_class")?;
     if surface_class != DECLARED_SURFACE_CLASS {
         bail!("children_current row has unsupported surface_class {surface_class}");

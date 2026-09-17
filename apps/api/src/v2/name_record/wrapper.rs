@@ -25,13 +25,18 @@ pub(crate) fn wrapper_metadata(
         .ok_or_else(invalid_wrapper_metadata)?;
     let fuses =
         WrapperFuses::from_summary(declared_summary).ok_or_else(invalid_wrapper_metadata)?;
-    if !lifecycle_matches_fuses(state, fuses) {
+    if !wrapper_lifecycle_matches_fuses(state, fuses) {
         return Err(invalid_wrapper_metadata());
     }
     Ok(Some((state, fuses)))
 }
 
-const fn lifecycle_matches_fuses(state: WrapperState, fuses: WrapperFuses) -> bool {
+/// Whether a NameWrapper lifecycle label agrees with a fuse word; shared by name detail and the
+/// `restrictions` block so both reject an inconsistent projection identically.
+pub(crate) const fn wrapper_lifecycle_matches_fuses(
+    state: WrapperState,
+    fuses: WrapperFuses,
+) -> bool {
     let has_locked_pair = fuses.cannot_unwrap && fuses.parent_cannot_control;
     // Any non-parent-controlled fuse requires both PARENT_CANNOT_CONTROL and
     // CANNOT_UNWRAP, including unnamed low-word bits.

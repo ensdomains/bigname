@@ -132,6 +132,12 @@ fn proxy_deployed(
         decoded.clone(),
         format!("migration-factory:{}", address_hex(event.proxyAddress)),
     ));
+    output
+        .discovery
+        .push(super::DiscoveryDraft::ResolverAnnouncement {
+            proxy_address: address_hex(event.proxyAddress),
+            implementation: address_hex(event.implementation),
+        });
     Ok(decoded)
 }
 

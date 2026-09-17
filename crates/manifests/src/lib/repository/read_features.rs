@@ -35,13 +35,15 @@ pub(super) fn validate_read_features(manifest: &SourceManifest, path: &Path) -> 
         }
     }
     if !manifest.resolver_implementations.is_empty()
-        && manifest
-            .contracts
-            .iter()
-            .any(|contract| !contract.read_features.is_empty())
+        && manifest.contracts.iter().any(|contract| {
+            !(contract.read_features.is_empty()
+                || (manifest.source_family == "ens_v2_resolver_l1"
+                    && contract.role == "public_resolver_v2"
+                    && contract.proxy_kind == "none"))
+        })
     {
         bail!(
-            "manifest implementation family in {} must declare implementation-sensitive read features only on resolver_implementations",
+            "manifest implementation family in {} permits contract read features only on direct PublicResolverV2; declare proxy features on resolver_implementations",
             path.display()
         );
     }

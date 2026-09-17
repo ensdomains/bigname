@@ -7,8 +7,10 @@ pub(super) mod v1;
 pub(super) fn reconcile_same_transaction_setups_for_test(output: &mut super::model::BatchOutput) {
     v1::reconcile_same_transaction_setups(output);
 }
+pub(super) mod v2_record_resolver;
 pub(super) mod v2_registry;
 mod v2_resolver;
+pub(super) use v2_resolver::public_resolver_v2_signature;
 
 use anyhow::bail;
 use serde_json::Value;
@@ -39,7 +41,6 @@ pub(super) fn event_allows_empty_emitter_roles(
         has_registry_announcement_rule,
     )
 }
-
 #[derive(Clone, Debug)]
 pub(super) struct Interpreted {
     pub events: Vec<EventDraft>,
@@ -92,13 +93,11 @@ impl Interpreted {
             .append(&mut other.migration_observations);
     }
 }
-
 #[derive(Clone, Debug)]
 pub(super) struct SourcedEventBatch {
     pub source_manifest_id: i64,
     pub events: Vec<EventDraft>,
 }
-
 #[derive(Clone, Debug)]
 pub(super) struct MigrationObservation {
     pub source_family: String,
@@ -117,7 +116,6 @@ pub(super) fn v2_boundary_expiration(
 ) -> anyhow::Result<Interpreted> {
     v2_registry::boundary_expiration(transition, released_at)
 }
-
 #[derive(Clone, Debug)]
 pub(super) struct EventDraft {
     pub event_kind: String,
@@ -144,7 +142,6 @@ impl LabelDraft {
         self.raw_label.is_empty() || self.explicit_preimage_observed || already_represented
     }
 }
-
 #[derive(Clone, Debug)]
 pub(super) struct ShadowNameDraft {
     pub raw_labels: Vec<Vec<u8>>,
@@ -188,7 +185,6 @@ pub(super) fn raw_name_observation(
         )
     }
 }
-
 #[derive(Clone, Debug)]
 pub(super) struct NameDraft {
     pub labels: Vec<String>,
@@ -238,6 +234,12 @@ pub(super) enum DiscoveryDraft {
         admission_basis: String,
         observation_key: String,
     },
+    /// A proxy announcing its implementation. Admits the proxy as a resolver only when the
+    /// implementation is declared in a same-deployment `resolver_implementations` list.
+    ResolverAnnouncement {
+        proxy_address: String,
+        implementation: String,
+    },
 }
 
 pub(super) fn interpret(
@@ -246,19 +248,31 @@ pub(super) fn interpret(
     state: &mut State,
     registrar_context: super::migration::RegistrarContext,
 ) -> anyhow::Result<Interpreted> {
-    if let Some(output) = standard_approvals::interpret(selected, raw)? {
+    if let Some(output) = standard_approvals::interpret(selected, raw, state)? {
         return Ok(output);
     }
-    let mut output = match selected.source.source_family.as_str() {
-        family if family.starts_with("ens_v1_") || family.starts_with("basenames_") => {
-            v1::interpret(selected, raw, state, registrar_context)
+    let mut output = if v2_resolver::is_public_node_event(selected) {
+        if !selected.manifest_declared_emitter
+            || !public_resolver_v2_signature(&selected.event.signature)
+        {
+            bail!("PublicResolverV2 requires an exact declared emitter and node event");
         }
-        "ens_v2_registry_l1" | "ens_v2_root_l1" | "ens_v2_registrar_l1" => {
-            v2_registry::interpret(selected, raw, state)
+        v1::interpret_node_resolver(selected, raw, state)
+    } else {
+        match selected.source.source_family.as_str() {
+            family if family.starts_with("ens_v1_") || family.starts_with("basenames_") => {
+                v1::interpret(selected, raw, state, registrar_context)
+            }
+            "ens_v2_registry_l1" | "ens_v2_root_l1" | "ens_v2_registrar_l1" => {
+                v2_registry::interpret(selected, raw, state)
+            }
+            "ens_v2_resolver_l1" if v2_record_resolver::selected_generation(selected) => {
+                v2_record_resolver::interpret(selected, raw, state)
+            }
+            "ens_v2_resolver_l1" => v2_resolver::interpret(selected, raw, state),
+            "ens_v2_migration_l1" => migration::interpret(selected, raw),
+            family => bail!("source family {family} has no schema-v2 adapter"),
         }
-        "ens_v2_resolver_l1" => v2_resolver::interpret(selected, raw, state),
-        "ens_v2_migration_l1" => migration::interpret(selected, raw),
-        family => bail!("source family {family} has no schema-v2 adapter"),
     }?;
     for event in &mut output.events {
         if event.state_scope.is_empty() {
@@ -268,8 +282,24 @@ pub(super) fn interpret(
     Ok(output)
 }
 
-pub(super) fn reconcile_batch(output: &mut super::model::BatchOutput) {
-    v1::reconcile_same_transaction_setups(output);
+pub(super) fn reconcile_block(
+    catalog: &super::catalog::Catalog,
+    block: &super::model::RawBlockInput,
+    raw_logs: &[super::model::RawLogInput],
+    observations: &[MigrationObservation],
+    committed_state: &super::state::State,
+    block_state: &mut super::state::State,
+    output: &mut super::model::BatchOutput,
+) -> anyhow::Result<()> {
+    v1::reconcile_block(
+        catalog,
+        block,
+        raw_logs,
+        observations,
+        committed_state,
+        block_state,
+        output,
+    )
 }
 
 fn state_scope(selected: &Selected, raw: &RawLogInput, event: &EventDraft) -> String {
@@ -359,6 +389,15 @@ pub(super) fn validate_manifest(
     rules: &[DiscoveryRuleInput],
 ) -> anyhow::Result<()> {
     for event in &source.events {
+        if source.source_family == "ens_v2_resolver_l1"
+            && event
+                .emitter_roles
+                .iter()
+                .any(|role| role == "public_resolver_v2")
+            && !public_resolver_v2_signature(&event.signature)
+        {
+            bail!("PublicResolverV2 admits only the five node record events");
+        }
         if !supports_signature(&source.source_family, &event.signature) {
             bail!(
                 "source family {} has no typed schema-v2 adapter for {}",
@@ -513,7 +552,17 @@ fn supports_signature(source_family: &str, signature: &str) -> bool {
         ),
         "ens_v2_resolver_l1" => matches!(
             signature,
-            "AddressChanged(bytes32,uint256,bytes)"
+            "Linked(uint256,bytes32,bytes)"
+                | "ResourceArgument(uint256,bytes)"
+                | "AddressUpdated(uint256,uint256,bytes)"
+                | "TextUpdated(uint256,string,string,string)"
+                | "DataUpdated(uint256,string,string,bytes)"
+                | "ContenthashUpdated(uint256,bytes)"
+                | "NameUpdated(uint256,string)"
+                | "ABIUpdated(uint256,uint256)"
+                | "InterfaceUpdated(uint256,bytes4,address)"
+                | "AddrChanged(bytes32,address)"
+                | "AddressChanged(bytes32,uint256,bytes)"
                 | "TextChanged(bytes32,string,string,string)"
                 | "ContenthashChanged(bytes32,bytes)"
                 | "NameChanged(bytes32,string)"

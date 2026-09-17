@@ -282,7 +282,7 @@ fn v1_release_order_matches_naive_scan_after_expiry_updates_and_removals() {
     observe_registrar(&mut state, "updated", Some(50));
     observe_registrar(&mut state, "updated", Some(500));
     observe_registrar(&mut state, "removed", Some(50));
-    state.restore_v1_registration_release(NAMESPACE, "removed");
+    state.restore_v1_registration_release(NAMESPACE, "removed", 0);
 
     assert_expiry_index_is_derived(&state);
     let timestamp = 100 + super::ENS_GRACE_PERIOD_SECS + 1;
@@ -310,7 +310,7 @@ fn v1_expiry_index_matches_naive_scan_over_generated_mutations() {
                 };
                 observe_registrar(&mut state, &namehash, expiry);
             }
-            3 => state.restore_v1_registration_release(NAMESPACE, &namehash),
+            3 => state.restore_v1_registration_release(NAMESPACE, &namehash, 0),
             _ => {
                 let timestamp =
                     super::ENS_GRACE_PERIOD_SECS + (sequence.next() % 6_000) as i64 - 3_000;
@@ -401,6 +401,79 @@ fn assert_expiry_index_is_derived(state: &State) {
         .map(|(expiry, key)| (*expiry, key.clone()))
         .collect::<OrdSet<_>>();
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn restoring_a_lapsed_wrapped_release_does_not_revive_registry_custody() {
+    const HOLDER: &str = "0x0000000000000000000000000000000000000055";
+    const WRAPPER: &str = "0x0000000000000000000000000000000000000077";
+    let namehash = "lapsed-wrapped";
+    let mut state = State::new(Vec::new(), Vec::new());
+    // The NameWrapper holds the registry node on behalf of the wrapped lease, so the registry
+    // remembers a non-zero, authenticatable owner for the node.
+    state.observe_v1_registry(
+        NAMESPACE,
+        namehash,
+        format!("{NAMESPACE}:{namehash}"),
+        true,
+        Uuid::from_u128(1),
+        "ens_v1_registry_l1".to_owned(),
+        Some(WRAPPER.to_owned()),
+        Some("0x0000000000000000000000000000000000000099".to_owned()),
+        Some(format!("registry:{namehash}")),
+    );
+    state.set_v1_registry_owner_views(
+        NAMESPACE,
+        namehash,
+        WRAPPER.to_owned(),
+        WRAPPER.to_owned(),
+        None,
+    );
+    observe_registrar(&mut state, namehash, Some(100));
+    state.activate_v1_authority(
+        NAMESPACE,
+        namehash,
+        Some(V1NameState {
+            logical_name_id: format!("{NAMESPACE}:{namehash}"),
+            surface_known: true,
+            resource_id: Uuid::from_u128(1),
+            token_lineage_id: Some(Uuid::from_u128(2)),
+            authority_source_family: "ens_v1_wrapper_l1".to_owned(),
+            source_manifest_id: Some(1),
+            labelhash: None,
+            expiry: Some(100),
+            owner: Some(HOLDER.to_owned()),
+            registry_contract: None,
+            authority_key: Some(format!("wrapper:{namehash}")),
+            wrapper_fallback: false,
+        }),
+    );
+    let lapsed_at = 100 + super::ENS_GRACE_PERIOD_SECS + 1;
+
+    // Live path: the lapsed wrapped lease leaves no ENSv1 authority behind.
+    let mut live = state.clone();
+    let releases = live.settle_v1_releases(lapsed_at);
+    assert_eq!(release_keys(releases), vec![v1_key(NAMESPACE, namehash)]);
+    assert_eq!(live.v1_name(NAMESPACE, namehash), None, "live release");
+    assert_eq!(
+        live.v1_registrar(NAMESPACE, namehash),
+        None,
+        "live registrar"
+    );
+
+    // Restore path (the stored RegistrationReleased replayed as a prior event) must land on
+    // the same state instead of reviving the wrapper's registry-only custody.
+    state.restore_v1_registration_release(NAMESPACE, namehash, lapsed_at);
+    assert_eq!(
+        state.v1_registrar(NAMESPACE, namehash),
+        None,
+        "restored registrar"
+    );
+    assert_eq!(
+        state.v1_name(NAMESPACE, namehash),
+        live.v1_name(NAMESPACE, namehash),
+        "restored release must match the live release"
+    );
 }
 
 fn observe_registrar(state: &mut State, namehash: &str, expiry: Option<i64>) {

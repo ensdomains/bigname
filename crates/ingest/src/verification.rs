@@ -170,11 +170,7 @@ impl VerificationProvider {
 
         let mut logs = selected_by_identity
             .into_values()
-            .filter(|log| {
-                log.topics
-                    .first()
-                    .is_some_and(|topic0| filter.includes(&log.address, topic0, log.block_number))
-            })
+            .filter(|log| filter.includes_log(&log.address, &log.topics, log.block_number))
             .map(VerificationLog::from)
             .collect::<Vec<_>>();
         logs.sort_by_key(|log| {
@@ -210,6 +206,7 @@ async fn fetch_queries(
                 query.to_block,
                 &query.addresses,
                 &query.topic0s,
+                &query.topic1s,
             )
             .await
             .map_err(|error| provider_error("failed to fetch verification logs", error))?;

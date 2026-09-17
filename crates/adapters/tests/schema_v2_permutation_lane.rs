@@ -11,7 +11,7 @@
 //! the coverage floor does require the kind the wrapper derives from a fuse-bearing wrap.
 //!
 //! Knobs:
-//! - `BIGNAME_PERMUTATION_CASES` — permutations per protocol world. Default 48 (144 sequences per
+//! - `BIGNAME_PERMUTATION_CASES` — permutations per protocol world. Default 48 (240 sequences per
 //!   run) keeps the lane inside the CI budget; raise it for deeper local sweeps.
 //! - `BIGNAME_PERMUTATION_SEED` — base seed, decimal. Default 1846370029.
 //!
@@ -46,16 +46,17 @@ use permutation::{
     convergence::BatchBoundaryArtifacts,
     directed::Directed,
     events::{
-        V1BaseRegistrar, V1LegacyController, V1Registry, V1Resolver, V1UnwrappedController,
+        V1LegacyController, V1RegistrarToken, V1Registry, V1Resolver, V1UnwrappedController,
         V1WrappedController, V1Wrapper, V2Registry, V2Resolver, declared_events,
     },
     invariants::{IdentityReferences, assert_upsert_guards_agree, converge, split},
     names::{dns_encode, labelhash, namehash},
     scenario::{self, BurstPhase},
     world::{
-        BlockSpec, ENS_V1_MAINNET, ENS_V1_SEPOLIA, ENS_V2_SEPOLIA, GeneratedLog, Wiring, World,
-        assert_pins_are_current, assert_worlds_cover_deployments, checked_in_manifests,
-        declared_event_kinds, declared_event_topics,
+        BlockSpec, ENS_V1_MAINNET, ENS_V1_SEPOLIA, ENS_V1_SEPOLIA_HACKATHON, ENS_V2_SEPOLIA,
+        ENS_V2_SEPOLIA_HACKATHON, GeneratedLog, Wiring, World, assert_pins_are_current,
+        assert_worlds_cover_deployments, checked_in_manifests, declared_event_kinds,
+        declared_event_topics,
     },
 };
 
@@ -71,7 +72,13 @@ const DEFAULT_SEED: u64 = 0x6e0d_5eed;
 /// `generated_scenarios_are_reproducible_from_their_seed`.
 const CASE_STRIDE: u64 = 0xd134_2543_de82_ef95;
 const SPLIT_SALT: u64 = 0xa076_1d64_78bd_642f;
-const WORLDS: [&World; 3] = [&ENS_V1_MAINNET, &ENS_V1_SEPOLIA, &ENS_V2_SEPOLIA];
+const WORLDS: [&World; 5] = [
+    &ENS_V1_MAINNET,
+    &ENS_V1_SEPOLIA,
+    &ENS_V2_SEPOLIA,
+    &ENS_V1_SEPOLIA_HACKATHON,
+    &ENS_V2_SEPOLIA_HACKATHON,
+];
 /// Any timestamp works for coverage; the axes decide which events a pool contains, not the clock.
 const SETTLE_TIMESTAMP: i64 = 1_700_000_000;
 
@@ -3122,7 +3129,7 @@ fn wrapped_past_grace_lapse_input(wiring: &Wiring) -> Result<BatchInput> {
             0,
             0,
             registrar,
-            V1BaseRegistrar::NameRegistered {
+            V1RegistrarToken::NameRegistered {
                 id: U256::from_be_bytes(label.0),
                 owner: wrapper_address,
                 expires: U256::from(EXPIRY),
@@ -3696,6 +3703,11 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
             "PermissionChanged",
             "PermissionScopeChanged",
             "PreimageObserved",
+            "RecordChanged",
+            "RecordVersionChanged",
+            "RegistrationGranted",
+            "RegistrationReleased",
+            "RegistrationRenewed",
             "ResolverChanged",
             "SubregistryChanged",
             "SurfaceBound",
@@ -3713,12 +3725,66 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
             "PermissionChanged",
             "PreimageObserved",
             "RecordChanged",
+            "RecordVersionChanged",
             "RegistrarNameRegistered",
             "RegistrationGranted",
             "RegistrationReleased",
             "RegistrationRenewed",
+            "RegistrationReserved",
             "RegistryCreated",
             "ResolverChanged",
+            "RootPermissionChanged",
+            "SubregistryChanged",
+            "SurfaceBound",
+            "SurfaceUnbound",
+            "TokenControlTransferred",
+            "TokenRegenerated",
+            "TokenResourceLinked",
+            "Upgraded",
+        ],
+    ),
+    (
+        ENS_V1_SEPOLIA_HACKATHON.label,
+        &[
+            "AuthorityEpochChanged",
+            "AuthorityTransferred",
+            "ExpiryChanged",
+            "PermissionChanged",
+            "PermissionScopeChanged",
+            "PreimageObserved",
+            "RecordChanged",
+            "RecordVersionChanged",
+            "RegistrationGranted",
+            "RegistrationReleased",
+            "RegistrationRenewed",
+            "ResolverChanged",
+            "ReverseChanged",
+            "SubregistryChanged",
+            "SurfaceBound",
+            "SurfaceUnbound",
+            "TokenControlTransferred",
+        ],
+    ),
+    (
+        ENS_V2_SEPOLIA_HACKATHON.label,
+        &[
+            "AuthorityTransferred",
+            "ExpiryChanged",
+            "ParentChanged",
+            "PermissionChanged",
+            "PreimageObserved",
+            "RecordChanged",
+            "RecordVersionChanged",
+            "RegistrarNameRegistered",
+            "RegistrationGranted",
+            "RegistrationReleased",
+            "RegistrationRenewed",
+            "RegistrationReserved",
+            "RegistryCreated",
+            "ResolverChanged",
+            "ResolverRecordLinked",
+            "ResolverPermissionArgument",
+            "RootPermissionChanged",
             "SubregistryChanged",
             "SurfaceBound",
             "SurfaceUnbound",
@@ -3753,6 +3819,8 @@ const EXPECTED_ARTIFACTS: &[(&str, &[(&str, usize)])] = &[
     (ENS_V1_MAINNET.label, &[]),
     (ENS_V1_SEPOLIA.label, &[]),
     (ENS_V2_SEPOLIA.label, &[]),
+    (ENS_V1_SEPOLIA_HACKATHON.label, &[]),
+    (ENS_V2_SEPOLIA_HACKATHON.label, &[]),
 ];
 
 /// The first thing to rule out when a pinned count moves: these are counts over the sequences one
@@ -3771,6 +3839,8 @@ const EXPECTED_SUBREGISTRY_DETACHES: &[(&str, usize)] = &[
     (ENS_V1_MAINNET.label, 0),
     (ENS_V1_SEPOLIA.label, 0),
     (ENS_V2_SEPOLIA.label, 51),
+    (ENS_V1_SEPOLIA_HACKATHON.label, 0),
+    (ENS_V2_SEPOLIA_HACKATHON.label, 51),
 ];
 
 /// Per-world corpus volume floors — minimum raw-log and normalized-event totals the default
@@ -3787,6 +3857,8 @@ const MINIMUM_VOLUMES: &[(&str, usize, usize)] = &[
     (ENS_V1_MAINNET.label, 1012, 3187),
     (ENS_V1_SEPOLIA.label, 746, 2543),
     (ENS_V2_SEPOLIA.label, 675, 1390),
+    (ENS_V1_SEPOLIA_HACKATHON.label, 746, 2543),
+    (ENS_V2_SEPOLIA_HACKATHON.label, 675, 1390),
 ];
 
 /// The pre-registration burst axis's reach at the default corpus, per world: how many cases the
@@ -3815,6 +3887,8 @@ const EXPECTED_BURST_REACH: &[(&str, usize, [usize; BurstPhase::COUNT], usize)] 
     (ENS_V1_MAINNET.label, 8, [14, 14, 14], 5),
     (ENS_V1_SEPOLIA.label, 0, [0, 0, 0], 0),
     (ENS_V2_SEPOLIA.label, 0, [0, 0, 0], 0),
+    (ENS_V1_SEPOLIA_HACKATHON.label, 0, [0, 0, 0], 0),
+    (ENS_V2_SEPOLIA_HACKATHON.label, 0, [0, 0, 0], 0),
 ];
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -3828,44 +3902,12 @@ struct BurstReach {
 /// reason each one is out. Anything a manifest declares that is neither derived nor listed here
 /// fails the lane, so adding an event to a manifest forces a decision instead of silently widening
 /// the gap between what the manifests promise and what this lane covers.
-/// Keyed by world, because a reason true of one protocol is not automatically true of the other —
-/// three of these are ENSv2-only today, and a flat list would excuse ENSv1 on ENSv2's reasoning.
-const UNREACHED_EVENT_KINDS: &[(&str, &str, &str)] = &[
-    (
-        ENS_V1_MAINNET.label,
-        "RecordVersionChanged",
-        "the resolver pool emits no VersionChanged, so no record-version bump is generated",
-    ),
-    (
-        ENS_V1_SEPOLIA.label,
-        "RegistrationReleased",
-        "the generated registrations remain live beyond the settlement timestamp, so no release \
-         boundary is reached",
-    ),
-    (
-        ENS_V1_SEPOLIA.label,
-        "RegistrationRenewed",
-        "the generated Sepolia pool emits no numeric BaseRegistrar renewal",
-    ),
-    (
-        ENS_V2_SEPOLIA.label,
-        "RecordVersionChanged",
-        "the generated resolver pool emits no VersionChanged; the directed released-name replay \
-         covers record-version attribution",
-    ),
-    (
-        ENS_V2_SEPOLIA.label,
-        "RegistrationReserved",
-        "the pools emit no LabelReserved; reservation is a registrar-side path with no registration \
-         to permute",
-    ),
-    (
-        ENS_V2_SEPOLIA.label,
-        "RootPermissionChanged",
-        "EACRolesChanged derives this only when it names resource zero on a registry or root, and \
-         the pool always names a non-zero resource",
-    ),
-];
+/// Keyed by world, because an event omitted by one deployment's pool may be required by another.
+const UNREACHED_EVENT_KINDS: &[(&str, &str, &str)] = &[(
+    ENS_V1_MAINNET.label,
+    "RecordVersionChanged",
+    "the resolver pool emits no VersionChanged, so no record-version bump is generated",
+)];
 
 /// The manifests declare which normalized events each ABI event derives, so they — not this lane's
 /// own list of what it happens to reach — are the honest denominator for coverage.

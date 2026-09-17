@@ -296,9 +296,8 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
     // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f),
     // which emits `NameChanged`
     // (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L18 @ ens_v1@91c966f).
-    // Schema-v2 deliberately keeps that resolver observation raw-only; it
-    // does not synthesize the v1 route-local fallback into the persisted
-    // primary projection.
+    // Project joins the node-keyed name observation through the current reverse
+    // resolver and publishes the declared claim without forward verification.
     let primary: (String, Option<String>) = sqlx::query_as(
         "SELECT claim_status, raw_claim_name FROM primary_names_current
          WHERE address = $1 AND coin_type = '60' AND namespace = 'ens'",
@@ -306,7 +305,10 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
     .bind(format!("{alice:#x}"))
     .fetch_one(&run.db.pool)
     .await?;
-    assert_eq!(primary, ("not_found".to_owned(), None));
+    assert_eq!(
+        primary,
+        ("success".to_owned(), Some("burst.eth".to_owned()))
+    );
 
     let (topics, data): (Vec<String>, Vec<u8>) = sqlx::query_as(
         "SELECT log.topics, log.data FROM raw_logs log

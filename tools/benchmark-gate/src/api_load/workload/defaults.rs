@@ -26,11 +26,11 @@ pub(super) fn exact_name_requests(
 ) -> Result<()> {
     for (namespace, name) in &corpus.names {
         if namespace_inference_matches(namespace, name) {
-            requests.push(get(base, &["v2", "names", name], &[])?);
+            requests.push(get(base, &["v1", "names", name], &[])?);
         }
         requests.push(get(
             base,
-            &["v2", "names", name],
+            &["v1", "names", name],
             &[("source", "indexed"), ("namespace", namespace)],
         )?);
     }
@@ -44,7 +44,7 @@ pub(super) fn record_requests(
 ) -> Result<()> {
     for (index, (namespace, name)) in corpus.names.iter().enumerate() {
         if namespace_inference_matches(namespace, name) {
-            requests.push(get(base, &["v2", "names", name, "records"], &[])?);
+            requests.push(get(base, &["v1", "names", name, "records"], &[])?);
         }
         let keys = if index % 2 == 0 {
             "addr:60"
@@ -59,7 +59,7 @@ pub(super) fn record_requests(
         if index % 2 == 0 {
             query.push(("include", "inventory"));
         }
-        requests.push(get(base, &["v2", "names", name, "records"], &query)?);
+        requests.push(get(base, &["v1", "names", name, "records"], &query)?);
     }
     Ok(())
 }
@@ -76,7 +76,7 @@ pub(super) fn subname_requests(
     };
     for (index, (namespace, parent)) in parents.iter().enumerate() {
         if namespace_inference_matches(namespace, parent) {
-            requests.push(get(base, &["v2", "names", parent, "subnames"], &[])?);
+            requests.push(get(base, &["v1", "names", parent, "subnames"], &[])?);
         }
         let mut query = vec![
             ("page_size", parameterized_page_size(index)),
@@ -85,7 +85,7 @@ pub(super) fn subname_requests(
         if index % 2 == 0 {
             query.push(("include", "counts"));
         }
-        requests.push(get(base, &["v2", "names", parent, "subnames"], &query)?);
+        requests.push(get(base, &["v1", "names", parent, "subnames"], &query)?);
     }
     Ok(())
 }
@@ -97,11 +97,11 @@ pub(super) fn name_history_requests(
 ) -> Result<()> {
     for (index, (namespace, name)) in corpus.names.iter().enumerate() {
         if namespace_inference_matches(namespace, name) {
-            requests.push(get(base, &["v2", "names", name, "history"], &[])?);
+            requests.push(get(base, &["v1", "names", name, "history"], &[])?);
         }
         requests.push(get(
             base,
-            &["v2", "names", name, "history"],
+            &["v1", "names", name, "history"],
             &[
                 ("scope", super::history_scope(index)),
                 ("page_size", parameterized_page_size(index)),
@@ -183,7 +183,7 @@ pub(super) fn lookup_requests(
         if name_mode && !default_mode {
             body["namespace"] = Value::String(name_samples[0].0.clone());
         }
-        requests.push(post(base, &["v2", "lookup"], body)?);
+        requests.push(post(base, &["v1", "lookup"], body)?);
     }
     Ok(())
 }
@@ -220,14 +220,14 @@ fn permission_dimension_requests(
     if key == "name" && !namespace_inference_matches(&target.namespace, &target.name) {
         default.push(("namespace", target.namespace.as_str()));
     }
-    let mut default_request = get(base, &["v2", "permissions"], &default)?;
+    let mut default_request = get(base, &["v1", "permissions"], &default)?;
     default_request.required_permission_audit_evidence =
         key == "registration_id" && target.retained_registration;
     requests.push(default_request);
     let mut parameterized = default;
     parameterized.push(("include", "lineage"));
     parameterized.push(("page_size", parameterized_page_size(index)));
-    let mut parameterized_request = get(base, &["v2", "permissions"], &parameterized)?;
+    let mut parameterized_request = get(base, &["v1", "permissions"], &parameterized)?;
     parameterized_request.required_permission_audit_evidence =
         key == "registration_id" && target.retained_registration;
     requests.push(parameterized_request);
@@ -240,7 +240,7 @@ pub(super) fn address_name_requests(
     requests: &mut Vec<RequestSpec>,
 ) -> Result<()> {
     for (index, (address, name, namespace, relation)) in corpus.address_names.iter().enumerate() {
-        requests.push(get(base, &["v2", "addresses", address, "names"], &[])?);
+        requests.push(get(base, &["v1", "addresses", address, "names"], &[])?);
         let query = search_term(name);
         let mut pairs = vec![
             ("namespace", namespace.as_str()),
@@ -263,7 +263,7 @@ pub(super) fn address_name_requests(
             }
             _ => {}
         }
-        requests.push(get(base, &["v2", "addresses", address, "names"], &pairs)?);
+        requests.push(get(base, &["v1", "addresses", address, "names"], &pairs)?);
     }
     Ok(())
 }
@@ -274,10 +274,10 @@ pub(super) fn address_history_requests(
     requests: &mut Vec<RequestSpec>,
 ) -> Result<()> {
     for (index, (address, _, namespace, relation)) in corpus.address_names.iter().enumerate() {
-        requests.push(get(base, &["v2", "addresses", address, "history"], &[])?);
+        requests.push(get(base, &["v1", "addresses", address, "history"], &[])?);
         requests.push(get(
             base,
-            &["v2", "addresses", address, "history"],
+            &["v1", "addresses", address, "history"],
             &[
                 ("namespace", namespace),
                 ("relation", public_relation(relation)?),
@@ -296,10 +296,10 @@ pub(super) fn search_requests(
 ) -> Result<()> {
     for (index, (namespace, name)) in corpus.names.iter().enumerate() {
         let query = search_term(name);
-        requests.push(get(base, &["v2", "search"], &[("q", query.as_str())])?);
+        requests.push(get(base, &["v1", "search"], &[("q", query.as_str())])?);
         requests.push(get(
             base,
-            &["v2", "search"],
+            &["v1", "search"],
             &[
                 ("q", query.as_str()),
                 (
@@ -315,7 +315,7 @@ pub(super) fn search_requests(
         )?);
         requests.push(get(
             base,
-            &["v2", "search"],
+            &["v1", "search"],
             &[
                 ("q", query.as_str()),
                 ("match", if index % 2 == 0 { "prefix" } else { "contains" }),
@@ -333,10 +333,10 @@ pub(super) fn event_requests(
     requests: &mut Vec<RequestSpec>,
 ) -> Result<()> {
     for (index, (namespace, name)) in corpus.names.iter().enumerate() {
-        requests.push(get(base, &["v2", "events"], &[])?);
+        requests.push(get(base, &["v1", "events"], &[])?);
         requests.push(get(
             base,
-            &["v2", "events"],
+            &["v1", "events"],
             &[
                 ("name", name),
                 ("namespace", namespace),
@@ -352,7 +352,7 @@ pub(super) fn event_requests(
         };
         requests.push(get(
             base,
-            &["v2", "events"],
+            &["v1", "events"],
             &[filter, ("page_size", parameterized_page_size(index))],
         )?);
     }

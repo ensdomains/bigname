@@ -37,6 +37,7 @@ pub(super) struct AddressHistoryAnchor {
     pub(super) resource_id: Option<Uuid>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn load_address_history_selector(
     pool: &PgPool,
     address: &str,
@@ -45,6 +46,7 @@ pub(super) async fn load_address_history_selector(
     scope: HistoryScope,
     canonical_only: bool,
     include_candidates: bool,
+    published: Option<&std::collections::BTreeMap<String, i64>>,
 ) -> Result<HistorySelector> {
     let current_rows = if canonical_only {
         load_address_names_current_for_relations(pool, address, namespace, relations).await
@@ -91,6 +93,7 @@ pub(super) async fn load_address_history_selector(
         relations,
         canonical_only,
         include_candidates,
+        published,
     )
     .await?;
     for anchor in historical_matches {
@@ -121,6 +124,7 @@ async fn load_historical_address_history_matches(
     relations: Option<&[AddressNameRelation]>,
     canonical_only: bool,
     include_candidates: bool,
+    published: Option<&std::collections::BTreeMap<String, i64>>,
 ) -> Result<Vec<AddressHistoryAnchor>> {
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
@@ -164,6 +168,24 @@ async fn load_historical_address_history_matches(
         builder.push_bind(namespace);
     }
 
+    if let Some(bounds) = published {
+        if bounds.is_empty() {
+            builder.push(" AND FALSE");
+        } else {
+            builder.push(" AND (");
+            for (index, (chain, block)) in bounds.iter().enumerate() {
+                if index > 0 {
+                    builder.push(" OR ");
+                }
+                builder.push("(ne.chain_id = ");
+                builder.push_bind(chain);
+                builder.push(" AND ne.block_number <= ");
+                builder.push_bind(*block);
+                builder.push(")");
+            }
+            builder.push(")");
+        }
+    }
     builder.push(" AND ");
     push_address_match_filter(&mut builder, address, relations);
 

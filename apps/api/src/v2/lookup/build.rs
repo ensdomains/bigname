@@ -9,14 +9,13 @@ use crate::v2::support::{
     record_content_hash_from_entries, record_text_records_from_entries, record_unsupported_fields,
 };
 use crate::v2::{
-    RegistrationStatus, Relation, Status, V2Result,
+    Authority, RegistrationStatus, Relation, Status, V2Result,
     name_record::{
         self, chain_id_from_positions, json_string_at_paths, network_from_parts, string_field,
     },
     shared_product_reason,
     vocab::{
-        MISSING_UNSUPPORTED_REASON, PARTIAL_SERVE_UNSUPPORTED_REASON, downgrades_unsupported_name,
-        projected_row_product_reason,
+        MISSING_UNSUPPORTED_REASON, downgrades_unsupported_name, projected_row_product_reason,
     },
 };
 
@@ -49,6 +48,7 @@ pub(super) fn build_forward_feed_record(
         expires_at: None,
         registration_status: None,
         resolver: None,
+        subregistry: None,
         addresses: None,
         text_records: None,
         content_hash: None,
@@ -61,6 +61,9 @@ pub(super) fn build_forward_feed_record(
         )),
         is_primary: None,
         relations: Vec::new(),
+        resolution: None,
+        authority: None,
+        migrated_at: None,
         status,
         unsupported_reason,
         failure_reason: identity_record_failure_reason(&record.row.coverage, status)?,
@@ -105,6 +108,7 @@ pub(super) fn build_reverse_feed_record(
         expires_at: None,
         registration_status: None,
         resolver: None,
+        subregistry: None,
         addresses: None,
         text_records: None,
         content_hash: None,
@@ -117,6 +121,9 @@ pub(super) fn build_reverse_feed_record(
         )),
         is_primary: Some(reverse_identity_is_primary(record)),
         relations: lookup_relations(&record.relation_facets),
+        resolution: None,
+        authority: None,
+        migrated_at: None,
         status,
         unsupported_reason,
         failure_reason: identity_record_failure_reason(&record.name_record.row.coverage, status)?,
@@ -175,11 +182,9 @@ fn build_detail_record(
         .as_ref()
         .filter(|_| !unsupported_fields.contains("primary_address"))
         .and_then(|addresses| addresses.get(primary_coin_type).cloned());
-    let resolver = (has_current_registration
-        && string_field(record.row.coverage.get("unsupported_reason")).as_deref()
-            != Some(PARTIAL_SERVE_UNSUPPORTED_REASON))
-    .then(|| name_record::resolver(&record.row.declared_summary))
-    .flatten();
+    let resolver = name_record::identity_row_serves_resolver(&record.row)
+        .then(|| name_record::resolver(&record.row.declared_summary))
+        .flatten();
 
     Ok(LookupRecord {
         name: record.row.normalized_name.clone(),
@@ -202,6 +207,7 @@ fn build_detail_record(
         expires_at: registration.expires_at,
         registration_status: Some(registration.registration_status),
         resolver,
+        subregistry: None,
         primary_address,
         addresses,
         text_records,
@@ -221,6 +227,9 @@ fn build_detail_record(
         )),
         is_primary,
         relations,
+        resolution: None,
+        authority: Authority::from_provenance(&record.row.provenance),
+        migrated_at: None,
         status,
         unsupported_reason,
         failure_reason: identity_record_failure_reason(&record.row.coverage, status)?,
@@ -253,6 +262,7 @@ fn authority_unsupported_record(
         expires_at: None,
         registration_status: None,
         resolver: None,
+        subregistry: None,
         addresses: None,
         text_records: None,
         content_hash: None,
@@ -262,6 +272,9 @@ fn authority_unsupported_record(
         network: None,
         is_primary: None,
         relations: Vec::new(),
+        resolution: None,
+        authority: None,
+        migrated_at: None,
         status,
         unsupported_reason,
         failure_reason: None,

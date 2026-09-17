@@ -21,20 +21,86 @@ pub struct ChildrenCurrentRow {
     pub last_recomputed_at: OffsetDateTime,
 }
 
-/// Storage-local keyset cursor for declared direct child collection reads.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ChildrenCurrentKeysetCursor {
-    pub canonical_display_name: String,
-    pub child_logical_name_id: String,
+/// Sort key for declared direct child page reads. The timestamp sorts read the child's
+/// `name_current.declared_summary` through the same COALESCE the address-name sorts use, so a
+/// child with no current name row, or no timestamp at that path, sorts as a null.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChildrenCurrentSort {
+    Name,
+    ExpiresAt,
+    RegisteredAt,
 }
 
-impl From<&ChildrenCurrentRow> for ChildrenCurrentKeysetCursor {
-    fn from(row: &ChildrenCurrentRow) -> Self {
+impl ChildrenCurrentSort {
+    pub const fn is_timestamp(self) -> bool {
+        matches!(self, Self::ExpiresAt | Self::RegisteredAt)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChildrenCurrentOrder {
+    Asc,
+    Desc,
+}
+
+/// Page-narrowing controls for declared direct child page reads. `q` is a caller-normalized
+/// prefix compared byte-wise against the served child name; `include_expired=false` omits
+/// children whose current registration is released or whose expiry is earlier than the
+/// supplied fixed evaluation time (or the database's transaction time when omitted).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChildrenCurrentPageFilter<'a> {
+    pub q: Option<&'a str>,
+    pub include_expired: bool,
+    /// Fixed evaluation time for expiry filtering across count and continuation requests.
+    pub evaluated_at: Option<OffsetDateTime>,
+    pub sort: ChildrenCurrentSort,
+    pub order: ChildrenCurrentOrder,
+}
+
+impl Default for ChildrenCurrentPageFilter<'_> {
+    fn default() -> Self {
         Self {
-            canonical_display_name: row.canonical_display_name.clone(),
-            child_logical_name_id: row.child_logical_name_id.clone(),
+            q: None,
+            include_expired: true,
+            evaluated_at: None,
+            sort: ChildrenCurrentSort::Name,
+            order: ChildrenCurrentOrder::Asc,
         }
     }
+}
+
+impl ChildrenCurrentPageFilter<'_> {
+    /// True when the page admits every row the per-parent summary counts.
+    pub const fn admits_every_child(&self) -> bool {
+        self.q.is_none() && self.include_expired
+    }
+
+    const fn needs_name_current(&self) -> bool {
+        self.sort.is_timestamp() || !self.include_expired
+    }
+
+    pub(super) const fn joins_name_current(&self) -> bool {
+        self.needs_name_current()
+    }
+}
+
+/// Sort-specific keyset position for declared direct child page reads. The name sort orders by
+/// the served name the cursor already carries, so it needs no value of its own; the timestamp
+/// sorts carry the row's (possibly absent) timestamp.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ChildrenCurrentSortValue {
+    Name,
+    Timestamp(Option<OffsetDateTime>),
+}
+
+/// Storage-local keyset cursor for declared direct child collection reads. Every sort breaks ties
+/// by served name and then by child id, so the page order is stable and readable whatever the
+/// sort; the name is therefore part of every cursor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChildrenCurrentKeysetCursor {
+    pub sort_value: ChildrenCurrentSortValue,
+    pub canonical_display_name: String,
+    pub child_logical_name_id: String,
 }
 
 /// Compact metadata for the full declared direct child filter.
@@ -51,7 +117,18 @@ pub struct ChildrenCurrentSummary {
 /// Bounded declared direct child page plus full-filter summary metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChildrenCurrentPage {
+    /// Exact number of children admitted by the page filters, before its cursor.
+    pub total_count: u64,
     pub rows: Vec<ChildrenCurrentRow>,
     pub next_cursor: Option<ChildrenCurrentKeysetCursor>,
     pub summary: ChildrenCurrentSummary,
+}
+
+/// Bounded page of the declared children one registry contract holds, with the exact count of
+/// every such child.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegistryChildrenPage {
+    pub rows: Vec<ChildrenCurrentRow>,
+    pub next_cursor: Option<ChildrenCurrentKeysetCursor>,
+    pub label_count: i64,
 }

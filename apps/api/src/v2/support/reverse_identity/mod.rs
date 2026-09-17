@@ -11,6 +11,9 @@ use sqlx::{PgPool, Row};
 mod page;
 
 #[cfg(test)]
+pub(crate) use page::explain_reverse_identity_page;
+
+#[cfg(test)]
 pub(crate) mod relation_page_test_hooks {
     use std::sync::{
         Arc,
@@ -273,6 +276,37 @@ pub(crate) async fn load_reverse_identity_records_page_live(
     .await
 }
 
+/// The readable primary-name claims for one address and coin type, keyed by public namespace.
+/// Shares the single primary-name read of the reverse page loader so `relation=resolves_to`
+/// computes `is_primary` from the same claim and snapshot rules as the authority relations.
+pub(crate) async fn load_reverse_identity_primary_snapshots(
+    pool: &PgPool,
+    address: &str,
+    coin_type: &str,
+    public_namespaces: &[String],
+) -> Result<BTreeMap<String, IdentityPrimaryNameSnapshot>> {
+    let input = ReverseIdentityStorageInput {
+        address: address.to_owned(),
+        coin_type: coin_type.to_owned(),
+        roles: ReverseIdentityRoles::Both,
+        page_size: 1,
+        cursor: None,
+    };
+    let mut loaded =
+        page::load_primary_names(pool, std::slice::from_ref(&input), public_namespaces).await?;
+    let by_namespace = loaded
+        .pop()
+        .and_then(|value| match value {
+            serde_json::Value::Object(map) => Some(map),
+            _ => None,
+        })
+        .unwrap_or_default();
+    by_namespace
+        .into_iter()
+        .map(|(namespace, value)| Ok((namespace, page::decode_primary_name(value)?)))
+        .collect()
+}
+
 pub(crate) async fn prepare_reverse_identity_additional_scan(
     pool: &PgPool,
     served_head: Option<&crate::v2::lookup::head::ServedHead>,
@@ -408,14 +442,12 @@ fn reverse_identity_record(
     })
 }
 
-async fn load_reverse_identity_total_counts_live(
+async fn query_reverse_identity_total_counts(
     pool: &PgPool,
     inputs: &[ReverseIdentityStorageInput],
     public_namespaces: &[String],
-) -> Result<BTreeMap<(String, ReverseIdentityRoles), u64>> {
-    #[cfg(test)]
-    test_hooks::record(pool).await?;
-
+    explain: bool,
+) -> Result<Vec<sqlx::postgres::PgRow>> {
     let requests = inputs
         .iter()
         .map(|input| (input.address.clone(), input.roles))
@@ -431,18 +463,43 @@ async fn load_reverse_identity_total_counts_live(
 
     let query = format!(
         r#"
-        WITH {READABLE_REVERSE_IDENTITY_CTES}, requested AS (
+        WITH {READABLE_REVERSE_IDENTITY_CTES}, requested AS MATERIALIZED (
             SELECT *
-            FROM UNNEST($1::TEXT[], $2::TEXT[]) AS requested(address, roles)
+            FROM UNNEST($1::TEXT[], $2::TEXT[]) AS request_input(address, roles)
+        ), readable_candidates AS MATERIALIZED (
+            SELECT seed.address, seed.relation, readable_relation.logical_name_id
+            FROM bigname_phase.address_names_current seed
+            JOIN LATERAL (
+                SELECT anc.logical_name_id
+                FROM readable_relations anc
+                WHERE anc.address = seed.address
+                  AND anc.logical_name_id = seed.logical_name_id
+                  AND anc.relation = seed.relation
+                -- Recheck this stored relation once before per-input aggregation.
+                OFFSET 0
+            ) readable_relation ON TRUE
+            WHERE seed.address = ANY($1::TEXT[])
+              AND seed.namespace = ANY($3::TEXT[])
+              AND EXISTS (
+                  SELECT 1 FROM requested request_match
+                  WHERE request_match.address = seed.address
+                    AND (
+                        request_match.roles = 'both'
+                        OR (request_match.roles = 'owned'
+                            AND seed.relation IN ('registrant', 'token_holder'))
+                        OR (request_match.roles = 'managed'
+                            AND seed.relation = 'effective_controller')
+                    )
+                  OFFSET 0
+              )
         )
         SELECT
             requested.address,
             requested.roles,
             COUNT(DISTINCT anc.logical_name_id)::BIGINT AS total_count
         FROM requested
-        LEFT JOIN readable_relations anc
+        LEFT JOIN readable_candidates anc
           ON anc.address = requested.address
-         AND anc.namespace = ANY($3::TEXT[])
          AND (
              requested.roles = 'both'
              OR (requested.roles = 'owned' AND anc.relation IN ('registrant', 'token_holder'))
@@ -452,6 +509,14 @@ async fn load_reverse_identity_total_counts_live(
         ORDER BY requested.address, requested.roles
         "#
     );
+    #[cfg(not(test))]
+    let _ = explain;
+    #[cfg(test)]
+    let query = if explain {
+        format!("EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON) {query}")
+    } else {
+        query
+    };
     let rows = sqlx::query(&query)
         .bind(&addresses)
         .bind(&roles)
@@ -464,6 +529,29 @@ async fn load_reverse_identity_total_counts_live(
                 inputs.len()
             )
         })?;
+
+    Ok(rows)
+}
+
+#[cfg(test)]
+pub(crate) async fn explain_reverse_identity_count(
+    pool: &PgPool,
+    inputs: &[ReverseIdentityStorageInput],
+    public_namespaces: &[String],
+) -> Result<serde_json::Value> {
+    let rows = query_reverse_identity_total_counts(pool, inputs, public_namespaces, true).await?;
+    anyhow::ensure!(rows.len() == 1, "expected exactly one reverse count plan");
+    Ok(rows[0].try_get("QUERY PLAN")?)
+}
+
+async fn load_reverse_identity_total_counts_live(
+    pool: &PgPool,
+    inputs: &[ReverseIdentityStorageInput],
+    public_namespaces: &[String],
+) -> Result<BTreeMap<(String, ReverseIdentityRoles), u64>> {
+    #[cfg(test)]
+    test_hooks::record(pool).await?;
+    let rows = query_reverse_identity_total_counts(pool, inputs, public_namespaces, false).await?;
 
     rows.into_iter()
         .map(|row| {

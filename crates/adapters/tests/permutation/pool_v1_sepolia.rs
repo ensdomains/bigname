@@ -2,9 +2,9 @@ use alloy_primitives::{Address, U256};
 use alloy_sol_types::SolEvent;
 
 use super::{
-    events::{V1BaseRegistrar, V1RegistrarToken, V1Registry, V1Resolver, V1Wrapper},
-    names::{dns_encode, labelhash, namehash},
-    scenario::{Action, Dimensions, action, emission, stage},
+    events::{V1RegistrarToken, V1Registry, V1Resolver, V1Reverse, V1Wrapper},
+    names::{dns_encode, labelhash, namehash, reverse_labels},
+    scenario::{Action, Dimensions, ExpiryWindow, Perturbation, action, emission, stage},
     world::Wiring,
 };
 
@@ -16,8 +16,9 @@ const RESOLVER: &str = "ens_v1_resolver_l1";
 const GRACE_PERIOD: i64 = 90 * 24 * 60 * 60;
 
 /// Generates the ordinary ENSv1 authority path declared by the checked-in Sepolia manifests.
-/// This generated event world exercises numeric BaseRegistrar lifecycle plus the registry,
-/// resolver, wrapper, and registrar Transfer that restores unwrap authority.
+/// Numeric BaseRegistrar grants and renewals establish a lease even without an admitted controller
+/// label event. Registration emits the mint, registry ownership, then the numeric grant.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L167 @ ens_v1@91c966f)
 pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) -> Vec<Action> {
     let registry = wiring.address(REGISTRY, "registry");
     let registrar = wiring.address(REGISTRAR, "registrar");
@@ -26,8 +27,14 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
     let wrapper_address = address(wrapper);
     let resolver_address = address(resolver);
     let eth_node = namehash(&["eth"]);
-    let expiry = u64::try_from(settle_timestamp + GRACE_PERIOD + 31_536_000)
-        .expect("Sepolia fixture expiry fits u64");
+    let lease_expiry = u64::try_from(match dimensions.expiry_window {
+        ExpiryWindow::Active => settle_timestamp + 31_536_000,
+        ExpiryWindow::JustExpired => settle_timestamp - 3_600,
+        ExpiryWindow::PastGrace => settle_timestamp - 17_280_000,
+    })
+    .expect("Sepolia fixture lease expiry fits u64");
+    let expiry =
+        lease_expiry + u64::try_from(GRACE_PERIOD).expect("Sepolia fixture expiry fits u64");
     let mut actions = Vec::new();
 
     for (index, label) in LABELS.iter().take(dimensions.name_count).enumerate() {
@@ -44,20 +51,29 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             stage::REGISTER,
             vec![
                 emission(
+                    registrar,
+                    V1RegistrarToken::Transfer {
+                        from: Address::ZERO,
+                        to: owner,
+                        tokenId: U256::from_be_bytes(hash.0),
+                    }
+                    .encode_log_data(),
+                ),
+                emission(
                     registry,
                     V1Registry::NewOwner {
                         node: eth_node,
                         label: hash,
-                        owner: wrapper_address,
+                        owner,
                     }
                     .encode_log_data(),
                 ),
                 emission(
                     registrar,
-                    V1BaseRegistrar::NameRegistered {
+                    V1RegistrarToken::NameRegistered {
                         id: U256::from_be_bytes(hash.0),
-                        owner: wrapper_address,
-                        expires: U256::from(expiry),
+                        owner,
+                        expires: U256::from(lease_expiry),
                     }
                     .encode_log_data(),
                 ),
@@ -67,6 +83,15 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             format!("{label}:wrap"),
             stage::LINK,
             vec![
+                emission(
+                    registrar,
+                    V1RegistrarToken::Transfer {
+                        from: owner,
+                        to: wrapper_address,
+                        tokenId: U256::from_be_bytes(hash.0),
+                    }
+                    .encode_log_data(),
+                ),
                 emission(
                     registry,
                     V1Registry::Transfer {
@@ -196,6 +221,61 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                 ),
             ],
         ));
+        if dimensions.has(Perturbation::RenewalAfterExpiry) {
+            actions.push(action(
+                format!("{label}:renewal"),
+                stage::WRITE,
+                vec![emission(
+                    registrar,
+                    V1RegistrarToken::NameRenewed {
+                        id: U256::from_be_bytes(hash.0),
+                        expires: U256::from(lease_expiry + 31_536_000),
+                    }
+                    .encode_log_data(),
+                )],
+            ));
+        }
+        if dimensions.has(Perturbation::ReverseClaim)
+            && let Some(reverse) = wiring.optional_address("ens_v1_reverse_l1", "reverse_registrar")
+        {
+            let reverse_labels = reverse_labels(&format!("{owner:#x}"));
+            let reverse_node = namehash(
+                &reverse_labels
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+            );
+            actions.push(action(
+                format!("{label}:reverse"),
+                stage::LATE,
+                vec![
+                    emission(
+                        reverse,
+                        V1Reverse::ReverseClaimed {
+                            addr: owner,
+                            node: reverse_node,
+                        }
+                        .encode_log_data(),
+                    ),
+                    emission(
+                        registry,
+                        V1Registry::NewResolver {
+                            node: reverse_node,
+                            resolver: resolver_address,
+                        }
+                        .encode_log_data(),
+                    ),
+                    emission(
+                        resolver,
+                        V1Resolver::NameChanged {
+                            node: reverse_node,
+                            name: format!("{label}.eth"),
+                        }
+                        .encode_log_data(),
+                    ),
+                ],
+            ));
+        }
     }
     actions
 }

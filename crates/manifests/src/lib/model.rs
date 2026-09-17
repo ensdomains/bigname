@@ -82,11 +82,35 @@ pub struct ActiveManifestVersion {
     pub capability_flags: BTreeMap<String, CapabilityFlag>,
 }
 
+/// One manifest version the lookup engine may select as a verified-execution entrypoint. Unlike
+/// `ActiveManifestVersion` this view keeps `shadow` manifests, because ENS execution runs through
+/// a shadow-scoped `ens_execution` manifest on both deployment profiles.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionManifestVersion {
+    pub manifest_version: u64,
+    pub source_family: String,
+    pub chain: String,
+    pub rollout_status: String,
+    pub capability_flags: BTreeMap<String, CapabilityFlag>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NamespaceManifestSnapshot {
     pub manifests: Vec<ActiveManifestVersion>,
     pub last_updated: String,
 }
+
+/// `[[contracts]].role` of a declared ENSv2-side resolver instance that stores no records and answers
+/// by forwarding to the same name's ENSv1 resolver (`docs/manifests.md` § ENSv1 mirror resolver).
+pub const ENSV1_MIRROR_RESOLVER_ROLE: &str = "ensv1_mirror_resolver";
+/// `correlation_addresses` key naming the ENSv1 registry a declared mirror resolver reads.
+pub const ENSV1_MIRROR_REGISTRY_CORRELATION_KEY: &str = "ens_v1_registry";
+
+/// ENS [authority arms](../../../docs/glossary.md#authority-epoch) an `ens_execution` manifest may
+/// name in `verified_authority_arms`; Basenames has no arm split and no such declaration.
+pub const VERIFIED_AUTHORITY_ARMS: &[&str] = &["ens_v1", "ens_v2"];
+/// Arms an `ens_execution` manifest admits when it declares no `verified_authority_arms`.
+pub const DEFAULT_VERIFIED_AUTHORITY_ARMS: &[&str] = &["ens_v1"];
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SourceManifest {
@@ -107,6 +131,23 @@ pub struct SourceManifest {
     pub discovery_rules: Vec<DiscoveryRule>,
     #[serde(default, skip_serializing_if = "ManifestAbi::is_empty")]
     pub abi: ManifestAbi,
+    /// `ens_execution` only: the ENS authority arms whose names the declared Universal Resolver may
+    /// verify (`docs/manifests.md` § `verified_authority_arms`). Absent means
+    /// [`DEFAULT_VERIFIED_AUTHORITY_ARMS`]; the payload keeps the field absent so existing
+    /// manifests serialize unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_authority_arms: Option<Vec<String>>,
+}
+
+impl SourceManifest {
+    /// The arms a verified read may execute for through this manifest's entrypoint, declared or
+    /// defaulted.
+    pub fn verified_authority_arms(&self) -> Vec<&str> {
+        match &self.verified_authority_arms {
+            Some(arms) => arms.iter().map(String::as_str).collect(),
+            None => DEFAULT_VERIFIED_AUTHORITY_ARMS.to_vec(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -268,6 +309,8 @@ pub(crate) struct RawSourceManifest {
     discovery_rules: Vec<DiscoveryRule>,
     #[serde(default)]
     abi: ManifestAbi,
+    #[serde(default)]
+    verified_authority_arms: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -307,6 +350,7 @@ impl From<RawSourceManifest> for SourceManifest {
             contracts: value.contracts,
             discovery_rules: value.discovery_rules,
             abi: value.abi,
+            verified_authority_arms: value.verified_authority_arms,
         }
     }
 }

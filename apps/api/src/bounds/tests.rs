@@ -38,22 +38,22 @@ fn default_config_is_valid_and_keeps_rate_limiting_disabled() {
 #[test]
 fn verified_request_classifier_covers_live_execution_modes() {
     let cases = [
-        ("/v2/addresses/0x01/primary-name", true),
-        ("/v2/addresses/0x01/primary-name?source=", true),
-        ("/v2/addresses/0x01/primary-name?source=%20%20", true),
-        ("/v2/addresses/0x01/primary-name?source=indexed", false),
-        ("/v2/names/alice.eth?source=ver%69fied", true),
-        ("/v2/names/alice.eth?source=%20verified%20", true),
-        ("/v2/names/alice.eth?source=auto", false),
-        ("/v2/names/alice.eth/records?source=auto", false),
-        ("/v2/names/alice.eth/records?source=%20auto%20", false),
-        ("/v2/names/alice.eth/records?source=auto&keys=%20%20", false),
+        ("/v1/addresses/0x01/primary-name", true),
+        ("/v1/addresses/0x01/primary-name?source=", true),
+        ("/v1/addresses/0x01/primary-name?source=%20%20", true),
+        ("/v1/addresses/0x01/primary-name?source=indexed", false),
+        ("/v1/names/alice.eth?source=ver%69fied", true),
+        ("/v1/names/alice.eth?source=%20verified%20", true),
+        ("/v1/names/alice.eth?source=auto", false),
+        ("/v1/names/alice.eth/records?source=auto", false),
+        ("/v1/names/alice.eth/records?source=%20auto%20", false),
+        ("/v1/names/alice.eth/records?source=auto&keys=%20%20", false),
         (
-            "/v2/names/alice.eth/records?source=auto&keys=addr%3A60",
+            "/v1/names/alice.eth/records?source=auto&keys=addr%3A60",
             true,
         ),
-        ("/v2/diagnostics/names/alice.eth/records", true),
-        ("/v2/diagnostics/names/alice.eth/execution", false),
+        ("/v1/diagnostics/names/alice.eth/records", true),
+        ("/v1/diagnostics/names/alice.eth/execution", false),
     ];
 
     for (uri, expected) in cases {
@@ -243,7 +243,7 @@ async fn healthz_remains_ready_while_global_concurrency_is_saturated() {
                     }
                 }),
             )
-            .route("/v2/status", get(|| async { "visible" })),
+            .route("/v1/status", get(|| async { "visible" })),
         Router::new().route(
             "/healthz",
             get(|| async { axum::Json(json!({ "status": "ready" })) }),
@@ -269,13 +269,13 @@ async fn healthz_remains_ready_while_global_concurrency_is_saturated() {
     assert_eq!(payload.get("status"), Some(&json!("ready")));
     let status = app
         .clone()
-        .oneshot(request("/v2/status"))
+        .oneshot(request("/v1/status"))
         .await
         .expect("status request must complete");
     assert_error(status, StatusCode::SERVICE_UNAVAILABLE, "overloaded").await;
     let unmatched = app
         .clone()
-        .oneshot(request("/v2/not-a-route"))
+        .oneshot(request("/v1/not-a-route"))
         .await
         .expect("unmatched request must complete");
     assert_error(unmatched, StatusCode::SERVICE_UNAVAILABLE, "overloaded").await;
@@ -351,7 +351,7 @@ async fn verified_concurrency_limit_is_separate_from_cheap_requests() {
     let app = apply_request_bounds(
         Router::new()
             .route(
-                "/v2/addresses/{address}/primary-name",
+                "/v1/addresses/{address}/primary-name",
                 get({
                     let started = started.clone();
                     let release = release.clone();
@@ -373,13 +373,13 @@ async fn verified_concurrency_limit_is_separate_from_cheap_requests() {
 
     let first = tokio::spawn(
         app.clone()
-            .oneshot(request("/v2/addresses/0x01/primary-name")),
+            .oneshot(request("/v1/addresses/0x01/primary-name")),
     );
     started.notified().await;
 
     let overloaded = app
         .clone()
-        .oneshot(request("/v2/addresses/0x02/primary-name?source=verified"))
+        .oneshot(request("/v1/addresses/0x02/primary-name?source=verified"))
         .await
         .expect("shed request must complete");
     assert_error(overloaded, StatusCode::SERVICE_UNAVAILABLE, "overloaded").await;
@@ -405,7 +405,7 @@ async fn indexed_v2_primary_name_bypasses_verified_concurrency_admission() {
     let release = Arc::new(Notify::new());
     let app = apply_request_bounds(
         Router::new().route(
-            "/v2/addresses/{address}/primary-name",
+            "/v1/addresses/{address}/primary-name",
             get({
                 let started = started.clone();
                 let release = release.clone();
@@ -431,21 +431,21 @@ async fn indexed_v2_primary_name_bypasses_verified_concurrency_admission() {
 
     let held = tokio::spawn(
         app.clone()
-            .oneshot(request("/v2/addresses/0x01/primary-name")),
+            .oneshot(request("/v1/addresses/0x01/primary-name")),
     );
     started.notified().await;
 
     let indexed = app
         .clone()
-        .oneshot(request("/v2/addresses/0x02/primary-name?source=indexed"))
+        .oneshot(request("/v1/addresses/0x02/primary-name?source=indexed"))
         .await
         .expect("indexed primary-name request must complete");
     assert_eq!(indexed.status(), StatusCode::OK);
 
     for uri in [
-        "/v2/addresses/0x03/primary-name?source=verified",
-        "/v2/addresses/0x03/primary-name?source=",
-        "/v2/addresses/0x03/primary-name?source=%20%20",
+        "/v1/addresses/0x03/primary-name?source=verified",
+        "/v1/addresses/0x03/primary-name?source=",
+        "/v1/addresses/0x03/primary-name?source=%20%20",
     ] {
         let overloaded = app
             .clone()
@@ -482,17 +482,17 @@ async fn empty_auto_records_bypass_verified_concurrency_admission() {
         }
     };
     let app = apply_request_bounds(
-        Router::new().route("/v2/names/{name}/records", get(handler)),
+        Router::new().route("/v1/names/{name}/records", get(handler)),
         Router::new(),
         &config,
     );
 
     let held = tokio::spawn(app.clone().oneshot(request(
-        "/v2/names/alice.eth/records?source=auto&keys=avatar&hold=true",
+        "/v1/names/alice.eth/records?source=auto&keys=avatar&hold=true",
     )));
     started.notified().await;
 
-    for uri in ["/v2/names/alice.eth/records?source=auto"] {
+    for uri in ["/v1/names/alice.eth/records?source=auto"] {
         let response = app
             .clone()
             .oneshot(request(uri))
@@ -508,7 +508,7 @@ async fn empty_auto_records_bypass_verified_concurrency_admission() {
     let overloaded = app
         .clone()
         .oneshot(request(
-            "/v2/names/alice.eth/records?source=auto&keys=addr:60",
+            "/v1/names/alice.eth/records?source=auto&keys=addr:60",
         ))
         .await
         .expect("non-empty auto records request must complete");
@@ -525,7 +525,7 @@ async fn empty_auto_records_do_not_consume_verified_rate_limit_tokens() {
     let mut config = test_config();
     config.verified_rate_limit_per_second = 1;
     let app = apply_request_bounds(
-        Router::new().route("/v2/names/{name}/records", get(|| async { "ok" })),
+        Router::new().route("/v1/names/{name}/records", get(|| async { "ok" })),
         Router::new(),
         &config,
     );
@@ -533,13 +533,13 @@ async fn empty_auto_records_do_not_consume_verified_rate_limit_tokens() {
     let first = app
         .clone()
         .oneshot(request(
-            "/v2/names/alice.eth/records?source=auto&keys=avatar",
+            "/v1/names/alice.eth/records?source=auto&keys=avatar",
         ))
         .await
         .expect("first non-empty auto records request must complete");
     assert_eq!(first.status(), StatusCode::OK);
 
-    for uri in ["/v2/names/alice.eth/records?source=auto&keys="] {
+    for uri in ["/v1/names/alice.eth/records?source=auto&keys="] {
         let response = app
             .clone()
             .oneshot(request(uri))
@@ -554,7 +554,7 @@ async fn empty_auto_records_do_not_consume_verified_rate_limit_tokens() {
 
     let limited = app
         .oneshot(request(
-            "/v2/names/alice.eth/records?source=auto&keys=addr:60",
+            "/v1/names/alice.eth/records?source=auto&keys=addr:60",
         ))
         .await
         .expect("second non-empty auto records request must complete");
@@ -568,7 +568,7 @@ async fn enabled_rate_limit_is_per_forwarded_client_ip() {
     config.trust_x_forwarded_for = true;
     let app = apply_request_bounds(
         Router::new().route(
-            "/v2/addresses/{address}/primary-name",
+            "/v1/addresses/{address}/primary-name",
             get(|| async { "ok" }),
         ),
         Router::new(),
@@ -578,7 +578,7 @@ async fn enabled_rate_limit_is_per_forwarded_client_ip() {
     let first = app
         .clone()
         .oneshot(forwarded_request(
-            "/v2/addresses/0x01/primary-name?source=%20verified%20",
+            "/v1/addresses/0x01/primary-name?source=%20verified%20",
             "203.0.113.1",
         ))
         .await
@@ -588,7 +588,7 @@ async fn enabled_rate_limit_is_per_forwarded_client_ip() {
     let limited = app
         .clone()
         .oneshot(forwarded_request(
-            "/v2/addresses/0x02/primary-name?source=verified",
+            "/v1/addresses/0x02/primary-name?source=verified",
             "203.0.113.1",
         ))
         .await
@@ -597,7 +597,7 @@ async fn enabled_rate_limit_is_per_forwarded_client_ip() {
 
     let other_client = app
         .oneshot(forwarded_request(
-            "/v2/addresses/0x03/primary-name?source=verified",
+            "/v1/addresses/0x03/primary-name?source=verified",
             "203.0.113.2",
         ))
         .await

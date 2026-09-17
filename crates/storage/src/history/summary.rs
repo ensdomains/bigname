@@ -3,7 +3,8 @@ use serde_json::Value;
 use sqlx::{PgConnection, Postgres, QueryBuilder};
 
 use super::{
-    EventHistoryReadFilter, HistoryChainPositionSample, HistorySummary, HistorySummaryMode,
+    EventHistoryReadFilter, HistoryChainPositionSample, HistoryOrder, HistorySummary,
+    HistorySummaryMode,
     duplicates::push_product_history_duplicate_filter,
     paging::{push_history_filters, push_history_order_terms},
     source::push_history_source_for_filter,
@@ -17,8 +18,13 @@ pub(super) async fn load_history_summary(
 ) -> Result<Option<HistorySummary>> {
     match mode {
         HistorySummaryMode::None => Ok(None),
-        HistorySummaryMode::Count => {
-            let total_count = load_history_total_count(connection, filter, canonical_only).await?;
+        HistorySummaryMode::Count | HistorySummaryMode::CappedCount(_) => {
+            let cap = match mode {
+                HistorySummaryMode::CappedCount(cap) => Some(cap),
+                _ => None,
+            };
+            let total_count =
+                load_history_total_count(connection, filter, canonical_only, cap).await?;
             Ok(Some(HistorySummary {
                 total_count,
                 normalized_event_ids: Vec::new(),
@@ -37,19 +43,34 @@ pub(super) async fn load_history_summary(
     }
 }
 
+/// With a cap, the count stops scanning after `cap + 1` matching rows, so the
+/// result is exact at or below the cap and `cap + 1` means "more than the cap".
 async fn load_history_total_count(
     connection: &mut PgConnection,
     filter: &EventHistoryReadFilter,
     canonical_only: bool,
+    cap: Option<u64>,
 ) -> Result<u64> {
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT COUNT(*)::BIGINT AS total_count
         "#,
     );
-    push_history_source_for_filter(&mut builder, filter, canonical_only, false, false);
-    push_history_filters(&mut builder, filter, canonical_only);
-    push_product_history_duplicate_filter(&mut builder, filter, canonical_only);
+    if let Some(cap) = cap {
+        let limit = i64::try_from(cap.saturating_add(1))
+            .context("history total_count cap exceeds SQL limit")?;
+        builder.push(" FROM (SELECT 1 ");
+        push_history_source_for_filter(&mut builder, filter, canonical_only, false, false);
+        push_history_filters(&mut builder, filter, canonical_only);
+        push_product_history_duplicate_filter(&mut builder, filter, canonical_only);
+        builder.push(" LIMIT ");
+        builder.push_bind(limit);
+        builder.push(") capped");
+    } else {
+        push_history_source_for_filter(&mut builder, filter, canonical_only, false, false);
+        push_history_filters(&mut builder, filter, canonical_only);
+        push_product_history_duplicate_filter(&mut builder, filter, canonical_only);
+    }
 
     let total_count = builder
         .build_query_scalar::<i64>()
@@ -72,7 +93,7 @@ async fn load_history_full_summary(
                 jsonb_agg(to_jsonb(ne.normalized_event_id::TEXT) ORDER BY
         "#,
     );
-    push_history_order_terms(&mut builder);
+    push_history_order_terms(&mut builder, HistoryOrder::Desc);
     builder.push(
         r#"
                 ) FILTER (WHERE ne.normalized_event_id IS NOT NULL),
@@ -82,7 +103,7 @@ async fn load_history_full_summary(
                 jsonb_agg(ne.raw_fact_ref ORDER BY
         "#,
     );
-    push_history_order_terms(&mut builder);
+    push_history_order_terms(&mut builder, HistoryOrder::Desc);
     builder.push(
         r#"
                 ) FILTER (WHERE ne.raw_fact_ref IS NOT NULL),
@@ -98,7 +119,7 @@ async fn load_history_full_summary(
                     ORDER BY
         "#,
     );
-    push_history_order_terms(&mut builder);
+    push_history_order_terms(&mut builder, HistoryOrder::Desc);
     builder.push(
         r#"
                 ) FILTER (WHERE ne.normalized_event_id IS NOT NULL),

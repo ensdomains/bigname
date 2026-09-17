@@ -123,7 +123,13 @@ pub async fn load_phase_resolver_bound_name_rows(
          AND lower(resolver_capability.resolver_address) = lower($2)
         {DEFAULT_NAME_CURRENT_LINEAGE_JOINS}
         WHERE nc.support_status IN ('supported', 'unsupported')
-          AND nc.unsupported_reason IS DISTINCT FROM 'current_authority_not_projected'
+          -- Retained pointer evidence alone does not list a name whose authority is not projected;
+          -- an ENSv2 TLD's current root-registry pointer is its serving resource and does.
+          AND (
+              nc.unsupported_reason IS DISTINCT FROM 'current_authority_not_projected'
+              OR nc.provenance #>> '{{read_reachability,basis}}' =
+                  'root_registry_resolver_pointer'
+          )
           {DEFAULT_NAME_CURRENT_READ_FILTER}
           AND (
               (
@@ -154,8 +160,9 @@ pub async fn load_phase_resolver_bound_name_rows(
                   AND nc.serving_resource_id IS NOT NULL
                   AND nc.binding_kind IS NULL
                   AND nc.namespace IN ('ens', 'basenames')
-                  AND nc.provenance #>> '{{read_reachability,basis}}' =
-                      'retained_registry_resolver_pointer'
+                  AND nc.provenance #>> '{{read_reachability,basis}}' IN (
+                      'retained_registry_resolver_pointer', 'root_registry_resolver_pointer'
+                  )
               )
           )
           AND nc.declared_summary #>> '{{resolver,chain_id}}' = $1

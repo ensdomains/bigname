@@ -108,6 +108,7 @@ pub async fn load_permissions_current_account_resource_page(
     pool: &PgPool,
     subject: Option<&str>,
     resource_id: Option<Uuid>,
+    namespace: Option<&str>,
     cursor: Option<&PermissionsCurrentAccountResourceCursor>,
     page_size: u64,
 ) -> Result<PermissionsCurrentAccountResourcePage> {
@@ -115,6 +116,7 @@ pub async fn load_permissions_current_account_resource_page(
         pool,
         subject,
         resource_id,
+        namespace,
         cursor,
         page_size,
         AccountResourceSummaryMode::Full,
@@ -127,6 +129,7 @@ pub async fn load_permissions_current_account_resource_page_count_summary(
     pool: &PgPool,
     subject: Option<&str>,
     resource_id: Option<Uuid>,
+    namespace: Option<&str>,
     cursor: Option<&PermissionsCurrentAccountResourceCursor>,
     page_size: u64,
 ) -> Result<PermissionsCurrentAccountResourcePage> {
@@ -134,6 +137,7 @@ pub async fn load_permissions_current_account_resource_page_count_summary(
         pool,
         subject,
         resource_id,
+        namespace,
         cursor,
         page_size,
         AccountResourceSummaryMode::CountOnly,
@@ -151,6 +155,7 @@ async fn load_permissions_current_account_resource_page_with_summary(
     pool: &PgPool,
     subject: Option<&str>,
     resource_id: Option<Uuid>,
+    namespace: Option<&str>,
     cursor: Option<&PermissionsCurrentAccountResourceCursor>,
     page_size: u64,
     summary_mode: AccountResourceSummaryMode,
@@ -190,7 +195,12 @@ async fn load_permissions_current_account_resource_page_with_summary(
             WHERE TRUE
             "#,
         );
-        push_permissions_current_account_resource_filters(&mut page_builder, subject, resource_id);
+        push_permissions_current_account_resource_filters(
+            &mut page_builder,
+            subject,
+            resource_id,
+            namespace,
+        );
         push_permissions_current_account_resource_cursor(&mut page_builder, cursor);
         page_builder.push(
             r#" ORDER BY pc.subject COLLATE "C" ASC, pc.resource_id ASC, pc.scope COLLATE "C" ASC LIMIT "#,
@@ -214,11 +224,17 @@ async fn load_permissions_current_account_resource_page_with_summary(
 
     let summary = match summary_mode {
         AccountResourceSummaryMode::Full => {
-            load_permissions_current_account_resource_summary(pool, subject, resource_id).await?
+            load_permissions_current_account_resource_summary(pool, subject, resource_id, namespace)
+                .await?
         }
         AccountResourceSummaryMode::CountOnly => {
-            load_permissions_current_account_resource_count_summary(pool, subject, resource_id)
-                .await?
+            load_permissions_current_account_resource_count_summary(
+                pool,
+                subject,
+                resource_id,
+                namespace,
+            )
+            .await?
         }
     };
 
@@ -260,6 +276,7 @@ async fn load_permissions_current_account_resource_summary(
     pool: &PgPool,
     subject: Option<&str>,
     resource_id: Option<Uuid>,
+    namespace: Option<&str>,
 ) -> Result<PermissionsCurrentFullFilterSummary> {
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
@@ -274,7 +291,12 @@ async fn load_permissions_current_account_resource_summary(
         WHERE TRUE
         "#,
     );
-    push_permissions_current_account_resource_filters(&mut builder, subject, resource_id);
+    push_permissions_current_account_resource_filters(
+        &mut builder,
+        subject,
+        resource_id,
+        namespace,
+    );
 
     let row = builder
         .build()
@@ -289,6 +311,7 @@ async fn load_permissions_current_account_resource_count_summary(
     pool: &PgPool,
     subject: Option<&str>,
     resource_id: Option<Uuid>,
+    namespace: Option<&str>,
 ) -> Result<PermissionsCurrentFullFilterSummary> {
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
@@ -303,7 +326,12 @@ async fn load_permissions_current_account_resource_count_summary(
         WHERE TRUE
         "#,
     );
-    push_permissions_current_account_resource_filters(&mut builder, subject, resource_id);
+    push_permissions_current_account_resource_filters(
+        &mut builder,
+        subject,
+        resource_id,
+        namespace,
+    );
 
     let row = builder
         .build()
@@ -331,6 +359,7 @@ fn push_permissions_current_account_resource_filters<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     subject: Option<&'a str>,
     resource_id: Option<Uuid>,
+    namespace: Option<&'a str>,
 ) {
     if let Some(subject) = subject {
         builder.push(" AND pc.subject = ");
@@ -340,6 +369,25 @@ fn push_permissions_current_account_resource_filters<'a>(
     if let Some(resource_id) = resource_id {
         builder.push(" AND pc.resource_id = ");
         builder.push_bind(resource_id);
+    }
+
+    if let Some(namespace) = namespace {
+        // Resource audit reads include unnamed and superseded registrations, so namespace
+        // evidence comes from retained interpreted events rather than current name bindings.
+        builder.push(
+            r#" AND EXISTS (
+                SELECT 1 FROM bigname_phase.normalized_events ne
+                JOIN bigname_phase.chain_lineage lineage
+                  ON lineage.chain_id = ne.chain_id AND lineage.block_hash = ne.block_hash
+                WHERE ne.resource_id = pc.resource_id AND ne.namespace = "#,
+        );
+        builder.push_bind(namespace);
+        builder.push(
+            r#" AND ne.consumer_visibility = 'activated'
+                AND ne.canonicality_state IN ('canonical', 'safe', 'finalized')
+                AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+            )"#,
+        );
     }
 
     builder.push(DEFAULT_PERMISSIONS_CURRENT_READ_FILTER);

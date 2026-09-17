@@ -34,13 +34,17 @@ impl State {
             provisional_values: OrdMap::new(),
             v1_names: OrdMap::new(),
             v1_wrapper_data: OrdMap::new(),
+            v1_wrapper_delegates: OrdMap::new(),
+            v1_wrapper_burnt: imbl::OrdSet::new(),
             v1_pending_unwraps: OrdMap::new(),
             v1_registrar_transaction: Default::default(),
             v1_registrar_controllers: OrdSet::new(),
             v1_pending_wrapper_sync_expiries: OrdMap::new(),
             v1_correlated_wrapper_expiries: OrdMap::new(),
             v1_registrars: OrdMap::new(),
+            v1_registrar_evidence: OrdMap::new(),
             v1_expiries: OrdSet::new(),
+            v2_migration_times: OrdMap::new(),
             v1_registry_authorities: OrdMap::new(),
             v1_registry_owners: OrdMap::new(),
             v1_registry_owner_words: OrdMap::new(),
@@ -74,6 +78,7 @@ impl State {
             v2_entry_by_parent_label: OrdMap::new(),
             v2_parent_claims: OrdMap::new(),
             v2_resolver_hints: OrdMap::new(),
+            v2_resolver_arguments: OrdMap::new(),
             materialized_token_lineages: OrdSet::new(),
             v2_suffix_anchors: v2_suffix_anchors
                 .into_iter()
@@ -113,6 +118,7 @@ impl State {
         self.v1_names = replayed.v1_names;
         self.v1_wrapper_data = replayed.v1_wrapper_data;
         self.v1_registrars = replayed.v1_registrars;
+        self.v1_registrar_evidence = replayed.v1_registrar_evidence;
         self.v1_expiries = replayed.v1_expiries;
         self.v1_registry_authorities = replayed.v1_registry_authorities;
         self.v1_registry_owners = replayed.v1_registry_owners;
@@ -216,6 +222,7 @@ impl State {
                 scope,
             );
             self.values.insert(key, event.after_state.clone());
+            self.restore_registrar_evidence(&event);
             crate::schema_v2::state_restore::v1(self, &event);
             crate::schema_v2::state_restore::v2(self, &event);
             if is_v2_topology && !full_restore {

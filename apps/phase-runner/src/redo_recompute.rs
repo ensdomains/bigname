@@ -46,7 +46,8 @@ pub(crate) fn reject_separate_project_run(
         format!(
             "cannot run Project separately for chain {chain_id}: recompute-flags is pending \
              after its scoped projection refresh; rerun `phase-runner redo --chain {chain_id} \
-             --phase recompute-flags --from-block {from} --to-block {to}`"
+             --phase recompute-flags --from-block {from} --to-block {to}`{}",
+            crate::transitions::redo_rerun_options(crate::transitions::RedoRerun::RecomputeFlags)
         ),
     ))
 }

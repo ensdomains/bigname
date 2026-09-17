@@ -1,3 +1,6 @@
+#[path = "session_interpret.rs"]
+mod interpret;
+use interpret::interpret_loaded;
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, bail};
@@ -308,77 +311,6 @@ pub fn prepare_schema_v2_batch_incremental_with_provenance(
     })
 }
 
-fn interpret_loaded(
-    catalog: &mut Catalog,
-    blocks: &[super::RawBlockInput],
-    raw_logs: Vec<RawLogInput>,
-    state: &mut State,
-) -> anyhow::Result<BatchOutput> {
-    let mut output = BatchOutput::default();
-    let mut migration_observations = Vec::new();
-    let registrar_registry_setups = registrar_registry_setups(catalog, &raw_logs)?;
-    let mut raw_logs = raw_logs.into_iter().peekable();
-    let mut committed_state = state.clone();
-    committed_state.begin_batch();
-    for block in blocks {
-        let mut block_output = BatchOutput::default();
-        let mut block_state = committed_state.clone();
-        super::settle_block_boundary(catalog, block, &mut block_state, &mut block_output)?;
-        while raw_logs.peek().is_some_and(|raw| {
-            raw.block_number == block.block_number && raw.block_hash == block.block_hash
-        }) {
-            let raw = raw_logs.next().expect("peeked raw log");
-            interpret_raw(
-                catalog,
-                &raw,
-                &mut block_state,
-                &mut block_output,
-                &mut migration_observations,
-                &registrar_registry_setups,
-            )?;
-        }
-        super::protocol::reconcile_batch(&mut block_output);
-        if block_output
-            .normalized_events
-            .iter()
-            .any(|event| event.source_family.starts_with("ens_v1_"))
-        {
-            let delta = super::seam::fold_prior_events(
-                Vec::new(),
-                &block_output.normalized_events,
-                std::slice::from_ref(block),
-            )?;
-            let mut replayed_state = committed_state.clone();
-            replayed_state.apply_prior_event_delta(delta);
-            // Same-transaction reconciliation can remove or retarget ENSv1 transitions after live
-            // state observed them. Rebuild only ENSv1's durable protocol state from the survivors;
-            // other protocol state keeps the uninterrupted-walk behavior outside this fix's scope.
-            block_state.replace_ens_v1_protocol_state_from_replay(replayed_state);
-        }
-        committed_state = block_state;
-        append_output(&mut output, block_output);
-    }
-    if let Some(raw) = raw_logs.next() {
-        bail!(
-            "raw log {}:{} at block {} {} has no matching loaded live-lineage block",
-            raw.transaction_hash,
-            raw.log_index,
-            raw.block_number,
-            raw.block_hash
-        );
-    }
-    if let Some((logical_name_id, authority_arm)) =
-        committed_state.pending_v2_terminal_closure_hit()
-    {
-        bail!(
-            "terminal {authority_arm} binding closure for {logical_name_id} was not handled in its adapter batch"
-        );
-    }
-    super::identity::compact_reserved_label_preimages(&mut output)?;
-    super::migration::correlate(catalog, migration_observations, &mut output)?;
-    Ok(output)
-}
-
 fn append_output(into: &mut BatchOutput, from: BatchOutput) {
     let BatchOutput {
         decode_skips,
@@ -481,9 +413,9 @@ fn interpret_raw(
     output: &mut BatchOutput,
     migration_observations: &mut Vec<super::protocol::MigrationObservation>,
     registrar_registry_setups: &RegistrarRegistrySetups,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let Some(selected) = catalog.select(raw)? else {
-        return Ok(());
+        return Ok(false);
     };
     let mut registrar_context = if selected.source.source_family == "ens_v1_registrar_l1" {
         super::migration::registrar_context(catalog, &selected, raw)?
@@ -536,7 +468,7 @@ fn interpret_raw(
                     match_all: selected.match_all,
                     decode_context: error.to_string(),
                 });
-                return Ok(());
+                return Ok(true);
             }
             Err(error) => {
                 return Err(error).with_context(|| {
@@ -547,7 +479,13 @@ fn interpret_raw(
                 });
             }
         };
-    prepare_v1(&selected, raw, &mut interpreted, &mut candidate_state)?;
+    prepare_v1(
+        catalog,
+        &selected,
+        raw,
+        &mut interpreted,
+        &mut candidate_state,
+    )?;
     *state = candidate_state;
     super::normalized::materialize(&selected, raw, interpreted.events.clone(), state, output);
     super::sourced_events::materialize(
@@ -572,7 +510,14 @@ fn interpret_raw(
         output,
     );
     super::identity::materialize(&selected, raw, &interpreted, state, output)?;
-    super::discovery::materialize(catalog, &selected, raw, interpreted.discovery, output)?;
+    super::discovery::materialize(
+        catalog,
+        &selected,
+        raw,
+        interpreted.discovery,
+        state,
+        output,
+    )?;
     if let Some(migration_source) = registrar_migration_source {
         migration_observations.extend(interpreted.migration_observations);
         super::normalized::materialize_for_source(
@@ -586,7 +531,7 @@ fn interpret_raw(
         debug_assert!(interpreted.migration_events.is_empty());
         migration_observations.extend(interpreted.migration_observations);
     }
-    Ok(())
+    Ok(true)
 }
 
 fn registrar_registry_setups(

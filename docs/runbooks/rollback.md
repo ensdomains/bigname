@@ -27,9 +27,10 @@ Before changing deployed binaries:
    set; and
 4. keep the public edge on the maintainer-approved policy for that binary.
 
-For the current C2 state, the binary has no v1 REST routes and the pre-C3 edge
-does not expose `/v2`. Do not improvise an edge flip as part of rollback; the
-C3 public-edge change remains separately maintainer-gated.
+Since #315 the binary serves the contract under `/v1` and the checked-in edge
+admits it. A rollback to a pre-#315 binary (which served `/v2`) must also roll
+back `docker/caddy/Caddyfile` to the matching revision; do not improvise a
+separate edge policy as part of rollback.
 
 Do not proceed when health cannot prove the expected database and phase-runner
 state. Apply any rollback migration plan separately; the deleted worker

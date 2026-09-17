@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 alloy-json-rpc.workspace = true
+bigname-storage.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 alloy-transport-http.workspace = true
@@ -19,9 +20,9 @@ reqwest = { version = "0.13.2", default-features = false, features = ["json", "r
 serde.workspace = true
 serde_json = "1.0.149"
 sqlx = { workspace = true, features = ["time"] }
+tokio.workspace = true
 tower = { version = "0.5.2", default-features = false }
 
 [dev-dependencies]
-bigname-storage.workspace = true
 bigname-test-support.workspace = true
 tokio.workspace = true

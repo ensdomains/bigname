@@ -2551,6 +2551,7 @@ fn dense_registrar_first_output_has_no_unreferenced_registry_resources() -> Resu
     );
     Ok(())
 }
+
 #[test]
 fn numeric_transfer_then_plaintext_renewal_preserves_registry_provenance() -> Result<()> {
     numeric_late_plaintext_registry_case(false)

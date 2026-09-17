@@ -48,7 +48,13 @@
                                THEN selected_registration.after_state -> 'expiry'
                            ELSE COALESCE(to_jsonb(expiry.expiry_seconds), CASE
                                WHEN selected_registration.is_v2_lifecycle
-                                   THEN selected_registration.after_state -> 'expiry' END)
+                                   THEN selected_registration.after_state -> 'expiry' END,
+                               -- A wrapped ENSv1 name with no registrar lease (a wrapped
+                               -- subname) expires when its NameWrapper entry does; that is
+                               -- the only expiry the chain holds for it.
+                               CASE WHEN wrapper.wrapper_state IS NOT NULL
+                                     AND NOT COALESCE(selected_registration.is_v2_lifecycle, false)
+                                   THEN to_jsonb(wrapper_expiry.servable_expiry_seconds) END)
                        END,
                        'registered_at', registration_grant.block_timestamp,
                        'created_at', created.block_timestamp,
@@ -65,12 +71,28 @@
                                'authority_kind', NULL, 'authority_key', NULL,
                                'registrant', NULL, 'expiry', NULL
                            )
+                       -- A released ENSv1 lease whose custody was not revived is a tombstone:
+                       -- the registrar lease is gone and nothing current owns the node, so the
+                       -- lapsed registrant, authority and expiry are history only.
+                       WHEN COALESCE(selected_authority.released_v1_tombstone, false)
+                           THEN jsonb_build_object('authority_kind', NULL, 'authority_key', NULL,
+                               'registrant', NULL, 'expiry', NULL)
+                       -- An ENSv2 registration lapsed by path expiry keeps its lapsed expiry as
+                       -- a readable detail (the registry entry still holds it); an explicit
+                       -- release clears the entry, so nothing current remains.
+                       WHEN selected_registration.event_kind = 'RegistrationReleased'
+                        AND selected_authority.selected_authority_arm = 'ens_v2'
+                        AND selected_registration.after_state ->> 'source_event' = 'RegistryPathExpired'
+                       THEN jsonb_build_object('authority_kind', NULL, 'authority_key', NULL,
+                           'registrant', NULL)
                        WHEN selected_registration.event_kind = 'RegistrationReleased'
                         AND selected_authority.selected_authority_arm = 'ens_v2'
                        THEN jsonb_build_object('authority_kind', NULL, 'authority_key', NULL,
                            'registrant', NULL, 'expiry', NULL) ELSE '{}'::jsonb END,
                    'control', CASE
                        WHEN selected_authority.known_ownerless_registry
+                           THEN jsonb_build_object('status', 'unregistered')
+                       WHEN COALESCE(selected_authority.released_v1_tombstone, false)
                            THEN jsonb_build_object('status', 'unregistered')
                        WHEN selected_registration.event_kind = 'RegistrationReleased'
                         AND selected_authority.selected_authority_arm = 'ens_v2'
@@ -87,8 +109,13 @@
                                    selected_registration.after_state ->> 'status')
                            END,
                            'expiry', CASE
-                               WHEN expiry.expiry_seconds IS NULL THEN NULL
-                               ELSE to_jsonb(to_char(to_timestamp(expiry.expiry_seconds)
+                               WHEN COALESCE(expiry.expiry_seconds, CASE
+                                        WHEN wrapper.wrapper_state IS NOT NULL
+                                         AND NOT COALESCE(selected_registration.is_v2_lifecycle, false)
+                                            THEN wrapper_expiry.servable_expiry_seconds END)
+                                    IS NULL THEN NULL
+                               ELSE to_jsonb(to_char(to_timestamp(COALESCE(expiry.expiry_seconds,
+                                        wrapper_expiry.servable_expiry_seconds))
                                    AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
                            END,
                            'registrant', registrant.registrant,
@@ -99,13 +126,29 @@
                    'resolver', jsonb_build_object(
                        'chain_id', CASE
                            WHEN resolver.resolver_address IS NOT NULL AND resolver.resolver_address <> '0x0000000000000000000000000000000000000000'
-                            AND NOT (COALESCE(selected_registration.event_kind, '') IN ('RegistrationReleased', 'RegistrationReserved') AND selected_authority.selected_authority_arm = 'ens_v2')
+                            AND (
+                                -- The serving pointer is served as selected, including through a
+                                -- root-registry TLD reservation.
+                                resolver.normalized_event_id = serving.pointer_event_id
+                                OR (
+                                    NOT (COALESCE(selected_registration.event_kind, '') IN ('RegistrationReleased', 'RegistrationReserved') AND selected_authority.selected_authority_arm = 'ens_v2')
+                                    AND NOT COALESCE(selected_authority.released_v1_tombstone, false)
+                                )
+                            )
                                THEN resolver.chain_id
                            ELSE NULL
                        END,
                        'address', CASE
                            WHEN resolver.resolver_address IS NOT NULL AND resolver.resolver_address <> '0x0000000000000000000000000000000000000000'
-                            AND NOT (COALESCE(selected_registration.event_kind, '') IN ('RegistrationReleased', 'RegistrationReserved') AND selected_authority.selected_authority_arm = 'ens_v2')
+                            AND (
+                                -- The serving pointer is served as selected, including through a
+                                -- root-registry TLD reservation.
+                                resolver.normalized_event_id = serving.pointer_event_id
+                                OR (
+                                    NOT (COALESCE(selected_registration.event_kind, '') IN ('RegistrationReleased', 'RegistrationReserved') AND selected_authority.selected_authority_arm = 'ens_v2')
+                                    AND NOT COALESCE(selected_authority.released_v1_tombstone, false)
+                                )
+                            )
                                THEN resolver.resolver_address
                            ELSE NULL
                        END,
@@ -164,6 +207,7 @@
                jsonb_build_object(
                    'chain_id', $1,
                    'surface_block_number', surface.block_number,
+                   'registrant_event_id', registrant.normalized_event_id,
                    'selected_event_ids', COALESCE(evidence.event_ids, '[]'::jsonb),
                    'raw_fact_refs', COALESCE(evidence.raw_fact_refs, '[]'::jsonb),
                    'manifest_versions', COALESCE(
@@ -323,7 +367,13 @@
                      event.log_index DESC NULLS LAST, event.normalized_event_id DESC LIMIT 1
         ) v2_registration_latest ON TRUE
         LEFT JOIN project_resources resource ON resource.resource_id = row_identity.event_resource_id LEFT JOIN LATERAL (
-            SELECT event.*, lineage.block_timestamp
+            SELECT event.*, CASE
+                WHEN event.source_family = 'ens_v1_registrar_l1'
+                 AND event.after_state ->> 'state_derived' = 'true'
+                 AND event.after_state ->> 'surface_materialization' = 'true'
+                 AND event.after_state ->> 'registrar_surface_snapshot' = 'true'
+                THEN to_timestamp((event.after_state ->> 'original_registered_at')::bigint)
+                ELSE lineage.block_timestamp END AS block_timestamp
             FROM project_authority_events event
             LEFT JOIN chain_lineage lineage
               ON lineage.chain_id = event.chain_id
@@ -356,7 +406,8 @@
                        WHEN 'TokenControlTransferred' THEN event.after_state ->> 'to'
                        WHEN 'RegistrationReleased' THEN event.before_state ->> 'registrant'
                        ELSE event.after_state ->> 'registrant'
-                   END) AS registrant
+                   END) AS registrant,
+                   event.normalized_event_id
             FROM project_registration_events event
             WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind IN (
@@ -452,7 +503,18 @@
                         AND (event.after_state ->> 'expiry')::numeric <=
                             18446744073709551615
                            THEN (event.after_state ->> 'expiry')::numeric
-                   END AS expiry_seconds
+                   END AS expiry_seconds,
+                   -- The same word as a servable timestamp: a wrapped name without a registrar
+                   -- lease (a wrapped subname) expires when its NameWrapper entry does. Zero
+                   -- means the parent set no expiry; words past the timestamp range are dropped
+                   -- like malformed registrar expiries.
+                   CASE
+                       WHEN jsonb_typeof(event.after_state -> 'expiry') = 'number'
+                        AND (event.after_state ->> 'expiry')::numeric =
+                            trunc((event.after_state ->> 'expiry')::numeric)
+                        AND (event.after_state ->> 'expiry')::numeric BETWEEN 1 AND 253402300799
+                           THEN (event.after_state ->> 'expiry')::bigint
+                   END AS servable_expiry_seconds
             FROM project_authority_events event
             WHERE event.resource_id = resource.resource_id
               AND event.event_kind = 'ExpiryChanged'
@@ -525,6 +587,11 @@
                            THEN NULL
                        WHEN selected_registration.is_v2_lifecycle AND event.event_kind = 'TokenControlTransferred'
                            THEN event.after_state ->> 'to'
+                       -- A numeric lease disclosed by a later readable observation has no
+                       -- name-attached registry transfer: its registry owner was proven equal to
+                       -- the registrar owner at disclosure and travels in the snapshot's getter.
+                       WHEN event.event_kind = 'RegistrationGranted'
+                           THEN event.after_state ->> 'owner_getter'
                        ELSE COALESCE(
                            event.after_state ->> 'registry_owner',
                            event.after_state ->> 'owner'
@@ -537,6 +604,8 @@
                  OR (selected_registration.is_v2_lifecycle AND event.event_kind = 'TokenControlTransferred')
                  OR (event.event_kind = 'SurfaceBound' AND event.after_state @>
                      '{"state_derived":true,"authority_kind":"registry_only"}')
+                 OR (event.event_kind = 'RegistrationGranted' AND event.after_state @>
+                     '{"state_derived":true,"registrar_surface_snapshot":true}')
               )
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
@@ -692,8 +761,9 @@
                          AND event.source_family = 'ens_v2_registry_l1'
                          AND manifest.namespace = 'ens'
                          AND manifest.chain_id = 'ethereum-sepolia'
-                         AND manifest.deployment_label =
-                             'ens_v2_sepolia_post_audit'
+                         AND manifest.deployment_label IN (
+                             'ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon'
+                         )
                    )
                    AND EXISTS (
                        SELECT 1
@@ -706,12 +776,132 @@
                          AND event.source_family = 'ens_v2_registrar_l1'
                          AND manifest.namespace = 'ens'
                          AND manifest.chain_id = 'ethereum-sepolia'
-                         AND manifest.deployment_label =
-                             'ens_v2_sepolia_post_audit'
+                         AND manifest.deployment_label IN (
+                             'ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon'
+                         )
                          AND manifest.manifest_payload
                              -> 'capability_flags'
                              -> 'exact_name_profile'
                              ->> 'status' = 'supported'
+                   ) OR EXISTS (
+                       -- A validated migration replaces the registrar qualification only
+                       -- for its exact current successor in the admitted registry profile.
+                       SELECT 1
+                       FROM project_events boundary
+                       JOIN project_manifests migration_manifest
+                         ON migration_manifest.manifest_id = boundary.source_manifest_id
+                        AND migration_manifest.manifest_version = boundary.manifest_version
+                        AND migration_manifest.source_family = boundary.source_family
+                       JOIN project_events successor
+                         ON successor.chain_id = boundary.chain_id
+                        AND successor.namespace = boundary.namespace
+                        AND successor.logical_name_id = boundary.logical_name_id
+                        AND successor.resource_id = selected_authority.selected_resource_id
+                        AND successor.event_kind = 'SurfaceBound'
+                        AND successor.source_family = 'ens_v2_registry_l1'
+                        AND successor.after_state ->> 'surface_binding_id' =
+                            selected_authority.selected_binding_id::text
+                        AND successor.block_number = boundary.block_number
+                        AND successor.transaction_index = boundary.transaction_index
+                       JOIN project_manifests registry_manifest
+                         ON registry_manifest.manifest_id = successor.source_manifest_id
+                        AND registry_manifest.manifest_version = successor.manifest_version
+                        AND registry_manifest.source_family = successor.source_family
+                       JOIN contract_instance_addresses registry_address
+                         ON registry_address.chain_id = successor.chain_id
+                        AND registry_address.contract_instance_id::text =
+                            boundary.after_state ->> 'successor_registry_contract_instance_id'
+                        AND lower(registry_address.address) =
+                            lower(successor.raw_fact_ref ->> 'emitting_address')
+                        AND COALESCE(registry_address.active_from_block_number, 0)
+                            <= successor.block_number
+                        AND (registry_address.active_to_block_number IS NULL
+                             OR registry_address.active_to_block_number >= successor.block_number)
+                       WHERE surface.namespace = 'ens'
+                         AND boundary.namespace = surface.namespace
+                         AND boundary.logical_name_id = surface.logical_name_id
+                         AND boundary.chain_id = 'ethereum-sepolia'
+                         AND selected_authority.selected_authority_arm = 'ens_v2'
+                         AND selected_authority.unsupported_reason IS NULL
+                         AND selected_authority.authority_proof_kind =
+                             'migration_authority_transition'
+                         AND boundary.normalized_event_id =
+                             selected_authority.authority_proof_event_id
+                         AND boundary.event_identity =
+                             selected_authority.authority_proof_event_identity
+                         AND boundary.event_kind = 'MigrationApplied'
+                         AND boundary.source_family = 'ens_v2_migration_l1'
+                         AND boundary.consumer_visibility = 'activated'
+                         AND boundary.canonicality_state IN ('canonical', 'safe', 'finalized')
+                         AND boundary.after_state #>> '{successor_binding,binding_id}' =
+                             selected_authority.selected_binding_id::text
+                         AND boundary.after_state #>> '{successor_binding,resource_id}' =
+                             selected_authority.selected_resource_id::text
+                         AND migration_manifest.namespace = boundary.namespace
+                         AND migration_manifest.chain_id = boundary.chain_id
+                         AND migration_manifest.deployment_label IN ('ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon')
+                         AND registry_manifest.namespace = successor.namespace
+                         AND registry_manifest.chain_id = successor.chain_id
+                         AND registry_manifest.deployment_label IN ('ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon')
+                         AND (
+                             -- The successor registry is either declared in the admitted
+                             -- registry profile or was created on chain by an admitted
+                             -- migration (LockedMigrationController / WrapperRegistry deploy a
+                             -- WrapperRegistry per migrated name and announce it), which is the
+                             -- same registry-creation proof the authority builder accepts for
+                             -- positive child registrations.
+                             EXISTS (
+                                 SELECT 1 FROM jsonb_array_elements(COALESCE(
+                                     registry_manifest.manifest_payload -> 'contracts', '[]'::jsonb
+                                 )) declaration
+                                 WHERE declaration ->> 'role' = 'registry'
+                                   AND lower(declaration ->> 'address') = lower(registry_address.address)
+                                   AND (declaration ->> 'start_block' IS NULL
+                                        OR (declaration ->> 'start_block')::bigint <= successor.block_number)
+                             )
+                             OR EXISTS (
+                                 SELECT 1
+                                 FROM migration_discovery_associations created
+                                 JOIN discovery_edges created_edge
+                                   ON created_edge.chain_id = created.chain_id
+                                  AND created_edge.edge_kind = 'registry_announcement'
+                                  AND created_edge.to_contract_instance_id =
+                                      created.registry_contract_instance_id
+                                  AND created_edge.source_manifest_id = created.source_manifest_id
+                                  AND created_edge.active_from_block_number = created.block_number
+                                  AND created_edge.active_from_block_hash = created.block_hash
+                                  AND (created_edge.provenance ->> 'transaction_index')::bigint =
+                                      created.transaction_index
+                                  AND (created_edge.provenance ->> 'log_index')::bigint =
+                                      created.log_index
+                                 JOIN chain_lineage created_lineage
+                                   ON created_lineage.chain_id = created.chain_id
+                                  AND created_lineage.block_hash = created.block_hash
+                                  AND created_lineage.block_number = created.block_number
+                                 WHERE created.chain_id = successor.chain_id
+                                   AND created.correlation_kind = 'migration_registry_creation'
+                                   AND created.registry_contract_instance_id =
+                                       registry_address.contract_instance_id
+                                   AND lower(created.registry_address) =
+                                       lower(registry_address.address)
+                                   AND created.block_number <= successor.block_number
+                                   AND created.canonicality_state IN ('canonical', 'safe', 'finalized')
+                                   AND created_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                                   AND created_edge.canonicality_state IN ('canonical', 'safe', 'finalized')
+                                   AND (created_edge.active_to_block_number IS NULL
+                                        OR created_edge.active_to_block_number >= successor.block_number)
+                             )
+                         )
+                   ) OR (
+                       -- A positive ENSv2 child registration is already proven by the authority
+                       -- builder against a migration-created, announced registry under a
+                       -- migrated parent; the exact profile follows that chain of custody.
+                       -- Every operand is coalesced: a NULL here would make `supported`
+                       -- NULL and the support CASE below would fall through to 'supported'.
+                       COALESCE(selected_authority.selected_authority_arm, '') = 'ens_v2'
+                       AND selected_authority.unsupported_reason IS NULL
+                       AND COALESCE(selected_authority.authority_proof_kind, '') =
+                           'positive_v2_child_registration'
                    ) AS supported
         ) ens_v2_profile ON TRUE
         CROSS JOIN LATERAL (
@@ -734,8 +924,4 @@
         ) support
         WHERE surface.visibility_state = 'active'
           AND surface.raw_name <> ''
-          AND NOT COALESCE(
-              registration_current.event_kind = 'RegistrationReleased' AND registration_current.after_state ->> 'source_event' = 'RegistryPathExpired' AND registration_current.after_state ->> 'derived_from' = 'interpreter_state' AND registration_current.after_state ->> 'terminal_reason' = 'registry_name_binding_expired' AND
-              (selected_authority.selected_authority_arm = 'ens_v2' OR (selected_authority.selected_authority_arm IS NULL AND selected_authority.unsupported_reason = 'current_authority_not_projected')) AND (binding.resource_id IS NULL OR registration_current.resource_id = binding.resource_id), FALSE
-          )
         ORDER BY surface.logical_name_id

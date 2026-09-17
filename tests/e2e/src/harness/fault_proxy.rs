@@ -354,6 +354,23 @@ impl FaultProxy {
             .len()
     }
 
+    pub fn transaction_receipt_request_count(&self, transaction_hash: &str) -> usize {
+        self.state
+            .calls
+            .lock()
+            .expect("provider-fault calls lock must not be poisoned")
+            .iter()
+            .filter(|call| {
+                call.method == "eth_getTransactionReceipt"
+                    && call
+                        .params
+                        .get(0)
+                        .and_then(Value::as_str)
+                        .is_some_and(|hash| hash.eq_ignore_ascii_case(transaction_hash))
+            })
+            .count()
+    }
+
     pub fn assert_healthy(&self) -> Result<()> {
         let errors = self
             .state

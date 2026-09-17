@@ -11,9 +11,6 @@ sol! {
 
     interface V1RegistrarToken {
         event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
-    }
-
-    interface V1BaseRegistrar {
         event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires);
         event NameRenewed(uint256 indexed id, uint256 expires);
     }
@@ -194,11 +191,19 @@ sol! {
         event NameChanged(bytes32 indexed node, string name);
         event VersionChanged(bytes32 indexed node, uint64 newVersion);
     }
+
+    interface V2RecordResolver {
+        event Linked(uint256 indexed recordId, bytes32 indexed node, bytes name);
+        event AddressUpdated(uint256 indexed recordId, uint256 coinType, bytes addressBytes);
+        event NameUpdated(uint256 indexed recordId, string primaryName);
+        event ResourceArgument(uint256 indexed resource, bytes arg);
+    }
 }
 
 /// One event fragment this lane emits, checked against the manifest ABI of the world that admits
 /// it. `topics` is the log's topic count, so a fragment that disagrees with the manifest about
 /// which parameters are indexed is caught even though it hashes to the same topic0.
+#[derive(Clone)]
 pub struct DeclaredEvent {
     pub world: &'static str,
     pub name: &'static str,
@@ -226,8 +231,8 @@ pub fn declared_events() -> Vec<DeclaredEvent> {
             V1Registry::Transfer,
             V1Registry::NewResolver,
             V1RegistrarToken::Transfer,
-            V1BaseRegistrar::NameRegistered,
-            V1BaseRegistrar::NameRenewed,
+            V1RegistrarToken::NameRegistered,
+            V1RegistrarToken::NameRenewed,
             V1LegacyController::NameRegistered,
             V1LegacyController::NameRenewed,
             V1WrappedController::NameRegistered,
@@ -249,6 +254,7 @@ pub fn declared_events() -> Vec<DeclaredEvent> {
         [
             V2Registry::RegistryCreated,
             V2Registry::LabelRegistered,
+            V2Registry::LabelReserved,
             V2Registry::LabelUnregistered,
             V2Registry::ExpiryUpdated,
             V2Registry::SubregistryUpdated,
@@ -265,6 +271,7 @@ pub fn declared_events() -> Vec<DeclaredEvent> {
             V2Resolver::AddressChanged,
             V2Resolver::TextChanged,
             V2Resolver::NameChanged,
+            V2Resolver::VersionChanged,
         ]
     );
     let v1_sepolia = declared!(
@@ -274,7 +281,8 @@ pub fn declared_events() -> Vec<DeclaredEvent> {
             V1Registry::Transfer,
             V1Registry::NewResolver,
             V1RegistrarToken::Transfer,
-            V1BaseRegistrar::NameRegistered,
+            V1RegistrarToken::NameRegistered,
+            V1RegistrarToken::NameRenewed,
             V1Wrapper::NameWrapped,
             V1Wrapper::NameUnwrapped,
             V1Wrapper::ExpiryExtended,
@@ -283,7 +291,43 @@ pub fn declared_events() -> Vec<DeclaredEvent> {
             V1Resolver::VersionChanged,
         ]
     );
-    v1.into_iter().chain(v1_sepolia).chain(v2).collect()
+    let v1_hackathon = v1_sepolia
+        .iter()
+        .cloned()
+        .map(|mut event| {
+            event.world = "ens_v1_sepolia_hackathon";
+            event
+        })
+        .chain(declared!(
+            "ens_v1_sepolia_hackathon",
+            [V1Reverse::ReverseClaimed, V1Resolver::NameChanged]
+        ));
+    let v2_hackathon = v2
+        .iter()
+        .filter(|event| {
+            event.signature != V2Resolver::AliasChanged::SIGNATURE
+                && event.signature != V2Resolver::NameChanged::SIGNATURE
+        })
+        .cloned()
+        .map(|mut event| {
+            event.world = "ens_v2_sepolia_hackathon";
+            event
+        })
+        .chain(declared!(
+            "ens_v2_sepolia_hackathon",
+            [
+                V2RecordResolver::Linked,
+                V2RecordResolver::AddressUpdated,
+                V2RecordResolver::NameUpdated,
+                V2RecordResolver::ResourceArgument,
+            ]
+        ));
+    v1.into_iter()
+        .chain(v1_sepolia.clone())
+        .chain(v2.clone())
+        .chain(v1_hackathon)
+        .chain(v2_hackathon)
+        .collect()
 }
 
 pub fn encoded_topics(encoded: &LogData) -> Vec<String> {

@@ -3,7 +3,7 @@ use alloy_sol_types::SolEvent;
 
 use super::{
     events::{
-        V1BaseRegistrar, V1LegacyController, V1RegistrarToken, V1Registry, V1Resolver, V1Reverse,
+        V1LegacyController, V1RegistrarToken, V1Registry, V1Resolver, V1Reverse,
         V1UnwrappedController, V1WrappedController, V1Wrapper,
     },
     names::{child_node, dns_encode, labelhash, namehash, reverse_labels},
@@ -570,7 +570,7 @@ fn registration(
         .expect("registration emits controller event");
     emissions.push(emission(
         wires.registrar,
-        V1BaseRegistrar::NameRegistered {
+        V1RegistrarToken::NameRegistered {
             id: U256::from_be_bytes(hash.0),
             owner: registrar_owner,
             expires,
@@ -631,7 +631,7 @@ fn renewal(
         vec![
             emission(
                 wires.registrar,
-                V1BaseRegistrar::NameRenewed {
+                V1RegistrarToken::NameRenewed {
                     id: U256::from_be_bytes(hash.0),
                     expires,
                 }

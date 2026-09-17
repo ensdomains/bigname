@@ -15,6 +15,7 @@ alloy-primitives.workspace = true
 alloy-rpc-types-eth.workspace = true
 anyhow.workspace = true
 base64 = "0.22.1"
+futures-util.workspace = true
 jsonwebtoken = { version = "10.3.0", default-features = false, features = ["rust_crypto", "use_pem"] }
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
 serde.workspace = true

@@ -33,6 +33,11 @@ fn strip_corpus_minted(value: &mut Value) {
             for key in VOLATILE {
                 map.remove(*key);
             }
+            if let Some(value) = map.get_mut("registrant_event_id")
+                && value.is_number()
+            {
+                *value = Value::String("<normalized_event_id>".to_owned());
+            }
             // authority_key's third segment is the corpus-minted contract
             // instance ordinal; everything else in it is chain-derived.
             if let Some(Value::String(key)) = map.get_mut("authority_key") {
@@ -84,6 +89,68 @@ async fn parent_migration_path(run: &support::PipelineRun, parent: &str) -> Resu
     assert_eq!(rows[0].2, "activated");
     assert!(!rows[0].3);
     Ok(rows[0].0.clone())
+}
+
+#[tokio::test]
+async fn plain_unwrapped_eleven_log_migration_publishes_only_v2_authority() -> Result<()> {
+    const LABEL: &str = "plain-migration";
+    const NAME: &str = "plain-migration.eth";
+    let harness = support::deploy_connected_migration_harness().await?;
+    let rpc = harness.anvil.client();
+    let owner = rpc.accounts().await?[1];
+    let registered = ens_v1::register_eth_name(
+        &rpc,
+        &harness.ens_v1,
+        LABEL,
+        owner,
+        YEAR,
+        harness.ens_v1.public_resolver.address,
+    )
+    .await?;
+    // Instant Anvil blocks can share a timestamp and invert cross-block log times.
+    // Keep this registration before migration in both chain position and header time.
+    rpc.increase_time(1).await?;
+    let expiry = ens_v1::eth_name_expiry(&rpc, &harness.ens_v1, LABEL).await?;
+    ens_v2_migration::reserve_eth_label(&rpc, &harness.ens_v2, LABEL, expiry).await?;
+    let receipt = ens_v2_migration::migrate_unwrapped(
+        &rpc,
+        &harness.ens_v1,
+        &harness.migration,
+        owner,
+        LABEL,
+    )
+    .await?;
+    let mut timestamps = Vec::new();
+    for block in [registered.register_block, receipt.block_number] {
+        let header = rpc
+            .call(
+                "eth_getBlockByNumber",
+                serde_json::json!([format!("{block:#x}"), false]),
+            )
+            .await?;
+        let timestamp = header["timestamp"]
+            .as_str()
+            .context("registration/migration header timestamp")?;
+        timestamps.push(u64::from_str_radix(timestamp.trim_start_matches("0x"), 16)?);
+    }
+    assert!(
+        timestamps[1] > timestamps[0],
+        "migration header timestamp must follow registration: {timestamps:?}"
+    );
+    let receipt_body = rpc
+        .call(
+            "eth_getTransactionReceipt",
+            serde_json::json!([receipt.tx_hash]),
+        )
+        .await?;
+    assert_eq!(
+        receipt_body["logs"]
+            .as_array()
+            .context("migration logs")?
+            .len(),
+        11
+    );
+    support::prove_plain_migration_http(&harness, NAME, owner).await
 }
 
 #[tokio::test]
@@ -457,7 +524,7 @@ async fn composed_mainnet_profile_serves_both_protocols_without_leakage() -> Res
     // Row 4: primary claims remain namespace-scoped. The generic ENSv1
     // resolver emits `NameChanged`
     // (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L18 @ ens_v1@91c966f);
-    // schema-v2 preserves it but does not admit it as a primary-name claim.
+    // Project joins it through the current reverse-node resolver to the retained tuple.
     // The Basenames reverse registrar remains admitted for its deployment's
     // coin type 2147492101
     // (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L8 @ ens_v1@91c966f)
@@ -470,7 +537,11 @@ async fn composed_mainnet_profile_serves_both_protocols_without_leakage() -> Res
     assert_eq!(status, 200, "ens primary failed: {ens_primary}");
     assert_eq!(
         pointer(&ens_primary, "/declared_state/claimed_primary_name/status"),
-        "not_found"
+        "success"
+    );
+    assert_eq!(
+        pointer(&ens_primary, "/declared_state/claimed_primary_name/name"),
+        "alice.eth"
     );
     let (status, base_primary) = body(
         &composed,

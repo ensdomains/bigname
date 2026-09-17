@@ -32,20 +32,20 @@ async fn v2_routes_reject_known_but_inapplicable_query_params() -> Result<()> {
 
     for (uri, expected_message) in [
         (
-            "/v2/events?dedupe=name",
+            "/v1/events?dedupe=name",
             "unknown query parameter: dedupe",
         ),
-        ("/v2/names/alice.eth?q=x", "unknown query parameter: q"),
+        ("/v1/names/alice.eth?q=x", "unknown query parameter: q"),
         (
-            "/v2/addresses/0x00000000000000000000000000000000000000aa/names?match=contains",
+            "/v1/addresses/0x00000000000000000000000000000000000000aa/names?match=contains",
             "unknown query parameter: match",
         ),
         (
-            "/v2/diagnostics/events?relation=registrant",
+            "/v1/diagnostics/events?relation=registrant",
             "unknown query parameter: relation",
         ),
         (
-            "/v2/resolvers/1/0x00000000000000000000000000000000000000aa?namespace=ens",
+            "/v1/resolvers/1/0x00000000000000000000000000000000000000aa?namespace=ens",
             "unknown query parameter: namespace",
         ),
     ] {
@@ -112,7 +112,7 @@ async fn v2_documented_query_params_remain_accepted_for_positive_controls() -> R
     let status_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v2/status")
+                .uri("/v1/status")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -121,7 +121,7 @@ async fn v2_documented_query_params_remain_accepted_for_positive_controls() -> R
     assert_eq!(status_response.status(), StatusCode::OK);
     database.cleanup().await?;
 
-    let name_payload = v2_name_record_payload("/v2/names/Alice.eth?source=verified").await?;
+    let name_payload = v2_name_record_payload("/v1/names/Alice.eth?source=verified").await?;
     assert_eq!(name_payload["meta"]["source"], json!("verified"));
 
     Ok(())
@@ -130,115 +130,115 @@ async fn v2_documented_query_params_remain_accepted_for_positive_controls() -> R
 const V2_STRICT_QUERY_CASES: &[V2StrictQueryCase] = &[
     V2StrictQueryCase {
         method: V2StrictQueryMethod::PostLookup,
-        uri: "/v2/lookup",
+        uri: "/v1/lookup",
         expected_message: "query parameters are not supported on this route",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/status",
+        uri: "/v1/status",
         expected_message: "query parameters are not supported on this route",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/names/alice.eth",
+        uri: "/v1/names/alice.eth",
         expected_message: "unknown query parameter: bogus_param",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/names/alice.eth/records",
+        uri: "/v1/names/alice.eth/records",
         expected_message: "unknown query parameter: bogus_param",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/names/alice.eth/subnames",
+        uri: "/v1/names/alice.eth/subnames",
         expected_message: "unknown query parameter: bogus_param",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/names/alice.eth/history",
+        uri: "/v1/names/alice.eth/history",
         expected_message: "unknown query parameter: bogus_param",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/permissions",
+        uri: "/v1/permissions",
         expected_message: "unknown query parameter: bogus_param",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/addresses/0x00000000000000000000000000000000000000aa/names",
+        uri: "/v1/addresses/0x00000000000000000000000000000000000000aa/names",
         expected_message: "unknown query parameter: bogus_param",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/addresses/0x00000000000000000000000000000000000000aa/primary-name",
+        uri: "/v1/addresses/0x00000000000000000000000000000000000000aa/primary-name",
         expected_message: "unknown query parameter: bogus_param",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/addresses/0x00000000000000000000000000000000000000aa/history",
+        uri: "/v1/addresses/0x00000000000000000000000000000000000000aa/history",
         expected_message: "unknown query parameter: bogus_param",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/search",
+        uri: "/v1/search",
         expected_message: "unknown query parameter: bogus_param",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/events",
+        uri: "/v1/events",
         expected_message: "unknown query parameter: bogus_param",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/resolvers/1/0x00000000000000000000000000000000000000aa",
+        uri: "/v1/resolvers/1/0x00000000000000000000000000000000000000aa",
         expected_message: "unknown query parameter: bogus_param",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/namespaces/ens",
+        uri: "/v1/namespaces/ens",
         expected_message: "query parameters are not supported on this route",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/diagnostics/names/alice.eth/coverage",
+        uri: "/v1/diagnostics/names/alice.eth/coverage",
         expected_message: "unknown query parameter: bogus_param",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/diagnostics/names/alice.eth/binding",
+        uri: "/v1/diagnostics/names/alice.eth/binding",
         expected_message: "unknown query parameter: bogus_param",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/diagnostics/names/alice.eth/authority",
+        uri: "/v1/diagnostics/names/alice.eth/authority",
         expected_message: "unknown query parameter: bogus_param",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/diagnostics/names/alice.eth/records",
+        uri: "/v1/diagnostics/names/alice.eth/records",
         expected_message: "unknown query parameter: bogus_param",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/diagnostics/namespaces/ens/manifests",
+        uri: "/v1/diagnostics/namespaces/ens/manifests",
         expected_message: "query parameters are not supported on this route",
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/diagnostics/events",
+        uri: "/v1/diagnostics/events",
         expected_message: "unknown query parameter: bogus_param",
     },
 ];
 
 const V2_LATEST_STATE_COLLECTION_URIS: &[&str] = &[
-    "/v2/names/alice.eth/subnames",
-    "/v2/names/alice.eth/history",
-    "/v2/permissions?address=0x00000000000000000000000000000000000000aa",
-    "/v2/addresses/0x00000000000000000000000000000000000000aa/names",
-    "/v2/addresses/0x00000000000000000000000000000000000000aa/history",
-    "/v2/search?q=alice",
-    "/v2/events",
-    "/v2/diagnostics/events",
+    "/v1/names/alice.eth/subnames",
+    "/v1/names/alice.eth/history",
+    "/v1/permissions?address=0x00000000000000000000000000000000000000aa",
+    "/v1/addresses/0x00000000000000000000000000000000000000aa/names",
+    "/v1/addresses/0x00000000000000000000000000000000000000aa/history",
+    "/v1/search?q=alice",
+    "/v1/events",
+    "/v1/diagnostics/events",
 ];
 
 async fn v2_strict_query_response(

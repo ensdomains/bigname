@@ -2,6 +2,7 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{Marker, ProjectError, Result};
 
+mod linked_records;
 pub(crate) mod node_record_events;
 
 use node_record_events::SCOPED_NODE_RECORD_EVENT_IDS_SQL;
@@ -15,6 +16,7 @@ const PROJECTION_TABLES: &[&str] = &[
     "record_inventory_current",
     "resolver_current",
     "address_names_current",
+    "address_records_current",
     "primary_names_current",
 ];
 
@@ -47,6 +49,13 @@ pub(crate) async fn inputs(
     full_rebuild: bool,
 ) -> Result<()> {
     create_events(transaction, chain_id, target.number, full_rebuild).await?;
+    linked_records::include(transaction, chain_id, target.number, full_rebuild).await?;
+    // Collect statistics after all history is staged so builders can plan joins
+    // against the actual event mix, including linked resolver records.
+    sqlx::query("ANALYZE project_events")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to analyze staged events", error))?;
     create_identity_views(transaction, chain_id, target, full_rebuild).await?;
     Ok(())
 }
@@ -127,7 +136,10 @@ async fn create_declared_resolver_addresses(
          CROSS JOIN LATERAL jsonb_array_elements(COALESCE(
              manifest.manifest_payload -> 'contracts', '[]'::jsonb
          )) WITH ORDINALITY declarations(declaration, declaration_ordinality)
-         WHERE manifest.source_family = 'ens_v1_resolver_l1'
+         WHERE (manifest.source_family = 'ens_v1_resolver_l1'
+                OR (manifest.source_family = 'ens_v2_resolver_l1'
+                    AND declaration ->> 'role' IN ('public_resolver_v2', 'ensv1_mirror_resolver')
+                    AND declaration ->> 'proxy_kind' = 'none'))
            AND declaration ->> 'address' IS NOT NULL
            AND btrim(declaration ->> 'address') <> ''
            AND lower(declaration ->> 'address') <>
@@ -135,7 +147,17 @@ async fn create_declared_resolver_addresses(
            AND (
                declaration ->> 'start_block' IS NULL
                OR (declaration ->> 'start_block')::bigint <= $1
-           )",
+           )
+           AND (manifest.source_family <> 'ens_v2_resolver_l1' OR NOT EXISTS (
+               SELECT 1 FROM jsonb_array_elements(
+                   manifest.manifest_payload -> 'contracts'
+               ) WITH ORDINALITY later(item, ordinal)
+               WHERE lower(item ->> 'address') = lower(declaration ->> 'address')
+                 AND COALESCE((item ->> 'start_block')::bigint, 0) <= $1
+                 AND (COALESCE((item ->> 'start_block')::bigint, 0), ordinal) >
+                     (COALESCE((declaration ->> 'start_block')::bigint, 0),
+                      declaration_ordinality)
+           ))",
     )
     .bind(target_block)
     .execute(&mut **transaction)
@@ -242,6 +264,15 @@ async fn create_scoped_event_ids(
         UNION
         SELECT event.normalized_event_id
         FROM project_scope_children scope
+        JOIN normalized_events event USING (logical_name_id)
+        WHERE event.chain_id = $1 AND event.block_number <= $2
+          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        UNION
+        -- An ancestor reached only through a changed child's edge stages its own events (migration
+        -- boundary, subregistry pointer, ownership) as parent evidence; its other children stay out
+        -- of scope.
+        SELECT event.normalized_event_id
+        FROM project_scope_ancestors scope
         JOIN normalized_events event USING (logical_name_id)
         WHERE event.chain_id = $1 AND event.block_number <= $2
           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -422,7 +453,9 @@ async fn create_scoped_event_ids(
         JOIN normalized_events resolver
           ON resolver.chain_id = $1
          AND resolver.block_number <= $2
-         AND resolver.event_kind = 'ResolverChanged'
+         AND (resolver.event_kind IN ('ResolverChanged', 'RecordVersionChanged')
+              OR (resolver.event_kind = 'RecordChanged'
+                  AND resolver.after_state ->> 'source_event' = 'NameChanged'))
          AND resolver.canonicality_state IN ('canonical', 'safe', 'finalized')
          AND lower(resolver.after_state ->> 'node') =
              lower(reverse.after_state ->> 'reverse_node')
@@ -456,6 +489,8 @@ async fn create_identity_views(
              SELECT logical_name_id FROM project_scope_names
              UNION
              SELECT logical_name_id FROM project_scope_children
+             UNION
+             SELECT logical_name_id FROM project_scope_ancestors
          ) scope USING (logical_name_id)"
     };
     let surface_statement = format!(

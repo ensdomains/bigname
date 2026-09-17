@@ -225,14 +225,8 @@ async fn build_bounded_ephemeral_verified_record_answers(
 ) -> V2Result<BTreeMap<String, RecordAnswer>> {
     let mut answers = BTreeMap::new();
     for chunk in records.chunks(DIAGNOSTIC_RECORDS_VERIFIED_LOOKUP_CONCURRENCY) {
-        let verified_lookup = load_ephemeral_verified_record_lookup(
-            state,
-            row,
-            record_inventory,
-            chunk,
-            selected_snapshot,
-        )
-        .await?;
+        let verified_lookup =
+            load_ephemeral_verified_record_lookup(state, row, chunk, selected_snapshot).await?;
         let verified = build_verified_name_records(
             row,
             record_inventory,

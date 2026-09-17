@@ -28,10 +28,8 @@ use crate::schema_v2::{
     model::RawLogInput,
     state::{State, V1NameState, V1RegistryReadAnchor},
 };
-
 pub(super) mod node;
 pub(super) mod surface;
-
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 sol! {
     event Transfer(bytes32 indexed node, address owner);
@@ -546,19 +544,25 @@ pub(super) fn push_permission_change(
     let Some(authority_key) = authority.authority_key.as_deref() else {
         return;
     };
-    let permission_states = if grant {
-        v1_grant_states
+    let (before, after) = if grant {
+        v1_grant_states(
+            subject,
+            scope,
+            power,
+            authority_kind(authority),
+            authority_key,
+            source_event_kind,
+        )
     } else {
-        v1_revoke_states
+        v1_revoke_states(
+            subject,
+            scope,
+            power,
+            authority_kind(authority),
+            authority_key,
+            source_event_kind,
+        )
     };
-    let (before, after) = permission_states(
-        subject,
-        scope,
-        power,
-        authority_kind(authority),
-        authority_key,
-        source_event_kind,
-    );
     output.events.push(EventDraft {
         event_kind: "PermissionChanged".to_owned(),
         logical_name_id: authority

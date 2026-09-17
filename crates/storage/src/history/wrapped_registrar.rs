@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
 use sqlx::{PgPool, Postgres, QueryBuilder};
@@ -17,8 +17,22 @@ pub(super) async fn load_wrapped_registrar_resource_ids(
     logical_name_id: &str,
     canonical_only: bool,
 ) -> Result<Vec<Uuid>> {
+    load_wrapped_registrar_resource_ids_published(pool, logical_name_id, canonical_only, None).await
+}
+
+async fn load_wrapped_registrar_resource_ids_published(
+    pool: &PgPool,
+    logical_name_id: &str,
+    canonical_only: bool,
+    published: Option<&BTreeMap<String, i64>>,
+) -> Result<Vec<Uuid>> {
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_wrapped_registrar_resources_query(&mut builder, logical_name_id, canonical_only);
+    push_wrapped_registrar_resources_query(
+        &mut builder,
+        logical_name_id,
+        canonical_only,
+        published,
+    );
     builder
         .build_query_scalar()
         .fetch_all(pool)
@@ -34,6 +48,7 @@ pub(super) fn push_wrapped_registrar_resources_query<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     logical_name_id: &'a str,
     canonical_only: bool,
+    published: Option<&'a BTreeMap<String, i64>>,
 ) {
     builder.push(
         r#"
@@ -57,13 +72,33 @@ pub(super) fn push_wrapped_registrar_resources_query<'a>(
     if canonical_only {
         push_canonical_row_filter(builder, "ne", "lineage");
     }
+    if let Some(bounds) = published {
+        builder.push(" AND (");
+        if bounds.is_empty() {
+            builder.push("FALSE");
+        }
+        for (index, (chain_id, block)) in bounds.iter().enumerate() {
+            if index > 0 {
+                builder.push(" OR ");
+            }
+            builder.push("(ne.chain_id = ");
+            builder.push_bind(chain_id);
+            builder.push(" AND ne.block_number <= ");
+            builder.push_bind(*block);
+            builder.push(")");
+        }
+        builder.push(")");
+    }
     builder.push(" ORDER BY 1");
 }
 
+/// `published` caps binding expansion at each chain's published block, so a
+/// read bound to a publication snapshot cannot reach anchors written after it.
 pub(super) async fn load_resource_ids_for_logical_name_id(
     pool: &PgPool,
     logical_name_id: &str,
     canonical_only: bool,
+    published: Option<&BTreeMap<String, i64>>,
 ) -> Result<Vec<Uuid>> {
     let bindings = if canonical_only {
         crate::load_surface_bindings_by_logical_name_id(pool, logical_name_id).await
@@ -76,17 +111,38 @@ pub(super) async fn load_resource_ids_for_logical_name_id(
     }?;
     let mut resource_ids = bindings
         .into_iter()
+        .filter(|binding| is_published(published, &binding.chain_id, binding.block_number))
         .map(|binding| binding.resource_id)
         .collect::<BTreeSet<_>>();
-    resource_ids
-        .extend(load_wrapped_registrar_resource_ids(pool, logical_name_id, canonical_only).await?);
+    resource_ids.extend(
+        load_wrapped_registrar_resource_ids_published(
+            pool,
+            logical_name_id,
+            canonical_only,
+            published,
+        )
+        .await?,
+    );
     Ok(resource_ids.into_iter().collect())
+}
+
+fn is_published(
+    published: Option<&BTreeMap<String, i64>>,
+    chain_id: &str,
+    block_number: i64,
+) -> bool {
+    published.is_none_or(|bounds| {
+        bounds
+            .get(chain_id)
+            .is_some_and(|block| block_number <= *block)
+    })
 }
 
 pub(super) async fn load_logical_name_ids_for_resource_id(
     pool: &PgPool,
     resource_id: Uuid,
     canonical_only: bool,
+    published: Option<&BTreeMap<String, i64>>,
 ) -> Result<Vec<String>> {
     let bindings = if canonical_only {
         crate::load_surface_bindings_by_resource_id(pool, resource_id).await
@@ -95,6 +151,7 @@ pub(super) async fn load_logical_name_ids_for_resource_id(
     }?;
     let mut logical_name_ids = bindings
         .into_iter()
+        .filter(|binding| is_published(published, &binding.chain_id, binding.block_number))
         .map(|binding| binding.logical_name_id)
         .collect::<BTreeSet<_>>();
     let mut candidates = BTreeSet::new();
@@ -105,8 +162,13 @@ pub(super) async fn load_logical_name_ids_for_resource_id(
         if logical_name_ids.contains(&logical_name_id) {
             continue;
         }
-        let wrapped_registrars =
-            load_wrapped_registrar_resource_ids(pool, &logical_name_id, canonical_only).await?;
+        let wrapped_registrars = load_wrapped_registrar_resource_ids_published(
+            pool,
+            &logical_name_id,
+            canonical_only,
+            published,
+        )
+        .await?;
         if wrapped_registrars.contains(&resource_id) {
             logical_name_ids.insert(logical_name_id);
         }

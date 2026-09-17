@@ -3,15 +3,24 @@ mod decode;
 mod page;
 mod query;
 mod read;
+mod resolves_to;
 mod types;
 pub use count::{AddressNamesCurrentCountFilter, count_address_names_current_for_app_filter};
 pub use page::{
-    load_address_names_current_page, load_address_names_current_page_sorted_for_relations,
+    load_address_names_current_page, load_address_names_current_page_filtered,
+    load_address_names_current_page_sorted_for_relations,
+};
+pub(crate) use query::{
+    escape_like_pattern, push_expires_at_timestamp_expr, push_registered_at_timestamp_expr,
 };
 pub use read::{
     load_address_names_current, load_address_names_current_for_relations,
     load_address_names_current_including_noncanonical,
     load_address_names_current_including_noncanonical_for_relations,
+};
+pub use resolves_to::{
+    AddressRecordCurrentEntry, AddressRecordsCurrentPage, ENSIP19_DEFAULT_ADDRESS_RECORD_KEY,
+    load_address_records_current_page,
 };
 pub use types::{
     AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation, AddressNamesCurrentCursor,
@@ -21,6 +30,8 @@ pub use types::{
     AddressNamesCurrentSummary,
 };
 
+// Project owns the selected binding. Interpret can close it before the next publication,
+// so read eligibility checks canonicality, not its mutable active_to field.
 pub const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
   AND anc.canonicality_summary ->> 'state' = 'canonical_lineage'
   AND EXISTS (
@@ -64,7 +75,6 @@ pub const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
       'safe'::bigname_phase.canonicality_state,
       'finalized'::bigname_phase.canonicality_state
   )
-  AND binding.active_to IS NULL
   AND (
       anc.token_lineage_id IS NULL
       OR (

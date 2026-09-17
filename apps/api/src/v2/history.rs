@@ -5,8 +5,8 @@ use axum::{
     extract::{Path, State},
 };
 use bigname_storage::{
-    HistoryCursor, HistoryEvent as StorageHistoryEvent, HistorySummaryMode, SnapshotAt,
-    SnapshotSelectionScope,
+    HistoryBlockWindow, HistoryCursor, HistoryEvent as StorageHistoryEvent, HistoryOrder,
+    HistoryPageOptions, HistorySummary, HistorySummaryMode, SnapshotAt, SnapshotSelectionScope,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::types::{
@@ -22,17 +22,26 @@ use super::support::{
     ExactNameSnapshotSelector, exact_name_snapshot_scope, normalize_inferred_route_name,
 };
 use super::{
-    AtSelector, CursorPayload, Envelope, HistoryEventType, HistoryScope, Meta, Page,
-    QueryParamAllowlist, StrictQueryParams, V2Error, V2Result, api_error_to_v2, decode,
-    decode_at_token, encode, validate_latest_collection_selectors,
+    AtSelector, CursorPayload, Envelope, EventDetail, HistoryEventType, HistoryInclude,
+    HistoryScope, Page, QueryParamAllowlist, QueryParams, SortOrder, StrictQueryParams, V2Error,
+    V2Result, all_chain_slugs, api_error_to_v2, build_event_detail, decode, decode_at_token,
+    encode, history_include, raw_event_kind, validate_latest_collection_selectors,
 };
 
-const HISTORY_SORT: &str = "chain_position_desc";
+const HISTORY_SORT_DESC: &str = "chain_position_desc";
+const HISTORY_SORT_ASC: &str = "chain_position_asc";
 const NAMESPACE_FILTER_KEY: &str = "namespace";
 const NAME_FILTER_KEY: &str = "name";
 const SCOPE_FILTER_KEY: &str = "scope";
+const TYPE_FILTER_KEY: &str = "type";
+const FROM_TIMESTAMP_FILTER_KEY: &str = "from_timestamp";
+const TO_TIMESTAMP_FILTER_KEY: &str = "to_timestamp";
 const NORMALIZED_EVENT_ID_CURSOR_KEY: &str = "normalized_event_id";
 const EVENT_IDENTITY_CURSOR_KEY: &str = "event_identity";
+
+/// Anchored history counts are exact up to this many product-visible rows;
+/// larger results report `total_count=null` instead of scanning further.
+pub(crate) const HISTORY_TOTAL_COUNT_CAP: u64 = 10_000;
 
 pub(crate) struct HistoryQueryParams;
 
@@ -42,6 +51,11 @@ impl QueryParamAllowlist for HistoryQueryParams {
         "at",
         "finality",
         "scope",
+        "type",
+        "order",
+        "from_timestamp",
+        "to_timestamp",
+        "include",
         "cursor",
         "page_size",
     ];
@@ -60,6 +74,12 @@ pub(crate) struct HistoryEvent {
     pub(crate) timestamp: Option<String>,
     pub(crate) transaction_hash: Option<String>,
     pub(crate) log_index: Option<i64>,
+    /// Present only with `include=data`: `contract_address`, `data`.
+    #[serde(flatten)]
+    pub(crate) detail: Option<EventDetail>,
+    /// Present only with `include=raw`: the raw storage event kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) kind: Option<String>,
 }
 
 pub(crate) async fn get_history(
@@ -69,6 +89,7 @@ pub(crate) async fn get_history(
 ) -> V2Result<Json<Envelope<Vec<HistoryEvent>>>> {
     let params = params.into_inner();
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
+    let include = history_include(&params.include)?;
     let normalized = normalize_inferred_route_name(&input_name)
         .map_err(|error| V2Error::invalid_input(error.message))?;
     let namespace = params
@@ -78,14 +99,33 @@ pub(crate) async fn get_history(
 
     let logical_name_id =
         bigname_storage::logical_name_id_for_name(&namespace, &normalized.normalized_name);
+    let cursor_binding = HistoryCursorBinding {
+        namespace: &namespace,
+        parent_logical_name_id: &logical_name_id,
+        scope: params.scope,
+        order: history_storage_order(params.order),
+        params: &params,
+    };
+    let snapshot = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+        &state,
+        params.cursor.as_deref(),
+        Some(&namespace),
+    )
+    .await?;
     let storage_cursor = params
         .cursor
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
-            history_storage_cursor(&payload, &namespace, &logical_name_id, params.scope)
+            let cursor = history_storage_cursor(&payload, &cursor_binding)?;
+            snapshot.validate_cursor(&payload)?;
+            Ok(cursor)
         })
         .transpose()?;
+    let block_window = Some(bound_history_block_window(
+        resolve_history_block_window(&state.pool, &params).await?,
+        &snapshot.block_bounds(),
+    ));
     let interpret_redo_fence = bigname_storage::capture_interpret_redo_fence(&state.pool)
         .await
         .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
@@ -134,6 +174,12 @@ pub(crate) async fn get_history(
             ))
         })?
         .into_iter()
+        .filter(|binding| {
+            snapshot
+                .block_bounds()
+                .get(&binding.chain_id)
+                .is_some_and(|block| binding.block_number <= *block)
+        })
         .map(|binding| binding.resource_id)
         .collect::<BTreeSet<_>>();
         resource_ids.extend(
@@ -172,7 +218,8 @@ pub(crate) async fn get_history(
         resource_ids.into_iter().collect()
     };
     let storage_scope = history_storage_scope(params.scope);
-    let event_kinds = product_history_event_kinds();
+    let mut options = history_page_options(&params, block_window);
+    options.publication_block_bounds = Some(snapshot.block_bounds());
 
     let storage_page = bigname_storage::load_name_history_page(
         &state.pool,
@@ -182,26 +229,30 @@ pub(crate) async fn get_history(
         true,
         storage_cursor.as_ref(),
         params.page_size,
-        HistorySummaryMode::None,
-        &event_kinds,
+        if params.include.iter().any(|v| v == "total_count") {
+            HistorySummaryMode::Count
+        } else {
+            HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP)
+        },
+        &options,
         Some(&interpret_redo_fence),
     )
     .await
     .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
 
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
-        encode(&history_cursor_payload(
-            cursor,
-            &namespace,
-            &parent.logical_name_id,
-            params.scope,
-        ))
+        encode(&snapshot.bind_cursor(history_cursor_payload(cursor, &cursor_binding)))
     });
     let has_more = next_cursor.is_some();
+    let total_count = if params.include.iter().any(|v| v == "total_count") {
+        storage_page.summary.as_ref().map(|s| s.total_count)
+    } else {
+        history_total_count(storage_page.summary.as_ref())
+    };
     let data = storage_page
         .rows
         .iter()
-        .filter_map(|row| build_history_event(row, &normalized.normalized_name))
+        .filter_map(|row| build_history_event(row, &normalized.normalized_name, include))
         .collect();
     Ok(Json(Envelope {
         data,
@@ -209,16 +260,129 @@ pub(crate) async fn get_history(
             cursor: params.cursor.clone(),
             next_cursor,
             page_size: params.page_size,
-            total_count: None,
+            total_count,
             has_more,
         }),
-        meta: Meta::default(),
+        meta: snapshot.finish(&state).await?,
     }))
+}
+
+/// History routes default to newest-first; `order=asc` is the exact reverse.
+pub(crate) fn history_storage_order(order: Option<SortOrder>) -> HistoryOrder {
+    match order {
+        None | Some(SortOrder::Desc) => HistoryOrder::Desc,
+        Some(SortOrder::Asc) => HistoryOrder::Asc,
+    }
+}
+
+pub(crate) fn history_sort_token(order: HistoryOrder) -> &'static str {
+    match order {
+        HistoryOrder::Desc => HISTORY_SORT_DESC,
+        HistoryOrder::Asc => HISTORY_SORT_ASC,
+    }
+}
+
+/// Cursor filter entries shared by every history collection: the canonical
+/// `type` set and the canonical timestamp bounds, each only when requested.
+pub(crate) fn insert_history_filter_keys(
+    filters: &mut BTreeMap<String, String>,
+    params: &QueryParams,
+) {
+    if let Some(event_types) = params.event_types.as_ref() {
+        filters.insert(TYPE_FILTER_KEY.to_owned(), event_types.canonical_value());
+    }
+    if let Some(bound) = params.from_timestamp.as_ref() {
+        filters.insert(
+            FROM_TIMESTAMP_FILTER_KEY.to_owned(),
+            bound.canonical.clone(),
+        );
+    }
+    if let Some(bound) = params.to_timestamp.as_ref() {
+        filters.insert(TO_TIMESTAMP_FILTER_KEY.to_owned(), bound.canonical.clone());
+    }
+}
+
+/// Intersect the caller's time window with the publication's readable per-chain positions.
+/// Forward Interpret work beyond Project's served blocks never changes a continued history.
+pub(crate) fn bound_history_block_window(
+    requested: Option<HistoryBlockWindow>,
+    published: &BTreeMap<String, i64>,
+) -> HistoryBlockWindow {
+    let ranges = match requested {
+        Some(window) => window
+            .ranges
+            .into_iter()
+            .filter_map(|mut range| {
+                let published = *published.get(&range.chain_id)?;
+                range.to_block = Some(range.to_block.map_or(published, |to| to.min(published)));
+                (range.from_block.is_none_or(|from| from <= published)).then_some(range)
+            })
+            .collect(),
+        None => published
+            .iter()
+            .map(|(chain_id, block)| bigname_storage::ChainBlockRange {
+                chain_id: chain_id.clone(),
+                from_block: None,
+                to_block: Some(*block),
+            })
+            .collect(),
+    };
+    HistoryBlockWindow { ranges }
+}
+
+/// Map `from_timestamp`/`to_timestamp` to per-chain block ranges from readable
+/// lineage rows. `None` when no timestamp bound was requested.
+pub(crate) async fn resolve_history_block_window(
+    pool: &sqlx::PgPool,
+    params: &QueryParams,
+) -> V2Result<Option<HistoryBlockWindow>> {
+    if params.from_timestamp.is_none() && params.to_timestamp.is_none() {
+        return Ok(None);
+    }
+    let ranges = bigname_storage::resolve_chain_block_ranges(
+        pool,
+        &all_chain_slugs(),
+        params.from_timestamp.as_ref().map(|bound| bound.value),
+        params.to_timestamp.as_ref().map(|bound| bound.value),
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(error = ?error, "failed to resolve history timestamp window");
+        V2Error::internal_error("failed to resolve history timestamp window")
+    })?;
+    Ok(Some(HistoryBlockWindow { ranges }))
+}
+
+/// Product read options: an explicit `type` set narrows the stored kinds and
+/// joins cursor anchor validation; otherwise every product kind is read.
+pub(crate) fn history_page_options(
+    params: &QueryParams,
+    block_window: Option<HistoryBlockWindow>,
+) -> HistoryPageOptions {
+    HistoryPageOptions {
+        publication_block_bounds: None,
+        order: history_storage_order(params.order),
+        event_kinds: params
+            .event_types
+            .as_ref()
+            .map(|event_types| event_types.storage_event_kinds())
+            .unwrap_or_else(product_history_event_kinds),
+        bind_cursor_anchor_to_event_kinds: params.event_types.is_some(),
+        block_window,
+    }
+}
+
+/// A capped count above the cap means the exact count was not computed.
+pub(crate) fn history_total_count(summary: Option<&HistorySummary>) -> Option<u64> {
+    summary
+        .map(|summary| summary.total_count)
+        .filter(|total_count| *total_count <= HISTORY_TOTAL_COUNT_CAP)
 }
 
 pub(crate) fn build_history_event(
     row: &StorageHistoryEvent,
     anchor_name: &str,
+    include: HistoryInclude,
 ) -> Option<HistoryEvent> {
     let event_type = history_event_type(&row.event_kind)?;
 
@@ -233,6 +397,8 @@ pub(crate) fn build_history_event(
         timestamp: row.block_timestamp.map(format_timestamp),
         transaction_hash: row.transaction_hash.clone(),
         log_index: row.log_index,
+        detail: include.data.then(|| build_event_detail(row, event_type)),
+        kind: raw_event_kind(row, include),
     })
 }
 
@@ -279,22 +445,41 @@ fn history_redo_stale_error() -> V2Error {
     V2Error::stale("history is temporarily unavailable while Interpret redo is in progress")
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct HistoryCursorBinding<'a> {
+    pub(crate) namespace: &'a str,
+    pub(crate) parent_logical_name_id: &'a str,
+    pub(crate) scope: HistoryScope,
+    pub(crate) order: HistoryOrder,
+    pub(crate) params: &'a QueryParams,
+}
+
+fn history_cursor_filters(binding: &HistoryCursorBinding<'_>) -> BTreeMap<String, String> {
+    let mut filters = BTreeMap::from([
+        (
+            NAMESPACE_FILTER_KEY.to_owned(),
+            binding.namespace.to_owned(),
+        ),
+        (
+            NAME_FILTER_KEY.to_owned(),
+            binding.parent_logical_name_id.to_owned(),
+        ),
+        (
+            SCOPE_FILTER_KEY.to_owned(),
+            binding.scope.as_str().to_owned(),
+        ),
+    ]);
+    insert_history_filter_keys(&mut filters, binding.params);
+    filters
+}
+
 pub(crate) fn history_cursor_payload(
     cursor: &HistoryCursor,
-    namespace: &str,
-    parent_logical_name_id: &str,
-    scope: HistoryScope,
+    binding: &HistoryCursorBinding<'_>,
 ) -> CursorPayload {
     CursorPayload::new(
-        HISTORY_SORT,
-        BTreeMap::from([
-            (NAMESPACE_FILTER_KEY.to_owned(), namespace.to_owned()),
-            (
-                NAME_FILTER_KEY.to_owned(),
-                parent_logical_name_id.to_owned(),
-            ),
-            (SCOPE_FILTER_KEY.to_owned(), scope.as_str().to_owned()),
-        ]),
+        history_sort_token(binding.order),
+        history_cursor_filters(binding),
         BTreeMap::from([
             (
                 NORMALIZED_EVENT_ID_CURSOR_KEY.to_owned(),
@@ -311,22 +496,12 @@ pub(crate) fn history_cursor_payload(
 
 pub(crate) fn history_storage_cursor(
     payload: &CursorPayload,
-    namespace: &str,
-    parent_logical_name_id: &str,
-    scope: HistoryScope,
+    binding: &HistoryCursorBinding<'_>,
 ) -> V2Result<HistoryCursor> {
-    if payload.sort != HISTORY_SORT {
+    if payload.sort != history_sort_token(binding.order) {
         return Err(invalid_cursor_error());
     }
-    if payload.filters.len() != 3
-        || payload
-            .filters
-            .get(NAMESPACE_FILTER_KEY)
-            .map(String::as_str)
-            != Some(namespace)
-        || payload.filters.get(NAME_FILTER_KEY).map(String::as_str) != Some(parent_logical_name_id)
-        || payload.filters.get(SCOPE_FILTER_KEY).map(String::as_str) != Some(scope.as_str())
-    {
+    if payload.filters != history_cursor_filters(binding) {
         return Err(invalid_cursor_error());
     }
     if payload.last_item.len() != 2 {
@@ -417,101 +592,4 @@ pub(crate) fn format_timestamp(value: OffsetDateTime) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn history_cursor_payload_round_trips_storage_cursor() {
-        let cursor = HistoryCursor {
-            normalized_event_id: 42,
-            event_identity: "event:42".to_owned(),
-        };
-        let payload = history_cursor_payload(&cursor, "ens", "ens:parent.eth", HistoryScope::Both);
-
-        assert_eq!(
-            payload.filters,
-            BTreeMap::from([
-                ("namespace".to_owned(), "ens".to_owned()),
-                ("name".to_owned(), "ens:parent.eth".to_owned()),
-                ("scope".to_owned(), "both".to_owned()),
-            ])
-        );
-
-        assert_eq!(
-            history_storage_cursor(&payload, "ens", "ens:parent.eth", HistoryScope::Both)
-                .expect("cursor must decode"),
-            cursor
-        );
-        assert!(payload.snapshot.is_none());
-    }
-
-    #[test]
-    fn history_cursor_rejects_wrong_sort_filter_or_scope() {
-        let cursor = HistoryCursor {
-            normalized_event_id: 42,
-            event_identity: "event:42".to_owned(),
-        };
-
-        let mut payload =
-            history_cursor_payload(&cursor, "ens", "ens:parent.eth", HistoryScope::Both);
-        payload.sort = "wrong".to_owned();
-        assert!(
-            history_storage_cursor(&payload, "ens", "ens:parent.eth", HistoryScope::Both).is_err()
-        );
-
-        let mut payload =
-            history_cursor_payload(&cursor, "ens", "ens:parent.eth", HistoryScope::Both);
-        payload
-            .filters
-            .insert("name".to_owned(), "ens:other.eth".to_owned());
-        assert!(
-            history_storage_cursor(&payload, "ens", "ens:parent.eth", HistoryScope::Both).is_err()
-        );
-
-        let payload = history_cursor_payload(&cursor, "ens", "ens:parent.eth", HistoryScope::Name);
-        assert!(
-            history_storage_cursor(&payload, "ens", "ens:parent.eth", HistoryScope::Both).is_err()
-        );
-    }
-
-    #[test]
-    fn history_cursor_ignores_legacy_snapshot_component() {
-        let cursor = HistoryCursor {
-            normalized_event_id: 42,
-            event_identity: "event:42".to_owned(),
-        };
-        let mut payload =
-            history_cursor_payload(&cursor, "ens", "ens:parent.eth", HistoryScope::Both);
-        payload.snapshot = Some("legacy-snapshot".to_owned());
-
-        assert_eq!(
-            history_storage_cursor(&payload, "ens", "ens:parent.eth", HistoryScope::Both)
-                .expect("legacy snapshot component must not bind a latest-state cursor"),
-            cursor
-        );
-    }
-
-    #[test]
-    fn history_event_type_filters_non_product_kinds() {
-        assert_eq!(
-            history_event_type("RegistrationRenewed"),
-            Some(HistoryEventType::Renewal)
-        );
-        assert_eq!(
-            history_event_type("RegistrationReleased"),
-            Some(HistoryEventType::Release)
-        );
-        assert_eq!(
-            history_event_type("ExpiryChanged"),
-            Some(HistoryEventType::Expiry)
-        );
-        assert_eq!(
-            history_event_type("AuthorityEpochChanged"),
-            Some(HistoryEventType::Authority)
-        );
-        assert_eq!(history_event_type("SurfaceBound"), None);
-        assert_eq!(history_event_type("PreimageObserved"), None);
-        assert_eq!(history_event_type("MigrationApplied"), None);
-        assert_eq!(history_event_type("ContractDiscovered"), None);
-    }
-}
+mod tests;

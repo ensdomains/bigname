@@ -4,7 +4,7 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use bigname_storage::{HistoryCursor, HistorySummaryMode};
+use bigname_storage::{HistoryCursor, HistoryOrder, HistorySummaryMode};
 
 use crate::AppState;
 
@@ -12,13 +12,14 @@ use super::address_names::relation_set_to_storage;
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::support::{ensure_public_namespace, parse_evm_address};
 use super::{
-    CursorPayload, Envelope, Event, HistoryScope, Meta, Page, QueryParamAllowlist, RelationSet,
-    StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_event, decode, encode,
-    history_storage_scope, map_history_page_error, product_history_event_kinds,
+    CursorPayload, Envelope, Event, HISTORY_TOTAL_COUNT_CAP, HistoryScope, Page,
+    QueryParamAllowlist, QueryParams, RelationSet, StrictQueryParams, V2Error, V2Result,
+    api_error_to_v2, build_event, decode, encode, history_include, history_page_options,
+    history_sort_token, history_storage_order, history_storage_scope, history_total_count,
+    insert_history_filter_keys, map_history_page_error, resolve_history_block_window,
     validate_latest_collection_selectors,
 };
 
-const ADDRESS_HISTORY_SORT: &str = "chain_position_desc";
 const ADDRESS_FILTER_KEY: &str = "address";
 const NAMESPACE_FILTER_KEY: &str = "namespace";
 const RELATION_FILTER_KEY: &str = "relation";
@@ -35,6 +36,11 @@ impl QueryParamAllowlist for AddressHistoryQueryParams {
         "finality",
         "relation",
         "scope",
+        "type",
+        "order",
+        "from_timestamp",
+        "to_timestamp",
+        "include",
         "cursor",
         "page_size",
     ];
@@ -49,6 +55,16 @@ pub(crate) async fn get_address_history(
 ) -> V2Result<Json<Envelope<Vec<Event>>>> {
     let params = params.into_inner();
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
+    if params
+        .relation
+        .as_ref()
+        .is_some_and(RelationSet::is_resolves_to)
+    {
+        return Err(V2Error::invalid_input(
+            "relation=resolves_to is not supported for address history",
+        ));
+    }
+    let include = history_include(&params.include)?;
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let namespace = params.namespace.clone().unwrap_or_else(|| "ens".to_owned());
     ensure_public_namespace(&namespace).map_err(api_error_to_v2)?;
@@ -59,22 +75,37 @@ pub(crate) async fn get_address_history(
         .unwrap_or_default();
     let storage_relations = (!storage_relations.is_empty()).then_some(storage_relations.as_slice());
     let storage_scope = history_storage_scope(params.scope);
-    let event_kinds = product_history_event_kinds();
 
     let cursor_binding = AddressHistoryCursorBinding {
         address: &normalized_address,
         namespace: &namespace,
         relation: params.relation.as_ref(),
         scope: params.scope,
+        order: history_storage_order(params.order),
+        params: Some(&params),
     };
+    let snapshot = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+        &state,
+        params.cursor.as_deref(),
+        Some(&namespace),
+    )
+    .await?;
     let storage_cursor = params
         .cursor
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
-            address_history_storage_cursor(&payload, &cursor_binding)
+            let cursor = address_history_storage_cursor(&payload, &cursor_binding)?;
+            snapshot.validate_cursor(&payload)?;
+            Ok(cursor)
         })
         .transpose()?;
+    let block_window = Some(super::history::bound_history_block_window(
+        resolve_history_block_window(&state.pool, &params).await?,
+        &snapshot.block_bounds(),
+    ));
+    let mut options = history_page_options(&params, block_window);
+    options.publication_block_bounds = Some(snapshot.block_bounds());
 
     let storage_page = bigname_storage::load_address_history_page_for_relations(
         &state.pool,
@@ -85,8 +116,12 @@ pub(crate) async fn get_address_history(
         true,
         storage_cursor.as_ref(),
         params.page_size,
-        HistorySummaryMode::None,
-        &event_kinds,
+        if params.include.iter().any(|v| v == "total_count") {
+            HistorySummaryMode::Count
+        } else {
+            HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP)
+        },
+        &options,
         true,
     )
     .await
@@ -100,11 +135,15 @@ pub(crate) async fn get_address_history(
     .await
     .map_err(|_| V2Error::internal_error("failed to run history read test hook"))?;
 
-    let next_cursor = storage_page
-        .next_cursor
-        .as_ref()
-        .map(|cursor| encode(&address_history_cursor_payload(cursor, &cursor_binding)));
+    let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
+        encode(&snapshot.bind_cursor(address_history_cursor_payload(cursor, &cursor_binding)))
+    });
     let has_more = next_cursor.is_some();
+    let total_count = if params.include.iter().any(|v| v == "total_count") {
+        storage_page.summary.as_ref().map(|s| s.total_count)
+    } else {
+        history_total_count(storage_page.summary.as_ref())
+    };
     let logical_name_ids = storage_page
         .rows
         .iter()
@@ -135,7 +174,7 @@ pub(crate) async fn get_address_history(
                 .as_ref()
                 .and_then(|logical_name_id| names.get(logical_name_id))
                 .map(|row| row.normalized_name.as_str());
-            build_event(row, name)
+            build_event(row, name, include)
         })
         .collect();
     Ok(Json(Envelope {
@@ -144,10 +183,10 @@ pub(crate) async fn get_address_history(
             cursor: params.cursor.clone(),
             next_cursor,
             page_size: params.page_size,
-            total_count: None,
+            total_count,
             has_more,
         }),
-        meta: Meta::default(),
+        meta: snapshot.finish(&state).await?,
     }))
 }
 
@@ -157,6 +196,10 @@ pub(crate) struct AddressHistoryCursorBinding<'a> {
     pub(crate) namespace: &'a str,
     pub(crate) relation: Option<&'a RelationSet>,
     pub(crate) scope: HistoryScope,
+    pub(crate) order: HistoryOrder,
+    /// Request parameters whose `type` set and timestamp bounds the cursor binds;
+    /// `None` binds an unfiltered request.
+    pub(crate) params: Option<&'a QueryParams>,
 }
 
 pub(crate) fn address_history_cursor_payload(
@@ -164,7 +207,7 @@ pub(crate) fn address_history_cursor_payload(
     binding: &AddressHistoryCursorBinding<'_>,
 ) -> CursorPayload {
     CursorPayload::new(
-        ADDRESS_HISTORY_SORT,
+        history_sort_token(binding.order),
         address_history_cursor_filters(binding),
         BTreeMap::from([
             (
@@ -184,7 +227,7 @@ pub(crate) fn address_history_storage_cursor(
     payload: &CursorPayload,
     binding: &AddressHistoryCursorBinding<'_>,
 ) -> V2Result<HistoryCursor> {
-    if payload.sort != ADDRESS_HISTORY_SORT {
+    if payload.sort != history_sort_token(binding.order) {
         return Err(invalid_cursor_error());
     }
     if payload.filters != address_history_cursor_filters(binding) {
@@ -226,6 +269,9 @@ fn address_history_cursor_filters(
     if let Some(relation) = binding.relation {
         filters.insert(RELATION_FILTER_KEY.to_owned(), relation.canonical_value());
     }
+    if let Some(params) = binding.params {
+        insert_history_filter_keys(&mut filters, params);
+    }
     filters
 }
 
@@ -251,6 +297,8 @@ mod tests {
             namespace: "ens",
             relation: Some(relation),
             scope: HistoryScope::Both,
+            order: HistoryOrder::Desc,
+            params: None,
         }
     }
 
@@ -290,6 +338,47 @@ mod tests {
             address_history_storage_cursor(&payload, &binding).expect("cursor must decode"),
             cursor
         );
+    }
+
+    #[test]
+    fn address_history_cursor_binds_order_type_set_and_timestamps() {
+        let cursor = sample_cursor();
+        let params = crate::v2::QueryParams::try_from(crate::v2::RawQueryParams {
+            order: Some("asc".to_owned()),
+            event_type: Some("record,authority".to_owned()),
+            to_timestamp: Some("2023-11-14T22:15:07Z".to_owned()),
+            ..crate::v2::RawQueryParams::default()
+        })
+        .expect("params must parse");
+        let binding = AddressHistoryCursorBinding {
+            order: HistoryOrder::Asc,
+            params: Some(&params),
+            ..sample_binding()
+        };
+        let payload = address_history_cursor_payload(&cursor, &binding);
+
+        assert_eq!(payload.sort, "chain_position_asc");
+        assert_eq!(
+            payload.filters,
+            BTreeMap::from([
+                ("address".to_owned(), ADDRESS.to_owned()),
+                ("namespace".to_owned(), "ens".to_owned()),
+                ("relation".to_owned(), "manager".to_owned()),
+                ("scope".to_owned(), "both".to_owned()),
+                ("type".to_owned(), "authority,record".to_owned()),
+                ("to_timestamp".to_owned(), "2023-11-14T22:15:07Z".to_owned()),
+            ])
+        );
+        assert_eq!(
+            address_history_storage_cursor(&payload, &binding).expect("cursor must decode"),
+            cursor
+        );
+        assert!(address_history_storage_cursor(&payload, &sample_binding()).is_err());
+        let desc_binding = AddressHistoryCursorBinding {
+            order: HistoryOrder::Desc,
+            ..binding.clone()
+        };
+        assert!(address_history_storage_cursor(&payload, &desc_binding).is_err());
     }
 
     #[test]

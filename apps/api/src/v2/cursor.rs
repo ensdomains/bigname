@@ -13,6 +13,8 @@ pub(crate) struct Payload {
     pub(crate) filters: BTreeMap<String, String>,
     pub(crate) last_item: BTreeMap<String, String>,
     pub(crate) snapshot: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) evaluated_at: Option<String>,
 }
 
 impl Payload {
@@ -28,6 +30,7 @@ impl Payload {
             filters,
             last_item,
             snapshot,
+            evaluated_at: None,
         }
     }
 }

@@ -91,6 +91,9 @@ impl Engine {
                     &request.sources,
                     common.number + 1,
                     load_to,
+                    // Live-follow works at the unfinalized head, exactly where a
+                    // prefetched range could be read before the reorg that changes it.
+                    None,
                 )
                 .await?;
             self.require_loaded_suffix_descends_from(&request.chain_id, &loaded.marker, &common)

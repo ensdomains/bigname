@@ -5,7 +5,33 @@ pub(super) async fn load_supported_record_inventory_current_for_snapshot(
     row: &NameCurrentRow,
     selected_snapshot: &SelectedSnapshot,
 ) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
-    let Some((resource_id, record_version_boundary)) = record_inventory_lookup_key(row) else {
+    load_record_inventory_for_snapshot_key(
+        pool,
+        record_inventory_lookup_key(row),
+        selected_snapshot,
+    )
+    .await
+}
+
+pub(super) async fn load_indexed_record_inventory_current_for_snapshot(
+    pool: &PgPool,
+    row: &NameCurrentRow,
+    selected_snapshot: &SelectedSnapshot,
+) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
+    load_record_inventory_for_snapshot_key(
+        pool,
+        bigname_storage::resolution_record_inventory_lookup_key_any_chain(row),
+        selected_snapshot,
+    )
+    .await
+}
+
+async fn load_record_inventory_for_snapshot_key(
+    pool: &PgPool,
+    lookup_key: Option<(Uuid, JsonValue)>,
+    selected_snapshot: &SelectedSnapshot,
+) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
+    let Some((resource_id, record_version_boundary)) = lookup_key else {
         return Ok(None);
     };
 
@@ -105,6 +131,9 @@ async fn load_record_inventory_current_matching_selected_snapshot_by_resource(
               'safe'::bigname_phase.canonicality_state,
               'finalized'::bigname_phase.canonicality_state
           )
+          -- A cleared registration's history-only row serves no records; probing it would only
+          -- find the record-serving read filter reject it and report an unloadable projection row.
+          AND ric.provenance ->> 'record_serving' IS DISTINCT FROM 'false'
         "#,
     )
     .bind(resource_id)
@@ -184,9 +213,7 @@ async fn probe_record_inventory_current_candidate_for_snapshot(
         )
         .await?
         {
-            SnapshotProjectionRead::Found(record_inventory_row) => {
-                Ok(Some(record_inventory_row))
-            }
+            SnapshotProjectionRead::Found(record_inventory_row) => Ok(Some(record_inventory_row)),
             SnapshotProjectionRead::NotFound => Err(SnapshotSelectionError::internal(format!(
                 "matched record_inventory_current boundary for resource_id {resource_id} but the projection row was not loadable"
             ))),

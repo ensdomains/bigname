@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::name_record::string_field;
-use super::support::{ResolutionRecordKey, parse_resolution_record_key};
+use super::support::{ResolutionRecordKey, parse_resolution_record_key, serving_record_inventory};
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct RecordInventory {
@@ -58,6 +58,29 @@ pub(super) fn inventory_summary(
     let Some(record_inventory) = record_inventory else {
         return RecordInventory::default();
     };
+
+    if serving_record_inventory(Some(record_inventory)).is_none() {
+        // An unsupported row can assert neither presence nor absence, so every product key it
+        // knows about, and every requested key, is unsupported (docs/api-v2-routes.md).
+        let mut unsupported_keys = keys_from_sections(&[
+            &record_inventory.selectors,
+            &record_inventory.entries,
+            &record_inventory.explicit_gaps,
+        ])
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        unsupported_keys.extend(
+            requested_records
+                .into_iter()
+                .flatten()
+                .map(|record| record.record_key.clone()),
+        );
+        return RecordInventory {
+            known_keys: Vec::new(),
+            unset_keys: Vec::new(),
+            unsupported_keys: unsupported_keys.into_iter().collect(),
+        };
+    }
 
     let unset_keys = keys_from_sections(&[&record_inventory.explicit_gaps]);
     let mut unsupported_keys = record_inventory

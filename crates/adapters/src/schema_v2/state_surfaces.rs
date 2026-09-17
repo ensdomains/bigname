@@ -157,34 +157,6 @@ impl State {
         }
     }
 
-    /// A resolver set while the node's authority had no surface is linked to the
-    /// resource alone. When a label-bearing event names the surface, the link
-    /// takes the name, and the link as it was is returned so the caller can
-    /// replay it onto the surface; a link that already carries a name, or no
-    /// link, returns nothing.
-    pub(in crate::schema_v2) fn name_v1_resolver_link(
-        &mut self,
-        namespace: &str,
-        namehash: &str,
-        logical_name_id: &str,
-        resource_id: Uuid,
-    ) -> Option<V1ResolverLink> {
-        let key = v1_key(namespace, namehash);
-        let link = self.v1_resolver_links.get(&key)?.clone();
-        if link.logical_name_id.is_some()
-            || link.resolver_address.eq_ignore_ascii_case(ZERO_ADDRESS)
-        {
-            return None;
-        }
-        let named = V1ResolverLink {
-            resource_id: Some(resource_id),
-            logical_name_id: Some(logical_name_id.to_owned()),
-            ..link
-        };
-        self.v1_resolver_links.insert(key, named.clone());
-        Some(named)
-    }
-
     pub(in crate::schema_v2) fn v1_resolver_link(
         &self,
         namespace: &str,

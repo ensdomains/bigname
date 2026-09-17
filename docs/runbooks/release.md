@@ -25,10 +25,11 @@ installer deliberately refuses a nonempty phase schema, so schema initialization
 is a separate deployment step rather than part of the repeatable smoke check. CI
 performs that setup immediately before invoking this script.
 
-The edge check reflects the C2/C3 transition. The API binary serves `/v2`,
-GraphQL, and `/healthz`, while the checked-in public edge still denies `/v2`.
-Removed v1 and documentation-helper paths return `404`; GraphQL POST and its
-browser preflight remain admitted. The C3 edge flip is maintainer-gated.
+The edge check reflects the #315 state. The API binary serves `/v1`, GraphQL, `/docs`,
+and `/healthz`; the checked-in public edge admits `/v1` reads,
+`POST /v1/lookup`, GraphQL POST, and their browser preflights. `/v2`,
+documentation-helper paths, `/healthz`, GraphiQL, and encoded-traversal paths
+return `404` publicly.
 
 `--no-network` makes Cargo offline and requires all HTTP endpoints to be
 loopback. It does not skip the PostgreSQL, API, or Caddy checks. CI must fetch

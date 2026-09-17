@@ -499,7 +499,10 @@ and resumable. A completed scoped refresh stays marked as "Interpret flags
 pending" until Interpret completion clears or replaces it atomically, so a
 restart in that handoff resumes the same command without repeating Project. An
 unrelated ordinary Project redo that was already pending is widened or
-preserved, never completed by the recompute session. This split
+preserved, never completed by the recompute session; a stop that lands after
+that widening committed and before the flags were recomputed reports the
+widened redo and asks for a `recompute-flags` rerun over the same range, since
+that redo runs as usual but does not recompute the flags. This split
 deliberately narrows the simplification plan's
 bare statement that the mode runs without replay: shadow names suppress
 bindings, so a class transition requires normal binding derivation or
@@ -559,9 +562,9 @@ phase-state reset, rerun the normal pipeline instead.
 ## Surviving services
 
 The API uses one `bigname_phase` request pool plus a reserved readiness
-connection. GraphQL, `/v2/status`, snapshot selection,
+connection. GraphQL, `/v1/status`, snapshot selection,
 [verified lookup](glossary.md#verified-lookup), and all projection reads use
-phase relations. The `/v2/status` phase-runner heartbeat
+phase relations. The `/v1/status` phase-runner heartbeat
 threshold uses `BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS` (60 seconds by
 default). V2 record lookup may perform only the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write;
@@ -576,7 +579,7 @@ or `UPDATE` on
 `resolution_divergences` and no `UPDATE` on the guarded head, lineage, or
 projection relations.
 
-API startup tolerates a wholly absent phase schema so `/v2/status` can return
+API startup tolerates a wholly absent phase schema so `/v1/status` can return
 its empty, `degraded` response. Once the phase schema exists, startup checks
 every phase-schema relation, function, and type its serving paths read:
 relations by name, both guarded functions by exact signature, and the
@@ -603,6 +606,7 @@ GRANT SELECT ON TABLE
     bigname_phase.migration_event_associations,
     bigname_phase.name_current,
     bigname_phase.address_names_current,
+    bigname_phase.address_records_current,
     bigname_phase.children_current,
     bigname_phase.permissions_current,
     bigname_phase.permissions_current_resource_summary,
@@ -614,7 +618,8 @@ GRANT SELECT ON TABLE
     bigname_phase.record_inventory_current,
     bigname_phase.primary_names_current,
     bigname_phase.manifest_versions,
-    bigname_phase.manifest_contract_instances
+    bigname_phase.manifest_contract_instances,
+    bigname_phase.contract_instance_addresses
 TO bigname_api;
 GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state(
     text, bigint, text, jsonb, jsonb, uuid, text, text
@@ -625,10 +630,23 @@ GRANT EXECUTE ON FUNCTION bigname_phase.write_resolution_divergence(
 ) TO bigname_api;
 ```
 
-This role cannot read raw facts, discovery state, the divergence table, or
-unrelated operational tables directly. Reapply these explicit relation and
-function grants after a reviewed phase-schema replacement; do not use ownership
+This role cannot read raw facts, the divergence table, or unrelated operational
+tables directly. Its only direct discovery-state read is
+`contract_instance_addresses`: the registry overview and labels routes use
+declared address intervals to recognize registry contracts at the selected
+block. The grant is SELECT-only and does not admit discovery writes.
+Reapply these explicit relation and function grants after a reviewed
+phase-schema replacement; do not use ownership
 or schema-wide write grants as a shortcut.
+
+`migration_event_associations` is on the list because
+`GET /v1/diagnostics/events` selects the ENSv1→ENSv2 migration correlation rows
+for its candidate payload; the public `GET /v1/events` path shares the same
+loader but does not select from that table. The row set is Interpret
+coordination state rather than a projection, so the grant is deliberately
+read-only and does not widen the API's write boundary. A database provisioned
+without it serves every other route and fails only that one, with a permission
+error rather than an empty payload.
 
 ### Replacing an initialized phase schema
 
@@ -713,9 +731,121 @@ replay evidence.
 
 Configure
 `BIGNAME_API_CHAIN_RPC_URLS` for status and verified lookup as described in the
-API docs. The request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; together
+API docs. Verified ENS reads (`source=verified` and `source=auto` on
+`/v1/names/{name}/records`, `/v1/lookup`, and ENS/60 verification on
+`/v1/addresses/{address}/primary-name`) execute against the Ethereum L1 of the
+deployment profile the API serves, so an API in front of a `manifests/sepolia`
+projection needs an `ethereum-sepolia=<https url>` entry (an API in front of
+`manifests/mainnet` needs `ethereum-mainnet=`). Without that entry the verified
+routes fail closed with `409 stale` and `GET /v1/namespaces/ens` reports
+`verified_records` and `verified_primary_name` as `unsupported` with
+`unsupported_reason=execution_provider_not_configured` for chain `11155111`;
+with it, both report `full`. The Sepolia entrypoint is the checked-in shadow
+`manifests/sepolia/ethereum/ens/ens_execution/v1.toml`, which the normal
+manifest sync installs. The request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; together
 with the reserved readiness connection, one API process can open at most
 `BIGNAME_DATABASE_MAX_CONNECTIONS + 1` PostgreSQL connections.
+
+### Database connection budget
+
+`BIGNAME_DATABASE_MAX_CONNECTIONS` is an API-only setting. The phase runner does
+not read it; it derives its own pools from the number of configured chains, so
+the two services must be budgeted separately.
+
+For `C` configured chains, one phase-runner process opens at most:
+
+| Pool | Size | Where |
+| --- | --- | --- |
+| Phase pool | `max(2C, 4)` | `apps/phase-runner/src/main.rs`, `RunnerDatabase::connect` in the `Run` arm |
+| Verification pool | `max(C, 1)` | `apps/phase-runner/src/main.rs`, `VerificationDatabase::connect` in the `Run` arm |
+| Advisory phase locks, peak | `3C` | see below |
+
+Each lock is a dedicated connection outside both pools, because it holds a
+session-scoped `pg_try_advisory_lock` (`PhaseLock::acquire`, `apps/phase-runner/src/phase_lock.rs`).
+How many are held at once depends on where the chain is in its cycle, and the
+budget has to cover the peak, not the common case:
+
+| Situation | Locks per chain | Where |
+| --- | --- | --- |
+| Serial path: Verify runs before Live (`verify_before_live`) | `1` | `PhaseRunner::run_chain`, `apps/phase-runner/src/runner_chain.rs` |
+| Combined path: Verify and Live polled concurrently, each holding its own lock | `2` | `apps/phase-runner/src/runner_live_follow.rs` |
+| Post-Live discovery repair: a Verify fence, then an Ingest fence inside it, then one phase lock inside that | `3` | `runner_live_follow.rs:70`, `:112`, `:143` |
+| `rewind` (separate operator process): the four writer-phase locks, no Verify lock | `4`, plus its own pool | `rewind::acquire_writer_locks`, `apps/phase-runner/src/rewind.rs`; `RunnerDatabase::connect` in the `Rewind` arm |
+
+A fence is an ordinary phase lock on that phase's name, so it excludes the
+phase itself rather than adding to it — the post-Live Verify fence waits for the
+paired Verify to release before it is granted. Catch-up and the spine phases run
+one after another and never hold two of their own locks at once.
+
+So budget `max(2C, 4) + max(C, 1) + 3C` for the running service: a one-chain
+deployment peaks at `4 + 1 + 3 = 8` connections and settles at `6` or `7`
+depending on the path; three chains peak at `6 + 3 + 9 = 18`. A start that
+finds phases recorded against chains no longer configured takes one lock at a
+time to close them out (`settle_unconfigured_phases`, `apps/phase-runner/src/runner_chain.rs`) and does
+not raise the peak.
+
+`phase-runner rewind` is not part of that figure: it is a separate process
+with its own pool of up to `2` connections (`RunnerDatabase::connect` in the `Rewind` arm)
+that takes the Ingest, Interpret, Project, and Live locks for one chain and
+never the Verify lock (`rewind::acquire_writer_locks`, `apps/phase-runner/src/rewind.rs`). It therefore
+succeeds while the supervised runner is alive whenever that chain is not in a
+writer phase — during its serial Verify phase, for instance — so the two
+processes can hold connections at the same time. Either stop the supervised
+runner before a rewind, or budget `6` more connections for the duration:
+`14` for one chain, `24` for three. A rewind against a chain whose writer
+phase is running fails on the held lock rather than waiting.
+
+`phase-runner redo` is likewise a separate, and potentially long-running,
+process: a writer pool of up to `4` (`RunnerDatabase::connect` in the `Redo` arm), a
+verifier pool of `1` opened at start whenever the requested redo includes
+Verify (`VerificationDatabase::connect` under `phase.requires_verify()`), and up to two locks at once — the Project
+lock is held while the Interpret phase runs beneath it
+(`run_recompute_interpret_with_project_lock`, `apps/phase-runner/src/runner_operator_redo.rs`), and every phase run
+takes its own lock (`PhaseRunner::run_phase`, `apps/phase-runner/src/runner.rs`). The advisory locks
+let it run beside a supervised runner that holds a non-conflicting phase such as
+Live. Either stop the supervised runner before an explicit redo, or budget `7`
+more for its duration.
+
+The advisory locks do **not** serialize explicit processes against each other:
+they only prevent the same phase from running twice on the same chain. A
+Verify-only redo holds the Verify lock alone
+(`redo_phase_only`, `apps/phase-runner/src/runner_operator_redo.rs`), rewind never takes
+Verify, and lock keys are per chain, so a redo and a rewind — or two redos on
+different chains — can run at the same time and each brings its own pools and
+locks: up to `7` for a redo, `6` for a rewind. Run one explicit process at a
+time, which is what the ceiling below assumes, or add each additional
+overlapping process to the budget in full.
+
+**The superuser reservation.** The writer login created from `POSTGRES_USER` is
+a superuser; `bigname_api` and `bigname_verify` are created `NOSUPERUSER`
+(the grant blocks above). PostgreSQL 16 keeps
+`superuser_reserved_connections` (default `3`, set explicitly in the compose
+files as `POSTGRES_SUPERUSER_RESERVED_CONNECTIONS`) usable by superusers only,
+so a non-superuser connection is refused once `max_connections` minus that
+reservation is in use — even though the superuser writer pool, its advisory
+locks, and a redo or rewind can still connect. A ceiling set exactly to the
+service sum therefore starves the API and the verifier first. Count the
+reservation in the ceiling rather than relying on it as headroom.
+
+Set the server's own ceiling explicitly with `POSTGRES_MAX_CONNECTIONS` rather
+than inheriting the PostgreSQL default, and size it as the sum of:
+
+| Term | Value |
+| --- | --- |
+| Supervised runner peak | `max(2C, 4) + max(C, 1) + 3C` |
+| Explicit maintenance, one process at a time | `7` (a redo; a rewind needs `6`) — add `7` per additional process you intend to overlap |
+| Superuser reservation | `superuser_reserved_connections`, `3` by default |
+| Administrative headroom | `2` for `psql` and `sqlx migrate` |
+| Each API process | `BIGNAME_DATABASE_MAX_CONNECTIONS + 1` |
+
+One chain with one API process at the default pool of `10` and one explicit
+process at a time: `8 + 7 + 3 + 2 + 11 = 31`. Three chains: `18 + 7 + 3 + 2 +
+11 = 41`. A redo (`7`) and a rewind (`6`) overlapping would need `37` rather than
+`31`. The shipped default of `100` clears all of these; the arithmetic
+matters when the ceiling is lowered to fit `work_mem`. Then budget it against `work_mem`: a single
+backend can hold several `work_mem` allocations at once, so the worst case a
+server commits to is roughly `max_connections x work_mem x concurrent sort or
+hash nodes`, on top of `shared_buffers`.
 
 ## Owner-ratified Sepolia source-role rollout
 
@@ -776,7 +906,14 @@ validation, defaulting to 45000 (45 seconds). Startup rejects a request timeout
 that leaves less than 5000 ms of grace, before database connections or listeners.
 For a 60000 ms request timeout, use at least 65000 ms of grace. Direct launches
 without this optional budget retain their existing request-timeout behavior.
-External stop-timeout overrides must honor the same budget. This API-only
-slice is Part of #641: phase-runner SIGTERM, stop grace, batch settlement,
-heartbeat, restart, and redo behavior remain deferred. It does not authorize
-production rollout or complete the issue.
+External stop-timeout overrides must honor the same budget. The API slice is
+Part of #641. The phase runner handles SIGTERM as well as SIGINT
+(`apps/phase-runner/src/shutdown.rs`), for the supervised run and explicit redo
+only, observing the request at the next batch boundary so the batch in flight
+commits before the loop exits; Compose sets an explicit `stop_grace_period` on
+`phase-runner` (default 120s, `BIGNAME_PHASE_RUNNER_STOP_GRACE_PERIOD`). See the
+runbook's [Pause and resume indexing](runbooks/production-docker.md#pause-and-resume-indexing)
+for what an expired grace leaves behind. Runner heartbeat, restart, and redo
+behaviour under SIGTERM are not separately verified by the container shutdown
+job, which drains the API only. Neither slice authorizes production rollout or
+completes the issue.

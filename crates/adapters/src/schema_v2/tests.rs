@@ -8,8 +8,17 @@ use super::*;
 
 mod migration;
 
+#[path = "tests/record_id_resolver.rs"]
+mod record_id_resolver;
+
+#[path = "tests/resolver_announcements.rs"]
+mod resolver_announcements;
+
 #[path = "tests/v1_pre_surface_resolver.rs"]
 mod v1_pre_surface_resolver;
+
+#[path = "tests/wrapper_permissions.rs"]
+mod wrapper_permissions;
 
 const CHAIN: &str = "adapter-test";
 const CONTRACT: &str = "0x0000000000000000000000000000000000000042";
@@ -316,6 +325,240 @@ mod v1_registrar {
                 matches!(e.event_kind.as_str(), "ResolverChanged" | "SurfaceBound")
                 || (e.event_kind == "AuthorityEpochChanged" && !e.after_state["authority_kind"].is_null())));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn lapsed_wrapped_lease_does_not_revive_the_name_wrapper_registry_custody() -> anyhow::Result<()>
+    {
+        const HOLDER: &str = "0x0000000000000000000000000000000000000055";
+        const WRAPPER: &str = "0x0000000000000000000000000000000000000077";
+        let label = "lapsed-wrapped";
+        let labelhash = keccak256(label.as_bytes());
+        let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]);
+        let parent = super::common::namehash(&["eth".to_owned()]);
+        let block = |number, timestamp| RawBlockInput {
+            chain_id: CHAIN.to_owned(),
+            block_hash: format!("block-{number}"),
+            block_number: number,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(timestamp),
+            canonicality_state: "canonical".to_owned(),
+        };
+        let wrapper_manifest = manifest_with_events(
+            84,
+            "ens",
+            "ens_v1_wrapper_l1",
+            &[(
+                "NameWrapped",
+                "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+                &["name_wrapper"],
+                &[
+                    "TokenControlTransferred",
+                    "ExpiryChanged",
+                    "PermissionScopeChanged",
+                    "SurfaceBound",
+                    "SurfaceUnbound",
+                    "AuthorityEpochChanged",
+                    "PreimageObserved",
+                ],
+            )],
+        );
+        let mut wrapper_admission = admission(84, "name_wrapper");
+        wrapper_admission.address = WRAPPER.to_owned();
+        wrapper_admission.contract_instance_id = Uuid::from_u128(84);
+        // Block 1: controller registration held by HOLDER (registrar_release.rs callback order).
+        // Block 2: wrapETH2LD — the ERC721 token moves to the wrapper, the wrapper reclaims the
+        // registry node, then NameWrapped names HOLDER as the wrapped owner.
+        // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol wrapETH2LD/_wrapETH2LD)
+        let logs = vec![
+            raw_at(
+                super::v1_registry::NewOwner {
+                    node: parent.parse()?,
+                    label: labelhash,
+                    owner: CONTROLLER.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                REGISTRY,
+            ),
+            raw_at(
+                with_topic0(
+                    BaseNameRegistered {
+                        id: U256::from_be_slice(labelhash.as_slice()),
+                        owner: CONTROLLER.parse()?,
+                        expires: U256::from(42),
+                    }
+                    .encode_log_data(),
+                    keccak256(b"NameRegistered(uint256,address,uint256)"),
+                ),
+                1,
+                1,
+                CONTRACT,
+            ),
+            raw_at(
+                super::v1_registry::Transfer {
+                    node: node.parse()?,
+                    owner: HOLDER.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                2,
+                REGISTRY,
+            ),
+            raw_at(
+                Transfer {
+                    from: CONTROLLER.parse()?,
+                    to: HOLDER.parse()?,
+                    tokenId: U256::from_be_slice(labelhash.as_slice()),
+                }
+                .encode_log_data(),
+                1,
+                3,
+                CONTRACT,
+            ),
+            raw_at(
+                super::NameRegistered {
+                    name: label.to_owned(),
+                    label: labelhash,
+                    owner: HOLDER.parse()?,
+                    expires: U256::from(42),
+                }
+                .encode_log_data(),
+                1,
+                4,
+                CONTROLLER,
+            ),
+            raw_at(
+                Transfer {
+                    from: HOLDER.parse()?,
+                    to: WRAPPER.parse()?,
+                    tokenId: U256::from_be_slice(labelhash.as_slice()),
+                }
+                .encode_log_data(),
+                2,
+                0,
+                CONTRACT,
+            ),
+            raw_at(
+                super::v1_registry::Transfer {
+                    node: node.parse()?,
+                    owner: WRAPPER.parse()?,
+                }
+                .encode_log_data(),
+                2,
+                1,
+                REGISTRY,
+            ),
+            raw_at(
+                super::NameWrapped {
+                    node: node.parse()?,
+                    name: b"\x0elapsed-wrapped\x03eth\0".to_vec().into(),
+                    owner: HOLDER.parse()?,
+                    fuses: 196_608,
+                    expiry: 42 + 90 * 86400,
+                }
+                .encode_log_data(),
+                2,
+                2,
+                WRAPPER,
+            ),
+        ];
+        let first_input = BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![lifecycle_manifest(), registry_manifest(), wrapper_manifest],
+            discovery_rules: vec![],
+            admissions: admissions()
+                .into_iter()
+                .chain([registry_admission(), wrapper_admission])
+                .collect(),
+            prior_events: vec![],
+            blocks: vec![block(1, 1), block(2, 2)],
+            raw_logs: logs,
+        };
+        let (first, session) = interpret_test_batch_incremental(first_input.clone(), None)?;
+        let wrapped = first
+            .normalized_events
+            .iter()
+            .find(|e| e.event_kind == "SurfaceBound" && e.source_family == "ens_v1_wrapper_l1")
+            .expect("wrapped surface");
+        assert_eq!(wrapped.after_state["authority_kind"], "wrapper");
+        let grant = first
+            .normalized_events
+            .iter()
+            .find(|e| e.event_kind == "RegistrationGranted" && e.log_index == Some(1))
+            .unwrap();
+        let mut tail = first_input.clone();
+        tail.raw_logs.clear();
+        tail.blocks = vec![
+            block(3, 42 + 90 * 86400),
+            block(4, 42 + 90 * 86400 + 1),
+            block(5, 42 + 90 * 86400 + 2),
+        ];
+        let (live, _) = interpret_test_batch_incremental(tail.clone(), Some(session))?;
+        let mut full_input = first_input.clone();
+        full_input.blocks.extend(tail.blocks.clone());
+        let full = interpret_test_batch(full_input)?;
+        let full_events = full
+            .normalized_events
+            .into_iter()
+            .filter(|e| e.block_number >= Some(3))
+            .collect::<Vec<_>>();
+        assert_eq!(live.normalized_events, full_events, "full replay");
+        for prior in [
+            first.normalized_events.iter().map(prior_event).collect(),
+            seam::fold_prior_events(vec![], &first.normalized_events, &first_input.blocks)?,
+        ] {
+            tail.prior_events = prior;
+            let restored = interpret_test_batch(tail.clone())?;
+            assert_eq!(
+                restored.normalized_events, live.normalized_events,
+                "restore"
+            );
+            assert_eq!(
+                restored.surface_bindings, live.surface_bindings,
+                "restore bindings"
+            );
+        }
+        let releases = live
+            .normalized_events
+            .iter()
+            .filter(|e| e.event_kind == "RegistrationReleased")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            releases.len(),
+            1,
+            "lapsed wrapped lease releases exactly once"
+        );
+        assert_eq!(releases[0].block_number, Some(4));
+        assert_eq!(releases[0].resource_id, grant.resource_id);
+        // The NameWrapper only holds the registry node on behalf of the lease. Once the lease
+        // lapses past grace, no ENSv1 authority remains: the wrapper custody must not be revived
+        // as a registry-only owner that keeps serving the name as registered.
+        let revived = live
+            .normalized_events
+            .iter()
+            .filter(|e| {
+                e.event_kind == "SurfaceBound"
+                    || (e.event_kind == "AuthorityEpochChanged"
+                        && !e.after_state["authority_kind"].is_null())
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            revived.is_empty(),
+            "lapsed wrapped lease revived custody: {revived:#?}"
+        );
+        let epoch = live
+            .normalized_events
+            .iter()
+            .find(|e| e.event_kind == "AuthorityEpochChanged")
+            .expect("wrapper authority epoch closes at release");
+        assert_eq!(epoch.before_state["authority_kind"], "wrapper");
+        assert!(
+            live.surface_bindings.is_empty(),
+            "{:#?}",
+            live.surface_bindings
+        );
         Ok(())
     }
 
@@ -4340,6 +4583,97 @@ fn registry_created_emits_the_ruled_self_edge() -> anyhow::Result<()> {
 }
 
 #[test]
+fn a_registry_pointing_a_label_back_at_itself_does_not_halt_interpretation() -> anyhow::Result<()> {
+    // Seen on the Sepolia hackathon deployment (block 11673141): a discovery-admitted user
+    // registry set one of its own labels' subregistry to its own address. Under the #569
+    // ruling an undeclared emitter's anomalous log is skipped and recorded, not terminal; a
+    // manifest-declared registry doing the same stays fatal.
+    let sender: Address = Address::repeat_byte(0x51);
+    let manifest = || {
+        manifest_with_events(
+            68,
+            "ens",
+            "ens_v2_registry_l1",
+            &[(
+                "SubregistryUpdated",
+                "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)",
+                &["registry"],
+                &["SubregistryChanged"],
+            )],
+        )
+    };
+    let rules = || {
+        vec![DiscoveryRuleInput {
+            manifest_id: 68,
+            edge_kind: "subregistry".to_owned(),
+            from_role: Some("registry".to_owned()),
+            admission: "linked_subregistry_event".to_owned(),
+        }]
+    };
+    let self_loop = || {
+        vec![raw_at(
+            v2_registry::SubregistryUpdated {
+                tokenId: U256::from(7),
+                subregistry: CONTRACT.parse().unwrap(),
+                sender,
+            }
+            .encode_log_data(),
+            1,
+            0,
+            CONTRACT,
+        )]
+    };
+    let mut announced = admission(68, "registry");
+    announced.discovery_edge_kind = Some("registry_announcement".to_owned());
+    announced.discovery_from_contract_instance_id = Some(announced.contract_instance_id);
+    announced.discovery_observation_key = Some("registry-announcement:self".to_owned());
+
+    let declared = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest()],
+        discovery_rules: rules(),
+        admissions: vec![admission(68, "registry")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: self_loop(),
+    });
+    assert!(
+        declared.is_err(),
+        "a manifest-declared registry pointing at itself stays fatal"
+    );
+
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest()],
+        discovery_rules: rules(),
+        admissions: vec![announced],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: self_loop(),
+    })?;
+
+    assert!(
+        output
+            .discovery_edges
+            .iter()
+            .all(|edge| edge.edge_kind != "subregistry"),
+        "a self-loop opens no subregistry discovery edge"
+    );
+    assert_eq!(
+        output.decode_skips.len(),
+        1,
+        "the skip is recorded explicitly"
+    );
+    assert!(
+        output.decode_skips[0]
+            .decode_context
+            .contains("self-edge of kind subregistry")
+    );
+    assert_eq!(output.decode_skips[0].block_number, 1);
+    Ok(())
+}
+
+#[test]
 fn registry_created_selects_the_rule_role_independent_of_admission_order() -> anyhow::Result<()> {
     let root = admission(2, "ETHRegistry");
     let registry = admission(2, "registry");
@@ -4574,7 +4908,7 @@ fn role_insensitivity_metadata_scans_routed_descendant_helpers() {
     }];
     let routes = std::collections::BTreeMap::from([(
         "role_independent_family".to_owned(),
-        routed_path.clone(),
+        std::collections::BTreeSet::from([routed_path.clone()]),
     )]);
     let sources = std::collections::BTreeMap::from([
         (
@@ -4624,7 +4958,7 @@ fn role_insensitivity_metadata_scans_selected_bearing_sibling_helpers() {
     }];
     let routes = std::collections::BTreeMap::from([(
         "role_independent_family".to_owned(),
-        routed_path.clone(),
+        std::collections::BTreeSet::from([routed_path.clone()]),
     )]);
     let sources = std::collections::BTreeMap::from([
         (
@@ -4657,6 +4991,53 @@ fn role_insensitivity_metadata_scans_selected_bearing_sibling_helpers() {
 }
 
 #[test]
+fn role_insensitivity_metadata_does_not_follow_string_only_helpers() -> anyhow::Result<()> {
+    let workspace_root = std::path::Path::new("/workspace");
+    let routed_path = workspace_root.join("schema_v2/protocol/resolver.rs");
+    let helper_path = workspace_root.join("schema_v2/protocol/helper.rs");
+    let entries = [bigname_manifests::RoleInsensitiveEvent {
+        source_family: "role_independent_family",
+        event: "SharedEvent",
+        justification: "test fixture",
+        adapter_file: "schema_v2/protocol/resolver.rs",
+    }];
+    let routes = std::collections::BTreeMap::from([(
+        "role_independent_family".to_owned(),
+        std::collections::BTreeSet::from([routed_path.clone()]),
+    )]);
+    let sources = std::collections::BTreeMap::from([
+        (
+            routed_path,
+            r#"
+                use super::helper::consume_namespace;
+                fn interpret(selected: &Selected) {
+                    let namespace = &selected.source.namespace;
+                    match selected.event.name.as_str() {
+                        "SharedEvent" => {
+                            consume_namespace(&selected.source.namespace);
+                            consume_namespace(namespace);
+                        }
+                        _ => {}
+                    }
+                }
+            "#
+            .to_owned(),
+        ),
+        (
+            helper_path,
+            r#"
+                fn consume_namespace(namespace: &str) {}
+                fn unrelated_role_reader(selected: &Selected) {
+                    consume(selected.emitter_role.as_deref());
+                }
+            "#
+            .to_owned(),
+        ),
+    ]);
+    validate_role_insensitivity_metadata(workspace_root, &entries, &routes, &sources)
+}
+
+#[test]
 fn role_insensitivity_metadata_scans_glob_imported_selected_helpers() {
     let workspace_root = std::path::Path::new("/workspace");
     let routed_path = workspace_root.join("schema_v2/protocol/resolver.rs");
@@ -4669,7 +5050,7 @@ fn role_insensitivity_metadata_scans_glob_imported_selected_helpers() {
     }];
     let routes = std::collections::BTreeMap::from([(
         "role_independent_family".to_owned(),
-        routed_path.clone(),
+        std::collections::BTreeSet::from([routed_path.clone()]),
     )]);
     let sources = std::collections::BTreeMap::from([
         (
@@ -4714,7 +5095,7 @@ fn role_insensitivity_metadata_tracks_forwarded_selected_aliases() {
     }];
     let routes = std::collections::BTreeMap::from([(
         "role_independent_family".to_owned(),
-        routed_path.clone(),
+        std::collections::BTreeSet::from([routed_path.clone()]),
     )]);
     let sources = std::collections::BTreeMap::from([
         (
@@ -4761,7 +5142,7 @@ fn role_insensitivity_metadata_follows_reexported_selected_helpers() {
     }];
     let routes = std::collections::BTreeMap::from([(
         "role_independent_family".to_owned(),
-        routed_path.clone(),
+        std::collections::BTreeSet::from([routed_path.clone()]),
     )]);
     let sources = std::collections::BTreeMap::from([
         (
@@ -4811,7 +5192,7 @@ fn role_insensitivity_metadata_scans_shared_dispatchers() {
     }];
     let routes = std::collections::BTreeMap::from([(
         "role_independent_family".to_owned(),
-        routed_path.clone(),
+        std::collections::BTreeSet::from([routed_path.clone()]),
     )]);
     let sources = std::collections::BTreeMap::from([
         (
@@ -4878,7 +5259,7 @@ fn role_insensitivity_metadata_rejects_a_stale_event_literal() {
     }];
     let routes = std::collections::BTreeMap::from([(
         "role_independent_family".to_owned(),
-        routed_path.clone(),
+        std::collections::BTreeSet::from([routed_path.clone()]),
     )]);
     let sources = std::collections::BTreeMap::from([(
         routed_path,
@@ -5048,12 +5429,23 @@ fn checked_in_protocol_adapter_paths_follow_production_dispatch() -> anyhow::Res
         routes.get("basenames_base_resolver")
     );
     assert_eq!(
+        routes.get("ens_v2_resolver_l1"),
+        Some(&std::collections::BTreeSet::from([
+            schema_v2_root.join("protocol/v2_record_resolver.rs"),
+            schema_v2_root.join("protocol/v2_resolver.rs"),
+        ]))
+    );
+    assert_eq!(
         routes.get("ens_v2_registry_l1"),
-        Some(&schema_v2_root.join("protocol/v2_registry.rs"))
+        Some(&std::collections::BTreeSet::from([
+            schema_v2_root.join("protocol/v2_registry.rs")
+        ]))
     );
     assert_eq!(
         routes.get("ens_v2_registrar_l1"),
-        Some(&schema_v2_root.join("protocol/v2_registry/registrar.rs"))
+        Some(&std::collections::BTreeSet::from([
+            schema_v2_root.join("protocol/v2_registry/registrar.rs")
+        ]))
     );
     Ok(())
 }
@@ -5086,7 +5478,9 @@ fn protocol_adapter_paths_honor_a_top_level_v1_family_reroute() -> anyhow::Resul
 
     assert_eq!(
         routes.get("ens_v1_resolver_l1"),
-        Some(&schema_v2_root.join("protocol/v2_resolver.rs"))
+        Some(&std::collections::BTreeSet::from([
+            schema_v2_root.join("protocol/v2_resolver.rs")
+        ]))
     );
     Ok(())
 }
@@ -5113,7 +5507,7 @@ fn role_insensitive_events_collapse_distinct_admission_roles() -> anyhow::Result
         (String, String),
         std::collections::BTreeMap<String, Vec<String>>,
     >::new();
-    for environment in ["mainnet", "sepolia"] {
+    for environment in ["mainnet", "sepolia", "sepolia-hackathon"] {
         let repository = bigname_manifests::load_repository(manifest_root.join(environment))?;
         for loaded in repository.manifests() {
             for event in &loaded.manifest.abi.events {
@@ -5225,7 +5619,7 @@ fn required_discovery_rules_cover_protocol_rule_lookup_producers() -> anyhow::Re
     let mut manifest_id = 700;
     let mut covered_producers = std::collections::BTreeSet::new();
     let mut covered_cases = std::collections::BTreeSet::new();
-    for environment in ["mainnet", "sepolia"] {
+    for environment in ["mainnet", "sepolia", "sepolia-hackathon"] {
         let repository = bigname_manifests::load_repository(manifest_root.join(environment))?;
         for loaded in repository
             .manifests()
@@ -17161,7 +17555,7 @@ fn checked_in_manifest_event_corpus_has_typed_schema_v2_adapters() -> anyhow::Re
         .join("../..")
         .join("manifests");
     let mut manifest_id = 0i64;
-    for environment in ["mainnet", "sepolia"] {
+    for environment in ["mainnet", "sepolia", "sepolia-hackathon"] {
         let repository = bigname_manifests::load_repository(root.join(environment))?;
         for loaded in repository.manifests() {
             manifest_id += 1;
@@ -17734,32 +18128,31 @@ fn discovery_draft_aliases_by_source(
             };
             syn::visit::Visit::visit_file(&mut collector, file);
             for import in imports {
-                if !import.glob {
-                    if let (Some(local), Some(exporter_path)) = (
+                if !import.glob
+                    && let (Some(local), Some(exporter_path)) = (
                         import.local.clone(),
                         resolve_local_module_source(path, &import.path, files.keys()),
-                    ) {
-                        if let Some(exported) = aliases.get(&exporter_path) {
-                            qualified_additions.push((
-                                path.clone(),
-                                exported
-                                    .draft_types
-                                    .iter()
-                                    .map(|draft| (local.clone(), draft.clone()))
-                                    .collect::<std::collections::BTreeSet<_>>(),
-                                exported
-                                    .edge_variants
-                                    .iter()
-                                    .map(|variant| (local.clone(), variant.clone()))
-                                    .collect::<std::collections::BTreeSet<_>>(),
-                                exported
-                                    .announcement_variants
-                                    .iter()
-                                    .map(|variant| (local.clone(), variant.clone()))
-                                    .collect::<std::collections::BTreeSet<_>>(),
-                            ));
-                        }
-                    }
+                    )
+                    && let Some(exported) = aliases.get(&exporter_path)
+                {
+                    qualified_additions.push((
+                        path.clone(),
+                        exported
+                            .draft_types
+                            .iter()
+                            .map(|draft| (local.clone(), draft.clone()))
+                            .collect::<std::collections::BTreeSet<_>>(),
+                        exported
+                            .edge_variants
+                            .iter()
+                            .map(|variant| (local.clone(), variant.clone()))
+                            .collect::<std::collections::BTreeSet<_>>(),
+                        exported
+                            .announcement_variants
+                            .iter()
+                            .map(|variant| (local.clone(), variant.clone()))
+                            .collect::<std::collections::BTreeSet<_>>(),
+                    ));
                 }
                 let (module, imported_name) = if import.glob {
                     (import.path.as_slice(), None)
@@ -17851,39 +18244,34 @@ fn discovery_draft_aliases_by_source(
                 if owner_path.is_empty() {
                     continue;
                 }
-                if matches!(variant.as_str(), "Edge" | "RegistryAnnouncement") {
-                    if let Some(exporter_path) =
+                if matches!(variant.as_str(), "Edge" | "RegistryAnnouncement")
+                    && let Some(exporter_path) =
                         resolve_local_module_source(path, owner_path, files.keys())
+                    && let Some(exported) = aliases.get(&exporter_path)
+                {
+                    let module = owner_path
+                        .last()
+                        .expect("resolved module path has a final segment")
+                        .clone();
+                    let edge_variants =
+                        if variant == "Edge" && exported.edge_variants.contains(variant) {
+                            std::collections::BTreeSet::from([(module.clone(), variant.clone())])
+                        } else {
+                            std::collections::BTreeSet::new()
+                        };
+                    let announcement_variants = if variant == "RegistryAnnouncement"
+                        && exported.announcement_variants.contains(variant)
                     {
-                        if let Some(exported) = aliases.get(&exporter_path) {
-                            let module = owner_path
-                                .last()
-                                .expect("resolved module path has a final segment")
-                                .clone();
-                            let edge_variants =
-                                if variant == "Edge" && exported.edge_variants.contains(variant) {
-                                    std::collections::BTreeSet::from([(
-                                        module.clone(),
-                                        variant.clone(),
-                                    )])
-                                } else {
-                                    std::collections::BTreeSet::new()
-                                };
-                            let announcement_variants = if variant == "RegistryAnnouncement"
-                                && exported.announcement_variants.contains(variant)
-                            {
-                                std::collections::BTreeSet::from([(module, variant.clone())])
-                            } else {
-                                std::collections::BTreeSet::new()
-                            };
-                            qualified_additions.push((
-                                path.clone(),
-                                std::collections::BTreeSet::new(),
-                                edge_variants,
-                                announcement_variants,
-                            ));
-                        }
-                    }
+                        std::collections::BTreeSet::from([(module, variant.clone())])
+                    } else {
+                        std::collections::BTreeSet::new()
+                    };
+                    qualified_additions.push((
+                        path.clone(),
+                        std::collections::BTreeSet::new(),
+                        edge_variants,
+                        announcement_variants,
+                    ));
                 }
                 if owner_path.len() < 2 {
                     continue;
@@ -17993,10 +18381,9 @@ fn discovery_draft_aliases(file: &syn::File) -> DiscoveryDraftAliases {
             .path
             .last()
             .is_some_and(|name| name == "DiscoveryDraft")
+            && let Some(local) = &import.local
         {
-            if let Some(local) = &import.local {
-                aliases.draft_types.insert(local.clone());
-            }
+            aliases.draft_types.insert(local.clone());
         }
     }
     let mut type_aliases = Vec::new();
@@ -18424,7 +18811,7 @@ fn checked_in_manifest_source_family_events()
         .join("../..")
         .join("manifests");
     let mut events = std::collections::BTreeSet::new();
-    for environment in ["mainnet", "sepolia"] {
+    for environment in ["mainnet", "sepolia", "sepolia-hackathon"] {
         let repository = bigname_manifests::load_repository(manifest_root.join(environment))?;
         for loaded in repository.manifests() {
             events.extend(
@@ -18444,12 +18831,13 @@ fn scope_protocol_rule_lookup_producers(
     schema_v2_root: &std::path::Path,
     locations: &std::collections::BTreeSet<(std::path::PathBuf, String, String)>,
     manifest_events: &std::collections::BTreeSet<(String, String)>,
-    adapter_paths: &std::collections::BTreeMap<String, std::path::PathBuf>,
+    adapter_paths: &ProtocolAdapterPaths,
 ) -> anyhow::Result<std::collections::BTreeSet<(String, String, String)>> {
     let mut producers = std::collections::BTreeSet::new();
     for (path, event, edge_kind) in locations {
         let owning_routes = adapter_paths
             .iter()
+            .flat_map(|(family, paths)| paths.iter().map(move |path| (family, path)))
             .filter(|(_, adapter_path)| routed_adapter_owns_source(adapter_path, path))
             .collect::<Vec<_>>();
         let most_specific_depth = owning_routes
@@ -18510,10 +18898,13 @@ fn routed_adapter_owns_source(
     source_path.starts_with(descendant_root)
 }
 
+type ProtocolAdapterPaths =
+    std::collections::BTreeMap<String, std::collections::BTreeSet<std::path::PathBuf>>;
+
 fn checked_in_protocol_adapter_paths(
     schema_v2_root: &std::path::Path,
     known_families: &std::collections::BTreeSet<String>,
-) -> anyhow::Result<std::collections::BTreeMap<String, std::path::PathBuf>> {
+) -> anyhow::Result<ProtocolAdapterPaths> {
     let protocol_source = std::fs::read_to_string(schema_v2_root.join("protocol.rs"))?;
     let v1_source = std::fs::read_to_string(schema_v2_root.join("protocol/v1.rs"))?;
     let v2_registry_source =
@@ -18533,46 +18924,53 @@ fn protocol_adapter_paths_from_dispatch_sources(
     protocol_source: &str,
     v1_source: &str,
     v2_registry_source: &str,
-) -> anyhow::Result<std::collections::BTreeMap<String, std::path::PathBuf>> {
+) -> anyhow::Result<ProtocolAdapterPaths> {
     let mut paths = std::collections::BTreeMap::new();
     for source_family in known_families {
         if source_family.ends_with("_execution") || source_family == "basenames_l1_compat" {
             continue;
         }
-        let top_level_module = dispatch_module_for_family(protocol_source, source_family)?;
-        let path = if top_level_module == "v1" {
-            let module = dispatch_module_for_family(v1_source, source_family)?;
-            schema_v2_root.join(format!("protocol/v1/{module}.rs"))
-        } else if top_level_module == "v2_registry" {
-            if let Some(nested_module) =
-                nested_dispatch_module_for_family(v2_registry_source, source_family)?
-            {
-                schema_v2_root.join(format!("protocol/v2_registry/{nested_module}.rs"))
+        let mut family_paths = std::collections::BTreeSet::new();
+        for top_level_module in dispatch_modules_for_family(protocol_source, source_family)? {
+            if top_level_module == "v1" {
+                for module in dispatch_modules_for_family(v1_source, source_family)? {
+                    family_paths.insert(schema_v2_root.join(format!("protocol/v1/{module}.rs")));
+                }
+            } else if top_level_module == "v2_registry" {
+                let path = if let Some(nested_module) =
+                    nested_dispatch_module_for_family(v2_registry_source, source_family)?
+                {
+                    schema_v2_root.join(format!("protocol/v2_registry/{nested_module}.rs"))
+                } else {
+                    schema_v2_root.join("protocol/v2_registry.rs")
+                };
+                family_paths.insert(path);
             } else {
-                schema_v2_root.join("protocol/v2_registry.rs")
+                family_paths.insert(schema_v2_root.join(format!("protocol/{top_level_module}.rs")));
             }
-        } else {
-            schema_v2_root.join(format!("protocol/{top_level_module}.rs"))
-        };
-        paths.insert(source_family.clone(), path);
+        }
+        paths.insert(source_family.clone(), family_paths);
     }
     Ok(paths)
 }
 
-fn dispatch_module_for_family(source: &str, source_family: &str) -> anyhow::Result<String> {
+fn dispatch_modules_for_family(
+    source: &str,
+    source_family: &str,
+) -> anyhow::Result<std::collections::BTreeSet<String>> {
     let file = syn::parse_file(source)?;
     let function = production_interpret_function(&file)?;
     let mut visitor = SourceFamilyMatchVisitor::new(source_family);
     syn::visit::Visit::visit_block(&mut visitor, &function.block);
     anyhow::ensure!(
-        visitor.routes.len() == 1,
-        "production dispatch must have exactly one adapter arm for {source_family}, found {:?}",
-        visitor.routes,
+        !visitor.routes.is_empty(),
+        "production dispatch has no adapter arm for {source_family}",
     );
-    one_interpret_target(
-        visitor.routes.pop().expect("one adapter arm"),
-        source_family,
-    )
+    visitor
+        .routes
+        .into_iter()
+        .map(|route| one_interpret_target(route, source_family))
+        .collect()
 }
 
 fn nested_dispatch_module_for_family(
@@ -18900,7 +19298,7 @@ fn read_rust_source_map(
 fn validate_role_insensitivity_metadata(
     workspace_root: &std::path::Path,
     entries: &[bigname_manifests::RoleInsensitiveEvent],
-    routes: &std::collections::BTreeMap<String, std::path::PathBuf>,
+    routes: &ProtocolAdapterPaths,
     sources: &std::collections::BTreeMap<std::path::PathBuf, String>,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -18921,21 +19319,25 @@ fn validate_role_insensitivity_metadata(
             entry.source_family,
             entry.event,
         );
-        let routed_path = routes.get(entry.source_family).with_context(|| {
+        let routed_paths = routes.get(entry.source_family).with_context(|| {
             format!(
                 "ROLE_INSENSITIVE_EVENTS entry for {} {} has no production dispatch route",
                 entry.source_family, entry.event,
             )
         })?;
         let declared_path = workspace_root.join(entry.adapter_file);
+        let routed_path = routed_paths
+            .iter()
+            .find(|path| normalize_path(&declared_path) == normalize_path(path));
         anyhow::ensure!(
-            normalize_path(&declared_path) == normalize_path(routed_path),
-            "ROLE_INSENSITIVE_EVENTS entry for {} {} declares adapter_file {}, but production dispatch routes to {}",
+            routed_path.is_some(),
+            "ROLE_INSENSITIVE_EVENTS entry for {} {} declares adapter_file {}, but production dispatch routes to {:?}",
             entry.source_family,
             entry.event,
             declared_path.display(),
-            routed_path.display(),
+            routed_paths,
         );
+        let routed_path = routed_path.expect("declared adapter is a dispatch route");
         let routed_source = sources
             .get(routed_path)
             .with_context(|| format!("read routed adapter source {}", routed_path.display()))?;
@@ -18946,17 +19348,26 @@ fn validate_role_insensitivity_metadata(
             entry.event,
             routed_path.display(),
         );
+        let mut role_sources = std::collections::BTreeSet::new();
+        for path in routed_paths {
+            let source = sources
+                .get(path)
+                .with_context(|| format!("read routed adapter source {}", path.display()))?;
+            if rust_source_handles_selected_event(source, entry.event)? {
+                role_sources.extend(role_read_source_paths(path, sources)?);
+            }
+        }
 
         // The static boundary is the production dispatcher chain, routed module tree, and local
         // sibling modules reached by a function call that passes a `Selected` parameter. Macro
         // expansion, trait/method dispatch, function pointers, and `Selected` hidden inside
         // another value remain outside this test-side analysis.
-        for path in role_read_source_paths(routed_path, sources)? {
+        for path in role_sources {
             let source = sources
                 .get(&path)
                 .expect("routed module source path came from the source map");
             anyhow::ensure!(
-                !rust_source_reads_emitter_role(source)?,
+                !scoped_source_reads_role(source, entry.source_family, entry.event)?,
                 "ROLE_INSENSITIVE_EVENTS entry for {} {} routes through {} which reads Selected.emitter_role",
                 entry.source_family,
                 entry.event,
@@ -19138,11 +19549,10 @@ struct SelectedArgumentCallVisitor<'a> {
 impl<'ast> syn::visit::Visit<'ast> for SelectedArgumentCallVisitor<'_> {
     fn visit_local(&mut self, local: &'ast syn::Local) {
         if local.init.as_ref().is_some_and(|initializer| {
-            expression_references_any_name(&initializer.expr, &self.selected_names)
-        }) {
-            if let Some(local_name) = local_pattern_name(&local.pat) {
-                self.selected_names.insert(local_name);
-            }
+            expression_carries_selected(&initializer.expr, &self.selected_names)
+        }) && let Some(local_name) = local_pattern_name(&local.pat)
+        {
+            self.selected_names.insert(local_name);
         }
         syn::visit::visit_local(self, local);
     }
@@ -19151,18 +19561,16 @@ impl<'ast> syn::visit::Visit<'ast> for SelectedArgumentCallVisitor<'_> {
         let carries_selected = call
             .args
             .iter()
-            .any(|argument| expression_references_any_name(argument, &self.selected_names));
-        if carries_selected {
-            if let syn::Expr::Path(function) = call.func.as_ref() {
-                self.calls.push(
-                    function
-                        .path
-                        .segments
-                        .iter()
-                        .map(|segment| segment.ident.to_string())
-                        .collect(),
-                );
-            }
+            .any(|argument| expression_carries_selected(argument, &self.selected_names));
+        if carries_selected && let syn::Expr::Path(function) = call.func.as_ref() {
+            self.calls.push(
+                function
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect(),
+            );
         }
         syn::visit::visit_expr_call(self, call);
     }
@@ -19177,11 +19585,11 @@ fn local_pattern_name(pattern: &syn::Pat) -> Option<String> {
     }
 }
 
-fn expression_references_any_name(
+fn expression_carries_selected(
     expression: &syn::Expr,
     names: &std::collections::BTreeSet<String>,
 ) -> bool {
-    let mut visitor = NamedExpressionVisitor {
+    let mut visitor = SelectedValueVisitor {
         names,
         found: false,
     };
@@ -19189,12 +19597,16 @@ fn expression_references_any_name(
     visitor.found
 }
 
-struct NamedExpressionVisitor<'a> {
+struct SelectedValueVisitor<'a> {
     names: &'a std::collections::BTreeSet<String>,
     found: bool,
 }
 
-impl<'ast> syn::visit::Visit<'ast> for NamedExpressionVisitor<'_> {
+impl<'ast> syn::visit::Visit<'ast> for SelectedValueVisitor<'_> {
+    fn visit_expr_field(&mut self, _: &'ast syn::ExprField) {
+        // Passing a field such as selected.source.namespace does not pass Selected itself.
+    }
+
     fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
         if expression
             .path
@@ -19308,12 +19720,168 @@ fn rust_source_reads_emitter_role(source: &str) -> anyhow::Result<bool> {
     Ok(visitor.found)
 }
 
+#[test]
+fn role_scope_keeps_mixed_wildcard_arms() -> anyhow::Result<()> {
+    let source = r#"fn interpret(selected: &Selected) { match (selected.source.source_family.as_str(), selected.event.name.as_str()) { ("other" | _, "TextChanged") => consume(selected.emitter_role), _ => () } }"#;
+    assert!(scoped_source_reads_role(source, "ens", "TextChanged")?);
+    Ok(())
+}
+
+#[test]
+fn role_scope_respects_short_circuit_family_guards() -> anyhow::Result<()> {
+    for expression in [
+        r#"selected.source.source_family == "ens_v1_registrar_l1" && selected.emitter_role.is_some()"#,
+        r#"selected.source.source_family.as_str() != "ens_v1_resolver_l1" && selected.emitter_role.is_some()"#,
+        r#""ens_v1_resolver_l1" == selected.source.source_family || selected.emitter_role.is_some()"#,
+        r#"!(selected.source.source_family == "ens_v1_registrar_l1") || selected.emitter_role.is_some()"#,
+        r#"(selected.source.source_family == "ens_v1_registrar_l1" && unknown()) && selected.emitter_role.is_some()"#,
+        r#"selected.event.name.as_str() == "NameRegistered" && selected.emitter_role.is_some()"#,
+    ] {
+        let source = format!("fn interpret(selected: &Selected) {{ let _ = {expression}; }}");
+        assert!(
+            !scoped_source_reads_role(&source, "ens_v1_resolver_l1", "ABIChanged")?,
+            "role read must be short-circuited: {expression}"
+        );
+        assert!(
+            scoped_source_reads_role(&source, "ens_v1_registrar_l1", "NameRegistered")?,
+            "role read remains reachable for the matching registrar event: {expression}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn role_scope_keeps_reads_before_or_without_a_decisive_guard() -> anyhow::Result<()> {
+    for expression in [
+        r#"selected.emitter_role.is_some() && selected.source.source_family == "other""#,
+        r#"selected.emitter_role.is_some() || selected.source.source_family == "ens_v1_resolver_l1""#,
+        "unknown() && selected.emitter_role.is_some()",
+        "unknown() || selected.emitter_role.is_some()",
+        r#"selected.source.namespace == "other" && selected.emitter_role.is_some()"#,
+        r#"(selected.source.source_family == "other" || unknown()) && selected.emitter_role.is_some()"#,
+    ] {
+        let source = format!("fn interpret(selected: &Selected) {{ let _ = {expression}; }}");
+        assert!(
+            scoped_source_reads_role(&source, "ens_v1_resolver_l1", "ABIChanged")?,
+            "reachable or undecidable role read must remain checked: {expression}"
+        );
+    }
+    Ok(())
+}
+
+fn scoped_source_reads_role(source: &str, family: &str, event: &str) -> anyhow::Result<bool> {
+    let file = syn::parse_file(source)?;
+    let mut visitor = EmitterRoleReadVisitor {
+        found: false,
+        event_scope: Some((family.to_owned(), event.to_owned())),
+    };
+    syn::visit::Visit::visit_file(&mut visitor, &file);
+    Ok(visitor.found)
+}
+
+fn role_scope_boolean(expression: &syn::Expr, family: &str, event: &str) -> Option<bool> {
+    match expression {
+        syn::Expr::Binary(binary) => match binary.op {
+            syn::BinOp::And(_) => match role_scope_boolean(&binary.left, family, event)? {
+                false => Some(false),
+                true => role_scope_boolean(&binary.right, family, event),
+            },
+            syn::BinOp::Or(_) => match role_scope_boolean(&binary.left, family, event)? {
+                true => Some(true),
+                false => role_scope_boolean(&binary.right, family, event),
+            },
+            syn::BinOp::Eq(_) | syn::BinOp::Ne(_) => {
+                let equal = role_scope_string(&binary.left, family, event)?
+                    == role_scope_string(&binary.right, family, event)?;
+                Some(if matches!(binary.op, syn::BinOp::Eq(_)) {
+                    equal
+                } else {
+                    !equal
+                })
+            }
+            _ => None,
+        },
+        syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Not(_)) => {
+            role_scope_boolean(&unary.expr, family, event).map(|value| !value)
+        }
+        syn::Expr::Group(group) => role_scope_boolean(&group.expr, family, event),
+        syn::Expr::Paren(paren) => role_scope_boolean(&paren.expr, family, event),
+        _ => None,
+    }
+}
+
+fn role_scope_string(expression: &syn::Expr, family: &str, event: &str) -> Option<String> {
+    if selected_source_family_expression(expression) || source_family_match_expression(expression) {
+        return Some(family.to_owned());
+    }
+    if selected_event_name_match_expression(expression) {
+        return Some(event.to_owned());
+    }
+    match expression {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(value),
+            ..
+        }) => Some(value.value()),
+        syn::Expr::Group(group) => role_scope_string(&group.expr, family, event),
+        syn::Expr::Paren(paren) => role_scope_string(&paren.expr, family, event),
+        _ => None,
+    }
+}
+
 #[derive(Default)]
 struct EmitterRoleReadVisitor {
     found: bool,
+    event_scope: Option<(String, String)>,
 }
 
 impl<'ast> syn::visit::Visit<'ast> for EmitterRoleReadVisitor {
+    fn visit_expr_binary(&mut self, expression: &'ast syn::ExprBinary) {
+        if let Some((family, event)) = &self.event_scope
+            && matches!(expression.op, syn::BinOp::And(_) | syn::BinOp::Or(_))
+        {
+            let left = role_scope_boolean(&expression.left, family, event);
+            self.visit_expr(&expression.left);
+            if !matches!(
+                (&expression.op, left),
+                (syn::BinOp::And(_), Some(false)) | (syn::BinOp::Or(_), Some(true))
+            ) {
+                self.visit_expr(&expression.right);
+            }
+            return;
+        }
+        syn::visit::visit_expr_binary(self, expression);
+    }
+
+    fn visit_expr_match(&mut self, expression: &'ast syn::ExprMatch) {
+        if let (Some((family, event)), syn::Expr::Tuple(tuple)) =
+            (&self.event_scope, expression.expr.as_ref())
+            && tuple.elems.len() == 2
+            && source_family_match_expression(&tuple.elems[0])
+            && selected_event_name_match_expression(&tuple.elems[1])
+        {
+            let scope = [family.clone(), event.clone()];
+            self.visit_expr(&expression.expr);
+            for arm in &expression.arms {
+                let excluded = if let syn::Pat::Tuple(pattern) = &arm.pat {
+                    pattern.elems.len() == 2
+                        && pattern.elems.iter().zip(&scope).any(|(part, value)| {
+                            let exact = matches!(part, syn::Pat::Lit(_))
+                                || matches!(part, syn::Pat::Or(or) if or.cases.iter().all(|p| matches!(p, syn::Pat::Lit(_))));
+                            let literals = pattern_string_values(part);
+                            exact && !literals.is_empty() && !literals.contains(value)
+                        })
+                } else {
+                    false
+                };
+                if !excluded {
+                    self.visit_arm(arm);
+                }
+            }
+            return;
+        }
+        syn::visit::visit_expr_match(self, expression);
+    }
+
     fn visit_expr_field(&mut self, expression: &'ast syn::ExprField) {
         if matches!(&expression.member, syn::Member::Named(member) if member == "emitter_role") {
             self.found = true;
@@ -19893,5 +20461,182 @@ fn reconciliation_probe_event(
         migration_correlation_ids: Vec::new(),
         consumer_visibility: "activated".to_owned(),
         before_state_explicit: false,
+    }
+}
+
+use crate::schema_v2 as adapter_api;
+#[path = "../../tests/fixtures/interpreters/numeric_short_lease.rs"]
+mod numeric_short_lease_fixture;
+
+mod numeric_short_lease_tests {
+    use super::{numeric_short_lease_fixture as fixture, *};
+
+    fn snapshot(output: &BatchOutput) -> &NormalizedEvent {
+        output
+            .normalized_events
+            .iter()
+            .find(|event| {
+                event.event_kind == "RegistrationGranted"
+                    && event.after_state["registrar_surface_snapshot"] == true
+            })
+            .expect("readable observation must disclose the proven registrar lease")
+    }
+
+    #[test]
+    fn captured_numeric_registration_then_readable_reservation_migrates_without_a_controller()
+    -> anyhow::Result<()> {
+        let input = fixture::input()?;
+        fixture::assert_receipt_order(&input);
+        let expected = fixture::fixture()?;
+        let prefix = interpret_schema_v2_batch(fixture::range(&input, 403, 406))?;
+        let original = fixture::registrar_grant(&prefix);
+        assert!(original.logical_name_id.is_none());
+        assert!(
+            prefix
+                .surface_bindings
+                .iter()
+                .all(|binding| Some(binding.resource_id) != original.resource_id)
+        );
+        let full = interpret_schema_v2_batch(input.clone())?;
+        assert_eq!(
+            fixture::registrar_grant(&full),
+            original,
+            "later readability rewrote the original grant"
+        );
+        let named = snapshot(&full);
+        let logical = format!("ens:{}", expected["node"].as_str().unwrap());
+        assert_eq!(named.logical_name_id.as_deref(), Some(logical.as_str()));
+        assert_eq!(named.resource_id, original.resource_id);
+        assert_eq!(named.block_number, Some(407));
+        assert_eq!(
+            named.after_state["token_lineage_id"],
+            original.after_state["token_lineage_id"]
+        );
+        assert_eq!(
+            named.after_state["original_registered_at"],
+            expected["registration_timestamp"]
+        );
+        assert_eq!(named.after_state["expiry"], expected["v1_expiry"]);
+        assert_eq!(
+            named.after_state["authority_owner"],
+            expected["expected_owner"]
+        );
+        assert_eq!(
+            named.after_state["registrar_surface_evidence"]["grant"]["block_number"],
+            403
+        );
+        assert_eq!(
+            named.after_state["registrar_surface_evidence"]["registry_owner"]["block_number"],
+            406
+        );
+        assert_ne!(
+            named.raw_fact_ref["emitting_address"],
+            original.raw_fact_ref["emitting_address"]
+        );
+        assert!(
+            full.surface_bindings
+                .iter()
+                .any(|binding| binding.resource_id == named.resource_id.unwrap()
+                    && binding.block_number == 407
+                    && binding.logical_name_id == logical)
+        );
+        assert!(
+            full.normalized_events
+                .iter()
+                .any(|event| event.event_kind == "ResolverChanged"
+                    && event.after_state["registrar_surface_snapshot"] == true
+                    && event.after_state["resolver"] == expected["expected_resolver"])
+        );
+        for log in [0, 4] {
+            assert!(
+                full.normalized_events.iter().any(|event| event.event_kind
+                    == "TokenControlTransferred"
+                    && event.block_number == Some(415)
+                    && event.log_index == Some(log)
+                    && event.resource_id == named.resource_id
+                    && event.logical_name_id.as_deref() == Some(logical.as_str())),
+                "real migration transfer at log {log} must retain the named predecessor lineage"
+            );
+        }
+        assert_eq!(full.migration_authority_transitions.len(), 1);
+        assert!(
+            full.normalized_events
+                .iter()
+                .any(|event| event.event_kind == "MigrationApplied"
+                    && event.consumer_visibility == "activated"
+                    && event.block_number == Some(415))
+        );
+        assert!(
+            full.normalized_events
+                .iter()
+                .filter(|event| event.block_number == Some(416))
+                .all(|event| !(event.event_kind == "SurfaceUnbound"
+                    && event.source_family.starts_with("ens_v2_")))
+        );
+        for split in [403, 406, 407, 414, 415] {
+            let before = fixture::range(&input, 403, split);
+            let (head, session) = prepare_schema_v2_batch_incremental(
+                before.clone(),
+                None,
+                StateCacheCapacity::Unlimited,
+            )?
+            .finish(Vec::new())?;
+            let tail = fixture::range(&input, split + 1, 416);
+            let (continued, _) = prepare_schema_v2_batch_incremental(
+                tail.clone(),
+                Some(session),
+                StateCacheCapacity::Unlimited,
+            )?
+            .finish(Vec::new())?;
+            let mut restored_input = tail;
+            restored_input.prior_events =
+                seam::fold_prior_events(Vec::new(), &head.normalized_events, &before.blocks)?;
+            let restored = interpret_schema_v2_batch(restored_input)?;
+            assert_eq!(
+                continued, restored,
+                "cold restoration at {split} changed output"
+            );
+            assert_eq!(
+                continued.normalized_events,
+                full.normalized_events
+                    .iter()
+                    .filter(|event| event.block_number.is_some_and(|number| number > split))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                "continuous split at {split} changed raw fixture interpretation"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn later_trigger_time_preserves_original_numeric_registration_time() -> anyhow::Result<()> {
+        let mut input = fixture::input()?;
+        // Explicit constructed timing variant; all captured receipt topics/data/order stay unchanged.
+        for raw in input
+            .raw_logs
+            .iter_mut()
+            .filter(|raw| raw.block_number == 407)
+        {
+            raw.block_timestamp += time::Duration::seconds(5);
+        }
+        for block in input
+            .blocks
+            .iter_mut()
+            .filter(|block| block.block_number == 407)
+        {
+            block.block_timestamp += time::Duration::seconds(5);
+        }
+        let output = interpret_schema_v2_batch(fixture::range(&input, 403, 414))?;
+        let snapshot = snapshot(&output);
+        assert_eq!(
+            snapshot.after_state["original_registered_at"],
+            fixture::fixture()?["registration_timestamp"]
+        );
+        assert_eq!(
+            snapshot.after_state["expiry"],
+            fixture::fixture()?["v1_expiry"]
+        );
+        Ok(())
     }
 }

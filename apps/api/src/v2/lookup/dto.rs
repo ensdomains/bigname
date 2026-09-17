@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::v2::{Page, RegistrationStatus, Relation, Resolver, Status};
+use crate::v2::{
+    AddressNameResolution, Authority, Page, RegistrationStatus, RegistryRef, Relation, Resolver,
+    Status,
+};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -115,6 +118,8 @@ pub(crate) struct LookupRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resolver: Option<Resolver>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subregistry: Option<RegistryRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) addresses: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) text_records: Option<BTreeMap<String, String>>,
@@ -132,6 +137,13 @@ pub(crate) struct LookupRecord {
     pub(crate) is_primary: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) relations: Vec<Relation>,
+    /// Present only on `relation=resolves_to` reverse rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resolution: Option<AddressNameResolution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) authority: Option<Authority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) migrated_at: Option<String>,
     pub(crate) status: Status,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unsupported_reason: Option<String>,

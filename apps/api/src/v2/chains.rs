@@ -45,6 +45,14 @@ const CHAIN_ID_MAPPINGS: &[ChainIdMapping] = &[
     },
 ];
 
+/// Every storage chain slug the deployment profiles can serve, in registry order.
+pub(crate) fn all_chain_slugs() -> Vec<&'static str> {
+    CHAIN_ID_MAPPINGS
+        .iter()
+        .map(|mapping| mapping.slug)
+        .collect()
+}
+
 pub(crate) fn slug_to_numeric(slug: &str) -> Option<u64> {
     CHAIN_ID_MAPPINGS
         .iter()

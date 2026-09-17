@@ -110,6 +110,7 @@ pub(crate) enum SnapshotReadResource {
     DiagnosticData,
     Name,
     NameRecords,
+    Registry,
     Resolver,
     Resource,
 }
@@ -120,6 +121,7 @@ impl SnapshotReadResource {
             Self::DiagnosticData => "diagnostic data",
             Self::Name => "name",
             Self::NameRecords => "name records",
+            Self::Registry => "registry",
             Self::Resolver => "resolver",
             Self::Resource => "resource",
         }

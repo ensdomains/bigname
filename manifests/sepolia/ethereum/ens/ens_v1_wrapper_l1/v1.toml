@@ -52,7 +52,7 @@ start_block = 3790153
 name = "NameWrapped"
 fragment = "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)"
 emitter_roles = ["name_wrapper"]
-normalized_events = ["TokenControlTransferred", "ExpiryChanged", "PermissionScopeChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]
+normalized_events = ["TokenControlTransferred", "ExpiryChanged", "PermissionScopeChanged", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]
 
 # Wrapper authority events consumed by manifest-derived authority topic lookup.
 # NameUnwrapped is also the emancipated-branch cleanup a migrated child's ENSv1
@@ -66,7 +66,7 @@ normalized_events = ["TokenControlTransferred", "ExpiryChanged", "PermissionScop
 name = "NameUnwrapped"
 fragment = "event NameUnwrapped(bytes32 indexed node, address owner)"
 emitter_roles = ["name_wrapper"]
-normalized_events = ["SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged"]
+normalized_events = ["SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PermissionChanged"]
 
 [[abi.events]]
 name = "FusesSet"
@@ -97,6 +97,9 @@ normalized_events = ["TokenControlTransferred", "PermissionChanged"]
 
 # NameWrapper delegates token approval to ERC1155Fuse, whose _approve emits the
 # ERC-721-shaped Approval event; its owner-wide setter emits ApprovalForAll.
+# Both are standard approval declarations: the list stays empty and the adapter
+# maps ApprovalForAll to AccountPermissionChanged (fanned out per wrapped name by
+# Project) and Approval to a resource-scoped PermissionChanged for the delegate.
 # (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L124-L135 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L36-L47 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L105-L117 @ ens_v1@91c966f)

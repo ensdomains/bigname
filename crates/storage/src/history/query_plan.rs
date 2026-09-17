@@ -2,7 +2,7 @@ use anyhow::Result;
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use super::{
-    EventHistoryReadFilter,
+    EventHistoryReadFilter, HistoryOrder,
     duplicates::push_product_history_duplicate_filter,
     paging::{push_history_filters, push_history_order, push_history_select},
     wrapped_registrar::{
@@ -26,7 +26,12 @@ pub(super) async fn explain_history_filter_for_test(
         .await?;
 
     let mut forward = QueryBuilder::<Postgres>::new("EXPLAIN (COSTS OFF) ");
-    push_wrapped_registrar_resources_query(&mut forward, lookup.logical_name_id, canonical_only);
+    push_wrapped_registrar_resources_query(
+        &mut forward,
+        lookup.logical_name_id,
+        canonical_only,
+        None,
+    );
     let forward_plan = forward
         .build_query_scalar::<String>()
         .fetch_all(&mut *transaction)
@@ -58,7 +63,7 @@ pub(super) async fn explain_history_filter_for_test(
     push_history_select(&mut builder, &filter, canonical_only, false, false);
     push_history_filters(&mut builder, &filter, canonical_only);
     push_product_history_duplicate_filter(&mut builder, &filter, canonical_only);
-    push_history_order(&mut builder);
+    push_history_order(&mut builder, HistoryOrder::Desc);
     let plan = builder
         .build_query_scalar::<String>()
         .fetch_all(&mut *transaction)

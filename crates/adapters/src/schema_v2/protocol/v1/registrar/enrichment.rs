@@ -74,12 +74,14 @@ fn event(
     let resource_id = binding_target.map(|state| state.resource_id);
     let token_lineage_id = binding_target.and_then(|state| state.token_lineage_id);
     let bind = binding_target.is_some_and(|state| !state.surface_known);
-    // This event names a surface its authority did not have. A resolver set
-    // while the name was unknown was linked to the resource alone; it is
-    // replayed onto the surface now, as a registrar event does for a
-    // registry-only authority it promotes.
+    // This event names a surface its registrar lease did not have. A resolver
+    // set while the name was unknown was linked to the resource alone; it is
+    // replayed onto the surface now. A registry-only authority is promoted
+    // through `append_surface_materialization` instead, which carries its own
+    // replay, so this covers only leases (the authorities with a token lineage).
     if bind
         && let Some(target) = binding_target
+        && target.token_lineage_id.is_some()
         && let Some(source_manifest_id) = target.source_manifest_id
         && let Some(link) = state.name_v1_resolver_link(
             &selected.source.namespace,

@@ -282,7 +282,7 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
 
     let first_page = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes&page_size=1"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes&page_size=1"),
     )
     .await?;
 
@@ -363,7 +363,7 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
 
     let second_page = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes&page_size=1&cursor={next_cursor}"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes&page_size=1&cursor={next_cursor}"),
     )
     .await?;
     assert_eq!(second_page["data"]["bound_names"]["data"][0]["name"], json!("beta.eth"));
@@ -435,7 +435,7 @@ async fn v2_get_resolver_serves_total_counts_with_bounded_samples() -> Result<()
     let payload = v2_resolver_payload_for_database(
         &database,
         &format!(
-            "/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes,aliases,roles"
+            "/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes,aliases,roles"
         ),
     )
     .await?;
@@ -484,7 +484,7 @@ async fn v2_get_resolver_rejects_pre_unification_cursor_snapshot_binding() -> Re
 
     let response = v2_resolver_response_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=1&cursor={old_cursor}"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=1&cursor={old_cursor}"),
     )
     .await?;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -511,7 +511,7 @@ async fn v2_get_resolver_returns_empty_bound_names_when_overview_exists() -> Res
 
     let payload = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
     )
     .await?;
 
@@ -543,7 +543,7 @@ async fn v2_get_resolver_omits_names_without_projected_authority() -> Result<()>
 
     let payload = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"),
     )
     .await?;
     let names = payload["data"]["bound_names"]["data"]
@@ -553,6 +553,50 @@ async fn v2_get_resolver_omits_names_without_projected_authority() -> Result<()>
         .map(|row| row["name"].as_str().expect("bound name must be text"))
         .collect::<Vec<_>>();
     assert_eq!(names, vec!["beta.eth"]);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_resolver_lists_a_root_registry_pointer_without_projected_authority() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture(&database).await?;
+    // An ENSv2 TLD whose root-registry token has a resolver pointer but no observed registration.
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET support_status = 'unsupported',
+             unsupported_reason = 'current_authority_not_projected',
+             serving_resource_id = resource_id,
+             resource_id = NULL,
+             surface_binding_id = NULL,
+             token_lineage_id = NULL,
+             binding_kind = NULL,
+             provenance = provenance || jsonb_build_object(
+                 'read_reachability', jsonb_build_object(
+                     'basis', 'root_registry_resolver_pointer'))
+         WHERE raw_name = 'alpha.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+    upsert_test_resolver_current_rows(
+        &database,
+        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
+    )
+    .await?;
+
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+    )
+    .await?;
+    let names = payload["data"]["bound_names"]["data"]
+        .as_array()
+        .expect("bound names must be an array")
+        .iter()
+        .map(|row| row["name"].as_str().expect("bound name must be text"))
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["alpha.eth", "beta.eth"], "{payload}");
 
     database.cleanup().await?;
     Ok(())
@@ -582,7 +626,7 @@ async fn v2_get_resolver_omits_ownerless_reservations_from_bound_names() -> Resu
 
     let payload = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"),
     )
     .await?;
     let names = payload["data"]["bound_names"]["data"]
@@ -618,7 +662,7 @@ async fn v2_get_resolver_serves_phase_rows() -> Result<()> {
         .await?;
     let payload = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"),
     )
     .await?;
 
@@ -658,7 +702,7 @@ async fn v2_get_resolver_rejects_bound_name_from_another_phase_snapshot() -> Res
 
     let response = v2_resolver_response_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=50"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=50"),
     )
     .await?;
 
@@ -718,7 +762,7 @@ async fn v2_get_resolver_excludes_ownerless_name_when_bindings_are_unsupported()
 
     let payload = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"),
     )
     .await?;
     let names = payload["data"]["bound_names"]["data"]
@@ -753,7 +797,7 @@ async fn v2_get_resolver_excludes_unclassified_serving_resource_row() -> Result<
 
     let payload = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"),
     )
     .await?;
     let names = payload["data"]["bound_names"]["data"]
@@ -803,7 +847,7 @@ async fn v2_get_resolver_includes_ownerless_name_when_bindings_are_supported() -
 
     let payload = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"),
     )
     .await?;
     let names = payload["data"]["bound_names"]["data"]
@@ -841,7 +885,7 @@ async fn v2_get_resolver_uses_dictionary_owner_and_registrant_precedence_for_bou
 
     let payload = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes&page_size=50"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes&page_size=50"),
     )
     .await?;
     let rows = payload["data"]["bound_names"]["data"]
@@ -876,7 +920,7 @@ async fn v2_get_resolver_reports_unsupported_requested_sections_in_meta() -> Res
     let payload = v2_resolver_payload_for_database(
         &database,
         &format!(
-            "/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes,aliases,roles,events"
+            "/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes,aliases,roles,events"
         ),
     )
     .await?;
@@ -919,7 +963,7 @@ async fn v2_get_resolver_reports_narrowed_unsupported_sections_as_unsupported() 
 
     let payload = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
     )
     .await?;
 
@@ -947,7 +991,7 @@ async fn v2_get_resolver_filters_bound_names_by_declared_resolver_chain() -> Res
 
     let payload = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
     )
     .await?;
     let rows = payload["data"]["bound_names"]["data"]
@@ -999,7 +1043,7 @@ async fn v2_get_resolver_excludes_lower_height_orphaned_project_targets() -> Res
 
     let names_payload = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
     )
     .await?;
     assert_eq!(names_payload["data"]["bound_names"]["data"], json!([]));
@@ -1026,7 +1070,7 @@ async fn v2_get_resolver_excludes_lower_height_orphaned_project_targets() -> Res
 
     let response = v2_resolver_response_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"),
     )
     .await?;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -1050,7 +1094,7 @@ async fn v2_get_resolver_paginates_route_chain_rows_across_interleaved_chains() 
 
     let first_page = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes&page_size=1"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes&page_size=1"),
     )
     .await?;
     let first_rows = first_page["data"]["bound_names"]["data"]
@@ -1063,7 +1107,7 @@ async fn v2_get_resolver_paginates_route_chain_rows_across_interleaved_chains() 
 
     let second_page = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes&page_size=1&cursor={next_cursor}"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes&page_size=1&cursor={next_cursor}"),
     )
     .await?;
     let second_rows = second_page["data"]["bound_names"]["data"]
@@ -1104,7 +1148,7 @@ async fn v2_get_resolver_does_not_advertise_wrong_chain_lookahead_as_more() -> R
 
     let payload = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes&page_size=1"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes&page_size=1"),
     )
     .await?;
 
@@ -1137,7 +1181,7 @@ async fn v2_get_resolver_maps_unsupported_reason_to_product_vocabulary() -> Resu
 
     let payload = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
     )
     .await?;
 
@@ -1166,7 +1210,7 @@ async fn v2_get_resolver_rejects_pipeline_unsupported_reason() -> Result<()> {
 
     let response = v2_resolver_response_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
     )
     .await?;
 
@@ -1195,7 +1239,7 @@ async fn v2_get_resolver_supplies_reason_when_unsupported_summary_omits_one() ->
 
     let payload = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
     )
     .await?;
 
@@ -1220,7 +1264,7 @@ async fn v2_get_resolver_missing_overview_returns_not_found() -> Result<()> {
 
     let response = v2_resolver_response_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"),
     )
     .await?;
 
@@ -1246,7 +1290,7 @@ async fn v2_get_resolver_missing_historical_projection_returns_stale() -> Result
     .await?;
     let initial = v2_resolver_payload_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"),
     )
     .await?;
     let token = initial["meta"]["as_of_token"]
@@ -1258,7 +1302,7 @@ async fn v2_get_resolver_missing_historical_projection_returns_stale() -> Result
 
     let response = v2_resolver_response_for_database(
         &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?at={token}"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?at={token}"),
     )
     .await?;
 
@@ -1274,10 +1318,10 @@ async fn v2_get_resolver_rejects_malformed_input() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
 
     for uri in [
-        format!("/v2/resolvers/ethereum-mainnet/{V2_RESOLVER_ADDRESS}"),
-        format!("/v2/resolvers/99999999/{V2_RESOLVER_ADDRESS}"),
-        "/v2/resolvers/1/not-an-address".to_owned(),
-        format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=records"),
+        format!("/v1/resolvers/ethereum-mainnet/{V2_RESOLVER_ADDRESS}"),
+        format!("/v1/resolvers/99999999/{V2_RESOLVER_ADDRESS}"),
+        "/v1/resolvers/1/not-an-address".to_owned(),
+        format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=records"),
     ] {
         let response = v2_resolver_response_for_database(&database, &uri).await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -1566,4 +1610,169 @@ fn unsupported_resolver_current_row(chain_id: &str, resolver_address: &str) -> R
         },
     });
     row
+}
+
+#[tokio::test]
+async fn v2_resolver_roles_carry_grant_event_provenance() -> Result<()> {
+    const HOLDER: &str = "0x0000000000000000000000000000000000000abc";
+    const OTHER_HOLDER: &str = "0x0000000000000000000000000000000000000abd";
+    let database = TestDatabase::new_migrated().await?;
+    let mut resolver = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    resolver.declared_summary["role_holders"]["count"] = json!(2);
+    resolver.declared_summary["role_holders"]["items"]
+        .as_array_mut()
+        .expect("role holder items")
+        .push(json!({
+            "subject": OTHER_HOLDER,
+            "resource_count": 1,
+            "permission_row_count": 1,
+            "effective_powers": ["set_records"],
+            "resource_ids": ["00000000-0000-0000-0000-00000000b1ff"],
+        }));
+    database
+        .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
+        .await?;
+    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
+
+    let resource_id = Uuid::from_u128(0xb100);
+    upsert_test_resources(&database.pool, &[resource(resource_id)]).await?;
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[
+            raw_block("ethereum-mainnet", "0xgrant150", None, 150, 1_700_000_150),
+            raw_block("ethereum-mainnet", "0xgrant160", None, 160, 1_700_000_160),
+        ],
+    )
+    .await?;
+    let grant_event = |identity: &str, block_number: i64, powers: Value| {
+        let mut event = history_event(
+            identity,
+            None,
+            Some(resource_id),
+            Some("ethereum-mainnet"),
+            Some(block_number),
+            Some(&format!("0xgrant{block_number}")),
+            Some(&format!("0xgrant{block_number}tx")),
+            Some(3),
+            CanonicalityState::Canonical,
+        );
+        event.event_kind = "PermissionChanged".to_owned();
+        event.source_family = "ens_v2_resolver_l1".to_owned();
+        event.after_state = json!({
+            "subject": HOLDER,
+            "effective_powers": powers,
+            "scope": {
+                "kind": "resolver",
+                "chain_id": "ethereum-mainnet",
+                "resolver_address": V2_RESOLVER_ADDRESS,
+            },
+        });
+        event
+    };
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            grant_event("resolver-grant-150", 150, json!(["set_resolver"])),
+            grant_event("resolver-grant-160", 160, json!(["set_resolver", "set_records"])),
+        ],
+    )
+    .await?;
+    let event_ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM bigname_phase.normalized_events \
+         WHERE event_identity IN ('resolver-grant-150', 'resolver-grant-160') \
+         ORDER BY block_number",
+    )
+    .fetch_all(&database.pool)
+    .await?;
+    assert_eq!(event_ids.len(), 2);
+    let mut permission = permission_current_row(
+        resource_id,
+        HOLDER,
+        PermissionScope::Resolver {
+            chain_id: "ethereum-mainnet".to_owned(),
+            resolver_address: V2_RESOLVER_ADDRESS.to_owned(),
+        },
+        7,
+        160,
+    );
+    permission.effective_powers = json!(["set_resolver", "set_records"]);
+    permission.provenance["normalized_event_ids"] = json!(event_ids);
+    upsert_phase_permissions_current_rows(&database.pool, &[permission]).await?;
+
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=roles"),
+    )
+    .await?;
+    let roles = payload["data"]["roles"].as_array().expect("roles");
+    assert_eq!(roles.len(), 2);
+    let holder = roles
+        .iter()
+        .find(|item| item["address"] == json!(HOLDER))
+        .expect("holder role item");
+    assert_eq!(
+        holder["grant_event"],
+        json!({
+            "block_number": 150,
+            "timestamp": "2023-11-14T22:15:50Z",
+            "transaction_hash": "0xgrant150tx",
+            "log_index": 3,
+        })
+    );
+    assert_eq!(holder["powers"], json!(["set_records", "set_resolver"]));
+    let other = roles
+        .iter()
+        .find(|item| item["address"] == json!(OTHER_HOLDER))
+        .expect("other role item");
+    assert!(other.get("grant_event").is_none(), "{other}");
+    assert_no_banned_v1_spellings(&payload);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[test]
+fn v2_resolver_overview_reports_a_declared_ensv1_mirror() {
+    let include = crate::v2::resolver_overview_include(&["nodes".to_owned()])
+        .expect("valid include must parse");
+    let plain = crate::v2::build_resolver_overview(
+        resolver_current_row("ethereum-sepolia", V2_RESOLVER_ADDRESS),
+        11_155_111,
+        include,
+        empty_bound_names(),
+    )
+    .expect("resolver overview must build");
+    assert!(
+        serde_json::to_value(plain)
+            .expect("overview must serialize")
+            .get("mirror")
+            .is_none()
+    );
+
+    let mut row = resolver_current_row("ethereum-sepolia", V2_RESOLVER_ADDRESS);
+    row.declared_summary["classification"] = json!({
+        "source_family": "ens_v2_resolver_l1",
+        "role": "ensv1_mirror_resolver",
+        "basis": "manifest_declared_address",
+        "read_features": [],
+        "mirror": {
+            "mirrored_source_family": "ens_v1_resolver_l1",
+            "mirrored_registry_source_family": "ens_v1_registry_l1",
+            "mirrored_registry_address": "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e"
+        }
+    });
+    let overview =
+        crate::v2::build_resolver_overview(row, 11_155_111, include, empty_bound_names())
+            .expect("resolver overview must build");
+    let value = serde_json::to_value(overview).expect("overview must serialize");
+    assert_eq!(
+        value["mirror"],
+        json!({
+            "kind": "ensv1_registry",
+            "registry": {
+                "chain_id": 11_155_111,
+                "address": "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e"
+            }
+        })
+    );
 }

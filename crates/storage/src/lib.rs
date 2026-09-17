@@ -26,6 +26,7 @@ mod phase_projection_reads;
 mod primary_name;
 mod projection_helpers;
 mod record_inventory;
+mod registries;
 mod resolution_support;
 mod resolver;
 mod snapshot_selection;
@@ -37,21 +38,26 @@ pub use address_names::{
     AddressNamesCurrentCountFilter, AddressNamesCurrentCursor, AddressNamesCurrentDedupe,
     AddressNamesCurrentOrder, AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary,
     AddressNamesCurrentSort, AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
-    AddressNamesCurrentSortedPage, AddressNamesCurrentSummary,
-    DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
+    AddressNamesCurrentSortedPage, AddressNamesCurrentSummary, AddressRecordCurrentEntry,
+    AddressRecordsCurrentPage, DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS,
+    DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER, ENSIP19_DEFAULT_ADDRESS_RECORD_KEY,
     count_address_names_current_for_app_filter, load_address_names_current,
     load_address_names_current_for_relations, load_address_names_current_including_noncanonical,
     load_address_names_current_including_noncanonical_for_relations,
-    load_address_names_current_page, load_address_names_current_page_sorted_for_relations,
+    load_address_names_current_page, load_address_names_current_page_filtered,
+    load_address_names_current_page_sorted_for_relations, load_address_records_current_page,
 };
 pub use api_preflight::{
     ApiLookupDdlKind, ApiLookupDdlObject, load_missing_api_lookup_ddl, phase_schema_exists,
 };
 pub use children::{
-    ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentRow, ChildrenCurrentSummary,
-    DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS, DEFAULT_CHILDREN_CURRENT_READ_FILTER,
+    ChildrenCurrentKeysetCursor, ChildrenCurrentOrder, ChildrenCurrentPage,
+    ChildrenCurrentPageFilter, ChildrenCurrentRow, ChildrenCurrentSort, ChildrenCurrentSortValue,
+    ChildrenCurrentSummary, DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS,
+    DEFAULT_CHILDREN_CURRENT_READ_FILTER, RegistryChildrenPage, count_registry_children_current,
     load_children_current, load_children_current_including_noncanonical,
-    load_children_current_page, load_children_current_summaries,
+    load_children_current_page, load_children_current_page_filtered,
+    load_children_current_summaries, load_registry_children_current_page,
 };
 pub use evm_primitives::{
     ens_namehash_label_bytes, logical_name_id_for_name, normalize_evm_address, normalize_evm_b256,
@@ -61,15 +67,16 @@ pub use history::explain_registration_history_filter_for_test;
 #[cfg(any(test, feature = "test-support"))]
 pub use history::history_anchor_read_test_hooks;
 pub use history::{
-    EventHistoryAddressFilter, EventHistoryFilter, HistoryChainPositionSample, HistoryCursor,
-    HistoryEvent, HistoryPage, HistoryScope, HistorySummary, HistorySummaryMode,
+    ChainBlockRange, EventHistoryAddressFilter, EventHistoryFilter, EventHistoryResolverFilter,
+    HistoryBlockWindow, HistoryChainPositionSample, HistoryCursor, HistoryEvent, HistoryOrder,
+    HistoryPage, HistoryPageOptions, HistoryScope, HistorySummary, HistorySummaryMode,
     InterpretRedoFence, InterpretRedoInProgress, InvalidHistoryCursor,
     capture_interpret_redo_fence, load_address_history, load_address_history_for_relations,
     load_address_history_page, load_address_history_page_for_relations, load_event_history,
-    load_event_history_page, load_event_history_page_with_redo_policy, load_name_history,
-    load_name_history_head, load_name_history_page, load_resource_history,
+    load_event_history_page, load_event_history_page_with_redo_policy, load_history_events_by_ids,
+    load_name_history, load_name_history_head, load_name_history_page, load_resource_history,
     load_resource_history_page, load_wrapped_registrar_resource_ids_by_logical_name_id,
-    revalidate_interpret_redo_fence,
+    resolve_chain_block_ranges, revalidate_interpret_redo_fence,
 };
 pub use history::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
 pub use identity::{
@@ -102,14 +109,16 @@ pub use lineage::{
 };
 pub use name_current::{
     DEFAULT_ADDRESS_NAMES_MEMBERSHIP_JOINS, DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER,
-    DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER, NameCurrentAddressFilter,
-    NameCurrentAddressRelationFilter, NameCurrentListCursor, NameCurrentListCursorValue,
-    NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage, NameCurrentListRow,
-    NameCurrentListSort, NameCurrentRow, count_name_current_list,
+    DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER,
+    MIGRATION_AUTHORITY_TRANSITION_PROOF_KIND, NameCurrentAddressFilter,
+    NameCurrentAddressRelationFilter, NameCurrentExpiringFilter, NameCurrentListCursor,
+    NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage,
+    NameCurrentListRow, NameCurrentListSort, NameCurrentRow, count_name_current_list,
     load_current_names_by_resource_ids, load_name_current, load_name_current_by_logical_name_ids,
-    load_name_current_for_snapshot, load_name_current_list_page,
+    load_name_current_expiring_page, load_name_current_for_snapshot, load_name_current_list_page,
     load_name_current_list_page_offset, load_name_current_list_row_by_name,
-    load_name_current_list_row_by_namehash, name_current_list_cursor_from_row,
+    load_name_current_list_row_by_namehash, load_name_migration_transition_timestamps,
+    name_current_authority_arm, name_current_list_cursor_from_row,
 };
 pub use normalized_events::*;
 pub use permissions::{
@@ -121,8 +130,9 @@ pub use permissions::{
     load_permissions_current, load_permissions_current_account_resource_page,
     load_permissions_current_account_resource_page_count_summary,
     load_permissions_current_by_resource_ids, load_permissions_current_for_resolver_scope,
-    load_permissions_current_page, load_permissions_current_resolver_targets,
-    load_permissions_current_resource_summaries, load_permissions_current_resource_summary,
+    load_permissions_current_for_resolver_scope_subjects, load_permissions_current_page,
+    load_permissions_current_resolver_targets, load_permissions_current_resource_summaries,
+    load_permissions_current_resource_summary, permission_resource_matches_namespace,
 };
 pub use phase_projection_reads::{
     DEFAULT_RESOLVER_CURRENT_READ_FILTER, PHASE_EXPECTED_CHAIN_IDS_SELECT,
@@ -138,23 +148,30 @@ pub use primary_name::{
 };
 pub use record_inventory::{
     RECORD_INVENTORY_CANONICALITY_SUMMARY_FILTER, RECORD_INVENTORY_PROJECTION_LINEAGE_FILTER,
-    RECORD_INVENTORY_RESOURCE_CANONICALITY_FILTER, RECORD_INVENTORY_RESOURCE_LINEAGE_FILTER,
-    RESOURCE_CANONICALITY_JOINS, RecordInventoryCurrentRow,
-    count_record_inventory_selectors_by_lookup_keys, load_record_inventory_current,
-    load_record_inventory_current_batch, load_record_inventory_current_for_snapshot,
-    load_record_inventory_current_with_anchor_fallback, record_version_boundary_storage_key,
+    RECORD_INVENTORY_RECORD_SERVING_FILTER, RECORD_INVENTORY_RESOURCE_CANONICALITY_FILTER,
+    RECORD_INVENTORY_RESOURCE_LINEAGE_FILTER, RESOURCE_CANONICALITY_JOINS,
+    RecordInventoryCurrentRow, count_record_inventory_selectors_by_lookup_keys,
+    load_record_inventory_current, load_record_inventory_current_batch,
+    load_record_inventory_current_for_snapshot, load_record_inventory_current_with_anchor_fallback,
+    record_version_boundary_storage_key,
+};
+pub use registries::{
+    RegistryContractRow, RegistryCreation, RegistryCreationBasis, RegistryReferenceKeysetCursor,
+    RegistryReferencePage, SubregistryPointer, count_contract_events, load_registry_contract,
+    load_registry_references_page, load_registry_serving_pointer,
+    load_subregistry_pointers_for_names,
 };
 pub use resolution_support::{
     BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE, ENS_NAMESPACE,
-    ETHEREUM_MAINNET_CHAIN_ID, SupportedVerifiedResolutionRecordKey, VerifiedResolutionPathClass,
-    VerifiedResolutionRecord, VerifiedResolutionRequestedChainPosition,
-    VerifiedResolutionSupportBoundary, canonical_addr_coin_type,
-    classify_supported_resolution_topology,
-    identity_name_current_has_event_linked_ownerless_registry_serving, is_resolution_avatar_record,
-    name_current_has_event_linked_ownerless_registry_serving,
-    parse_supported_verified_resolution_record_key, projected_resolution_boundaries_from_topology,
-    projected_resolution_topology, record_version_boundary_has_pointer,
-    resolution_record_inventory_lookup_key, resolution_record_inventory_lookup_key_any_chain,
+    ETHEREUM_MAINNET_CHAIN_ID, EVENT_LINKED_REGISTRY_SERVING_BASES,
+    SupportedVerifiedResolutionRecordKey, VerifiedResolutionPathClass, VerifiedResolutionRecord,
+    VerifiedResolutionRequestedChainPosition, VerifiedResolutionSupportBoundary,
+    canonical_addr_coin_type, classify_supported_resolution_topology,
+    identity_name_current_has_event_linked_registry_serving, is_resolution_avatar_record,
+    name_current_has_event_linked_registry_serving, parse_supported_verified_resolution_record_key,
+    projected_resolution_boundaries_from_topology, projected_resolution_topology,
+    record_version_boundary_has_pointer, resolution_record_inventory_lookup_key,
+    resolution_record_inventory_lookup_key_any_chain,
     resolution_record_inventory_lookup_key_for_revalidation, resolution_record_version_boundary,
     resolution_record_version_boundary_for_revalidation, resolution_supports_avatar_readback,
     resolution_verified_support_boundary, row_has_basenames_supported_chain_positions,
@@ -164,10 +181,11 @@ pub use resolution_support::{
 };
 pub use resolver::ResolverCurrentRow;
 pub use snapshot_selection::{
-    CURRENT_PROJECT_PUBLICATION_JOIN, ChainPosition, ChainPositions, SelectedSnapshot, SnapshotAt,
-    SnapshotConsistency, SnapshotPositionRequirement, SnapshotProjectionRead,
-    SnapshotSelectionError, SnapshotSelectionErrorKind, SnapshotSelectionResult,
-    SnapshotSelectionScope, SnapshotSelectorInput, ensure_projection_chain_positions_match,
+    CURRENT_PROJECT_PUBLICATION_JOIN, ChainPosition, ChainPositions,
+    PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS, SelectedSnapshot, SnapshotAt, SnapshotConsistency,
+    SnapshotPositionRequirement, SnapshotProjectionRead, SnapshotSelectionError,
+    SnapshotSelectionErrorKind, SnapshotSelectionResult, SnapshotSelectionScope,
+    SnapshotSelectorInput, ensure_projection_chain_positions_match, load_served_project_generation,
     parse_rfc3339_utc_timestamp, resolve_exact_name_snapshot_selection, snapshot_chain_has_head,
 };
 

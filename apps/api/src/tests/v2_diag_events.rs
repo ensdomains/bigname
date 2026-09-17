@@ -8,7 +8,7 @@ const DIAG_EVENTS_SURFACE_BINDING_ID: u128 = 0xd1a90000000000000000000000000003;
 #[tokio::test]
 async fn v2_get_diagnostic_events_returns_raw_rows_and_infers_namespace() -> Result<()> {
     let (database, payload) =
-        v2_diag_events_payload("/v2/diagnostics/events?name=Diag.eth&page_size=10").await?;
+        v2_diag_events_payload("/v1/diagnostics/events?name=Diag.eth&page_size=10").await?;
 
     assert_eq!(payload["page"]["page_size"], json!(10));
     assert_eq!(payload["page"]["total_count"], Value::Null);
@@ -100,7 +100,7 @@ async fn v2_get_diagnostic_events_returns_raw_rows_and_infers_namespace() -> Res
 #[tokio::test]
 async fn v2_get_diagnostic_events_paginates_and_rejects_cursor_mismatch() -> Result<()> {
     let (database, first_page) = v2_diag_events_payload(
-        "/v2/diagnostics/events?namespace=ens&name=diag.eth&page_size=1",
+        "/v1/diagnostics/events?namespace=ens&name=diag.eth&page_size=1",
     )
     .await?;
 
@@ -113,7 +113,7 @@ async fn v2_get_diagnostic_events_paginates_and_rejects_cursor_mismatch() -> Res
 
     let second_page = v2_diag_events_payload_for_database(
         &database,
-        &format!("/v2/diagnostics/events?namespace=ens&name=diag.eth&page_size=1&cursor={next_cursor}"),
+        &format!("/v1/diagnostics/events?namespace=ens&name=diag.eth&page_size=1&cursor={next_cursor}"),
     )
     .await?;
     assert_eq!(second_page["page"]["cursor"], json!(next_cursor));
@@ -123,7 +123,7 @@ async fn v2_get_diagnostic_events_paginates_and_rejects_cursor_mismatch() -> Res
     let filter_mismatch = v2_diag_events_response_for_database(
         &database,
         &format!(
-            "/v2/diagnostics/events?namespace=ens&name=diag.eth&from_block=303&page_size=1&cursor={next_cursor}"
+            "/v1/diagnostics/events?namespace=ens&name=diag.eth&from_block=303&page_size=1&cursor={next_cursor}"
         ),
     )
     .await?;
@@ -134,7 +134,7 @@ async fn v2_get_diagnostic_events_paginates_and_rejects_cursor_mismatch() -> Res
     let at_rejected = v2_diag_events_response_for_database(
         &database,
         &format!(
-            "/v2/diagnostics/events?namespace=ens&name=diag.eth&at=2023-11-14T22:18:23Z&page_size=1&cursor={next_cursor}"
+            "/v1/diagnostics/events?namespace=ens&name=diag.eth&at=2023-11-14T22:18:23Z&page_size=1&cursor={next_cursor}"
         ),
     )
     .await?;
@@ -153,7 +153,7 @@ async fn v2_get_diagnostic_events_paginates_and_rejects_cursor_mismatch() -> Res
 #[tokio::test]
 async fn v2_get_diagnostic_events_honors_namespace_and_filters_without_snapshot_meta() -> Result<()> {
     let (database, ens) = v2_diag_events_payload(
-        "/v2/diagnostics/events?namespace=ens&name=diag.eth&finality=latest&page_size=10",
+        "/v1/diagnostics/events?namespace=ens&name=diag.eth&finality=latest&page_size=10",
     )
     .await?;
     assert_eq!(ens["meta"], json!({}));
@@ -169,7 +169,7 @@ async fn v2_get_diagnostic_events_honors_namespace_and_filters_without_snapshot_
     );
 
     let basenames =
-        v2_diag_events_payload_for_database(&database, "/v2/diagnostics/events?namespace=basenames")
+        v2_diag_events_payload_for_database(&database, "/v1/diagnostics/events?namespace=basenames")
             .await?;
     let data = basenames["data"]
         .as_array()
@@ -182,7 +182,7 @@ async fn v2_get_diagnostic_events_honors_namespace_and_filters_without_snapshot_
     let filtered = v2_diag_events_payload_for_database(
         &database,
         &format!(
-            "/v2/diagnostics/events?namespace=ens&address={DIAG_EVENTS_ADDRESS}&type=registration&from_block=303&to_block=303"
+            "/v1/diagnostics/events?namespace=ens&address={DIAG_EVENTS_ADDRESS}&type=registration&from_block=303&to_block=303"
         ),
     )
     .await?;

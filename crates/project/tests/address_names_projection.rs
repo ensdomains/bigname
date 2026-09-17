@@ -1448,8 +1448,12 @@ async fn registry_self_with_linked_resolver_serves_without_control() -> Result<(
                 declared_summary #>> '{resolver,address}',
                 (SELECT count(*) FROM children_current
                  WHERE child_logical_name_id = $1),
+                -- A cleared pointer may still publish the history-only row that carries
+                -- provenance.attributed_event_ids; it serves no records, and that is what this
+                -- counts.
                 (SELECT count(*) FROM record_inventory_current
-                 WHERE resource_id = $2::uuid)
+                 WHERE resource_id = $2::uuid
+                   AND provenance ->> 'record_serving' IS DISTINCT FROM 'false')
          FROM name_current WHERE logical_name_id = $1",
     )
     .bind(OWNERLESS_LOGICAL)

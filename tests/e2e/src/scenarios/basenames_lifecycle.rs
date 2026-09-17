@@ -42,7 +42,7 @@ async fn v2_records(api: &V2Api, name: &str, source: &str) -> Result<Value> {
     let response = api
         .client
         .get(format!(
-            "{}/v2/names/{name}/records?namespace=basenames&source={source}&keys=addr:60",
+            "{}/v1/names/{name}/records?namespace=basenames&source={source}&keys=addr:60",
             api.base_url
         ))
         .send()

@@ -50,11 +50,10 @@ impl State {
             let completed = self
                 .v1_pending_wrapper_sync_expiries
                 .iter()
-                .filter_map(|(key, (expected_controller, expiry))| {
-                    expected_controller
-                        .eq_ignore_ascii_case(&controller)
-                        .then(|| (key.clone(), *expiry))
+                .filter(|(_, (expected_controller, _))| {
+                    expected_controller.eq_ignore_ascii_case(&controller)
                 })
+                .map(|(key, (_, expiry))| (key.clone(), *expiry))
                 .collect::<Vec<_>>();
             for (key, expiry) in completed {
                 let expiry = self
@@ -224,6 +223,67 @@ impl State {
         {
             state.expiry = Some(i64::try_from(expiry).unwrap_or(i64::MAX));
         }
+    }
+
+    /// The current per-token approved address, kept because `_beforeTransfer` and `_burn` clear
+    /// the approval without an event.
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L837-L840 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L275 @ ens_v1@91c966f)
+    pub(in crate::schema_v2) fn set_v1_wrapper_delegate(
+        &mut self,
+        namespace: &str,
+        namehash: &str,
+        delegate: Option<String>,
+    ) -> Option<String> {
+        let key = v1_key(namespace, namehash);
+        match delegate {
+            Some(delegate) => self
+                .v1_wrapper_delegates
+                .insert(key, delegate.to_ascii_lowercase()),
+            None => self.v1_wrapper_delegates.remove(&key),
+        }
+    }
+
+    /// Whether the holder row of a still-linked wrapper name was already revoked by an ERC-1155
+    /// burn, so the `NameUnwrapped` that follows the burn does not revoke it a second time.
+    /// Returns the previous flag.
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+    pub(in crate::schema_v2) fn set_v1_wrapper_burnt(
+        &mut self,
+        namespace: &str,
+        namehash: &str,
+        burnt: bool,
+    ) -> bool {
+        let key = v1_key(namespace, namehash);
+        if burnt {
+            self.v1_wrapper_burnt.insert(key).is_some()
+        } else {
+            self.v1_wrapper_burnt.remove(&key).is_some()
+        }
+    }
+
+    pub(in crate::schema_v2) fn v1_wrapper_delegate(
+        &self,
+        namespace: &str,
+        namehash: &str,
+    ) -> Option<String> {
+        self.v1_wrapper_delegates
+            .get(&v1_key(namespace, namehash))
+            .cloned()
+    }
+
+    // NameWrapper reads fuses through `_clearOwnerAndFuses`, which zeroes them once the entry
+    // expiry precedes the block timestamp.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
+    pub(in crate::schema_v2) fn v1_wrapper_effective_fuses(
+        &self,
+        namespace: &str,
+        namehash: &str,
+        at_unix_timestamp: i64,
+    ) -> Option<u32> {
+        let data = self.v1_wrapper_data.get(&v1_key(namespace, namehash))?;
+        let expired = u64::try_from(at_unix_timestamp).is_ok_and(|now| data.expiry < now);
+        Some(if expired { 0 } else { data.fuses })
     }
 
     pub(in crate::schema_v2) fn set_v1_wrapper_fuses(
