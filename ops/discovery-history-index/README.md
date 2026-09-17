@@ -20,13 +20,22 @@ batch transaction; inspect `pg_stat_progress_create_index` rather than restartin
 that batch. The script permits that transaction wait and bounds the entire build to thirty
 minutes. Retain its output in the deployment receipt.
 
-Before treating the step as complete, require exactly one index row, both
-`indisvalid` and `indisready` true, and the expected definition. `IF NOT EXISTS`
-does not fix an invalid index from an interrupted concurrent build. If this
-specific index is invalid and no build is running, drop only it with
-`DROP INDEX CONCURRENTLY bigname_phase.discovery_edges_observation_history_idx`,
-then rerun the installation and validity checks. Do not drop the existing active
-indexes. Never drop a valid replacement merely because an installation was retried.
+The script ends with a check that fails, with a non-zero `psql` exit, unless
+the named index belongs to `bigname_phase.discovery_edges` and is both
+`indisvalid` and `indisready`. It prints the index row first, so the receipt
+shows the flags either way. The check does not compare the definition: before
+treating the step as complete, also require exactly one index row with the
+expected definition.
+
+An interrupted concurrent build, for example one cancelled or stopped by the
+thirty-minute limit, leaves an invalid index under the intended name.
+`IF NOT EXISTS` matches on the name alone, so rerunning the script skips
+creation and then fails at the check. Nothing drops or rebuilds the index
+automatically. To recover, first confirm in `pg_stat_progress_create_index` that
+no build is still running. Then drop only this index with
+`DROP INDEX CONCURRENTLY bigname_phase.discovery_edges_observation_history_idx`
+and rerun the script. Do not drop the existing active indexes. Never drop a
+valid replacement merely because an installation was retried.
 
 Capture representative `EXPLAIN (ANALYZE, BUFFERS)` read-only equivalents of the
 historical queries before and after installation. Verify indexed access includes
@@ -34,7 +43,11 @@ the observation key and compare actual completed Interpret batches and consumed
 raw logs. A faster isolated query does not prove end-to-end throughput by itself.
 
 The matching versioned schema-migration installs the same definition on initialized
-databases; after a live prebuild, its `IF NOT EXISTS` is a no-op. Apply that migration
+databases; after a live prebuild, its `IF NOT EXISTS` is a no-op. That file
+matches on the name alone, so the later schema-migration
+`20260917160000_discovery_edges_index_validity_check.sql` fails the SQLx run if
+this index exists but is not valid and ready. It changes nothing; recover as
+described above, then run the schema-migrations again. Apply that migration
 through the usual SQLx release process when adopting this source revision. The
 fresh baseline also includes the index. No binary replacement or Interpret replay
 is needed solely to preinstall it on the current deployment.
