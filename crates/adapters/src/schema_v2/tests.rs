@@ -610,7 +610,7 @@ mod v1_registrar {
                     name: "far-future-expiry".to_owned(),
                     label: labelhash,
                     owner: CONTRACT.parse()?,
-                    expires: U256::from(42),
+                    expires: far_future,
                 }
                 .encode_log_data(),
                 1,

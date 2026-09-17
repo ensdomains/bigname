@@ -238,6 +238,9 @@ independently of the registration marker.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L68 @ ens_v1@91c966f)
 
 Numeric BaseRegistrar expiry above the signed timestamp range is retained as `i64::MAX`.
+The `ens_v1_registrar_l1` controller events that repeat that expiry next to the label use the same
+rule, so an out-of-range value does not fail interpretation and lose the label; Basenames expiry
+decoding stays strict.
 Settlement treats an expiry whose grace addition overflows that range as live; public timestamp
 rendering keeps the existing `null` representation for unrepresentable dates. Co-admitted
 ENSv1→ENSv2 migration evidence retains over-`u64` expiry as decimal text and does not use it for
