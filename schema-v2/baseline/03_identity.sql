@@ -153,6 +153,16 @@ CREATE INDEX IF NOT EXISTS discovery_edges_observation_history_idx
     )
     WHERE canonicality_state <> 'orphaned';
 
+-- Reopening an exact observation must also find orphaned and closed rows.
+CREATE INDEX IF NOT EXISTS discovery_edges_reopen_idx
+    ON discovery_edges (
+        chain_id,
+        from_contract_instance_id,
+        edge_kind,
+        active_from_block_number,
+        (provenance ->> 'observation_key')
+    );
+
 CREATE TABLE IF NOT EXISTS token_lineages (
     token_lineage_id uuid PRIMARY KEY,
     chain_id text NOT NULL,

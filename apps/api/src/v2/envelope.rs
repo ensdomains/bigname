@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::permission_support::UnlistedPermissionSurface;
 use super::vocab::{Completeness, Source};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -35,6 +36,9 @@ pub(crate) struct Meta {
     pub(crate) unsupported_fields: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unsupported_reason: Option<String>,
+    /// Permission reads only: the permission surfaces whose holders the rows do not list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) unlisted_permission_surfaces: Option<Vec<UnlistedPermissionSurface>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) source: Option<Source>,
 }

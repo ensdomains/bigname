@@ -57,7 +57,43 @@ host measurement, and changes no direct CLI defaults or backup policy (#329).
    WAL, tablespace, socket, backup or other service content. It must contain only
    disposable probe content and no links into those trees. Reject overlap with
    every effective mount, including `RETH_DATA_DIR`.
-3. Record Docker/Compose versions, daemon host/context, Docker data root, volume
+3. Choose the container memory ceilings: `POSTGRES_MEMORY_LIMIT`,
+   `BIGNAME_API_MEMORY_LIMIT`, `BIGNAME_PHASE_RUNNER_MEMORY_LIMIT` and, with the
+   public overlay, `BIGNAME_PUBLIC_PROXY_MEMORY_LIMIT`, as positive Docker byte
+   values (`24g`, `2048m`). The kernel charges the file page cache a container
+   populates to that container's cgroup, so the cache PostgreSQL reads through
+   lives inside `POSTGRES_MEMORY_LIMIT`, not beside it: that ceiling must cover
+   `shared_buffers` + `maintenance_work_mem` + `max_connections` × `work_mem` ×
+   a few (a backend can hold several `work_mem` allocations at once, and shared
+   memory is charged too) **plus the page cache PostgreSQL is meant to have**,
+   which is what `POSTGRES_EFFECTIVE_CACHE_SIZE` tells the planner it has.
+   Lower `effective_cache_size` to fit the ceiling rather than the other way
+   round; the Compose default of `96GB` is not a fit for a `24g` ceiling. The
+   budget is the host's total RAM (`free -b`) minus an explicit host reserve
+   for what runs outside any ceiling — kernel, Docker daemon, monitoring,
+   shells — of at least 2 GiB or 5%, whichever is larger, minus an allowance
+   for the co-resident archive node that is its own ceiling if it has one and
+   otherwise a worst case, never its observed usage, which is not a bound.
+   The four ceilings must sum to no more than that budget; a budget that
+   forces a ceiling below its floor above means the host is too small for
+   both workloads, not that the reserve can be spent. An OOM kill of one
+   backend makes the postmaster restart every session. For the runner and the API, take the
+   peak RSS observed on this host under catch-up and under load respectively
+   and add headroom; where no observation exists yet, record that the ceiling
+   is provisional and revisit it after the first catch-up. A container that
+   reaches its ceiling is killed and restarted; check `docker inspect
+   --format '{{.State.OOMKilled}}'` on any unexplained restart. Compose only
+   refuses an empty value, and `0` renders as *no* limit, so validate the
+   rendered model with every active overlay before recreating anything:
+
+   ```sh
+   scripts/check-compose-memory-limits --env-file .env.server \
+     -f docker-compose.server.yml -f docker-compose.public.yml
+   ```
+
+   It fails unless every service carries a positive ceiling and `json-file`
+   logging with `max-size` and `max-file`.
+4. Record Docker/Compose versions, daemon host/context, Docker data root, volume
    driver/options, rootless/user-namespace settings and applicable security policy.
    Inspect PostgreSQL's effective mount rather than guessing from `postgres-data`:
 
@@ -79,7 +115,7 @@ host measurement, and changes no direct CLI defaults or backup policy (#329).
    both the actual database storage and probe. Require matching actual mounted
    filesystem/device, not merely matching path prefixes or equal free-byte counts.
    Check corresponding mount/device/`df -Pk` observations inside both containers.
-4. Prepare permissions for the effective service identity, including rootless,
+5. Prepare permissions for the effective service identity, including rootless,
    user-namespace, ACL and SELinux mappings. The image's nominal UID/GID is 10001;
    do not blindly `chown 10001:10001` on the host. Verify required diagnostic
    tools on the actual host/image rather than assuming they are installed.
@@ -87,7 +123,7 @@ host measurement, and changes no direct CLI defaults or backup policy (#329).
    successful create/remove operation. Also observe the real runner creating and
    deleting `.phase-runner-capacity-probe-*` with a host filesystem event observer,
    leaving no file behind. A manual touch by a different user is insufficient.
-5. Inspect effective settings before any recreation. Shell variables override
+6. Inspect effective settings before any recreation. Shell variables override
    `--env-file`; clear unintended overrides. Capture outputs privately and redact
    credentials before sharing. For each of server only, server/public,
    server/Reth and server/public/Reth, run the corresponding command above with
@@ -99,7 +135,11 @@ host measurement, and changes no direct CLI defaults or backup policy (#329).
    can render; their creation-time rejection remains a required control below.
    Require one dedicated read/write bind, identical absolute source/target and
    `create_host_path: false`. Both Reth sets must retain their separate read-only
-   mount. No unrelated service environment, command, port, network or volume may
+   mount. Require the chosen memory ceiling on every service
+   (`deploy.resources.limits.memory` in the rendered model — the check above —
+   and `HostConfig.Memory` greater than zero on every created container) and
+   the `json-file` logging options on each. No
+   unrelated service environment, command, port, network or volume may
    change. Inspect the created container as well; the env file alone is not proof:
 
    ```sh
@@ -107,6 +147,7 @@ host measurement, and changes no direct CLI defaults or backup policy (#329).
    docker inspect "$runner_container" --format '{{json .Config.Env}}'
    docker inspect "$runner_container" --format '{{json .Mounts}}'
    docker inspect "$runner_container" --format '{{json .Config.User}} {{json .Config.Entrypoint}} {{json .Config.Cmd}}'
+   docker inspect "$runner_container" --format '{{.HostConfig.Memory}} {{json .HostConfig.LogConfig}}'
    docker top "$runner_container"
    ```
 
@@ -166,10 +207,43 @@ normalized publication, API correctness, restore or production serving acceptanc
 ### Apply or roll back the wiring
 
 After the effective configuration and filesystem/permission checks pass, follow
-the approved deployment boundary and recreate only the intended phase-runner with
-all active overlays. Settings are read at startup. Changing the floor/ceiling does
-not require phase-row edits; genuine capacity breaches resume automatically after
-capacity recovers. Preserve the PostgreSQL volume during rollback: never use
+the approved deployment boundary and recreate the services whose wiring changed,
+with all active overlays. A change to the runner's floor or probe path touches
+only `phase-runner`. A change to the memory ceilings or log rotation touches
+every service: a running container keeps its old `HostConfig` and `LogConfig`
+until it is recreated, so recreating only the runner leaves PostgreSQL, the API
+and the proxy unlimited and unrotated. Pause indexing first
+([§ Pause and resume indexing](#pause-and-resume-indexing)), then recreate in
+dependency order — PostgreSQL (a short outage for every client), the API, the
+proxy where the public overlay is active, the runner — and inspect each created
+container before moving on. Build the command from the deployment's exact
+overlay set, the same `-f` list every other command in this runbook uses for
+it: `docker-compose.server.yml` always, `docker-compose.public.yml` only where
+the proxy runs, `docker-compose.reth-db.yml` only where the runner reads Reth.
+Recreating with an overlay missing rebuilds the container without that
+overlay's wiring — the runner loses its `eth_archive_node` network and the
+read-only `RETH_DATA_DIR` bind — and an overlay added that the deployment does
+not run demands variables it never set.
+
+```sh
+# Server + public + Reth shown; drop the overlays and services this deployment does not run.
+compose=(docker compose --env-file .env.server \
+  -f docker-compose.server.yml -f docker-compose.public.yml -f docker-compose.reth-db.yml)
+scripts/check-compose-memory-limits "${compose[@]:2}"
+"${compose[@]}" up -d --no-deps --force-recreate postgres
+"${compose[@]}" up -d --no-deps --force-recreate api public-proxy
+"${compose[@]}" up -d --no-deps --force-recreate phase-runner
+for service in postgres api public-proxy phase-runner; do
+  docker inspect "$("${compose[@]}" ps -q "$service")" \
+    --format "$service {{.HostConfig.Memory}} {{json .HostConfig.LogConfig}} {{json .HostConfig.Binds}}"
+done
+```
+
+Every line must show a memory value greater than zero and a `json-file` config
+with `max-size` and `max-file`; the runner's line must still show the Reth
+bind where that overlay is active. Settings are read at startup. Changing the
+floor/ceiling does not require phase-row edits; genuine capacity breaches
+resume automatically after capacity recovers. Preserve the PostgreSQL volume during rollback: never use
 `down -v`. Restore the reviewed configuration/image and inspect the effective
 settings again. The harmless dedicated probe directory may remain, but reverting
 this wiring restores the old disabled/misdirected defaults and loses its protection.
@@ -350,9 +424,9 @@ only re-checks the result.
 Before continuing, require
 `discovery_edges_observation_history_index_ready` from the query below to be
 true. It checks that the index belongs to `bigname_phase.discovery_edges`, is
-valid and ready, and has the reviewed key columns, order, and predicate. The
-`install.sql` check does not compare the definition, so this query is required
-even after a successful `install.sql` run.
+valid and ready, and has the reviewed key columns, order, and predicate.
+`install.sql` ends with its own validity and definition check; run this query
+as well when the statement was applied by hand.
 
 An interrupted build, for example one cancelled or stopped by the
 thirty-minute limit, leaves an invalid index under the intended name, and
@@ -373,6 +447,59 @@ runbook asks for. Then apply the schema-migration in step 4; its
 not allow the versioned schema-migration to perform the first build against a
 populated production `discovery_edges` table: an ordinary index build blocks
 writes to the table until the schema-migration's transaction ends.
+
+The release containing `20260917130000_discovery_edges_reopen_idx.sql` adds the
+exact lookup Interpret uses to find a retained observation, orphaned and closed
+ones included, before it inserts a new row. On an initialized production
+namespace, build `discovery_edges_reopen_idx` concurrently in step 3 with the
+reviewed statement below. The source of that statement is
+[`ops/discovery-reopen-index/install.sql`](../../ops/discovery-reopen-index/install.sql);
+the copy below must stay identical to it. `schema-v2/apply-check.sh` proves
+that `install.sql`, the fresh baseline, and the schema-migration build the same
+definition, but nothing checks this runbook's copy, so compare the two before
+the release and treat `install.sql` as correct if they differ. Prefer running
+`install.sql` itself, as
+[its index runbook](../../ops/discovery-reopen-index/README.md) describes: it
+also lifts the lock timeout, bounds the build to thirty minutes, prints the
+index row, and exits non-zero unless the index is valid, ready, and has the
+reviewed definition. This build can also be completed before the stop/start
+window opens; step 3 then only re-checks the result.
+
+Before continuing, require `discovery_edges_reopen_index_ready` from the query
+below to be true. It checks that the index belongs to
+`bigname_phase.discovery_edges`, is valid and ready, has the reviewed key
+columns and order, and has no predicate.
+
+An interrupted build leaves an invalid index under the intended name, and
+`IF NOT EXISTS` then skips it. To recover, first confirm in
+`pg_stat_progress_create_index` that no build is still running. Then drop only
+this index with
+`DROP INDEX CONCURRENTLY bigname_phase.discovery_edges_reopen_idx`, rerun the
+statement or `install.sql`, and repeat the query. Recover an index that is
+valid but has the wrong definition the same way. Never drop a valid index with
+the reviewed definition or the other discovery indexes.
+
+In the release record, keep the `install.sql` output or the statement with its
+start and end times, the result of the query below, the before and after
+`EXPLAIN (ANALYZE, BUFFERS)` plans and completed-batch measurements, and the
+`benchmark.py` JSON output the index runbook asks for. Then apply the
+schema-migration in step 4; its `IF NOT EXISTS` build is a no-op when the
+concurrent index is already valid. Do not allow it to perform the first build
+against a populated production `discovery_edges` table.
+
+Both discovery index schema-migrations adopt an existing index by name alone,
+so on their own they would also accept the invalid index an interrupted
+concurrent build leaves behind. The later
+`20260917160000_discovery_edges_index_validity_check.sql` closes that gap: in
+step 4 it fails, and `sqlx migrate run` stops without recording it, if either
+index exists but is not valid and ready, or is valid but does not have the
+reviewed definition. It also fails when `bigname_phase.discovery_edges` exists
+and either name is missing or belongs to a table, view, or other relation that
+is not an index. The error names the index and, for a definition mismatch,
+prints the definition it found beside the expected one. It never drops or
+rebuilds an index. If it
+fails, follow the recovery steps above or in the matching index runbook, then
+run `sqlx migrate run` again.
 
 The release containing
 `20260904120000_project_redo_child_registration_history.sql` adds the bounded
@@ -514,7 +641,8 @@ EXISTS (
 ) AS normalized_events_emitter_history_index_ready;
 
 -- The schema qualifier on the enum type depends on the session search_path,
--- so it is removed before the predicate is compared.
+-- so both spellings of the predicate are accepted. The printed text is not
+-- rewritten, because a replacement would also change a string literal.
 SELECT EXISTS (
     SELECT 1
     FROM pg_class index_relation
@@ -541,11 +669,39 @@ SELECT EXISTS (
               '(provenance ->> ''observation_key''::text)',
               'active_from_block_number'
           ]
-      AND replace(
-              pg_get_expr(index_state.indpred, index_state.indrelid, true),
-              'bigname_phase.', ''
-          ) = 'canonicality_state <> ''orphaned''::canonicality_state'
+      AND pg_get_expr(index_state.indpred, index_state.indrelid, true) IN (
+              'canonicality_state <> ''orphaned''::canonicality_state',
+              'canonicality_state <> ''orphaned''::bigname_phase.canonicality_state'
+          )
 ) AS discovery_edges_observation_history_index_ready;
+
+SELECT EXISTS (
+    SELECT 1
+    FROM pg_class index_relation
+    JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
+    JOIN pg_am access_method ON access_method.oid = index_relation.relam
+    WHERE index_relation.oid =
+          to_regclass('bigname_phase.discovery_edges_reopen_idx')
+      AND index_state.indrelid = to_regclass('bigname_phase.discovery_edges')
+      AND index_state.indisvalid
+      AND index_state.indisready
+      AND NOT index_state.indisunique
+      AND access_method.amname = 'btree'
+      AND index_state.indnkeyatts = 5
+      AND index_state.indoption::text = '0 0 0 0 0'
+      AND ARRAY(
+              SELECT pg_get_indexdef(index_state.indexrelid, key_position, true)
+              FROM generate_series(1, index_state.indnatts) AS key_position
+              ORDER BY key_position
+          ) = ARRAY[
+              'chain_id',
+              'from_contract_instance_id',
+              'edge_kind',
+              'active_from_block_number',
+              '(provenance ->> ''observation_key''::text)'
+          ]
+      AND index_state.indpred IS NULL
+) AS discovery_edges_reopen_index_ready;
 ```
 
 Apply the following index statements one at a time with the writer role. Do not
@@ -669,6 +825,14 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS discovery_edges_observation_history_idx
         active_from_block_number
     )
     WHERE canonicality_state <> 'orphaned';
+CREATE INDEX CONCURRENTLY IF NOT EXISTS discovery_edges_reopen_idx
+    ON bigname_phase.discovery_edges (
+        chain_id,
+        from_contract_instance_id,
+        edge_kind,
+        active_from_block_number,
+        (provenance ->> 'observation_key')
+    );
 CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_chain_block_number_idx
     ON bigname_phase.name_surfaces (chain_id, block_number);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS surface_bindings_chain_block_number_idx
@@ -735,6 +899,7 @@ indexes are additive; rollback may leave them in place.
    `20260902120000_normalized_events_basenames_record_node_resolver_idx.sql`,
    or `20260911120000_normalized_events_emitter_history_idx.sql`,
    or `20260917120000_discovery_edges_observation_history_idx.sql`,
+   or `20260917130000_discovery_edges_reopen_idx.sql`,
    apply the applicable reviewed `CREATE INDEX CONCURRENTLY` statements from
    the block above, then validate each with the readiness query above it;
    otherwise skip this step;
@@ -828,7 +993,7 @@ indexes are additive; rollback may leave them in place.
    the supervisor's Verify completion output (`/v1/status` cannot be used here
    because the API is stopped; after startup, the API accepts every known verification level at or above Sepolia's `quick_synced` floor and rejects unknown
    levels);
-11. start the API built from the same commit and confirm `/v1/status` reports
+11. before starting the API, apply the explicit API-role `GRANT SELECT` inventory in [`deployment.md`](../deployment.md#surviving-services), including `account_permission_state_current`, and verify the configured login with `has_table_privilege`; then start the API built from the same commit and confirm `/v1/status` reports
    current phase state and no pending redo; and
 12. run the release smoke and public-edge checks before undraining traffic.
 
