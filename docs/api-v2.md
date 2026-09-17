@@ -120,7 +120,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `failure_reason` | reason code or short reason string for `failed`, `stale`, `not_found`, or `mismatch` details | route-specific failure detail fields |
 | `completeness` | `full`, `partial`, `unsupported` | `coverage.status` on product routes (full taxonomy moves to diagnostics) |
 | `powers` | effective permission powers, drawn from the [permission powers vocabulary](#permission-powers-vocabulary); storage `resource_control` is exposed as `registration_control`; `registry_control` is passed through from an effective registry-operator account row; ENSv2 registry `was_reserved` is a non-authorizing history marker retained here so marker-only transitions remain visible (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@a971bd64) | `effective_powers` |
-| `unlisted_permission_surfaces` | on permission reads, the sorted codes of permission surfaces whose holders the rows do not list: `registrar_approvals`, `resolver_approvals`, `wrapper_parent_control`; omitted when nothing is unlisted or support is unknown | new in v2 |
+| `unlisted_permission_surfaces` | on permission reads, the sorted codes of permission surfaces whose holders the rows do not list: `ens_v2_registry_operators`, `registrar_approvals`, `resolver_approvals`, `wrapper_parent_control`; omitted when nothing is unlisted or support is unknown | new in v2 |
 | `unsupported_fields` | fields or expansions that could not be served or proved for a response item | `unsupported_filters`, coverage-derived unsupported field lists |
 | `keys` | comma-separated resolver record-key allowlist | `records` query parameter, selector token lists in record diagnostics |
 | `page` | pagination object on top-level collections, per-input lookup results, and the resolver overview `bound_names` nested collection | pagination sections with divergent field subsets |
@@ -212,6 +212,7 @@ response carries `meta.completeness=partial`,
 
 | Code | Surface not listed |
 | --- | --- |
+| `ens_v2_registry_operators` | operators that the name's owner approved on the ENSv2 registry with `setApprovalForAll` |
 | `registrar_approvals` | BaseRegistrar ERC-721 per-token and operator approvals |
 | `resolver_approvals` | resolver operator approvals and per-name delegates |
 | `wrapper_parent_control` | the parent name's control over a wrapped subname that is not emancipated |
@@ -233,6 +234,17 @@ service), not a per-registration permission, and is never a row.
 (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L162 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L186 @ ens_v1@91c966f)
+An ENSv2 registry registration reports
+`["ens_v2_registry_operators","resolver_approvals"]`. Its direct role holders
+are rows. The ENSv2 registry also gives the owner's roles to every operator the
+owner approved with `setApprovalForAll`, and those operators are not rows.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
+An ENSv2 registration has no BaseRegistrar token, so it never reports
+`registrar_approvals`. It reports `resolver_approvals` because the ENSv2
+`PublicResolverV2` authorizes the owner's operators and per-name delegates, and
+those are not rows either.
+(upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L51-L59 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L174-L184 @ ens_v2@a971bd64)
 A set of registrations reports the sorted union of its members' lists. A
 summary that independently proves full coverage contributes nothing, and a
 resource-bound read of it omits all three fields. Missing or indeterminate
@@ -253,10 +265,10 @@ does not claim complete permission coverage. A `registration_id` outside an
 explicit `namespace` instead returns an empty page without resource
 restrictions or permission support metadata.
 
-An address-only permissions read always reports all three codes,
+An address-only permissions read always reports all four codes,
 including when it returns zero rows or its current page contains no wrapper
-resource, because returned registrations cannot establish the request's full
-permission set.
+or ENSv2 resource, because returned registrations cannot establish the
+request's full permission set.
 For `include=role_summary`, any non-full resource summary makes the overall
 address-name response `partial`, lists `role_summary` in
 `meta.unsupported_fields`, and reports the same reason and surface list. Projected

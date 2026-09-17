@@ -1086,6 +1086,36 @@ async fn v2_address_role_summary_uses_wrapper_reason_for_wrapper_page() -> Resul
 }
 
 #[tokio::test]
+async fn v2_address_role_summary_reports_sorted_union_for_ens_v1_and_ens_v2_page() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    // alpha.eth keeps its ENSv1 registrar summary; beta.eth becomes an ENSv2 registry resource.
+    upsert_phase_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(Uuid::from_u128(0xb100), Some("ens_v2_registry")),
+    ).await?;
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?include=role_summary"),
+    ).await?;
+    let names = payload["data"].as_array().unwrap().iter()
+        .map(|row| row["name"].as_str().unwrap()).collect::<Vec<_>>();
+    assert!(names.contains(&"alpha.eth") && names.contains(&"beta.eth"), "{names:?}");
+    assert_eq!(payload["meta"]["unsupported_fields"], json!(["role_summary"]));
+    assert_unlisted_permission_surfaces(
+        &payload,
+        &["ens_v2_registry_operators", "registrar_approvals", "resolver_approvals"],
+    );
+
+    let ens_v2_only = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=beta&include=role_summary"),
+    ).await?;
+    assert_unlisted_permission_surfaces(&ens_v2_only, V2_ENS_V2_REGISTRY_UNLISTED_SURFACES);
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_address_names_rejects_bad_address_and_unknown_include() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database

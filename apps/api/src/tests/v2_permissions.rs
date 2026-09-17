@@ -582,7 +582,32 @@ async fn v2_permissions_resource_reason_names_registrar_and_resolver_gaps() -> R
 }
 
 #[tokio::test]
-async fn v2_permissions_account_reason_names_registrar_resolver_and_wrapper_gaps() -> Result<()> {
+async fn v2_permissions_ens_v2_registry_resource_names_registry_operator_gap() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let resource_id = v2_permissions_current_resource_id();
+    upsert_phase_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(resource_id, Some("ens_v2_registry")),
+    )
+    .await?;
+
+    for selector in [format!("registration_id={resource_id}"), "name=perms.eth".to_owned()] {
+        let payload =
+            v2_permissions_payload_for_database(&database, &format!("/v1/permissions?{selector}"))
+                .await?;
+        assert_unlisted_permission_surfaces(&payload, V2_ENS_V2_REGISTRY_UNLISTED_SURFACES);
+        // An ENSv2 registration has no BaseRegistrar token, so that code must not appear.
+        let surfaces = payload["meta"]["unlisted_permission_surfaces"]
+            .as_array()
+            .expect("surfaces");
+        assert!(!surfaces.contains(&json!("registrar_approvals")), "{selector}");
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_permissions_account_reason_names_all_four_gaps() -> Result<()> {
     let (database, payload) = v2_permissions_payload(&format!(
         "/v1/permissions?address={V2_PERMISSIONS_SUBJECT}"
     )).await?;
@@ -1120,7 +1145,7 @@ async fn v2_permissions_resource_bound_read_serves_registry_locked_roles() -> Re
             "locked_roles": ["renew", "transfer"],
         })
     );
-    assert_unlisted_permission_surfaces(&payload, V2_UNWRAPPED_UNLISTED_SURFACES);
+    assert_unlisted_permission_surfaces(&payload, V2_ENS_V2_REGISTRY_UNLISTED_SURFACES);
 
     summary.resource_restrictions = None;
     upsert_phase_permissions_current_resource_summary(&database.pool, &summary).await?;
@@ -1238,7 +1263,10 @@ const V2_OPERATOR_OWNER: &str = "0x0000000000000000000000000000000000000a11";
 const V2_OPERATOR_REGISTRY: &str = "0x0000000000000000000000000000000000000c33";
 const V2_UNWRAPPED_UNLISTED_SURFACES: &[&str] = &["registrar_approvals", "resolver_approvals"];
 const V2_WRAPPER_UNLISTED_SURFACES: &[&str] = &["resolver_approvals", "wrapper_parent_control"];
+const V2_ENS_V2_REGISTRY_UNLISTED_SURFACES: &[&str] =
+    &["ens_v2_registry_operators", "resolver_approvals"];
 const V2_ALL_UNLISTED_SURFACES: &[&str] = &[
+    "ens_v2_registry_operators",
     "registrar_approvals",
     "resolver_approvals",
     "wrapper_parent_control",

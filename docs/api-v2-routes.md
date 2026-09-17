@@ -1560,9 +1560,9 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   `meta.completeness=partial`,
   `unsupported_reason=permissions_partially_listed`, and
   `meta.unlisted_permission_surfaces`, the sorted codes defined in
-  [api-v2.md](api-v2.md): `registrar_approvals`, `resolver_approvals`, and
-  `wrapper_parent_control`. The list shrinks as later parts of issue #605 add
-  these surfaces. An unwrapped registrar- or registry-held registration reports
+  [api-v2.md](api-v2.md): `ens_v2_registry_operators`, `registrar_approvals`,
+  `resolver_approvals`, and `wrapper_parent_control`. The list shrinks as later
+  parts of issue #605 add these surfaces. An unwrapped registrar- or registry-held registration reports
   `["registrar_approvals","resolver_approvals"]`.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
@@ -1574,19 +1574,28 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   approvals are not enumerated; the NameWrapper `Ownable` owner is a
   deployment-wide administrator, not a per-registration permission.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565-L589 @ ens_v1@91c966f)
+  An ENSv2 registry registration reports
+  `["ens_v2_registry_operators","resolver_approvals"]`: its direct role holders
+  are rows, while operators the owner approved on the ENSv2 registry and
+  `PublicResolverV2` operators and delegates are not. It has no BaseRegistrar
+  token, so it never reports `registrar_approvals`.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L51-L59 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L174-L184 @ ens_v2@a971bd64)
   Independently proven full support omits all three fields. Missing or
   unrecognized summary metadata returns `meta.completeness=partial` with
   `unsupported_reason=permission_support_unknown`, no list, and takes
-  precedence. A mixed wrapper/non-wrapper request reports the sorted union. An
-  address-only read always reports all three codes, including for zero rows or a
-  page with no wrapper row, unless indeterminate support wins. Returned rows do
-  not define the request denominator: zero rows
+  precedence. A request that mixes wrapper, non-wrapper, or ENSv2 registrations
+  reports the sorted union. An address-only read always reports all four codes,
+  including for zero rows or a page with no wrapper or ENSv2 row, unless
+  indeterminate support wins. Returned rows do not define the request denominator: zero rows
   do not prove that no account can mutate the selected name or registration.
   Projected rows are not suppressed by these classifications and remain useful,
   but neither the page nor a role summary is an authoritative permission
   enumeration while the partial marker is present. Registrar ERC-721 approvals,
   resolver approvals/delegates, and parent control of non-emancipated wrapped
-  subnames remain absent. ENSv2 registry operators remain outside this slice.
+  subnames remain absent. ENSv2 registry operators also remain absent, and an
+  ENSv2 registration names that gap as `ens_v2_registry_operators`.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) A `name` filter
   resolves only the selected current registration: a migrated name returns its
   ENSv2 permission rows, while an explicit `registration_id` can still select a

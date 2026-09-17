@@ -139,7 +139,7 @@ pub(crate) async fn get_permissions(
                     .map_err(|_| V2Error::internal_error("failed to load permission support"))?;
             permission_support_for_resources(&ids, &summaries)
         } else {
-            PermissionSupport::Unknown
+            PermissionSupport::UNKNOWN
         };
         return Ok(empty_permissions_response(
             &params,
@@ -249,7 +249,7 @@ fn empty_permissions_response(
         EmptyPermissionsSelection::MissingOrUnsupportedNameAnchor => {
             apply_permissions_collection_support_meta(
                 &mut meta,
-                PermissionSupport::Unknown,
+                PermissionSupport::UNKNOWN,
                 PermissionRequestScope::AccountWide,
             );
         }
