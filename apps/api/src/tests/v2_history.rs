@@ -112,7 +112,7 @@ async fn v2_history_lists_pointer_attributed_record_writes_for_the_registration(
         80,
     )
     .await?;
-    seed_v2_history_blocks(&database, 131..=132).await?;
+    seed_v2_history_blocks(&database, 130..=132).await?;
 
     // PublicResolverV2 writes stay node-keyed at interpretation: no logical name, no resource.
     // Project attributes the first one to this registration through its resolver pointer and
@@ -139,6 +139,14 @@ async fn v2_history_lists_pointer_attributed_record_writes_for_the_registration(
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
+            // The grant makes the resource a registration, which the events feed filter needs.
+            v2_history_event(
+                "attributed-record-grant",
+                Some(logical_name_id),
+                Some(resource_id),
+                "RegistrationGranted",
+                130,
+            ),
             node_write(attributed_identity, 131, "node:attributed-record.eth"),
             node_write(
                 "ens_v2_resolver:2:ethereum-mainnet:0xhistory132:0xtx132:0:RecordChanged:0",
@@ -184,6 +192,22 @@ async fn v2_history_lists_pointer_attributed_record_writes_for_the_registration(
             "scope={scope}: an unattributed node write must not appear: {rows:?}"
         );
     }
+
+    // The registration filter on the events feed lists the same attributed write.
+    let by_registration = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?registration_id={resource_id}&page_size=20"),
+    )
+    .await?;
+    let rows = by_registration["data"].as_array().expect("event data");
+    assert!(
+        rows.iter().any(|row| row["transaction_hash"] == json!("0xtx131")),
+        "registration-filtered events dropped the attributed write: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row["transaction_hash"] == json!("0xtx132")),
+        "registration-filtered events listed an unattributed node write: {rows:?}"
+    );
 
     // A keyset cursor issued on the attributed row must validate and continue.
     let first = v2_history_payload_for_database(
@@ -350,7 +374,7 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
 }
 
 #[tokio::test]
-async fn v2_registry_history_registration_identity_uses_event_position() -> Result<()> {
+async fn v2_tokenized_registry_history_keeps_identity_outside_the_binding_window() -> Result<()> {
     const ADDRESS: &str = "0x0000000000000000000000000000000000007122";
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "ens:event-position-history.eth";
@@ -421,11 +445,11 @@ async fn v2_registry_history_registration_identity_uses_event_position() -> Resu
     let rows = payload["data"].as_array().expect("product history rows");
     assert_eq!(rows.len(), 3, "{rows:?}");
     assert_eq!(rows[0]["log_index"], json!(4));
-    assert_eq!(rows[0]["registration_id"], Value::Null);
+    assert_eq!(rows[0]["registration_id"], json!(resource_id.to_string()));
     assert_eq!(rows[1]["log_index"], json!(2));
     assert_eq!(rows[1]["registration_id"], json!(resource_id.to_string()));
     assert_eq!(rows[2]["log_index"], json!(0));
-    assert_eq!(rows[2]["registration_id"], Value::Null);
+    assert_eq!(rows[2]["registration_id"], json!(resource_id.to_string()));
 
     database.cleanup().await
 }
@@ -600,7 +624,25 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
         )],
     )
     .await?;
-    seed_v2_history_blocks(&database, 121..=124).await?;
+    seed_v2_history_blocks(&database, 120..=125).await?;
+    // The old registration ends exactly where the next binding begins.
+    sqlx::query(
+        "UPDATE bigname_phase.surface_bindings
+         SET active_from = to_timestamp(1700000121), active_to = to_timestamp(1700000123)
+         WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .execute(&database.pool)
+    .await?;
+    let later_binding = address_name_surface_binding(
+        Uuid::from_u128(0x9141),
+        logical_name_id,
+        later_resource_id,
+        "0xhistory123",
+        123,
+        1_700_000_123,
+    );
+    upsert_test_surface_bindings(&database.pool, &[later_binding]).await?;
     let mut unmapped_surface_event = v2_history_event(
         "registration-filter-unmapped-surface",
         Some(logical_name_id),
@@ -609,34 +651,57 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
         124,
     );
     unmapped_surface_event.source_family = "ens_v2_registrar_l1".to_owned();
-    bigname_storage::insert_normalized_event_fixtures(
-        &database.pool,
-        &[
-            v2_history_event(
-                "registration-filter-grant",
-                Some(logical_name_id),
-                Some(resource_id),
-                "RegistrationGranted",
-                121,
-            ),
-            v2_history_event(
-                "registration-filter-record",
-                Some(logical_name_id),
-                None,
-                "RecordChanged",
-                122,
-            ),
-            v2_history_event(
-                "registration-filter-later-grant",
-                Some(logical_name_id),
-                Some(later_resource_id),
-                "RegistrationGranted",
-                123,
-            ),
-            unmapped_surface_event,
-        ],
-    )
-    .await?;
+    let mut events = vec![
+        v2_history_event(
+            "registration-filter-grant",
+            Some(logical_name_id),
+            Some(resource_id),
+            "RegistrationGranted",
+            121,
+        ),
+        v2_history_event(
+            "registration-filter-record",
+            Some(logical_name_id),
+            None,
+            "RecordChanged",
+            122,
+        ),
+        v2_history_event(
+            "registration-filter-later-grant",
+            Some(logical_name_id),
+            Some(later_resource_id),
+            "RegistrationGranted",
+            123,
+        ),
+        v2_history_event(
+            "registration-filter-before-record",
+            Some(logical_name_id),
+            None,
+            "RecordChanged",
+            120,
+        ),
+        v2_history_event(
+            "registration-filter-next-record",
+            Some(logical_name_id),
+            None,
+            "RecordChanged",
+            123,
+        ),
+        v2_history_event(
+            "registration-filter-latest-record",
+            Some(logical_name_id),
+            None,
+            "RecordChanged",
+            125,
+        ),
+        unmapped_surface_event,
+    ];
+    for event in &mut events {
+        if event.event_kind == "RecordChanged" {
+            event.source_family = "ens_v1_resolver_l1".to_owned();
+        }
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
 
     let payload = v2_history_payload_for_database(
         &database,
@@ -653,8 +718,69 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
         &format!("/v1/events?registration_id={resource_id}&page_size=1"),
     )
     .await?;
-    assert_eq!(history_types(first_page["data"].as_array().unwrap()), vec!["record"]);
+    assert_eq!(
+        history_types(first_page["data"].as_array().unwrap()),
+        vec!["record"]
+    );
     assert_eq!(first_page["page"]["has_more"], json!(true));
+
+    let cursor = first_page["page"]["next_cursor"]
+        .as_str()
+        .expect("old registration cursor");
+    let second_page = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?registration_id={resource_id}&page_size=1&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(
+        history_types(second_page["data"].as_array().unwrap()),
+        vec!["registration"]
+    );
+    assert_eq!(second_page["page"]["has_more"], json!(false));
+    assert_eq!(second_page["page"]["next_cursor"], Value::Null);
+
+    let newer_page = bigname_storage::load_event_history_page(
+        &database.pool,
+        bigname_storage::EventHistoryFilter {
+            resource_id: Some(later_resource_id),
+            ..bigname_storage::EventHistoryFilter::default()
+        },
+        true,
+        None,
+        1,
+        bigname_storage::HistorySummaryMode::Full,
+        false,
+    )
+    .await?;
+    assert_eq!(newer_page.rows.len(), 1);
+    assert_eq!(
+        newer_page.rows[0].event_identity,
+        "registration-filter-latest-record"
+    );
+    assert_eq!(newer_page.summary.as_ref().unwrap().total_count, 3);
+    let foreign_anchor = newer_page
+        .next_cursor
+        .as_ref()
+        .expect("newer registration cursor");
+    let invalid_cursor = bigname_storage::load_event_history_page(
+        &database.pool,
+        bigname_storage::EventHistoryFilter {
+            resource_id: Some(resource_id),
+            ..bigname_storage::EventHistoryFilter::default()
+        },
+        true,
+        Some(foreign_anchor),
+        1,
+        bigname_storage::HistorySummaryMode::None,
+        false,
+    )
+    .await
+    .expect_err("a newer name event cannot anchor the old registration");
+    assert!(
+        invalid_cursor
+            .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
+            .is_some()
+    );
 
     let storage_page = bigname_storage::load_event_history_page(
         &database.pool,

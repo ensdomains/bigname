@@ -651,6 +651,160 @@ async fn v2_lookup_withholds_retained_inventory_for_released_tombstone() -> Resu
 }
 
 #[tokio::test]
+async fn wrapped_name_lookup_uses_the_registrar_lease_handle() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let wrapper_resource_id = Uuid::from_u128(0x5a_0501);
+    let registrar_resource_id = Uuid::from_u128(0x5a_0502);
+    seed_identity_name(
+        &database,
+        "ens:later-wrapped-lookup.eth",
+        "later-wrapped-lookup.eth",
+        "later-wrapped-lookup.eth",
+        "namehash:later-wrapped-lookup.eth",
+        wrapper_resource_id,
+        Uuid::from_u128(0x5a_0503),
+        Uuid::from_u128(0x5a_0504),
+        "0x0000000000000000000000000000000000000abc",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        38,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE name_current
+         SET declared_summary = jsonb_set(
+             declared_summary,
+             '{registration,resource_id}',
+             to_jsonb($1::text),
+             true
+         )
+         WHERE raw_name = 'later-wrapped-lookup.eth'",
+    )
+    .bind(registrar_resource_id)
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"name": "later-wrapped-lookup.eth"}]}),
+    )
+    .await?;
+    assert_eq!(
+        payload["data"][0]["record"]["registration_id"],
+        json!(registrar_resource_id.to_string()),
+        "batch lookup returned the NameWrapper resource instead of the registrar lease"
+    );
+
+    // A wrapped subname has no registrar lease, so Project selects no registration resource
+    // and the bound NameWrapper resource stays the handle.
+    let subname_wrapper = Uuid::from_u128(0x5a_0505);
+    seed_identity_name(
+        &database,
+        "ens:sub.wrapped-lookup.eth",
+        "sub.wrapped-lookup.eth",
+        "sub.wrapped-lookup.eth",
+        "namehash:sub.wrapped-lookup.eth",
+        subname_wrapper,
+        Uuid::from_u128(0x5a_0506),
+        Uuid::from_u128(0x5a_0507),
+        "0x0000000000000000000000000000000000000abc",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        38,
+    )
+    .await?;
+    let subname = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"name": "sub.wrapped-lookup.eth"}]}),
+    )
+    .await?;
+    assert_eq!(
+        subname["data"][0]["record"]["registration_id"],
+        json!(subname_wrapper.to_string())
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn released_name_serves_its_lapsed_holder_only_in_the_lapsed_block() -> Result<()> {
+    const HOLDER: &str = "0x0000000000000000000000000000000000000abc";
+    let database = TestDatabase::new_migrated().await?;
+    let lease = Uuid::from_u128(0x5a_0601);
+    for (logical, name, resource, token, binding) in [
+        ("ens:lapsed-lease.eth", "lapsed-lease.eth", 0x5a_0602_u128, 0x5a_0603_u128, 0x5a_0604_u128),
+        ("ens:live-lease.eth", "live-lease.eth", 0x5a_0612, 0x5a_0613, 0x5a_0614),
+    ] {
+        seed_identity_name(
+            &database,
+            logical,
+            name,
+            name,
+            &format!("namehash:{name}"),
+            Uuid::from_u128(resource),
+            Uuid::from_u128(token),
+            Uuid::from_u128(binding),
+            HOLDER,
+            bigname_storage::AddressNameRelation::TokenHolder,
+            38,
+        )
+        .await?;
+    }
+    // The registration object Project writes for a released ENSv1 tombstone.
+    sqlx::query(
+        "UPDATE name_current
+         SET declared_summary = declared_summary || jsonb_build_object(
+             'registration', (declared_summary -> 'registration') || jsonb_build_object(
+                 'status', 'released', 'authority_kind', NULL, 'authority_key', NULL,
+                 'registrant', NULL, 'expiry', 1700000000, 'released_at', 1707776000,
+                 'resource_id', $1::text,
+                 'lapsed_registration', jsonb_build_object(
+                     'registrant', $2::text, 'authority_kind', 'wrapper',
+                     'authority_key', 'wrapper:lapsed', 'released_at', 1707776000)),
+             'control', jsonb_build_object('status', 'unregistered'))
+         WHERE raw_name = 'lapsed-lease.eth'",
+    )
+    .bind(lease)
+    .bind(HOLDER)
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [
+            {"name": "lapsed-lease.eth"}, {"name": "live-lease.eth"}
+        ]}),
+    )
+    .await?;
+    let expected_lapsed = json!({
+        "registrant": HOLDER,
+        "authority": "wrapper",
+        "released_at": "2024-02-12T22:13:20Z",
+    });
+    let lapsed = &payload["data"][0]["record"];
+    assert_eq!(lapsed["registration_status"], json!("released"), "{lapsed:?}");
+    assert_eq!(lapsed["registration_id"], json!(lease.to_string()));
+    assert_eq!(lapsed["expires_at"], json!("2023-11-14T22:13:20Z"));
+    assert!(lapsed.get("registrant").is_none(), "{lapsed:?}");
+    assert!(lapsed.get("owner").is_none(), "{lapsed:?}");
+    assert_eq!(lapsed["lapsed_registration"], expected_lapsed);
+    let live = &payload["data"][1]["record"];
+    assert!(live.get("lapsed_registration").is_none(), "{live:?}");
+
+    let detail = v2_name_record_payload_for_database(&database, "/v1/names/lapsed-lease.eth")
+        .await?;
+    let record = &detail["data"];
+    assert_eq!(record["registration_status"], json!("released"), "{record:?}");
+    assert_eq!(record["registration_id"], json!(lease.to_string()));
+    assert_eq!(record["expires_at"], json!("2023-11-14T22:13:20Z"));
+    assert!(record.get("registrant").is_none(), "{record:?}");
+    assert!(record.get("owner").is_none(), "{record:?}");
+    assert_eq!(record["lapsed_registration"], expected_lapsed);
+    let live = v2_name_record_payload_for_database(&database, "/v1/names/live-lease.eth").await?;
+    assert!(live["data"].get("lapsed_registration").is_none(), "{live:?}");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_lookup_ignores_stale_audit_inventory_for_reservation() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_identity_name(

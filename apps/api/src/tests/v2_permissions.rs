@@ -538,6 +538,107 @@ async fn v2_name_and_name_filtered_permissions_select_the_same_live_registration
 }
 
 #[tokio::test]
+async fn wrapped_name_permissions_carry_the_registrar_lease_handle() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    // The fixture's bound resource plays the NameWrapper resource of a wrapped `.eth` name;
+    // Project serves the BaseRegistrar lease it wrapped as the registration resource.
+    let wrapper_resource_id = v2_permissions_current_resource_id();
+    let lease_resource_id = Uuid::from_u128(0xe300);
+    upsert_test_resources(&database.pool, &[resource(lease_resource_id)]).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+             declared_summary,
+             '{registration,resource_id}',
+             to_jsonb($1::text),
+             true
+         )
+         WHERE raw_name = 'perms.eth'",
+    )
+    .bind(lease_resource_id)
+    .execute(&database.pool)
+    .await?;
+    let (logical_name_id, namehash): (String, String) = sqlx::query_as(
+        "SELECT logical_name_id, namehash FROM bigname_phase.name_current
+         WHERE raw_name = 'perms.eth'",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    // The lease's own rows carry the node; the NameWrapped binding records the link.
+    let mut grant = v2_history_event(
+        "perms-lease-grant",
+        None,
+        Some(lease_resource_id),
+        "RegistrationGranted",
+        120,
+    );
+    grant.after_state["namehash"] = json!(namehash);
+    let mut binding = v2_history_event(
+        "perms-wrapper-binding",
+        Some(&logical_name_id),
+        Some(wrapper_resource_id),
+        "SurfaceBound",
+        121,
+    );
+    binding.source_family = "ens_v1_wrapper_l1".to_owned();
+    binding.after_state = json!({
+        "source_event": "NameWrapped",
+        "node": namehash,
+        "wrapped_registrar_resource_id": lease_resource_id,
+    });
+    seed_v2_history_blocks(&database, 120..=121).await?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant, binding]).await?;
+
+    let name = v2_name_record_payload_for_database(&database, "/v1/names/Perms.eth").await?;
+    assert_eq!(
+        name["data"]["registration_id"],
+        json!(lease_resource_id.to_string())
+    );
+    let by_name =
+        v2_permissions_payload_for_database(&database, "/v1/permissions?name=Perms.eth").await?;
+    let rows = by_name["data"].as_array().expect("permissions data");
+    assert!(!rows.is_empty());
+    assert!(
+        rows.iter().all(|row| {
+            row["registration_id"] == name["data"]["registration_id"]
+                && row["authority_context"] == json!("current_for_name")
+        }),
+        "permission rows must carry the registration_id the name serves: {rows:?}"
+    );
+
+    let paired = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?name=Perms.eth&registration_id={lease_resource_id}"),
+    )
+    .await?;
+    assert_eq!(paired["data"], by_name["data"]);
+
+    // The registration_id read from the name selects the same permissions on its own.
+    let by_lease = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={lease_resource_id}"),
+    )
+    .await?;
+    let lease_rows = by_lease["data"].as_array().expect("lease permissions");
+    assert_eq!(lease_rows.len(), rows.len(), "{lease_rows:?}");
+    assert!(lease_rows.iter().all(|row| {
+        row["registration_id"] == json!(lease_resource_id.to_string())
+            && row["authority_context"] == json!("resource_audit")
+    }));
+
+    // The NameWrapper resource is not the name's registration.
+    let wrapper_pair = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?name=Perms.eth&registration_id={wrapper_resource_id}"),
+    )
+    .await?;
+    assert_eq!(wrapper_pair["data"], json!([]));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_permissions_non_name_filters_carry_publication_metadata() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_permissions_fixture(&database).await?;

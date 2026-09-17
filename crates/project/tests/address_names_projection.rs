@@ -3193,8 +3193,8 @@ async fn project_later_wrapper_delta(
                 .await?;
                 assert_eq!(
                     unwrapped_registration.as_deref(),
-                    Some(CONTROL_RESOURCE),
-                    "the first wrapper handle changed while the lifecycle was unwrapped"
+                    Some(OWNERLESS_RESOURCE),
+                    "the registrar lease handle changed while the lifecycle was unwrapped"
                 );
             }
             seed_next_binding(
@@ -3594,24 +3594,26 @@ async fn later_wrapper_deltas_project_identically_incrementally_and_from_zero() 
     Ok(())
 }
 
+/// A name registered through the NameWrapper is identified by its BaseRegistrar lease, the same
+/// as a name wrapped later; a re-wrap mints a new NameWrapper resource and changes nothing.
 #[tokio::test]
 #[rustfmt::skip]
-async fn born_wrapped_rewrap_keeps_the_first_wrapper_registration_identity() -> Result<()> {
+async fn rewrap_of_a_name_wrapped_at_registration_keeps_the_registrar_lease_identity() -> Result<()> {
     let incremental = project_later_wrapper_delta(LaterWrapperDelta::Rewrap, true, false, true).await?;
     let from_zero = project_later_wrapper_delta(LaterWrapperDelta::Rewrap, false, false, true).await?;
     assert_eq!(incremental, from_zero, "re-wrap projection diverged between an incremental batch and from-zero rebuild");
-    assert_eq!(incremental.registration_resource_id.as_deref(), Some(CONTROL_RESOURCE), "a later wrapper split the registrar-born lifecycle away from its first wrapper handle");
+    assert_eq!(incremental.registration_resource_id.as_deref(), Some(OWNERLESS_RESOURCE), "a name wrapped at registration must be identified by its registrar lease, not a NameWrapper resource");
     assert_eq!(incremental.registrant.as_deref(), Some("0x7777777777777777777777777777777777777777"));
     assert_eq!(incremental.registrant, incremental.address_registrant);
     Ok(())
 }
 
 #[tokio::test] #[rustfmt::skip]
-async fn born_wrapped_release_keeps_the_wrapper_registration_identity() -> Result<()> {
+async fn release_of_a_name_wrapped_at_registration_keeps_the_registrar_lease_identity() -> Result<()> {
     let incremental = project_later_wrapper_delta(LaterWrapperDelta::RegistrarRelease, true, false, true).await?;
     let from_zero = project_later_wrapper_delta(LaterWrapperDelta::RegistrarRelease, false, false, true).await?;
     assert_eq!(incremental, from_zero); assert_eq!(incremental.registration_status.as_deref(), Some("released"));
-    assert_eq!(incremental.registration_resource_id.as_deref(), Some(CONTROL_RESOURCE)); assert_eq!(incremental.registrant, incremental.address_registrant); Ok(())
+    assert_eq!(incremental.registration_resource_id.as_deref(), Some(OWNERLESS_RESOURCE)); assert_eq!(incremental.registrant, incremental.address_registrant); Ok(())
 }
 
 #[tokio::test]
@@ -3638,11 +3640,7 @@ async fn registry_update_after_wrapper_release_preserves_registration_history() 
         assert_eq!(incremental.registration_status.as_deref(), Some("released"));
         assert_eq!(
             incremental.registration_resource_id.as_deref(),
-            Some(if born_wrapped {
-                CONTROL_RESOURCE
-            } else {
-                OWNERLESS_RESOURCE
-            })
+            Some(OWNERLESS_RESOURCE)
         );
         // Born-wrapped registration starts in the wrapping block; later wrapping
         // retains the earlier start. The unrelated block-10 grant cannot win.
@@ -4062,7 +4060,16 @@ fn assert_released_tombstone(row: &serde_json::Value) {
     assert_eq!(registration["status"], "released", "{row:#}");
     assert!(registration["registrant"].is_null(), "{row:#}");
     assert!(registration["authority_kind"].is_null(), "{row:#}");
-    assert!(registration["expiry"].is_null(), "{row:#}");
+    assert!(registration["authority_key"].is_null(), "{row:#}");
+    // The lapsed lease keeps its own expiry, not the NameWrapper's later one.
+    assert_eq!(registration["expiry"], 4242, "{row:#}");
+    assert_eq!(registration["resource_id"], OWNERLESS_RESOURCE, "{row:#}");
+    // The previous holder is served only inside the lapsed block.
+    let lapsed = &registration["lapsed_registration"];
+    assert_eq!(lapsed["authority_kind"], "wrapper", "{row:#}");
+    assert_eq!(lapsed["authority_key"], "wrapper:born", "{row:#}");
+    assert_eq!(lapsed["released_at"], 7_780_243, "{row:#}");
+    assert!(lapsed["registrant"].is_string(), "{row:#}");
     assert_eq!(
         row["declared_summary"]["control"],
         json!({"status": "unregistered"})
@@ -4083,6 +4090,11 @@ async fn lapsed_born_wrapped_lease_serves_a_released_tombstone() -> Result<()> {
     let from_zero = born_wrapped_projection(BornWrappedShape::LinkRecorded, false).await?;
     assert_eq!(incremental, from_zero);
     assert_released_tombstone(&incremental);
+    assert_eq!(
+        incremental["declared_summary"]["registration"]["lapsed_registration"]["registrant"],
+        CONTROL_OWNER.to_lowercase(),
+        "the lapsed holder is the last NameWrapper token owner: {incremental:#}"
+    );
     Ok(())
 }
 
@@ -4116,6 +4128,12 @@ async fn wrapper_expiry_alone_does_not_select_a_released_tombstone() -> Result<(
     assert!(
         incremental["declared_summary"]["registration"]["released_at"].is_null(),
         "{incremental:#}"
+    );
+    assert!(
+        incremental["declared_summary"]["registration"]
+            .get("lapsed_registration")
+            .is_none(),
+        "a name that is not released carries no lapsed block: {incremental:#}"
     );
     Ok(())
 }
