@@ -42,7 +42,9 @@ RUN set -eu; \
     done; \
     for member in apps/phase-runner crates/content-hash; do \
         echo 'fn main() {}' > "$member/build.rs"; \
-    done
+    done; \
+    mkdir -p crates/ingest/examples \
+        && echo 'fn main() {}' > crates/ingest/examples/reth-db-smoke.rs
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
