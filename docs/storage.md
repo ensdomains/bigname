@@ -1149,6 +1149,15 @@ same-window capture and its subsequent windows; orphaned creation logs cannot
 expand a watch filter. Installing creation capture requires the normal
 manifest-driven Ingest redo and full Interpret replay, preserving raw facts.
 
+The rule is one validated CHECK on `discovery_edges` named
+`discovery_edges_self_edge_check`. The baseline creates it on a fresh install.
+Schema-migration `20260917140000_resolver_creation_self_edge.sql` replaces the
+older rule on an existing database; it is already applied on a live database,
+so its content is fixed. Schema-migration
+`20260917141000_discovery_self_edge_check_name.sql` then settles the name: it
+renames a rule that has the right text under a generated name, and replaces the
+rule only when its text differs.
+
 ### Interpret process memory
 
 `normalized_events` is the working store for each [interpreter state

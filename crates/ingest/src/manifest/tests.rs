@@ -1234,6 +1234,22 @@ async fn resolver_creation_migration_permits_only_the_announcement_self_edge() -
     for _ in 0..2 {
         sqlx::raw_sql(migration).execute(database.pool()).await?;
     }
+    let settle_name =
+        include_str!("../../../../migrations/20260917141000_discovery_self_edge_check_name.sql");
+    let self_edge_checks = "SELECT oid::bigint, conname::text FROM pg_constraint
+        WHERE conrelid = 'bigname_phase.discovery_edges'::regclass AND contype = 'c'";
+    let before: Vec<(i64, String)> = sqlx::query_as(self_edge_checks)
+        .fetch_all(database.pool())
+        .await?;
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].1, "discovery_edges_self_edge_check");
+    for _ in 0..2 {
+        sqlx::raw_sql(settle_name).execute(database.pool()).await?;
+        let after: Vec<(i64, String)> = sqlx::query_as(self_edge_checks)
+            .fetch_all(database.pool())
+            .await?;
+        assert_eq!(after, before, "the settled rule must not be replaced");
+    }
     let id = Uuid::new_v4();
     for (kind, source, allowed) in [
         ("resolver", "ResolverCreated", true),

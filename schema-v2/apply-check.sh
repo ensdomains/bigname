@@ -304,7 +304,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=7
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=34
+expected_predecessor_shape_proof_count=35
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -396,7 +396,8 @@ for migration_file in \
     "$ROOT/migrations/20260917120000_discovery_edges_observation_history_idx.sql" \
     "$ROOT/migrations/20260917130000_discovery_edges_reopen_idx.sql" \
     "$ROOT/migrations/20260917131000_project_scoped_history_indexes.sql" \
-    "$ROOT/migrations/20260917140000_resolver_creation_self_edge.sql"
+    "$ROOT/migrations/20260917140000_resolver_creation_self_edge.sql" \
+    "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -848,21 +849,68 @@ DROP TABLE expected_project_scoped_history_indexes;
 SQL
 } | run_psql
 # Upgrade the discovery self-edge rule from its preceding shape: an unnamed
-# CHECK that allowed only registry announcements to point at themselves. The
-# result must carry the fresh baseline's name and definition, leave exactly one
-# self-edge CHECK, and a second apply must not replace the constraint.
+# CHECK that allowed only registry announcements to point at themselves.
+# 20260917140000 is already applied on a live database, so it stays as it was
+# and always replaces the rule. 20260917141000 starts from that exact result:
+# it must leave the fresh baseline's name, definition and validity, keep exactly
+# one self-edge CHECK, and replace nothing on the first or the second apply.
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<'SQL'
+CREATE FUNCTION pg_temp.self_edge_checks()
+RETURNS TABLE (constraint_oid oid, conname name, definition text, convalidated boolean)
+LANGUAGE sql STABLE AS $$
+    SELECT oid, conname, pg_get_constraintdef(oid), convalidated
+    FROM pg_constraint
+    WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
+      AND pg_get_constraintdef(oid) LIKE
+          '%from_contract_instance_id <> to_contract_instance_id%'
+$$;
+CREATE FUNCTION pg_temp.assert_self_edge_check_matches_baseline(step text)
+RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+    IF (SELECT count(*) FROM pg_temp.self_edge_checks()) <> 1 THEN
+        RAISE EXCEPTION '%: discovery_edges does not carry exactly one self-edge CHECK', step;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_temp.self_edge_checks() observed
+        JOIN expected_discovery_self_edge_check expected
+          ON expected.conname = observed.conname
+         AND expected.definition = observed.definition
+         AND expected.convalidated = observed.convalidated
+        WHERE observed.convalidated
+    ) THEN
+        RAISE EXCEPTION '%: discovery self-edge CHECK differs from the baseline', step;
+    END IF;
+END $$;
+CREATE FUNCTION pg_temp.assert_self_edge_check_kept(step text)
+RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_temp.self_edge_checks() observed
+        JOIN kept_discovery_self_edge_check kept USING (constraint_oid)
+    ) THEN
+        RAISE EXCEPTION '%: the discovery self-edge CHECK was replaced', step;
+    END IF;
+END $$;
 CREATE TEMP TABLE expected_discovery_self_edge_check AS
+SELECT conname, definition, convalidated
+FROM pg_temp.self_edge_checks()
+WHERE conname = 'discovery_edges_self_edge_check';
+CREATE TEMP TABLE expected_discovery_sibling_checks AS
 SELECT conname, pg_get_constraintdef(oid) AS definition
 FROM pg_constraint
 WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
-  AND conname = 'discovery_edges_self_edge_check';
+  AND conname ~ '^discovery_edges_check[0-9]*$';
 DO $$
 BEGIN
     IF (SELECT count(*) FROM expected_discovery_self_edge_check) <> 1 THEN
         RAISE EXCEPTION 'fresh baseline does not name discovery_edges_self_edge_check';
+    END IF;
+    IF (SELECT count(*) FROM expected_discovery_sibling_checks) <> 4 THEN
+        RAISE EXCEPTION 'fresh baseline does not pin discovery_edges_check1 to discovery_edges_check4';
     END IF;
 END $$;
 ALTER TABLE discovery_edges
@@ -874,9 +922,8 @@ ALTER TABLE discovery_edges
 DO $$
 BEGIN
     IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
-          AND conname = 'discovery_edges_check'
+        SELECT 1 FROM pg_temp.self_edge_checks()
+        WHERE conname = 'discovery_edges_check'
     ) THEN
         RAISE EXCEPTION 'preceding self-edge CHECK did not take its original generated name';
     END IF;
@@ -884,48 +931,67 @@ END $$;
 SQL
     emit_phase_migration "$ROOT/migrations/20260917140000_resolver_creation_self_edge.sql" preceding-shape
     cat <<'SQL'
-CREATE TEMP TABLE upgraded_discovery_self_edge_check AS
-SELECT oid AS constraint_oid
-FROM pg_constraint
-WHERE conrelid = 'discovery_edges'::regclass
-  AND conname = 'discovery_edges_self_edge_check';
+SELECT pg_temp.assert_self_edge_check_matches_baseline('after 20260917140000');
+CREATE TEMP TABLE kept_discovery_self_edge_check AS
+SELECT constraint_oid FROM pg_temp.self_edge_checks();
 SQL
-    emit_phase_migration "$ROOT/migrations/20260917140000_resolver_creation_self_edge.sql" baseline-first
+    emit_phase_migration "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql" preceding-shape
     cat <<'SQL'
+SELECT pg_temp.assert_self_edge_check_matches_baseline('first 20260917141000 apply');
+SELECT pg_temp.assert_self_edge_check_kept('first 20260917141000 apply');
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql" baseline-first
+    cat <<'SQL'
+SELECT pg_temp.assert_self_edge_check_matches_baseline('second 20260917141000 apply');
+SELECT pg_temp.assert_self_edge_check_kept('second 20260917141000 apply');
 DO $$
 BEGIN
-    IF (
-        SELECT count(*) FROM pg_constraint
-        WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
-          AND pg_get_constraintdef(oid) LIKE
-              '%from_contract_instance_id <> to_contract_instance_id%'
-    ) <> 1 THEN
-        RAISE EXCEPTION 'discovery_edges does not carry exactly one self-edge CHECK';
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        JOIN expected_discovery_self_edge_check expected
-          ON expected.conname = pg_constraint.conname
-         AND expected.definition = pg_get_constraintdef(pg_constraint.oid)
-        WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
-          AND convalidated
+    IF EXISTS (
+        (SELECT conname, pg_get_constraintdef(oid)
+         FROM pg_constraint
+         WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
+           AND conname ~ '^discovery_edges_check[0-9]*$'
+         EXCEPT SELECT conname, definition FROM expected_discovery_sibling_checks)
+        UNION ALL
+        (SELECT conname, definition FROM expected_discovery_sibling_checks
+         EXCEPT
+         SELECT conname, pg_get_constraintdef(oid)
+         FROM pg_constraint
+         WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
+           AND conname ~ '^discovery_edges_check[0-9]*$')
     ) THEN
-        RAISE EXCEPTION 'discovery self-edge CHECK upgrade differs from the baseline';
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        JOIN upgraded_discovery_self_edge_check upgraded
-          ON upgraded.constraint_oid = pg_constraint.oid
-        WHERE conrelid = 'discovery_edges'::regclass
-          AND conname = 'discovery_edges_self_edge_check'
-    ) THEN
-        RAISE EXCEPTION 'second apply replaced the discovery self-edge CHECK';
+        RAISE EXCEPTION 'upgraded discovery_edges sibling CHECK names differ from the baseline';
     END IF;
 END $$;
+
+-- A baseline installed after 20260917140000 ran as a no-op could hold the
+-- wanted rule under its generated name. That is a rename, not a replacement.
+ALTER TABLE discovery_edges
+    RENAME CONSTRAINT discovery_edges_self_edge_check TO discovery_edges_check;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql" specialized
+    cat <<'SQL'
+SELECT pg_temp.assert_self_edge_check_matches_baseline('generated-name apply');
+SELECT pg_temp.assert_self_edge_check_kept('generated-name apply');
+
+-- A rule with different text, next to a stray second one, is replaced.
+ALTER TABLE discovery_edges
+    DROP CONSTRAINT discovery_edges_self_edge_check,
+    ADD CHECK (
+        edge_kind = 'registry_announcement'
+        OR from_contract_instance_id <> to_contract_instance_id
+    ),
+    ADD CONSTRAINT discovery_edges_stray_self_edge_check CHECK (
+        edge_kind <> 'proxy_implementation'
+        OR from_contract_instance_id <> to_contract_instance_id
+    );
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql" specialized
+    cat <<'SQL'
+SELECT pg_temp.assert_self_edge_check_matches_baseline('different-text apply');
 DROP TABLE expected_discovery_self_edge_check;
-DROP TABLE upgraded_discovery_self_edge_check;
+DROP TABLE expected_discovery_sibling_checks;
+DROP TABLE kept_discovery_self_edge_check;
 SQL
 } | run_psql
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor
