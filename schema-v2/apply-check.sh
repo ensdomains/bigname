@@ -642,7 +642,16 @@ if [ -n "${BIGNAME_DATABASE_URL:-}" ]; then
     url_rest="${BIGNAME_DATABASE_URL#*://}"
     url_authority="${url_rest%%/*}"
     url_path="${url_rest#"$url_authority"}"
-    apply_check_url="${url_scheme}${apply_check_role}:${apply_check_role_password}@${url_authority##*@}${url_path}"
+    # libpq also takes credentials as query parameters, which would override the
+    # userinfo; keep every other connection option.
+    url_query=""
+    if [[ "$url_path" == *\?* ]]; then
+        url_query="${url_path#*\?}"
+        url_path="${url_path%%\?*}"
+        url_query="$(printf '%s' "$url_query" | tr '&' '\n' \
+            | grep -vE '^(user|password|passfile)=' | paste -sd '&' -)"
+    fi
+    apply_check_url="${url_scheme}${apply_check_role}:${apply_check_role_password}@${url_authority##*@}${url_path}${url_query:+?$url_query}"
 fi
 migration_application_log="$(
     mktemp "${TMPDIR:-/tmp}/schema-v2-migration-applications.XXXXXX"
@@ -684,6 +693,11 @@ trap cleanup EXIT
 } | run_psql_as_owner
 
 printf 'CREATE SCHEMA "%s";\n' "$scratch_schema" | run_psql
+# The scratch schema exists; from here the login may create nothing else in the
+# database, so an assembled CREATE SCHEMA bigname_phase fails where the
+# production schema does not yet exist.
+printf "SELECT format('REVOKE CREATE ON DATABASE %%I FROM %%I', current_database(), '%s') \\gexec\n" "$apply_check_role" \
+    | run_psql_as_owner
 # Prove the role boundary on every run: an identifier the rewrite cannot see,
 # assembled inside EXECUTE, must fail on the production schema whether or not
 # that schema exists in this database, while the same statement against the
@@ -694,7 +708,8 @@ assert_dynamic_production_name_is_refused() {
     for prelude in "" "RESET ROLE;" "RESET SESSION AUTHORIZATION;" "SET SESSION AUTHORIZATION DEFAULT;"; do
     for statement in \
         "CREATE TABLE bigname_' || 'phase.apply_check_probe (a int)" \
-        "INSERT INTO bigname_' || 'phase.chain_phase_state (chain_id, phase_name) VALUES (''probe'', ''ingest'')"
+        "INSERT INTO bigname_' || 'phase.chain_phase_state (chain_id, phase_name) VALUES (''probe'', ''ingest'')" \
+        "CREATE SCHEMA bigname_' || 'phase_apply_check_probe"
     do
         if probe_stderr="$({
             printf 'SET search_path TO "%s";\n' "$scratch_schema"
@@ -707,7 +722,8 @@ assert_dynamic_production_name_is_refused() {
         case "$probe_stderr" in
             *"permission denied for schema bigname_phase"* \
                 | *'schema "bigname_phase" does not exist'* \
-                | *'relation "bigname_phase.'*'does not exist'*) ;;
+                | *'relation "bigname_phase.'*'does not exist'* \
+                | *"permission denied for database"*) ;;
             *)
                 printf '%s\n' "dynamic production schema name failed for another reason:" "$probe_stderr" >&2
                 exit 1

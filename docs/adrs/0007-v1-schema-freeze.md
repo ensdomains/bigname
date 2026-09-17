@@ -493,10 +493,13 @@ as a full walk by each deployment that adopts them. The
 stable/unstable identifier split gives downstream authors a rule they can follow
 without understanding the whole replay model.
 
-**Negative.** The freeze is enforced by review, not by tooling — nothing fails CI
-when a schema change lands without amending this ADR, beyond the existing
-requirement that `apply-check.sh` move with the schema. It also front-loads
-decisions that would otherwise be made inside the slices, which costs time now.
+**Negative.** Tooling enforces only the mechanics of the freeze: `apply-check.sh`
+fails CI when a schema change lands without moving the conformance test, and
+when a schema-migration lands without advancing the head this ADR and
+`storage.md` name. Whether a change is an authorized carve-out or a substantive
+amendment is still decided by review — nothing fails CI when the head is
+advanced but the ADR's decision is not recorded. It also front-loads decisions
+that would otherwise be made inside the slices, which costs time now.
 
 **Newly possible failure mode.** A carve-out landing without its `apply-check.sh`
 allowlist entry fails CI with a forbidden-table error that does not obviously
