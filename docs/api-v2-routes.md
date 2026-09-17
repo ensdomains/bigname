@@ -1454,8 +1454,12 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   setter, and does not count; a revoked family drops out, and a multi-setter
   argument left with one held reading is served as that reading — so a row
   with no held reading, like a grant whose argument was never observed,
-  carries no `record_resource`. A text or data key that is not printable UTF-8 is served
-  as `key_bytes` (hex) instead of `key`. `coin_type` and `content_type` are
+  carries no `record_resource`. A text or data key is served as `key` when its
+  bytes are valid UTF-8, contain no NUL byte, and are not empty or whitespace
+  only — the same cutoff the interpreter applies when it names the record
+  (`crates/adapters/src/schema_v2/common.rs`, `event_string_selector`) —
+  and otherwise as `key_bytes`, the raw bytes as lowercase `0x` hex; a key
+  with other control characters is still `key`. `coin_type` and `content_type` are
   numbers, as everywhere else in the API; an argument the chain carried beyond
   64 bits is served as its decimal string under `coin_type_decimal` or
   `content_type_decimal` instead.

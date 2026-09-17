@@ -419,7 +419,8 @@ mod tests {
                 .unwrap(),
             Some(json!({"kind": "text", "hash": hash, "key": "url"}))
         );
-        // A key that is not printable UTF-8 is bytes, not a string that looks like hex.
+        // A key the interpreter could not name (invalid UTF-8, a NUL, or blank) is bytes,
+        // not a string that looks like hex.
         assert_eq!(
             record_resource_value(
                 &json!({"kind": "text", "key": "0xff", "hash": hash,
