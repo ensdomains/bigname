@@ -404,16 +404,6 @@ mod tests {
         .expect("rewind command must resolve");
 
         match command {
-            ResolvedCommand::SourceTransport {
-                database_url,
-                old,
-                new,
-            } => {
-                let database = RunnerDatabase::connect(&database_url, 2).await?;
-                let receipt =
-                    phase_runner::source_transport::transition(&database, &old, &new).await?;
-                println!("{}", serde_json::to_string(&receipt)?);
-            }
             ResolvedCommand::Rewind {
                 chain_id, ancestor, ..
             } => {
