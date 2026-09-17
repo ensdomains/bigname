@@ -5507,7 +5507,7 @@ fn role_insensitive_events_collapse_distinct_admission_roles() -> anyhow::Result
         (String, String),
         std::collections::BTreeMap<String, Vec<String>>,
     >::new();
-    for environment in ["mainnet", "sepolia", "sepolia-hackathon"] {
+    for environment in ["mainnet", "sepolia"] {
         let repository = bigname_manifests::load_repository(manifest_root.join(environment))?;
         for loaded in repository.manifests() {
             for event in &loaded.manifest.abi.events {
@@ -5517,6 +5517,17 @@ fn role_insensitive_events_collapse_distinct_admission_roles() -> anyhow::Result
                     .insert(event.fragment.clone(), event.normalized_events.clone());
             }
         }
+    }
+
+    // Exercise remaining decoder-supported events with ABI-only protocol fixtures,
+    // independently of which resolver generation the current deployment selects.
+    let node_events: Vec<bigname_manifests::ManifestAbiEvent> =
+        serde_json::from_str(include_str!("../../tests/fixtures/node-resolver-abi.json"))?;
+    for event in node_events {
+        variants
+            .entry(("ens_v2_resolver_l1".to_owned(), event.name))
+            .or_default()
+            .insert(event.fragment, event.normalized_events);
     }
 
     let mut manifest_id = 720;
@@ -5619,7 +5630,7 @@ fn required_discovery_rules_cover_protocol_rule_lookup_producers() -> anyhow::Re
     let mut manifest_id = 700;
     let mut covered_producers = std::collections::BTreeSet::new();
     let mut covered_cases = std::collections::BTreeSet::new();
-    for environment in ["mainnet", "sepolia", "sepolia-hackathon"] {
+    for environment in ["mainnet", "sepolia"] {
         let repository = bigname_manifests::load_repository(manifest_root.join(environment))?;
         for loaded in repository
             .manifests()
@@ -17555,7 +17566,7 @@ fn checked_in_manifest_event_corpus_has_typed_schema_v2_adapters() -> anyhow::Re
         .join("../..")
         .join("manifests");
     let mut manifest_id = 0i64;
-    for environment in ["mainnet", "sepolia", "sepolia-hackathon"] {
+    for environment in ["mainnet", "sepolia"] {
         let repository = bigname_manifests::load_repository(root.join(environment))?;
         for loaded in repository.manifests() {
             manifest_id += 1;
@@ -18811,7 +18822,7 @@ fn checked_in_manifest_source_family_events()
         .join("../..")
         .join("manifests");
     let mut events = std::collections::BTreeSet::new();
-    for environment in ["mainnet", "sepolia", "sepolia-hackathon"] {
+    for environment in ["mainnet", "sepolia"] {
         let repository = bigname_manifests::load_repository(manifest_root.join(environment))?;
         for loaded in repository.manifests() {
             events.extend(

@@ -1,24 +1,42 @@
-# ENSv2 sepolia-dev ETHRegistrar admission for the alternate profile.
-# ETHRegistrar deployment address:
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2_sepolia_dev@554c309).
+# Official 2026-09-15 Sepolia deployment; replaces the old Sepolia and hackathon corpora.
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/.deployment.json:L4 @ ens_v2_sepolia_20260916@366de741)
 manifest_version = 1
 namespace = "ens"
 source_family = "ens_v2_registrar_l1"
 chain = "ethereum-sepolia"
-deployment_epoch = "ens_v2_sepolia_dev"
-rollout_status = "deprecated"
+deployment_epoch = "ens_v2_sepolia_20260915"
+rollout_status = "active"
 normalizer_version = "ensip15@ens-normalize-0.1.1"
 discovery_rules = []
 
 [capability_flags]
-exact_name_profile = { status = "shadow", notes = "sepolia-dev registrar lifecycle facts are admitted before product reads depend on them" }
-name_history = { status = "shadow", notes = "sepolia-dev registrar history remains downstream work" }
+exact_name_profile = { status = "supported", notes = "selected official Sepolia ETHRegistry and ETHRegistrar supply exact-name facts; deployment validation remains separate" }
+name_history = { status = "shadow", notes = "post-audit Sepolia registrar history remains downstream work" }
 
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistrar.json:L2 @ ens_v2_sepolia_20260916@366de741)
 [[roots]]
 name = "ETHRegistrar"
-address = "0x68586418353b771cf2425ed14a07512aa880c532"
+address = "0xabe76f6c8dfced81aa5a2bb8034202a7136b94ca"
+start_block = 11709083
 
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistrar.json:L2 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistrar.json:L1427 @ ens_v2_sepolia_20260916@366de741)
 [[contracts]]
 role = "registrar"
-address = "0x68586418353b771cf2425ed14a07512aa880c532"
+address = "0xabe76f6c8dfced81aa5a2bb8034202a7136b94ca"
 proxy_kind = "none"
+start_block = 11709083
+
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistrar.json:L261 @ ens_v2_sepolia_20260916@366de741)
+[[abi.events]]
+name = "NameRegistered"
+fragment = "event NameRegistered(uint256 indexed tokenId, string label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 indexed referrer, uint256 base, uint256 premium)"
+emitter_roles = ["registrar"]
+normalized_events = ["RegistrarNameRegistered", "PreimageObserved"]
+
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistrar.json:L310 @ ens_v2_sepolia_20260916@366de741)
+[[abi.events]]
+name = "NameRenewed"
+fragment = "event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 indexed referrer, uint256 amount)"
+emitter_roles = ["registrar"]
+normalized_events = ["RegistrationRenewed", "PreimageObserved"]

@@ -62,6 +62,15 @@ must carry the exact live DDL, validity checks, recovery procedure, and
 release-record evidence instead of silently treating the baseline edit as an
 initialized-namespace upgrade.
 
+Interpret redo preparation looks up name bindings across canonicality states,
+including rows it has just staged as orphaned. The
+`surface_bindings_chain_name_history_idx` index covers `(chain_id, logical_name_id)`
+without a canonicality predicate for that historical lookup. It complements the
+canonical-only serving indexes and changes no replay or identity semantics.
+Existing installations receive it through
+`20260916120000_surface_bindings_name_history_idx.sql`; pause the phase runner
+while applying this ordinary index build, then resume its existing redo.
+
 The physical layers are:
 
 1. lineage and head state — `chain_lineage`, `chain_header_audit`,

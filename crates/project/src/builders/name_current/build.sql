@@ -762,7 +762,7 @@
                          AND manifest.namespace = 'ens'
                          AND manifest.chain_id = 'ethereum-sepolia'
                          AND manifest.deployment_label IN (
-                             'ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon'
+                             'ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon', 'ens_v2_sepolia_20260915'
                          )
                    )
                    AND EXISTS (
@@ -777,7 +777,7 @@
                          AND manifest.namespace = 'ens'
                          AND manifest.chain_id = 'ethereum-sepolia'
                          AND manifest.deployment_label IN (
-                             'ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon'
+                             'ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon', 'ens_v2_sepolia_20260915'
                          )
                          AND manifest.manifest_payload
                              -> 'capability_flags'
@@ -839,10 +839,10 @@
                              selected_authority.selected_resource_id::text
                          AND migration_manifest.namespace = boundary.namespace
                          AND migration_manifest.chain_id = boundary.chain_id
-                         AND migration_manifest.deployment_label IN ('ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon')
+                         AND migration_manifest.deployment_label IN ('ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon', 'ens_v2_sepolia_20260915')
                          AND registry_manifest.namespace = successor.namespace
                          AND registry_manifest.chain_id = successor.chain_id
-                         AND registry_manifest.deployment_label IN ('ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon')
+                         AND registry_manifest.deployment_label IN ('ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon', 'ens_v2_sepolia_20260915')
                          AND (
                              -- The successor registry is either declared in the admitted
                              -- registry profile or was created on chain by an admitted

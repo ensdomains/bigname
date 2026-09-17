@@ -23,3 +23,5 @@ Current policy:
 - draft manifests may reserve shape for future source families without activating intake
 - manifest changes must stay within the schema frozen in `docs/manifests.md`
 - a runtime selects exactly one manifest profile root; `manifests/mainnet/` and `manifests/sepolia/` must not be loaded into the same canonical corpus, watch plan, discovery graph, or projection set
+
+The Sepolia profile now selects the [official 2026-09-15 deployment](../docs/sepolia-deployment.md). The previous Sepolia and hackathon manifests are removed.

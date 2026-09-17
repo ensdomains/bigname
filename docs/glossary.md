@@ -324,7 +324,7 @@ never merged; `mode`/`source` selects which a route returns.
 
 the manifest label naming which
 protocol deployment generation a source family belongs to (for example
-`ens_v2_sepolia_post_audit`), so facts from different deployments of the same
+`ens_v2_sepolia_20260915`), so facts from different deployments of the same
 protocol never mix silently.
 
 ## Deployment profile

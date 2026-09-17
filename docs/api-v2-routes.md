@@ -822,8 +822,8 @@ collection route carry neither header.
   [authority arm](glossary.md#authority-epoch) is outside the
   `verified_authority_arms` the selected `ens_execution` manifest declares
   (`manifests.md` § `verified_authority_arms`; absent means `["ens_v1"]`, so
-  an `ens_v2`-selected name is refused on the Mainnet and Sepolia profiles and
-  admitted on `sepolia-hackathon`). Neither refusal dispatches a provider call.
+  an `ens_v2`-selected name is refused on Mainnet and
+  admitted on the official `sepolia` profile). Neither refusal dispatches a provider call.
   Bound ENS names of either arm with a non-null exact resolver carry a
   projected direct topology (`execution.md` § Resolver-record lookup), so an
   admitted arm executes the direct route and compares against the indexed
@@ -834,10 +834,8 @@ collection route carry neither header.
   exact resolver, a projected name identity and DNS wire name, no alias,
   linked-subregistry, projected wildcard, or cross-chain transport path, and an
   admitted Universal Resolver manifest entrypoint on that chain
-  (`ens_execution`, checked in for both profiles; the separately evidenced
-  `sepolia-hackathon` profile declares its own hackathon Universal Resolver
-  under the same family, see `manifests.md` § Sepolia hackathon deployment
-  evidence). Verified ENS reads follow
+  (`ens_execution`, checked in for both profiles; see the
+  [official Sepolia deployment](sepolia-deployment.md)). Verified ENS reads follow
   the same rules on both chains; only the chain, and therefore the
   `BIGNAME_API_CHAIN_RPC_URLS` entry they need (`ethereum-mainnet=` or
   `ethereum-sepolia=`), differs. This makes the indexed null-resolver miss
@@ -1044,14 +1042,14 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 | ABI records | Outside the grammar | No public key. ENS defines ABI records by node and accepted content-type mask. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IABIResolver.sol:L4-L16 @ ens_v1@91c966f) |
 | Public keys | Outside the grammar | No public key. ENS defines a secp256k1 public-key record. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IPubkeyResolver.sol:L4-L12 @ ens_v1@91c966f) |
 | Interface declarations | Outside the grammar | No public key. ENS defines an interface-ID-to-implementer lookup. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IInterfaceResolver.sol:L4-L22 @ ens_v1@91c966f) |
-| Reverse-claim name records | Served outside the grammar | No record key. For indexed claim intake, only a `RecordChanged` row whose `primary_claim_source` was produced when the reverse-registrar adapter interpreted `NameForAddrChanged` is attributed to a reverse claim. Among indexed `RecordChanged` rows, only those attributed rows contribute claim values to the primary-name projection; a `ReverseChanged` event for the same address, coin type, and namespace must also exist, and the indexed claim attaches to that event's key. ENSv1's standalone reverse registrar emits `NameForAddrChanged` when it stores an address's name. (upstream: .refs/ens_v1/contracts/reverseRegistrar/StandaloneReverseRegistrar.sol:L28-L30 @ ens_v1@91c966f) Mainnet ENS reverse resolution instead uses the separate [event-silent](glossary.md#event-silent) reverse-resolver [hydration](glossary.md#hydration) or request-scoped [verified lookup](glossary.md#verified-lookup) path, not indexed `NameForAddrChanged` claim intake; its reverse registrar emits `ReverseClaimed` and calls the selected resolver to set the name. (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L76-L84 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123-L131 @ ens_v1@91c966f) The `sepolia-hackathon` [deployment profile](glossary.md#deployment-profile)'s declared ReverseRegistrar has the same shape: its `ReverseClaimed` keys the indexed tuple and records the reverse node's resolver, its PublicResolver `NameChanged` stays unattributed, and no hydration is admitted for that resolver, so the indexed answer is `not_found` and the claim value comes from the verified path. |
-| General resolver name records | History only; outside the grammar | No public key or current value surface. Every resolver-family `NameChanged` is retained as an unattributed normalized `RecordChanged` in the `name` family, regardless of resolver or node type; a write for an `<addr>.addr.reverse` node therefore remains unattributed. When the row is associated with a materialized name, `GET /v1/names/{name}/history` exposes the change as `type=record` without its stored name value. The record routes reject the `name` family, and the primary-name projection ignores these rows because they have no `primary_claim_source`. ENSv1 defines `NameChanged` generically by node and name. (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L4-L11 @ ens_v1@91c966f) |
+| Reverse-claim name records | Served outside the grammar | No record key. The primary-name projection takes an indexed claim value from one of two event paths, chosen by the event that keys the address, coin type, and namespace tuple. (1) When the reverse-registrar adapter interprets `NameForAddrChanged`, it emits the tuple's `ReverseChanged` and a `RecordChanged` row carrying `primary_claim_source`; the claim attaches to that tuple. ENSv1's standalone reverse registrar emits `NameForAddrChanged` when it stores an address's name. (upstream: .refs/ens_v1/contracts/reverseRegistrar/StandaloneReverseRegistrar.sol:L28-L30 @ ens_v1@91c966f) (2) The ENSv1 `addr.reverse` ReverseRegistrar declared by the Mainnet and canonical `sepolia` [deployment profiles](glossary.md#deployment-profile) emits no name: it emits `ReverseClaimed` with the reverse node, sets that node's registry resolver, and calls the resolver's `setName`, which emits `NameChanged`. (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L76-L84 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123-L131 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L19 @ ens_v1@91c966f) For such a tuple the projection joins the `ReverseClaimed` reverse node to the latest retained `NameChanged` or record-version reset on the node's current registry resolver, as described in [projections.md](projections.md#primary-names). A Sepolia or Mainnet `setName` through an admitted event-emitting PublicResolver therefore yields an indexed `claim_status = success` with the claimed name; a blank name or a version reset yields `not_found`. The joined `RecordChanged` row itself still carries no `primary_claim_source`. When the reverse node's resolver is [event-silent](glossary.md#event-silent) (it stores the name without emitting `NameChanged`), there is nothing to join, so the indexed answer is `not_found` unless reverse-resolver [hydration](glossary.md#hydration) is admitted for that resolver; the canonical `sepolia` profile admits none. Either way the indexed value is a declared claim only: forward verification stays on the request-scoped [verified lookup](glossary.md#verified-lookup) path. |
+| General resolver name records | History only; outside the grammar | No public key or current value surface. Every resolver-family `NameChanged` is retained as an unattributed normalized `RecordChanged` in the `name` family, regardless of resolver or node type; a write for an `<addr>.addr.reverse` node therefore remains unattributed. When the row is associated with a materialized name, `GET /v1/names/{name}/history` exposes the change as `type=record` without its stored name value. The record routes reject the `name` family. The primary-name projection reads these rows only through the reverse-node join in the row above: a `NameChanged` for a node that no retained `ReverseClaimed` tuple names, or on a resolver that is not that node's current registry resolver, contributes nothing. ENSv1 defines `NameChanged` generically by node and name. (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L4-L11 @ ens_v1@91c966f) |
 | Resolver record versions | Outside the grammar | No public key. ENS keeps a per-node record version on the resolver and bumps it on `clearRecords`, emitting `VersionChanged`; the indexed record inventory retains that event as the boundary that invalidates older record values, but the version number itself is not served. (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L20-L22 @ ens_v1@91c966f) |
 | DNS record sets | Outside the grammar | No public key. ENS defines DNS record-set update/delete events and a wire-format getter. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSRecordResolver.sol:L4-L24 @ ens_v1@91c966f) |
 | DNS zone hashes | Outside the grammar | No public key. ENS defines a DNS zone-hash update event and getter. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSZoneResolver.sol:L4-L15 @ ens_v1@91c966f) |
 | Legacy content and multihash | Outside the grammar | No public key. ENS retains these getters and setters as deprecated resolver functions. (upstream: .refs/ens_v1/contracts/resolvers/Resolver.sol:L86-L93 @ ens_v1@91c966f) |
 | ENSv1 arbitrary data records | Outside the grammar | No public key. ENS defines string-keyed arbitrary byte data. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDataResolver.sol:L5-L21 @ ens_v1@91c966f) The pinned ENSv1 `PublicResolver` source composes `DataResolver`. (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20-L30 @ ens_v1@91c966f) bigname's ENSv1 resolver-family manifest admits and normalizes `DataChanged`, but its Mainnet PublicResolver admission rows include `DataResolver` in none of their declared resolver compositions; see [ENS mainnet admission](manifests.md#ens-mainnet). This is an admitted-generation composition limit and a grammar limit, not an event-admission limit. |
-| ENSv2 generic data resources | Outside the grammar | No public key. The admitted archived Sepolia resolver ABI exposes `DataChanged` and `NamedDataResource`; their normalized-event exclusion is documented in the [ENSv2 admission divergence](upstream.md#ensv2-data-event-admission-narrowing). (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L360-L375 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L505-L519 @ ens_v2@a971bd64) |
+| ENSv2 generic data resources | Outside the grammar | No public key. The historical June Sepolia resolver ABI exposed `DataChanged` and `NamedDataResource`; their normalized-event exclusion is documented in the [ENSv2 admission divergence](upstream.md#ensv2-data-event-admission-narrowing). (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L360-L375 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L505-L519 @ ens_v2@a971bd64) |
 
 ### `GET /v1/names/{name}/subnames`
 
@@ -1800,16 +1798,9 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   Sepolia profile's `ens_execution` Universal Resolver and `ens_v1_registry_l1`
   registry declarations, with the same reverse leg, the same pre-forward
   authority gate, the same hash pinning to the readable Sepolia head, and the
-  same provider limits. On Sepolia the gate does real work: the profile admits
-  ENSv2 registries while its `ens_execution` manifest admits only the `ens_v1`
-  arm, so a claimed name whose selected authority is an `ens_v2` arm is refused
-  before the forward call exactly as described above. Under the
-  `sepolia-hackathon` profile, whose `ens_execution` manifest declares
-  `verified_authority_arms = ["ens_v1", "ens_v2"]` because its proxy is a
-  UniversalResolverV2 walking the hackathon root registry
-  `(upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L21-L45 @ ens_v2@a971bd64)`,
-  an `ens_v2`-selected claim is admitted and the forward call executes through
-  that proxy; `ens_v1`-selected names stay admitted there too. The
+  same provider limits. The official Sepolia manifest admits both `ens_v1` and `ens_v2`
+  through its Universal Resolver proxy; the [deployment inventory](sepolia-deployment.md)
+  records the root binding and rollout verification. The
   Sepolia evidence below explains the projected authority and the ENSv1-path
   behavior that route relies on. An
   unwrapped ENSv1→ENSv2 migration clears the migrated node's ENSv1 resolver
@@ -1835,7 +1826,7 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L454-L458 @ ens_v2@a971bd64)`
   `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L546-L553 @ ens_v2@a971bd64)`
   `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L606-L613 @ ens_v2@a971bd64)`.
-  The `eth`-node redirect is scripted intent plus a deployed Sepolia resolver in
+  The following paragraph records historical ENSv1 routing evidence, rather than the current V2 proxy route. The `eth`-node redirect was scripted intent plus a deployed Sepolia resolver in
   the pinned checkout
   `(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ENSV2Resolver.json:L2 @ ens_v2@a971bd64)`;
   the [`ens_v2` pin](../.refs/MANIFEST.toml) is scoped to the admitted
@@ -1903,12 +1894,8 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   anomaly and returns `exact_name_authority_not_verifiable`. A claim the
   projection supports whose selected authority arm is not listed in the
   selected `ens_execution` manifest's `verified_authority_arms` returns that
-  same reason: on the Mainnet and Sepolia profiles that manifest admits only
-  `ens_v1`, so an `ens_v2`-selected claim has no forward-resolution path there
-  and the route declines rather than resolving the name through a Universal
-  Resolver its own authority selection has already ruled out. A profile whose
-  manifest lists `ens_v2` (the `sepolia-hackathon` profile) admits that claim
-  instead. The refusal case needs a deployment profile that can support an
+  same reason. Mainnet lists only `ens_v1`; the official Sepolia manifest
+  lists both arms and therefore admits an `ens_v2`-selected claim. The refusal case needs a deployment profile that can support an
   ENSv2 selection at all; where the deployment profile shadows the ENSv2 arm,
   the name is already unsupported and takes the first case instead. None of the
   three cases dispatches a forward resolver call. A live reverse claim has

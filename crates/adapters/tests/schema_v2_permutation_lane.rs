@@ -11,7 +11,7 @@
 //! the coverage floor does require the kind the wrapper derives from a fuse-bearing wrap.
 //!
 //! Knobs:
-//! - `BIGNAME_PERMUTATION_CASES` — permutations per protocol world. Default 48 (240 sequences per
+//! - `BIGNAME_PERMUTATION_CASES` — permutations per protocol world. Default 48 (144 sequences per
 //!   run) keeps the lane inside the CI budget; raise it for deeper local sweeps.
 //! - `BIGNAME_PERMUTATION_SEED` — base seed, decimal. Default 1846370029.
 //!
@@ -53,10 +53,9 @@ use permutation::{
     names::{dns_encode, labelhash, namehash},
     scenario::{self, BurstPhase},
     world::{
-        BlockSpec, ENS_V1_MAINNET, ENS_V1_SEPOLIA, ENS_V1_SEPOLIA_HACKATHON, ENS_V2_SEPOLIA,
-        ENS_V2_SEPOLIA_HACKATHON, GeneratedLog, Wiring, World, assert_pins_are_current,
-        assert_worlds_cover_deployments, checked_in_manifests, declared_event_kinds,
-        declared_event_topics,
+        BlockSpec, ENS_V1_MAINNET, ENS_V1_SEPOLIA, ENS_V2_SEPOLIA, GeneratedLog, Wiring, World,
+        assert_pins_are_current, assert_worlds_cover_deployments, checked_in_manifests,
+        declared_event_kinds, declared_event_topics,
     },
 };
 
@@ -72,13 +71,7 @@ const DEFAULT_SEED: u64 = 0x6e0d_5eed;
 /// `generated_scenarios_are_reproducible_from_their_seed`.
 const CASE_STRIDE: u64 = 0xd134_2543_de82_ef95;
 const SPLIT_SALT: u64 = 0xa076_1d64_78bd_642f;
-const WORLDS: [&World; 5] = [
-    &ENS_V1_MAINNET,
-    &ENS_V1_SEPOLIA,
-    &ENS_V2_SEPOLIA,
-    &ENS_V1_SEPOLIA_HACKATHON,
-    &ENS_V2_SEPOLIA_HACKATHON,
-];
+const WORLDS: [&World; 3] = [&ENS_V1_MAINNET, &ENS_V1_SEPOLIA, &ENS_V2_SEPOLIA];
 /// Any timestamp works for coverage; the axes decide which events a pool contains, not the clock.
 const SETTLE_TIMESTAMP: i64 = 1_700_000_000;
 
@@ -313,7 +306,7 @@ fn wrapped_past_grace_lapse_is_batch_grid_independent() -> Result<()> {
 #[test]
 fn v2_alias_observed_record_name_link_is_batch_grid_independent() -> Result<()> {
     let checked_in = checked_in_manifests()?;
-    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?.with_node_resolver_abi()?;
     let node = namehash(&["alias", "eth"]);
     let expected_name = format!("ens:{node:#x}");
     let input = v2_alias_observed_record_input(&wiring)?;
@@ -357,7 +350,7 @@ fn v2_alias_observed_record_name_link_is_batch_grid_independent() -> Result<()> 
 // this probe as evidence until a separate issue and fix domain-separate those observation classes.
 fn v2_named_resource_alias_retained_key_collision_is_batch_grid_independent() -> Result<()> {
     let checked_in = checked_in_manifests()?;
-    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?.with_node_resolver_abi()?;
     let input = v2_named_resource_alias_collision_input(&wiring)?;
     let whole = interpret_schema_v2_batch(input.clone())?;
     let collision_name = format!("ens:{:#x}", namehash(&["collision", "eth"]));
@@ -422,7 +415,7 @@ fn v2_unregistered_record_name_link_is_batch_grid_independent() -> Result<()> {
     // resource without a resolver, unregister, then write the late resolver record in a later
     // block.
     let checked_in = checked_in_manifests()?;
-    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?.with_node_resolver_abi()?;
     let node = namehash(&["alpha", "eth"]);
     let expected_name = format!("ens:{node:#x}");
     let input = v2_released_name_record_input(
@@ -477,7 +470,7 @@ fn v2_unregistered_record_name_link_is_batch_grid_independent() -> Result<()> {
 #[test]
 fn v2_regeneration_collision_closes_displaced_registration_in_every_replay_shape() -> Result<()> {
     let checked_in = checked_in_manifests()?;
-    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?.with_node_resolver_abi()?;
     for (case, collision) in [
         ("regeneration-collision", true),
         ("unregister-comparator", false),
@@ -1475,7 +1468,7 @@ fn assert_v2_regeneration_collision_output(output: &BatchOutput, collision: bool
 #[test]
 fn v2_unregistered_record_version_name_link_is_batch_grid_independent() -> Result<()> {
     let checked_in = checked_in_manifests()?;
-    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?.with_node_resolver_abi()?;
     let node = namehash(&["alpha", "eth"]);
     let expected_name = format!("ens:{node:#x}");
     let input = v2_released_name_record_input(
@@ -1524,7 +1517,7 @@ fn v2_unregistered_record_version_name_link_is_batch_grid_independent() -> Resul
 #[test]
 fn v2_unregistered_record_stream_rethreads_before_state_after_restore() -> Result<()> {
     let checked_in = checked_in_manifests()?;
-    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?.with_node_resolver_abi()?;
     let node = namehash(&["alpha", "eth"]);
     let input = v2_released_name_record_input(
         &wiring,
@@ -1610,7 +1603,7 @@ fn v2_release_then_resolver_only_batches_restore_boundary_clock_exactly() -> Res
 #[test]
 fn v2_shadow_registry_preimage_does_not_gain_record_attribution_after_restore() -> Result<()> {
     let checked_in = checked_in_manifests()?;
-    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?.with_node_resolver_abi()?;
     let input = v2_shadow_registry_record_input(&wiring)?;
     let converged = converge(
         "directed=v2-shadow-registry-preimage",
@@ -1641,7 +1634,7 @@ fn v2_shadow_registry_preimage_does_not_gain_record_attribution_after_restore() 
 #[test]
 fn v2_shadow_alias_preimage_does_not_gain_record_attribution_after_restore() -> Result<()> {
     let checked_in = checked_in_manifests()?;
-    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?.with_node_resolver_abi()?;
     let input = v2_alias_record_input(&wiring, "a\0b", "target")?;
     let converged = converge("directed=v2-shadow-alias-preimage", input, vec![0..1, 1..2])?;
     let whole_record = converged
@@ -3718,56 +3711,6 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
     (
         ENS_V2_SEPOLIA.label,
         &[
-            "AliasChanged",
-            "AuthorityTransferred",
-            "ExpiryChanged",
-            "ParentChanged",
-            "PermissionChanged",
-            "PreimageObserved",
-            "RecordChanged",
-            "RecordVersionChanged",
-            "RegistrarNameRegistered",
-            "RegistrationGranted",
-            "RegistrationReleased",
-            "RegistrationRenewed",
-            "RegistrationReserved",
-            "RegistryCreated",
-            "ResolverChanged",
-            "RootPermissionChanged",
-            "SubregistryChanged",
-            "SurfaceBound",
-            "SurfaceUnbound",
-            "TokenControlTransferred",
-            "TokenRegenerated",
-            "TokenResourceLinked",
-            "Upgraded",
-        ],
-    ),
-    (
-        ENS_V1_SEPOLIA_HACKATHON.label,
-        &[
-            "AuthorityEpochChanged",
-            "AuthorityTransferred",
-            "ExpiryChanged",
-            "PermissionChanged",
-            "PermissionScopeChanged",
-            "PreimageObserved",
-            "RecordChanged",
-            "RecordVersionChanged",
-            "RegistrationGranted",
-            "RegistrationReleased",
-            "RegistrationRenewed",
-            "ResolverChanged",
-            "ReverseChanged",
-            "SubregistryChanged",
-            "SurfaceBound",
-            "SurfaceUnbound",
-            "TokenControlTransferred",
-        ],
-    ),
-    (
-        ENS_V2_SEPOLIA_HACKATHON.label,
-        &[
             "AuthorityTransferred",
             "ExpiryChanged",
             "ParentChanged",
@@ -3819,8 +3762,6 @@ const EXPECTED_ARTIFACTS: &[(&str, &[(&str, usize)])] = &[
     (ENS_V1_MAINNET.label, &[]),
     (ENS_V1_SEPOLIA.label, &[]),
     (ENS_V2_SEPOLIA.label, &[]),
-    (ENS_V1_SEPOLIA_HACKATHON.label, &[]),
-    (ENS_V2_SEPOLIA_HACKATHON.label, &[]),
 ];
 
 /// The first thing to rule out when a pinned count moves: these are counts over the sequences one
@@ -3839,8 +3780,6 @@ const EXPECTED_SUBREGISTRY_DETACHES: &[(&str, usize)] = &[
     (ENS_V1_MAINNET.label, 0),
     (ENS_V1_SEPOLIA.label, 0),
     (ENS_V2_SEPOLIA.label, 51),
-    (ENS_V1_SEPOLIA_HACKATHON.label, 0),
-    (ENS_V2_SEPOLIA_HACKATHON.label, 51),
 ];
 
 /// Per-world corpus volume floors — minimum raw-log and normalized-event totals the default
@@ -3857,8 +3796,6 @@ const MINIMUM_VOLUMES: &[(&str, usize, usize)] = &[
     (ENS_V1_MAINNET.label, 1012, 3187),
     (ENS_V1_SEPOLIA.label, 746, 2543),
     (ENS_V2_SEPOLIA.label, 675, 1390),
-    (ENS_V1_SEPOLIA_HACKATHON.label, 746, 2543),
-    (ENS_V2_SEPOLIA_HACKATHON.label, 675, 1390),
 ];
 
 /// The pre-registration burst axis's reach at the default corpus, per world: how many cases the
@@ -3887,8 +3824,6 @@ const EXPECTED_BURST_REACH: &[(&str, usize, [usize; BurstPhase::COUNT], usize)] 
     (ENS_V1_MAINNET.label, 8, [14, 14, 14], 5),
     (ENS_V1_SEPOLIA.label, 0, [0, 0, 0], 0),
     (ENS_V2_SEPOLIA.label, 0, [0, 0, 0], 0),
-    (ENS_V1_SEPOLIA_HACKATHON.label, 0, [0, 0, 0], 0),
-    (ENS_V2_SEPOLIA_HACKATHON.label, 0, [0, 0, 0], 0),
 ];
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -4125,14 +4060,14 @@ fn volume_floors_fail_under_the_minimum() {
 }
 
 #[test]
-fn alias_changed_is_a_required_ens_v2_corpus_kind() {
+fn record_link_is_a_required_ens_v2_corpus_kind() {
     let required = REQUIRED_EVENT_KINDS
         .iter()
         .find_map(|(world, kinds)| (*world == ENS_V2_SEPOLIA.label).then_some(*kinds))
         .expect("ENSv2 required-event floor");
     assert!(
-        required.contains(&"AliasChanged"),
-        "the generated alias restore path must stay in the ENSv2 coverage floor"
+        required.contains(&"ResolverRecordLinked"),
+        "the generated record-ID link path must stay in the ENSv2 coverage floor"
     );
 }
 
