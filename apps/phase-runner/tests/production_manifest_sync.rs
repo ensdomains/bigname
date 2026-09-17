@@ -5694,3 +5694,87 @@ async fn official_sepolia_mirror_and_direct_resolver_sync_idempotently() -> Resu
     scratch.cleanup().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn two_contracts_sharing_the_mirror_role_sync_under_address_qualified_names() -> Result<()> {
+    // Declarations persist under `(manifest_id, declaration_kind, declaration_name)`. Two contracts
+    // that share the repeatable mirror role must therefore each keep an address-qualified name,
+    // or the second would overwrite the first. The official profile declares only one mirror, so
+    // this synthetic manifest covers the two-address case.
+    let scratch = ScratchDatabase::create("production_manifest_shared_role_pair").await?;
+    let chain_id = "manifest-shared-role-pair";
+    let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v2_resolver_l1")?;
+    fs::write(
+        fixture
+            .root
+            .join("test")
+            .join("ens_v2_resolver_l1")
+            .join("v1.toml"),
+        format!(
+            r#"manifest_version = 1
+namespace = "test"
+source_family = "ens_v2_resolver_l1"
+chain = "{chain_id}"
+deployment_epoch = "fixture"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+discovery_rules = []
+
+[correlation_addresses]
+ens_v1_registry = "0x00000000000000000000000000000000000000AA"
+
+[capability_flags]
+
+[[contracts]]
+role = "ensv1_mirror_resolver"
+address = "0x0000000000000000000000000000000000000010"
+proxy_kind = "none"
+start_block = 34567
+
+[[contracts]]
+role = "ensv1_mirror_resolver"
+address = "0x0000000000000000000000000000000000000011"
+proxy_kind = "none"
+start_block = 34560
+"#
+        ),
+    )?;
+    let repository = load_repository(&fixture.root)?;
+    let expected: Vec<(String, String, String, Option<i64>)> = vec![
+        (
+            "ensv1_mirror_resolver@0x0000000000000000000000000000000000000010".into(),
+            "ensv1_mirror_resolver".into(),
+            "0x0000000000000000000000000000000000000010".into(),
+            Some(34_567),
+        ),
+        (
+            "ensv1_mirror_resolver@0x0000000000000000000000000000000000000011".into(),
+            "ensv1_mirror_resolver".into(),
+            "0x0000000000000000000000000000000000000011".into(),
+            Some(34_560),
+        ),
+    ];
+
+    // The second sync checks that a resync neither collapses nor duplicates the pair.
+    for pass in ["first sync", "resync"] {
+        sync_schema_v2_repository(scratch.pool(), &repository).await?;
+        let declared: Vec<(String, String, String, Option<i64>)> = sqlx::query_as(
+            "SELECT declaration.declaration_name, declaration.role,
+                    lower(declaration.declared_address), declaration.start_block_number
+             FROM manifest_versions manifest
+             JOIN manifest_contract_instances declaration
+               ON declaration.manifest_id = manifest.manifest_id
+             WHERE manifest.chain_id = $1
+               AND manifest.source_family = 'ens_v2_resolver_l1'
+               AND manifest.rollout_status = 'active'
+             ORDER BY declaration.declaration_name",
+        )
+        .bind(chain_id)
+        .fetch_all(scratch.pool())
+        .await?;
+        assert_eq!(declared, expected, "{pass}");
+    }
+    scratch.cleanup().await?;
+    Ok(())
+}
