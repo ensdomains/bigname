@@ -379,9 +379,9 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=8
+expected_refusal_assertions=11
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=32
+expected_predecessor_shape_proof_count=33
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -471,7 +471,8 @@ for migration_file in \
     "$ROOT/migrations/20260914120100_address_records_current_comments.sql" \
     "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" \
     "$ROOT/migrations/20260917120000_discovery_edges_observation_history_idx.sql" \
-    "$ROOT/migrations/20260917130000_discovery_edges_reopen_idx.sql"
+    "$ROOT/migrations/20260917130000_discovery_edges_reopen_idx.sql" \
+    "$ROOT/migrations/20260917160000_discovery_edges_index_validity_check.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -869,6 +870,59 @@ END $$;
 DROP TABLE expected_discovery_reopen_index;
 SQL
 } | run_psql
+# The live prebuild in ops/discovery-reopen-index/install.sql must build the
+# baseline definition, refuse an invalid index, and recover as its README says.
+assert_concurrent_index_installer discovery-reopen \
+    discovery_edges_reopen_idx \
+    "$ROOT/ops/discovery-reopen-index/install.sql" \
+    ops/discovery-reopen-index/README.md
+# The two index schema-migrations above adopt an existing index by name alone.
+# The validity check that follows them passes on the shape they leave, changes
+# nothing when rerun, and ignores an index that does not exist yet.
+discovery_index_validity_migration="$ROOT/migrations/20260917160000_discovery_edges_index_validity_check.sql"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    emit_phase_migration "$discovery_index_validity_migration" preceding-shape
+    emit_phase_migration "$discovery_index_validity_migration" baseline-first
+    cat <<'SQL'
+BEGIN;
+DROP INDEX discovery_edges_observation_history_idx;
+DROP INDEX discovery_edges_reopen_idx;
+SQL
+    emit_phase_migration "$discovery_index_validity_migration" baseline-first
+    cat <<'SQL'
+ROLLBACK;
+DO $$
+BEGIN
+    IF (
+        SELECT count(*) FROM pg_index
+        WHERE indexrelid IN (
+                  'discovery_edges_observation_history_idx'::regclass,
+                  'discovery_edges_reopen_idx'::regclass
+              )
+          AND indisvalid AND indisready
+    ) <> 2 THEN
+        RAISE EXCEPTION 'discovery index validity check changed an index';
+    END IF;
+END $$;
+SQL
+} | run_psql
+assert_migration_context_count "$discovery_index_validity_migration" preceding-shape 1
+assert_migration_context_count "$discovery_index_validity_migration" baseline-first 2
+# An interrupted concurrent build leaves an invalid index under the right name.
+# Mark each scratch index invalid in turn, inside a transaction that rolls
+# back, and require the schema-migration to fail rather than record success.
+for discovery_index_name in \
+    discovery_edges_observation_history_idx \
+    discovery_edges_reopen_idx
+do
+    assert_migration_refusal "invalid-$discovery_index_name" \
+        "$discovery_index_validity_migration" \
+        "$discovery_index_name exists but is not a valid and ready index on $scratch_schema.discovery_edges; follow the recovery steps in ops/discovery-history-index/README.md or ops/discovery-reopen-index/README.md, then run the schema-migrations again" <<SQL
+UPDATE pg_index SET indisvalid = false
+WHERE indexrelid = '$discovery_index_name'::regclass;
+SQL
+done
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor
 # shape, then validate the additive tuple invariant independently. Both files
 # must remain idempotent after the upgrade completes.
