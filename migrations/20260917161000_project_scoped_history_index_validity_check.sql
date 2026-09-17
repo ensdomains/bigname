@@ -26,10 +26,16 @@
 -- search_path; schema-v2/apply-check.sh proves it for the baseline, the
 -- earlier schema-migration, and install.sql.
 --
--- The search_path change is transaction-local, and the block puts the previous
--- value back before it returns, so later statements in the same transaction
--- see the search_path they would have seen without this file. When the block
--- raises, the transaction, or the savepoint around it, rolls the change back.
+-- quote_all_identifiers is turned off while the definitions are read, for the
+-- same reason: when a caller has it on, PostgreSQL prints every identifier in
+-- double quotes, starting with the index name, and a healthy index would be
+-- refused. The quotes are not stripped from the printed text, because a text
+-- replacement would also change a double quote inside a string literal.
+--
+-- Both changes are transaction-local, and the block puts the previous values
+-- back before it returns, so later statements in the same transaction see the
+-- settings they would have seen without this file. When the block raises, the
+-- transaction, or the savepoint around it, rolls the changes back.
 --
 -- To recover, follow ops/project-scoped-history/README.md: confirm no build is
 -- running, drop only the named index with DROP INDEX CONCURRENTLY, rerun
@@ -53,6 +59,7 @@ DECLARE
     found_definition text;
     found_kind text;
     previous_search_path text;
+    previous_quote_all_identifiers text;
 BEGIN
     IF to_regclass('bigname_phase.normalized_events') IS NULL THEN
         RETURN;
@@ -61,6 +68,9 @@ BEGIN
     -- Every name below is schema-qualified or lives in pg_catalog.
     previous_search_path := current_setting('search_path');
     PERFORM set_config('search_path', 'pg_catalog', true);
+    -- The expected text below has no quoted identifiers.
+    previous_quote_all_identifiers := current_setting('quote_all_identifiers');
+    PERFORM set_config('quote_all_identifiers', 'off', true);
 
     FOR checked_index, expected_definition IN
         SELECT * FROM (VALUES
@@ -133,5 +143,6 @@ BEGIN
     END LOOP;
 
     PERFORM set_config('search_path', previous_search_path, true);
+    PERFORM set_config('quote_all_identifiers', previous_quote_all_identifiers, true);
 END
 $migration$;

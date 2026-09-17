@@ -230,6 +230,21 @@ async fn verify_index_migration(transaction: &mut Transaction<'_, Postgres>) -> 
         search_path == "bigname_phase, public",
         "validity check left search_path as {search_path}"
     );
+    // With quote_all_identifiers on PostgreSQL prints every identifier quoted. The check must
+    // still accept the healthy indexes, and must put the caller's setting back as well.
+    let mut savepoint = transaction.begin().await?;
+    raw_sql("SET LOCAL quote_all_identifiers = on")
+        .execute(&mut *savepoint)
+        .await?;
+    raw_sql(VALIDITY_CHECK).execute(&mut *savepoint).await?;
+    let quote_all: String = sqlx::query_scalar("SELECT current_setting('quote_all_identifiers')")
+        .fetch_one(&mut *savepoint)
+        .await?;
+    ensure!(
+        quote_all == "on",
+        "validity check left quote_all_identifiers as {quote_all}"
+    );
+    savepoint.rollback().await?;
     // IF NOT EXISTS adopts a relation by name alone. An interrupted concurrent build leaves an
     // invalid index, and a wrong manual build leaves other keys; the later check must refuse both.
     for (name, reviewed) in &baseline {

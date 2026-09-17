@@ -20,15 +20,19 @@ SET statement_timeout = '30min';
 -- even that out, because a text replacement would also change a string literal
 -- such as a JSON key. Instead the function's own SET search_path clause makes
 -- search_path pg_catalog while it runs, so both schema names are always
--- printed, and the expected text keeps them. PostgreSQL puts the session's
--- search_path back when the function returns or raises, so the CREATE INDEX
--- statements below are not affected. Every name the function uses is
--- schema-qualified or lives in pg_catalog. The function lives in pg_temp and
--- disappears with the session.
+-- printed, and the expected text keeps them. Its SET quote_all_identifiers
+-- clause turns that setting off for the same read: when the session has it on,
+-- PostgreSQL prints every identifier in double quotes and a healthy index would
+-- be refused. The quotes are not stripped from the printed text either.
+-- PostgreSQL puts the session's search_path and quote_all_identifiers back when
+-- the function returns or raises, so the CREATE INDEX statements below are not
+-- affected. Every name the function uses is schema-qualified or lives in
+-- pg_catalog. The function lives in pg_temp and disappears with the session.
 CREATE OR REPLACE FUNCTION pg_temp.check_project_scoped_history_indexes(require_built boolean)
 RETURNS void
 LANGUAGE plpgsql
 SET search_path = pg_catalog
+SET quote_all_identifiers = off
 AS $check$
 DECLARE
     checked_index text;

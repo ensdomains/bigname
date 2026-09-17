@@ -200,6 +200,45 @@ assert_search_path_sql() {
         "    END IF;" \
         "END \$\$;"
 }
+# Emit SQL that fails unless quote_all_identifiers is exactly this text.
+assert_quote_all_identifiers_sql() {
+    printf '%s\n' \
+        "DO \$\$ BEGIN" \
+        "    IF current_setting('quote_all_identifiers') <> '$1' THEN" \
+        "        RAISE EXCEPTION 'quote_all_identifiers is %, expected $1', current_setting('quote_all_identifiers');" \
+        "    END IF;" \
+        "END \$\$;"
+}
+# Emit SQL that runs one index validity check, a schema-migration or a whole
+# ops/ installer, for a caller that has quote_all_identifiers on. PostgreSQL
+# then prints every identifier in pg_get_indexdef quoted, so a check that
+# compares the printed text must turn the setting off while it reads the
+# definitions, or it refuses healthy indexes. It must also leave the caller's
+# setting as it found it: in the session, inside one transaction where the
+# setting is only transaction-local, and after that transaction commits.
+# Nothing here is recorded as a schema-migration application.
+emit_quote_all_identifiers_probe() {
+    local checked_file="$1"
+    local transaction_mode="$2"
+    printf 'SET quote_all_identifiers = on;\n'
+    render_phase_migration "$checked_file"
+    assert_quote_all_identifiers_sql on
+    if [ "$transaction_mode" = in-transaction ]; then
+        # As sqlx applies a schema-migration. The installers cannot run here:
+        # CREATE INDEX CONCURRENTLY refuses a transaction block.
+        printf 'BEGIN;\n'
+        render_phase_migration "$checked_file"
+        assert_quote_all_identifiers_sql on
+        printf 'COMMIT;\n'
+        assert_quote_all_identifiers_sql on
+        printf 'RESET quote_all_identifiers;\nBEGIN;\nSET LOCAL quote_all_identifiers = on;\n'
+        render_phase_migration "$checked_file"
+        assert_quote_all_identifiers_sql on
+        printf 'COMMIT;\n'
+        assert_quote_all_identifiers_sql off
+    fi
+    printf 'RESET quote_all_identifiers;\n'
+}
 assert_migration_refusal() {
     local label="$1"
     local migration_file="$2"
@@ -310,6 +349,10 @@ END \$\$;"
         # leave the session's as it found it.
         assert_search_path_sql "$scratch_schema"
         printf '%s\n' "$matches_baseline_sql"
+        # A caller with quote_all_identifiers on must get the same answer for
+        # the healthy index, and keep its setting.
+        emit_quote_all_identifiers_probe "$install_file" outside-transaction
+        printf '%s\n' "$matches_baseline_sql"
         # An interrupted concurrent build leaves an invalid index under this
         # name. Mark this scratch index invalid to stand in for one.
         printf '%s\n' \
@@ -388,6 +431,7 @@ assert_discovery_index_definitions_accepted() {
         assert_search_path_sql "$scratch_schema, public"
         printf 'COMMIT;\n'
         assert_search_path_sql public
+        emit_quote_all_identifiers_probe "$discovery_index_validity_migration" in-transaction
     } | run_psql
 }
 assert_unconfigured_settlement_constraint() {
@@ -1215,6 +1259,7 @@ project_history_index_names=(
     assert_search_path_sql "$scratch_schema, public"
     printf 'COMMIT;\n'
     assert_search_path_sql public
+    emit_quote_all_identifiers_probe "$project_history_validity_migration" in-transaction
 } | run_psql
 # The live prebuild in ops/project-scoped-history/install.sql builds all eight
 # indexes in one file. For each in turn it must build the baseline definition,

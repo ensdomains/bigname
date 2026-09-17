@@ -600,6 +600,12 @@ EXISTS (
       AND index_state.indisready
 ) AS normalized_events_emitter_history_index_ready;
 
+-- The next two queries compare key and predicate text as PostgreSQL prints it.
+-- With quote_all_identifiers on it prints every identifier in double quotes,
+-- and a healthy index would read as not ready, so turn it off for this session.
+-- The quotes are not stripped from the printed text instead.
+SET quote_all_identifiers = off;
+
 -- The schema qualifier on the enum type depends on the session search_path,
 -- so both spellings of the predicate are accepted. The printed text is not
 -- rewritten, because a replacement would also change a string literal.
