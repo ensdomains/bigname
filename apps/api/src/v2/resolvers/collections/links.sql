@@ -8,8 +8,11 @@ WITH latest_links AS (
     LEFT JOIN bigname_phase.chain_lineage lineage
       ON lineage.chain_id = event.chain_id AND lineage.block_hash = event.block_hash
      AND lineage.block_number = event.block_number
+    -- The emitter predicate is the indexed one (normalized_events_emitter_history_idx);
+    -- a record-ID resolver emits its own Linked logs.
     WHERE event.chain_id = $1 AND event.event_kind = 'ResolverRecordLinked'
       AND event.after_state ->> 'storage_model' = 'resolver_record_id'
+      AND lower(event.raw_fact_ref ->> 'emitting_address') = $2
       AND lower(event.after_state ->> 'resolver') = $2
       AND event.consumer_visibility = 'activated'
       AND event.canonicality_state IN ('canonical', 'safe', 'finalized')

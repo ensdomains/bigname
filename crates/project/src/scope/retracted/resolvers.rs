@@ -190,41 +190,55 @@ pub(super) async fn seed_relinked_resolvers(
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
+    // One pass over the chain's link events, grouped by resolver, then compared
+    // with every row: the cost is the link history once, not once per resolver.
+    // The emitter predicate is the indexed one (normalized_events_emitter_history_idx);
+    // a record-ID resolver emits its own Linked logs.
     let statement = format!(
         r#"
+        WITH latest AS (
+            SELECT DISTINCT ON (lower(event.raw_fact_ref ->> 'emitting_address'),
+                                lower(event.after_state ->> 'node'))
+                   lower(event.raw_fact_ref ->> 'emitting_address') AS resolver_address,
+                   lower(event.after_state ->> 'node') AS node,
+                   event.after_state ->> 'resolver_record_id' AS record_id,
+                   event.event_identity
+            FROM normalized_events event
+            JOIN chain_lineage lineage
+              ON lineage.chain_id = event.chain_id
+             AND lineage.block_hash = event.block_hash
+             AND lineage.block_number = event.block_number
+            WHERE event.chain_id = $1
+              AND event.event_kind = 'ResolverRecordLinked'
+              AND event.after_state ->> 'storage_model' = 'resolver_record_id'
+              AND event.raw_fact_ref ->> 'emitting_address' IS NOT NULL
+              AND lower(event.after_state ->> 'resolver') =
+                  lower(event.raw_fact_ref ->> 'emitting_address')
+              AND event.consumer_visibility = 'activated'
+              AND event.block_number <= $2
+              AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+            ORDER BY lower(event.raw_fact_ref ->> 'emitting_address'),
+                     lower(event.after_state ->> 'node'),
+                     event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST,
+                     event.log_index DESC NULLS LAST,
+                     event.normalized_event_id DESC
+        ),
+        digests AS (
+            SELECT resolver_address, {digest} AS digest
+            FROM latest
+            WHERE record_id <> '0'
+            GROUP BY resolver_address
+        )
         INSERT INTO project_scope_resolvers
         SELECT lower(row.resolver_address)
         FROM resolver_current row
+        LEFT JOIN digests ON digests.resolver_address = lower(row.resolver_address)
         WHERE row.chain_id = $1
           AND row.declared_summary #>> '{{links,status}}' = 'supported'
-          AND row.declared_summary #>> '{{links,digest}}' IS DISTINCT FROM (
-              SELECT {digest}
-              FROM (
-                  SELECT DISTINCT ON (lower(event.after_state ->> 'node'))
-                         lower(event.after_state ->> 'node') AS node,
-                         event.after_state ->> 'resolver_record_id' AS record_id,
-                         event.event_identity
-                  FROM normalized_events event
-                  JOIN chain_lineage lineage
-                    ON lineage.chain_id = event.chain_id
-                   AND lineage.block_hash = event.block_hash
-                   AND lineage.block_number = event.block_number
-                  WHERE event.chain_id = $1
-                    AND event.event_kind = 'ResolverRecordLinked'
-                    AND event.after_state ->> 'storage_model' = 'resolver_record_id'
-                    AND lower(event.after_state ->> 'resolver') = lower(row.resolver_address)
-                    AND event.consumer_visibility = 'activated'
-                    AND event.block_number <= $2
-                    AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-                    AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-                  ORDER BY lower(event.after_state ->> 'node'),
-                           event.block_number DESC NULLS LAST,
-                           event.transaction_index DESC NULLS LAST,
-                           event.log_index DESC NULLS LAST,
-                           event.normalized_event_id DESC
-              ) latest
-              WHERE record_id <> '0'
-          )
+          AND row.declared_summary #>> '{{links,digest}}' IS DISTINCT FROM
+              COALESCE(digests.digest, md5(''))
         ON CONFLICT DO NOTHING
         "#,
         digest = crate::builders::LINK_DIGEST_SQL

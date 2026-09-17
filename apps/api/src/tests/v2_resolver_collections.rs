@@ -207,6 +207,8 @@ async fn v2_resolver_collection_links_pages_latest_link_per_node_in_record_order
         event.event_kind = "ResolverRecordLinked".to_owned();
         event.after_state = json!({"source_event":"Linked", "storage_model":"resolver_record_id",
             "resolver":resolver, "node":node, "resolver_record_id":record});
+        // A record-ID resolver emits its own Linked logs; the read filters on the emitter.
+        event.raw_fact_ref["emitting_address"] = json!(resolver);
         event
     };
     // Records 1, 2, 3 and 10: a text sort would place "10" before "2".

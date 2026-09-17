@@ -262,8 +262,11 @@ pub(super) async fn include_link_targets(
         JOIN name_surfaces surface
           ON surface.logical_name_id = scope.logical_name_id
          AND surface.chain_id = $1
+        -- Link events carry no logical name, which is the partial predicate of
+        -- normalized_events_ens_v1_record_node_resolver_idx (chain, node, resolver).
         JOIN normalized_events event
           ON event.chain_id = $1
+         AND event.logical_name_id IS NULL
          AND event.event_kind = 'ResolverRecordLinked'
          AND event.after_state ->> 'storage_model' = 'resolver_record_id'
          AND lower(event.after_state ->> 'node') = lower(surface.namehash)
