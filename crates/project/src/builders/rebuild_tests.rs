@@ -209,11 +209,11 @@ fn rows_read(plan: &Value, relation: &str) -> f64 {
         let number = |key: &str| node[key].as_f64().unwrap_or(0.0);
         let handled = (number("Actual Rows")
             + number("Rows Removed by Filter")
+            + number("Rows Removed by Index Recheck")
             + number("Rows Removed by Join Filter"))
             * number("Actual Loops");
         let children = node["Plans"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-        let scans_relation = children.is_empty()
-            && (node["Relation Name"] == relation || node["CTE Name"] == relation);
+        let scans_relation = node["Relation Name"] == relation || node["CTE Name"] == relation;
         let visited: Vec<_> = children
             .iter()
             .map(|child| visit(child, relation))
@@ -607,5 +607,30 @@ async fn record_inventory_reads_attributed_events_a_fixed_number_of_times() -> R
         rows <= 40.0 * PLAN_NAMES as f64,
         "project_record_pointer_history rows handled: {rows}; {plan}"
     );
+    rebuild.finish().await
+}
+
+/// Each reverse claim reads the resolver pointer and the name record of its own reverse node.
+/// With only the event-kind index to go by, every claim read every `ResolverChanged` event and
+/// then every `RecordChanged` event. The statement is unchanged; staging now indexes those events
+/// by node.
+#[tokio::test]
+async fn primary_names_look_each_reverse_node_up_by_key() -> Result<()> {
+    let mut rebuild =
+        Rebuild::through("rebuild_plan_primary", PLAN_NAMES, Builder::PrimaryNames).await?;
+    let plan = rebuild
+        .explain(super::primary_names::BUILD_PRIMARY_NAMES)
+        .await?;
+    let rows = rows_read(&plan, "project_events");
+    ensure!(
+        rows <= 40.0 * PLAN_NAMES as f64,
+        "project_events rows handled: {rows}; {plan}"
+    );
+    let claims: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM project_stage_primary_names_current WHERE claim_status = 'success'",
+    )
+    .fetch_one(&mut *rebuild.transaction)
+    .await?;
+    ensure!(claims > 0, "the seed has no primary name");
     rebuild.finish().await
 }

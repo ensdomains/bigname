@@ -12,8 +12,17 @@ pub(super) async fn build(
     // Resolver history matters only for that tuple's current reverse node, so no historical
     // resolver-pointer dependent can change another address's primary-name row.
     stage_claim_normalization(transaction).await?;
-    sqlx::query(
-        r#"
+    sqlx::query(BUILD_PRIMARY_NAMES)
+        .bind(chain_id)
+        .bind(target.number)
+        .bind(&target.hash)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to build primary_names_current", error))?;
+    Ok(())
+}
+
+pub(in crate::builders) const BUILD_PRIMARY_NAMES: &str = r#"
         WITH reverse_candidates AS (
             SELECT event.*,
                    event.after_state ->> 'address' AS address,
@@ -131,16 +140,7 @@ pub(super) async fn build(
         LEFT JOIN project_primary_claim_normalization normalized
           ON normalized.normalized_event_id = claim.normalized_event_id
         ORDER BY lower(reverse.address), reverse.coin_type, reverse.claim_namespace
-        "#,
-    )
-    .bind(chain_id)
-    .bind(target.number)
-    .bind(&target.hash)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to build primary_names_current", error))?;
-    Ok(())
-}
+        "#;
 
 async fn stage_claim_normalization(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query(
