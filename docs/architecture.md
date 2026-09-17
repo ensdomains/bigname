@@ -665,7 +665,7 @@ Registry-name suffix labels are retained verbatim. Raw label text keys the live 
   `Upgraded` observation. The rule and its watch-plan effect are specified in
   [`manifests.md` § Resolver admission by implementation
   announcement](manifests.md#resolver-admission-by-implementation-announcement).
-  (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L627-L637 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/VerifiableFactory.json:L48 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L514-L526 @ ens_v2_sepolia_20260916@366de741) (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/VerifiableFactory.json:L48 @ ens_v2_sepolia_20260916@366de741)
 
 Project applies the same declaration precedence when it classifies an active
 resolver-discovery admission for serving. An applicable exact resolver
