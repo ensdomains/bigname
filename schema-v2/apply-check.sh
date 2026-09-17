@@ -258,6 +258,51 @@ assert_index_install_refusal() {
     refusal_assertions_passed=$((refusal_assertions_passed + 1))
     refusal_probe_seconds=$((refusal_probe_seconds + SECONDS - refusal_started))
 }
+# Prove one concurrent index installer from ops/ against the scratch schema:
+# from the shape without the index it builds the fresh-baseline definition and
+# passes its own validity check, a rerun is a no-op, an invalid index under the
+# same name makes it fail, and the documented drop-and-rerun recovery works.
+assert_concurrent_index_installer() {
+    local label="$1"
+    local index_name="$2"
+    local install_file="$3"
+    local readme_path="$4"
+    local matches_baseline_sql="DO \$\$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index, expected_installed_index expected
+        WHERE indexrelid = '$index_name'::regclass
+          AND indisvalid AND indisready
+          AND pg_get_indexdef(indexrelid) = expected.definition
+    ) THEN
+        RAISE EXCEPTION '$index_name prebuild differs from the baseline';
+    END IF;
+END \$\$;"
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' \
+            "CREATE TABLE expected_installed_index AS" \
+            "SELECT pg_get_indexdef(indexrelid) AS definition" \
+            "FROM pg_index WHERE indexrelid = '$index_name'::regclass;" \
+            "DROP INDEX $index_name;"
+        render_phase_migration "$install_file"
+        render_phase_migration "$install_file"
+        printf '%s\n' "$matches_baseline_sql"
+        # An interrupted concurrent build leaves an invalid index under this
+        # name. Mark this scratch index invalid to stand in for one.
+        printf '%s\n' \
+            "UPDATE pg_index SET indisvalid = false" \
+            "WHERE indexrelid = '$index_name'::regclass;"
+    } | run_psql >/dev/null
+    assert_index_install_refusal "$label-invalid-prebuild" "$install_file" \
+        "$index_name is missing from $scratch_schema.discovery_edges or is not valid and ready; follow the recovery steps in $readme_path before retrying"
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' "DROP INDEX $index_name;"
+        render_phase_migration "$install_file"
+        printf '%s\n' "$matches_baseline_sql" "DROP TABLE expected_installed_index;"
+    } | run_psql >/dev/null
+}
 assert_unconfigured_settlement_constraint() {
     local provenance="$1"
     local false_error
@@ -789,53 +834,11 @@ DROP TABLE expected_discovery_history_index;
 SQL
 } | run_psql
 # The live prebuild in ops/discovery-history-index/install.sql must build the
-# same definition, pass its own validity check, and stay a no-op when rerun.
-discovery_history_install="$ROOT/ops/discovery-history-index/install.sql"
-discovery_history_index_matches_baseline_sql="$(cat <<'SQL'
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_index, expected_discovery_history_index expected
-        WHERE indexrelid = 'discovery_edges_observation_history_idx'::regclass
-          AND indisvalid AND indisready AND indpred IS NOT NULL
-          AND pg_get_indexdef(indexrelid) = expected.definition
-    ) THEN
-        RAISE EXCEPTION 'discovery observation-history index prebuild differs from the baseline';
-    END IF;
-END $$;
-SQL
-)"
-{
-    printf 'SET search_path TO "%s";\n' "$scratch_schema"
-    cat <<'SQL'
-CREATE TABLE expected_discovery_history_index AS
-SELECT pg_get_indexdef(indexrelid) AS definition
-FROM pg_index
-WHERE indexrelid = 'discovery_edges_observation_history_idx'::regclass;
-DROP INDEX discovery_edges_observation_history_idx;
-SQL
-    render_phase_migration "$discovery_history_install"
-    render_phase_migration "$discovery_history_install"
-    printf '%s\n' "$discovery_history_index_matches_baseline_sql"
-    # An interrupted concurrent build leaves an invalid index under this name.
-    # Mark this scratch index invalid to stand in for one.
-    cat <<'SQL'
-UPDATE pg_index SET indisvalid = false
-WHERE indexrelid = 'discovery_edges_observation_history_idx'::regclass;
-SQL
-} | run_psql >/dev/null
-assert_index_install_refusal discovery-history-invalid-prebuild \
-    "$discovery_history_install" \
-    "discovery_edges_observation_history_idx is missing from $scratch_schema.discovery_edges or is not valid and ready; follow the recovery steps in ops/discovery-history-index/README.md before retrying"
-# The documented recovery: drop only the invalid index, then rerun the installer.
-{
-    printf 'SET search_path TO "%s";\n' "$scratch_schema"
-    printf '%s\n' 'DROP INDEX discovery_edges_observation_history_idx;'
-    render_phase_migration "$discovery_history_install"
-    printf 'SET search_path TO "%s";\n' "$scratch_schema"
-    printf '%s\n' "$discovery_history_index_matches_baseline_sql"
-    printf '%s\n' 'DROP TABLE expected_discovery_history_index;'
-} | run_psql >/dev/null
+# baseline definition, refuse an invalid index, and recover as its README says.
+assert_concurrent_index_installer discovery-history \
+    discovery_edges_observation_history_idx \
+    "$ROOT/ops/discovery-history-index/install.sql" \
+    ops/discovery-history-index/README.md
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor
 # shape, then validate the additive tuple invariant independently. Both files
 # must remain idempotent after the upgrade completes.
