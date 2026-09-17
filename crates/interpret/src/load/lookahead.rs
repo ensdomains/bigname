@@ -3,7 +3,7 @@
 use bigname_adapters::schema_v2::{
     BatchInput, ManifestInput, StateCacheCapacity, V1BatchDependencies, V1NodeRequest,
     begin_schema_v2_adapter_restore_with_provenance, collect_v1_batch_dependencies,
-    v1_lookahead_supports_family,
+    restore_schema_v2_lookahead_session, v1_lookahead_supports_family,
 };
 use sqlx::PgPool;
 
@@ -123,7 +123,7 @@ pub(crate) async fn batch_input(
         )
     })?;
     let restored_event_count = prior.len();
-    let mut restore = begin_schema_v2_adapter_restore_with_provenance(
+    let restore = begin_schema_v2_adapter_restore_with_provenance(
         chain_id.to_owned(),
         input.manifests.clone(),
         provenance.clone(),
@@ -132,10 +132,11 @@ pub(crate) async fn batch_input(
         state_cache_capacity,
     )
     .map_err(|error| invalid_dependencies("begin restore", error))?;
-    restore
-        .apply_prior_events(prior)
-        .map_err(|error| invalid_dependencies("restore", error))?;
-    let adapter_session = restore.finish(predecessor);
+    // Restore runs under the same loaded-names check as interpretation, so an event that
+    // reaches a name whose history was not loaded fails the batch.
+    let adapter_session =
+        restore_schema_v2_lookahead_session(restore, prior, predecessor, &dependencies.nodes)
+            .map_err(|error| invalid_dependencies("restore", error))?;
     tx.commit().await.map_err(|error| {
         InterpretError::database("failed to commit lookahead input snapshot", error)
     })?;
@@ -186,3 +187,7 @@ fn invalid_dependencies(operation: &str, error: anyhow::Error) -> InterpretError
 #[cfg(test)]
 #[path = "lookahead_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "lookahead_equivalence_tests.rs"]
+mod equivalence_tests;

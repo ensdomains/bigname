@@ -17457,7 +17457,39 @@ fn interpret_test_batch(mut input: BatchInput) -> anyhow::Result<BatchOutput> {
         }
         input.blocks = blocks.into_values().collect();
     }
-    super::interpret_schema_v2_batch(input)
+    let output = super::interpret_schema_v2_batch(input.clone())?;
+    // Every ENSv1-only fixture input doubles as a loader-equivalence case: interpreting it
+    // from lookahead-scoped state must give exactly the output of full restored state.
+    if lookahead::is_ensv1_only(&input) {
+        lookahead::assert_scoped_matches(input).map_err(|error| {
+            error.context("ENSv1 fixture input differs between lookahead and full-state")
+        })?;
+    }
+    Ok(output)
+}
+
+#[test]
+fn every_ensv1_adapter_fixture_matches_scoped_lookahead() -> anyhow::Result<()> {
+    // `interpret_test_batch` is the entry point of the adapter fixture tests. This pins that
+    // it runs the lookahead comparison for ENSv1-only inputs, and only for those.
+    let ensv1 = BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![lookahead::registrar_manifest()],
+        discovery_rules: Vec::new(),
+        admissions: Vec::new(),
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: Vec::new(),
+    };
+    assert!(lookahead::is_ensv1_only(&ensv1));
+    let before = lookahead::scoped_comparisons();
+    interpret_test_batch(ensv1.clone())?;
+    assert_eq!(lookahead::scoped_comparisons(), before + 1);
+
+    let mut with_v2 = ensv1;
+    with_v2.manifests[0].source_family = "ens_v2_registry_l1".to_owned();
+    assert!(!lookahead::is_ensv1_only(&with_v2));
+    Ok(())
 }
 
 fn interpret_test_batch_incremental(

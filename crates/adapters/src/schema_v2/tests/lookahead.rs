@@ -71,48 +71,106 @@ fn complete(
     prepared.finish(tails)
 }
 
-// In-memory oracle for direct-node/resource SQL selection. Production SQL has its own tests.
+thread_local! {
+    /// Scoped comparisons run on this test thread, so a test can prove the fixture hook ran.
+    static SCOPED_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(super) fn scoped_comparisons() -> usize {
+    SCOPED_COMPARISONS.get()
+}
+
+/// An input the lookahead loader would be chosen for: every manifest family is covered and
+/// the retained history holds only ENSv1 events, which is all the production query reads.
+pub(super) fn is_ensv1_only(input: &BatchInput) -> bool {
+    !input.manifests.is_empty()
+        && input
+            .manifests
+            .iter()
+            .all(|manifest| v1_lookahead_supports_family(&manifest.source_family))
+        && input
+            .prior_events
+            .iter()
+            .all(|event| event.source_family.starts_with("ens_v1_"))
+}
+
+/// The name an event is filed under by `normalized_events_v1_direct_node_probe_idx` and
+/// `events.sql`: its first node field in the pinned order, else its logical name.
+fn routed_name(event: &PriorEventInput) -> Option<String> {
+    seam::v1_event_node(&event.after_state)
+        .or_else(|| {
+            ["/grant_source/node", "/revocation_source/node"]
+                .iter()
+                .find_map(|path| event.after_state.pointer(path).and_then(Value::as_str))
+        })
+        .map(|node| format!("{}:{}", event.namespace, node.to_lowercase()))
+        .or_else(|| event.logical_name_id.clone())
+}
+
+/// Mirrors `due_names.sql`: registrar grants, renewals and token transfers whose expiry plus
+/// the grace period falls after the predecessor timestamp and before the last block's.
+fn due_names(prior: &[PriorEventInput], predecessor: Option<i64>, last: i64) -> Vec<V1NodeRequest> {
+    let grace = i128::from(super::super::state::ENS_GRACE_PERIOD_SECS);
+    prior
+        .iter()
+        .filter(|event| {
+            event.source_family == "ens_v1_registrar_l1"
+                && matches!(
+                    event.event_kind.as_str(),
+                    "RegistrationGranted" | "RegistrationRenewed" | "TokenControlTransferred"
+                )
+        })
+        .filter_map(|event| {
+            let text = match event.after_state.get("expiry")? {
+                Value::Number(number) => number.to_string(),
+                Value::String(text) => text.clone(),
+                _ => return None,
+            };
+            let digits = text.strip_prefix(['+', '-']).unwrap_or(&text);
+            if digits.is_empty()
+                || !digits.bytes().all(|byte| byte.is_ascii_digit())
+                || digits.trim_start_matches('0').len() > 19
+            {
+                return None;
+            }
+            let expiry: i128 = text.parse().ok()?;
+            let in_i64 = |value: i128| i64::try_from(value).is_ok();
+            let due = in_i64(expiry)
+                && in_i64(expiry + grace)
+                && predecessor.is_none_or(|at| expiry >= i128::from(at) - grace)
+                && expiry < i128::from(last) - grace;
+            let node = seam::v1_event_node(&event.after_state)?;
+            due.then(|| V1NodeRequest {
+                namespace: event.namespace.clone(),
+                node: node.to_lowercase(),
+            })
+        })
+        .collect()
+}
+
+/// In-memory stand-in for the production selection in `events.sql`, run to the same closure
+/// as the Interpret loader. It files each event under exactly one name, as the index does,
+/// and reads an event by resource only when it has no name at all. Fixture history is already
+/// folded to the latest event per state key, so the SQL's per-key winner step has nothing
+/// left to choose; that step has its own database tests.
 fn scope(
     mut deps: V1BatchDependencies,
     prior: &[PriorEventInput],
 ) -> anyhow::Result<(V1BatchDependencies, Vec<PriorEventInput>)> {
     loop {
+        let names: BTreeSet<String> = deps
+            .nodes
+            .iter()
+            .map(|request| format!("{}:{}", request.namespace, request.node))
+            .collect();
         let rows = prior
             .iter()
-            .filter(|event| {
-                let node = ["child_node", "namehash", "node"]
-                    .iter()
-                    .find_map(|field| event.after_state.get(field).and_then(Value::as_str))
-                    .or_else(|| {
-                        event
-                            .after_state
-                            .pointer("/grant_source/node")
-                            .and_then(Value::as_str)
-                    })
-                    .or_else(|| {
-                        event
-                            .after_state
-                            .pointer("/revocation_source/node")
-                            .and_then(Value::as_str)
-                    });
-                let direct = node.map(|node| V1NodeRequest {
-                    namespace: event.namespace.clone(),
-                    node: node.to_lowercase(),
-                });
-                let name = event
-                    .logical_name_id
-                    .as_deref()
-                    .and_then(|s| s.split_once(':'))
-                    .map(|(ns, n)| V1NodeRequest {
-                        namespace: ns.to_owned(),
-                        node: n.to_lowercase(),
-                    });
-                direct.as_ref().is_some_and(|n| deps.nodes.contains(n))
-                    || (direct.as_ref().is_none_or(|n| deps.nodes.contains(n))
-                        && (name.as_ref().is_some_and(|n| deps.nodes.contains(n))
-                            || event
-                                .resource_id
-                                .is_some_and(|r| deps.resource_ids.contains(&r))))
+            .filter(|event| event.source_family.starts_with("ens_v1_"))
+            .filter(|event| match routed_name(event) {
+                Some(name) => names.contains(&name),
+                None => event
+                    .resource_id
+                    .is_some_and(|resource| deps.resource_ids.contains(&resource)),
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -156,21 +214,56 @@ pub(super) fn assert_scoped_matches(mut input: BatchInput) -> anyhow::Result<Ada
         &prior,
     )?
     .0;
-    let (dependencies, rows) = scope(collect_v1_batch_dependencies(&input, &provenance)?, &prior)?;
+    let predecessor = input
+        .blocks
+        .first()
+        .map(|block| block.block_timestamp - time::Duration::seconds(1));
+    let mut dependencies = collect_v1_batch_dependencies(&input, &provenance)?;
+    if let Some(last) = input.blocks.last() {
+        // Interpret bounds the due window below by the timestamp of the block before the
+        // batch. Fixture inputs carry no such block; the latest retained event stands in for
+        // it, because no earlier batch can have settled releases after that point. The
+        // synthetic `predecessor` above is often far later and would hide names that fall
+        // due in the gap a fixture leaves between its history and its batch.
+        let history_end = prior
+            .iter()
+            .filter_map(|event| event.block_timestamp)
+            .max()
+            .map(OffsetDateTime::unix_timestamp);
+        dependencies.nodes.extend(due_names(
+            &prior,
+            history_end,
+            last.block_timestamp.unix_timestamp(),
+        ));
+    }
+    let (dependencies, rows) = scope(dependencies, &prior)?;
     assert!(dependencies.unsupported.is_empty());
+    let session = restore_schema_v2_lookahead_session(
+        begin_schema_v2_adapter_restore(
+            input.chain_id.clone(),
+            input.manifests.clone(),
+            input.discovery_rules.clone(),
+            input.admissions.clone(),
+            StateCacheCapacity::Unlimited,
+        )?,
+        rows,
+        predecessor,
+        &dependencies.nodes,
+    )?;
     let prepared = prepare_schema_v2_batch_lookahead(
         input.clone(),
         provenance,
-        restore(&input, rows)?,
+        session,
         &dependencies.nodes,
         StateCacheCapacity::Unlimited,
     )?;
     let (actual, session) = complete(prepared, &prior)?;
     assert_eq!(actual, expected, "complete scoped suffix output differs");
+    SCOPED_COMPARISONS.set(SCOPED_COMPARISONS.get() + 1);
     Ok(session)
 }
 
-fn registrar_manifest() -> ManifestInput {
+pub(super) fn registrar_manifest() -> ManifestInput {
     manifest_with_events(
         81,
         "ens",
@@ -653,4 +746,154 @@ fn child_only_history_does_not_supply_parent_surface_membership() -> anyhow::Res
         "a known child must not invent parent authority"
     );
     Ok(())
+}
+
+#[test]
+fn restore_reads_outside_loaded_nodes_fail() -> anyhow::Result<()> {
+    let manifests = vec![registrar_manifest()];
+    let admissions = vec![admission(81, "registrar_controller")];
+    let register = |name: &str, index| {
+        raw_at(
+            NameRegistered {
+                name: name.to_owned(),
+                label: keccak256(name),
+                owner: CONTRACT.parse().unwrap(),
+                expires: U256::from(1_000_000),
+            }
+            .encode_log_data(),
+            1,
+            index,
+            CONTRACT,
+        )
+    };
+    let prefix = input(
+        manifests.clone(),
+        admissions.clone(),
+        vec![register("alice", 0), register("bob", 1)],
+    );
+    let output = interpret_schema_v2_batch(prefix.clone())?;
+    let prior = seam::fold_prior_events(vec![], &output.normalized_events, &prefix.blocks)?;
+    let node = |name: &str| V1NodeRequest {
+        namespace: "ens".to_owned(),
+        node: super::super::common::namehash(&[name.to_owned(), "eth".to_owned()]),
+    };
+    let begin = || {
+        begin_schema_v2_adapter_restore(
+            CHAIN.to_owned(),
+            manifests.clone(),
+            vec![],
+            admissions.clone(),
+            StateCacheCapacity::Unlimited,
+        )
+    };
+    // Both names loaded: every restore read is inside the loaded set.
+    let both = BTreeSet::from([node("alice"), node("bob")]);
+    let session = restore_schema_v2_lookahead_session(begin()?, prior.clone(), None, &both)?;
+    assert!(session.v1_name("ens", &node("bob").node).is_some());
+    // Bob's events handed to a restore that loaded only alice would rebuild bob from an
+    // arbitrary part of his history. Restore must refuse instead.
+    let alice_only = BTreeSet::from([node("alice")]);
+    let error = restore_schema_v2_lookahead_session(begin()?, prior, None, &alice_only)
+        .err()
+        .expect("restore outside the loaded names must fail");
+    assert!(
+        error.to_string().contains("accessed unloaded nodes")
+            && error.to_string().contains(&node("bob").node),
+        "{error:#}"
+    );
+    Ok(())
+}
+
+/// The lookahead index files an event under one name; restore must apply it to that same
+/// name, or a loaded name would miss an event that the full-state loader applies to it.
+#[test]
+fn resolver_changed_node_precedence_matches_restore() -> anyhow::Result<()> {
+    assert_eq!(
+        seam::V1_EVENT_NODE_FIELDS,
+        ["child_node", "namehash", "node"]
+    );
+    let hash = |byte: u8| format!("{:#x}", alloy_primitives::B256::repeat_byte(byte));
+    let (parent, child, by_namehash, by_node) = (hash(1), hash(2), hash(3), hash(4));
+    let resolver_changed = |after_state: Value, name: &str| PriorEventInput {
+        retained_state_key: format!("test:{name}"),
+        chain_id: CHAIN.to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: Some(format!("ens:{name}")),
+        resource_id: Some(Uuid::from_u128(7)),
+        event_kind: "ResolverChanged".to_owned(),
+        source_family: "ens_v1_registry_l1".to_owned(),
+        manifest_version: 1,
+        source_manifest_id: None,
+        emitting_address: None,
+        state_scope: None,
+        block_timestamp: None,
+        after_state,
+    };
+    for (after_state, filed_under) in [
+        // No adapter emits differing `namehash` and `node`; if one ever does, the index
+        // files the event under `namehash`, so restore must read `namehash` first too.
+        (
+            json!({"node": by_node, "namehash": by_namehash, "resolver": CONTRACT}),
+            &by_namehash,
+        ),
+        // A registry NewOwner carries its parent in `node` and the created name in `child_node`.
+        (
+            json!({"node": parent, "child_node": child, "resolver": CONTRACT}),
+            &child,
+        ),
+    ] {
+        assert_eq!(
+            seam::v1_event_node(&after_state),
+            Some(filed_under.as_str())
+        );
+        let event = resolver_changed(after_state, filed_under);
+        assert_eq!(
+            routed_name(&event).as_deref(),
+            Some(format!("ens:{filed_under}").as_str())
+        );
+        // Restoring with only that name loaded proves restore touches no other name.
+        let loaded = BTreeSet::from([V1NodeRequest {
+            namespace: "ens".to_owned(),
+            node: filed_under.clone(),
+        }]);
+        restore_schema_v2_lookahead_session(
+            begin_schema_v2_adapter_restore(
+                CHAIN.to_owned(),
+                vec![registrar_manifest()],
+                vec![],
+                vec![],
+                StateCacheCapacity::Unlimited,
+            )?,
+            vec![event],
+            None,
+            &loaded,
+        )?;
+    }
+    Ok(())
+}
+
+/// Lookahead reads retained events of the `ens_v1_*` families only, yet it also covers these
+/// families. That is sound because they keep no state: a manifest of one of them cannot
+/// declare an event, so no log is ever interpreted under it and no event of it is stored.
+#[test]
+fn covered_families_outside_ens_v1_cannot_interpret_a_log() {
+    for family in [
+        "basenames_l1_compat",
+        "basenames_execution",
+        "ens_execution",
+    ] {
+        assert!(v1_lookahead_supports_family(family));
+        let mut manifest = registrar_manifest();
+        manifest.source_family = family.to_owned();
+        let error = interpret_schema_v2_batch(input(vec![manifest], vec![], vec![]))
+            .err()
+            .expect("a declared event must be refused");
+        assert!(
+            format!("{error:#}").contains("has no typed schema-v2 adapter"),
+            "{family}: {error:#}"
+        );
+    }
+    for family in ["basenames_base_registry", "ens_v2_registry_l1"] {
+        assert!(!v1_lookahead_supports_family(family));
+    }
 }

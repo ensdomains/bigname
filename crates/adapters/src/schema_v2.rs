@@ -25,7 +25,8 @@ mod state_restore;
 
 pub use lookahead::{
     V1BatchDependencies, V1NodeRequest, collect_v1_batch_dependencies,
-    prepare_schema_v2_batch_lookahead, v1_lookahead_supports_family,
+    prepare_schema_v2_batch_lookahead, restore_schema_v2_lookahead_session,
+    v1_lookahead_supports_family,
 };
 pub use model::*;
 pub use session::{

@@ -85,6 +85,11 @@ impl Engine {
         self
     }
 
+    /// The loader most recently chosen for a chain, as reported in the log.
+    pub fn chosen_loader(&self, chain_id: &str) -> Result<Option<StateLoader>> {
+        self.loader_choices.current(chain_id)
+    }
+
     /// Operator override: always restore prior state with the full-state loader, even on
     /// a chain where the per-batch ENSv1 lookahead loader would be chosen automatically.
     pub fn with_full_state_loader_forced(mut self, forced: bool) -> Self {

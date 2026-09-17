@@ -53,6 +53,14 @@ impl fmt::Display for FullStateReason {
 pub(super) struct LoaderChoices(Mutex<HashMap<String, StateLoader>>);
 
 impl LoaderChoices {
+    pub(super) fn current(&self, chain_id: &str) -> Result<Option<StateLoader>> {
+        let choices = self
+            .0
+            .lock()
+            .map_err(|_| InterpretError::transient("interpret loader-choice lock was poisoned"))?;
+        Ok(choices.get(chain_id).cloned())
+    }
+
     /// Returns true when this call logged, which is what the tests observe.
     pub(super) fn record(&self, chain_id: &str, choice: StateLoader) -> Result<bool> {
         let mut choices = self

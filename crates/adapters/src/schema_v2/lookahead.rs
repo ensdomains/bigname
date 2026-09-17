@@ -6,8 +6,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{
-    AdapterSession, BatchInput, ManifestInput, PreparedAdapterBatch, PriorEventInput,
-    StateCacheCapacity,
+    AdapterSession, AdapterSessionRestore, BatchInput, ManifestInput, PreparedAdapterBatch,
+    PriorEventInput, StateCacheCapacity,
     catalog::{Catalog, Selected},
     common::stable_uuid,
 };
@@ -215,6 +215,22 @@ pub fn prepare_schema_v2_batch_lookahead(
             Some(session),
             cache_capacity,
         )
+    })
+}
+
+/// Restore the session for a lookahead batch from exactly the prior events loaded for
+/// `loaded_nodes`, then advance time-derived state to the batch's predecessor timestamp.
+/// Restore must only touch names whose complete history was loaded: an event that
+/// reaches another name would rebuild that name from part of its history.
+pub fn restore_schema_v2_lookahead_session(
+    mut restore: AdapterSessionRestore,
+    prior_events: Vec<PriorEventInput>,
+    resume_predecessor_timestamp: Option<time::OffsetDateTime>,
+    loaded_nodes: &BTreeSet<V1NodeRequest>,
+) -> anyhow::Result<AdapterSession> {
+    coverage::checked(loaded_nodes, || {
+        restore.apply_prior_events(prior_events)?;
+        Ok(restore.finish(resume_predecessor_timestamp))
     })
 }
 

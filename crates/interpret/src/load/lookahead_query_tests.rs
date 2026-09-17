@@ -458,3 +458,132 @@ async fn expiry_generic_plan_uses_both_timestamp_index_bounds() -> Result {
     db.cleanup().await?;
     Ok(())
 }
+
+fn index_names(plan: &Value, names: &mut Vec<String>) {
+    if let Some(name) = plan["Index Name"].as_str() {
+        names.push(name.to_owned());
+    }
+    for child in plan["Plans"].as_array().into_iter().flatten() {
+        index_names(child, names);
+    }
+}
+
+/// The fixture database holds only the checked-in baseline schema, so this proves the
+/// baseline defines indexes whose expressions the two lookahead queries can use. A drifted
+/// expression in either place would fall back to scanning `normalized_events`.
+#[tokio::test]
+async fn lookahead_sql_uses_baseline_indexes() -> Result {
+    let db = database().await?;
+    sqlx::query(
+        "INSERT INTO normalized_events
+         (event_identity,namespace,event_kind,source_family,manifest_version,chain_id,
+          block_number,block_hash,transaction_hash,raw_fact_ref,derivation_kind,
+          canonicality_state,after_state)
+         SELECT 'plan-'||n,'ens','RegistrationGranted','ens_v1_registrar_l1',1,$1,
+                1,'block-1','tx',jsonb_build_object($2::text,'key-'||n),
+                'ens_v1_unwrapped_authority','canonical',
+                jsonb_build_object('namehash','node-'||n,'expiry',n)
+         FROM generate_series(1,5000) n",
+    )
+    .bind(CHAIN)
+    .bind(INTERPRETER_STATE_KEY)
+    .execute(db.pool())
+    .await?;
+    let mut connection = db.pool().acquire().await?;
+    sqlx::raw_sql("ANALYZE normalized_events; ANALYZE chain_lineage;")
+        .execute(&mut *connection)
+        .await?;
+    let events_sql = super::EVENTS
+        .replace("{state_key}", INTERPRETER_STATE_KEY)
+        .replace("{state_scope}", super::STATE_SCOPE_KEY)
+        .replace("{clear_marker}", SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY);
+    for (statement, signature, arguments, index) in [
+        (
+            events_sql.as_str(),
+            "text,bigint,text[],uuid[]",
+            format!("'{CHAIN}',3,ARRAY['ens:node-7','ens:node-4000'],ARRAY[]::uuid[]"),
+            "normalized_events_v1_direct_node_probe_idx",
+        ),
+        (
+            super::DUE_NAMES,
+            "text,bigint,bigint,bigint,bigint",
+            format!(
+                "'{CHAIN}',3,{},{},{ENS_GRACE_PERIOD_SECS}",
+                ENS_GRACE_PERIOD_SECS + 100,
+                ENS_GRACE_PERIOD_SECS + 110
+            ),
+            "normalized_events_v1_due_probe_idx",
+        ),
+    ] {
+        // Both plan kinds matter: sqlx prepares the statement, and PostgreSQL may switch a
+        // prepared statement to its generic plan.
+        for mode in ["force_custom_plan", "force_generic_plan"] {
+            let prepared = format!("{index}_{mode}");
+            sqlx::raw_sql(&format!(
+                "SET plan_cache_mode={mode}; PREPARE {prepared}({signature}) AS {statement}"
+            ))
+            .execute(&mut *connection)
+            .await?;
+            let plan: Value = sqlx::query_scalar(&format!(
+                "EXPLAIN (FORMAT JSON) EXECUTE {prepared}({arguments})"
+            ))
+            .fetch_one(&mut *connection)
+            .await?;
+            let mut used = Vec::new();
+            index_names(&plan[0]["Plan"], &mut used);
+            assert!(
+                used.iter().any(|name| name == index),
+                "{mode} plan must use {index}, used {used:?}"
+            );
+        }
+    }
+    drop(connection);
+    db.cleanup().await?;
+    Ok(())
+}
+
+/// The index files each event under one name, so the query must find an event under that
+/// name and no other. The order of fields is the adapter's `V1_EVENT_NODE_FIELDS`.
+#[tokio::test]
+async fn events_sql_files_an_event_under_the_same_name_as_restore() -> Result {
+    use bigname_adapters::schema_v2::seam::V1_EVENT_NODE_FIELDS;
+    let coalesce = V1_EVENT_NODE_FIELDS
+        .map(|field| format!("after_state ->> '{field}'"))
+        .join(", ");
+    for (what, sql) in [
+        ("events.sql", super::EVENTS.replace("event.", "")),
+        ("due_names.sql", super::DUE_NAMES.replace("event.", "")),
+        (
+            "the baseline index",
+            include_str!("../../../../schema-v2/baseline/05_normalized_events.sql").to_owned(),
+        ),
+    ] {
+        assert!(
+            sql.contains(&format!("COALESCE({coalesce}")),
+            "{what} must read the name fields in the order {V1_EVENT_NODE_FIELDS:?}"
+        );
+    }
+    let db = database().await?;
+    seed(
+        db.pool(),
+        "both-fields",
+        None,
+        None,
+        1,
+        None,
+        key("both-fields"),
+        json!({"node":"by-node","namehash":"by-namehash"}),
+    )
+    .await?;
+    let mut connection = db.pool().acquire().await?;
+    let by_namehash = events(&mut connection, CHAIN, 2, &["ens:by-namehash".into()], &[]).await?;
+    assert_eq!(identities(&by_namehash), ["both-fields"]);
+    assert!(
+        events(&mut connection, CHAIN, 2, &["ens:by-node".into()], &[])
+            .await?
+            .is_empty()
+    );
+    drop(connection);
+    db.cleanup().await?;
+    Ok(())
+}

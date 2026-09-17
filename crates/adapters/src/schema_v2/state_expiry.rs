@@ -107,6 +107,11 @@ impl State {
         due.sort();
         let mut releases = Vec::new();
         for key in due {
+            // These keys come from the expiry index, not from `v1_key`, so report each one
+            // to the lookahead coverage check here. A lapsed registration belonging to a
+            // name whose history was not loaded would be released from partial state; under
+            // lookahead that fails the batch instead.
+            super::super::lookahead::observe_node(&key);
             let Some(registrar) = self.v1_registrars.remove(&key) else {
                 continue;
             };
