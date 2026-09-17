@@ -544,14 +544,20 @@ async fn create_identity_views(
     .await
     .map_err(|error| ProjectError::database("failed to stage binding candidates", error))?;
 
-    sqlx::query(
-        "CREATE INDEX ON project_binding_candidates (
-             logical_name_id, authority_arm, block_number
-         )",
-    )
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to index binding candidates", error))?;
-
+    // The builders look these tables up once per name or per resource, so each gets its key and
+    // statistics. Temporary tables are never analyzed automatically.
+    for statement in [
+        "ALTER TABLE project_surfaces ADD PRIMARY KEY (logical_name_id)",
+        "ALTER TABLE project_resources ADD PRIMARY KEY (resource_id)",
+        "CREATE INDEX ON project_binding_candidates (logical_name_id, authority_arm, block_number)",
+        "ANALYZE project_surfaces",
+        "ANALYZE project_resources",
+        "ANALYZE project_binding_candidates",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| ProjectError::database("failed to index identity stages", error))?;
+    }
     Ok(())
 }
