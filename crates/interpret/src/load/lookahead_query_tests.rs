@@ -1,4 +1,7 @@
 use super::{ENS_GRACE_PERIOD_SECS, due_names, events, events_with_byte_limit};
+use bigname_adapters::schema_v2::seam::{
+    INTERPRETER_STATE_KEY, SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY,
+};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
 use sqlx::{PgPool, types::Uuid};
@@ -55,7 +58,7 @@ async fn seed(
 }
 
 fn key(value: &str) -> Value {
-    json!({"interpreter_state_key":value})
+    json!({(INTERPRETER_STATE_KEY):value})
 }
 
 fn identities(events: &[bigname_adapters::schema_v2::PriorEventInput]) -> Vec<&str> {
@@ -75,7 +78,7 @@ async fn global_winners_preserve_partitions_positions_and_canonical_hashes() -> 
             "null-key",
             1,
             None,
-            json!({"interpreter_state_key":null}),
+            json!({(INTERPRETER_STATE_KEY):null}),
             json!({}),
         ),
         ("empty-old", 1, None, key(""), json!({})),
@@ -89,14 +92,14 @@ async fn global_winners_preserve_partitions_positions_and_canonical_hashes() -> 
             1,
             None,
             key("shared"),
-            json!({"subregistry_invalidated_token_ids":[]}),
+            json!({(SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY):[]}),
         ),
         (
             "clear-new",
             2,
             None,
             key("shared"),
-            json!({"subregistry_invalidated_token_ids":[]}),
+            json!({(SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY):[]}),
         ),
         ("move-old", 1, None, key("moved"), json!({})),
         ("canonical", 2, None, key("canonical"), json!({})),
