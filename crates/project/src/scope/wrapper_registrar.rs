@@ -69,8 +69,23 @@ pub(super) async fn include_registrars_for_scoped_wrappers(
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
-    sqlx::query(
-        "WITH scoped_wrappers AS (
+    sqlx::query(REGISTRARS_FOR_SCOPED_WRAPPERS)
+        .bind(chain_id)
+        .bind(target_block)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database(
+                "failed to scope wrapped registrar resources from wrapper bindings",
+                error,
+            )
+        })?;
+    Ok(())
+}
+
+// The lease is looked up through the `resources` primary key: the recorded text is cast to a
+// uuid, not every resource id to text.
+const REGISTRARS_FOR_SCOPED_WRAPPERS: &str = "WITH scoped_wrappers AS (
              SELECT wrapper.normalized_event_id
              FROM project_scope_resources scope
              JOIN normalized_events wrapper
@@ -94,8 +109,8 @@ pub(super) async fn include_registrars_for_scoped_wrappers(
           AND wrapper_lineage.block_number = wrapper.block_number
          JOIN resources registrar
            ON registrar.chain_id = wrapper.chain_id
-          AND registrar.resource_id::text =
-              wrapper.after_state ->> 'wrapped_registrar_resource_id'
+          AND registrar.resource_id =
+              (wrapper.after_state ->> 'wrapped_registrar_resource_id')::uuid
          WHERE wrapper.chain_id = $1
            AND wrapper.block_number <= $2
            AND wrapper.source_family = 'ens_v1_wrapper_l1'
@@ -105,17 +120,20 @@ pub(super) async fn include_registrars_for_scoped_wrappers(
            AND wrapper_lineage.canonicality_state IN (
                'canonical', 'safe', 'finalized'
            )
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(chain_id)
-    .bind(target_block)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| {
-        ProjectError::database(
-            "failed to scope wrapped registrar resources from wrapper bindings",
-            error,
-        )
-    })?;
-    Ok(())
+         ON CONFLICT DO NOTHING";
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn wrapped_registrar_lookup_uses_the_resources_primary_key() {
+        let query = super::REGISTRARS_FOR_SCOPED_WRAPPERS;
+        assert!(
+            !query.contains("registrar.resource_id::text"),
+            "casting resources.resource_id to text defeats its primary key"
+        );
+        assert!(query.contains(
+            "registrar.resource_id =\n              \
+             (wrapper.after_state ->> 'wrapped_registrar_resource_id')::uuid"
+        ));
+    }
 }

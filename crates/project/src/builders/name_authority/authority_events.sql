@@ -1,76 +1,12 @@
--- Events that belong to each name's selected authority. Registrar lifecycle rows that carry no
--- name are attached by exact resource identity: the selected registrar resource with the same
--- namehash, or the registrar lease a NameWrapper binding recorded in
--- wrapped_registrar_resource_id.
+-- Events that belong to each name's selected authority. The join is a plain equality on the
+-- name: `.eth` BaseRegistrar lifecycle rows written before the label was known are given their
+-- name while staging (`bind_resource_events`), so this statement never has to search the rows
+-- that carry no name.
 CREATE TEMP TABLE project_authority_events ON COMMIT DROP AS
-SELECT DISTINCT ON (event.normalized_event_id)
-       event.*, authority.logical_name_id AS selected_logical_name_id
+SELECT DISTINCT ON (event.normalized_event_id) event.*
 FROM project_events event
 JOIN project_name_authority authority
   ON authority.logical_name_id = event.logical_name_id
-  OR (event.logical_name_id IS NULL
-      AND ((event.resource_id = authority.selected_resource_id
-            AND event.source_family = 'ens_v1_registrar_l1'
-            AND event.event_kind IN (
-                'RegistrationGranted', 'RegistrationRenewed',
-                'RegistrationReleased', 'ExpiryChanged'
-            )
-            AND EXISTS (
-                SELECT 1 FROM project_surfaces selected_surface
-                WHERE selected_surface.logical_name_id =
-                      authority.logical_name_id
-                  AND lower(selected_surface.namehash) =
-                      lower(event.after_state ->> 'namehash')
-            ))
-           OR (event.source_family = 'ens_v1_registrar_l1'
-               AND event.event_kind IN (
-                   'RegistrationGranted', 'RegistrationRenewed',
-                   'ExpiryChanged', 'TokenControlTransferred'
-               )
-               AND EXISTS (
-                   SELECT 1 FROM project_events selected_wrapper
-                   WHERE selected_wrapper.logical_name_id =
-                         authority.logical_name_id
-                     AND (
-                         selected_wrapper.resource_id = authority.selected_resource_id
-                         OR (event.event_kind = 'RegistrationGranted'
-                             AND selected_wrapper.resource_id = (
-                                 SELECT predecessor.resource_id
-                                 FROM project_binding_candidates predecessor
-                                 JOIN project_bindings selected_binding
-                                   ON selected_binding.logical_name_id = predecessor.logical_name_id
-                                 WHERE selected_binding.logical_name_id = authority.logical_name_id
-                                   AND predecessor.authority_arm = authority.selected_authority_arm
-                                   AND (predecessor.block_number,
-                                        COALESCE((predecessor.provenance ->> 'transaction_index')::bigint, -1),
-                                        COALESCE((predecessor.provenance ->> 'log_index')::bigint, -1))
-                                       < (selected_binding.block_number,
-                                          COALESCE((selected_binding.provenance ->> 'transaction_index')::bigint, -1),
-                                          COALESCE((selected_binding.provenance ->> 'log_index')::bigint, -1))
-                                 ORDER BY predecessor.block_number DESC,
-                                          COALESCE((predecessor.provenance ->> 'transaction_index')::bigint, -1) DESC,
-                                          COALESCE((predecessor.provenance ->> 'log_index')::bigint, -1) DESC,
-                                          predecessor.surface_binding_id DESC
-                                 LIMIT 1
-                             ))
-                     )
-                     AND selected_wrapper.source_family =
-                         'ens_v1_wrapper_l1'
-                     AND selected_wrapper.event_kind = 'SurfaceBound'
-                     AND (
-                         event.event_kind <> 'TokenControlTransferred'
-                         OR event.transaction_hash IS DISTINCT FROM
-                            selected_wrapper.transaction_hash
-                         OR lower(event.after_state ->> 'to') IS DISTINCT FROM
-                            lower(selected_wrapper.raw_fact_ref ->>
-                                  'emitting_address')
-                     )
-                     AND selected_wrapper.after_state ->>
-                         'wrapped_registrar_resource_id' =
-                         event.resource_id::text
-                     AND lower(selected_wrapper.after_state ->> 'node') =
-                         lower(event.after_state ->> 'namehash')
-               ))))
 WHERE (
       (
           authority.unsupported_reason IS NULL
@@ -344,12 +280,17 @@ WHERE (
               (authority.authority_epoch_start_position ->> 'log_index')::bigint, -1
           )
       )
+      -- A lease registered before the wrap predates the wrapper's authority epoch. Rows that
+      -- staging named through the selected wrapper's recorded lease are still that name's lease.
       OR (
-          event.logical_name_id IS NULL
-          AND event.source_family = 'ens_v1_registrar_l1'
+          event.source_family = 'ens_v1_registrar_l1'
           AND event.event_kind IN (
               'RegistrationGranted', 'RegistrationRenewed', 'ExpiryChanged',
               'TokenControlTransferred'
+          )
+          AND EXISTS (
+              SELECT 1 FROM project_wrapper_linked_events linked
+              WHERE linked.normalized_event_id = event.normalized_event_id
           )
           AND EXISTS (
               SELECT 1 FROM project_events selected_wrapper

@@ -39,9 +39,10 @@ impl State {
 
     /// A resolver set while the node's authority had no surface is linked to the
     /// resource alone. When a label-bearing event names the surface, the link
-    /// takes the name, and the link as it was is returned so the caller can
-    /// replay it onto the surface; a link that already carries a name, or no
-    /// link, returns nothing.
+    /// takes the name and the named authority's resource, and the link as it is
+    /// now stored is returned so the caller can replay its resolver onto the
+    /// surface. A link that already carries a name, a cleared (zero) resolver,
+    /// or no link returns nothing and changes nothing.
     pub(in crate::schema_v2) fn name_v1_resolver_link(
         &mut self,
         namespace: &str,

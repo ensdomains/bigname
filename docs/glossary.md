@@ -1903,6 +1903,18 @@ ENSv1 resources remain queryable in resource audit context after ENSv2 becomes
 authoritative.
 
 <a id="released-v2-authority"></a>
+## Registrar surface snapshot
+
+the named, [state-derived](#state-derived-normalized-event) `RegistrationGranted` (with its
+expiry and permission rows) that Interpret writes when a source other than a registrar
+controller or the NameWrapper discloses the label of a BaseRegistrar lease that was registered
+without a name. It is marked `state_derived`, `surface_materialization` and
+`registrar_surface_snapshot`, sits at the raw position of the disclosure, and reports the
+lease's original registration time and current state. The lease's original rows keep their null
+`logical_name_id`; Project attaches those to the name by resource identity (see
+[projections](projections.md#exact-name-projection)), and both describe one registration. See
+[storage semantics](storage.md).
+
 ## Released v2 authority
 
 the authority tombstone left when an

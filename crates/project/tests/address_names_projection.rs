@@ -2757,69 +2757,391 @@ async fn a_basenames_registry_only_binding_preserves_its_divergent_owner() -> Re
     Ok(())
 }
 
-#[rustfmt::skip]
-async fn registrar_reveal_projection(split: bool) -> Result<((String, i64, String, String, i64), Vec<(String, serde_json::Value)>)> {
+async fn registrar_reveal_projection(
+    split: bool,
+) -> Result<(
+    (String, i64, String, String, i64),
+    Vec<(String, serde_json::Value)>,
+)> {
     let (database, pool) = migrated_pool().await?;
     seed_chain(&pool).await?;
-    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 8, 'canonical')")
-        .bind(OWNERLESS_RESOURCE).bind(CHAIN).bind(block_hash(8)).execute(&pool).await?;
+    sqlx::query(
+        "INSERT INTO resources (resource_id, chain_id, block_hash, block_number,
+             canonicality_state)
+         VALUES ($1::uuid, $2, $3, 8, 'canonical')",
+    )
+    .bind(OWNERLESS_RESOURCE)
+    .bind(CHAIN)
+    .bind(block_hash(8))
+    .execute(&pool)
+    .await?;
     for (kind, index) in [("RegistrationGranted", 1), ("ExpiryChanged", 2)] {
-        seed_normalized_event(&pool, &format!("fixture:surface-less-{kind}"), None, Some(OWNERLESS_RESOURCE), kind, "ens_v1_registrar_l1", 8, index, json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:fixture","registrant":CONTROL_OWNER,"expiry":4242,"namehash":OWNERLESS_NAMEHASH}), json!({})).await?;
+        seed_normalized_event(
+            &pool,
+            &format!("fixture:surface-less-{kind}"),
+            None,
+            Some(OWNERLESS_RESOURCE),
+            kind,
+            "ens_v1_registrar_l1",
+            8,
+            index,
+            json!({
+                "source_event": "NameRegistered",
+                "authority_kind": "registrar",
+                "authority_key": "registrar:fixture",
+                "registrant": CONTROL_OWNER,
+                "expiry": 4242,
+                "namehash": OWNERLESS_NAMEHASH,
+            }),
+            json!({}),
+        )
+        .await?;
     }
-    if split { run_project(&pool, 8, 8, None).await?; }
-    seed_surface(&pool, OWNERLESS_NAMEHASH, "revealed.eth", OWNERLESS_RESOURCE, OWNERLESS_BINDING).await?;
-    seed_normalized_event(&pool, "fixture:revealed-resolver", Some(OWNERLESS_LOGICAL), Some(OWNERLESS_RESOURCE), "ResolverChanged", "ens_v1_registry_l1", 9, 1, json!({"source_event":"NewResolver","node":OWNERLESS_NAMEHASH,"resolver":RESOLVER_ADDRESS}), json!({"emitting_address":REGISTRY_ADDRESS})).await?;
-    seed_normalized_event(&pool, "fixture:revealed-record", Some(OWNERLESS_LOGICAL), None, "RecordChanged", "ens_v1_resolver_l1", 9, 2, json!({"node":OWNERLESS_NAMEHASH,"record_family":"text","record_key":"text:description","selector_key":"description","value":"revealed incrementally"}), json!({"emitting_address":RESOLVER_ADDRESS})).await?;
+    if split {
+        run_project(&pool, 8, 8, None).await?;
+    }
+    seed_surface(
+        &pool,
+        OWNERLESS_NAMEHASH,
+        "revealed.eth",
+        OWNERLESS_RESOURCE,
+        OWNERLESS_BINDING,
+    )
+    .await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:revealed-resolver",
+        Some(OWNERLESS_LOGICAL),
+        Some(OWNERLESS_RESOURCE),
+        "ResolverChanged",
+        "ens_v1_registry_l1",
+        9,
+        1,
+        json!({"source_event":"NewResolver","node":OWNERLESS_NAMEHASH,"resolver":RESOLVER_ADDRESS}),
+        json!({"emitting_address":REGISTRY_ADDRESS}),
+    )
+    .await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:revealed-record",
+        Some(OWNERLESS_LOGICAL),
+        None,
+        "RecordChanged",
+        "ens_v1_resolver_l1",
+        9,
+        2,
+        json!({
+            "node": OWNERLESS_NAMEHASH,
+            "record_family": "text",
+            "record_key": "text:description",
+            "selector_key": "description",
+            "value": "revealed incrementally",
+        }),
+        json!({"emitting_address":RESOLVER_ADDRESS}),
+    )
+    .await?;
     run_project(&pool, 9, 8, split.then_some(8)).await?;
-    let summary = sqlx::query_as("SELECT declared_summary #>> '{registration,status}', (declared_summary #>> '{registration,expiry}')::bigint, resource_id::text, declared_summary #>> '{resolver,address}', (SELECT count(*) FROM record_inventory_current WHERE resource_id = $2::uuid) FROM name_current WHERE logical_name_id = $1")
-        .bind(OWNERLESS_LOGICAL).bind(OWNERLESS_RESOURCE).fetch_one(&pool).await?;
+    let summary = sqlx::query_as(
+        "SELECT declared_summary #>> '{registration,status}',
+             (declared_summary #>> '{registration,expiry}')::bigint, resource_id::text,
+             declared_summary #>> '{resolver,address}', (SELECT count(*)
+         FROM record_inventory_current
+         WHERE resource_id = $2::uuid)
+         FROM name_current
+         WHERE logical_name_id = $1",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .bind(OWNERLESS_RESOURCE)
+    .fetch_one(&pool)
+    .await?;
     let snapshot = serving_projection_snapshot(&pool).await?;
     database.cleanup().await?;
     Ok((summary, snapshot))
 }
 
 #[tokio::test]
-#[rustfmt::skip]
-async fn registrar_only_then_enrichment_projects_name_addressable_registration() -> Result<()> { let (summary, _) = registrar_reveal_projection(false).await?; assert_eq!(summary, ("active".to_owned(), 4242, OWNERLESS_RESOURCE.to_owned(), RESOLVER_ADDRESS.to_lowercase(), 1)); Ok(()) }
-
-#[tokio::test]
-#[rustfmt::skip]
-async fn registrar_only_then_enrichment_converges_across_project_batches() -> Result<()> { assert_eq!(registrar_reveal_projection(false).await?, registrar_reveal_projection(true).await?); Ok(()) }
-
-#[tokio::test]
-#[rustfmt::skip]
-async fn resource_keyed_registrar_event_does_not_backfill_a_different_surface_on_shared_resource() -> Result<()> {
-    let (database, pool) = migrated_pool().await?; seed_chain(&pool).await?;
-    seed_surface(&pool, CONTROL_NAMEHASH, "control.eth", OWNERLESS_RESOURCE, CONTROL_BINDING).await?;
-    seed_normalized_event(&pool, "fixture:unrelated-resource-registration", None, Some(OWNERLESS_RESOURCE), "RegistrationGranted", "ens_v1_registrar_l1", 8, 1, json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:unrelated","registrant":CONTROL_OWNER,"expiry":4242,"namehash":OWNERLESS_NAMEHASH}), json!({})).await?;
-    run_project(&pool, 8, 8, None).await?;
-    let expiry: Option<i64> = sqlx::query_scalar("SELECT (declared_summary #>> '{registration,expiry}')::bigint FROM name_current WHERE logical_name_id = $1").bind(CONTROL_LOGICAL).fetch_one(&pool).await?;
-    assert_eq!(expiry, None); database.cleanup().await?; Ok(())
+async fn registrar_only_then_enrichment_projects_name_addressable_registration() -> Result<()> {
+    let (summary, _) = registrar_reveal_projection(false).await?;
+    assert_eq!(
+        summary,
+        (
+            "active".to_owned(),
+            4242,
+            OWNERLESS_RESOURCE.to_owned(),
+            RESOLVER_ADDRESS.to_lowercase(),
+            1
+        )
+    );
+    Ok(())
 }
 
 #[tokio::test]
-#[rustfmt::skip]
+async fn registrar_only_then_enrichment_converges_across_project_batches() -> Result<()> {
+    assert_eq!(
+        registrar_reveal_projection(false).await?,
+        registrar_reveal_projection(true).await?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resource_keyed_registrar_event_does_not_backfill_a_different_surface_on_shared_resource()
+-> Result<()> {
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    seed_surface(
+        &pool,
+        CONTROL_NAMEHASH,
+        "control.eth",
+        OWNERLESS_RESOURCE,
+        CONTROL_BINDING,
+    )
+    .await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:unrelated-resource-registration",
+        None,
+        Some(OWNERLESS_RESOURCE),
+        "RegistrationGranted",
+        "ens_v1_registrar_l1",
+        8,
+        1,
+        json!({
+            "source_event": "NameRegistered",
+            "authority_kind": "registrar",
+            "authority_key": "registrar:unrelated",
+            "registrant": CONTROL_OWNER,
+            "expiry": 4242,
+            "namehash": OWNERLESS_NAMEHASH,
+        }),
+        json!({}),
+    )
+    .await?;
+    run_project(&pool, 8, 8, None).await?;
+    let expiry: Option<i64> = sqlx::query_scalar(
+        "SELECT (declared_summary #>> '{registration,expiry}')::bigint
+         FROM name_current
+         WHERE logical_name_id = $1",
+    )
+    .bind(CONTROL_LOGICAL)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(expiry, None);
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn later_wrapper_projection_joins_only_the_wrapped_registrar_lineage() -> Result<()> {
     const LATEST_WRAPPER_OWNER: &str = "0x7777777777777777777777777777777777777777";
     const WRAPPER_CONTRACT: &str = "0x9999999999999999999999999999999999999999";
-    let (database, pool) = migrated_pool().await?; seed_chain(&pool).await?;
-    for resource in [OLD_REGISTRAR_RESOURCE, OWNERLESS_RESOURCE] { sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 8, 'canonical')").bind(resource).bind(CHAIN).bind(block_hash(8)).execute(&pool).await?; }
-    seed_surface(&pool, OWNERLESS_NAMEHASH, "wrapped.eth", CONTROL_RESOURCE, CONTROL_BINDING).await?;
-    sqlx::query("INSERT INTO token_lineages (token_lineage_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 8, 'canonical')").bind(WRAPPER_LINEAGE).bind(CHAIN).bind(block_hash(8)).execute(&pool).await?;
-    sqlx::query("UPDATE resources SET token_lineage_id = $1::uuid WHERE resource_id = $2::uuid").bind(WRAPPER_LINEAGE).bind(CONTROL_RESOURCE).execute(&pool).await?;
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    for resource in [OLD_REGISTRAR_RESOURCE, OWNERLESS_RESOURCE] {
+        sqlx::query(
+            "INSERT INTO resources (resource_id, chain_id, block_hash, block_number,
+                 canonicality_state)
+             VALUES ($1::uuid, $2, $3, 8, 'canonical')",
+        )
+        .bind(resource)
+        .bind(CHAIN)
+        .bind(block_hash(8))
+        .execute(&pool)
+        .await?;
+    }
+    seed_surface(
+        &pool,
+        OWNERLESS_NAMEHASH,
+        "wrapped.eth",
+        CONTROL_RESOURCE,
+        CONTROL_BINDING,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO token_lineages (token_lineage_id, chain_id, block_hash, block_number,
+             canonicality_state)
+         VALUES ($1::uuid, $2, $3, 8, 'canonical')",
+    )
+    .bind(WRAPPER_LINEAGE)
+    .bind(CHAIN)
+    .bind(block_hash(8))
+    .execute(&pool)
+    .await?;
+    sqlx::query("UPDATE resources SET token_lineage_id = $1::uuid WHERE resource_id = $2::uuid")
+        .bind(WRAPPER_LINEAGE)
+        .bind(CONTROL_RESOURCE)
+        .execute(&pool)
+        .await?;
     for (identity, logical, resource, kind, family, block, log, state) in [
-        ("fixture:old-registration", None, OLD_REGISTRAR_RESOURCE, "RegistrationGranted", "ens_v1_registrar_l1", 8, 0, json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:old","registrant":PRIOR_CONTROLLER,"expiry":1111,"namehash":OWNERLESS_NAMEHASH})),
-        ("fixture:wrapped-registration", None, OWNERLESS_RESOURCE, "RegistrationGranted", "ens_v1_registrar_l1", 8, 1, json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:fixture","registrant":PRIOR_CONTROLLER,"expiry":4242,"namehash":OWNERLESS_NAMEHASH})),
-        ("fixture:wrapped-expiry", None, OWNERLESS_RESOURCE, "ExpiryChanged", "ens_v1_registrar_l1", 8, 2, json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:fixture","registrant":CONTROL_OWNER,"expiry":4242,"namehash":OWNERLESS_NAMEHASH})),
-        ("fixture:wrapped-registrar-transfer", None, OWNERLESS_RESOURCE, "TokenControlTransferred", "ens_v1_registrar_l1", 9, 1, json!({"source_event":"Transfer","from":PRIOR_CONTROLLER,"to":CONTROL_OWNER,"namehash":OWNERLESS_NAMEHASH})),
-        ("fixture:wrapped-binding", Some(OWNERLESS_LOGICAL), CONTROL_RESOURCE, "SurfaceBound", "ens_v1_wrapper_l1", 9, 3, json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"wrapped_registrar_resource_id":OWNERLESS_RESOURCE})),
-        ("fixture:wrapped-scope", Some(OWNERLESS_LOGICAL), CONTROL_RESOURCE, "PermissionScopeChanged", "ens_v1_wrapper_l1", 9, 3, json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"wrapper_state":"wrapped","fuses":0})),
-        ("fixture:wrapper-expiry", Some(OWNERLESS_LOGICAL), CONTROL_RESOURCE, "ExpiryChanged", "ens_v1_wrapper_l1", 9, 3, json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"expiry":5252})),
-        ("fixture:wrapped-renewal", None, OWNERLESS_RESOURCE, "RegistrationRenewed", "ens_v1_registrar_l1", 10, 1, json!({"source_event":"NameRenewed","authority_kind":"registrar","registrant":CONTROL_OWNER,"expiry":5252,"namehash":OWNERLESS_NAMEHASH})),
-        ("fixture:wrapped-renewed-expiry", None, OWNERLESS_RESOURCE, "ExpiryChanged", "ens_v1_registrar_l1", 10, 2, json!({"source_event":"NameRenewed","authority_kind":"registrar","registrant":CONTROL_OWNER,"expiry":5252,"namehash":OWNERLESS_NAMEHASH})),
-    ] { seed_normalized_event(&pool, identity, logical, Some(resource), kind, family, block, log, state, json!({})).await?; }
-    sqlx::query("UPDATE normalized_events SET transaction_hash = (SELECT transaction_hash FROM normalized_events WHERE event_identity = 'fixture:wrapped-binding') WHERE event_identity = 'fixture:wrapped-registrar-transfer'").execute(&pool).await?;
-    sqlx::query("UPDATE normalized_events SET raw_fact_ref = jsonb_build_object('emitting_address', lower($1)) WHERE event_identity = 'fixture:wrapped-binding'").bind(WRAPPER_CONTRACT).execute(&pool).await?;
+        (
+            "fixture:old-registration",
+            None,
+            OLD_REGISTRAR_RESOURCE,
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            8,
+            0,
+            json!({
+                "source_event": "NameRegistered",
+                "authority_kind": "registrar",
+                "authority_key": "registrar:old",
+                "registrant": PRIOR_CONTROLLER,
+                "expiry": 1111,
+                "namehash": OWNERLESS_NAMEHASH,
+            }),
+        ),
+        (
+            "fixture:wrapped-registration",
+            None,
+            OWNERLESS_RESOURCE,
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            8,
+            1,
+            json!({
+                "source_event": "NameRegistered",
+                "authority_kind": "registrar",
+                "authority_key": "registrar:fixture",
+                "registrant": PRIOR_CONTROLLER,
+                "expiry": 4242,
+                "namehash": OWNERLESS_NAMEHASH,
+            }),
+        ),
+        (
+            "fixture:wrapped-expiry",
+            None,
+            OWNERLESS_RESOURCE,
+            "ExpiryChanged",
+            "ens_v1_registrar_l1",
+            8,
+            2,
+            json!({
+                "source_event": "NameRegistered",
+                "authority_kind": "registrar",
+                "authority_key": "registrar:fixture",
+                "registrant": CONTROL_OWNER,
+                "expiry": 4242,
+                "namehash": OWNERLESS_NAMEHASH,
+            }),
+        ),
+        (
+            "fixture:wrapped-registrar-transfer",
+            None,
+            OWNERLESS_RESOURCE,
+            "TokenControlTransferred",
+            "ens_v1_registrar_l1",
+            9,
+            1,
+            json!({
+                "source_event": "Transfer",
+                "from": PRIOR_CONTROLLER,
+                "to": CONTROL_OWNER,
+                "namehash": OWNERLESS_NAMEHASH,
+            }),
+        ),
+        (
+            "fixture:wrapped-binding",
+            Some(OWNERLESS_LOGICAL),
+            CONTROL_RESOURCE,
+            "SurfaceBound",
+            "ens_v1_wrapper_l1",
+            9,
+            3,
+            json!({
+                "source_event": "NameWrapped",
+                "node": OWNERLESS_NAMEHASH,
+                "wrapped_registrar_resource_id": OWNERLESS_RESOURCE,
+            }),
+        ),
+        (
+            "fixture:wrapped-scope",
+            Some(OWNERLESS_LOGICAL),
+            CONTROL_RESOURCE,
+            "PermissionScopeChanged",
+            "ens_v1_wrapper_l1",
+            9,
+            3,
+            json!({
+                "source_event": "NameWrapped",
+                "node": OWNERLESS_NAMEHASH,
+                "wrapper_state": "wrapped",
+                "fuses": 0,
+            }),
+        ),
+        (
+            "fixture:wrapper-expiry",
+            Some(OWNERLESS_LOGICAL),
+            CONTROL_RESOURCE,
+            "ExpiryChanged",
+            "ens_v1_wrapper_l1",
+            9,
+            3,
+            json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"expiry":5252}),
+        ),
+        (
+            "fixture:wrapped-renewal",
+            None,
+            OWNERLESS_RESOURCE,
+            "RegistrationRenewed",
+            "ens_v1_registrar_l1",
+            10,
+            1,
+            json!({
+                "source_event": "NameRenewed",
+                "authority_kind": "registrar",
+                "registrant": CONTROL_OWNER,
+                "expiry": 5252,
+                "namehash": OWNERLESS_NAMEHASH,
+            }),
+        ),
+        (
+            "fixture:wrapped-renewed-expiry",
+            None,
+            OWNERLESS_RESOURCE,
+            "ExpiryChanged",
+            "ens_v1_registrar_l1",
+            10,
+            2,
+            json!({
+                "source_event": "NameRenewed",
+                "authority_kind": "registrar",
+                "registrant": CONTROL_OWNER,
+                "expiry": 5252,
+                "namehash": OWNERLESS_NAMEHASH,
+            }),
+        ),
+    ] {
+        seed_normalized_event(
+            &pool,
+            identity,
+            logical,
+            Some(resource),
+            kind,
+            family,
+            block,
+            log,
+            state,
+            json!({}),
+        )
+        .await?;
+    }
+    sqlx::query(
+        "UPDATE normalized_events
+         SET transaction_hash = (SELECT transaction_hash
+         FROM normalized_events
+         WHERE event_identity = 'fixture:wrapped-binding')
+         WHERE event_identity = 'fixture:wrapped-registrar-transfer'",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET raw_fact_ref = jsonb_build_object('emitting_address', lower($1))
+         WHERE event_identity = 'fixture:wrapped-binding'",
+    )
+    .bind(WRAPPER_CONTRACT)
+    .execute(&pool)
+    .await?;
     seed_normalized_event(
         &pool,
         "fixture:later-wrapper-transfer",
@@ -2833,21 +3155,100 @@ async fn later_wrapper_projection_joins_only_the_wrapped_registrar_lineage() -> 
         json!({}),
     )
     .await?;
-    seed_normalized_event(&pool, "fixture:wrap-registrar-transfer", Some(OWNERLESS_LOGICAL), Some(OWNERLESS_RESOURCE), "TokenControlTransferred", "ens_v1_registrar_l1", 9, 3, json!({"source_event":"Transfer","from":CONTROL_OWNER,"to":WRAPPER_CONTRACT,"namehash":OWNERLESS_NAMEHASH}), json!({})).await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:wrap-registrar-transfer",
+        Some(OWNERLESS_LOGICAL),
+        Some(OWNERLESS_RESOURCE),
+        "TokenControlTransferred",
+        "ens_v1_registrar_l1",
+        9,
+        3,
+        json!({
+            "source_event": "Transfer",
+            "from": CONTROL_OWNER,
+            "to": WRAPPER_CONTRACT,
+            "namehash": OWNERLESS_NAMEHASH,
+        }),
+        json!({}),
+    )
+    .await?;
     run_project(&pool, 8, 8, None).await?;
     run_project(&pool, 10, 9, Some(8)).await?;
-    let summary: (String, i64) = sqlx::query_as("SELECT declared_summary #>> '{registration,status}', (declared_summary #>> '{registration,expiry}')::bigint FROM name_current WHERE logical_name_id = $1").bind(OWNERLESS_LOGICAL).fetch_one(&pool).await?;
-    let registrants: Vec<String> = sqlx::query_scalar("SELECT address FROM address_names_current WHERE logical_name_id = $1 AND relation = 'registrant' ORDER BY address").bind(OWNERLESS_LOGICAL).fetch_all(&pool).await?;
+    let summary: (String, i64) = sqlx::query_as(
+        "SELECT declared_summary #>> '{registration,status}',
+             (declared_summary #>> '{registration,expiry}')::bigint
+         FROM name_current
+         WHERE logical_name_id = $1",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .fetch_one(&pool)
+    .await?;
+    let registrants: Vec<String> = sqlx::query_scalar(
+        "SELECT address
+         FROM address_names_current
+         WHERE logical_name_id = $1
+         AND relation = 'registrant'
+         ORDER BY address",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .fetch_all(&pool)
+    .await?;
     assert_eq!(summary, ("active".to_owned(), 5252));
-    assert_eq!(registrants, vec![PRIOR_CONTROLLER.to_lowercase()], "a wrapped name serves the NameWrapped owner as registrant, as the chain records it");
+    assert_eq!(
+        registrants,
+        vec![PRIOR_CONTROLLER.to_lowercase()],
+        "a wrapped name serves the NameWrapped owner as registrant, as the chain records it"
+    );
     seed_blocks(&pool, [11]).await?;
-    seed_normalized_event(&pool, "fixture:later-wrapper-holder-transfer", Some(OWNERLESS_LOGICAL), Some(CONTROL_RESOURCE), "TokenControlTransferred", "ens_v1_wrapper_l1", 11, 1, json!({"source_event":"TransferSingle","from":PRIOR_CONTROLLER,"to":LATEST_WRAPPER_OWNER}), json!({})).await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:later-wrapper-holder-transfer",
+        Some(OWNERLESS_LOGICAL),
+        Some(CONTROL_RESOURCE),
+        "TokenControlTransferred",
+        "ens_v1_wrapper_l1",
+        11,
+        1,
+        json!({"source_event":"TransferSingle","from":PRIOR_CONTROLLER,"to":LATEST_WRAPPER_OWNER}),
+        json!({}),
+    )
+    .await?;
     run_project(&pool, 11, 8, None).await?;
-    let current_registrant: String = sqlx::query_scalar("SELECT declared_summary #>> '{registration,registrant}' FROM name_current WHERE logical_name_id = $1").bind(OWNERLESS_LOGICAL).fetch_one(&pool).await?;
-    let later_relations: Vec<String> = sqlx::query_scalar("SELECT relation FROM address_names_current WHERE logical_name_id = $1 AND address = lower($2) ORDER BY relation").bind(OWNERLESS_LOGICAL).bind(LATEST_WRAPPER_OWNER).fetch_all(&pool).await?;
-    assert_eq!(current_registrant, LATEST_WRAPPER_OWNER.to_lowercase(), "a later wrapper transfer must replace the NameWrapped owner");
-    assert_eq!(later_relations, vec!["effective_controller".to_owned(), "registrant".to_owned(), "token_holder".to_owned()]);
-    database.cleanup().await?; Ok(())
+    let current_registrant: String = sqlx::query_scalar(
+        "SELECT declared_summary #>> '{registration,registrant}'
+         FROM name_current
+         WHERE logical_name_id = $1",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .fetch_one(&pool)
+    .await?;
+    let later_relations: Vec<String> = sqlx::query_scalar(
+        "SELECT relation
+         FROM address_names_current
+         WHERE logical_name_id = $1
+         AND address = lower($2)
+         ORDER BY relation",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .bind(LATEST_WRAPPER_OWNER)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        current_registrant,
+        LATEST_WRAPPER_OWNER.to_lowercase(),
+        "a later wrapper transfer must replace the NameWrapped owner"
+    );
+    assert_eq!(
+        later_relations,
+        vec![
+            "effective_controller".to_owned(),
+            "registrant".to_owned(),
+            "token_holder".to_owned()
+        ]
+    );
+    database.cleanup().await?;
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2980,7 +3381,14 @@ async fn project_later_wrapper_delta(
                 8
             },
             0,
-            json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:old","registrant":PRIOR_CONTROLLER,"expiry":1111,"namehash":OWNERLESS_NAMEHASH}),
+            json!({
+                "source_event": "NameRegistered",
+                "authority_kind": "registrar",
+                "authority_key": "registrar:old",
+                "registrant": PRIOR_CONTROLLER,
+                "expiry": 1111,
+                "namehash": OWNERLESS_NAMEHASH,
+            }),
         ),
         (
             "fixture:incremental-registration",
@@ -2988,7 +3396,14 @@ async fn project_later_wrapper_delta(
             "RegistrationGranted",
             if born_wrapped { 9 } else { 8 },
             1,
-            json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:current","registrant":if born_wrapped { WRAPPER_CONTRACT } else { CONTROL_OWNER },"expiry":4242,"namehash":OWNERLESS_NAMEHASH}),
+            json!({
+                "source_event": "NameRegistered",
+                "authority_kind": "registrar",
+                "authority_key": "registrar:current",
+                "registrant": if born_wrapped { WRAPPER_CONTRACT } else { CONTROL_OWNER },
+                "expiry": 4242,
+                "namehash": OWNERLESS_NAMEHASH,
+            }),
         ),
         (
             "fixture:incremental-expiry",
@@ -2996,7 +3411,14 @@ async fn project_later_wrapper_delta(
             "ExpiryChanged",
             if born_wrapped { 9 } else { 8 },
             if born_wrapped { 1 } else { 2 },
-            json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:current","registrant":if born_wrapped { WRAPPER_CONTRACT } else { CONTROL_OWNER },"expiry":4242,"namehash":OWNERLESS_NAMEHASH}),
+            json!({
+                "source_event": "NameRegistered",
+                "authority_kind": "registrar",
+                "authority_key": "registrar:current",
+                "registrant": if born_wrapped { WRAPPER_CONTRACT } else { CONTROL_OWNER },
+                "expiry": 4242,
+                "namehash": OWNERLESS_NAMEHASH,
+            }),
         ),
     ] {
         seed_normalized_event(
@@ -3022,7 +3444,12 @@ async fn project_later_wrapper_delta(
             "TokenControlTransferred",
             "ens_v1_registrar_l1",
             2,
-            json!({"source_event":"Transfer","from":CONTROL_OWNER,"to":WRAPPER_CONTRACT,"namehash":OWNERLESS_NAMEHASH}),
+            json!({
+                "source_event": "Transfer",
+                "from": CONTROL_OWNER,
+                "to": WRAPPER_CONTRACT,
+                "namehash": OWNERLESS_NAMEHASH,
+            }),
             json!({}),
         ),
         (
@@ -3031,7 +3458,11 @@ async fn project_later_wrapper_delta(
             "SurfaceBound",
             "ens_v1_wrapper_l1",
             3,
-            json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"wrapped_registrar_resource_id":OWNERLESS_RESOURCE}),
+            json!({
+                "source_event": "NameWrapped",
+                "node": OWNERLESS_NAMEHASH,
+                "wrapped_registrar_resource_id": OWNERLESS_RESOURCE,
+            }),
             json!({"emitting_address":WRAPPER_CONTRACT}),
         ),
         (
@@ -3040,7 +3471,12 @@ async fn project_later_wrapper_delta(
             "PermissionScopeChanged",
             "ens_v1_wrapper_l1",
             3,
-            json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"wrapper_state":"wrapped","fuses":0}),
+            json!({
+                "source_event": "NameWrapped",
+                "node": OWNERLESS_NAMEHASH,
+                "wrapper_state": "wrapped",
+                "fuses": 0,
+            }),
             json!({}),
         ),
         (
@@ -3126,7 +3562,11 @@ async fn project_later_wrapper_delta(
                 "ens_v1_wrapper_l1",
                 11,
                 1,
-                json!({"source_event":"TransferSingle","from":PRIOR_CONTROLLER,"to":LATEST_WRAPPER_OWNER}),
+                json!({
+                    "source_event": "TransferSingle",
+                    "from": PRIOR_CONTROLLER,
+                    "to": LATEST_WRAPPER_OWNER,
+                }),
                 json!({}),
             )
             .await?;
@@ -3179,7 +3619,12 @@ async fn project_later_wrapper_delta(
                 "ens_v1_registrar_l1",
                 10,
                 2,
-                json!({"source_event":"Transfer","from":WRAPPER_CONTRACT,"to":CONTROL_OWNER,"namehash":OWNERLESS_NAMEHASH}),
+                json!({
+                    "source_event": "Transfer",
+                    "from": WRAPPER_CONTRACT,
+                    "to": CONTROL_OWNER,
+                    "namehash": OWNERLESS_NAMEHASH,
+                }),
                 json!({}),
             )
             .await?;
@@ -3236,7 +3681,11 @@ async fn project_later_wrapper_delta(
                 "ens_v1_wrapper_l1",
                 11,
                 1,
-                json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"wrapped_registrar_resource_id":OWNERLESS_RESOURCE}),
+                json!({
+                    "source_event": "NameWrapped",
+                    "node": OWNERLESS_NAMEHASH,
+                    "wrapped_registrar_resource_id": OWNERLESS_RESOURCE,
+                }),
                 json!({"emitting_address":WRAPPER_CONTRACT}),
             )
             .await?;
@@ -3249,7 +3698,11 @@ async fn project_later_wrapper_delta(
                 "ens_v1_wrapper_l1",
                 11,
                 2,
-                json!({"source_event":"TransferSingle","from":WRAPPER_CONTRACT,"to":LATEST_WRAPPER_OWNER}),
+                json!({
+                    "source_event": "TransferSingle",
+                    "from": WRAPPER_CONTRACT,
+                    "to": LATEST_WRAPPER_OWNER,
+                }),
                 json!({}),
             )
             .await?;
@@ -3262,7 +3715,12 @@ async fn project_later_wrapper_delta(
                 "ens_v1_wrapper_l1",
                 11,
                 1,
-                json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"wrapper_state":"wrapped","fuses":0}),
+                json!({
+                    "source_event": "NameWrapped",
+                    "node": OWNERLESS_NAMEHASH,
+                    "wrapper_state": "wrapped",
+                    "fuses": 0,
+                }),
                 json!({}),
             )
             .await?;
@@ -3290,7 +3748,11 @@ async fn project_later_wrapper_delta(
                 "ens_v1_registry_l1",
                 11,
                 1,
-                json!({"source_event":"NewResolver","node":OWNERLESS_NAMEHASH,"resolver":RESOLVER_ADDRESS}),
+                json!({
+                    "source_event": "NewResolver",
+                    "node": OWNERLESS_NAMEHASH,
+                    "resolver": RESOLVER_ADDRESS,
+                }),
                 json!({"emitting_address":REGISTRY_ADDRESS}),
             )
             .await?;
@@ -3306,7 +3768,13 @@ async fn project_later_wrapper_delta(
                     "ens_v1_registrar_l1",
                     11,
                     log,
-                    json!({"source_event":"NameRenewed","authority_kind":"registrar","registrant":CONTROL_OWNER,"expiry":6262,"namehash":OWNERLESS_NAMEHASH}),
+                    json!({
+                        "source_event": "NameRenewed",
+                        "authority_kind": "registrar",
+                        "registrant": CONTROL_OWNER,
+                        "expiry": 6262,
+                        "namehash": OWNERLESS_NAMEHASH,
+                    }),
                     json!({}),
                 )
                 .await?;
@@ -3322,7 +3790,11 @@ async fn project_later_wrapper_delta(
                 "ens_v1_wrapper_l1",
                 10,
                 1,
-                json!({"source_event":"TransferSingle","from":PRIOR_CONTROLLER,"to":LATEST_WRAPPER_OWNER}),
+                json!({
+                    "source_event": "TransferSingle",
+                    "from": PRIOR_CONTROLLER,
+                    "to": LATEST_WRAPPER_OWNER,
+                }),
                 json!({}),
             )
             .await?;
@@ -3354,7 +3826,12 @@ async fn project_later_wrapper_delta(
                 "ens_v1_registrar_l1",
                 11,
                 1,
-                json!({"source_event":"RegistrationReleased","authority_kind":"registrar","expiry":4242,"namehash":OWNERLESS_NAMEHASH}),
+                json!({
+                    "source_event": "RegistrationReleased",
+                    "authority_kind": "registrar",
+                    "expiry": 4242,
+                    "namehash": OWNERLESS_NAMEHASH,
+                }),
                 json!({}),
             )
             .await?;
@@ -3429,7 +3906,11 @@ async fn project_later_wrapper_delta(
             "ens_v1_registry_l1",
             12,
             1,
-            json!({"source_event":"NewResolver","node":OWNERLESS_NAMEHASH,"resolver":RESOLVER_ADDRESS}),
+            json!({
+                "source_event": "NewResolver",
+                "node": OWNERLESS_NAMEHASH,
+                "resolver": RESOLVER_ADDRESS,
+            }),
             json!({"emitting_address":REGISTRY_ADDRESS}),
         )
         .await?;
@@ -3604,23 +4085,49 @@ async fn later_wrapper_deltas_project_identically_incrementally_and_from_zero() 
 /// A name registered through the NameWrapper is identified by its BaseRegistrar lease, the same
 /// as a name wrapped later; a re-wrap mints a new NameWrapper resource and changes nothing.
 #[tokio::test]
-#[rustfmt::skip]
-async fn rewrap_of_a_name_wrapped_at_registration_keeps_the_registrar_lease_identity() -> Result<()> {
-    let incremental = project_later_wrapper_delta(LaterWrapperDelta::Rewrap, true, false, true).await?;
-    let from_zero = project_later_wrapper_delta(LaterWrapperDelta::Rewrap, false, false, true).await?;
-    assert_eq!(incremental, from_zero, "re-wrap projection diverged between an incremental batch and from-zero rebuild");
-    assert_eq!(incremental.registration_resource_id.as_deref(), Some(OWNERLESS_RESOURCE), "a name wrapped at registration must be identified by its registrar lease, not a NameWrapper resource");
-    assert_eq!(incremental.registrant.as_deref(), Some("0x7777777777777777777777777777777777777777"));
+async fn rewrap_of_a_name_wrapped_at_registration_keeps_the_registrar_lease_identity() -> Result<()>
+{
+    let incremental =
+        project_later_wrapper_delta(LaterWrapperDelta::Rewrap, true, false, true).await?;
+    let from_zero =
+        project_later_wrapper_delta(LaterWrapperDelta::Rewrap, false, false, true).await?;
+    assert_eq!(
+        incremental, from_zero,
+        "re-wrap projection diverged between an incremental batch and from-zero rebuild"
+    );
+    assert_eq!(
+        incremental.registration_resource_id.as_deref(),
+        Some(OWNERLESS_RESOURCE),
+        "a name wrapped at registration must be identified by its registrar lease, not a \
+         NameWrapper resource"
+    );
+    assert_eq!(
+        incremental.registrant.as_deref(),
+        Some("0x7777777777777777777777777777777777777777")
+    );
     assert_eq!(incremental.registrant, incremental.address_registrant);
     Ok(())
 }
 
-#[tokio::test] #[rustfmt::skip]
-async fn release_of_a_name_wrapped_at_registration_keeps_the_registrar_lease_identity() -> Result<()> {
-    let incremental = project_later_wrapper_delta(LaterWrapperDelta::RegistrarRelease, true, false, true).await?;
-    let from_zero = project_later_wrapper_delta(LaterWrapperDelta::RegistrarRelease, false, false, true).await?;
-    assert_eq!(incremental, from_zero); assert_eq!(incremental.registration_status.as_deref(), Some("released"));
-    assert_eq!(incremental.registration_resource_id.as_deref(), Some(OWNERLESS_RESOURCE)); assert_eq!(incremental.address_registrant, None, "a registry-only binding lists nobody under relation=registrant"); Ok(())
+#[tokio::test]
+async fn release_of_a_name_wrapped_at_registration_keeps_the_registrar_lease_identity() -> Result<()>
+{
+    let incremental =
+        project_later_wrapper_delta(LaterWrapperDelta::RegistrarRelease, true, false, true).await?;
+    let from_zero =
+        project_later_wrapper_delta(LaterWrapperDelta::RegistrarRelease, false, false, true)
+            .await?;
+    assert_eq!(incremental, from_zero);
+    assert_eq!(incremental.registration_status.as_deref(), Some("released"));
+    assert_eq!(
+        incremental.registration_resource_id.as_deref(),
+        Some(OWNERLESS_RESOURCE)
+    );
+    assert_eq!(
+        incremental.address_registrant, None,
+        "a registry-only binding lists nobody under relation=registrant"
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -3695,46 +4202,486 @@ async fn later_wrapper_retraction_projects_identically_incrementally_and_from_ze
 #[derive(Debug, PartialEq)]
 struct EnrichedRegistryOnlyProjection {
     expiry: Option<i64>,
+    registered_at: Option<String>,
+    serving: Vec<(String, serde_json::Value)>,
     registration_resource_id: Option<String>,
     registrant: Option<String>,
     address_registrant: Option<String>,
 }
 
-#[rustfmt::skip]
-async fn project_enriched_registry_only(controller_registered: bool, incremental: bool) -> Result<EnrichedRegistryOnlyProjection> {
-    const ALICE: &str = "0x5555555555555555555555555555555555555555"; const BOB: &str = "0x6666666666666666666666666666666666666666";
-    const REGISTRY_RESOURCE: &str = "edededed-eded-eded-eded-edededededed"; const REGISTRY_BINDING: &str = "efefefef-efef-efef-efef-efefefefefef"; const EXPIRY: i64 = 1_700_001_100;
-    let (database, pool) = migrated_pool().await?; seed_chain(&pool).await?;
-    seed_surface(&pool, OWNERLESS_NAMEHASH, "enriched-later.eth", OWNERLESS_RESOURCE, OWNERLESS_BINDING).await?;
+async fn project_enriched_registry_only(
+    controller_registered: bool,
+    incremental: bool,
+) -> Result<EnrichedRegistryOnlyProjection> {
+    project_enriched_registry_only_batches(controller_registered, incremental, None).await
+}
+
+/// A batch at block 11, after the registrar resource's binding has closed.
+#[derive(Clone, Copy)]
+enum LaterBatch {
+    /// Touches only the registry-only resource.
+    RegistryOwner,
+    /// Touches only the registrar resource, with a renewal that carries no name.
+    RenewalWithoutName,
+}
+
+async fn project_enriched_registry_only_batches(
+    controller_registered: bool,
+    incremental: bool,
+    later_batch: Option<LaterBatch>,
+) -> Result<EnrichedRegistryOnlyProjection> {
+    const ALICE: &str = "0x5555555555555555555555555555555555555555";
+    const BOB: &str = "0x6666666666666666666666666666666666666666";
+    const REGISTRY_RESOURCE: &str = "edededed-eded-eded-eded-edededededed";
+    const REGISTRY_BINDING: &str = "efefefef-efef-efef-efef-efefefefefef";
+    const EXPIRY: i64 = 1_700_001_100;
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    seed_surface(
+        &pool,
+        OWNERLESS_NAMEHASH,
+        "enriched-later.eth",
+        OWNERLESS_RESOURCE,
+        OWNERLESS_BINDING,
+    )
+    .await?;
     if !controller_registered {
-        sqlx::query("UPDATE surface_bindings SET block_number = 9, block_hash = $2, active_from = '2026-08-01T00:00:09Z' WHERE surface_binding_id = $1::uuid").bind(OWNERLESS_BINDING).bind(block_hash(9)).execute(&pool).await?;
+        sqlx::query(
+            "UPDATE surface_bindings
+             SET block_number = 9, block_hash = $2, active_from = '2026-08-01T00:00:09Z'
+             WHERE surface_binding_id = $1::uuid",
+        )
+        .bind(OWNERLESS_BINDING)
+        .bind(block_hash(9))
+        .execute(&pool)
+        .await?;
         seed_binding_provenance(&pool, OWNERLESS_BINDING, 0, 1).await?;
     }
     for (identity, kind, block, log, expiry) in [
-        ("fixture:enriched-grant", "RegistrationGranted", 8, 1, 1_700_000_100),
-        ("fixture:enriched-initial-expiry", "ExpiryChanged", 8, 2, 1_700_000_100),
-        ("fixture:enriched-renewal", "RegistrationRenewed", 9, 0, EXPIRY),
-        ("fixture:enriched-renewal-expiry", "ExpiryChanged", 9, 0, EXPIRY),
-    ] { seed_normalized_event(&pool, identity, controller_registered.then_some(OWNERLESS_LOGICAL), Some(OWNERLESS_RESOURCE), kind, "ens_v1_registrar_l1", block, log, json!({"source_event":if block == 8 { "NameRegistered" } else { "NameRenewed" },"authority_kind":"registrar","registrant":ALICE,"expiry":expiry,"namehash":OWNERLESS_NAMEHASH}), json!({})).await?; }
-    if incremental { run_project(&pool, 9, 8, None).await?; }
-    seed_next_binding(&pool, OWNERLESS_NAMEHASH, REGISTRY_RESOURCE, REGISTRY_BINDING, 10, "2026-08-01T00:00:10Z").await?;
+        (
+            "fixture:enriched-grant",
+            "RegistrationGranted",
+            8,
+            1,
+            1_700_000_100,
+        ),
+        (
+            "fixture:enriched-initial-expiry",
+            "ExpiryChanged",
+            8,
+            2,
+            1_700_000_100,
+        ),
+        (
+            "fixture:enriched-renewal",
+            "RegistrationRenewed",
+            9,
+            0,
+            EXPIRY,
+        ),
+        (
+            "fixture:enriched-renewal-expiry",
+            "ExpiryChanged",
+            9,
+            0,
+            EXPIRY,
+        ),
+    ] {
+        seed_normalized_event(
+            &pool,
+            identity,
+            controller_registered.then_some(OWNERLESS_LOGICAL),
+            Some(OWNERLESS_RESOURCE),
+            kind,
+            "ens_v1_registrar_l1",
+            block,
+            log,
+            json!({
+                "source_event": if block == 8 { "NameRegistered" } else { "NameRenewed" },
+                "authority_kind": "registrar",
+                "registrant": ALICE,
+                "expiry": expiry,
+                "namehash": OWNERLESS_NAMEHASH,
+            }),
+            json!({}),
+        )
+        .await?;
+    }
+    if incremental {
+        run_project(&pool, 9, 8, None).await?;
+    }
+    seed_next_binding(
+        &pool,
+        OWNERLESS_NAMEHASH,
+        REGISTRY_RESOURCE,
+        REGISTRY_BINDING,
+        10,
+        "2026-08-01T00:00:10Z",
+    )
+    .await?;
     seed_binding_provenance(&pool, REGISTRY_BINDING, 0, 0).await?;
-    seed_authority_epoch_changed(&pool, "fixture:enriched-registry-only-epoch", OWNERLESS_NAMEHASH, REGISTRY_RESOURCE, 10, "registry_only").await?;
-    seed_normalized_event(&pool, "fixture:enriched-unreclaimed-transfer", Some(OWNERLESS_LOGICAL), Some(OWNERLESS_RESOURCE), "TokenControlTransferred", "ens_v1_registrar_l1", 10, 0, json!({"source_event":"Transfer","authority_kind":"registrar","from":ALICE,"to":BOB,"namehash":OWNERLESS_NAMEHASH}), json!({})).await?;
-    run_project(&pool, 10, if incremental { 10 } else { 8 }, incremental.then_some(9)).await?;
-    let (expiry, registration_resource_id, registrant) = sqlx::query_as("SELECT (declared_summary #>> '{registration,expiry}')::bigint, declared_summary #>> '{registration,resource_id}', declared_summary #>> '{registration,registrant}' FROM name_current WHERE logical_name_id = $1").bind(OWNERLESS_LOGICAL).fetch_one(&pool).await?;
-    let address_registrant = sqlx::query_scalar("SELECT address FROM address_names_current WHERE logical_name_id = $1 AND relation = 'registrant'").bind(OWNERLESS_LOGICAL).fetch_optional(&pool).await?;
-    database.cleanup().await?; Ok(EnrichedRegistryOnlyProjection { expiry, registration_resource_id, registrant, address_registrant })
+    seed_authority_epoch_changed(
+        &pool,
+        "fixture:enriched-registry-only-epoch",
+        OWNERLESS_NAMEHASH,
+        REGISTRY_RESOURCE,
+        10,
+        "registry_only",
+    )
+    .await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:enriched-unreclaimed-transfer",
+        Some(OWNERLESS_LOGICAL),
+        Some(OWNERLESS_RESOURCE),
+        "TokenControlTransferred",
+        "ens_v1_registrar_l1",
+        10,
+        0,
+        json!({
+            "source_event": "Transfer",
+            "authority_kind": "registrar",
+            "from": ALICE,
+            "to": BOB,
+            "namehash": OWNERLESS_NAMEHASH,
+        }),
+        json!({}),
+    )
+    .await?;
+    if incremental || later_batch.is_none() {
+        run_project(
+            &pool,
+            10,
+            if incremental { 10 } else { 8 },
+            incremental.then_some(9),
+        )
+        .await?;
+    }
+    if let Some(later_batch) = later_batch {
+        seed_blocks(&pool, [11]).await?;
+        match later_batch {
+            LaterBatch::RegistryOwner => {
+                seed_authority_transferred(
+                    &pool,
+                    "fixture:enriched-later-registry-owner",
+                    OWNERLESS_NAMEHASH,
+                    REGISTRY_RESOURCE,
+                    11,
+                    1,
+                    json!({
+                        "node": OWNERLESS_NAMEHASH,
+                        "owner": ALICE,
+                        "owner_getter": ALICE,
+                        "authority_kind": "registry_only",
+                    }),
+                )
+                .await?;
+            }
+            LaterBatch::RenewalWithoutName => {
+                for (kind, log) in [("RegistrationRenewed", 1), ("ExpiryChanged", 2)] {
+                    seed_normalized_event(
+                        &pool,
+                        &format!("fixture:enriched-later-{kind}"),
+                        None,
+                        Some(OWNERLESS_RESOURCE),
+                        kind,
+                        "ens_v1_registrar_l1",
+                        11,
+                        log,
+                        json!({
+                            "source_event": "NameRenewed",
+                            "authority_kind": "registrar",
+                            "registrant": BOB,
+                            "expiry": EXPIRY + 1_000,
+                            "namehash": OWNERLESS_NAMEHASH,
+                        }),
+                        json!({}),
+                    )
+                    .await?;
+                }
+            }
+        }
+        run_project(
+            &pool,
+            11,
+            if incremental { 11 } else { 8 },
+            incremental.then_some(10),
+        )
+        .await?;
+    }
+    let (expiry, registered_at, registration_resource_id, registrant) = sqlx::query_as(
+        "SELECT (declared_summary #>> '{registration,expiry}')::bigint,
+             declared_summary #>> '{registration,registered_at}',
+             declared_summary #>> '{registration,resource_id}',
+             declared_summary #>> '{registration,registrant}'
+         FROM name_current
+         WHERE logical_name_id = $1",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .fetch_one(&pool)
+    .await?;
+    let address_registrant = sqlx::query_scalar(
+        "SELECT address
+         FROM address_names_current
+         WHERE logical_name_id = $1
+         AND relation = 'registrant'",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .fetch_optional(&pool)
+    .await?;
+    let serving = serving_projection_snapshot(&pool).await?;
+    database.cleanup().await?;
+    Ok(EnrichedRegistryOnlyProjection {
+        expiry,
+        registered_at,
+        serving,
+        registration_resource_id,
+        registrant,
+        address_registrant,
+    })
 }
 
 #[tokio::test]
-#[rustfmt::skip]
 async fn enrich_later_registration_keeps_lease_through_registry_only_fallback() -> Result<()> {
-    let incremental = project_enriched_registry_only(false, true).await?; let from_zero = project_enriched_registry_only(false, false).await?;
-    assert_eq!(incremental, from_zero); assert_eq!(incremental.expiry, Some(1_700_001_100), "plaintext enrichment left the live registrar expiry behind its binding");
-    assert_eq!(incremental.registration_resource_id.as_deref(), Some(OWNERLESS_RESOURCE)); assert_eq!(incremental.registrant.as_deref(), Some("0x6666666666666666666666666666666666666666")); assert_eq!(incremental.address_registrant, None, "a registry-only binding lists nobody under relation=registrant");
+    let incremental = project_enriched_registry_only(false, true).await?;
+    let from_zero = project_enriched_registry_only(false, false).await?;
+    assert_eq!(incremental, from_zero);
+    assert_eq!(
+        incremental.expiry,
+        Some(1_700_001_100),
+        "plaintext enrichment left the live registrar expiry behind its binding"
+    );
+    assert_eq!(
+        incremental.registration_resource_id.as_deref(),
+        Some(OWNERLESS_RESOURCE)
+    );
+    assert_eq!(
+        incremental.registrant.as_deref(),
+        Some("0x6666666666666666666666666666666666666666")
+    );
+    assert_eq!(
+        incremental.address_registrant, None,
+        "a registry-only binding lists nobody under relation=registrant"
+    );
     let controller_control = project_enriched_registry_only(true, false).await?;
-    assert_eq!(controller_control.expiry, incremental.expiry); assert_eq!(controller_control.registration_resource_id, incremental.registration_resource_id); assert_eq!(controller_control.registrant, incremental.registrant); assert_eq!(controller_control.address_registrant, incremental.address_registrant); Ok(())
+    assert_eq!(controller_control.expiry, incremental.expiry);
+    assert_eq!(
+        controller_control.registration_resource_id,
+        incremental.registration_resource_id
+    );
+    assert_eq!(controller_control.registrant, incremental.registrant);
+    assert_eq!(
+        controller_control.address_registrant,
+        incremental.address_registrant
+    );
+    Ok(())
+}
+
+/// Once the registry-only binding is selected the registrar resource's binding is closed. A later
+/// batch that touches only the registry resource must still stage the lease rows that carry no
+/// name, as a rebuild does; otherwise the name loses its expiry and registration date until the
+/// next rebuild.
+#[tokio::test]
+async fn closed_registrar_binding_keeps_its_lease_in_a_later_incremental_batch() -> Result<()> {
+    let later = Some(LaterBatch::RegistryOwner);
+    let incremental = project_enriched_registry_only_batches(false, true, later).await?;
+    let from_zero = project_enriched_registry_only_batches(false, false, later).await?;
+    assert_eq!(
+        (incremental.expiry, &incremental.registered_at),
+        (from_zero.expiry, &from_zero.registered_at),
+        "a batch that touched only the registry resource dropped the closed binding's lease"
+    );
+    assert_eq!(incremental, from_zero);
+    assert_eq!(from_zero.expiry, Some(1_700_001_100));
+    assert!(from_zero.registered_at.is_some());
+    Ok(())
+}
+
+/// The other direction: a renewal without a name arrives on the registrar resource after its
+/// binding closed. A rebuild names the row through the closed binding, so the batch must rebuild
+/// the name too.
+#[tokio::test]
+async fn renewal_without_a_name_on_a_closed_binding_rebuilds_its_name() -> Result<()> {
+    let later = Some(LaterBatch::RenewalWithoutName);
+    let incremental = project_enriched_registry_only_batches(false, true, later).await?;
+    let from_zero = project_enriched_registry_only_batches(false, false, later).await?;
+    assert_eq!(incremental, from_zero);
+    Ok(())
+}
+
+/// Today's mainnet manifest shape: controller events grant leases, so registrar rows carry the
+/// name, while the registry adapter may have written rows without one before the label was known.
+/// A name is released and registered again on a new resource; a later batch touches only the new
+/// resource. The closed binding's resource is out of that batch's scope, so anything a rebuild
+/// attached through it would be missing incrementally.
+async fn project_released_then_reregistered(
+    incremental: bool,
+) -> Result<Vec<(String, serde_json::Value)>> {
+    const SECOND_RESOURCE: &str = "50000000-0000-0000-0000-000000000001";
+    const SECOND_BINDING: &str = "50000000-0000-0000-0000-000000000011";
+    let (database, pool) = migrated_pool().await?;
+    seed_blocks(&pool, [8, 9, 10, 11]).await?;
+    seed_surface(
+        &pool,
+        OWNERLESS_NAMEHASH,
+        "registered-twice.eth",
+        OWNERLESS_RESOURCE,
+        OWNERLESS_BINDING,
+    )
+    .await?;
+    seed_binding_provenance(&pool, OWNERLESS_BINDING, 0, 1).await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:twice-registry-row-before-label",
+        None,
+        Some(OWNERLESS_RESOURCE),
+        "AuthorityTransferred",
+        "ens_v1_registry_l1",
+        8,
+        0,
+        json!({
+            "node": OWNERLESS_NAMEHASH,
+            "owner": CONTROL_OWNER,
+            "owner_getter": CONTROL_OWNER,
+            "authority_kind": "registrar",
+        }),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:twice-registry-resolver-before-label",
+        None,
+        Some(OWNERLESS_RESOURCE),
+        "ResolverChanged",
+        "ens_v1_registry_l1",
+        8,
+        3,
+        json!({
+            "source_event": "NewResolver",
+            "node": OWNERLESS_NAMEHASH,
+            "resolver": RESOLVER_ADDRESS,
+        }),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    let lease = |registrant: &str, expiry: i64| {
+        json!({
+            "source_event": "NameRegistered",
+            "authority_kind": "registrar",
+            "registrant": registrant,
+            "expiry": expiry,
+            "namehash": OWNERLESS_NAMEHASH,
+        })
+    };
+    for (kind, log) in [("RegistrationGranted", 1), ("ExpiryChanged", 2)] {
+        seed_normalized_event(
+            &pool,
+            &format!("fixture:twice-first-{kind}"),
+            Some(OWNERLESS_LOGICAL),
+            Some(OWNERLESS_RESOURCE),
+            kind,
+            "ens_v1_registrar_l1",
+            8,
+            log,
+            lease(CONTROL_OWNER, 4242),
+            json!({}),
+        )
+        .await?;
+    }
+    seed_normalized_event(
+        &pool,
+        "fixture:twice-release",
+        Some(OWNERLESS_LOGICAL),
+        Some(OWNERLESS_RESOURCE),
+        "RegistrationReleased",
+        "ens_v1_registrar_l1",
+        9,
+        1,
+        json!({
+            "source_event": "NameReleased",
+            "authority_kind": "registrar",
+            "status": "released",
+            "namehash": OWNERLESS_NAMEHASH,
+        }),
+        json!({}),
+    )
+    .await?;
+    if incremental {
+        run_project(&pool, 9, 8, None).await?;
+    }
+    seed_next_binding(
+        &pool,
+        OWNERLESS_NAMEHASH,
+        SECOND_RESOURCE,
+        SECOND_BINDING,
+        10,
+        "2026-08-01T00:00:10Z",
+    )
+    .await?;
+    seed_binding_provenance(&pool, SECOND_BINDING, 0, 1).await?;
+    for (kind, log) in [("RegistrationGranted", 1), ("ExpiryChanged", 2)] {
+        seed_normalized_event(
+            &pool,
+            &format!("fixture:twice-second-{kind}"),
+            Some(OWNERLESS_LOGICAL),
+            Some(SECOND_RESOURCE),
+            kind,
+            "ens_v1_registrar_l1",
+            10,
+            log,
+            lease(PRIOR_CONTROLLER, 9_999_999_999),
+            json!({}),
+        )
+        .await?;
+    }
+    if incremental {
+        run_project(&pool, 10, 10, Some(9)).await?;
+    }
+    for (kind, log) in [("RegistrationRenewed", 1), ("ExpiryChanged", 2)] {
+        seed_normalized_event(
+            &pool,
+            &format!("fixture:twice-renewal-{kind}"),
+            Some(OWNERLESS_LOGICAL),
+            Some(SECOND_RESOURCE),
+            kind,
+            "ens_v1_registrar_l1",
+            11,
+            log,
+            lease(PRIOR_CONTROLLER, 19_999_999_999),
+            json!({}),
+        )
+        .await?;
+    }
+    run_project(
+        &pool,
+        11,
+        if incremental { 11 } else { 8 },
+        incremental.then_some(10),
+    )
+    .await?;
+    // The first resource's permission summary row is left out: a resource that no later batch
+    // touches keeps the target block of the batch that last projected it, with or without
+    // resource-keyed registrar rows.
+    let mut serving = serving_projection_snapshot(&pool).await?;
+    serving.retain(|(table, _)| table != "permissions_current_resource_summary");
+    database.cleanup().await?;
+    Ok(serving)
+}
+
+#[tokio::test]
+async fn released_then_reregistered_name_projects_identically_incrementally_and_from_zero()
+-> Result<()> {
+    let incremental = project_released_then_reregistered(true).await?;
+    let from_zero = project_released_then_reregistered(false).await?;
+    assert_eq!(incremental, from_zero);
+    let name_current = &from_zero[0].1[0];
+    assert_eq!(
+        name_current["declared_summary"]["registration"]["expiry"],
+        json!(19_999_999_999_i64),
+        "{name_current}"
+    );
+    Ok(())
 }
 
 /// A BaseRegistrar token transferred without `reclaim` leaves the registry owner behind, so the
@@ -3769,58 +4716,408 @@ async fn unreclaimed_transfer_serves_the_holder_without_a_registrant_relation() 
 // served before registrar rows were joined by resource identity; it must not change.
 
 #[tokio::test]
-#[rustfmt::skip]
 async fn controller_granted_born_wrapped_name_keeps_its_registrar_lease() -> Result<()> {
-    let (database, pool) = migrated_pool().await?; seed_chain(&pool).await?;
-    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 8, 'canonical')").bind(OWNERLESS_RESOURCE).bind(CHAIN).bind(block_hash(8)).execute(&pool).await?;
-    seed_surface(&pool, OWNERLESS_NAMEHASH, "bornwrapped.eth", CONTROL_RESOURCE, CONTROL_BINDING).await?;
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    sqlx::query(
+        "INSERT INTO resources (resource_id, chain_id, block_hash, block_number,
+             canonicality_state)
+         VALUES ($1::uuid, $2, $3, 8, 'canonical')",
+    )
+    .bind(OWNERLESS_RESOURCE)
+    .bind(CHAIN)
+    .bind(block_hash(8))
+    .execute(&pool)
+    .await?;
+    seed_surface(
+        &pool,
+        OWNERLESS_NAMEHASH,
+        "bornwrapped.eth",
+        CONTROL_RESOURCE,
+        CONTROL_BINDING,
+    )
+    .await?;
     seed_binding_provenance(&pool, CONTROL_BINDING, 0, 1).await?;
-    sqlx::query("INSERT INTO token_lineages (token_lineage_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 8, 'canonical')").bind(WRAPPER_LINEAGE).bind(CHAIN).bind(block_hash(8)).execute(&pool).await?;
-    sqlx::query("UPDATE resources SET token_lineage_id = $1::uuid WHERE resource_id = $2::uuid").bind(WRAPPER_LINEAGE).bind(CONTROL_RESOURCE).execute(&pool).await?;
+    sqlx::query(
+        "INSERT INTO token_lineages (token_lineage_id, chain_id, block_hash, block_number,
+             canonicality_state)
+         VALUES ($1::uuid, $2, $3, 8, 'canonical')",
+    )
+    .bind(WRAPPER_LINEAGE)
+    .bind(CHAIN)
+    .bind(block_hash(8))
+    .execute(&pool)
+    .await?;
+    sqlx::query("UPDATE resources SET token_lineage_id = $1::uuid WHERE resource_id = $2::uuid")
+        .bind(WRAPPER_LINEAGE)
+        .bind(CONTROL_RESOURCE)
+        .execute(&pool)
+        .await?;
     for (identity, resource, kind, family, log, state) in [
         // NameWrapped precedes the controller's NameRegistered, so no registrar lease is current yet.
-        ("fixture:born-binding", CONTROL_RESOURCE, "SurfaceBound", "ens_v1_wrapper_l1", 1, json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"authority_kind":"wrapper","wrapped_registrar_resource_id":null})),
-        ("fixture:born-scope", CONTROL_RESOURCE, "PermissionScopeChanged", "ens_v1_wrapper_l1", 1, json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"wrapper_state":"wrapped","fuses":0,"wrapped_registrar_resource_id":null})),
-        ("fixture:born-wrapper-expiry", CONTROL_RESOURCE, "ExpiryChanged", "ens_v1_wrapper_l1", 1, json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"expiry":7_780_242,"wrapped_registrar_resource_id":null})),
-        ("fixture:born-wrapper-transfer", CONTROL_RESOURCE, "TokenControlTransferred", "ens_v1_wrapper_l1", 1, json!({"source_event":"NameWrapped","to":CONTROL_OWNER,"wrapped_registrar_resource_id":null})),
-        ("fixture:born-grant", OWNERLESS_RESOURCE, "RegistrationGranted", "ens_v1_registrar_l1", 3, json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:born","registrant":CONTROL_OWNER,"expiry":4242,"namehash":OWNERLESS_NAMEHASH})),
-        ("fixture:born-expiry", OWNERLESS_RESOURCE, "ExpiryChanged", "ens_v1_registrar_l1", 3, json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:born","registrant":CONTROL_OWNER,"expiry":4242,"namehash":OWNERLESS_NAMEHASH})),
-    ] { seed_normalized_event(&pool, identity, Some(OWNERLESS_LOGICAL), Some(resource), kind, family, 8, log, state, json!({})).await?; }
-    sqlx::query("UPDATE normalized_events SET transaction_hash = '0xborn' WHERE event_identity LIKE 'fixture:born-%'").execute(&pool).await?;
+        (
+            "fixture:born-binding",
+            CONTROL_RESOURCE,
+            "SurfaceBound",
+            "ens_v1_wrapper_l1",
+            1,
+            json!({
+                "source_event": "NameWrapped",
+                "node": OWNERLESS_NAMEHASH,
+                "authority_kind": "wrapper",
+                "wrapped_registrar_resource_id": null,
+            }),
+        ),
+        (
+            "fixture:born-scope",
+            CONTROL_RESOURCE,
+            "PermissionScopeChanged",
+            "ens_v1_wrapper_l1",
+            1,
+            json!({
+                "source_event": "NameWrapped",
+                "node": OWNERLESS_NAMEHASH,
+                "wrapper_state": "wrapped",
+                "fuses": 0,
+                "wrapped_registrar_resource_id": null,
+            }),
+        ),
+        (
+            "fixture:born-wrapper-expiry",
+            CONTROL_RESOURCE,
+            "ExpiryChanged",
+            "ens_v1_wrapper_l1",
+            1,
+            json!({
+                "source_event": "NameWrapped",
+                "node": OWNERLESS_NAMEHASH,
+                "expiry": 7_780_242,
+                "wrapped_registrar_resource_id": null,
+            }),
+        ),
+        (
+            "fixture:born-wrapper-transfer",
+            CONTROL_RESOURCE,
+            "TokenControlTransferred",
+            "ens_v1_wrapper_l1",
+            1,
+            json!({
+                "source_event": "NameWrapped",
+                "to": CONTROL_OWNER,
+                "wrapped_registrar_resource_id": null,
+            }),
+        ),
+        (
+            "fixture:born-grant",
+            OWNERLESS_RESOURCE,
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            3,
+            json!({
+                "source_event": "NameRegistered",
+                "authority_kind": "registrar",
+                "authority_key": "registrar:born",
+                "registrant": CONTROL_OWNER,
+                "expiry": 4242,
+                "namehash": OWNERLESS_NAMEHASH,
+            }),
+        ),
+        (
+            "fixture:born-expiry",
+            OWNERLESS_RESOURCE,
+            "ExpiryChanged",
+            "ens_v1_registrar_l1",
+            3,
+            json!({
+                "source_event": "NameRegistered",
+                "authority_kind": "registrar",
+                "authority_key": "registrar:born",
+                "registrant": CONTROL_OWNER,
+                "expiry": 4242,
+                "namehash": OWNERLESS_NAMEHASH,
+            }),
+        ),
+    ] {
+        seed_normalized_event(
+            &pool,
+            identity,
+            Some(OWNERLESS_LOGICAL),
+            Some(resource),
+            kind,
+            family,
+            8,
+            log,
+            state,
+            json!({}),
+        )
+        .await?;
+    }
+    sqlx::query(
+        "UPDATE normalized_events
+         SET transaction_hash = '0xborn'
+         WHERE event_identity LIKE 'fixture:born-%'",
+    )
+    .execute(&pool)
+    .await?;
     run_project(&pool, 8, 8, None).await?;
-    let summary: (Option<String>, Option<i64>, Option<String>) = sqlx::query_as("SELECT declared_summary #>> '{registration,status}', (declared_summary #>> '{registration,expiry}')::bigint, declared_summary #>> '{registration,registered_at}' FROM name_current WHERE logical_name_id = $1").bind(OWNERLESS_LOGICAL).fetch_one(&pool).await?;
-    assert_eq!((summary.0.as_deref(), summary.1), (Some("active"), Some(4242)), "a controller-granted born-wrapped name lost its registrar lease: {summary:?}");
+    let summary: (Option<String>, Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT declared_summary #>> '{registration,status}',
+             (declared_summary #>> '{registration,expiry}')::bigint,
+             declared_summary #>> '{registration,registered_at}'
+         FROM name_current
+         WHERE logical_name_id = $1",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        (summary.0.as_deref(), summary.1),
+        (Some("active"), Some(4242)),
+        "a controller-granted born-wrapped name lost its registrar lease: {summary:?}"
+    );
     assert!(summary.2.is_some(), "{summary:?}");
-    database.cleanup().await?; Ok(())
+    assert_eq!(
+        name_origin(&pool, OWNERLESS_LOGICAL).await?,
+        json!({
+            "created_at": "2026-08-01T00:00:08+00:00",
+            "selected_event_ids": [
+                "fixture:born-binding",
+                "fixture:born-expiry",
+                "fixture:born-grant",
+                "fixture:born-scope",
+                "fixture:born-wrapper-expiry",
+                "fixture:born-wrapper-transfer",
+            ],
+            "raw_fact_refs": 6,
+            "manifest_versions": 6,
+            "control": {
+                "expiry": "1970-01-01T01:10:42Z",
+                "latest_event_kind": "TokenControlTransferred",
+                "registrant": CONTROL_OWNER.to_lowercase(),
+                "registry_owner": null,
+                "status": null,
+            },
+        }),
+        "created_at, provenance or control changed for a controller-granted born-wrapped name"
+    );
+    database.cleanup().await?;
+    Ok(())
 }
 
 #[tokio::test]
-#[rustfmt::skip]
-async fn controller_granted_later_wrapped_name_serves_the_same_registrant_as_before() -> Result<()> {
+async fn controller_granted_later_wrapped_name_serves_the_same_registrant_as_before() -> Result<()>
+{
     const WRAPPER_CONTRACT: &str = "0x9999999999999999999999999999999999999999";
-    let (database, pool) = migrated_pool().await?; seed_chain(&pool).await?;
-    seed_surface(&pool, OWNERLESS_NAMEHASH, "laterwrapped.eth", OWNERLESS_RESOURCE, OWNERLESS_BINDING).await?;
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    seed_surface(
+        &pool,
+        OWNERLESS_NAMEHASH,
+        "laterwrapped.eth",
+        OWNERLESS_RESOURCE,
+        OWNERLESS_BINDING,
+    )
+    .await?;
     seed_binding_provenance(&pool, OWNERLESS_BINDING, 0, 1).await?;
-    seed_successor_binding(&pool, OWNERLESS_NAMEHASH, CONTROL_RESOURCE, CONTROL_BINDING, 9).await?;
+    seed_successor_binding(
+        &pool,
+        OWNERLESS_NAMEHASH,
+        CONTROL_RESOURCE,
+        CONTROL_BINDING,
+        9,
+    )
+    .await?;
     seed_binding_provenance(&pool, CONTROL_BINDING, 0, 3).await?;
-    sqlx::query("INSERT INTO token_lineages (token_lineage_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 9, 'canonical')").bind(WRAPPER_LINEAGE).bind(CHAIN).bind(block_hash(9)).execute(&pool).await?;
-    sqlx::query("UPDATE resources SET token_lineage_id = $1::uuid WHERE resource_id = $2::uuid").bind(WRAPPER_LINEAGE).bind(CONTROL_RESOURCE).execute(&pool).await?;
+    sqlx::query(
+        "INSERT INTO token_lineages (token_lineage_id, chain_id, block_hash, block_number,
+             canonicality_state)
+         VALUES ($1::uuid, $2, $3, 9, 'canonical')",
+    )
+    .bind(WRAPPER_LINEAGE)
+    .bind(CHAIN)
+    .bind(block_hash(9))
+    .execute(&pool)
+    .await?;
+    sqlx::query("UPDATE resources SET token_lineage_id = $1::uuid WHERE resource_id = $2::uuid")
+        .bind(WRAPPER_LINEAGE)
+        .bind(CONTROL_RESOURCE)
+        .execute(&pool)
+        .await?;
     for (identity, resource, kind, family, block, log, state) in [
-        ("fixture:later-grant", OWNERLESS_RESOURCE, "RegistrationGranted", "ens_v1_registrar_l1", 8, 1, json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:later","registrant":CONTROL_OWNER,"expiry":4242,"namehash":OWNERLESS_NAMEHASH})),
-        ("fixture:later-expiry", OWNERLESS_RESOURCE, "ExpiryChanged", "ens_v1_registrar_l1", 8, 1, json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:later","registrant":CONTROL_OWNER,"expiry":4242,"namehash":OWNERLESS_NAMEHASH})),
-        ("fixture:later-custody", OWNERLESS_RESOURCE, "TokenControlTransferred", "ens_v1_registrar_l1", 9, 1, json!({"source_event":"Transfer","from":CONTROL_OWNER,"to":WRAPPER_CONTRACT,"namehash":OWNERLESS_NAMEHASH})),
-        ("fixture:later-binding", CONTROL_RESOURCE, "SurfaceBound", "ens_v1_wrapper_l1", 9, 3, json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"authority_kind":"wrapper","wrapped_registrar_resource_id":OWNERLESS_RESOURCE})),
-        ("fixture:later-scope", CONTROL_RESOURCE, "PermissionScopeChanged", "ens_v1_wrapper_l1", 9, 3, json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"wrapper_state":"wrapped","fuses":0,"wrapped_registrar_resource_id":OWNERLESS_RESOURCE})),
-        ("fixture:later-wrapper-expiry", CONTROL_RESOURCE, "ExpiryChanged", "ens_v1_wrapper_l1", 9, 3, json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"expiry":7_780_242,"wrapped_registrar_resource_id":OWNERLESS_RESOURCE})),
+        (
+            "fixture:later-grant",
+            OWNERLESS_RESOURCE,
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            8,
+            1,
+            json!({
+                "source_event": "NameRegistered",
+                "authority_kind": "registrar",
+                "authority_key": "registrar:later",
+                "registrant": CONTROL_OWNER,
+                "expiry": 4242,
+                "namehash": OWNERLESS_NAMEHASH,
+            }),
+        ),
+        (
+            "fixture:later-expiry",
+            OWNERLESS_RESOURCE,
+            "ExpiryChanged",
+            "ens_v1_registrar_l1",
+            8,
+            1,
+            json!({
+                "source_event": "NameRegistered",
+                "authority_kind": "registrar",
+                "authority_key": "registrar:later",
+                "registrant": CONTROL_OWNER,
+                "expiry": 4242,
+                "namehash": OWNERLESS_NAMEHASH,
+            }),
+        ),
+        (
+            "fixture:later-custody",
+            OWNERLESS_RESOURCE,
+            "TokenControlTransferred",
+            "ens_v1_registrar_l1",
+            9,
+            1,
+            json!({
+                "source_event": "Transfer",
+                "from": CONTROL_OWNER,
+                "to": WRAPPER_CONTRACT,
+                "namehash": OWNERLESS_NAMEHASH,
+            }),
+        ),
+        (
+            "fixture:later-binding",
+            CONTROL_RESOURCE,
+            "SurfaceBound",
+            "ens_v1_wrapper_l1",
+            9,
+            3,
+            json!({
+                "source_event": "NameWrapped",
+                "node": OWNERLESS_NAMEHASH,
+                "authority_kind": "wrapper",
+                "wrapped_registrar_resource_id": OWNERLESS_RESOURCE,
+            }),
+        ),
+        (
+            "fixture:later-scope",
+            CONTROL_RESOURCE,
+            "PermissionScopeChanged",
+            "ens_v1_wrapper_l1",
+            9,
+            3,
+            json!({
+                "source_event": "NameWrapped",
+                "node": OWNERLESS_NAMEHASH,
+                "wrapper_state": "wrapped",
+                "fuses": 0,
+                "wrapped_registrar_resource_id": OWNERLESS_RESOURCE,
+            }),
+        ),
+        (
+            "fixture:later-wrapper-expiry",
+            CONTROL_RESOURCE,
+            "ExpiryChanged",
+            "ens_v1_wrapper_l1",
+            9,
+            3,
+            json!({
+                "source_event": "NameWrapped",
+                "node": OWNERLESS_NAMEHASH,
+                "expiry": 7_780_242,
+                "wrapped_registrar_resource_id": OWNERLESS_RESOURCE,
+            }),
+        ),
         // wrapETH2LD lets the caller name a wrapped owner other than the registrant.
-        ("fixture:later-wrapper-transfer", CONTROL_RESOURCE, "TokenControlTransferred", "ens_v1_wrapper_l1", 9, 3, json!({"source_event":"NameWrapped","to":PRIOR_CONTROLLER,"wrapped_registrar_resource_id":OWNERLESS_RESOURCE})),
-    ] { seed_normalized_event(&pool, identity, Some(OWNERLESS_LOGICAL), Some(resource), kind, family, block, log, state, json!({"emitting_address":WRAPPER_CONTRACT})).await?; }
-    sqlx::query("UPDATE normalized_events SET transaction_hash = '0xwrap' WHERE event_identity LIKE 'fixture:later-%' AND block_number = 9").execute(&pool).await?;
+        (
+            "fixture:later-wrapper-transfer",
+            CONTROL_RESOURCE,
+            "TokenControlTransferred",
+            "ens_v1_wrapper_l1",
+            9,
+            3,
+            json!({
+                "source_event": "NameWrapped",
+                "to": PRIOR_CONTROLLER,
+                "wrapped_registrar_resource_id": OWNERLESS_RESOURCE,
+            }),
+        ),
+    ] {
+        seed_normalized_event(
+            &pool,
+            identity,
+            Some(OWNERLESS_LOGICAL),
+            Some(resource),
+            kind,
+            family,
+            block,
+            log,
+            state,
+            json!({"emitting_address":WRAPPER_CONTRACT}),
+        )
+        .await?;
+    }
+    sqlx::query(
+        "UPDATE normalized_events
+         SET transaction_hash = '0xwrap'
+         WHERE event_identity LIKE 'fixture:later-%'
+         AND block_number = 9",
+    )
+    .execute(&pool)
+    .await?;
     run_project(&pool, 9, 8, None).await?;
-    let summary: (Option<String>, Option<i64>, Option<String>) = sqlx::query_as("SELECT declared_summary #>> '{registration,status}', (declared_summary #>> '{registration,expiry}')::bigint, declared_summary #>> '{registration,registrant}' FROM name_current WHERE logical_name_id = $1").bind(OWNERLESS_LOGICAL).fetch_one(&pool).await?;
-    assert_eq!((summary.0.as_deref(), summary.1), (Some("active"), Some(4242)), "{summary:?}");
-    assert_eq!(summary.2, Some(PRIOR_CONTROLLER.to_lowercase()), "a later-wrapped name serves the NameWrapped owner as registrant");
-    database.cleanup().await?; Ok(())
+    let summary: (Option<String>, Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT declared_summary #>> '{registration,status}',
+             (declared_summary #>> '{registration,expiry}')::bigint,
+             declared_summary #>> '{registration,registrant}'
+         FROM name_current
+         WHERE logical_name_id = $1",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        (summary.0.as_deref(), summary.1),
+        (Some("active"), Some(4242)),
+        "{summary:?}"
+    );
+    assert_eq!(
+        summary.2,
+        Some(PRIOR_CONTROLLER.to_lowercase()),
+        "a later-wrapped name serves the NameWrapped owner as registrant"
+    );
+    assert_eq!(
+        name_origin(&pool, OWNERLESS_LOGICAL).await?,
+        json!({
+            "created_at": "2026-08-01T00:00:08+00:00",
+            "selected_event_ids": [
+                "fixture:later-binding",
+                "fixture:later-custody",
+                "fixture:later-expiry",
+                "fixture:later-grant",
+                "fixture:later-scope",
+                "fixture:later-wrapper-expiry",
+                "fixture:later-wrapper-transfer",
+            ],
+            "raw_fact_refs": 7,
+            "manifest_versions": 7,
+            "control": {
+                "expiry": "1970-01-01T01:10:42Z",
+                "latest_event_kind": "TokenControlTransferred",
+                "registrant": PRIOR_CONTROLLER.to_lowercase(),
+                "registry_owner": null,
+                "status": null,
+            },
+        }),
+        "created_at, provenance or control changed for a controller-granted later-wrapped name"
+    );
+    database.cleanup().await?;
+    Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -3900,8 +5197,25 @@ async fn born_wrapped_projection(
     } else {
         WRAPPER_CONTRACT
     };
-    let registrar = json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:born","registrant":grant_registrant,"authority_owner":WRAPPER_CONTRACT,"expiry":4242,"namehash":OWNERLESS_NAMEHASH});
-    let wrapper = json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"authority_kind":"wrapper","authority_key":"wrapper:born","wrapped_registrar_resource_id":link,"wrapper_state":"wrapped","fuses":0,"expiry":7_780_242});
+    let registrar = json!({
+        "source_event": "NameRegistered",
+        "authority_kind": "registrar",
+        "authority_key": "registrar:born",
+        "registrant": grant_registrant,
+        "authority_owner": WRAPPER_CONTRACT,
+        "expiry": 4242,
+        "namehash": OWNERLESS_NAMEHASH,
+    });
+    let wrapper = json!({
+        "source_event": "NameWrapped",
+        "node": OWNERLESS_NAMEHASH,
+        "authority_kind": "wrapper",
+        "authority_key": "wrapper:born",
+        "wrapped_registrar_resource_id": link,
+        "wrapper_state": "wrapped",
+        "fuses": 0,
+        "expiry": 7_780_242,
+    });
     for (identity, logical, resource, kind, family, log, state) in [
         (
             "fixture:lapsed-grant",
@@ -3928,7 +5242,12 @@ async fn born_wrapped_projection(
             "TokenControlTransferred",
             "ens_v1_wrapper_l1",
             2,
-            json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"to":CONTROL_OWNER,"wrapped_registrar_resource_id":link}),
+            json!({
+                "source_event": "NameWrapped",
+                "node": OWNERLESS_NAMEHASH,
+                "to": CONTROL_OWNER,
+                "wrapped_registrar_resource_id": link,
+            }),
         ),
         (
             "fixture:lapsed-wrapper-expiry",
@@ -4014,7 +5333,12 @@ async fn born_wrapped_projection(
                 "ens_v1_registrar_l1",
                 10,
                 log,
-                json!({"source_event":"NameRenewed","authority_kind":"registrar","expiry":99_999_999,"namehash":OWNERLESS_NAMEHASH}),
+                json!({
+                    "source_event": "NameRenewed",
+                    "authority_kind": "registrar",
+                    "expiry": 99_999_999,
+                    "namehash": OWNERLESS_NAMEHASH,
+                }),
                 json!({}),
             )
             .await?;
@@ -4044,21 +5368,36 @@ async fn born_wrapped_projection(
             OWNERLESS_RESOURCE,
             "RegistrationReleased",
             "ens_v1_registrar_l1",
-            json!({"source_event":"RegistrationReleased","expiry":4242,"namehash":OWNERLESS_NAMEHASH,"released_at":7_780_243}),
+            json!({
+                "source_event": "RegistrationReleased",
+                "expiry": 4242,
+                "namehash": OWNERLESS_NAMEHASH,
+                "released_at": 7_780_243,
+            }),
         ),
         (
             "fixture:lapsed-unbound",
             CONTROL_RESOURCE,
             "SurfaceUnbound",
             "ens_v1_wrapper_l1",
-            json!({"source_event":"RegistrationReleased","authority_kind":"wrapper","authority_key":"wrapper:born","active_to":7_780_243}),
+            json!({
+                "source_event": "RegistrationReleased",
+                "authority_kind": "wrapper",
+                "authority_key": "wrapper:born",
+                "active_to": 7_780_243,
+            }),
         ),
         (
             "fixture:lapsed-closing-epoch",
             CONTROL_RESOURCE,
             "AuthorityEpochChanged",
             "ens_v1_wrapper_l1",
-            json!({"source_event":"RegistrationReleased","authority_kind":null,"authority_key":null,"owner":null}),
+            json!({
+                "source_event": "RegistrationReleased",
+                "authority_kind": null,
+                "authority_key": null,
+                "owner": null,
+            }),
         ),
     ] {
         if shape == BornWrappedShape::WrapperExpiryOnly && identity == "fixture:lapsed-release" {
@@ -4415,7 +5754,14 @@ async fn snapshot_grant_and_bound_original_grant_serve_one_registration() -> Res
     .bind(CHAIN)
     .fetch_one(&pool)
     .await?;
-    let lease = json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:snapshot","registrant":CONTROL_OWNER,"expiry":4242,"namehash":OWNERLESS_NAMEHASH});
+    let lease = json!({
+        "source_event": "NameRegistered",
+        "authority_kind": "registrar",
+        "authority_key": "registrar:snapshot",
+        "registrant": CONTROL_OWNER,
+        "expiry": 4242,
+        "namehash": OWNERLESS_NAMEHASH,
+    });
     for (kind, log) in [("RegistrationGranted", 1), ("ExpiryChanged", 2)] {
         seed_normalized_event(
             &pool,
@@ -4813,5 +6159,104 @@ async fn wrapper_only_lapse_serves_no_registrant_until_a_wrapper_renewal() -> Re
             "step {number}: {step:?}"
         );
     }
+    Ok(())
+}
+
+/// What `name_current` publishes about where a name came from: `created_at`, the provenance event
+/// ids and the control fields.
+async fn name_origin(pool: &PgPool, logical_name_id: &str) -> Result<serde_json::Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+             'created_at', (declared_summary #>> '{registration,created_at}')::timestamptz,
+             'selected_event_ids', (
+                 SELECT COALESCE(jsonb_agg(event.event_identity ORDER BY event.event_identity),
+                                 '[]'::jsonb)
+                 FROM normalized_events event
+                 WHERE to_jsonb(event.normalized_event_id) <@
+                       (name_current.provenance -> 'selected_event_ids')
+             ),
+             'raw_fact_refs', jsonb_array_length(provenance -> 'raw_fact_refs'),
+             'manifest_versions', jsonb_array_length(provenance -> 'manifest_versions'),
+             'control', declared_summary -> 'control'
+         )
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// The ENSv1 registry adapter writes rows that carry a resource but no name while a label is
+/// unknown. Naming rows by resource identity exists for `.eth` BaseRegistrar lifecycle rows only:
+/// a registry row written before the label was known must stay out of the name's `created_at` and
+/// provenance lists, as it did before registrar rows were joined by resource identity.
+#[tokio::test]
+async fn registry_rows_without_a_name_stay_out_of_the_names_origin() -> Result<()> {
+    const OWNER: &str = "0x7777777777777777777777777777777777777777";
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    seed_surface(
+        &pool,
+        OWNERLESS_NAMEHASH,
+        "label-learned-later.eth",
+        OWNERLESS_RESOURCE,
+        OWNERLESS_BINDING,
+    )
+    .await?;
+    let owner_state = json!({
+        "node": OWNERLESS_NAMEHASH,
+        "owner": OWNER,
+        "owner_getter": OWNER,
+        "authority_kind": "registry_only"
+    });
+    seed_normalized_event(
+        &pool,
+        "fixture:registry-row-before-label",
+        None,
+        Some(OWNERLESS_RESOURCE),
+        "AuthorityTransferred",
+        "ens_v1_registry_l1",
+        8,
+        1,
+        owner_state.clone(),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:registry-row-after-label",
+        Some(OWNERLESS_LOGICAL),
+        Some(OWNERLESS_RESOURCE),
+        "AuthorityTransferred",
+        "ens_v1_registry_l1",
+        9,
+        1,
+        owner_state,
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    run_project(&pool, 9, 8, None).await?;
+
+    let origin = name_origin(&pool, OWNERLESS_LOGICAL).await?;
+    assert_eq!(
+        origin["selected_event_ids"],
+        json!(["fixture:registry-row-after-label"]),
+        "a registry row written without a name entered the name's provenance: {origin}"
+    );
+    assert_eq!(origin["raw_fact_refs"], json!(1), "{origin}");
+    assert_eq!(origin["manifest_versions"], json!(1), "{origin}");
+    let created_at_block: i64 = sqlx::query_scalar(
+        "SELECT block_number FROM chain_lineage
+         WHERE chain_id = $1 AND block_timestamp = ($2 #>> '{}')::timestamptz",
+    )
+    .bind(CHAIN)
+    .bind(&origin["created_at"])
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        created_at_block, 9,
+        "created_at moved back to a registry row written without a name: {origin}"
+    );
+    database.cleanup().await?;
     Ok(())
 }

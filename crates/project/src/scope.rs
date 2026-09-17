@@ -11,6 +11,7 @@ mod expiry;
 mod inventory;
 mod labels;
 mod primary;
+mod registrar_bindings;
 mod registry_resolver;
 mod registry_root;
 mod resolver;

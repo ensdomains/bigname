@@ -7,20 +7,67 @@ pub(super) async fn prepare(transaction: &mut Transaction<'_, Postgres>) -> Resu
     ownerless_registry(transaction).await
 }
 
+/// Names the `.eth` BaseRegistrar lifecycle rows that were written before the label was known.
+/// Rows of every other source family keep the name Interpret gave them, or none.
+///
+/// A row is named in one of two ways, both an exact match on the registrar resource and the
+/// namehash: through a binding of that resource to the name, or through the registrar lease a
+/// `NameWrapped` row of the name recorded in `wrapped_registrar_resource_id`. The second way
+/// leaves out the registrar transfer that moves the token into the NameWrapper in the wrap's own
+/// transaction: it names the NameWrapper contract, not a holder. Rows named the second way are
+/// listed in `project_wrapper_linked_events`.
 async fn bind_resource_events(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
-    sqlx::query(
+    for statement in [
         "UPDATE project_events event SET logical_name_id = binding.logical_name_id
          FROM project_binding_candidates binding JOIN project_surfaces surface
            ON surface.logical_name_id = binding.logical_name_id
          WHERE event.logical_name_id IS NULL AND event.resource_id = binding.resource_id
-           AND lower(surface.namehash) = lower(COALESCE(event.after_state->>'namehash',
-               event.after_state->>'child_node', event.after_state->>'node'))",
-    )
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to bind resource-keyed events", error))?;
+           AND event.source_family = 'ens_v1_registrar_l1'
+           AND event.event_kind IN (
+               'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
+               'ExpiryChanged', 'TokenControlTransferred'
+           )
+           AND lower(surface.namehash) = lower(event.after_state ->> 'namehash')",
+        "CREATE TEMP TABLE project_wrapper_linked_events (
+             normalized_event_id bigint PRIMARY KEY
+         ) ON COMMIT DROP",
+        BIND_WRAPPER_LINKED_EVENTS,
+    ] {
+        sqlx::query(statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to bind resource-keyed events", error)
+            })?;
+    }
     Ok(())
 }
+
+const BIND_WRAPPER_LINKED_EVENTS: &str = "
+    WITH named AS (
+        UPDATE project_events event SET logical_name_id = wrapper.logical_name_id
+        FROM project_events wrapper
+        WHERE event.logical_name_id IS NULL
+          AND event.source_family = 'ens_v1_registrar_l1'
+          AND event.event_kind IN (
+              'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
+              'ExpiryChanged', 'TokenControlTransferred'
+          )
+          AND wrapper.source_family = 'ens_v1_wrapper_l1'
+          AND wrapper.event_kind = 'SurfaceBound'
+          AND wrapper.logical_name_id IS NOT NULL
+          AND wrapper.after_state ->> 'wrapped_registrar_resource_id' = event.resource_id::text
+          AND lower(wrapper.after_state ->> 'node') = lower(event.after_state ->> 'namehash')
+          AND (
+              event.event_kind <> 'TokenControlTransferred'
+              OR event.transaction_hash IS DISTINCT FROM wrapper.transaction_hash
+              OR lower(event.after_state ->> 'to') IS DISTINCT FROM
+                 lower(wrapper.raw_fact_ref ->> 'emitting_address')
+          )
+        RETURNING event.normalized_event_id
+    )
+    INSERT INTO project_wrapper_linked_events
+    SELECT DISTINCT normalized_event_id FROM named";
 
 async fn ownerless_registry(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query(
@@ -101,10 +148,6 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
            ON candidate.surface_binding_id = authority.selected_binding_id",
         "CREATE INDEX ON project_bindings (logical_name_id)",
         include_str!("authority_events.sql"),
-        "UPDATE project_authority_events
-         SET logical_name_id = selected_logical_name_id
-         WHERE logical_name_id IS NULL",
-        "ALTER TABLE project_authority_events DROP COLUMN selected_logical_name_id",
         "CREATE INDEX ON project_authority_events (logical_name_id, normalized_event_id)",
         "CREATE INDEX ON project_authority_events (resource_id, normalized_event_id)",
         include_str!("registration_events.sql"),
@@ -226,4 +269,44 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
             })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// A full rebuild runs this statement once over every event and every name. With anything but
+    /// a plain equality between the two, Postgres can neither hash- nor merge-join them and
+    /// instead re-reads every row that carries no name once per name.
+    #[test]
+    fn authority_events_join_names_by_equality_only() {
+        let statement = include_str!("authority_events.sql");
+        let (join, _filter) = statement
+            .split_once("\nWHERE (")
+            .expect("the statement has a WHERE clause");
+        assert!(
+            join.trim_end().ends_with(
+                "FROM project_events event\nJOIN project_name_authority authority\n  \
+                 ON authority.logical_name_id = event.logical_name_id"
+            ),
+            "the events-to-names join must be a single equality on logical_name_id:\n{join}"
+        );
+        assert!(
+            !statement.contains("event.logical_name_id IS NULL"),
+            "rows without a name are named while staging, not searched by this statement"
+        );
+    }
+
+    /// The registrar lease a `NameWrapped` row recorded is attached while staging, with the same
+    /// restriction as the binding match: `.eth` BaseRegistrar lifecycle rows only.
+    #[test]
+    fn staging_names_only_base_registrar_lifecycle_rows() {
+        assert_eq!(
+            super::BIND_WRAPPER_LINKED_EVENTS
+                .matches("event.source_family = 'ens_v1_registrar_l1'")
+                .count(),
+            1
+        );
+        assert!(super::BIND_WRAPPER_LINKED_EVENTS.contains(
+            "wrapper.after_state ->> 'wrapped_registrar_resource_id' = event.resource_id::text"
+        ));
+    }
 }
