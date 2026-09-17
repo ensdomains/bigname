@@ -1,3 +1,11 @@
+/// The shape of `resolver_current.declared_summary`: its sections and their fields.
+/// Stored on every row as `summary_version`; a row carrying another value (or none,
+/// from before the field existed) is rebuilt on the next run whatever else it cites,
+/// which is how a reshaped summary reaches a resolver no event or manifest change
+/// would otherwise touch. Bump it when a section or field is added, removed, or
+/// changes meaning.
+pub(crate) const SUMMARY_VERSION: i32 = 1;
+
 /// The per-section summaries of `resolver_current.declared_summary`, spliced into the
 /// build statement after the `summarized` CTE. `$5` is the sample limit.
 pub(super) const SECTION_SUMMARIES: &str = r#"

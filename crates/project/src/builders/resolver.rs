@@ -18,6 +18,7 @@ pub(crate) use link_summary::LINK_DIGEST_SQL;
 use mirror::{DIRECT_MIRROR_DECLARED, MIRROR_CLASSIFICATION, MIRROR_ROLE};
 use read_features::{DECLARED_READ_FEATURES, IMPLEMENTATION_READ_FEATURES};
 use section_summaries::SECTION_SUMMARIES;
+pub(crate) use section_summaries::SUMMARY_VERSION;
 
 const SUMMARY_SAMPLE_LIMIT: i32 = 100;
 
@@ -516,7 +517,8 @@ pub(super) async fn build(
                        END,
                        'mirror', {MIRROR_CLASSIFICATION}
                    )),
-                   {SECTION_SUMMARIES}
+                   {SECTION_SUMMARIES},
+                   'summary_version', {SUMMARY_VERSION}
                ),
                CASE WHEN supported THEN 'supported' ELSE 'unsupported' END,
                support_reason,

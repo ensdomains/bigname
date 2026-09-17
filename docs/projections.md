@@ -809,7 +809,13 @@ node-keyed resolver the summary is `unsupported` with
 `record_links_not_applicable`. Full bound-name and permission collections
 remain on their name-side projections and routes instead of being duplicated
 into one resolver row. The resolver summary is diagnostic and does not replace
-exact-name topology.
+exact-name topology. Every row also carries `summary_version`, the shape of the
+summary as the Project code that wrote it defined it; a run rebuilds each
+resolver row whose version differs from the running code's (a row from before
+the field existed included), so a deploy that adds or reshapes a section
+reaches every resolver — a manifest-declared one with no events and an
+unchanged citation included — on the first run, without waiting for evidence
+that would otherwise rescope it.
 
 `resolver_current.unsupported_reason` for an ENSv2 resolver (and the
 `coverage.unsupported_reason` copied onto its record inventory) uses a closed

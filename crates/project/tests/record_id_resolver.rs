@@ -367,6 +367,60 @@ async fn resolver_links_summary_picks_up_a_name_discovered_later() -> Result<()>
     Ok(())
 }
 
+// A row built by an earlier deploy, before a section existed, is rebuilt on the
+// next run even when nothing it cites changed and no event in the run's range
+// names the resolver: the row's summary_version is what scopes it.
+#[tokio::test]
+async fn resolver_summary_reshaped_by_a_deploy_is_rebuilt_without_new_evidence() -> Result<()> {
+    const OTHER: &str = "0x5555555555555555555555555555555555555555";
+    let (db, pool) = database("record_id_summary_version").await?;
+    seed(&pool).await?;
+    event(
+        &pool,
+        "upgrade-other",
+        10,
+        8,
+        "Upgraded",
+        None,
+        json!({"proxy_address":OTHER,"implementation":IMPLEMENTATION}),
+    )
+    .await?;
+    run(&pool, 12, None, RunMode::Normal).await?;
+    let built = summary(&pool, OTHER).await?;
+    assert!(built["links"].is_object(), "{built}");
+    assert_eq!(built["summary_version"], json!(1), "{built}");
+    // The database an older deploy left behind: no links section, no version.
+    sqlx::query("UPDATE resolver_current SET declared_summary = declared_summary - 'links' - 'summary_version' WHERE resolver_address = $1")
+        .bind(OTHER).execute(&pool).await?;
+    // Nothing in 13..=18 names OTHER.
+    run(&pool, 18, Some(12), RunMode::Normal).await?;
+    assert_eq!(
+        summary(&pool, OTHER).await?,
+        built,
+        "stale row was not rebuilt"
+    );
+    // A row on the current version and untouched by the range is carried, not rebuilt.
+    sqlx::query("UPDATE resolver_current SET declared_summary = declared_summary || '{\"fixture_marker\": true}' WHERE resolver_address = $1")
+        .bind(OTHER).execute(&pool).await?;
+    run(&pool, 18, Some(18), RunMode::Normal).await?;
+    assert_eq!(
+        summary(&pool, OTHER).await?["fixture_marker"],
+        json!(true),
+        "a current row was rebuilt without a reason"
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+async fn summary(pool: &PgPool, resolver: &str) -> Result<Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT declared_summary FROM resolver_current WHERE resolver_address = $1",
+    )
+    .bind(resolver)
+    .fetch_one(pool)
+    .await?)
+}
+
 async fn links_summary(pool: &PgPool, resolver: &str) -> Result<Value> {
     Ok(sqlx::query_scalar(
         "SELECT declared_summary -> 'links' FROM resolver_current WHERE resolver_address = $1",
