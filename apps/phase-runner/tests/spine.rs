@@ -1762,6 +1762,7 @@ async fn capacity_breach_pauses_and_then_resumes_the_phase() -> Result<()> {
         CapacityConfig {
             interpret_blocks_per_batch: bigname_interpret::DEFAULT_INTERPRET_BLOCKS_PER_BATCH,
             interpret_force_full_state_loader: false,
+            interpret_lookahead_statement_timeout_secs: None,
             database_max_bytes: None,
             minimum_free_disk_bytes: 1,
             writable_path: ".".into(),

@@ -112,8 +112,16 @@ async fn readonly_mainnet_batches() -> anyhow::Result<()> {
             )
             .await?
         } else {
-            match super::batch_input(&pool, "ethereum-mainnet", from, from + 499, None, capacity)
-                .await?
+            match super::batch_input(
+                &pool,
+                "ethereum-mainnet",
+                from,
+                from + 499,
+                None,
+                capacity,
+                None,
+            )
+            .await?
             {
                 super::Attempt::Loaded(loaded) => *loaded,
                 super::Attempt::FullStateRequired(choice) => {

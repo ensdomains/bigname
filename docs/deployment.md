@@ -196,6 +196,14 @@ one block timestamp cannot be split across batches. The setting must not change
 stored output or the interpreter content hash, so it can be changed between runs
 without a redo.
 
+`BIGNAME_INTERPRET_LOOKAHEAD_STATEMENT_TIMEOUT_SECS`
+(`--interpret-lookahead-statement-timeout-secs`) sets a PostgreSQL
+`statement_timeout`, in seconds, on the lookahead loader's read transaction. It
+defaults to 0, which sets no timeout, so a legitimately large batch is never
+killed by default. With a value set, a read that exceeds it fails the batch with
+a database error and the runner retries the same batch; use it only to surface a
+bad query plan, and prefer a smaller batch when a batch is simply large.
+
 `BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR` configures the Prometheus listener for
 a directly launched runner and defaults to `127.0.0.1:9465`. The server Compose
 file fixes the container listener at `0.0.0.0:9465` and publishes it on host

@@ -17,7 +17,9 @@ on `normalized_events` serve its reads:
   token transfers by chain and parsed expiry, so Interpret can find registrations
   whose expiry plus the 90-day grace period falls inside a batch. The expression
   parses any stored expiry without raising and must stay identical to
-  `crates/interpret/src/load/lookahead/due_names.sql`. That query keeps both
+  `crates/interpret/src/load/lookahead/due_names.sql`. The same query also reads
+  the block just before the batch through `normalized_events_chain_block_number_idx`,
+  for registrar events that recorded an already-lapsed expiry. That query keeps both
   expiry bounds as index conditions in PostgreSQL's generic prepared plan; a
   mainnet read-only comparison returned the same 17 names in 7.2 milliseconds
   instead of 40.2 seconds.
@@ -47,6 +49,12 @@ these two indexes is invalid and no build is running, drop only it with
 and validity checks. Never drop a valid index merely because an installation was
 retried, and never drop one while a runner that uses the lookahead loader is
 processing batches.
+
+After both builds finish, run `ANALYZE bigname_phase.normalized_events` (or
+confirm autovacuum has analyzed the table since). Expression indexes have no
+statistics until the table is analyzed, and the loader's queries depend on them:
+in a test database without statistics, reading the history of 100,000 names did
+not finish in several minutes, and took under four seconds after `ANALYZE`.
 
 The matching versioned schema-migration installs the same definitions on
 initialized databases; after a live prebuild, its `IF NOT EXISTS` is a no-op.

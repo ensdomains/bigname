@@ -773,6 +773,13 @@ fn run_cli_carries_the_interpret_batch_length_and_loader_override() {
             .get(),
         50
     );
+    assert_eq!(run(&[]).interpret_lookahead_statement_timeout_secs, None);
+    assert_eq!(
+        run(&["--interpret-lookahead-statement-timeout-secs", "90"])
+            .interpret_lookahead_statement_timeout_secs
+            .map(std::num::NonZeroU32::get),
+        Some(90)
+    );
     assert!(!run(&[]).interpret_force_full_state_loader);
     assert!(run(&["--interpret-force-full-state-loader"]).interpret_force_full_state_loader);
 }

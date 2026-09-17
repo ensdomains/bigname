@@ -16,11 +16,6 @@ pub(crate) enum Attempt {
     FullStateRequired(StateLoader),
 }
 
-// A termination guard, not a size limit. Each round either adds a name or resource from the
-// chain's finite history or ends the loop, so the closure always terminates; sixteen rounds
-// of links between names is far beyond any ENSv1 shape the adapter emits.
-const MAX_DEPENDENCY_ROUNDS: usize = 16;
-
 pub(crate) async fn batch_input(
     pool: &PgPool,
     chain_id: &str,
@@ -28,6 +23,7 @@ pub(crate) async fn batch_input(
     to_block: i64,
     resume_marker: Option<(i64, &str)>,
     state_cache_capacity: StateCacheCapacity,
+    statement_timeout: Option<std::num::NonZeroU32>,
 ) -> Result<Attempt> {
     let mut tx = pool.begin().await.map_err(|error| {
         InterpretError::database("failed to begin lookahead input snapshot", error)
@@ -38,12 +34,18 @@ pub(crate) async fn batch_input(
         .map_err(|error| {
             InterpretError::database("failed to configure lookahead input snapshot", error)
         })?;
-    sqlx::query("SET LOCAL statement_timeout = '60s'")
+    // Off unless the operator sets it: a legitimately large batch must not be killed.
+    if let Some(timeout) = statement_timeout {
+        sqlx::query(&format!(
+            "SET LOCAL statement_timeout = '{}s'",
+            timeout.get()
+        ))
         .execute(&mut *tx)
         .await
         .map_err(|error| {
             InterpretError::database("failed to bound lookahead database reads", error)
         })?;
+    }
     super::validate_snapshot_resume_marker(&mut tx, chain_id, resume_marker).await?;
     let orphaning_epoch = cache::orphaning_epoch(&mut tx, chain_id).await?;
     let (manifests, provenance) = manifests::load(&mut tx, chain_id).await?;
@@ -94,8 +96,14 @@ pub(crate) async fn batch_input(
             node: node.to_owned(),
         });
     }
-    let mut prior = None;
-    for _ in 0..MAX_DEPENDENCY_ROUNDS {
+    // Load the events of the requested names and resources, add the names and resources
+    // those events link to, and repeat until a round adds nothing. There is no round limit:
+    // every round that continues adds at least one name or resource that occurs in the
+    // chain's stored history before this batch, that history is finite and fixed inside this
+    // snapshot, and nothing is ever removed, so the set stops growing after finitely many
+    // rounds. A subname many labels deep costs one round per label, because each stored
+    // `NewOwner` links a name to its parent.
+    let prior = loop {
         validate_dependencies(&dependencies)?;
         let previous = (dependencies.nodes.len(), dependencies.resource_ids.len());
         let names: Vec<_> = dependencies
@@ -111,17 +119,11 @@ pub(crate) async fn batch_input(
             .map_err(|error| invalid_dependencies("expand prior links", error))?;
         validate_dependencies(&dependencies)?;
         if previous == (dependencies.nodes.len(), dependencies.resource_ids.len()) {
-            prior = Some(events);
-            break;
+            break events;
         }
         // Discard this partial fetch before querying the expanded set. Never retain the
         // previous round's full payload while loading the next one.
-    }
-    let prior = prior.ok_or_else(|| {
-        InterpretError::data_integrity(
-            "lookahead dependency closure exceeds 16 rounds; refusing incomplete state",
-        )
-    })?;
+    };
     let restored_event_count = prior.len();
     let restore = begin_schema_v2_adapter_restore_with_provenance(
         chain_id.to_owned(),

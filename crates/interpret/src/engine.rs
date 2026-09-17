@@ -43,6 +43,7 @@ pub struct Engine {
     pool: PgPool,
     state_cache_capacity: StateCacheCapacity,
     blocks_per_batch: NonZeroU32,
+    lookahead_statement_timeout_secs: Option<NonZeroU32>,
     force_full_state_loader: bool,
     loader_choices: loader_choice::LoaderChoices,
     prior_sessions: Mutex<HashMap<String, PriorSession>>,
@@ -72,6 +73,7 @@ impl Engine {
             pool,
             state_cache_capacity: StateCacheCapacity::Entries(entries),
             blocks_per_batch: DEFAULT_INTERPRET_BLOCKS_PER_BATCH,
+            lookahead_statement_timeout_secs: None,
             force_full_state_loader: false,
             loader_choices: loader_choice::LoaderChoices::default(),
             prior_sessions: Mutex::new(HashMap::new()),
@@ -82,6 +84,13 @@ impl Engine {
     /// batch and must not change stored output.
     pub fn with_blocks_per_batch(mut self, blocks: NonZeroU32) -> Self {
         self.blocks_per_batch = blocks;
+        self
+    }
+
+    /// Optional PostgreSQL `statement_timeout`, in seconds, for the lookahead loader's
+    /// reads. `None`, the default, sets no timeout.
+    pub fn with_lookahead_statement_timeout_secs(mut self, seconds: Option<NonZeroU32>) -> Self {
+        self.lookahead_statement_timeout_secs = seconds;
         self
     }
 
@@ -189,6 +198,7 @@ impl Engine {
                 *batch_to,
                 resume_marker,
                 self.state_cache_capacity,
+                self.lookahead_statement_timeout_secs,
             )
             .await?
         };

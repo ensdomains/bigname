@@ -1218,10 +1218,19 @@ interpreting, the adapter decodes the batch's logs without interpreting them
 and lists every ENSv1 name (by namehash) and resource the logs can touch.
 Interpret adds the names whose registrar expiry plus the 90-day grace period
 falls inside the batch's time span, because time-derived releases touch names no
-log mentions. It then reads, in the batch's input snapshot, the latest readable
-event per interpreter state key among the events of those names and resources,
-follows the names and resources those events reference until no new one
-appears, and restores a fresh adapter state from exactly those events under the
+log mentions. A registration is released at the first block whose timestamp is
+strictly greater than its expiry plus the grace period, so the span runs from
+the timestamp of the block before the batch, inclusive, to the timestamp of the
+batch's last block, exclusive. One case lies below that span: a registrar event
+in the block just before the batch that recorded an expiry already lapsed at its
+own block. The adapter releases such a name at the next block boundary, which is
+the batch's first block, so Interpret adds those names too; every earlier block
+boundary has already settled. Interpret then reads, in the batch's input
+snapshot, the latest readable event per interpreter state key among the events
+of those names and resources, adds the names and resources those events
+reference, and repeats until a round adds nothing. There is no round limit: each
+continuing round adds a name or resource from the chain's finite stored history,
+so the repetition ends. Interpret restores a fresh adapter state from exactly those events under the
 same canonical-lineage and pre-batch boundary rules as a cold restore. The
 session is discarded after the batch. Two partial expression indexes on
 `normalized_events` serve these reads: `normalized_events_v1_direct_node_probe_idx`

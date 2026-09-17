@@ -20,6 +20,14 @@ pub(super) struct CapacityArgs {
         default_value_t = bigname_interpret::DEFAULT_INTERPRET_BLOCKS_PER_BATCH
     )]
     interpret_blocks_per_batch: NonZeroU32,
+    /// PostgreSQL statement timeout, in seconds, for the Interpret lookahead loader's reads.
+    /// 0, the default, sets no timeout.
+    #[arg(
+        long,
+        env = "BIGNAME_INTERPRET_LOOKAHEAD_STATEMENT_TIMEOUT_SECS",
+        default_value_t = 0
+    )]
+    interpret_lookahead_statement_timeout_secs: u32,
     #[arg(long, env = "BIGNAME_PHASE_RUNNER_INTERPRETER_STATE_CACHE_ENTRIES")]
     interpreter_state_cache_entries: Option<usize>,
     #[arg(long, env = "BIGNAME_PHASE_RUNNER_DATABASE_MAX_BYTES")]
@@ -53,6 +61,9 @@ pub(super) fn resolve_capacity(args: CapacityArgs) -> RunnerResult<CapacityConfi
     Ok(CapacityConfig {
         interpret_blocks_per_batch: args.interpret_blocks_per_batch,
         interpret_force_full_state_loader: args.interpret_force_full_state_loader,
+        interpret_lookahead_statement_timeout_secs: NonZeroU32::new(
+            args.interpret_lookahead_statement_timeout_secs,
+        ),
         database_max_bytes: args.database_max_bytes,
         minimum_free_disk_bytes: args.minimum_free_disk_bytes,
         writable_path: args.writable_path,

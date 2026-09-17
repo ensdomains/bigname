@@ -70,6 +70,9 @@ const BLOCK_OFFSETS: [i64; 12] = [
 /// grace period included, before its own block, followed by a block with no logs.
 const LAPSED_AT_BIRTH_OFFSETS: [i64; 2] = [0, 12];
 
+/// Three blocks, twelve seconds apart, for the exact-equality cases.
+const EXPIRY_BOUNDARY_OFFSETS: [i64; 3] = [0, 12, 24];
+
 #[derive(Clone, Copy)]
 enum History {
     /// Registrations, renewals, transfers, a subname, lapses, and a re-registration.
@@ -78,6 +81,8 @@ enum History {
     LapsedAtBirth,
     /// A chain of subnames twenty labels deep, then a resolver set on the deepest one.
     DeepSubname,
+    /// Two registrations whose expiry plus grace period equals a block timestamp exactly.
+    ExpiryBoundaries,
 }
 
 impl History {
@@ -85,6 +90,7 @@ impl History {
         match self {
             Self::Lifecycle => &BLOCK_OFFSETS,
             Self::LapsedAtBirth | Self::DeepSubname => &LAPSED_AT_BIRTH_OFFSETS,
+            Self::ExpiryBoundaries => &EXPIRY_BOUNDARY_OFFSETS,
         }
     }
 
@@ -276,6 +282,17 @@ async fn seed_history(pool: &PgPool, history: History) -> TestResult {
             resolver: RESOLVER.parse()?,
         };
         return seed.log(ENS_REGISTRY, resolver.encode_log_data()).await;
+    }
+    if matches!(history, History::ExpiryBoundaries) {
+        seed.block(FIRST_BLOCK).await?;
+        // Ivy's expiry plus grace equals the timestamp of her own block. With one block per
+        // batch that block is the last of the previous batch, so she sits exactly on the
+        // line between the two branches of the due-names query.
+        seed.register("ivy", OWNER, START - GRACE).await?;
+        // June's expiry plus grace equals the timestamp of the next block, the first block of
+        // the next batch. A registration is still live at equality, so she is released one
+        // block later.
+        return seed.register("june", OWNER, START + 12 - GRACE).await;
     }
     if matches!(history, History::LapsedAtBirth) {
         // The deployed registrar cannot record this (its `register` sets the expiry to the
@@ -472,12 +489,13 @@ async fn walk(history: History, blocks_per_batch: u32, force_full_state: bool) -
     let last_block = history.last_block();
     while from <= last_block {
         let to = (from + i64::from(blocks_per_batch) - 1).min(last_block);
-        let lookahead = match super::batch_input(pool, CHAIN, from, to, None, CAPACITY).await? {
-            super::Attempt::Loaded(loaded) => *loaded,
-            super::Attempt::FullStateRequired(choice) => {
-                anyhow::bail!("mainnet manifests must choose lookahead, got {choice:?}")
-            }
-        };
+        let lookahead =
+            match super::batch_input(pool, CHAIN, from, to, None, CAPACITY, None).await? {
+                super::Attempt::Loaded(loaded) => *loaded,
+                super::Attempt::FullStateRequired(choice) => {
+                    anyhow::bail!("mainnet manifests must choose lookahead, got {choice:?}")
+                }
+            };
         // Names the batch's own logs mention are loaded whether or not they are due.
         let mentioned: BTreeSet<String> =
             bigname_adapters::schema_v2::collect_v1_batch_dependencies(
@@ -594,6 +612,42 @@ async fn deeply_nested_subname_loads_through_lookahead() -> TestResult {
     let walk = walk(History::DeepSubname, 1, false).await?;
     assert!(walk.released.is_empty());
     assert!(walk.stored.iter().any(|row| row.contains("NewResolver")));
+    Ok(())
+}
+
+/// A registration is released at the first block whose timestamp is strictly greater than
+/// its expiry plus the grace period. These two names put that instant exactly on a block
+/// timestamp: the last block of the previous batch (ivy) and the first block of the batch
+/// (june). Every batch length must release each of them in the same block as the full-state
+/// loader, which the walk checks batch by batch.
+#[tokio::test]
+async fn expiry_exactly_on_a_block_timestamp_matches_full_state() -> TestResult {
+    let mut stored = Vec::new();
+    for blocks_per_batch in [1, 2, 3] {
+        let walk = walk(History::ExpiryBoundaries, blocks_per_batch, false).await?;
+        assert_eq!(walk.released, BTreeSet::from([name("ivy"), name("june")]));
+        stored.push(walk.stored);
+    }
+    let full_state = walk(History::ExpiryBoundaries, 1, true).await?.stored;
+    let released_at = |label: &str| {
+        full_state
+            .iter()
+            .map(|row| serde_json::from_str::<serde_json::Value>(row).expect("stored row"))
+            .find(|row| {
+                row["event_kind"] == "RegistrationReleased"
+                    && row["after_state"]["namehash"] == name(label)[4..]
+            })
+            .map(|row| row["block_number"].as_i64().expect("block number") - FIRST_BLOCK)
+    };
+    assert_eq!(released_at("ivy"), Some(1), "strictly after her own block");
+    assert_eq!(
+        released_at("june"),
+        Some(2),
+        "still live at exact equality in block 1"
+    );
+    for stored in stored {
+        assert_eq!(stored, full_state);
+    }
     Ok(())
 }
 
