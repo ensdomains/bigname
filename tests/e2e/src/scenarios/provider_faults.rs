@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 
 use super::support;
@@ -17,6 +17,9 @@ use crate::harness::{
 const INGEST_CHAIN: &str = "ethereum-e2e-rpc";
 const TEXT_KEY: &str = "com.twitter";
 const YEAR: u64 = 365 * 24 * 60 * 60;
+/// RPC ingest reads a window once and re-fetches it at most twice after a rejected
+/// provider response; a response still rejected on the last read is terminal.
+const WINDOW_READ_ATTEMPTS: usize = 3;
 
 struct Corpus {
     db: HarnessDb,
@@ -228,34 +231,61 @@ async fn transient_provider_faults_and_partial_receipts_recover_to_control() -> 
     proxy.add_faults([
         FaultSpec::error_once(&fixture.receipt.tx_hash, -32005, "injected capacity limit"),
         FaultSpec::delay_timeout_once(&fixture.receipt.tx_hash, Duration::from_millis(20)),
-        FaultSpec::truncate_once(&fixture.receipt.tx_hash, 8),
+        FaultSpec::truncate_times(&fixture.receipt.tx_hash, 8, WINDOW_READ_ATTEMPTS),
     ]);
 
+    // Leg 1: truncation that outlasts ingest's bounded window re-fetch is terminal.
     let faulted = prepare_corpus(&fixture.deployment).await?;
     let first_attempt = rpc_ingest(&faulted, &proxy.url, head).await;
-    for kind in [
-        FaultKind::ErrorOnce,
-        FaultKind::DelayTimeout,
-        FaultKind::Truncate,
+    for (kind, expected) in [
+        (FaultKind::ErrorOnce, 1),
+        (FaultKind::DelayTimeout, 1),
+        (FaultKind::Truncate, WINDOW_READ_ATTEMPTS),
     ] {
         ensure!(
-            proxy.hit_count(kind) == 1,
-            "phase-runner ingest observed {} {kind:?} hits instead of one",
+            proxy.hit_count(kind) == expected,
+            "phase-runner ingest observed {} {kind:?} hits instead of {expected}",
             proxy.hit_count(kind)
         );
     }
+    let Err(first_error) = first_attempt else {
+        bail!("truncated JSON on every read of the window should terminate the first bounded redo");
+    };
     ensure!(
-        first_attempt.is_err(),
-        "the truncated JSON response should terminate the first bounded redo"
+        format!("{first_error:#}").contains("JSON-RPC response"),
+        "the first redo failed for a reason other than the truncated response: {first_error:#}"
+    );
+    ensure!(
+        raw_log_count(&faulted.db.pool, &fixture.receipt.tx_hash).await? == 0
+            && raw_receipt_count(&faulted.db.pool, &fixture.receipt.tx_hash).await? == 0,
+        "the persistently truncated window unexpectedly retained target facts"
     );
 
-    // The structurally malformed response ends that command before it reaches
-    // receipt hydration. A temporarily missing selected receipt is retryable:
-    // the second command must refetch it and finish without an explicit repair.
+    // Leg 2: a one-off truncated response is rejected, the window is read again by
+    // the same command, and the re-fetch is visible to the operator.
+    proxy.add_fault(FaultSpec::truncate_once(&fixture.receipt.tx_hash, 8));
+    let recovered_output = rpc_ingest(&faulted, &proxy.url, head)
+        .await
+        .context("a one-off truncated response should be re-fetched by the same redo")?;
     ensure!(
-        raw_receipt_count(&faulted.db.pool, &fixture.receipt.tx_hash).await? == 0,
-        "the malformed-response attempt unexpectedly retained the target receipt"
+        proxy.hit_count(FaultKind::Truncate) == WINDOW_READ_ATTEMPTS + 1,
+        "phase-runner ingest observed {} Truncate hits instead of {}",
+        proxy.hit_count(FaultKind::Truncate),
+        WINDOW_READ_ATTEMPTS + 1
     );
+    ensure!(
+        recovered_output.contains("re-fetching ingest window")
+            && recovered_output.contains("JSON-RPC response"),
+        "the in-place window re-fetch was not logged with its cause: {recovered_output}"
+    );
+    ensure!(
+        raw_log_count(&faulted.db.pool, &fixture.receipt.tx_hash).await? == 1
+            && raw_receipt_count(&faulted.db.pool, &fixture.receipt.tx_hash).await? == 1,
+        "the re-fetched window did not retain the target log and receipt"
+    );
+
+    // Leg 3: a temporarily missing selected receipt is retryable: the same
+    // command must refetch it and finish without an explicit repair.
     let receipt_requests = proxy.transaction_receipt_request_count(&fixture.receipt.tx_hash);
     proxy.add_fault(FaultSpec::drop_receipts_once(&fixture.receipt.tx_hash, 1));
     rpc_ingest(&faulted, &proxy.url, head).await?;
