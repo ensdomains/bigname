@@ -152,10 +152,9 @@ impl Rebuild {
         Ok(query.fetch_one(&mut *self.transaction).await?[0]["Plan"].take())
     }
 
-    /// Both statements wrote the same rows: nothing is left of either side once the other is
-    /// taken away, duplicates included.
-    async fn assert_same_rows(&mut self, current: &str, previous: &str) -> Result<()> {
-        let (rows, only_current, only_previous): (i64, i64, i64) = sqlx::query_as(&format!(
+    /// Rows only in `current` and rows only in `previous`, duplicates included.
+    async fn row_differences(&mut self, current: &str, previous: &str) -> Result<(i64, i64)> {
+        let (rows, extra, missing): (i64, i64, i64) = sqlx::query_as(&format!(
             "SELECT (SELECT count(*) FROM {current}),
                     (SELECT count(*) FROM (TABLE {current} EXCEPT ALL TABLE {previous}) extra),
                     (SELECT count(*) FROM (TABLE {previous} EXCEPT ALL TABLE {current}) missing)"
@@ -166,11 +165,31 @@ impl Rebuild {
             rows > 0,
             "{current} is empty, so the comparison proves nothing"
         );
+        Ok((extra, missing))
+    }
+
+    /// Both statements wrote the same rows: nothing is left of either side once the other is
+    /// taken away.
+    async fn assert_same_rows(&mut self, current: &str, previous: &str) -> Result<()> {
+        let (extra, missing) = self.row_differences(current, previous).await?;
         ensure!(
-            only_current == 0 && only_previous == 0,
-            "{current} differs from {previous}: {only_current} extra, {only_previous} missing"
+            extra == 0 && missing == 0,
+            "{current} differs from {previous}: {extra} extra, {missing} missing"
         );
         Ok(())
+    }
+
+    /// Keeps what the current statement wrote to `stage` as `current_rows`, empties the stage,
+    /// and lets `previous` fill it again from the same staged inputs.
+    async fn rerun_with(&mut self, stage: &str, previous: &str) -> Result<()> {
+        raw_sql(&format!(
+            "DROP TABLE IF EXISTS current_rows;
+             CREATE TEMP TABLE current_rows AS TABLE {stage};
+             TRUNCATE {stage}"
+        ))
+        .execute(&mut *self.transaction)
+        .await?;
+        self.execute(previous).await
     }
 
     async fn finish(self) -> Result<()> {
@@ -320,25 +339,21 @@ async fn name_current_matches_the_statement_with_the_lifecycle_cte() -> Result<(
     );
 
     let mut rebuild = Rebuild::through("rebuild_equal_names", 600, Builder::NameCurrent).await?;
-    raw_sql(
-        "CREATE TEMP TABLE current_name_rows AS TABLE project_stage_name_current;
-         TRUNCATE project_stage_name_current",
-    )
-    .execute(&mut *rebuild.transaction)
-    .await?;
     let previous = format!(
         "{PREVIOUS_V2_LIFECYCLE_CTE}{}",
         BUILD_NAME_CURRENT.replace("project_v2_lifecycle_events", "v2_lifecycle_events")
     );
-    rebuild.execute(&previous).await?;
     rebuild
-        .assert_same_rows("current_name_rows", "project_stage_name_current")
+        .rerun_with("project_stage_name_current", &previous)
+        .await?;
+    rebuild
+        .assert_same_rows("current_rows", "project_stage_name_current")
         .await?;
     let (v2_rows, released): (i64, i64) = sqlx::query_as(
         "SELECT count(*) FILTER (WHERE declared_summary #>> '{registration,authority_kind}'
                                        = 'ens_v2_registry'),
                 count(*) FILTER (WHERE declared_summary #>> '{registration,status}' = 'released')
-         FROM current_name_rows",
+         FROM current_rows",
     )
     .fetch_one(&mut *rebuild.transaction)
     .await?;
@@ -374,5 +389,65 @@ async fn name_current_reads_each_name_by_key() -> Result<()> {
             "{relation} rows handled: {rows}; {plan}"
         );
     }
+    rebuild.finish().await
+}
+
+/// `sql` with the text from `from` through `through` swapped for `previous`.
+fn with_previous(sql: &str, from: &str, through: &str, previous: &str) -> String {
+    let start = sql.find(from).expect("start of the rewritten fragment");
+    let end = start
+        + sql[start..]
+            .find(through)
+            .expect("end of the rewritten fragment")
+        + through.len();
+    format!("{}{previous}{}", &sql[..start], &sql[end..])
+}
+
+/// The token holder used to be looked up again in `project_authority_events` by event id, which
+/// no index served. It is the row already joined as `registration`.
+#[tokio::test]
+async fn address_names_match_the_statement_that_looked_the_transfer_up_again() -> Result<()> {
+    use super::address_names::BUILD_ADDRESS_NAMES;
+    let previous = with_previous(
+        BUILD_ADDRESS_NAMES,
+        "            -- The token holder is read from the registrant event",
+        ") token_holder ON TRUE\n",
+        include_str!("../../tests/rebuild_performance/previous_address_names_token_holder.sql"),
+    );
+    let mut rebuild =
+        Rebuild::through("rebuild_equal_addresses", 600, Builder::AddressNames).await?;
+    rebuild
+        .rerun_with("project_stage_address_names_current", &previous)
+        .await?;
+    rebuild
+        .assert_same_rows("current_rows", "project_stage_address_names_current")
+        .await?;
+    let transfers: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM project_stage_name_current name
+         JOIN project_authority_events event
+           ON event.normalized_event_id = (name.provenance ->> 'registrant_event_id')::bigint
+         WHERE event.event_kind = 'TokenControlTransferred'",
+    )
+    .fetch_one(&mut *rebuild.transaction)
+    .await?;
+    ensure!(
+        transfers > 0,
+        "the seed has no registrant that is a token transfer"
+    );
+    rebuild.finish().await
+}
+
+#[tokio::test]
+async fn address_names_read_authority_events_once() -> Result<()> {
+    let mut rebuild =
+        Rebuild::through("rebuild_plan_addresses", PLAN_NAMES, Builder::AddressNames).await?;
+    let plan = rebuild
+        .explain(super::address_names::BUILD_ADDRESS_NAMES)
+        .await?;
+    let rows = rows_read(&plan, "project_authority_events");
+    ensure!(
+        rows <= 40.0 * PLAN_NAMES as f64,
+        "project_authority_events rows handled: {rows}; {plan}"
+    );
     rebuild.finish().await
 }
