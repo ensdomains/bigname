@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS discovery_edges (
         ),
     CHECK (
         edge_kind = 'registry_announcement'
+        OR (edge_kind = 'resolver' AND discovery_source = 'ResolverCreated')
         OR from_contract_instance_id <> to_contract_instance_id
     ),
     CHECK (btrim(discovery_source) <> ''),

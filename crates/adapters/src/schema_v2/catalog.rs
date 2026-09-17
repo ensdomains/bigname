@@ -174,6 +174,9 @@ impl Catalog {
             let source = self
                 .source(manifest_id)
                 .with_context(|| format!("admission references inactive manifest {manifest_id}"))?;
+            if announcements::is_registry_pointer(source, admission) {
+                continue;
+            }
             let rank = match admission.discovery_edge_kind.as_deref() {
                 Some("registry_announcement") => 1,
                 None if announcement_namespaces.contains(source.namespace.as_str()) => 0,

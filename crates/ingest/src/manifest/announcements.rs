@@ -19,6 +19,7 @@ pub(super) async fn canonical(
         WHERE raw.chain_id = $1
           AND raw.block_number <= $2
           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+          AND cardinality(raw.topics) > 0
           AND lower(raw.topics[1]) = lower($3)
         GROUP BY lower(raw.emitting_address)
         ORDER BY lower(raw.emitting_address)
@@ -31,7 +32,7 @@ pub(super) async fn canonical(
     .await
     .map_err(|error| {
         IngestError::database(
-            format!("failed to load canonical registry announcements for chain {chain_id}"),
+            format!("failed to load canonical creation announcements for chain {chain_id}"),
             error,
         )
     })

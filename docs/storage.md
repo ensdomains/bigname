@@ -1139,6 +1139,16 @@ current registry stores itself for a requested zero owner.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L34 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L55 @ ens_v1@91c966f)
 
+### Resolver creation replay
+
+`ResolverCreated` is stored as `ContractDiscovered` and an Interpret-owned
+`resolver` self-edge anchored to the raw creation log. This is the only permitted
+resolver self-edge. ENSv2 registry-pointer edges remain binding history and are
+excluded from emitter admission. Canonical raw creation logs drive Ingest's
+same-window capture and its subsequent windows; orphaned creation logs cannot
+expand a watch filter. Installing creation capture requires the normal
+manifest-driven Ingest redo and full Interpret replay, preserving raw facts.
+
 ### Interpret process memory
 
 `normalized_events` is the working store for each [interpreter state

@@ -165,3 +165,67 @@ async fn refetch_does_not_relax_other_integrity_checks_or_retry_reorg_errors() -
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn resolver_creation_fetches_same_transaction_and_later_records_before_returning()
+-> Result<()> {
+    use crate::test_chain::{NOISE_ADDRESS, TestLog};
+    let creation = bigname_manifests::resolver_creation_topic0();
+    let mut chain = TestChain::synthetic(FIRST, 2, 1);
+    let first = &mut chain.blocks[0].transactions[1];
+    first.logs.insert(
+        0,
+        TestLog {
+            log_index: 1,
+            address: WATCHED_ADDRESS.to_owned(),
+            topics: vec![creation.clone()],
+            data: "0x".to_owned(),
+        },
+    );
+    for (index, log) in first.logs.iter_mut().enumerate() {
+        log.log_index = index as i64 + 1;
+    }
+    let endpoint = serve(chain, Tamper::None).await?;
+    let provider = Arc::new(endpoint.provider);
+    let filter = WatchFilter::watching_creation(
+        FIRST,
+        FIRST + 1,
+        creation.clone(),
+        vec![WATCHED_TOPIC.to_owned()],
+    );
+    let result = WindowReader {
+        provider: &provider,
+        coinbase: None,
+        prefetch: None,
+        filter: &filter,
+    }
+    .fetch(FIRST, FIRST + 1)
+    .await?;
+    let selected = result
+        .selected
+        .iter()
+        .map(|log| (log.block_number, log.log_index, log.topics[0].clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        selected,
+        vec![
+            (FIRST, 1, creation),
+            (FIRST, 2, WATCHED_TOPIC.to_owned()),
+            (FIRST, 4, WATCHED_TOPIC.to_owned()),
+            (FIRST + 1, 1, WATCHED_TOPIC.to_owned()),
+            (FIRST + 1, 3, WATCHED_TOPIC.to_owned()),
+        ]
+    );
+    assert!(
+        !result
+            .selected
+            .iter()
+            .any(|log| log.address == NOISE_ADDRESS)
+    );
+    assert_eq!(
+        result.queries.len(),
+        2,
+        "creation scan plus scoped capture in the same window"
+    );
+    Ok(())
+}

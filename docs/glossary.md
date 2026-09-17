@@ -365,8 +365,10 @@ schema-v2 baseline constrains an edge's kind to five values: `resolver`,
 [`migration`](#migration-edge-migration). An edge's kind decides whether it
 admits an emitter or only records topology. In particular, a registry
 announcement admits an ENSv2 registry independently of parent reachability,
-while a subregistry edge records parent-child reachability without admitting
-its target.
+while subregistry and ENSv2 registry-to-resolver edges record relationships
+without admitting their targets. A `resolver` self-edge whose source is
+`ResolverCreated` records independent creation-based capture; it does not bind
+a name or authorize resolver reads.
 
 ## Discovery-watch admission snapshot
 
@@ -381,90 +383,21 @@ work and redo authority.
 
 ## Discovery-rule widening and narrowing
 
-manifest-synchronization
-classifications for address-admitting `resolver` and `registry_announcement`
-discovery rules and their emitting declarations. Widening adds a rule or
-emitter, adds the first emitter to a rule that previously matched no
-declaration, or moves an emitter's inclusive start block earlier. Narrowing
-removes rules or emitters, including removal of a rule's last emitter, or moves
-an emitter's start later. For an active resolver discovery rule, widening also
-includes a registry/resolver pair whose desired manifest `deployment_epoch`
-values newly match after the preceding active pair did not, or whose matching
-source epoch changes. Replacing the rule-bearing source manifest within one
-matching epoch is a discovery source replacement because existing discovery
-edges retain the preceding manifest identity; changing the pair from matching
-to nonmatching is narrowing. Resolver widening or source replacement whose
-earliest desired emitter candidate intersects retained history is rejected
-because the admitted addresses are not known until Interpret materializes their
-discovery edges. Direct declarations contribute their inclusive starts floored
-by the earliest persisted address admission. Declaration history is scoped by
-namespace, family, role, and address, while contract-address active ranges are
-shared by chain and address. Synchronization reconstructs the floor from current active
-declarations and active manifest states retained by `SourceManifestUpdated`,
-combined with current and finitely retired contract-address active ranges named by those
-manifests. A declaration start rewritten by an earlier synchronization and
-later Interpret provenance writes do not recap or erase it. An omitted start is
-an effective block-zero bound; refreshing its initial-epoch active address row
-materializes zero so a later finite declaration cannot recap that retained
-admission, and omitting a previously finite start backdates that active epoch to
-zero. Retained omitted-start manifest history contributes zero even when
-an older binary left a finite first-observed block. Interpret's discovery refresh
-now leaves the address row's `NULL` untouched, fixing
-[issue #547](https://github.com/ensdomains/bigname/issues/547), so this repair is
-legacy-only for the laundering sequence between unchanged synchronizations of
-an already-declared address, while it still intentionally fires when a finite
-discovery-created address row is later declared for the first time with an
-omitted start. When a desired
-active declaration omits its start, synchronization restores zero on the
-earliest address epoch even if retired; later re-admitted epochs keep their
-bounded starts. It stamps the required Ingest redo from block zero (clamped to
-the earliest configured source start) and invalidates the derived phases for the
-restored interval. The repair is one-shot:
-the stored row is then zero and its positive-floor predicate cannot fire again;
-a current finite declaration keeps its finite watch bound. Reusing a retired
-address under another declaration identity remains conservative when the new
-declared start precedes the bounded new active range: the older shared address
-floor can still cause rejection. Full Interpret redo preserves the last
-finitely retired manifest-declared range as coordination state. Later manifest
-re-admission therefore retains its persisted floor, while a later event
-observation may append a bounded active range or backdate an existing later
-active range without changing retired history. A rule with no matching
-declaration contributes block zero, and an ENSv2 registry manifest with an
-active `registry_announcement` rule contributes a distinct block-zero,
-role-free emitter path even when an emitterless candidate or direct
-declarations already exist. Adding that path is widening because an
-announcement-admitted registry can emit `ResolverUpdated` and match the
-resolver rule.
-(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L478 @ ens_v2@a971bd64)
-Removing the last direct emitter narrows only the
-declaration-backed part of such a rule. Registry-announcement widening instead
-stamps a required Ingest redo for the ENSv2 registry family from the earlier of
-that declaration start and the earliest retained canonical announcement
-selected by its [all-emitter watch plan](#watch-plan--watched-tuple); intake
-then discovers each registry and fetches its remaining events in the same
-window. Other families reject the historical transition. Narrowing introduces
-no missing historical discovery input.
-For ENSv2, a canonical discovery producer is effective only when its ABI event
-is present, Interpret selection admits its emitter role (or the announcement path
-bypasses roles), and it declares Interpret's required normalized output. Newly
-enabling `RegistryCreated()`/`RegistryCreated` or
-`ResolverUpdated(uint256,address,address)`/`ResolverChanged` through any of those
-fields is discovery widening even without a manifest-version change; other
-event-set growth is ordinary watch-plan widening. Removing a resolver producer
-from a direct declaration is conservatively rejected over retained history.
-Dropping `RegistryCreated` from `normalized_events` for a declaration-backed
-`registry_announcement` rule is instead accepted with a required Ingest redo;
-Interpret then halts loudly on the selected undeclared event, and the
-[manifest-authority marker](#manifest-authority-marker) guarantees the initial
-invalidation. It is
-not a permanent manifest-validity guard: an empty redo can clear before a later
-`RegistryCreated` halts normal Interpret. Resolver-producer removal from an
-announcement-only/emitterless path is unclassified: ABI removal can leave
-retained coverage without a reproducible desired rule, while a
-`normalized_events` drop with the ABI topic still present makes Interpret halt
-loudly and recoverably on `ResolverUpdated`; an empty rebuild can likewise
-clear the preceding invalidation first.
+Manifest-synchronization classifications for changes that add or remove
+address-scoped capture. Comparisons retain namespace, source family, emitting
+role, declared address, and historical start. Persisted address floors prevent
+a later declaration edit from hiding previously admitted history.
+
+ENSv2 `SubregistryUpdated` and `ResolverUpdated` edges are topology-only and
+are excluded. `RegistryCreated` and `ResolverCreated` supply independent
+creation-based capture: Ingest selects creation logs across emitters and
+fetches the announcing address's remaining events in the same window. Adding
+the resolver creation ABI is ordinary compiled-watch widening, requiring one
+historical fetch before interpretation. Registry-announcement rule changes
+use the earliest retained canonical announcement when it predates the rule's
+emitting declaration. Historical widening of other address-admitting discovery
+rules remains rejected when the target addresses would only become known
+after Interpret. See [the watch-plan rules](manifests.md#mandatory-historical-fetch-after-watch-plan-widening).
 
 ## Durable composite cursor
 

@@ -16,7 +16,7 @@ fn address_range_only_admits_topics_from_its_manifest() {
         }],
         all_emitter_ranges: Vec::new(),
         implementation_ranges: Vec::new(),
-        registry_announcements: None,
+        creation_watches: Vec::new(),
     };
 
     assert!(filter.includes("0x01", "0xaa", 10));
@@ -40,13 +40,13 @@ fn announced_registry_topics_are_address_scoped_forward_only() {
         address_ranges: Vec::new(),
         all_emitter_ranges: Vec::new(),
         implementation_ranges: Vec::new(),
-        registry_announcements: Some(RegistryAnnouncementWatch {
+        creation_watches: vec![CreationWatch {
             announcement_topic0: "0xaa".to_owned(),
             scoped_topic0s: vec!["0xbb".to_owned()],
-        }),
+        }],
     };
 
-    let queries = filter.admit_registry_announcements([("0x01".to_owned(), 10)], 0, 20);
+    let queries = filter.admit_creation_announcements("0xaa", [("0x01".to_owned(), 10)], 0, 20);
 
     assert!(!filter.includes("0x01", "0xbb", 9));
     assert!(filter.includes("0x01", "0xbb", 10));
@@ -95,7 +95,7 @@ fn query_windows_do_not_cross_product_manifest_topics() {
         ],
         all_emitter_ranges: Vec::new(),
         implementation_ranges: Vec::new(),
-        registry_announcements: None,
+        creation_watches: Vec::new(),
     };
 
     assert_eq!(
@@ -129,7 +129,7 @@ fn generic_resolver_topics_scan_all_emitters() {
             topic0s: vec!["0xaa".to_owned()],
         }],
         implementation_ranges: Vec::new(),
-        registry_announcements: None,
+        creation_watches: Vec::new(),
     };
 
     assert!(filter.includes("0x-unlisted", "0xaa", 10));
@@ -158,7 +158,7 @@ fn implementation_announcements_scan_all_emitters_narrowed_by_topic1() {
             topic0: "0xaa".to_owned(),
             topic1s: vec![implementation.clone()],
         }],
-        registry_announcements: None,
+        creation_watches: Vec::new(),
     };
 
     let announced = vec!["0xaa".to_owned(), implementation.clone()];
@@ -232,7 +232,7 @@ fn aliased_root_and_contract_ranges_form_one_provider_query() {
         ],
         all_emitter_ranges: Vec::new(),
         implementation_ranges: Vec::new(),
-        registry_announcements: None,
+        creation_watches: Vec::new(),
     };
 
     assert_eq!(
@@ -988,4 +988,118 @@ async fn insert_registry_watch_manifest(pool: &PgPool, chain_id: &str) -> AnyRes
     .bind(payload)
     .fetch_one(pool)
     .await?)
+}
+
+#[tokio::test]
+async fn resolver_creation_survives_restart_and_orphaned_creation_does_not_expand_capture()
+-> AnyResult<()> {
+    let database = range_database("resolver_creation_capture").await?;
+    let chain = "resolver-creation-chain";
+    let address = "0x00000000000000000000000000000000000000aa";
+    let created = bigname_manifests::resolver_creation_topic0();
+    let text = format!(
+        "{}",
+        alloy_primitives::keccak256("TextUpdated(uint256,string,string,string)")
+    );
+    let public = format!(
+        "{}",
+        alloy_primitives::keccak256("AddrChanged(bytes32,address)")
+    );
+    let payload = json!({
+        "manifest_version":1,"namespace":"ens","source_family":"ens_v2_resolver_l1",
+        "chain":chain,"deployment_epoch":"fixture","rollout_status":"active",
+        "normalizer_version":"ensip15@ens-normalize-0.1.1", "capability_flags":{},
+        "contracts":[],"roots":[],"discovery_rules":[],
+        "abi":{"events":[
+            {"name":"ResolverCreated","fragment":"event ResolverCreated()","emitter_roles":[],"normalized_events":["ContractDiscovered"]},
+            {"name":"TextUpdated","fragment":"event TextUpdated(uint256 indexed recordId, string indexed keyHash, string key, string value)","emitter_roles":[],"normalized_events":["RecordChanged"]},
+            {"name":"AddrChanged","fragment":"event AddrChanged(bytes32 indexed node, address a)","emitter_roles":["public_resolver_v2"],"normalized_events":["RecordChanged"]}
+        ],"calls":[]}
+    });
+    sqlx::query("INSERT INTO manifest_versions (manifest_version,namespace,source_family,chain_id,deployment_label,rollout_status,normalizer_version,file_path,manifest_payload) VALUES (1,'ens','ens_v2_resolver_l1',$1,'fixture','active','ensip15@ens-normalize-0.1.1','creation-test',$2)")
+        .bind(chain).bind(payload).execute(database.pool()).await?;
+    sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,'0xblock',10,now(),'canonical')").bind(chain).execute(database.pool()).await?;
+    sqlx::query("INSERT INTO raw_transactions (chain_id,block_hash,block_number,transaction_hash,transaction_index,from_address) VALUES ($1,'0xblock',10,'0xtx',0,$2)").bind(chain).bind(address).execute(database.pool()).await?;
+    sqlx::query("INSERT INTO raw_logs (chain_id,block_hash,block_number,transaction_hash,transaction_index,log_index,emitting_address,topics) VALUES ($1,'0xblock',10,'0xtx',0,1,$2,$3)")
+        .bind(chain).bind(address).bind(vec![created.clone()]).execute(database.pool()).await?;
+    let filter = load_watch_filter(database.pool(), chain, 11, 20).await?;
+    assert!(
+        filter.includes(address, &text, 11),
+        "retained creation expands a later window without Interpret"
+    );
+    assert!(
+        !filter.includes(address, &public, 11),
+        "direct public-node ABI must not leak into creation capture"
+    );
+    let mut connection = database.pool().acquire().await?;
+    let coverage = bigname_manifests::load_discovery_watch_coverage(&mut connection, chain).await?;
+    assert_eq!(
+        coverage.independently_covered[&(address.to_owned(), text.clone())][0].from,
+        10
+    );
+    sqlx::query("UPDATE chain_lineage SET canonicality_state='orphaned' WHERE chain_id=$1")
+        .bind(chain)
+        .execute(database.pool())
+        .await?;
+    let filter = load_watch_filter(database.pool(), chain, 11, 20).await?;
+    assert!(!filter.includes(address, &text, 11));
+    let coverage = bigname_manifests::load_discovery_watch_coverage(&mut connection, chain).await?;
+    assert!(coverage.independently_covered.is_empty());
+    drop(connection);
+    database.cleanup().await
+}
+
+impl WatchFilter {
+    pub(crate) fn watching_creation(
+        from: i64,
+        to: i64,
+        topic: String,
+        records: Vec<String>,
+    ) -> Self {
+        Self {
+            all_emitter_ranges: vec![AllEmitterRange {
+                from_block: from,
+                to_block: to,
+                topic0s: vec![topic.clone()],
+            }],
+            creation_watches: vec![CreationWatch {
+                announcement_topic0: topic,
+                scoped_topic0s: records,
+            }],
+            ..Self::default()
+        }
+    }
+}
+
+#[tokio::test]
+async fn resolver_creation_migration_permits_only_the_announcement_self_edge() -> AnyResult<()> {
+    let database =
+        TestDatabase::create(TestDatabaseConfig::new("resolver_creation_constraint")).await?;
+    sqlx::raw_sql("CREATE SCHEMA bigname_phase;
+        CREATE TABLE bigname_phase.discovery_edges (
+            edge_kind text NOT NULL, discovery_source text NOT NULL,
+            from_contract_instance_id uuid NOT NULL, to_contract_instance_id uuid NOT NULL,
+            CHECK (edge_kind = 'registry_announcement' OR from_contract_instance_id <> to_contract_instance_id)
+        )").execute(database.pool()).await?;
+    let migration =
+        include_str!("../../../../migrations/20260917140000_resolver_creation_self_edge.sql");
+    for _ in 0..2 {
+        sqlx::raw_sql(migration).execute(database.pool()).await?;
+    }
+    let id = Uuid::new_v4();
+    for (kind, source, allowed) in [
+        ("resolver", "ResolverCreated", true),
+        ("registry_announcement", "RegistryCreated", true),
+        ("resolver", "ResolverUpdated", false),
+        ("subregistry", "ResolverCreated", false),
+    ] {
+        let result = sqlx::query("INSERT INTO bigname_phase.discovery_edges VALUES ($1,$2,$3,$3)")
+            .bind(kind)
+            .bind(source)
+            .bind(id)
+            .execute(database.pool())
+            .await;
+        assert_eq!(result.is_ok(), allowed, "{kind}/{source}: {result:?}");
+    }
+    database.cleanup().await
 }

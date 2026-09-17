@@ -119,18 +119,22 @@ impl VerificationProvider {
             &mut selected_by_identity,
         )
         .await?;
-        if let Some(announcement_topic0) = filter.registry_announcement_topic0() {
+        for announcement_topic0 in filter.creation_topic0s() {
             let announcements = selected_by_identity
                 .values()
                 .filter(|log| {
                     log.topics
                         .first()
-                        .is_some_and(|topic| topic.eq_ignore_ascii_case(announcement_topic0))
+                        .is_some_and(|topic| topic.eq_ignore_ascii_case(&announcement_topic0))
                 })
                 .map(|log| (log.address.clone(), log.block_number))
                 .collect::<Vec<_>>();
-            let supplemental =
-                filter.admit_registry_announcements(announcements, from_block, to_block);
+            let supplemental = filter.admit_creation_announcements(
+                &announcement_topic0,
+                announcements,
+                from_block,
+                to_block,
+            );
             fetch_queries(
                 &self.provider,
                 &resolved,
