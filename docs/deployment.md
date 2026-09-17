@@ -51,6 +51,22 @@ docker compose --env-file .env.server -f docker-compose.server.yml up -d
 
 Server Compose requires nonempty `BIGNAME_PHASE_RUNNER_MINIMUM_FREE_DISK_BYTES`
 and `BIGNAME_PHASE_RUNNER_WRITABLE_PATH`; missing or empty values fail rendering.
+It also requires a container memory ceiling per service —
+`POSTGRES_MEMORY_LIMIT`, `BIGNAME_API_MEMORY_LIMIT`,
+`BIGNAME_PHASE_RUNNER_MEMORY_LIMIT`, and `BIGNAME_PUBLIC_PROXY_MEMORY_LIMIT`
+with the public overlay — rendered as `deploy.resources.limits.memory`, so a
+data-dependent spike is contained to the container that produced it (it is
+OOM-killed and restarted under `restart: unless-stopped`) rather than left to
+the host OOM killer to resolve among the runner, the API, PostgreSQL and a
+co-resident archive node. There are no defaults: size them in the
+[capacity preflight](runbooks/production-docker.md#capacity-preflight), where
+PostgreSQL's ceiling includes the page cache it reads through (the kernel
+charges it to the container), and validate the rendered model with
+`scripts/check-compose-memory-limits`, since Compose accepts `0` and Docker
+reads it as no limit. Every
+service logs through the `json-file` driver with rotation
+(`BIGNAME_LOG_MAX_SIZE`, default `100m`, times `BIGNAME_LOG_MAX_FILE`, default
+`5`), so container logs are bounded on the volume PostgreSQL writes to.
 Choose a positive reserve for the actual deployment, and pre-create a dedicated
 writable sibling on PostgreSQL's filesystem. The same absolute path is used on
 the Docker daemon host and inside the runner. Do not expose database files or
@@ -109,6 +125,7 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_MINIMUM_FREE_DISK_BYTES` — required server-Compose floor
 - `BIGNAME_PHASE_RUNNER_WRITABLE_PATH` — required server-Compose probe directory
 - `BIGNAME_PHASE_RUNNER_DATABASE_MAX_BYTES` — optional logical database ceiling
+- `BIGNAME_PHASE_RUNNER_MEMORY_LIMIT` — required server-Compose container memory ceiling
 - `BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_REDO_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS`
