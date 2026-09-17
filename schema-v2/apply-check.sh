@@ -304,7 +304,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=7
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=33
+expected_predecessor_shape_proof_count=34
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -395,7 +395,8 @@ for migration_file in \
     "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" \
     "$ROOT/migrations/20260917120000_discovery_edges_observation_history_idx.sql" \
     "$ROOT/migrations/20260917130000_discovery_edges_reopen_idx.sql" \
-    "$ROOT/migrations/20260917131000_project_scoped_history_indexes.sql"
+    "$ROOT/migrations/20260917131000_project_scoped_history_indexes.sql" \
+    "$ROOT/migrations/20260917140000_resolver_creation_self_edge.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -844,6 +845,87 @@ BEGIN
     END IF;
 END $$;
 DROP TABLE expected_project_scoped_history_indexes;
+SQL
+} | run_psql
+# Upgrade the discovery self-edge rule from its preceding shape: an unnamed
+# CHECK that allowed only registry announcements to point at themselves. The
+# result must carry the fresh baseline's name and definition, leave exactly one
+# self-edge CHECK, and a second apply must not replace the constraint.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_discovery_self_edge_check AS
+SELECT conname, pg_get_constraintdef(oid) AS definition
+FROM pg_constraint
+WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
+  AND conname = 'discovery_edges_self_edge_check';
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM expected_discovery_self_edge_check) <> 1 THEN
+        RAISE EXCEPTION 'fresh baseline does not name discovery_edges_self_edge_check';
+    END IF;
+END $$;
+ALTER TABLE discovery_edges
+    DROP CONSTRAINT discovery_edges_self_edge_check,
+    ADD CHECK (
+        edge_kind = 'registry_announcement'
+        OR from_contract_instance_id <> to_contract_instance_id
+    );
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
+          AND conname = 'discovery_edges_check'
+    ) THEN
+        RAISE EXCEPTION 'preceding self-edge CHECK did not take its original generated name';
+    END IF;
+END $$;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917140000_resolver_creation_self_edge.sql" preceding-shape
+    cat <<'SQL'
+CREATE TEMP TABLE upgraded_discovery_self_edge_check AS
+SELECT oid AS constraint_oid
+FROM pg_constraint
+WHERE conrelid = 'discovery_edges'::regclass
+  AND conname = 'discovery_edges_self_edge_check';
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917140000_resolver_creation_self_edge.sql" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF (
+        SELECT count(*) FROM pg_constraint
+        WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
+          AND pg_get_constraintdef(oid) LIKE
+              '%from_contract_instance_id <> to_contract_instance_id%'
+    ) <> 1 THEN
+        RAISE EXCEPTION 'discovery_edges does not carry exactly one self-edge CHECK';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        JOIN expected_discovery_self_edge_check expected
+          ON expected.conname = pg_constraint.conname
+         AND expected.definition = pg_get_constraintdef(pg_constraint.oid)
+        WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
+          AND convalidated
+    ) THEN
+        RAISE EXCEPTION 'discovery self-edge CHECK upgrade differs from the baseline';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        JOIN upgraded_discovery_self_edge_check upgraded
+          ON upgraded.constraint_oid = pg_constraint.oid
+        WHERE conrelid = 'discovery_edges'::regclass
+          AND conname = 'discovery_edges_self_edge_check'
+    ) THEN
+        RAISE EXCEPTION 'second apply replaced the discovery self-edge CHECK';
+    END IF;
+END $$;
+DROP TABLE expected_discovery_self_edge_check;
+DROP TABLE upgraded_discovery_self_edge_check;
 SQL
 } | run_psql
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor
