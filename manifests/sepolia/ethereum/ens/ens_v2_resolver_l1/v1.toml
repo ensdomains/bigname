@@ -8,10 +8,19 @@ deployment_epoch = "ens_v2_sepolia_20260915"
 rollout_status = "active"
 normalizer_version = "ensip15@ens-normalize-0.1.1"
 # (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2 @ ens_v2_sepolia_20260916@366de741)
+# `ensip19_default_address`: PermissionedResolver inherits AbstractRecordResolver, whose address
+# getter returns the default EVM coin-type entry when the requested EVM coin type is empty.
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L80-L83 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractRecordResolver.sol:L169-L178 @ ens_v2_sepolia_20260916@366de741)
 resolver_implementations = [ { role = "permissioned_resolver", address = "0x14f09fd05d4585759e54844dc9b00147131cf243", read_features = [ "ensip19_default_address" ] } ]
 roots = []
 discovery_rules = []
 
+# Constructor argument 3 (`registryV1`) of the declared ENSV1Resolver is the ENSv1 registry the
+# mirror resolver reads; it is the Sepolia ENSv1 registry deployment.
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L29-L33 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ENSV1Resolver.json:L749 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v1/deployments/sepolia/ENSRegistry.json:L2 @ ens_v1@91c966f)
 [correlation_addresses]
 ens_v1_registry = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e"
 
@@ -27,6 +36,12 @@ start_block = 11708986
 
 # (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PublicResolverV2.json:L2 @ ens_v2_sepolia_20260916@366de741)
 # (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PublicResolverV2.json:L2157 @ ens_v2_sepolia_20260916@366de741)
+# `ensip19_default_address`: PublicResolverV2 composes the ENSv1 `AddrResolver` profile. The
+# profile source in this deployment's compiler input returns `addrs[COIN_TYPE_DEFAULT]` when the
+# requested EVM coin type is empty (the cited line holds that whole source file).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PublicResolverV2.sol:L23-L35 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PublicResolverV2.json:L1272 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/build-info/solc-0_8_25-32c5cc51dc76e0217cc18fd81b550ff63339308e.json:L184 @ ens_v2_sepolia_20260916@366de741)
 [[contracts]]
 role = "public_resolver_v2"
 address = "0xd7e590ad0e92a6ac1d81f4483a9b951d3585a50f"

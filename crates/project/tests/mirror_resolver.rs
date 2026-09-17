@@ -960,7 +960,7 @@ async fn official_manifest_declares_the_mirror_and_classifies_it() -> Result<()>
 
     let address: &'static str = Box::leak(mirror.address.to_ascii_lowercase().into_boxed_str());
     let fixture = Fixture {
-        id: "mirror_hackathon",
+        id: "mirror_official_sepolia",
         base: i64::try_from(mirror.start_block.unwrap())? + 1,
         mirror: address,
         v2_payload: Some(serde_json::to_value(manifest)?),

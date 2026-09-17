@@ -13374,8 +13374,8 @@ async fn checked_in_sepolia_v1_resolver_logs_flow_through_interpret_and_project(
     scratch.cleanup().await
 }
 
-/// The separately evidenced `sepolia-hackathon` deployment profile declares its own
-/// ENSv1 ReverseRegistrar under `ens_v1_reverse_l1`. A wallet's `setName` on it emits
+/// The `sepolia` deployment profile declares the ENSv1 ReverseRegistrar under
+/// `ens_v1_reverse_l1`. A wallet's `setName` on it emits
 /// `ReverseClaimed`, then the registry's `NewOwner`/`NewResolver` for `<addr>.addr.reverse`, then
 /// the default PublicResolver's `NameChanged`
 /// (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83-L84 @ ens_v1@91c966f)
@@ -13394,7 +13394,7 @@ async fn checked_in_sepolia_reverse_claim_flows_through_interpret_and_project() 
     // Synthetic reverse claim using the canonical Sepolia contracts.
     const CLAIM_BLOCK: i64 = 11_698_738;
 
-    let scratch = ScratchDatabase::create("production_project_hackathon_reverse_claim").await?;
+    let scratch = ScratchDatabase::create("production_project_sepolia_reverse_claim").await?;
     let profile = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("manifests/sepolia");
@@ -13506,7 +13506,7 @@ async fn checked_in_sepolia_reverse_claim_flows_through_interpret_and_project() 
     );
 
     // The PublicResolver's NameChanged for the reverse node is name-family record history for the
-    // hackathon `ens_v1_resolver_l1` declaration, not an attributed primary-name claim.
+    // Sepolia `ens_v1_resolver_l1` declaration, not an attributed primary-name claim.
     let name_record: (String, String, bool) = sqlx::query_as(
         "SELECT source_family, lower(raw_fact_ref ->> 'emitting_address'),
                 after_state ? 'primary_claim_source'
