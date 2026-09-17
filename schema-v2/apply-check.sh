@@ -103,9 +103,13 @@ legacy_public_schema_drop="20260806120000_drop_legacy_public_schema.sql"
 # A post-cutoff schema-migration that names no bigname_phase object is never
 # applied by this check, so the rule for one is closed rather than parsed: it
 # may consist only of `DROP INDEX|TABLE|SEQUENCE|VIEW|FUNCTION|PROCEDURE`
-# statements (with CONCURRENTLY, IF EXISTS, CASCADE, RESTRICT) whose every
-# target is `schema.name`, written with plain identifiers and no strings,
-# quoted identifiers, dollar quoting, block comments, or other lexical forms.
+# statements (with CONCURRENTLY, IF EXISTS, RESTRICT) whose every target is
+# `schema.name`, written with plain identifiers and no strings, quoted
+# identifiers, dollar quoting, block comments, or other lexical forms. CASCADE
+# is refused: PostgreSQL would drop whatever depends on the target, so a
+# bigname_phase view, trigger, or foreign key hanging off a public object
+# would go with it unlisted, while RESTRICT (the default) makes such a
+# dependency fail the real schema-migration loudly.
 # Anything else -- any DDL that creates or alters, any DML, any expression,
 # any routine call -- must name `bigname_phase` and thereby join the
 # inventory, where it is applied and observed. A search-path-relative name
@@ -127,7 +131,11 @@ migration_is_closed_form_drop() {
                     continue
                 }
                 rest = substr(u, RSTART + RLENGTH)
-                sub(/ (CASCADE|RESTRICT)$/, "", rest)
+                if (rest ~ / CASCADE$/) {
+                    bad = bad " [CASCADE may drop a dependent bigname_phase object: " substr(s, 1, 40) "]"
+                    continue
+                }
+                sub(/ RESTRICT$/, "", rest)
                 # A routine target carries its argument signature; commas inside
                 # its parentheses separate arguments, not targets.
                 t = 0; depth = 0; target = ""
@@ -160,7 +168,9 @@ assert_uninventoried_migrations_are_schema_qualified() {
     # The rule proves itself on every run: each planted form must be refused
     # with its reason, and the closed form must be accepted.
     local -a refused=(
-        'DROP INDEX IF EXISTS public.old_idx, name_current_lookup_idx CASCADE;'
+        'DROP INDEX IF EXISTS public.old_idx, name_current_lookup_idx RESTRICT;'
+        'DROP VIEW public.bridge CASCADE;'
+        'DROP FUNCTION IF EXISTS public.fn(integer, text) cascade;'
         'DROP INDEX CONCURRENTLY IF EXISTS "public"."ok_idx";'
         'DROP TABLE "phase.audit";'
         'DROP TABLE U&"bigname\005Fphase".chain_phase_state;'
@@ -197,7 +207,7 @@ assert_uninventoried_migrations_are_schema_qualified() {
         printf '%s\n' "unicode-escape check refused a plain identifier" >&2
         exit 1
     fi
-    if ! printf -- '-- no-transaction\nDROP INDEX CONCURRENTLY IF EXISTS\n    public.old_idx;\nDROP TABLE IF EXISTS public.a, public.b CASCADE;\nDROP FUNCTION IF EXISTS public.fn(integer, text), public.g(numeric(10,2));\nDROP PROCEDURE public.p(integer, text) RESTRICT;\n' \
+    if ! printf -- '-- no-transaction\nDROP INDEX CONCURRENTLY IF EXISTS\n    public.old_idx;\nDROP TABLE IF EXISTS public.a, public.b;\nDROP FUNCTION IF EXISTS public.fn(integer, text), public.g(numeric(10,2));\nDROP PROCEDURE public.p(integer, text) RESTRICT;\n' \
         | migration_is_closed_form_drop /dev/stdin >/dev/null; then
         printf '%s\n' "closed-form check refused the closed form" >&2
         exit 1

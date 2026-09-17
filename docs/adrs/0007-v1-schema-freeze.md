@@ -163,7 +163,10 @@ by rule rather than by parsing: a schema-migration newer than the
 legacy-schema drop that names no `bigname_phase` object may consist only of
 `DROP` statements whose every target is `schema.name`, written with plain
 identifiers and nothing quoted — no strings, quoted identifiers, dollar
-quoting, or block comments. Any other statement, any expression, any routine
+quoting, or block comments — and without `CASCADE`, since a cascading drop
+would take any dependent `bigname_phase` object with it unlisted, where the
+default `RESTRICT` makes that dependency fail the schema-migration loudly.
+Any other statement, any expression, any routine
 call, and any spelling of the phase schema other than `bigname_phase` is
 refused, so a search-path-relative name cannot be written outside the
 inventory whatever statement carries it. The check proves itself on every
