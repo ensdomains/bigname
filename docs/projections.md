@@ -565,8 +565,13 @@ evidence is served as absence.
 (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L70-L84 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) Known
 owner-derived rows remain available, but neither those rows nor a zero-row
-summary is an authoritative permission enumeration. Every permissions response
-remains partial; request scope selects the documented absent-surface reason.
+summary is an authoritative permission enumeration. Every summary Project
+currently writes is partial for one of the reasons above, and request scope
+selects the documented absent-surface reason. A summary independently proven full stays
+full: a resource-bound response over it leaves `completeness`,
+`unsupported_reason`, and `unlisted_permission_surfaces` unset. API contract
+tests inject such a summary to verify that resource-bound public requests are
+not globally forced to partial.
 
 When a registrar `Transfer` changes ENSv1 or Basenames authority between a
 registrar resource and a registry-only resource, `resource_control` and
