@@ -129,10 +129,20 @@ pub(super) fn assert_scoped_matches(mut input: BatchInput) -> anyhow::Result<Ada
         input.blocks = input
             .raw_logs
             .iter()
-            .map(|r| r.block_number)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .map(block)
+            .map(|raw| {
+                (
+                    (raw.block_number, raw.block_hash.clone()),
+                    RawBlockInput {
+                        chain_id: raw.chain_id.clone(),
+                        block_hash: raw.block_hash.clone(),
+                        block_number: raw.block_number,
+                        block_timestamp: raw.block_timestamp,
+                        canonicality_state: raw.canonicality_state.clone(),
+                    },
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+            .into_values()
             .collect();
     }
     let prior = std::mem::take(&mut input.prior_events);
@@ -516,6 +526,131 @@ fn quiet_due_node_requires_a_loaded_certificate_before_publication() -> anyhow::
             .normalized_events
             .iter()
             .any(|e| e.event_kind == "RegistrationReleased")
+    );
+    Ok(())
+}
+
+#[test]
+fn child_only_history_does_not_supply_parent_surface_membership() -> anyhow::Result<()> {
+    sol! {
+        event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
+        event NewResolver(bytes32 indexed node, address resolver);
+    }
+    const REGISTRY: &str = "0x0000000000000000000000000000000000000098";
+    let parent = super::super::common::namehash(&["parent".to_owned(), "eth".to_owned()]);
+    let child =
+        super::super::common::namehash(&["kid".to_owned(), "parent".to_owned(), "eth".to_owned()]);
+    let manifests = vec![
+        manifest(
+            95,
+            "ens_v1_wrapper_l1",
+            "NameWrapped",
+            "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+            &["name_wrapper"],
+            &[
+                "TokenControlTransferred",
+                "ExpiryChanged",
+                "PermissionScopeChanged",
+                "AuthorityEpochChanged",
+            ],
+        ),
+        manifest_with_events(
+            96,
+            "ens",
+            "ens_v1_registry_l1",
+            &[
+                (
+                    "NewOwner",
+                    "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+                    &["registry"],
+                    &[
+                        "SubregistryChanged",
+                        "AuthorityTransferred",
+                        "AuthorityEpochChanged",
+                    ],
+                ),
+                (
+                    "NewResolver",
+                    "event NewResolver(bytes32 indexed node, address resolver)",
+                    &["registry"],
+                    &["ResolverChanged"],
+                ),
+            ],
+        ),
+    ];
+    let mut registry = admission(96, "registry");
+    registry.address = REGISTRY.to_owned();
+    let admissions = vec![admission(95, "name_wrapper"), registry];
+    let prefix = input(
+        manifests.clone(),
+        admissions.clone(),
+        vec![
+            raw_at(
+                NameWrapped {
+                    node: child.parse()?,
+                    name: b"\x03kid\x06parent\x03eth\0".to_vec().into(),
+                    owner: CONTRACT.parse()?,
+                    fuses: 1,
+                    expiry: 1_000_000,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                CONTRACT,
+            ),
+            raw_at(
+                NewOwner {
+                    node: parent.parse()?,
+                    label: keccak256("kid"),
+                    owner: CONTRACT.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                1,
+                REGISTRY,
+            ),
+        ],
+    );
+    let output = interpret_schema_v2_batch(prefix.clone())?;
+    let edge = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "SubregistryChanged")
+        .expect("child edge");
+    assert_eq!(
+        edge.logical_name_id.as_deref(),
+        Some(format!("ens:{child}").as_str())
+    );
+    assert_eq!(edge.after_state["node"], parent);
+    assert_eq!(edge.after_state["child_node"], child);
+    let prior = seam::fold_prior_events(vec![], &output.normalized_events, &prefix.blocks)?;
+    let mut suffix = input(
+        manifests,
+        admissions,
+        vec![raw_at(
+            NewResolver {
+                node: parent.parse()?,
+                resolver: CONTRACT.parse()?,
+            }
+            .encode_log_data(),
+            2,
+            0,
+            REGISTRY,
+        )],
+    );
+    let (_, selected) = scope(
+        collect_v1_batch_dependencies(&suffix, &suffix.manifests)?,
+        &prior,
+    )?;
+    assert!(
+        selected.is_empty(),
+        "parent-only request must not retain child history"
+    );
+    suffix.prior_events = prior;
+    let session = assert_scoped_matches(suffix)?;
+    assert!(
+        session.v1_name("ens", &parent).is_none(),
+        "a known child must not invent parent authority"
     );
     Ok(())
 }

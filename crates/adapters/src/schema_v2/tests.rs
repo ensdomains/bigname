@@ -14405,7 +14405,7 @@ fn assert_reverse_node_resolver_events_are_state_keyed(
     };
     let mut registry_admission = admission(90, "registry");
     registry_admission.address = REGISTRY_ADDRESS.to_owned();
-    let output = interpret_test_batch(BatchInput {
+    let batch = BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![
             manifest_with_events(
@@ -14450,7 +14450,11 @@ fn assert_reverse_node_resolver_events_are_state_keyed(
             raw_at(name_log, 1, 2, RESOLVER_ADDRESS),
             raw_at(text_log, 1, 3, RESOLVER_ADDRESS),
         ],
-    })?;
+    };
+    if namespace == "ens" {
+        lookahead::assert_scoped_matches(batch.clone())?;
+    }
+    let output = interpret_test_batch(batch)?;
 
     assert!(
         output.name_surfaces.is_empty(),

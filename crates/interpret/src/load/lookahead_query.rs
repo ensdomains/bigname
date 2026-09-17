@@ -1,6 +1,9 @@
 use bigname_adapters::schema_v2::{
     PriorEventInput,
-    seam::{retained_event_state_key, retained_prior_state_key},
+    seam::{
+        INTERPRETER_STATE_KEY, STATE_SCOPE_KEY, SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY,
+        retained_event_state_key, retained_prior_state_key,
+    },
 };
 use futures_util::TryStreamExt;
 use serde_json::Value;
@@ -51,7 +54,11 @@ async fn events_with_byte_limit(
     if names.is_empty() && resources.is_empty() {
         return Ok(Vec::new());
     }
-    let mut rows = sqlx::query_as::<_, EventRow>(EVENTS)
+    let query = EVENTS
+        .replace("{state_key}", INTERPRETER_STATE_KEY)
+        .replace("{state_scope}", STATE_SCOPE_KEY)
+        .replace("{clear_marker}", SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY);
+    let mut rows = sqlx::query_as::<_, EventRow>(&query)
         .bind(chain)
         .bind(before)
         .bind(names)
@@ -139,13 +146,13 @@ fn decode_event(
     block_timestamp: Option<OffsetDateTime>,
 ) -> Result<PriorEventInput> {
     macro_rules! field {
-        ($name:literal) => {
+        ($name:expr) => {
             serde_json::from_value(body[$name].take()).map_err(|error| {
                 InterpretError::data_integrity(format!("invalid lookahead {}: {error}", $name))
             })?
         };
     }
-    let interpreter_state_key: Option<String> = field!("interpreter_state_key");
+    let interpreter_state_key: Option<String> = field!(INTERPRETER_STATE_KEY);
     let event_identity: String = field!("event_identity");
     let after_state = body["after_state"].take();
     Ok(PriorEventInput {
@@ -162,7 +169,7 @@ fn decode_event(
         manifest_version: field!("manifest_version"),
         source_manifest_id: field!("source_manifest_id"),
         emitting_address: field!("emitting_address"),
-        state_scope: field!("state_scope"),
+        state_scope: field!(STATE_SCOPE_KEY),
         block_timestamp,
         after_state,
     })
