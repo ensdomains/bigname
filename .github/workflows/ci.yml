@@ -12,14 +12,29 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # A newer push replaces an older run of the same pull request. Runs on main
+  # are left to finish, because they are the only runs that save the Cargo
+  # caches every pull request restores (see the cache note below). A main run
+  # cancelled part-way saves nothing, and the next pull requests compile cold.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+# Cache note. GitHub keeps 10 GB of Actions cache per repository and evicts the
+# least recently used entries past that. A pull request can restore entries
+# saved by its own ref or by main, never by another pull request or by a merge
+# queue ref. So the entries worth keeping are the ones main saves.
+#
+# sccache is deliberately not used. Its GitHub backend stores one cache entry
+# per compiled crate and makes one cache API call per lookup and per write,
+# about ten thousand calls per run. That used up the repository's cache API
+# rate limit: nearly every sccache write failed, and the large keyed caches
+# below then failed with "You've hit a rate limit", "Unable to reserve cache"
+# and 429 on restore, which left the e2e shards and the container-shutdown job
+# compiling cold. The keyed Cargo caches cover the same dependencies with one
+# entry per job.
 env:
   CARGO_TERM_COLOR: always
-  RUSTC_WRAPPER: sccache
   RUST_VERSION: 1.93.1
   FOUNDRY_VERSION: v1.7.1
-  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
   static:
@@ -35,17 +50,14 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           components: clippy,rustfmt
 
-      - name: Set up sccache
-        id: sccache
-        continue-on-error: true
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Fall back without sccache
-        if: steps.sccache.outcome != 'success'
-        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-
+      # Only main saves this cache (see the cache note at the top). Pull requests
+      # and merge queue runs restore main's entry, falling back to main's entry
+      # for an older Cargo.lock, and save nothing: their copies were invisible
+      # to every other run and pushed main's entries out of the 10 GB limit.
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: cargo fmt
         run: cargo fmt --check
@@ -240,17 +252,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang libclang-dev
 
-      - name: Set up sccache
-        id: sccache
-        continue-on-error: true
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Fall back without sccache
-        if: steps.sccache.outcome != 'success'
-        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-
+      # Only main saves this cache (see the cache note at the top). Pull requests
+      # and merge queue runs restore main's entry, falling back to main's entry
+      # for an older Cargo.lock, and save nothing: their copies were invisible
+      # to every other run and pushed main's entries out of the 10 GB limit.
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Sync pinned upstream checkouts
         if: matrix.name == 'core'
@@ -304,15 +313,6 @@ jobs:
         with:
           tool: cargo-nextest@0.9.143
 
-      - name: Set up sccache
-        id: sccache
-        continue-on-error: true
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Fall back without sccache
-        if: steps.sccache.outcome != 'success'
-        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-
       - name: Compute phase-runner dependency-cache key
         id: phase_runner_cache_key
         run: |
@@ -325,6 +325,11 @@ jobs:
           echo "primary=$primary" >>"$GITHUB_OUTPUT"
           echo "phase-runner dependency-cache primary key: $primary"
 
+      # Restore only. `build (e2e phase-runner)` is the one job that saves this
+      # key, so the entry always holds the dependencies of the plain
+      # `cargo build -p phase-runner` that the e2e shards and the
+      # container-shutdown job repeat. When this shard won the save instead, the
+      # entry held this shard's all-features test build under the same key.
       - name: Cache phase-runner Cargo dependencies
         id: phase_runner_cache
         uses: Swatinem/rust-cache@v2
@@ -335,6 +340,7 @@ jobs:
           add-rust-environment-hash-key: false
           workspaces: ". -> target"
           cache-workspace-crates: false
+          save-if: false
 
       - name: Report phase-runner dependency cache
         env:
@@ -422,15 +428,6 @@ jobs:
         with:
           tool: cargo-nextest@0.9.143
 
-      - name: Set up sccache
-        id: sccache
-        continue-on-error: true
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Fall back without sccache
-        if: steps.sccache.outcome != 'success'
-        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-
       - name: Compute phase-runner dependency-cache key
         id: phase_runner_cache_key
         run: |
@@ -443,6 +440,11 @@ jobs:
           echo "primary=$primary" >>"$GITHUB_OUTPUT"
           echo "phase-runner dependency-cache primary key: $primary"
 
+      # Restore only. `build (e2e phase-runner)` is the one job that saves this
+      # key, so the entry always holds the dependencies of the plain
+      # `cargo build -p phase-runner` that the e2e shards and the
+      # container-shutdown job repeat. When this shard won the save instead, the
+      # entry held this shard's all-features test build under the same key.
       - name: Cache phase-runner Cargo dependencies
         id: phase_runner_cache
         uses: Swatinem/rust-cache@v2
@@ -453,6 +455,7 @@ jobs:
           add-rust-environment-hash-key: false
           workspaces: ". -> target"
           cache-workspace-crates: false
+          save-if: false
 
       - name: Report phase-runner dependency cache
         env:
@@ -526,15 +529,6 @@ jobs:
         with:
           tool: cargo-nextest@0.9.143
 
-      - name: Set up sccache
-        id: sccache
-        continue-on-error: true
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Fall back without sccache
-        if: steps.sccache.outcome != 'success'
-        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-
       - name: Compute phase-runner dependency-cache key
         id: phase_runner_cache_key
         run: |
@@ -547,6 +541,11 @@ jobs:
           echo "primary=$primary" >>"$GITHUB_OUTPUT"
           echo "phase-runner dependency-cache primary key: $primary"
 
+      # Restore only. `build (e2e phase-runner)` is the one job that saves this
+      # key, so the entry always holds the dependencies of the plain
+      # `cargo build -p phase-runner` that the e2e shards and the
+      # container-shutdown job repeat. When this shard won the save instead, the
+      # entry held this shard's all-features test build under the same key.
       - name: Cache phase-runner Cargo dependencies
         id: phase_runner_cache
         uses: Swatinem/rust-cache@v2
@@ -557,6 +556,7 @@ jobs:
           add-rust-environment-hash-key: false
           workspaces: ". -> target"
           cache-workspace-crates: false
+          save-if: false
 
       - name: Report phase-runner dependency cache
         env:
@@ -616,7 +616,6 @@ jobs:
       artifact-name: ${{ steps.package.outputs.artifact-name }}
     env:
       CARGO_INCREMENTAL: "0"
-      RUSTC_WRAPPER: ""
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -784,7 +783,6 @@ jobs:
       BIGNAME_E2E_TEST_THREADS: "8"
       BIGNAME_E2E_SHARD: "1"
       CARGO_INCREMENTAL: "0"
-      RUSTC_WRAPPER: ""
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -904,7 +902,6 @@ jobs:
       BIGNAME_E2E_TEST_THREADS: "8"
       BIGNAME_E2E_SHARD: "2"
       CARGO_INCREMENTAL: "0"
-      RUSTC_WRAPPER: ""
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -1021,12 +1018,9 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      # sccache is off here for the same reason as `build (e2e phase-runner)`: the
-      # dependency cache below covers this build instead. The image build takes its
-      # single-job constraint from the pinned one-CPU builder that
-      # `scripts/test-container-shutdown` creates and verifies, not from this job's
-      # environment, so the host build is free to use the runner's cores.
-      RUSTC_WRAPPER: ""
+      # The image build takes its single-job constraint from the pinned one-CPU
+      # builder that `scripts/test-container-shutdown` creates and verifies, not from
+      # this job's environment, so the host build is free to use the runner's cores.
       BIGNAME_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
       BIGNAME_E2E_SHUTDOWN_SOURCE_SHA: ${{ github.sha }}
       BIGNAME_E2E_SHUTDOWN_EVIDENCE: ${{ github.workspace }}/target/api-container-shutdown
@@ -1220,17 +1214,14 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
 
-      - name: Set up sccache
-        id: sccache
-        continue-on-error: true
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Fall back without sccache
-        if: steps.sccache.outcome != 'success'
-        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-
+      # Only main saves this cache (see the cache note at the top). Pull requests
+      # and merge queue runs restore main's entry, falling back to main's entry
+      # for an older Cargo.lock, and save nothing: their copies were invisible
+      # to every other run and pushed main's entries out of the 10 GB limit.
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Fetch smoke dependencies
         run: |
