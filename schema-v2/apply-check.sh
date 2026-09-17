@@ -304,7 +304,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=7
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=31
+expected_predecessor_shape_proof_count=32
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -393,7 +393,8 @@ for migration_file in \
     "$ROOT/migrations/20260914120000_lookup_publication_revalidation.sql" \
     "$ROOT/migrations/20260914120100_address_records_current_comments.sql" \
     "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" \
-    "$ROOT/migrations/20260917120000_discovery_edges_observation_history_idx.sql"
+    "$ROOT/migrations/20260917120000_discovery_edges_observation_history_idx.sql" \
+    "$ROOT/migrations/20260917130000_discovery_edges_reopen_idx.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -754,6 +755,35 @@ BEGIN
     END IF;
 END $$;
 DROP TABLE expected_discovery_history_index;
+SQL
+} | run_psql
+# Recreate the additive discovery reopen index from its preceding schema shape.
+# Compare the resulting catalog definition to the fresh baseline, then prove a
+# rerun leaves it unchanged.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_discovery_reopen_index AS
+SELECT pg_get_indexdef(indexrelid) AS definition
+FROM pg_index
+WHERE indexrelid = 'discovery_edges_reopen_idx'::regclass;
+DROP INDEX discovery_edges_reopen_idx;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917130000_discovery_edges_reopen_idx.sql" preceding-shape
+    emit_phase_migration "$ROOT/migrations/20260917130000_discovery_edges_reopen_idx.sql" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index, expected_discovery_reopen_index expected
+        WHERE indexrelid = 'discovery_edges_reopen_idx'::regclass
+          AND indisvalid AND indisready AND indpred IS NULL
+          AND pg_get_indexdef(indexrelid) = expected.definition
+    ) THEN
+        RAISE EXCEPTION 'discovery reopen index upgrade differs from the baseline';
+    END IF;
+END $$;
+DROP TABLE expected_discovery_reopen_index;
 SQL
 } | run_psql
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor
