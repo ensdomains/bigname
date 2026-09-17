@@ -59,7 +59,11 @@ data-dependent spike is contained to the container that produced it (it is
 OOM-killed and restarted under `restart: unless-stopped`) rather than left to
 the host OOM killer to resolve among the runner, the API, PostgreSQL and a
 co-resident archive node. There are no defaults: size them in the
-[capacity preflight](runbooks/production-docker.md#capacity-preflight). Every
+[capacity preflight](runbooks/production-docker.md#capacity-preflight), where
+PostgreSQL's ceiling includes the page cache it reads through (the kernel
+charges it to the container), and validate the rendered model with
+`scripts/check-compose-memory-limits`, since Compose accepts `0` and Docker
+reads it as no limit. Every
 service logs through the `json-file` driver with rotation
 (`BIGNAME_LOG_MAX_SIZE`, default `100m`, times `BIGNAME_LOG_MAX_FILE`, default
 `5`), so container logs are bounded on the volume PostgreSQL writes to.

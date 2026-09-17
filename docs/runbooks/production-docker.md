@@ -59,21 +59,35 @@ host measurement, and changes no direct CLI defaults or backup policy (#329).
    every effective mount, including `RETH_DATA_DIR`.
 3. Choose the container memory ceilings: `POSTGRES_MEMORY_LIMIT`,
    `BIGNAME_API_MEMORY_LIMIT`, `BIGNAME_PHASE_RUNNER_MEMORY_LIMIT` and, with the
-   public overlay, `BIGNAME_PUBLIC_PROXY_MEMORY_LIMIT`, as Docker byte values
-   (`24g`, `2048m`). Start from the host's total RAM (`free -b`), subtract what
-   the co-resident archive node is limited to or observed using, and leave the
-   kernel a page cache at least the size of PostgreSQL's
-   `effective_cache_size` assumption; the four ceilings must sum to less than
-   what remains. PostgreSQL's ceiling must cover `shared_buffers` plus
-   `maintenance_work_mem` plus `max_connections` × `work_mem` × a few, since a
-   backend can hold several `work_mem` allocations at once and the kernel counts
-   its shared memory against the container; an OOM kill of one backend makes
-   the postmaster restart every session. For the runner and the API, take the
+   public overlay, `BIGNAME_PUBLIC_PROXY_MEMORY_LIMIT`, as positive Docker byte
+   values (`24g`, `2048m`). The kernel charges the file page cache a container
+   populates to that container's cgroup, so the cache PostgreSQL reads through
+   lives inside `POSTGRES_MEMORY_LIMIT`, not beside it: that ceiling must cover
+   `shared_buffers` + `maintenance_work_mem` + `max_connections` × `work_mem` ×
+   a few (a backend can hold several `work_mem` allocations at once, and shared
+   memory is charged too) **plus the page cache PostgreSQL is meant to have**,
+   which is what `POSTGRES_EFFECTIVE_CACHE_SIZE` tells the planner it has.
+   Lower `effective_cache_size` to fit the ceiling rather than the other way
+   round; the Compose default of `96GB` is not a fit for a `24g` ceiling. The
+   four ceilings plus what the co-resident archive node is limited to or
+   observed using must sum to less than the host's total RAM (`free -b`),
+   with nothing reserved outside them. An OOM kill of one backend makes the
+   postmaster restart every session. For the runner and the API, take the
    peak RSS observed on this host under catch-up and under load respectively
    and add headroom; where no observation exists yet, record that the ceiling
    is provisional and revisit it after the first catch-up. A container that
    reaches its ceiling is killed and restarted; check `docker inspect
-   --format '{{.State.OOMKilled}}'` on any unexplained restart.
+   --format '{{.State.OOMKilled}}'` on any unexplained restart. Compose only
+   refuses an empty value, and `0` renders as *no* limit, so validate the
+   rendered model with every active overlay before recreating anything:
+
+   ```sh
+   scripts/check-compose-memory-limits --env-file .env.server \
+     -f docker-compose.server.yml -f docker-compose.public.yml
+   ```
+
+   It fails unless every service carries a positive ceiling and `json-file`
+   logging with `max-size` and `max-file`.
 4. Record Docker/Compose versions, daemon host/context, Docker data root, volume
    driver/options, rootless/user-namespace settings and applicable security policy.
    Inspect PostgreSQL's effective mount rather than guessing from `postgres-data`:
@@ -117,8 +131,9 @@ host measurement, and changes no direct CLI defaults or backup policy (#329).
    Require one dedicated read/write bind, identical absolute source/target and
    `create_host_path: false`. Both Reth sets must retain their separate read-only
    mount. Require the chosen memory ceiling on every service
-   (`deploy.resources.limits.memory` in the rendered model, `HostConfig.Memory`
-   on the created container) and the `json-file` logging options on each. No
+   (`deploy.resources.limits.memory` in the rendered model — the check above —
+   and `HostConfig.Memory` greater than zero on every created container) and
+   the `json-file` logging options on each. No
    unrelated service environment, command, port, network or volume may
    change. Inspect the created container as well; the env file alone is not proof:
 
@@ -187,10 +202,31 @@ normalized publication, API correctness, restore or production serving acceptanc
 ### Apply or roll back the wiring
 
 After the effective configuration and filesystem/permission checks pass, follow
-the approved deployment boundary and recreate only the intended phase-runner with
-all active overlays. Settings are read at startup. Changing the floor/ceiling does
-not require phase-row edits; genuine capacity breaches resume automatically after
-capacity recovers. Preserve the PostgreSQL volume during rollback: never use
+the approved deployment boundary and recreate the services whose wiring changed,
+with all active overlays. A change to the runner's floor or probe path touches
+only `phase-runner`. A change to the memory ceilings or log rotation touches
+every service: a running container keeps its old `HostConfig` and `LogConfig`
+until it is recreated, so recreating only the runner leaves PostgreSQL, the API
+and the proxy unlimited and unrotated. Pause indexing first
+([§ Pause and resume indexing](#pause-and-resume-indexing)), then recreate in
+dependency order — PostgreSQL (a short outage for every client), the API, the
+proxy, the runner — and inspect each created container before moving on:
+
+```sh
+compose=(docker compose --env-file .env.server -f docker-compose.server.yml -f docker-compose.public.yml)
+"${compose[@]}" up -d --no-deps --force-recreate postgres
+"${compose[@]}" up -d --no-deps --force-recreate api public-proxy
+"${compose[@]}" up -d --no-deps --force-recreate phase-runner
+for service in postgres api public-proxy phase-runner; do
+  docker inspect "$("${compose[@]}" ps -q "$service")" \
+    --format "$service {{.HostConfig.Memory}} {{json .HostConfig.LogConfig}}"
+done
+```
+
+Every line must show a memory value greater than zero and a `json-file` config
+with `max-size` and `max-file`. Settings are read at startup. Changing the
+floor/ceiling does not require phase-row edits; genuine capacity breaches
+resume automatically after capacity recovers. Preserve the PostgreSQL volume during rollback: never use
 `down -v`. Restore the reviewed configuration/image and inspect the effective
 settings again. The harmless dedicated probe directory may remain, but reverting
 this wiring restores the old disabled/misdirected defaults and loses its protection.

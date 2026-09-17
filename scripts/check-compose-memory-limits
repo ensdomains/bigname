@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Render a Compose configuration and refuse it unless every service carries a
+# positive memory ceiling and bounded json-file logging. Compose's `:?`
+# interpolation only rejects an empty value; `0` renders and Docker treats a
+# zero limit as unlimited, which would silently drop the guardrail.
+#
+# Usage: scripts/check-compose-memory-limits [docker compose arguments...]
+#   e.g. scripts/check-compose-memory-limits --env-file .env.server \
+#            -f docker-compose.server.yml -f docker-compose.public.yml
+set -euo pipefail
+rendered="$(docker compose "$@" config --format json)"
+python3 - "$rendered" <<'PY'
+import json, sys
+config = json.loads(sys.argv[1])
+failures = []
+for name, service in sorted(config.get("services", {}).items()):
+    # Compose renders the ceiling as a byte count string and drops a zero one.
+    memory = (((service.get("deploy") or {}).get("resources") or {}).get("limits") or {}).get("memory")
+    try:
+        memory_bytes = int(memory)
+    except (TypeError, ValueError):
+        memory_bytes = 0
+    if memory_bytes <= 0:
+        failures.append(f"{name}: deploy.resources.limits.memory is {memory!r}; a positive ceiling is required (0 renders as unlimited)")
+    logging = service.get("logging") or {}
+    options = logging.get("options") or {}
+    if logging.get("driver") != "json-file" or not options.get("max-size") or not options.get("max-file"):
+        failures.append(f"{name}: logging must be json-file with max-size and max-file, got {logging!r}")
+if failures:
+    print("\n".join(failures), file=sys.stderr)
+    sys.exit(1)
+for name, service in sorted(config.get("services", {}).items()):
+    print(f"{name}: memory {service['deploy']['resources']['limits']['memory']} bytes, logging {service['logging']['options']}")
+PY
