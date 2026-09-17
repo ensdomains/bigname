@@ -634,3 +634,32 @@ async fn primary_names_look_each_reverse_node_up_by_key() -> Result<()> {
     ensure!(claims > 0, "the seed has no primary name");
     rebuild.finish().await
 }
+
+/// The direct-topology update joins every name to its binding and its inventory row. While the
+/// binding stage had no statistics the planner took it for a single row and compared every
+/// binding with every name.
+#[tokio::test]
+async fn direct_topology_joins_names_to_bindings_once() -> Result<()> {
+    let mut rebuild = Rebuild::through(
+        "rebuild_plan_topology",
+        PLAN_NAMES,
+        Builder::RecordInventory,
+    )
+    .await?;
+    let plan = rebuild
+        .explain(super::name_topology::direct::PROJECT_DIRECT_TOPOLOGY)
+        .await?;
+    for relation in [
+        "project_stage_name_current",
+        "project_bindings",
+        "project_surfaces",
+        "project_stage_record_inventory_current",
+    ] {
+        let rows = rows_read(&plan, relation);
+        ensure!(
+            rows <= 20.0 * PLAN_NAMES as f64,
+            "{relation} rows handled: {rows}; {plan}"
+        );
+    }
+    rebuild.finish().await
+}
