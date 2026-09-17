@@ -80,6 +80,8 @@ struct ConnectionArgs {
 
 #[derive(Clone, Debug, Args)]
 struct CapacityArgs {
+    #[arg(long, env = "BIGNAME_EXPERIMENTAL_V1_LOOKAHEAD")]
+    experimental_v1_lookahead: bool,
     #[arg(long, env = "BIGNAME_PHASE_RUNNER_INTERPRETER_STATE_CACHE_ENTRIES")]
     interpreter_state_cache_entries: Option<usize>,
     #[arg(long, env = "BIGNAME_PHASE_RUNNER_DATABASE_MAX_BYTES")]
@@ -494,6 +496,7 @@ fn resolve_capacity(args: CapacityArgs) -> RunnerResult<CapacityConfig> {
         ));
     }
     Ok(CapacityConfig {
+        experimental_v1_lookahead: args.experimental_v1_lookahead,
         database_max_bytes: args.database_max_bytes,
         minimum_free_disk_bytes: args.minimum_free_disk_bytes,
         writable_path: args.writable_path,

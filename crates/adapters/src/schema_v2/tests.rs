@@ -6,6 +6,8 @@ use uuid::Uuid;
 
 use super::*;
 
+#[path = "tests/lookahead.rs"]
+mod lookahead;
 mod migration;
 
 #[path = "tests/record_id_resolver.rs"]
@@ -7115,7 +7117,7 @@ fn wrapper_fallback_registrar_identity_matches_live_full_replay_and_cold_restore
         .cloned()
         .collect::<Vec<_>>();
     let cold_prior = seam::fold_prior_events(Vec::new(), &fallback_history, &[block(1), block(2)])?;
-    let cold = interpret_test_batch(BatchInput {
+    let cold_input = BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: manifests(),
         discovery_rules: Vec::new(),
@@ -7123,7 +7125,9 @@ fn wrapper_fallback_registrar_identity_matches_live_full_replay_and_cold_restore
         prior_events: cold_prior,
         blocks: Vec::new(),
         raw_logs: vec![later_transfer.clone()],
-    })?;
+    };
+    lookahead::assert_scoped_matches(cold_input.clone())?;
+    let cold = interpret_test_batch(cold_input)?;
     let cold_later = cold
         .normalized_events
         .iter()

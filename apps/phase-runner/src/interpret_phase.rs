@@ -16,6 +16,11 @@ pub struct InterpretPhase {
 }
 
 impl InterpretPhase {
+    pub fn with_experimental_v1_lookahead(mut self, enabled: bool) -> Self {
+        self.engine = self.engine.with_experimental_v1_lookahead(enabled);
+        self
+    }
+
     pub fn new(pool: PgPool) -> Self {
         Self {
             engine: Engine::new(pool),
