@@ -241,10 +241,17 @@ async fn create_scoped_event_ids(
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
-    sqlx::raw_sql(ANALYZE_HISTORY_SCOPES_SQL)
-        .execute(&mut **transaction)
-        .await
-        .map_err(|error| ProjectError::database("failed to analyze scoped history keys", error))?;
+    for statement in ANALYZE_HISTORY_SCOPES_SQL
+        .split(';')
+        .filter(|statement| !statement.trim().is_empty())
+    {
+        sqlx::query(statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to analyze scoped history keys", error)
+            })?;
+    }
     sqlx::query(
         "CREATE TEMP TABLE project_event_ids (
              normalized_event_id bigint PRIMARY KEY
