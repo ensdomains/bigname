@@ -332,29 +332,85 @@ The release containing
 `20260917120000_discovery_edges_observation_history_idx.sql` adds the lookup
 Interpret uses to find earlier and later observations of one discovery
 relationship, including closed ones. On an initialized production namespace,
-build `discovery_edges_observation_history_idx` concurrently in step 3. This
-runbook does not repeat the statement: follow
-[the index runbook](../../ops/discovery-history-index/README.md) and run its
-[`install.sql`](../../ops/discovery-history-index/install.sql), which exits
-non-zero unless the index is valid and ready. Also confirm the definition as
-that runbook describes. The concurrent build permits writes, so it can be
-completed while the existing runner is still processing, before the stop/start
-window opens; step 3 then only re-checks the result. Then apply the
-schema-migration in step 4; its `IF NOT EXISTS` build is a no-op when the
-concurrent index is already valid. Do not allow the versioned schema-migration
-to perform the first build against a populated production `discovery_edges`
-table: an ordinary index build blocks writes to the table until the
-schema-migration's transaction ends.
+build `discovery_edges_observation_history_idx` concurrently in step 3 with the
+reviewed statement below. The source of that statement is
+[`ops/discovery-history-index/install.sql`](../../ops/discovery-history-index/install.sql);
+the copy below must stay identical to it. `schema-v2/apply-check.sh` proves
+that `install.sql`, the fresh baseline, and the schema-migration build the same
+definition, but nothing checks this runbook's copy, so compare the two before
+the release and treat `install.sql` as correct if they differ. Prefer running
+`install.sql` itself, as
+[the index runbook](../../ops/discovery-history-index/README.md) describes: it
+also lifts the lock timeout, bounds the build to thirty minutes, prints the
+index row, and exits non-zero unless the index is valid and ready. The
+concurrent build permits writes, so it can be completed while the existing
+runner is still processing, before the stop/start window opens; step 3 then
+only re-checks the result.
+
+Before continuing, require
+`discovery_edges_observation_history_index_ready` from the query below to be
+true. It checks that the index belongs to `bigname_phase.discovery_edges`, is
+valid and ready, and has the reviewed key columns, order, and predicate.
+`install.sql` ends with its own validity and definition check; run this query
+as well when the statement was applied by hand.
+
+An interrupted build, for example one cancelled or stopped by the
+thirty-minute limit, leaves an invalid index under the intended name, and
+`IF NOT EXISTS` then skips it. To recover, first confirm in
+`pg_stat_progress_create_index` that no build is still running. Then drop only
+this index with
+`DROP INDEX CONCURRENTLY bigname_phase.discovery_edges_observation_history_idx`,
+rerun the statement or `install.sql`, and repeat the query. Recover an index
+that is valid but has the wrong definition the same way. Never drop the active
+discovery indexes, and never drop a valid index with the reviewed definition
+merely because an installation was retried.
+
+In the release record, keep the `install.sql` output or the statement with its
+start and end times, the result of the query below, and the before and after
+`EXPLAIN (ANALYZE, BUFFERS)` plans and completed-batch measurements the index
+runbook asks for. Then apply the schema-migration in step 4; its
+`IF NOT EXISTS` build is a no-op when the concurrent index is already valid. Do
+not allow the versioned schema-migration to perform the first build against a
+populated production `discovery_edges` table: an ordinary index build blocks
+writes to the table until the schema-migration's transaction ends.
 
 The release containing `20260917130000_discovery_edges_reopen_idx.sql` adds the
 exact lookup Interpret uses to find a retained observation, orphaned and closed
 ones included, before it inserts a new row. On an initialized production
-namespace, build `discovery_edges_reopen_idx` concurrently in step 3 the same
-way: follow [its index runbook](../../ops/discovery-reopen-index/README.md) and
-run its [`install.sql`](../../ops/discovery-reopen-index/install.sql), which
-exits non-zero unless the index is valid and ready, and confirm the definition.
-This build can also be completed before the stop/start window opens. Then apply
-the schema-migration in step 4; do not allow it to perform the first build
+namespace, build `discovery_edges_reopen_idx` concurrently in step 3 with the
+reviewed statement below. The source of that statement is
+[`ops/discovery-reopen-index/install.sql`](../../ops/discovery-reopen-index/install.sql);
+the copy below must stay identical to it. `schema-v2/apply-check.sh` proves
+that `install.sql`, the fresh baseline, and the schema-migration build the same
+definition, but nothing checks this runbook's copy, so compare the two before
+the release and treat `install.sql` as correct if they differ. Prefer running
+`install.sql` itself, as
+[its index runbook](../../ops/discovery-reopen-index/README.md) describes: it
+also lifts the lock timeout, bounds the build to thirty minutes, prints the
+index row, and exits non-zero unless the index is valid, ready, and has the
+reviewed definition. This build can also be completed before the stop/start
+window opens; step 3 then only re-checks the result.
+
+Before continuing, require `discovery_edges_reopen_index_ready` from the query
+below to be true. It checks that the index belongs to
+`bigname_phase.discovery_edges`, is valid and ready, has the reviewed key
+columns and order, and has no predicate.
+
+An interrupted build leaves an invalid index under the intended name, and
+`IF NOT EXISTS` then skips it. To recover, first confirm in
+`pg_stat_progress_create_index` that no build is still running. Then drop only
+this index with
+`DROP INDEX CONCURRENTLY bigname_phase.discovery_edges_reopen_idx`, rerun the
+statement or `install.sql`, and repeat the query. Recover an index that is
+valid but has the wrong definition the same way. Never drop a valid index with
+the reviewed definition or the other discovery indexes.
+
+In the release record, keep the `install.sql` output or the statement with its
+start and end times, the result of the query below, the before and after
+`EXPLAIN (ANALYZE, BUFFERS)` plans and completed-batch measurements, and the
+`benchmark.py` JSON output the index runbook asks for. Then apply the
+schema-migration in step 4; its `IF NOT EXISTS` build is a no-op when the
+concurrent index is already valid. Do not allow it to perform the first build
 against a populated production `discovery_edges` table.
 
 Both discovery index schema-migrations adopt an existing index by name alone,
@@ -362,9 +418,14 @@ so on their own they would also accept the invalid index an interrupted
 concurrent build leaves behind. The later
 `20260917160000_discovery_edges_index_validity_check.sql` closes that gap: in
 step 4 it fails, and `sqlx migrate run` stops without recording it, if either
-index exists but is not valid and ready. It never drops or rebuilds an index.
-If it fails, follow the recovery steps in the matching index runbook, then run
-`sqlx migrate run` again.
+index exists but is not valid and ready, or is valid but does not have the
+reviewed definition. It also fails when `bigname_phase.discovery_edges` exists
+and either name is missing or belongs to a table, view, or other relation that
+is not an index. The error names the index and, for a definition mismatch,
+prints the definition it found beside the expected one. It never drops or
+rebuilds an index. If it
+fails, follow the recovery steps above or in the matching index runbook, then
+run `sqlx migrate run` again.
 
 The release containing
 `20260904120000_project_redo_child_registration_history.sql` adds the bounded
@@ -504,6 +565,68 @@ EXISTS (
       AND index_state.indisvalid
       AND index_state.indisready
 ) AS normalized_events_emitter_history_index_ready;
+
+-- The schema qualifier on the enum type depends on the session search_path,
+-- so it is removed before the predicate is compared.
+SELECT EXISTS (
+    SELECT 1
+    FROM pg_class index_relation
+    JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
+    JOIN pg_am access_method ON access_method.oid = index_relation.relam
+    WHERE index_relation.oid = to_regclass(
+              'bigname_phase.discovery_edges_observation_history_idx'
+          )
+      AND index_state.indrelid = to_regclass('bigname_phase.discovery_edges')
+      AND index_state.indisvalid
+      AND index_state.indisready
+      AND NOT index_state.indisunique
+      AND access_method.amname = 'btree'
+      AND index_state.indnkeyatts = 5
+      AND index_state.indoption::text = '0 0 0 0 0'
+      AND ARRAY(
+              SELECT pg_get_indexdef(index_state.indexrelid, key_position, true)
+              FROM generate_series(1, index_state.indnatts) AS key_position
+              ORDER BY key_position
+          ) = ARRAY[
+              'chain_id',
+              'from_contract_instance_id',
+              'edge_kind',
+              '(provenance ->> ''observation_key''::text)',
+              'active_from_block_number'
+          ]
+      AND replace(
+              pg_get_expr(index_state.indpred, index_state.indrelid, true),
+              'bigname_phase.', ''
+          ) = 'canonicality_state <> ''orphaned''::canonicality_state'
+) AS discovery_edges_observation_history_index_ready;
+
+SELECT EXISTS (
+    SELECT 1
+    FROM pg_class index_relation
+    JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
+    JOIN pg_am access_method ON access_method.oid = index_relation.relam
+    WHERE index_relation.oid =
+          to_regclass('bigname_phase.discovery_edges_reopen_idx')
+      AND index_state.indrelid = to_regclass('bigname_phase.discovery_edges')
+      AND index_state.indisvalid
+      AND index_state.indisready
+      AND NOT index_state.indisunique
+      AND access_method.amname = 'btree'
+      AND index_state.indnkeyatts = 5
+      AND index_state.indoption::text = '0 0 0 0 0'
+      AND ARRAY(
+              SELECT pg_get_indexdef(index_state.indexrelid, key_position, true)
+              FROM generate_series(1, index_state.indnatts) AS key_position
+              ORDER BY key_position
+          ) = ARRAY[
+              'chain_id',
+              'from_contract_instance_id',
+              'edge_kind',
+              'active_from_block_number',
+              '(provenance ->> ''observation_key''::text)'
+          ]
+      AND index_state.indpred IS NULL
+) AS discovery_edges_reopen_index_ready;
 ```
 
 Apply the following index statements one at a time with the writer role. Do not
@@ -618,6 +741,23 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_emitter_history_idx
         normalized_event_id DESC)
     WHERE raw_fact_ref ->> 'emitting_address' IS NOT NULL
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
+CREATE INDEX CONCURRENTLY IF NOT EXISTS discovery_edges_observation_history_idx
+    ON bigname_phase.discovery_edges (
+        chain_id,
+        from_contract_instance_id,
+        edge_kind,
+        (provenance ->> 'observation_key'),
+        active_from_block_number
+    )
+    WHERE canonicality_state <> 'orphaned';
+CREATE INDEX CONCURRENTLY IF NOT EXISTS discovery_edges_reopen_idx
+    ON bigname_phase.discovery_edges (
+        chain_id,
+        from_contract_instance_id,
+        edge_kind,
+        active_from_block_number,
+        (provenance ->> 'observation_key')
+    );
 CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_chain_block_number_idx
     ON bigname_phase.name_surfaces (chain_id, block_number);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS surface_bindings_chain_block_number_idx
@@ -685,7 +825,8 @@ indexes are additive; rollback may leave them in place.
    or `20260911120000_normalized_events_emitter_history_idx.sql`,
    or `20260917120000_discovery_edges_observation_history_idx.sql`,
    or `20260917130000_discovery_edges_reopen_idx.sql`,
-   apply and validate the applicable concurrent baseline indexes above;
+   apply the applicable reviewed `CREATE INDEX CONCURRENTLY` statements from
+   the block above, then validate each with the readiness query above it;
    otherwise skip this step;
    For the release containing
    `20260814130000_surface_binding_authority_arm.sql`, a populated phase schema
