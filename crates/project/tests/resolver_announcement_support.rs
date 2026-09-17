@@ -13,6 +13,8 @@ const CHAIN: &str = "ethereum-sepolia";
 const REGISTRY_INSTANCE: &str = "66000000-0000-0000-0000-000000000900";
 const ANNOUNCED_INSTANCE: &str = "66000000-0000-0000-0000-000000000901";
 const SILENT_INSTANCE: &str = "66000000-0000-0000-0000-000000000902";
+const CREATED_INSTANCE: &str = "66000000-0000-0000-0000-000000000903";
+const CREATED_RESOLVER: &str = "0x6666666666666666666666666666666666666666";
 const ANNOUNCED_RESOLVER: &str = "0x1111111111111111111111111111111111111111";
 const SILENT_RESOLVER: &str = "0x3333333333333333333333333333333333333333";
 const REGISTRY: &str = "0x5555555555555555555555555555555555555555";
@@ -63,6 +65,59 @@ async fn announced_implementation_supports_the_proxy_and_silence_is_unknown() ->
                 None,
             ),
         ]
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+/// `ResolverCreated()` only says that events are read from this address. It names no
+/// implementation, so a resolver known only by its creation self-edge is served as unsupported.
+#[tokio::test]
+async fn creation_self_edge_alone_is_served_as_implementation_unknown() -> Result<()> {
+    let (db, pool) = database("resolver_creation_only_support").await?;
+    seed(&pool).await?;
+    let resolver_manifest: i64 = sqlx::query_scalar(
+        "SELECT manifest_id FROM manifest_versions WHERE source_family = 'ens_v2_resolver_l1'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query("INSERT INTO contract_instances (contract_instance_id,chain_id,contract_kind) VALUES ($1::uuid,$2,'contract')")
+        .bind(CREATED_INSTANCE).bind(CHAIN).execute(&pool).await?;
+    sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id,chain_id,address,active_from_block_number,active_from_block_hash,source_manifest_id) VALUES ($1::uuid,$2,$3,$4,$5,$6)")
+        .bind(CREATED_INSTANCE).bind(CHAIN).bind(CREATED_RESOLVER).bind(BLOCK).bind(hash(BLOCK)).bind(resolver_manifest).execute(&pool).await?;
+    sqlx::query("INSERT INTO discovery_edges (chain_id,edge_kind,from_contract_instance_id,to_contract_instance_id,discovery_source,admission_basis,source_manifest_id,active_from_block_number,active_from_block_hash,canonicality_state) VALUES ($1,'resolver',$2::uuid,$2::uuid,'ResolverCreated','reachable_from_root',$3,$4,$5,'canonical')")
+        .bind(CHAIN).bind(CREATED_INSTANCE).bind(resolver_manifest).bind(BLOCK).bind(hash(BLOCK)).execute(&pool).await?;
+    // What Interpret writes for the creation log. There is no `Upgraded` for this address.
+    let after = json!({"source_event":"ResolverCreated","resolver":CREATED_RESOLVER});
+    let raw_fact_ref = json!({"kind":"raw_log","chain_id":CHAIN,"block_hash":hash(BLOCK),"block_number":BLOCK,"transaction_hash":hash(3000),"transaction_index":2,"log_index":0,"emitting_address":CREATED_RESOLVER,"state_scope":format!("{CREATED_RESOLVER}:-:-:-:ResolverCreated"),"interpreter_state_key":format!("ens:ens_v2_resolver_l1:-:-:ResolverCreated:{CREATED_RESOLVER}:-:-:-:ResolverCreated")});
+    sqlx::query("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state,raw_fact_ref,before_state,source_manifest_id) VALUES ('created','ens','ContractDiscovered','ens_v2_resolver_l1',1,$1,$2,$3,$4,2,0,'ens_v2_resolver','canonical',$5,$6,'{}',$7)")
+        .bind(CHAIN).bind(BLOCK).bind(hash(BLOCK)).bind(hash(3000)).bind(after).bind(raw_fact_ref).bind(resolver_manifest).execute(&pool).await?;
+
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: BLOCK,
+            affected_from_block: BLOCK,
+            affected_to_block: BLOCK,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT support_status, unsupported_reason
+         FROM resolver_current WHERE chain_id = $1 AND lower(resolver_address) = $2",
+    )
+    .bind(CHAIN)
+    .bind(CREATED_RESOLVER)
+    .fetch_optional(&pool)
+    .await?;
+    assert_eq!(
+        row,
+        Some((
+            "unsupported".to_owned(),
+            Some("resolver_implementation_unknown".to_owned()),
+        ))
     );
     db.cleanup().await?;
     Ok(())

@@ -58,9 +58,19 @@ suite cannot satisfy CI.
 4. Provider-fault and intake-path parity scenarios execute the real JSON-RPC
    ingest redo path.
    Truncated JSON, transient errors, delayed responses, omitted logs, and
-   partial receipts pass through the production provider implementation. A
+   partial receipts pass through the production provider implementation.
+   Truncated JSON on all three reads of a window must end the redo with no
+   target facts written, the redo still open and not advanced through the
+   failed window, and the ingest progress seeded before the command and the
+   published chain head both unchanged. A one-off truncation must be
+   re-fetched by the same redo, with the re-fetch warning visible in the
+   runner's log; its stored transactions, receipts, and logs on canonical
+   blocks, and the normalized events and projections derived from them, are
+   compared with a clean control straight away, before any later redo. A
    temporarily missing selected receipt must be refetched by the same redo;
-   the test observes the retry and checks the retained receipt before a clean redo.
+   the test observes the retry and compares the stored rows again. A final
+   clean redo is a separate idempotence check: it must leave those rows equal
+   to the control.
    The silent-log case explicitly pins pre-existing defect #154: a valid but
    incomplete response is accepted and published, and only the scenario's
    explicit clean redo repairs it. Its green result is evidence of that known

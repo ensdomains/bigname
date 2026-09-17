@@ -764,6 +764,143 @@ async fn planner_rejects_non_overlapping_discovery_and_address_windows() -> AnyR
 }
 
 #[tokio::test]
+async fn planner_ignores_ens_v2_pointer_windows_but_checks_creation_self_edges() -> AnyResult<()> {
+    let database = range_database("ingest_ens_v2_pointer_range").await?;
+    let chain_id = "ens-v2-pointer-range-chain";
+    let resolver_file_path = "tests/ens-v2-resolver-range.toml";
+    let registry_address = "0x00000000000000000000000000000000000000aa";
+    let address = "0x00000000000000000000000000000000000000cc";
+    let registry_id = insert_contract_instance(database.pool(), chain_id).await?;
+    let resolver_id = insert_contract_instance(database.pool(), chain_id).await?;
+    let registry_manifest_id = insert_family_manifest(
+        database.pool(),
+        chain_id,
+        ENS_V2_REGISTRY_SOURCE_FAMILY,
+        "tests/ens-v2-registry-range.toml",
+        json!([{
+            "role": "registry",
+            "address": registry_address,
+            "proxy_kind": "none",
+            "implementation": null,
+            "start_block": 0
+        }]),
+    )
+    .await?;
+    sqlx::query(
+        "
+        INSERT INTO manifest_contract_instances (
+            manifest_id, chain_id, declaration_kind, declaration_name,
+            contract_instance_id, declared_address, role, proxy_kind,
+            start_block_number
+        )
+        VALUES ($1, $2, 'contract', 'registry', $3, $4,
+                'registry', 'none', 0)
+        ",
+    )
+    .bind(registry_manifest_id)
+    .bind(chain_id)
+    .bind(registry_id)
+    .bind(registry_address)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "
+        INSERT INTO contract_instance_addresses (
+            contract_instance_id, chain_id, address,
+            active_from_block_number, source_manifest_id, provenance
+        )
+        VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)
+        ",
+    )
+    .bind(registry_id)
+    .bind(chain_id)
+    .bind(registry_address)
+    .bind(registry_manifest_id)
+    .execute(database.pool())
+    .await?;
+    let resolver_manifest_id = insert_family_manifest(
+        database.pool(),
+        chain_id,
+        ENS_V2_RESOLVER_SOURCE_FAMILY,
+        resolver_file_path,
+        json!([]),
+    )
+    .await?;
+    sqlx::query(
+        "
+        INSERT INTO contract_instance_addresses (
+            contract_instance_id, chain_id, address,
+            active_from_block_number, source_manifest_id, provenance
+        )
+        VALUES ($1, $2, $3, 20, $4, '{}'::jsonb)
+        ",
+    )
+    .bind(resolver_id)
+    .bind(chain_id)
+    .bind(address)
+    .bind(resolver_manifest_id)
+    .execute(database.pool())
+    .await?;
+    // Both edges close at block 10, before the resolver address opens at block 20.
+    let insert_edge = "
+        INSERT INTO discovery_edges (
+            chain_id, edge_kind, from_contract_instance_id,
+            to_contract_instance_id, discovery_source, admission_basis,
+            source_manifest_id, active_from_block_number,
+            active_from_block_hash, active_to_block_number,
+            active_to_block_hash, canonicality_state, deactivated_at,
+            provenance
+        )
+        VALUES ($1, 'resolver', $2, $3, $4, 'reachable_from_root', $5,
+                0, $6, 10, $6, 'finalized', now(), '{}'::jsonb)
+        ";
+    let boundary_hash = format!("0x{}", "33".repeat(32));
+    sqlx::query(insert_edge)
+        .bind(chain_id)
+        .bind(registry_id)
+        .bind(resolver_id)
+        .bind("ResolverUpdated")
+        .bind(registry_manifest_id)
+        .bind(&boundary_hash)
+        .execute(database.pool())
+        .await?;
+
+    // The registry pointer is binding history only: its window is not compared
+    // and it does not make the resolver address watched.
+    let filter = load_watch_filter(database.pool(), chain_id, 0, 30).await?;
+    let watched_addresses = filter
+        .queries()
+        .into_iter()
+        .flat_map(|query| query.addresses)
+        .collect::<Vec<_>>();
+    assert!(watched_addresses.contains(&registry_address.to_owned()));
+    assert!(!watched_addresses.contains(&address.to_owned()));
+
+    sqlx::query(insert_edge)
+        .bind(chain_id)
+        .bind(resolver_id)
+        .bind(resolver_id)
+        .bind("ResolverCreated")
+        .bind(resolver_manifest_id)
+        .bind(&boundary_hash)
+        .execute(database.pool())
+        .await?;
+    let error = load_watch_filter(database.pool(), chain_id, 0, 30)
+        .await
+        .expect_err("a disjoint creation self-edge must still stop planning");
+    let message = error.to_string();
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(
+        message.contains(resolver_file_path)
+            && message.contains("non-overlapping watch windows")
+            && message.contains("edge 0..=10")
+            && message.contains("address 20..=unbounded"),
+        "unexpected error: {message}"
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn planner_ignores_orphaned_discovery_windows() -> AnyResult<()> {
     let database = range_database("ingest_orphaned_discovery_range").await?;
     let chain_id = "orphaned-range-chain";
@@ -894,10 +1031,20 @@ async fn insert_manifest(
     file_path: &str,
     contracts: Value,
 ) -> AnyResult<i64> {
+    insert_family_manifest(pool, chain_id, "test_ranges", file_path, contracts).await
+}
+
+async fn insert_family_manifest(
+    pool: &PgPool,
+    chain_id: &str,
+    source_family: &str,
+    file_path: &str,
+    contracts: Value,
+) -> AnyResult<i64> {
     let payload = json!({
         "manifest_version": 1,
         "namespace": "test",
-        "source_family": "test_ranges",
+        "source_family": source_family,
         "chain": chain_id,
         "deployment_epoch": "fixture",
         "rollout_status": "active",
@@ -924,7 +1071,7 @@ async fn insert_manifest(
             deployment_label, rollout_status, normalizer_version,
             file_path, manifest_payload
         )
-        VALUES (1, 'test', 'test_ranges', $1, 'fixture', 'active',
+        VALUES (1, 'test', $4, $1, 'fixture', 'active',
                 'ensip15@ens-normalize-0.1.1', $2, $3)
         RETURNING manifest_id
         ",
@@ -932,6 +1079,7 @@ async fn insert_manifest(
     .bind(chain_id)
     .bind(file_path)
     .bind(payload)
+    .bind(source_family)
     .fetch_one(pool)
     .await?)
 }
@@ -1085,6 +1233,22 @@ async fn resolver_creation_migration_permits_only_the_announcement_self_edge() -
         include_str!("../../../../migrations/20260917140000_resolver_creation_self_edge.sql");
     for _ in 0..2 {
         sqlx::raw_sql(migration).execute(database.pool()).await?;
+    }
+    let settle_name =
+        include_str!("../../../../migrations/20260917141000_discovery_self_edge_check_name.sql");
+    let self_edge_checks = "SELECT oid::bigint, conname::text FROM pg_constraint
+        WHERE conrelid = 'bigname_phase.discovery_edges'::regclass AND contype = 'c'";
+    let before: Vec<(i64, String)> = sqlx::query_as(self_edge_checks)
+        .fetch_all(database.pool())
+        .await?;
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].1, "discovery_edges_self_edge_check");
+    for _ in 0..2 {
+        sqlx::raw_sql(settle_name).execute(database.pool()).await?;
+        let after: Vec<(i64, String)> = sqlx::query_as(self_edge_checks)
+            .fetch_all(database.pool())
+            .await?;
+        assert_eq!(after, before, "the settled rule must not be replaced");
     }
     let id = Uuid::new_v4();
     for (kind, source, allowed) in [

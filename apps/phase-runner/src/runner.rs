@@ -11,23 +11,25 @@ use crate::{
     config::{ChainConfig, TimingConfig},
     database::RunnerDatabase,
     error::{ErrorKind, RunnerError, RunnerResult, VERIFICATION_MISMATCH_PREFIX},
-    heads::publish_heads,
-    ingest_progress,
     phase::{Phase, PhaseBatchOutcome, PhaseName, PhaseSet, RunMode},
     phase_lock::PhaseLock,
     progress_monitor::RunnerPhaseProgress,
     runner_support::{
-        Backoff, HeartbeatThrottle, PhaseLoopResult, cancelled_redo_error,
-        finish_failed_redo_start, record_live_mismatch_with_lock, redo_outcome,
+        HeartbeatThrottle, PhaseLoopResult, StopClock, cancelled_redo_error,
+        finish_failed_redo_start, finish_stopped_redo_start, redo_outcome,
+        release_lock_racing_stop,
     },
+    shutdown::until_cancelled,
     state::PhaseStore,
-    state_persistence::{record_live_verification_mismatch, validate_progress},
 };
 
 #[path = "runner_batch.rs"]
 mod batch;
+#[path = "runner_capacity.rs"]
+mod capacity_wait;
 #[path = "runner_chain.rs"]
 mod chain;
+use chain::bounded_recovery;
 #[path = "runner_context.rs"]
 mod context;
 #[path = "runner_live_follow.rs"]
@@ -36,10 +38,14 @@ mod live_follow;
 mod manifest_attestation;
 #[path = "runner_operator_redo.rs"]
 mod operator_redo;
+#[path = "runner_recovery.rs"]
+mod recovery;
 #[path = "runner_required_redo.rs"]
 mod required_redo;
+#[path = "runner_restart.rs"]
+mod restart;
 
-type LiveMismatchReason = Arc<OnceLock<String>>;
+pub(super) type LiveMismatchReason = Arc<OnceLock<String>>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RedoPhase {
@@ -68,6 +74,8 @@ pub struct PhaseRunner {
     after_required_redo_catch_up: Option<live_follow::AfterRequiredRedoCatchUp>,
     loop_heartbeat: Option<crate::metrics::RunnerLoopHeartbeat>,
     phase_progress: RunnerPhaseProgress,
+    stop_budget: std::time::Duration,
+    chain_stop_clocks: Arc<std::sync::Mutex<BTreeMap<String, Arc<StopClock>>>>,
 }
 
 impl PhaseRunner {
@@ -101,6 +109,8 @@ impl PhaseRunner {
             after_required_redo_catch_up: None,
             loop_heartbeat: None,
             phase_progress: RunnerPhaseProgress::default(),
+            stop_budget: StopClock::DEFAULT_BUDGET,
+            chain_stop_clocks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         })
     }
 
@@ -122,91 +132,21 @@ impl PhaseRunner {
         self
     }
 
-    async fn run_phase_with_restart_inner(
+    /// A stop that wins before the phase transition commits leaves nothing to
+    /// record for a normal run; a redo still has to report itself incomplete.
+    async fn stopped_before_start(
         &self,
+        stop_clock: &StopClock,
         chain: &ChainConfig,
         phase_name: PhaseName,
-        mode: RunMode,
-        cancellation: CancellationToken,
-        live_mismatch: Option<LiveMismatchReason>,
-        automatic_discovery_ingest: bool,
+        mode: &RunMode,
     ) -> RunnerResult<()> {
-        let phase = self.phases.get(phase_name);
-        let mut backoff = Backoff::new(&self.timing);
-        loop {
-            self.record_loop_progress(&chain.chain_id);
-            if cancellation.is_cancelled() {
-                if mode.is_redo() {
-                    return Err(
-                        cancelled_redo_error(&self.store, &chain.chain_id, phase_name).await?,
-                    );
-                }
-                if phase_name == PhaseName::Live
-                    && matches!(mode, RunMode::Normal)
-                    && let Some(reason) = live_mismatch.as_deref().and_then(OnceLock::get)
-                {
-                    record_live_mismatch_with_lock(
-                        &self.database,
-                        &self.store,
-                        &chain.chain_id,
-                        reason,
-                    )
-                    .await?;
-                }
-                return Ok(());
-            }
-            let result = self
-                .run_phase_once(
-                    chain,
-                    Arc::clone(&phase),
-                    mode.clone(),
-                    cancellation.clone(),
-                    live_mismatch.as_deref(),
-                    automatic_discovery_ingest,
-                )
-                .await;
-            self.record_loop_progress(&chain.chain_id);
-            match result {
-                Ok(()) => return Ok(()),
-                Err(error) if error.is_retryable() => {
-                    let delay = backoff.next_delay();
-                    warn!(
-                        chain_id = chain.chain_id,
-                        phase = %phase_name,
-                        error = %error,
-                        retry_delay_ms = delay.as_millis(),
-                        "phase failed with a retryable error"
-                    );
-                    tokio::select! {
-                        () = cancellation.cancelled() => {
-                            if mode.is_redo() {
-                                return Err(cancelled_redo_error(
-                                    &self.store,
-                                    &chain.chain_id,
-                                    phase_name,
-                                )
-                                .await?);
-                            }
-                            if phase_name == PhaseName::Live
-                                && let Some(reason) =
-                                    live_mismatch.as_deref().and_then(OnceLock::get)
-                            {
-                                record_live_mismatch_with_lock(
-                                    &self.database,
-                                    &self.store,
-                                    &chain.chain_id,
-                                    reason,
-                                )
-                                .await?;
-                            }
-                            return Ok(());
-                        }
-                        () = tokio::time::sleep(delay) => {}
-                    }
-                }
-                Err(error) => return Err(error),
-            }
+        if mode.is_redo() {
+            return Err(
+                cancelled_redo_error(stop_clock, &self.store, &chain.chain_id, phase_name).await?,
+            );
         }
+        Ok(())
     }
 
     async fn run_phase_once(
@@ -215,26 +155,47 @@ impl PhaseRunner {
         phase: Arc<dyn Phase>,
         mode: RunMode,
         cancellation: CancellationToken,
-        live_mismatch: Option<&OnceLock<String>>,
         automatic_discovery_ingest: bool,
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
-        let mut phase_lock =
-            PhaseLock::acquire(self.database.connect_options(), &chain.chain_id, phase_name)
-                .await?;
-        phase_lock.check_alive().await?;
+        // Each attempt has its own stop budget, so a stop that lands during its
+        // batch bounds this attempt's records and release from the moment they
+        // begin, whatever another chain or the paired phase is doing.
+        let stop_clock = StopClock::new(self.stop_budget);
+        // The lock opens its own connection and probes it, both of which can stall
+        // on the network; a stop accepted meanwhile must not wait for them.
+        let acquired = until_cancelled(&cancellation, async {
+            let mut phase_lock =
+                PhaseLock::acquire(self.database.connect_options(), &chain.chain_id, phase_name)
+                    .await?;
+            phase_lock.check_alive().await?;
+            Ok(phase_lock)
+        })
+        .await?;
+        let Some(mut phase_lock) = acquired else {
+            return self
+                .stopped_before_start(&stop_clock, chain, phase_name, &mode)
+                .await;
+        };
         let result = self
             .run_locked_phase(
+                &stop_clock,
                 chain,
                 phase,
                 mode,
-                cancellation,
-                live_mismatch,
+                cancellation.clone(),
                 automatic_discovery_ingest,
                 &mut phase_lock,
             )
             .await;
-        let release = phase_lock.release().await;
+        let release = release_lock_racing_stop(
+            &stop_clock,
+            phase_lock,
+            &chain.chain_id,
+            phase_name,
+            &cancellation,
+        )
+        .await;
         match (result, release) {
             (Ok(()), Ok(())) => Ok(()),
             (Ok(()), Err(error)) => Err(error),
@@ -254,33 +215,53 @@ impl PhaseRunner {
     #[allow(clippy::too_many_arguments)]
     async fn run_locked_phase(
         &self,
+        stop_clock: &StopClock,
         chain: &ChainConfig,
         phase: Arc<dyn Phase>,
         mode: RunMode,
         cancellation: CancellationToken,
-        live_mismatch: Option<&OnceLock<String>>,
         automatic_discovery_ingest: bool,
         phase_lock: &mut PhaseLock,
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
-        if let Err(error) = self.check_ingest_identity(phase_name, chain, &mode).await {
-            return self
-                .record_phase_validation_failure(
-                    &chain.chain_id,
-                    phase_name,
-                    &mode,
-                    phase_lock,
-                    error,
-                )
-                .await;
+        // Start-up is raced like the batch loop, from the lock in `run_phase_once`
+        // through the identity check, the phase transition and the heartbeat: all
+        // wait on rows without a timeout, and a stop accepted during them must not
+        // be held until the grace period ends. A transition that loses the race is
+        // dropped before it commits.
+        let identity = until_cancelled(
+            &cancellation,
+            self.check_ingest_identity(phase_name, chain, &mode),
+        )
+        .await;
+        match identity {
+            Ok(Some(())) => {}
+            Ok(None) => {
+                return self
+                    .stopped_before_start(stop_clock, chain, phase_name, &mode)
+                    .await;
+            }
+            Err(error) => {
+                return self
+                    .record_phase_validation_failure(
+                        stop_clock,
+                        &chain.chain_id,
+                        phase_name,
+                        &mode,
+                        phase_lock,
+                        &cancellation,
+                        error,
+                    )
+                    .await;
+            }
         }
         let supplied_manifest_authority_generation = (phase_name == PhaseName::Interpret)
             .then(|| self.supplied_manifest_attestation_generation(&chain.chain_id))
             .flatten();
         let redo_session = if mode.is_redo() {
-            let session = self
-                .store
-                .begin_redo(
+            let begun = until_cancelled(
+                &cancellation,
+                self.store.begin_redo(
                     &chain.chain_id,
                     phase_name,
                     &mode,
@@ -288,8 +269,14 @@ impl PhaseRunner {
                     supplied_manifest_authority_generation.as_deref(),
                     &self.instance_id,
                     automatic_discovery_ingest,
-                )
-                .await?;
+                ),
+            )
+            .await?;
+            let Some(session) = begun else {
+                return self
+                    .stopped_before_start(stop_clock, chain, phase_name, &mode)
+                    .await;
+            };
             if phase_name == PhaseName::Interpret
                 && let Some(audit) = session.manifest_authority_audit.as_ref()
             {
@@ -298,49 +285,99 @@ impl PhaseRunner {
             }
             Some(session)
         } else {
-            if !self
-                .start_normal_phase(chain, Arc::clone(&phase), phase_lock)
-                .await?
-            {
+            let started = until_cancelled(
+                &cancellation,
+                self.start_normal_phase(
+                    stop_clock,
+                    chain,
+                    Arc::clone(&phase),
+                    phase_lock,
+                    &cancellation,
+                ),
+            )
+            .await?;
+            if started != Some(true) {
                 return Ok(());
             }
             None
         };
         let redo_attempt = redo_session.as_ref().map(|session| session.attempt_fence());
-        phase_lock.check_alive().await?;
-        if let Err(error) = self
-            .store
-            .start_heartbeat(&self.instance_id, &chain.chain_id, phase_name)
-            .await
-        {
+        // The lock probe after the transition is an unbounded `SELECT 1` on the
+        // lock's own connection, so it is raced with the heartbeat start.
+        let heartbeat = until_cancelled(&cancellation, async {
             phase_lock.check_alive().await?;
-            if let Some(session) = redo_session {
-                return finish_failed_redo_start(
+            self.store
+                .start_heartbeat(&self.instance_id, &chain.chain_id, phase_name)
+                .await
+        })
+        .await;
+        let started = match heartbeat {
+            Ok(Some(())) => Ok(()),
+            Ok(None) => {
+                let Some(session) = redo_session else {
+                    return Ok(());
+                };
+                let error =
+                    cancelled_redo_error(stop_clock, &self.store, &chain.chain_id, phase_name)
+                        .await?;
+                return Err(finish_stopped_redo_start(
+                    stop_clock,
                     &self.store,
-                    phase_lock.connection(),
+                    phase_lock,
                     &chain.chain_id,
                     phase_name,
                     session,
                     error,
                 )
-                .await;
+                .await);
             }
-            return Err(error);
+            Err(error) => Err(error),
+        };
+        if let Err(error) = started {
+            // The probe and the failed-start record run on the lock's connection;
+            // a stop arriving now bounds them, as it does the bookkeeping after
+            // the loop.
+            let Some(session) = redo_session else {
+                return Err(error);
+            };
+            return bounded_recovery(
+                stop_clock,
+                "phase start failure recording",
+                &chain.chain_id,
+                &cancellation,
+                async {
+                    phase_lock.check_alive().await?;
+                    finish_failed_redo_start(
+                        &self.store,
+                        phase_lock.connection(),
+                        &chain.chain_id,
+                        phase_name,
+                        session,
+                        error,
+                    )
+                    .await
+                },
+            )
+            .await;
         }
         let mut heartbeat = HeartbeatThrottle::new();
         let result = self
             .run_phase_batches(
+                stop_clock,
                 chain,
                 phase,
                 batch::Execution::new(mode.clone(), redo_attempt),
-                cancellation,
+                cancellation.clone(),
                 &mut heartbeat,
                 phase_lock,
             )
             .await;
         let result = match result {
             Ok(PhaseLoopResult::Cancelled) if mode.is_redo() => {
-                Err(cancelled_redo_error(&self.store, &chain.chain_id, phase_name).await?)
+                Err(
+                    cancelled_redo_error(stop_clock, &self.store, &chain.chain_id, phase_name)
+                        .await?,
+                )
             }
             result => result,
         };
@@ -350,17 +387,28 @@ impl PhaseRunner {
             return Err(error.clone());
         }
         if let Some(session) = redo_session {
-            phase_lock.check_alive().await?;
-            let restore = self
-                .store
-                .finish_redo(
-                    phase_lock.connection(),
-                    &chain.chain_id,
-                    phase_name,
-                    session,
-                    redo_outcome(&result),
-                )
-                .await;
+            // The lock's connection may be the stall a stop is waiting out; the
+            // probe and the redo bookkeeping on it are bounded once a stop is
+            // pending, whether it was already or arrives during them.
+            let restore = bounded_recovery(
+                stop_clock,
+                "redo bookkeeping",
+                &chain.chain_id,
+                &cancellation,
+                async {
+                    phase_lock.check_alive().await?;
+                    self.store
+                        .finish_redo(
+                            phase_lock.connection(),
+                            &chain.chain_id,
+                            phase_name,
+                            session,
+                            redo_outcome(&result),
+                        )
+                        .await
+                },
+            )
+            .await;
             return match (result, restore) {
                 (Ok(_), Ok(())) => Ok(()),
                 (Ok(_), Err(error)) => Err(error),
@@ -370,33 +418,38 @@ impl PhaseRunner {
                 }
             };
         }
+        // Completion and failure are recorded on the lock's connection, which after
+        // a stop may be the stall that ended the loop; both are bounded then, like
+        // the redo bookkeeping above.
         match result {
             Ok(PhaseLoopResult::Completed(progress)) => {
-                phase_lock.check_alive().await?;
-                self.store
-                    .complete_phase_with_lock(phase_lock, &chain.chain_id, phase_name, &progress)
-                    .await
+                bounded_recovery(
+                    stop_clock,
+                    "phase completion",
+                    &chain.chain_id,
+                    &cancellation,
+                    async {
+                        phase_lock.check_alive().await?;
+                        self.store
+                            .complete_phase_with_lock(
+                                phase_lock,
+                                &chain.chain_id,
+                                phase_name,
+                                &progress,
+                            )
+                            .await
+                    },
+                )
+                .await
             }
             Ok(PhaseLoopResult::Cancelled) => {
-                phase_lock.check_alive().await?;
-                if phase_name == PhaseName::Live
-                    && let Some(reason) = live_mismatch.and_then(OnceLock::get)
-                    && !record_live_verification_mismatch(
-                        self.store.pool(),
-                        &chain.chain_id,
-                        reason,
-                    )
-                    .await?
-                {
-                    return Err(RunnerError::data_integrity(format!(
-                        "verification mismatch could not mark live failed for chain {}",
-                        chain.chain_id
-                    )));
-                }
+                // Only a stop produces this arm, so a probe of the lock here would
+                // wait on the connection whose stall may have won; the release
+                // that follows is bounded and detects a lost lock itself. A Live
+                // mismatch is recorded by the live-follow loop that owns it.
                 Ok(())
             }
             Err(error) => {
-                phase_lock.check_alive().await?;
                 let failure_reason = if phase_name == PhaseName::Verify
                     && error.kind() == ErrorKind::VerificationMismatch
                 {
@@ -404,11 +457,20 @@ impl PhaseRunner {
                 } else {
                     error.to_string()
                 };
-                if let Err(record_error) = self
-                    .store
-                    .fail_phase(&chain.chain_id, phase_name, &failure_reason)
-                    .await
-                {
+                let record = bounded_recovery(
+                    stop_clock,
+                    "phase failure recording",
+                    &chain.chain_id,
+                    &cancellation,
+                    async {
+                        phase_lock.check_alive().await?;
+                        self.store
+                            .fail_phase(&chain.chain_id, phase_name, &failure_reason)
+                            .await
+                    },
+                )
+                .await;
+                if let Err(record_error) = record {
                     return Err(error.with_secondary("record phase failure", record_error));
                 }
                 Err(error)
@@ -416,8 +478,10 @@ impl PhaseRunner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_phase_batches(
         &self,
+        stop_clock: &StopClock,
         chain: &ChainConfig,
         phase: Arc<dyn Phase>,
         execution: batch::Execution,
@@ -432,98 +496,65 @@ impl PhaseRunner {
             if cancellation.is_cancelled() {
                 return Ok(PhaseLoopResult::Cancelled);
             }
-            phase_lock.check_alive().await?;
-            if self
-                .wait_for_capacity(
-                    chain,
-                    phase_name,
-                    reserved_write_bytes,
-                    &cancellation,
-                    heartbeat,
-                    phase_lock,
-                )
-                .await?
-            {
+            // Everything between the check above and the batch waits on the
+            // database — the lock probe, the capacity probe and its pause and
+            // resume writes, the context reads — so the whole prelude is raced.
+            // A write dropped mid-flight rolls back; a stop after a pause
+            // committed leaves the phase paused, which is where a stop inside
+            // the capacity wait already left it.
+            let prelude = until_cancelled(&cancellation, async {
+                phase_lock.check_alive().await?;
+                if self
+                    .wait_for_capacity(
+                        chain,
+                        phase_name,
+                        reserved_write_bytes,
+                        &cancellation,
+                        heartbeat,
+                        phase_lock,
+                    )
+                    .await?
+                {
+                    return Ok(None);
+                }
+                self.phase_context(chain, phase_name, mode.clone(), redo_attempt)
+                    .await
+                    .map(Some)
+            })
+            .await?;
+            let Some(context) = prelude.flatten() else {
                 return Ok(PhaseLoopResult::Cancelled);
-            }
-            let context = self
-                .phase_context(chain, phase_name, mode.clone(), redo_attempt)
-                .await?;
+            };
             let progress_token = self.phase_progress.begin_batch(&context);
             let retained_verification_level = context.resume.verification_level;
             let batch = phase.run_batch(context.clone());
             let outcome = phase_lock
                 .run_while_alive(self.timing.live_poll_interval, batch)
                 .await;
-            phase_lock.check_alive().await?;
-            let outcome = outcome?;
-            let progress = outcome.progress().clone();
-            validate_progress(
-                phase_name,
-                &progress,
-                matches!(&outcome, PhaseBatchOutcome::Complete(_)),
-            )?;
-            if phase_name == PhaseName::Verify {
-                crate::verify_phase::validate_reported_level(
-                    &chain.chain_id,
-                    &chain.sources,
-                    progress.verification_level,
-                )?;
-            }
-            if phase_name == PhaseName::Ingest && matches!(mode, RunMode::Normal) {
-                ingest_progress::validate(
-                    &chain.intake_sources(),
-                    &progress,
-                    matches!(&outcome, PhaseBatchOutcome::Complete(_)),
-                )?;
-            }
-            if progress.heads.is_some()
-                && !matches!(phase_name, PhaseName::Ingest | PhaseName::Live)
-            {
-                return Err(RunnerError::data_integrity(format!(
-                    "phase {phase_name} cannot publish chain heads; only ingest and live own \
-                     chain-head updates"
-                )));
-            }
-            if matches!(mode, RunMode::Normal)
-                && let Some(heads) = &progress.heads
-            {
-                phase_lock.check_alive().await?;
-                let heads =
-                    crate::heads::retain_stored_finality(self.store.pool(), &chain.chain_id, heads)
-                        .await?;
-                publish_heads(self.store.pool(), &chain.chain_id, &heads).await?;
-            }
-            phase_lock.check_alive().await?;
-            if mode.is_redo() {
-                self.before_redo_progress_write().await;
-            }
-            if phase_name == PhaseName::Ingest && matches!(mode, RunMode::Normal) {
-                phase_lock.check_alive().await?;
-                self.store
-                    .record_ingest_progress(&chain.chain_id, &chain.intake_sources(), &progress)
-                    .await?;
-            } else {
-                self.store
-                    .record_progress(&chain.chain_id, phase_name, &mode, redo_attempt, &progress)
-                    .await?;
-            }
-            self.phase_progress
-                .record_committed(progress_token, &outcome);
-            if matches!(outcome, PhaseBatchOutcome::Complete(_)) {
-                self.confirm_progress(context).await?;
-            }
-            if phase_name == PhaseName::Verify && matches!(mode, RunMode::Normal) {
-                crate::verify_level::warn_optional_downgrade(
-                    &chain.chain_id,
+            // The batch has finished; what follows records it and is required, since
+            // the batch's own writes are already committed. A stop accepted meanwhile
+            // does not abandon it, but bounds it: on expiry the run exits with a
+            // transient error and the durable state is what a kill between the batch
+            // and its progress write would have left, which the next start handles.
+            let (outcome, progress) = bounded_recovery(
+                stop_clock,
+                "post-batch settlement",
+                &chain.chain_id,
+                &cancellation,
+                self.settle_batch(
+                    chain,
+                    phase_name,
+                    &mode,
+                    redo_attempt,
+                    context,
+                    outcome,
+                    progress_token,
                     retained_verification_level,
-                    progress.verification_level,
-                );
-            }
-            phase_lock.check_alive().await?;
-            heartbeat
-                .record_if_due(&self.store, &self.instance_id, &chain.chain_id, phase_name)
-                .await?;
+                    heartbeat,
+                    phase_lock,
+                ),
+            )
+            .await?;
             self.record_loop_progress(&chain.chain_id);
             reserved_write_bytes = progress.estimated_write_bytes;
 
@@ -540,58 +571,6 @@ impl PhaseRunner {
                         () = tokio::time::sleep(self.timing.live_poll_interval) => {}
                     }
                 }
-            }
-        }
-    }
-
-    async fn wait_for_capacity(
-        &self,
-        chain: &ChainConfig,
-        phase: PhaseName,
-        reserved_write_bytes: u64,
-        cancellation: &CancellationToken,
-        heartbeat: &mut HeartbeatThrottle,
-        phase_lock: &mut PhaseLock,
-    ) -> RunnerResult<bool> {
-        let mut paused = false;
-        loop {
-            phase_lock.check_alive().await?;
-            let status = self
-                .capacity
-                .check(self.store.pool(), reserved_write_bytes)
-                .await;
-            phase_lock.check_alive().await?;
-            let status = status?;
-            if status.is_available() {
-                if paused {
-                    phase_lock.check_alive().await?;
-                    self.store.resume_phase(&chain.chain_id, phase).await?;
-                }
-                return Ok(false);
-            }
-            if !paused {
-                phase_lock.check_alive().await?;
-                self.store.pause_phase(&chain.chain_id, phase).await?;
-                self.phase_progress.clear_phase(&chain.chain_id, phase);
-                paused = true;
-            }
-            warn!(
-                chain_id = chain.chain_id,
-                phase = %phase,
-                breach_reasons = ?status.breach_reasons,
-                database_size_bytes = status.measurement.database_size_bytes,
-                free_disk_bytes = status.measurement.free_disk_bytes,
-                reserved_write_bytes,
-                "phase paused until storage capacity recovers"
-            );
-            phase_lock.check_alive().await?;
-            heartbeat
-                .record_if_due(&self.store, &self.instance_id, &chain.chain_id, phase)
-                .await?;
-            self.record_loop_progress(&chain.chain_id);
-            tokio::select! {
-                () = cancellation.cancelled() => return Ok(true),
-                () = tokio::time::sleep(self.capacity.poll_interval()) => {}
             }
         }
     }

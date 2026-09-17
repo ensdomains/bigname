@@ -329,6 +329,44 @@ to perform the first build against a populated production `normalized_events`
 table.
 
 The release containing
+`20260917120000_discovery_edges_observation_history_idx.sql` adds the lookup
+Interpret uses to find earlier and later observations of one discovery
+relationship, including closed ones. On an initialized production namespace,
+build `discovery_edges_observation_history_idx` concurrently in step 3. This
+runbook does not repeat the statement: follow
+[the index runbook](../../ops/discovery-history-index/README.md) and run its
+[`install.sql`](../../ops/discovery-history-index/install.sql), which exits
+non-zero unless the index is valid and ready. Also confirm the definition as
+that runbook describes. The concurrent build permits writes, so it can be
+completed while the existing runner is still processing, before the stop/start
+window opens; step 3 then only re-checks the result. Then apply the
+schema-migration in step 4; its `IF NOT EXISTS` build is a no-op when the
+concurrent index is already valid. Do not allow the versioned schema-migration
+to perform the first build against a populated production `discovery_edges`
+table: an ordinary index build blocks writes to the table until the
+schema-migration's transaction ends.
+
+The release containing `20260917130000_discovery_edges_reopen_idx.sql` adds the
+exact lookup Interpret uses to find a retained observation, orphaned and closed
+ones included, before it inserts a new row. On an initialized production
+namespace, build `discovery_edges_reopen_idx` concurrently in step 3 the same
+way: follow [its index runbook](../../ops/discovery-reopen-index/README.md) and
+run its [`install.sql`](../../ops/discovery-reopen-index/install.sql), which
+exits non-zero unless the index is valid and ready, and confirm the definition.
+This build can also be completed before the stop/start window opens. Then apply
+the schema-migration in step 4; do not allow it to perform the first build
+against a populated production `discovery_edges` table.
+
+Both discovery index schema-migrations adopt an existing index by name alone,
+so on their own they would also accept the invalid index an interrupted
+concurrent build leaves behind. The later
+`20260917160000_discovery_edges_index_validity_check.sql` closes that gap: in
+step 4 it fails, and `sqlx migrate run` stops without recording it, if either
+index exists but is not valid and ready. It never drops or rebuilds an index.
+If it fails, follow the recovery steps in the matching index runbook, then run
+`sqlx migrate run` again.
+
+The release containing
 `20260904120000_project_redo_child_registration_history.sql` adds the bounded
 Interpret-to-Project handoff for child and registry identifiers from deleted
 ENSv1→ENSv2 [migration-registry](../glossary.md#migration-registry-wrapperregistry)
@@ -645,6 +683,8 @@ indexes are additive; rollback may leave them in place.
    `20260831150000_normalized_events_v2_expiry_scope_idx.sql`, or
    `20260902120000_normalized_events_basenames_record_node_resolver_idx.sql`,
    or `20260911120000_normalized_events_emitter_history_idx.sql`,
+   or `20260917120000_discovery_edges_observation_history_idx.sql`,
+   or `20260917130000_discovery_edges_reopen_idx.sql`,
    apply and validate the applicable concurrent baseline indexes above;
    otherwise skip this step;
    For the release containing
@@ -814,6 +854,114 @@ docker compose --env-file .env.server \
 
 The API remains reachable while indexing is paused, but health and status must
 continue to report the stale or absent loop honestly.
+
+The phase runner handles SIGTERM, which is what `docker compose stop` sends and
+what `tini` forwards, so a stop is a clean stop rather than a kill. It observes
+the request at the next batch boundary: the batch already in flight finishes
+and commits, then the loop exits. Three cases exit nonzero on purpose. A stop that
+lands while a chain is working through automatically required redo cannot leave
+that redo looking finished, so the runner converts the cancellation into an
+error, the supervisor records the chain as stopped, and the process exits
+nonzero (`apps/phase-runner/src/runner.rs`, `apps/phase-runner/src/main.rs`).
+That is the incomplete-redo signal, not a failed shutdown: the redo stamp
+survives, the next start resumes it, and the exit code should not be read as
+corruption. Expect it whenever you stop a runner mid-redo. The second case is a
+stop that arrives while required work is blocked on its rows: start-up
+settlement or stopped-phase recovery, or the writes that record a batch that
+has already finished — its head publication, progress, completion, and
+heartbeat, and the phase's completion or failure record. None of that is
+abandoned, since the batch's own writes are already committed, but it is
+given what is left of one ten-second stop budget and then reports a transient
+error that the stopping run does not retry
+(`apps/phase-runner/src/runner_chain.rs`, `bounded_recovery`;
+`apps/phase-runner/src/runner_support.rs`, `StopClock`). The budget is per
+phase attempt and per chain: an attempt's records and lock release share one
+ten seconds that starts when the first of them observes the stop — after the
+attempt's batch, which is not bounded, and independently of another chain's
+or the paired phase's batch — and the chain's own waits that follow (fence
+releases, the mismatch record, the marker reads that decide what a stopped
+redo reports) share a second ten seconds of their own; within each budget the
+waits draw it down in sequence rather than each taking ten seconds. Nothing is corrupted: for start-up work the next start
+retries the same cleanup, and for a batch the durable state is the one a kill
+between the batch and its progress write leaves, which the next start handles
+the same way. Row contention is one cause — another process holding
+`chain_phase_state` — but not the only one: the same deadline covers opening
+the lock's own connection and waiting on the pool, so a stalled database or a
+saturated pool reports the same way. Check connectivity before hunting for a
+lock holder.
+
+An explicit `phase-runner redo` exits nonzero on a stop for the same reason, but
+it needs a different response. A stop during its setup, or at a batch boundary
+once it is running, becomes an `InvalidTransition` error rather than a silent
+success, so the incomplete redo cannot look finished
+(`apps/phase-runner/src/runner_operator_redo.rs`, `prepared_for_redo`;
+`apps/phase-runner/src/runner.rs`). Unlike the supervised runner there is no next
+start to resume it. Which response is needed depends on how far it got, and
+the error says which. A stop that wins before the command touched the database
+exits clean and logs that the redo never started. A stop during or after
+manifest synchronization exits nonzero and asks for a rerun even though no
+redo was stamped, because synchronization is the command's first commit — a
+changed manifest can retire derivation hashes or install required Ingest work —
+and once the stop wins, whether that commit made it is not known from the
+outside. A stop that wins before the redo was stamped but after the
+manifests are known to be current reports that it was *cancelled before it
+started* and that no unfinished redo was recorded: nothing blocks, nothing was
+changed, and rerunning is a choice, not a repair. A stop after the stamp
+exists reports the redo as *incomplete*: the
+stamp survives and blocks the phase from normal restart until the command is
+run again. That error says which command, built from the stamped mode and
+range — `rerun \`phase-runner redo --chain <chain> --phase <phase>
+--from-block <n> --to-block <n>\` with the chain's configured sources as --source
+options …` — because the stamp records neither the sources, the verifier URL,
+nor the hydration RPC, and the CLI or the Project phase rejects the bare
+command without them: add back the `--source` options the chain runs with,
+`--verification-database-url` when the phase is Verify or `all`, and
+`--hydration-rpc` for the chain (or `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS`)
+whenever Project runs — Project, Interpret, `all`, and `recompute-flags`. A redo over several chains that is stopped between two of them exits
+nonzero as well, reporting each chain it never started, since only a prefix
+was redone and nothing was stamped for the rest; rerun the command for those
+chains. Distinguish all of these from an exit `137`, which
+is the grace period expiring into SIGKILL. The API's own stop path, its validated
+`BIGNAME_API_STOP_GRACE_MS` bound, and what counts as graceful success are
+documented under [Stop the API](#stop-the-api).
+
+The runner therefore needs a stop grace period longer than one batch, and
+Compose's 10s default is not that. `stop_grace_period` is set explicitly on the
+`phase-runner` service and is tunable per deployment:
+
+- `BIGNAME_PHASE_RUNNER_STOP_GRACE_PERIOD` (default `120s`) — it must cover
+  the longest batch at this deployment's block range and hydration settings
+  *plus* twenty seconds of stop budget: the batch in flight is not bounded,
+  the attempt's own ten-second budget starts only when its settlement begins,
+  and the chain-level waits that follow have ten seconds more, so a batch that
+  finishes after 100 s under a 120 s grace leaves exactly the cleanup room
+  the runner may use. Nothing in the runner bounds a batch's wall time, so the
+  default is a starting value, not a derived limit. Each budget is a fixed
+  ten seconds that the runner does not derive from this value, so a grace
+  period at or below `10s` reaches SIGKILL before the first budget can report,
+  and the bounded exit described above cannot happen. Compose accepts such a value without complaint.
+
+A grace period that expires is a SIGKILL. Nothing is corrupted, but a batch is
+not one transaction. Each phase commits its own writes before the runner
+records progress: Project commits the projection swap
+(`crates/project/src/engine.rs`) and may then commit a separate canonical-head
+hydration transaction (`apps/phase-runner/src/project_phase.rs`); Interpret
+commits its normalized-event and identity writes
+(`crates/interpret/src/write.rs`); Ingest commits raw facts
+(`crates/ingest/src/write/mod.rs`) and the runner then publishes chain heads.
+Only after the phase returns does the runner write
+`chain_phase_state.current_block_*` and the ingest source cursors
+(`apps/phase-runner/src/runner.rs`). A kill inside any of those gaps leaves
+committed phase output whose progress marker still points at the previous
+batch. That is safe by design: the next start resumes from the durable marker
+and re-executes the batch, and every write path is replay-safe — raw facts
+insert if absent and are verified immutable, Interpret rows upsert on their
+identities and fail closed on divergent data, and Project's publication is a
+set-based delete-and-reinsert of the affected scope — so the redo costs the
+batch's wall time plus fresh `observed_at` timestamps and a new hydration
+attempt ordinal, and produces no duplicate or orphaned rows. The phase lock is
+only released when PostgreSQL reaps the dead session, so the next start can
+find the phase still held.
 
 ## Recovery plays
 
@@ -1055,4 +1203,8 @@ is not graceful success.
 
 Use disposable services for shutdown experiments, never the active production
 API or database. Fixture and container tests are not rollout, restore, or
-beta-launch evidence. No runner stop command or grace is added by this slice.
+beta-launch evidence. The runner's stop command and `stop_grace_period` are
+documented under [Pause and resume indexing](#pause-and-resume-indexing); the
+container shutdown job checks the runner's rendered Compose stop contract but
+drains only the API, so runner settlement, heartbeat, restart, and redo
+behaviour under SIGTERM are not covered by that evidence.

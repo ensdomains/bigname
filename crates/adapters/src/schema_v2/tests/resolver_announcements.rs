@@ -476,7 +476,7 @@ fn record_text(block: i64, log_index: i64) -> RawLogInput {
 #[test]
 fn resolver_creation_admits_initializer_records_without_a_registry_pointer() -> anyhow::Result<()> {
     // Creation precedes multicall in the actual initializer.
-    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L119 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2_sepolia_20260916@366de741)
     let output = interpret_test_batch(creation_input(vec![
         record_text(0, 0),
         raw_at(ResolverCreated {}.encode_log_data(), 1, 1, RESOLVER),

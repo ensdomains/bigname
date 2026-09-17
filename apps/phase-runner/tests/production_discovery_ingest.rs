@@ -46,6 +46,7 @@ const CHAIN: &str = "ethereum-sepolia";
 const REGISTRY: &str = "0x0000000000000000000000000000000000000047";
 const RESOLVER: &str = "0x0000000000000000000000000000000000000051";
 const SECOND_RESOLVER: &str = "0x0000000000000000000000000000000000000052";
+const IMPLEMENTATION: &str = "0x0000000000000000000000000000000000000077";
 const OWNER: &str = "0x00000000000000000000000000000000000000a1";
 const SENDER: &str = "0x00000000000000000000000000000000000000a2";
 const NORMALIZER: &str = "ensip15@ens-normalize-0.1.1";
@@ -76,8 +77,12 @@ sol! {
         string key,
         string value
     );
+    event Upgraded(address indexed implementation);
 }
 
+/// The registry family whose `ResolverUpdated` pointer binds the fixture name to the resolver.
+/// The pointer admits nothing: the resolver is admitted by announcing a declared implementation
+/// (`Upgraded`), and its record log in the following block is what the repair must re-fetch.
 #[derive(Clone, Copy)]
 enum Producer {
     Registry,
@@ -108,7 +113,8 @@ impl Producer {
 }
 
 #[tokio::test]
-async fn fresh_rpc_walk_repairs_registry_and_root_discovery_before_compared_verify() -> Result<()> {
+async fn fresh_rpc_walk_repairs_announced_resolver_discovery_before_compared_verify() -> Result<()>
+{
     for producer in [Producer::Registry, Producer::Root] {
         run_fresh_case(producer).await?;
     }
@@ -196,10 +202,12 @@ async fn run_fresh_case(producer: Producer) -> Result<()> {
     assert_eq!(fixture.resolver_range_requests.load(Ordering::SeqCst), 1);
     let raw_record: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM raw_logs
-         WHERE chain_id = $1 AND lower(emitting_address) = lower($2)",
+         WHERE chain_id = $1 AND lower(emitting_address) = lower($2)
+           AND lower(topics[1]) = lower($3)",
     )
     .bind(CHAIN)
     .bind(RESOLVER)
+    .bind(format!("{:#x}", TextChanged::SIGNATURE_HASH))
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(raw_record, 1, "the same run must fetch the missed RPC log");
@@ -346,12 +354,14 @@ async fn live_fetched_discovery_beyond_ingest_cursor_installs_and_drains_repair(
     let recovered: (i64, i64) = sqlx::query_as(
         "SELECT
              (SELECT count(*) FROM raw_logs
-              WHERE chain_id = $1 AND lower(emitting_address) = lower($2)),
+              WHERE chain_id = $1 AND lower(emitting_address) = lower($2)
+                AND lower(topics[1]) = lower($3)),
              (SELECT count(*) FROM normalized_events
               WHERE chain_id = $1 AND event_kind = 'RecordChanged')",
     )
     .bind(CHAIN)
     .bind(RESOLVER)
+    .bind(format!("{:#x}", TextChanged::SIGNATURE_HASH))
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(recovered, (1, 1));
@@ -768,6 +778,20 @@ async fn cross_family_all_emitter_coverage_keeps_discovery_repair_idle() -> Resu
         }),
     )
     .await?;
+    // Leave the discovered resolver one topic, the one the ENSv1 family covers from all emitters.
+    sqlx::query(
+        "UPDATE manifest_versions
+         SET manifest_payload = jsonb_set(
+             manifest_payload, '{abi,events}',
+             (SELECT jsonb_agg(event)
+              FROM jsonb_array_elements(manifest_payload #> '{abi,events}') AS events(event)
+              WHERE event ->> 'name' <> 'Upgraded')
+         )
+         WHERE chain_id = $1 AND source_family = 'ens_v2_resolver_l1'",
+    )
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
     seed_completed_discovery_state(scratch.pool()).await?;
 
     let before: (i64, bool) = sqlx::query_as(
@@ -963,10 +987,12 @@ impl Phase for ObservedPhase {
             {
                 let present: bool = sqlx::query_scalar(
                     "SELECT EXISTS (SELECT 1 FROM raw_logs
-                     WHERE chain_id = $1 AND lower(emitting_address) = lower($2))",
+                     WHERE chain_id = $1 AND lower(emitting_address) = lower($2)
+                       AND lower(topics[1]) = lower($3))",
                 )
                 .bind(&context.chain_id)
                 .bind(RESOLVER)
+                .bind(format!("{:#x}", TextChanged::SIGNATURE_HASH))
                 .fetch_one(&self.pool)
                 .await
                 .map_err(|error| {
@@ -1077,7 +1103,7 @@ impl VerificationReferenceProvider for FixtureReferences {
             .iter()
             .filter(|log| {
                 (from..=to).contains(&log.block_number)
-                    && filter.includes(&log.address, &log.topics[0], log.block_number)
+                    && filter.includes_log(&log.address, &log.topics, log.block_number)
             })
             .cloned()
             .collect();
@@ -1275,6 +1301,16 @@ fn fixture_logs(producer: Producer) -> Result<Vec<Value>> {
         .collect::<Vec<_>>();
     logs.push(encoded_log(
         RESOLVER,
+        1,
+        TX_1,
+        3,
+        Upgraded {
+            implementation: IMPLEMENTATION.parse()?,
+        }
+        .encode_log_data(),
+    ));
+    logs.push(encoded_log(
+        RESOLVER,
         2,
         TX_2,
         0,
@@ -1391,7 +1427,7 @@ async fn seed_manifest_configuration(pool: &sqlx::PgPool, producer: Producer) ->
     let instance = Uuid::new_v4();
     sqlx::query("INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind) VALUES ($1, $2, 'contract')").bind(instance).bind(CHAIN).execute(pool).await?;
     let source_payload = json!({"manifest_version":1,"namespace":"ens","source_family":producer.family(),"chain":CHAIN,"deployment_epoch":"fixture","rollout_status":"active","normalizer_version":NORMALIZER,"capability_flags":{},"roots":[],"contracts":[{"role":producer.role(),"address":REGISTRY,"proxy_kind":"none","start_block":0}],"discovery_rules":[{"edge_kind":"resolver","from_role":producer.role(),"admission":"reachable_from_root"}],"abi":{"events":[{"name":"LabelRegistered","fragment":"event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)","emitter_roles":[producer.role()],"normalized_events":["RegistrationGranted","PreimageObserved"]},{"name":"TokenResource","fragment":"event TokenResource(uint256 indexed tokenId, uint256 indexed resource)","emitter_roles":[producer.role()],"normalized_events":["TokenResourceLinked"]},{"name":"ResolverUpdated","fragment":"event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)","emitter_roles":[producer.role()],"normalized_events":["ResolverChanged"]}],"calls":[]}});
-    let resolver_payload = json!({"manifest_version":1,"namespace":"ens","source_family":"ens_v2_resolver_l1","chain":CHAIN,"deployment_epoch":"fixture","rollout_status":"active","normalizer_version":NORMALIZER,"capability_flags":{},"roots":[],"contracts":[],"discovery_rules":[],"abi":{"events":[{"name":"TextChanged","fragment":"event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)","emitter_roles":[],"normalized_events":["RecordChanged"]}],"calls":[]}});
+    let resolver_payload = json!({"manifest_version":1,"namespace":"ens","source_family":"ens_v2_resolver_l1","chain":CHAIN,"deployment_epoch":"fixture","rollout_status":"active","normalizer_version":NORMALIZER,"resolver_implementations":[{"role":"permissioned_resolver","address":IMPLEMENTATION}],"capability_flags":{},"roots":[],"contracts":[],"discovery_rules":[],"abi":{"events":[{"name":"Upgraded","fragment":"event Upgraded(address indexed implementation)","emitter_roles":[],"normalized_events":["Upgraded"]},{"name":"TextChanged","fragment":"event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)","emitter_roles":[],"normalized_events":["RecordChanged"]}],"calls":[]}});
     let source_id = insert_manifest(
         pool,
         producer.family(),
@@ -1491,12 +1527,23 @@ async fn seed_pre_live_spine(pool: &sqlx::PgPool) -> Result<()> {
     Ok(())
 }
 
+/// Seeds the edge Interpret materializes for a resolver's `Upgraded` self-announcement: the
+/// resolver manifest anchors it and it runs from the implementation instance.
 async fn add_discovered_resolver(pool: &sqlx::PgPool, address: &str, from: i64) -> Result<()> {
-    let source: (i64, Uuid) = sqlx::query_as("SELECT manifest.manifest_id, declaration.contract_instance_id FROM manifest_versions manifest JOIN manifest_contract_instances declaration ON declaration.manifest_id=manifest.manifest_id WHERE manifest.chain_id=$1 AND manifest.source_family='ens_v2_root_l1'").bind(CHAIN).fetch_one(pool).await?;
+    let manifest: i64 = sqlx::query_scalar(
+        "SELECT manifest_id FROM manifest_versions
+         WHERE chain_id = $1 AND source_family = 'ens_v2_resolver_l1'",
+    )
+    .bind(CHAIN)
+    .fetch_one(pool)
+    .await?;
+    let implementation = Uuid::new_v4();
     let target = Uuid::new_v4();
-    sqlx::query("INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind) VALUES ($1,$2,'contract')").bind(target).bind(CHAIN).execute(pool).await?;
-    sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number, active_from_block_hash, source_manifest_id, provenance) VALUES ($1,$2,$3,$4,$5,$6,'{}')").bind(target).bind(CHAIN).bind(address).bind(from).bind(block_hash(from)).bind(source.0).execute(pool).await?;
-    sqlx::query("INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id, discovery_source, admission_basis, source_manifest_id, active_from_block_number, active_from_block_hash, canonicality_state) VALUES ($1,'resolver',$2,$3,'event','reachable_from_root',$4,$5,$6,'finalized')").bind(CHAIN).bind(source.1).bind(target).bind(source.0).bind(from).bind(block_hash(from)).execute(pool).await?;
+    for instance in [implementation, target] {
+        sqlx::query("INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind) VALUES ($1,$2,'contract')").bind(instance).bind(CHAIN).execute(pool).await?;
+    }
+    sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number, active_from_block_hash, source_manifest_id, provenance) VALUES ($1,$2,$3,$4,$5,$6,'{}')").bind(target).bind(CHAIN).bind(address).bind(from).bind(block_hash(from)).bind(manifest).execute(pool).await?;
+    sqlx::query("INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id, discovery_source, admission_basis, source_manifest_id, active_from_block_number, active_from_block_hash, canonicality_state) VALUES ($1,'resolver',$2,$3,'Upgraded','declared_resolver_implementation',$4,$5,$6,'finalized')").bind(CHAIN).bind(implementation).bind(target).bind(manifest).bind(from).bind(block_hash(from)).execute(pool).await?;
     Ok(())
 }
 

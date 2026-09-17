@@ -168,8 +168,14 @@ PublicResolver declarations as supporting the default coin type.
 (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20-L31 @ ens_v1@91c966f)
 (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L32-L40 @ ens_app_v3@7175858)
 (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L151-L166 @ ens_app_v3@7175858)
-The official ENSv2 resolvers share the empty-address fallback in `AbstractRecordResolver`.
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractRecordResolver.sol:L168-L177 @ ens_v2_sepolia_20260916@366de741)
+The official `PermissionedResolver` inherits the empty-address fallback from `AbstractRecordResolver`.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L80-L83 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractRecordResolver.sol:L169-L178 @ ens_v2_sepolia_20260916@366de741)
+The official `PublicResolverV2` instead composes the ENSv1 `AddrResolver` profile, and the profile
+source in its deployment compiler input carries the same fallback (the cited line holds that whole source file).
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PublicResolverV2.sol:L23-L35 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PublicResolverV2.json:L1272 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/build-info/solc-0_8_25-32c5cc51dc76e0217cc18fd81b550ff63339308e.json:L184 @ ens_v2_sepolia_20260916@366de741)
 
 The admitted Basenames address is the legacy L2 resolver. It imports the
 vendored exact-storage address resolver, so it deliberately carries no
@@ -444,12 +450,12 @@ The latest resolver declares `read_features = ["ensip19_default_address"]`, matc
 Admission is necessary but not sufficient for a migrated child's cleanup to be
 observable. Both cleanup shapes — the wrapper token parked in the Graveyard, and
 the node unwrapped into it — are derived against wrapper state that only exists
-if that child's original `NameWrapped` was itself ingested. A source's ingest
-floor is operator-configured per run, not derived from a manifest
-`start_block`, so a Sepolia runtime started at the ENSv2 floor admits the
-wrapper family but still sees no cleanup for children wrapped earlier. Deriving
-child boundaries on this profile requires an ingest floor at or below the
-wrapper's `start_block`, and below each child's own wrap block.
+if that child's original `NameWrapped` was itself ingested. On Sepolia the
+runner therefore requires every chain source to start ingesting at block `0`
+and rejects any other configured start, so NameWrapper history from before the
+ENSv2 deployment stays observable. Each manifest `start_block` remains a
+per-contract watch lower bound: it sets the first block from which that
+contract's logs are watched and does not move the chain-wide ingest start.
 
 No ENSv1 registrar-controller contract is admitted on this deployment profile. The ordinary BaseRegistrar token lifecycle is present, but label-bearing registration and renewal observations emitted by registrar controllers are absent. Registrations visible only as numeric BaseRegistrar events establish no ordinary registrar identity after a full lapse, so re-registrations in that coverage gap do not independently restore an exact `.eth` name surface. The pinned `LegacyETHRegistrarController` at `0x7e02892cfc2Bfd53a75275451d73cF620e793fc0`, from block `3790197`, and `ETHRegistrarController` at `0xfb3cE5D01e0f33f41DbB39035dB9745962F1f968`, from block `8579988`, have receipt-backed deployment records. They remain outside this part because admitting either or both would only partially widen label-bearing intake and would not cover the wrapped-controller path that exposes the #515 gap.[^v1-sepolia-receipt-backed-controllers] This part therefore adopts #515 option (b); a separate controller capability slice owns any later admission.
 
@@ -637,7 +643,7 @@ Current fixed sources and receipt blocks are listed in [official Sepolia deploym
 The existing Sepolia ENSv1 BaseRegistrar at
 `0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85` is named by `correlation_addresses.ens_v1_base_registrar`; it is not a migration-family contract declaration or watch-plan input.
 `ens_v1_registrar_l1` admits that address from its historical start block, while the ENSv1→ENSv2 migration correlator accepts its observations only from the Graveyard deployment block `11709080` onward. This preserves the former launch-bounded scope: registrar rows that exist only because of migration correlation retain `ens_v2_migration_l1` normalized-row provenance and remain `consumer_visibility=candidate` unless every group they reference is complete; attribution of the raw log by `ens_v1_registrar_l1` alone does not make them ordinary consumer-visible registrar history.
-The address-keyed contract instance remains the same identity across the two uses. (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/Graveyard.json:L438 @ ens_v2@a971bd64)
+The address-keyed contract instance remains the same identity across the two uses. (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/Graveyard.json:L439 @ ens_v2_sepolia_20260916@366de741)
 Correlation is per name, never per transaction alone. Interpretation hashes the decoded bridge label bytes exactly as emitted; it does not normalize or rewrite them. That labelhash, interpreted as `uint256`, must equal the BaseRegistrar token ID. Interpretation then derives the `.eth` namehash from `ETH_NODE` and that labelhash and requires it to equal the v2 logical name/namehash. (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L7 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L8 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L108 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L113 @ ens_v2@a971bd64) A direct child under an already-migrated parent uses the same check without `ETH_NODE`: interpretation derives the child namehash from the parent [migration registry](glossary.md#migration-registry-wrapperregistry)'s own migration evidence — the CREATE2 salt of the factory log that created that registry, which is the parent's namehash — together with the registered labelhash, and requires the result to equal the ENSv2 logical name/namehash the registry topology resolves for that label. A mismatch means the evidence chain is incomplete and no boundary is derived. (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L151 @ ens_v2_sepolia_20260629@ccaeb58) The participating logs must have a valid path-specific order and come from the declared emitters and controller path; decoded expiry or duration values must agree for that path without reconstructing an expiry. A transaction-hash-only join is forbidden because one transaction can contain several labels through `syncWrapper` or a multi-item wrapper transfer. (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L132 @ ens_v2@a971bd64) Each name produces an independent correlation group, and unrelated co-located logs remain outside every group.
 
 Each group carries `correlation_kind`. A synchronized bridge renewal uses
@@ -852,11 +858,21 @@ address in the family-wide watch plan. (upstream: .refs/ens_v2_sepolia_20260916/
 
 Consumer slice 3A admits the same shape at any depth. The registry created for a
 locked child is deployed by its parent's registry, not by the locked migration
-controller, because `WrapperRegistry` inherits the same wrapper receiver, and the
-CREATE2 salt is the child's namehash.
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L32 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2_sepolia_20260629@ccaeb58)
-(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L151 @ ens_v2_sepolia_20260629@ccaeb58)
+controller, because `WrapperRegistry` inherits the same wrapper receiver.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/WrapperRegistry.sol:L29-L33 @ ens_v2_sepolia_20260916@366de741)
+The receiver checks that the migrated token ID is the child's namehash and passes that value to
+the factory as the `salt` argument.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/LockedWrapperReceiver.sol:L117-L121 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/LockedWrapperReceiver.sol:L149-L153 @ ens_v2_sepolia_20260916@366de741)
+The official Sepolia factory emits `ProxyDeployed(msg.sender, proxy, salt, implementation)`, so the
+log's `sender` is the contract that called the factory (the locked migration controller for a
+second-level name, the parent's `WrapperRegistry` for a deeper one) and its `salt` is the migrated
+name's namehash. The CREATE2 salt the factory actually uses is the hash of that caller and `salt`,
+not the namehash alone. The factory is a library contract with no source file in the pin; the cited
+build-info line holds its whole source in the deployment's compiler input.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/VerifiableFactory.json:L48 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/VerifiableFactory.json:L132 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/build-info/solc-0_8_25-555a61bb0e64a1101beb8cd0cb29f27cfbefb775.json:L1513 @ ens_v2_sepolia_20260916@366de741)
 Such a registry is admitted exactly as a controller-deployed one is — from the
 registry's own `RegistryCreated` announcement plus the factory log naming that
 registry — so admitted depth is unbounded: second level, third level, fourth
@@ -867,23 +883,23 @@ unchanged.
 
 A direct child never reaches a migration controller: the already-migrated
 parent's registry is itself the receiver and registers the child into itself.
-(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/MigrationHelper.sol:L124 @ ens_v2_sepolia_20260629@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L32 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/MigrationHelper.sol:L134 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/WrapperRegistry.sol:L29-L33 @ ens_v2_sepolia_20260916@366de741)
 The observable discriminator is that the child's `LabelRegistered` is emitted by
 the parent registry and its `sender` field equals that same emitting registry
 address, because the receiver re-enters through an external self-call restricted
 to itself; a second-level migration instead names a separate migration
 controller as `sender`.
-(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L149 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L167 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L467 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/AbstractWrapperReceiver.sol:L149 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/AbstractWrapperReceiver.sol:L167 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L493 @ ens_v2_sepolia_20260916@366de741)
 A child boundary additionally requires the child's own ENSv1 predecessor cleanup
 in the registration's transaction, which is what shows ENSv1 authority ended
 rather than merely that an ENSv2 registration happened. `locked_child` parks the
 child's wrapper token in the Graveyard without unwrapping it
-(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58);
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/LockedWrapperReceiver.sol:L146 @ ens_v2_sepolia_20260916@366de741);
 `emancipated_child` unwraps the child's node into the Graveyard
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64).
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2_sepolia_20260916@366de741).
 Both are emitted by the ENSv1 NameWrapper the ENSv1→ENSv2 migration manifest declares as a
 correlation address, so the requirement is manifest-anchored. A self-claim
 carrying neither derives no boundary.
@@ -1130,8 +1146,8 @@ Address-scoped interpretation begins at the `RegistryCreated()` block, including
 The current ENSv2 resolver manifest declares `ResolverCreated()` as an all-emitter
 event. The resolver emits it in its constructor and proxy initializer before
 initializer calls can write records.
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L107 @ ens_v2_sepolia_20260916@366de741)
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L119 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L108 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2_sepolia_20260916@366de741)
 Ingest fetches the announcing address's role-independent resolver events from
 the creation block through the end of that same window before advancing its
 cursor. Later windows load retained canonical creation logs. Verify uses the
@@ -1296,10 +1312,57 @@ compiled from the resolver manifest's `ResolverCreated()` ABI declaration;
 adding it triggers ordinary watch-plan widening and one Ingest redo. Changes
 to the topology rule still invalidate derived interpretation.
 
-For other address-admitting resolver rules, synchronization conservatively
-rejects historical rule/source widening whose target address set would only
-be known after Interpret. The comparison remains scoped by namespace, source
-family, edge kind, role, and admission policy.
+Every other `resolver` rule is classified as address-admitting. Today that is
+the rule the mainnet ENSv1 registry manifest declares, although `NewResolver`
+produces no discovery edge. For these rules, adding or broadening a rule over
+an already-ingested range is an ordering problem. Replacing a declaration that emits an unchanged active
+resolver rule has the same problem: the replacement contract's discovery
+events name resolver addresses only after Interpret materializes their edges,
+so an Ingest redo cannot yet fetch those resolvers' address-scoped history.
+`resolver` [discovery-rule widening and
+narrowing](glossary.md#discovery-rule-widening-and-narrowing) comparison is
+scoped within one chain by
+`(namespace, source_family, edge_kind, from_role, admission)` and preserves the
+normalized address and inclusive start block of each declaration for its
+`from_role`. Manifest synchronization loudly rejects either transition
+instead of mis-certifying a one-pass redo. The operator cannot perform that
+ordering with the current in-place phase workflow, because Interpret reads
+discovery rules only after admission. These transitions are therefore
+unsupported over retained history and require a fresh rebuild or a future
+dedicated discovery backfill mechanism. Adding the first emitting declaration
+to a resolver rule that previously matched no root or contract declaration is
+classified as widening and is intentionally rejected over retained history as
+a conservative case of the same ordering constraint. A `resolver` discovery
+rule with no matching root or contract declaration is itself historical
+discovery input, so adding such a rule in a new namespace over retained
+history is rejected like any other widening.
+
+The runner repairs the ordinary case of this ordering problem by itself.
+On a database that is being built or replayed, Interpret can discover resolver
+address/topic intervals after the Ingest pass over those blocks has completed.
+This happens for the ENSv2 `Upgraded` and `ProxyDeployed`
+[implementation announcements](#resolver-admission-by-implementation-announcement).
+It does not happen for registry resolver pointers in any family: ENSv1 and
+Basenames `NewResolver` and ENSv2 `ResolverUpdated` admit nothing. It also does
+not happen for `ResolverCreated()`, whose events Ingest already fetched in the
+creation window. When those
+intervals add coverage over already-ingested blocks, Interpret records required
+Ingest work. The runner automatically re-fetches the affected retained range
+with the discovery-aware filter and re-runs Interpret before Project and Verify
+proceed. Interrupted discovery repairs remain durable and resume through the
+normal runner recovery path. At startup, after Live, and after an
+operator-requested Interpret or all-phase redo, the runner can repeat the
+sequence of re-fetching newly admitted historical logs and re-running
+Interpret once for each active admitted discovery rule, plus eight additional
+times before downstream phases proceed. This fixed ceiling is a runaway
+backstop, not a tuning control:
+exhausting it stops the chain with an operator-visible error while Project and
+Verify remain fenced. Keep serving disabled, inspect
+`discovery_watch_admissions` and `chain_phase_state`, correct the
+non-converging admission or redo lifecycle, and then restart the runner.
+Operators do not need to schedule a manual second pass for the
+ordinary convergent case. Keep serving disabled until repair, projection, and
+the configured verification gate have completed.
 
 Runtime resolver admission also requires the registry and resolver families to
 have the same [deployment epoch](glossary.md#deployment-epoch). Manifest
@@ -1543,17 +1606,19 @@ ERC-1967 `Upgraded(address)` logs from manifest-declared and event-announced con
 
 ### Resolver admission by implementation announcement
 
-A registry `ResolverUpdated` admits its target resolver from the pointer's
-block only, and Interpret performs no historical lookback for a newly admitted
-address: a resolver's earlier logs stay uninterpreted. On the Sepolia hackathon
-deployment every stored raw `Upgraded` from a discovered resolver preceded the
-registry pointer that discovered it (a census of bigname's stored Sepolia raw
-logs on 2026-09-13: 646 raw `Upgraded` logs and no normalized `Upgraded`; all
-148 from discovered resolvers preceded their admitting pointer, 21 of them
-earlier in the pointer's own block), so pointer-only discovery can never
-satisfy the implementation-based support rule.
-`ens_v2_resolver_l1` therefore also admits a resolver from the block in which
-it, or its factory, announces a declared implementation:
+A registry `ResolverUpdated` records which resolver a name uses and nothing
+more. It does not [admit](glossary.md#admission) the target resolver, so it
+never causes that resolver's events to be read
+(see [resolver creation capture](#resolver-creation-capture)). Interpret also
+performs no historical lookback for a newly admitted address: a resolver's logs
+from before its admission block stay uninterpreted.
+
+An ENSv2 resolver is therefore read only from a block in which it announces
+itself. `ResolverCreated()` is one such announcement. Resolvers deployed before
+that event existed never emit it, and the support rule needs the resolver's
+implementation observation in any case, so `ens_v2_resolver_l1` also admits a
+resolver from the block in which it, or its factory, announces a declared
+implementation:
 
 - `Upgraded(address indexed implementation)` from any emitter whose indexed
   `implementation` is in the same-namespace, same-deployment
@@ -1563,7 +1628,7 @@ it, or its factory, announces a declared implementation:
   signature set — but narrowed by `topic1` to the declared implementation
   addresses, both in the [compiled watch plan](glossary.md#compiled-watch-plan)
   and in Interpret selection. `Upgraded` naming an undeclared implementation from
-  an unadmitted emitter is neither fetched nor selected. (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L627-L637 @ ens_v2@a971bd64) (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/interfaces/IERC1967.sol:L13 @ basenames@1809bbc)
+  an unadmitted emitter is neither fetched nor selected. (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L514-L526 @ ens_v2_sepolia_20260916@366de741) (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/interfaces/IERC1967.sol:L13 @ basenames@1809bbc)
 - `ProxyDeployed(sender, proxyAddress, salt, implementation)` from a declared
   `ens_v2_migration_l1` `verifiable_factory` whose `implementation` is declared
   the same way admits `proxyAddress` as an `ens_v2_resolver_l1` instance from
@@ -1571,7 +1636,7 @@ it, or its factory, announces a declared implementation:
   implementation observation: an `Upgraded` normalized event on the proxy's own
   `Upgraded` stream with `after_state.source_event = "ProxyDeployed"`, written
   under the resolver manifest when that manifest declares `Upgraded`. No extra
-  fetch is involved; the factory's logs are already watched. (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/VerifiableFactory.json:L48 @ ens_v2@a971bd64)
+  fetch is involved; the factory's logs are already watched. (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/VerifiableFactory.json:L48 @ ens_v2_sepolia_20260916@366de741)
 
 Both announcements write a `resolver` discovery edge with `discovery_source`
 `Upgraded` or `ProxyDeployed`, `admission_basis`
@@ -1581,9 +1646,13 @@ instance; a self-announcement's edge runs from the implementation's contract
 instance (the same instance the log's `proxy_implementation` edge names),
 because only registry announcements and `ResolverCreated` observations may produce self-edges. The
 announcement edge never closes: a later registry pointer to another resolver
-closes only the pointer edge. Registry-pointer discovery is unchanged, and a
-resolver that announces nothing remains admitted only through its pointer and
-stays `unsupported` with `resolver_implementation_unknown`
+closes only the pointer edge. A registry-pointer edge is binding history only
+and admits nothing. A resolver that announces nothing (no `ResolverCreated()`,
+and no `Upgraded` or `ProxyDeployed` naming a declared implementation) is not
+admitted, so none of its events are read, including any record events it
+emitted before or after a registry pointed a name at it. This is expected
+behaviour, not a gap to repair. Names that point at such a resolver still show
+it, and it stays `unsupported` with `resolver_implementation_unknown`
 ([projections.md](projections.md#resolver-and-records)).
 
 Same-block admission: when a discovery observation admits an address at block

@@ -226,6 +226,83 @@ assert_migration_refusal() {
     refusal_assertions_passed=$((refusal_assertions_passed + 1))
     refusal_probe_seconds=$((refusal_probe_seconds + SECONDS - refusal_started))
 }
+# Run a concurrent index installer from ops/ against the scratch schema and
+# require it to stop with exactly this error. CREATE INDEX CONCURRENTLY cannot
+# run inside a transaction, so the caller commits its setup and undoes it.
+assert_index_install_refusal() {
+    local label="$1"
+    local install_file="$2"
+    local exact_message="$3"
+    local refusal_stderr
+    local observed_error
+    local refusal_started=$SECONDS
+    if refusal_stderr="$(
+        render_phase_migration "$install_file" | run_psql 2>&1 >/dev/null
+    )"; then
+        printf '%s\n' "$label: index installer unexpectedly succeeded" >&2
+        exit 1
+    fi
+    observed_error="$(
+        printf '%s\n' "$refusal_stderr" \
+            | sed -n 's/^ERROR:[[:space:]]*//p' \
+            | sed -n '1p'
+    )"
+    if [ "$observed_error" != "$exact_message" ]; then
+        printf '%s\n' \
+            "$label: expected PostgreSQL error: $exact_message" \
+            "$label: observed PostgreSQL error: $observed_error" \
+            "$label: complete stderr:" \
+            "$refusal_stderr" >&2
+        exit 1
+    fi
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    refusal_probe_seconds=$((refusal_probe_seconds + SECONDS - refusal_started))
+}
+# Prove one concurrent index installer from ops/ against the scratch schema:
+# from the shape without the index it builds the fresh-baseline definition and
+# passes its own validity check, a rerun is a no-op, an invalid index under the
+# same name makes it fail, and the documented drop-and-rerun recovery works.
+assert_concurrent_index_installer() {
+    local label="$1"
+    local index_name="$2"
+    local install_file="$3"
+    local readme_path="$4"
+    local matches_baseline_sql="DO \$\$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index, expected_installed_index expected
+        WHERE indexrelid = '$index_name'::regclass
+          AND indisvalid AND indisready
+          AND pg_get_indexdef(indexrelid) = expected.definition
+    ) THEN
+        RAISE EXCEPTION '$index_name prebuild differs from the baseline';
+    END IF;
+END \$\$;"
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' \
+            "CREATE TABLE expected_installed_index AS" \
+            "SELECT pg_get_indexdef(indexrelid) AS definition" \
+            "FROM pg_index WHERE indexrelid = '$index_name'::regclass;" \
+            "DROP INDEX $index_name;"
+        render_phase_migration "$install_file"
+        render_phase_migration "$install_file"
+        printf '%s\n' "$matches_baseline_sql"
+        # An interrupted concurrent build leaves an invalid index under this
+        # name. Mark this scratch index invalid to stand in for one.
+        printf '%s\n' \
+            "UPDATE pg_index SET indisvalid = false" \
+            "WHERE indexrelid = '$index_name'::regclass;"
+    } | run_psql >/dev/null
+    assert_index_install_refusal "$label-invalid-prebuild" "$install_file" \
+        "$index_name is missing from $scratch_schema.discovery_edges or is not valid and ready; follow the recovery steps in $readme_path before retrying"
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' "DROP INDEX $index_name;"
+        render_phase_migration "$install_file"
+        printf '%s\n' "$matches_baseline_sql" "DROP TABLE expected_installed_index;"
+    } | run_psql >/dev/null
+}
 assert_unconfigured_settlement_constraint() {
     local provenance="$1"
     local false_error
@@ -302,9 +379,9 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=7
+expected_refusal_assertions=11
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=30
+expected_predecessor_shape_proof_count=36
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -392,7 +469,13 @@ for migration_file in \
     "$ROOT/migrations/20260913130100_account_permission_state_wrapper_operators.sql" \
     "$ROOT/migrations/20260914120000_lookup_publication_revalidation.sql" \
     "$ROOT/migrations/20260914120100_address_records_current_comments.sql" \
-    "$ROOT/migrations/20260915120000_address_records_optional_authority.sql"
+    "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" \
+    "$ROOT/migrations/20260917120000_discovery_edges_observation_history_idx.sql" \
+    "$ROOT/migrations/20260917130000_discovery_edges_reopen_idx.sql" \
+    "$ROOT/migrations/20260917131000_project_scoped_history_indexes.sql" \
+    "$ROOT/migrations/20260917140000_resolver_creation_self_edge.sql" \
+    "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql" \
+    "$ROOT/migrations/20260917160000_discovery_edges_index_validity_check.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -726,6 +809,328 @@ SQL
 assert_migration_context_count "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" empty-schema 1
 assert_migration_context_count "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" preceding-shape 1
 assert_migration_context_count "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" baseline-first 2
+# Recreate the additive discovery observation-history index from its preceding
+# schema shape. Compare the resulting catalog definition to the fresh baseline,
+# then prove a rerun leaves it unchanged.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_discovery_history_index AS
+SELECT pg_get_indexdef(indexrelid) AS definition
+FROM pg_index
+WHERE indexrelid = 'discovery_edges_observation_history_idx'::regclass;
+DROP INDEX discovery_edges_observation_history_idx;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917120000_discovery_edges_observation_history_idx.sql" preceding-shape
+    emit_phase_migration "$ROOT/migrations/20260917120000_discovery_edges_observation_history_idx.sql" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index, expected_discovery_history_index expected
+        WHERE indexrelid = 'discovery_edges_observation_history_idx'::regclass
+          AND indisvalid AND indisready AND indpred IS NOT NULL
+          AND pg_get_indexdef(indexrelid) = expected.definition
+    ) THEN
+        RAISE EXCEPTION 'discovery observation-history index upgrade differs from the baseline';
+    END IF;
+END $$;
+DROP TABLE expected_discovery_history_index;
+SQL
+} | run_psql
+# The live prebuild in ops/discovery-history-index/install.sql must build the
+# baseline definition, refuse an invalid index, and recover as its README says.
+assert_concurrent_index_installer discovery-history \
+    discovery_edges_observation_history_idx \
+    "$ROOT/ops/discovery-history-index/install.sql" \
+    ops/discovery-history-index/README.md
+# Recreate the additive discovery reopen index from its preceding schema shape.
+# Compare the resulting catalog definition to the fresh baseline, then prove a
+# rerun leaves it unchanged.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_discovery_reopen_index AS
+SELECT pg_get_indexdef(indexrelid) AS definition
+FROM pg_index
+WHERE indexrelid = 'discovery_edges_reopen_idx'::regclass;
+DROP INDEX discovery_edges_reopen_idx;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917130000_discovery_edges_reopen_idx.sql" preceding-shape
+    emit_phase_migration "$ROOT/migrations/20260917130000_discovery_edges_reopen_idx.sql" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index, expected_discovery_reopen_index expected
+        WHERE indexrelid = 'discovery_edges_reopen_idx'::regclass
+          AND indisvalid AND indisready AND indpred IS NULL
+          AND pg_get_indexdef(indexrelid) = expected.definition
+    ) THEN
+        RAISE EXCEPTION 'discovery reopen index upgrade differs from the baseline';
+    END IF;
+END $$;
+DROP TABLE expected_discovery_reopen_index;
+SQL
+} | run_psql
+# The live prebuild in ops/discovery-reopen-index/install.sql must build the
+# baseline definition, refuse an invalid index, and recover as its README says.
+assert_concurrent_index_installer discovery-reopen \
+    discovery_edges_reopen_idx \
+    "$ROOT/ops/discovery-reopen-index/install.sql" \
+    ops/discovery-reopen-index/README.md
+# The two index schema-migrations above adopt an existing index by name alone.
+# The validity check that follows them passes on the shape they leave, changes
+# nothing when rerun, and ignores an index that does not exist yet.
+discovery_index_validity_migration="$ROOT/migrations/20260917160000_discovery_edges_index_validity_check.sql"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    emit_phase_migration "$discovery_index_validity_migration" preceding-shape
+    emit_phase_migration "$discovery_index_validity_migration" baseline-first
+    cat <<'SQL'
+BEGIN;
+DROP INDEX discovery_edges_observation_history_idx;
+DROP INDEX discovery_edges_reopen_idx;
+SQL
+    emit_phase_migration "$discovery_index_validity_migration" baseline-first
+    cat <<'SQL'
+ROLLBACK;
+DO $$
+BEGIN
+    IF (
+        SELECT count(*) FROM pg_index
+        WHERE indexrelid IN (
+                  'discovery_edges_observation_history_idx'::regclass,
+                  'discovery_edges_reopen_idx'::regclass
+              )
+          AND indisvalid AND indisready
+    ) <> 2 THEN
+        RAISE EXCEPTION 'discovery index validity check changed an index';
+    END IF;
+END $$;
+SQL
+} | run_psql
+assert_migration_context_count "$discovery_index_validity_migration" preceding-shape 1
+assert_migration_context_count "$discovery_index_validity_migration" baseline-first 2
+# An interrupted concurrent build leaves an invalid index under the right name.
+# Mark each scratch index invalid in turn, inside a transaction that rolls
+# back, and require the schema-migration to fail rather than record success.
+for discovery_index_name in \
+    discovery_edges_observation_history_idx \
+    discovery_edges_reopen_idx
+do
+    assert_migration_refusal "invalid-$discovery_index_name" \
+        "$discovery_index_validity_migration" \
+        "$discovery_index_name exists but is not a valid and ready index on $scratch_schema.discovery_edges; follow the recovery steps in ops/discovery-history-index/README.md or ops/discovery-reopen-index/README.md, then run the schema-migrations again" <<SQL
+UPDATE pg_index SET indisvalid = false
+WHERE indexrelid = '$discovery_index_name'::regclass;
+SQL
+done
+# Recreate all eight additive project-scoped history indexes from their
+# preceding schema shape. Compare every resulting catalog definition to the
+# fresh baseline, then prove a rerun leaves them unchanged.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_project_scoped_history_indexes AS
+SELECT index_class.relname AS index_name,
+       pg_get_indexdef(pg_index.indexrelid) AS definition
+FROM pg_index
+JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
+WHERE pg_index.indrelid = 'normalized_events'::regclass
+  AND index_class.relname IN (
+      'normalized_events_project_name_node_idx',
+      'normalized_events_project_name_child_idx',
+      'normalized_events_project_name_after_target_idx',
+      'normalized_events_project_name_before_target_idx',
+      'normalized_events_project_primary_after_idx',
+      'normalized_events_project_primary_before_idx',
+      'normalized_events_project_primary_after_source_idx',
+      'normalized_events_project_primary_before_source_idx'
+  );
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM expected_project_scoped_history_indexes) <> 8 THEN
+        RAISE EXCEPTION 'fresh baseline does not define all eight project-scoped history indexes';
+    END IF;
+END $$;
+DROP INDEX
+    normalized_events_project_name_node_idx,
+    normalized_events_project_name_child_idx,
+    normalized_events_project_name_after_target_idx,
+    normalized_events_project_name_before_target_idx,
+    normalized_events_project_primary_after_idx,
+    normalized_events_project_primary_before_idx,
+    normalized_events_project_primary_after_source_idx,
+    normalized_events_project_primary_before_source_idx;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917131000_project_scoped_history_indexes.sql" preceding-shape
+    emit_phase_migration "$ROOT/migrations/20260917131000_project_scoped_history_indexes.sql" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF (
+        SELECT count(*)
+        FROM expected_project_scoped_history_indexes expected
+        JOIN pg_class index_class ON index_class.relname = expected.index_name
+        JOIN pg_index ON pg_index.indexrelid = index_class.oid
+        WHERE pg_index.indrelid = 'normalized_events'::regclass
+          AND pg_index.indisvalid AND pg_index.indisready
+          AND pg_index.indpred IS NOT NULL
+          AND pg_get_indexdef(pg_index.indexrelid) = expected.definition
+    ) <> 8 THEN
+        RAISE EXCEPTION 'project-scoped history index upgrade differs from the baseline';
+    END IF;
+END $$;
+DROP TABLE expected_project_scoped_history_indexes;
+SQL
+} | run_psql
+# Upgrade the discovery self-edge rule from its preceding shape: an unnamed
+# CHECK that allowed only registry announcements to point at themselves.
+# 20260917140000 is already applied on a live database, so it stays as it was
+# and always replaces the rule. 20260917141000 starts from that exact result:
+# it must leave the fresh baseline's name, definition and validity, keep exactly
+# one self-edge CHECK, and replace nothing on the first or the second apply.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE FUNCTION pg_temp.self_edge_checks()
+RETURNS TABLE (constraint_oid oid, conname name, definition text, convalidated boolean)
+LANGUAGE sql STABLE AS $$
+    SELECT oid, conname, pg_get_constraintdef(oid), convalidated
+    FROM pg_constraint
+    WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
+      AND pg_get_constraintdef(oid) LIKE
+          '%from_contract_instance_id <> to_contract_instance_id%'
+$$;
+CREATE FUNCTION pg_temp.assert_self_edge_check_matches_baseline(step text)
+RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+    IF (SELECT count(*) FROM pg_temp.self_edge_checks()) <> 1 THEN
+        RAISE EXCEPTION '%: discovery_edges does not carry exactly one self-edge CHECK', step;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_temp.self_edge_checks() observed
+        JOIN expected_discovery_self_edge_check expected
+          ON expected.conname = observed.conname
+         AND expected.definition = observed.definition
+         AND expected.convalidated = observed.convalidated
+        WHERE observed.convalidated
+    ) THEN
+        RAISE EXCEPTION '%: discovery self-edge CHECK differs from the baseline', step;
+    END IF;
+END $$;
+CREATE FUNCTION pg_temp.assert_self_edge_check_kept(step text)
+RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_temp.self_edge_checks() observed
+        JOIN kept_discovery_self_edge_check kept USING (constraint_oid)
+    ) THEN
+        RAISE EXCEPTION '%: the discovery self-edge CHECK was replaced', step;
+    END IF;
+END $$;
+CREATE TEMP TABLE expected_discovery_self_edge_check AS
+SELECT conname, definition, convalidated
+FROM pg_temp.self_edge_checks()
+WHERE conname = 'discovery_edges_self_edge_check';
+CREATE TEMP TABLE expected_discovery_sibling_checks AS
+SELECT conname, pg_get_constraintdef(oid) AS definition
+FROM pg_constraint
+WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
+  AND conname ~ '^discovery_edges_check[0-9]*$';
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM expected_discovery_self_edge_check) <> 1 THEN
+        RAISE EXCEPTION 'fresh baseline does not name discovery_edges_self_edge_check';
+    END IF;
+    IF (SELECT count(*) FROM expected_discovery_sibling_checks) <> 4 THEN
+        RAISE EXCEPTION 'fresh baseline does not pin discovery_edges_check1 to discovery_edges_check4';
+    END IF;
+END $$;
+ALTER TABLE discovery_edges
+    DROP CONSTRAINT discovery_edges_self_edge_check,
+    ADD CHECK (
+        edge_kind = 'registry_announcement'
+        OR from_contract_instance_id <> to_contract_instance_id
+    );
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_temp.self_edge_checks()
+        WHERE conname = 'discovery_edges_check'
+    ) THEN
+        RAISE EXCEPTION 'preceding self-edge CHECK did not take its original generated name';
+    END IF;
+END $$;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917140000_resolver_creation_self_edge.sql" preceding-shape
+    cat <<'SQL'
+SELECT pg_temp.assert_self_edge_check_matches_baseline('after 20260917140000');
+CREATE TEMP TABLE kept_discovery_self_edge_check AS
+SELECT constraint_oid FROM pg_temp.self_edge_checks();
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql" preceding-shape
+    cat <<'SQL'
+SELECT pg_temp.assert_self_edge_check_matches_baseline('first 20260917141000 apply');
+SELECT pg_temp.assert_self_edge_check_kept('first 20260917141000 apply');
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql" baseline-first
+    cat <<'SQL'
+SELECT pg_temp.assert_self_edge_check_matches_baseline('second 20260917141000 apply');
+SELECT pg_temp.assert_self_edge_check_kept('second 20260917141000 apply');
+DO $$
+BEGIN
+    IF EXISTS (
+        (SELECT conname, pg_get_constraintdef(oid)
+         FROM pg_constraint
+         WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
+           AND conname ~ '^discovery_edges_check[0-9]*$'
+         EXCEPT SELECT conname, definition FROM expected_discovery_sibling_checks)
+        UNION ALL
+        (SELECT conname, definition FROM expected_discovery_sibling_checks
+         EXCEPT
+         SELECT conname, pg_get_constraintdef(oid)
+         FROM pg_constraint
+         WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
+           AND conname ~ '^discovery_edges_check[0-9]*$')
+    ) THEN
+        RAISE EXCEPTION 'upgraded discovery_edges sibling CHECK names differ from the baseline';
+    END IF;
+END $$;
+
+-- A baseline installed after 20260917140000 ran as a no-op could hold the
+-- wanted rule under its generated name. That is a rename, not a replacement.
+ALTER TABLE discovery_edges
+    RENAME CONSTRAINT discovery_edges_self_edge_check TO discovery_edges_check;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql" specialized
+    cat <<'SQL'
+SELECT pg_temp.assert_self_edge_check_matches_baseline('generated-name apply');
+SELECT pg_temp.assert_self_edge_check_kept('generated-name apply');
+
+-- A rule with different text, next to a stray second one, is replaced.
+ALTER TABLE discovery_edges
+    DROP CONSTRAINT discovery_edges_self_edge_check,
+    ADD CHECK (
+        edge_kind = 'registry_announcement'
+        OR from_contract_instance_id <> to_contract_instance_id
+    ),
+    ADD CONSTRAINT discovery_edges_stray_self_edge_check CHECK (
+        edge_kind <> 'proxy_implementation'
+        OR from_contract_instance_id <> to_contract_instance_id
+    );
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql" specialized
+    cat <<'SQL'
+SELECT pg_temp.assert_self_edge_check_matches_baseline('different-text apply');
+DROP TABLE expected_discovery_self_edge_check;
+DROP TABLE expected_discovery_sibling_checks;
+DROP TABLE kept_discovery_self_edge_check;
+SQL
+} | run_psql
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor
 # shape, then validate the additive tuple invariant independently. Both files
 # must remain idempotent after the upgrade completes.
