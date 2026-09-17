@@ -4287,3 +4287,102 @@ async fn snapshot_grant_and_bound_original_grant_serve_one_registration() -> Res
     database.cleanup().await?;
     Ok(())
 }
+
+/// What `name_current` publishes about where a name came from: `created_at`, the provenance event
+/// ids and the control fields.
+async fn name_origin(pool: &PgPool, logical_name_id: &str) -> Result<serde_json::Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+             'created_at', (declared_summary #>> '{registration,created_at}')::timestamptz,
+             'selected_event_ids', (
+                 SELECT COALESCE(jsonb_agg(event.event_identity ORDER BY event.event_identity),
+                                 '[]'::jsonb)
+                 FROM normalized_events event
+                 WHERE to_jsonb(event.normalized_event_id) <@
+                       (name_current.provenance -> 'selected_event_ids')
+             ),
+             'raw_fact_refs', jsonb_array_length(provenance -> 'raw_fact_refs'),
+             'manifest_versions', jsonb_array_length(provenance -> 'manifest_versions'),
+             'control', declared_summary -> 'control'
+         )
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// The ENSv1 registry adapter writes rows that carry a resource but no name while a label is
+/// unknown. Naming rows by resource identity exists for `.eth` BaseRegistrar lifecycle rows only:
+/// a registry row written before the label was known must stay out of the name's `created_at` and
+/// provenance lists, as it did before registrar rows were joined by resource identity.
+#[tokio::test]
+async fn registry_rows_without_a_name_stay_out_of_the_names_origin() -> Result<()> {
+    const OWNER: &str = "0x7777777777777777777777777777777777777777";
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    seed_surface(
+        &pool,
+        OWNERLESS_NAMEHASH,
+        "label-learned-later.eth",
+        OWNERLESS_RESOURCE,
+        OWNERLESS_BINDING,
+    )
+    .await?;
+    let owner_state = json!({
+        "node": OWNERLESS_NAMEHASH,
+        "owner": OWNER,
+        "owner_getter": OWNER,
+        "authority_kind": "registry_only"
+    });
+    seed_normalized_event(
+        &pool,
+        "fixture:registry-row-before-label",
+        None,
+        Some(OWNERLESS_RESOURCE),
+        "AuthorityTransferred",
+        "ens_v1_registry_l1",
+        8,
+        1,
+        owner_state.clone(),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:registry-row-after-label",
+        Some(OWNERLESS_LOGICAL),
+        Some(OWNERLESS_RESOURCE),
+        "AuthorityTransferred",
+        "ens_v1_registry_l1",
+        9,
+        1,
+        owner_state,
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    run_project(&pool, 9, 8, None).await?;
+
+    let origin = name_origin(&pool, OWNERLESS_LOGICAL).await?;
+    assert_eq!(
+        origin["selected_event_ids"],
+        json!(["fixture:registry-row-after-label"]),
+        "a registry row written without a name entered the name's provenance: {origin}"
+    );
+    assert_eq!(origin["raw_fact_refs"], json!(1), "{origin}");
+    assert_eq!(origin["manifest_versions"], json!(1), "{origin}");
+    let created_at_block: i64 = sqlx::query_scalar(
+        "SELECT block_number FROM chain_lineage
+         WHERE chain_id = $1 AND block_timestamp = ($2 #>> '{}')::timestamptz",
+    )
+    .bind(CHAIN)
+    .bind(&origin["created_at"])
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        created_at_block, 9,
+        "created_at moved back to a registry row written without a name: {origin}"
+    );
+    database.cleanup().await?;
+    Ok(())
+}

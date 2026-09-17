@@ -7,14 +7,21 @@ pub(super) async fn prepare(transaction: &mut Transaction<'_, Postgres>) -> Resu
     ownerless_registry(transaction).await
 }
 
+/// Names the `.eth` BaseRegistrar lifecycle rows that were written before the label was known,
+/// through a binding of the same registrar resource to a name with the same namehash. Rows of
+/// every other source family keep the name Interpret gave them, or none.
 async fn bind_resource_events(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query(
         "UPDATE project_events event SET logical_name_id = binding.logical_name_id
          FROM project_binding_candidates binding JOIN project_surfaces surface
            ON surface.logical_name_id = binding.logical_name_id
          WHERE event.logical_name_id IS NULL AND event.resource_id = binding.resource_id
-           AND lower(surface.namehash) = lower(COALESCE(event.after_state->>'namehash',
-               event.after_state->>'child_node', event.after_state->>'node'))",
+           AND event.source_family = 'ens_v1_registrar_l1'
+           AND event.event_kind IN (
+               'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
+               'ExpiryChanged', 'TokenControlTransferred'
+           )
+           AND lower(surface.namehash) = lower(event.after_state ->> 'namehash')",
     )
     .execute(&mut **transaction)
     .await
