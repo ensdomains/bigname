@@ -135,9 +135,15 @@ fn due_names(prior: &[PriorEventInput], predecessor: Option<i64>, last: i64) -> 
             }
             let expiry: i128 = text.parse().ok()?;
             let in_i64 = |value: i128| i64::try_from(value).is_ok();
+            // Second branch of the query: an event in the block just before the batch has no
+            // lower bound, because its expiry may have lapsed before it was recorded. The
+            // latest retained timestamp stands in for that block.
+            let in_previous_block = predecessor.is_some()
+                && event.block_timestamp.map(OffsetDateTime::unix_timestamp) == predecessor;
             let due = in_i64(expiry)
                 && in_i64(expiry + grace)
-                && predecessor.is_none_or(|at| expiry >= i128::from(at) - grace)
+                && (in_previous_block
+                    || predecessor.is_none_or(|at| expiry >= i128::from(at) - grace))
                 && expiry < i128::from(last) - grace;
             let node = seam::v1_event_node(&event.after_state)?;
             due.then(|| V1NodeRequest {
