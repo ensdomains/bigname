@@ -2,7 +2,7 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{Marker, ProjectError, Result};
 
-mod direct;
+pub(in crate::builders) mod direct;
 mod serialization;
 
 pub(super) async fn build(
