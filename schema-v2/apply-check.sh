@@ -262,11 +262,13 @@ assert_index_install_refusal() {
 # from the shape without the index it builds the fresh-baseline definition and
 # passes its own validity check, a rerun is a no-op, an invalid index under the
 # same name makes it fail, and the documented drop-and-rerun recovery works.
+# The optional fifth argument names the indexed table (default discovery_edges).
 assert_concurrent_index_installer() {
     local label="$1"
     local index_name="$2"
     local install_file="$3"
     local readme_path="$4"
+    local table_name="${5:-discovery_edges}"
     local matches_baseline_sql="DO \$\$
 BEGIN
     IF NOT EXISTS (
@@ -295,7 +297,7 @@ END \$\$;"
             "WHERE indexrelid = '$index_name'::regclass;"
     } | run_psql >/dev/null
     assert_index_install_refusal "$label-invalid-prebuild" "$install_file" \
-        "$index_name is missing from $scratch_schema.discovery_edges or is not valid and ready; follow the recovery steps in $readme_path before retrying"
+        "$index_name is missing from $scratch_schema.$table_name or is not valid and ready; follow the recovery steps in $readme_path before retrying"
     {
         printf 'SET search_path TO "%s";\n' "$scratch_schema"
         printf '%s\n' "DROP INDEX $index_name;"
@@ -379,7 +381,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=11
+expected_refusal_assertions=15
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=35
 refusal_probe_seconds=0
@@ -1031,6 +1033,27 @@ END $$;
 DROP TABLE expected_v1_lookahead_indexes;
 SQL
 } | run_psql
+# The live prebuild in ops/v1-lookahead-indexes/install.sql builds both indexes
+# in one file. For each in turn it must build the baseline definition, refuse
+# an invalid index, and recover as its README says. The schema-migration adopts
+# an existing index by name alone, so it must also fail on an invalid one
+# rather than record success.
+for v1_lookahead_index_name in \
+    normalized_events_v1_due_probe_idx \
+    normalized_events_v1_direct_node_probe_idx
+do
+    assert_concurrent_index_installer "v1-lookahead-$v1_lookahead_index_name" \
+        "$v1_lookahead_index_name" \
+        "$ROOT/ops/v1-lookahead-indexes/install.sql" \
+        ops/v1-lookahead-indexes/README.md \
+        normalized_events
+    assert_migration_refusal "invalid-$v1_lookahead_index_name" \
+        "$ROOT/migrations/20260917150000_normalized_events_v1_lookahead_indexes.sql" \
+        "$v1_lookahead_index_name exists but is not a valid and ready index on $scratch_schema.normalized_events; follow the recovery steps in ops/v1-lookahead-indexes/README.md, then run the schema-migrations again" <<SQL
+UPDATE pg_index SET indisvalid = false
+WHERE indexrelid = '$v1_lookahead_index_name'::regclass;
+SQL
+done
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor
 # shape, then validate the additive tuple invariant independently. Both files
 # must remain idempotent after the upgrade completes.

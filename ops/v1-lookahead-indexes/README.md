@@ -41,12 +41,16 @@ that batch. The script permits that transaction wait and bounds each build to
 six hours, because both indexes cover most of a mainnet `normalized_events`
 table. Retain its output in the deployment receipt.
 
-Before treating the step as complete, require exactly two index rows, both with
-`indisvalid` and `indisready` true, and the expected definitions. `IF NOT EXISTS`
-does not fix an invalid index from an interrupted concurrent build. If one of
-these two indexes is invalid and no build is running, drop only it with
-`DROP INDEX CONCURRENTLY bigname_phase.<index name>`, then rerun the installation
-and validity checks. Never drop a valid index merely because an installation was
+The script ends with a check that fails, with a non-zero `psql` exit, unless
+both indexes belong to `bigname_phase.normalized_events` and are `indisvalid` and
+`indisready`. It prints the index rows first, so the receipt shows the flags
+either way. The check does not compare definitions, so before treating the step
+as complete also confirm exactly two index rows with the expected definitions.
+`IF NOT EXISTS` matches on the name alone and does not fix an invalid index from
+an interrupted concurrent build: rerunning the script skips creation and then
+fails at the check. If one of these two indexes is invalid, first confirm in
+`pg_stat_progress_create_index` that no build is still running, drop only it with
+`DROP INDEX CONCURRENTLY bigname_phase.<index name>`, then rerun the script. Never drop a valid index merely because an installation was
 retried, and never drop one while a runner that uses the lookahead loader is
 processing batches.
 
@@ -58,6 +62,9 @@ not finish in several minutes, and took under four seconds after `ANALYZE`.
 
 The matching versioned schema-migration installs the same definitions on
 initialized databases; after a live prebuild, its `IF NOT EXISTS` is a no-op.
+It ends with the same validity check, so the SQLx run fails rather than recording
+success if either index exists but is not valid and ready; recover as described
+above, then run the schema-migrations again.
 Apply that schema-migration through the usual SQLx release process when adopting
 this source revision. The fresh baseline also includes both indexes.
 

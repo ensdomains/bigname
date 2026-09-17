@@ -29,6 +29,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_v1_direct_node_probe_i
     WHERE canonicality_state IN ('canonical','safe','finalized')
       AND source_family LIKE 'ens\_v1\_%';
 
+-- Printed first so the receipt shows the flags even when the check below fails.
 SELECT indexrelid::regclass AS index_name, indisvalid, indisready,
        pg_size_pretty(pg_relation_size(indexrelid)) AS index_size,
        pg_get_indexdef(indexrelid) AS definition
@@ -37,3 +38,31 @@ WHERE indexrelid IN (
     to_regclass('bigname_phase.normalized_events_v1_due_probe_idx'),
     to_regclass('bigname_phase.normalized_events_v1_direct_node_probe_idx')
 );
+
+-- IF NOT EXISTS matches on the name alone, so an interrupted concurrent build
+-- leaves an invalid index that the statements above then skip. Fail here instead
+-- of reporting success; README.md describes the recovery.
+DO $check$
+DECLARE
+    checked_index text;
+BEGIN
+    FOREACH checked_index IN ARRAY ARRAY[
+        'normalized_events_v1_due_probe_idx',
+        'normalized_events_v1_direct_node_probe_idx'
+    ]
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_index
+            WHERE indexrelid = to_regclass('bigname_phase.' || checked_index)
+              AND indrelid = to_regclass('bigname_phase.normalized_events')
+              AND indisvalid
+              AND indisready
+        ) THEN
+            RAISE EXCEPTION
+                '% is missing from bigname_phase.normalized_events or is not valid and ready; follow the recovery steps in ops/v1-lookahead-indexes/README.md before retrying',
+                checked_index;
+        END IF;
+    END LOOP;
+END
+$check$;
