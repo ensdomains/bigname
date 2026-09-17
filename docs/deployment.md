@@ -821,4 +821,20 @@ production rollout or complete the issue.
 
 Build the runner against the node's pinned Reth version and test a bounded read-only sample before pausing ingestion. Supply the matching Sepolia chainspec, direct-reader mount and one `reth_db` intake descriptor; keep historical state RPC separate. Pause the adoption watcher, gracefully stop the runner, retain the cursor and phase-state evidence, and run the [same-node transport command](chain-intake.md#same-node-sepolia-transport-change). Save its receipt before resuming the existing replay range with the new intake descriptor. Do not reset the database or restart from block zero. The command may be reversed against the same node for rollback; keep the matching runtime/configuration until progress is verified.
 
+The direct-reader container, including one-off smoke and source-transport
+commands, must share the Reth node's PID namespace. For this deployment use
+`pid: "container:bigname-sepolia-reth"` in the Compose reader service (or the
+corresponding Docker `--pid=container:bigname-sepolia-reth` option). MDBX uses
+`getpid()` and takes a byte-range lock at that numeric PID in the shared data
+file; a writer's exclusive byte lock conflicts with a reader using the same
+number. Separate container PID namespaces can therefore make unrelated
+processes collide and fail opening with `Resource temporarily unavailable (11)`
+(upstream: .refs/reth/crates/storage/libmdbx-rs/mdbx-sys/libmdbx/mdbx.c:L1505 @ reth@189c0df3)
+(upstream: .refs/reth/crates/storage/libmdbx-rs/mdbx-sys/libmdbx/mdbx.c:L24855 @ reth@189c0df3)
+(upstream: .refs/reth/crates/storage/libmdbx-rs/mdbx-sys/libmdbx/mdbx.c:L24872 @ reth@189c0df3).
+Validate the final image entrypoint and PID configuration: overriding the
+entrypoint for a successful smoke test can change the process's PID and hide
+this collision. Keep the existing read-only data mounts and writable MDBX lock
+file; do not disable MDBX locking to work around it.
+
 A Reth dependency update may change the interpreter content hash through shared decoding dependencies. In that case finish the supported Interpret replay and required Project work before adopting the matching API. An already-required full Interpret replay can discharge this obligation using the new binary; it must not be bypassed.

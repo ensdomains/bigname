@@ -83,6 +83,9 @@ COPY --from=builder /app/target/release/phase-runner /usr/local/bin/phase-runner
 COPY --from=builder --chown=bigname:bigname /app/manifests /app/manifests
 COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/bigname
 
+# Direct Reth readers run as the node UID to share its writable MDBX lock file.
+RUN chmod 755 /app && chmod -R a+rX /app/manifests
+
 ENV BIGNAME_API_BIND_ADDR=0.0.0.0:3000 \
     BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT=/app/manifests/mainnet \
     RUST_LOG=info
