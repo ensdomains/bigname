@@ -33,8 +33,11 @@ pub(super) async fn build(
                    -- Only the record-ID generation's grants carry it: there the
                    -- selector's hash is the resource itself (keccak of the setter
                    -- argument). The node-keyed generation's named-resource selectors
-                   -- hash the key alone, or nothing, and describe a node.
+                   -- hash the key alone (NamedTextResource's keyHash) or nothing
+                   -- (NamedAddrResource), and describe a node.
                    -- (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L336-L337 @ ens_v2@a971bd64)
+                   -- (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L144-L153 @ ens_v2_sepolia_20260629@ccaeb58)
+                   -- (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L168-L172 @ ens_v2_sepolia_20260629@ccaeb58)
                    CASE WHEN jsonb_typeof(event.after_state -> 'selector' -> 'hash') = 'string'
                          AND event.after_state -> 'selector' ->> 'hash' =
                              event.after_state ->> 'upstream_resource'

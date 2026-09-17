@@ -222,6 +222,7 @@ async fn record_resolver_permission_rows_keep_the_decoded_argument_selector() ->
             json!({"kind": "resource", "key": null, "hash": null}),
         ),
         // A node-keyed named-resource selector hashes the key, not the resource.
+        // (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L144-L153 @ ens_v2_sepolia_20260629@ccaeb58)
         (
             "grant-node-keyed",
             503,
