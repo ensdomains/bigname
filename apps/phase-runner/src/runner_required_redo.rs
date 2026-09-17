@@ -8,11 +8,10 @@ use crate::{
     error::{RunnerError, RunnerResult},
     heads::load_marker,
     phase::{BlockRange, PhaseName, RunMode},
-    phase_lock::PhaseLock,
     runner_support::Backoff,
 };
 
-use super::PhaseRunner;
+use super::{PhaseRunner, chain::bounded_recovery};
 
 const DISCOVERY_REPAIR_ITERATION_MARGIN: usize = 8;
 
@@ -29,7 +28,15 @@ where
 {
     let mut backoff = Backoff::new(timing);
     loop {
-        match operation().await {
+        // The read itself is raced, not only the wait between attempts.
+        let Some(outcome) = crate::shutdown::until_cancelled(cancellation, async {
+            Ok::<_, RunnerError>(operation().await)
+        })
+        .await?
+        else {
+            return Ok(None);
+        };
+        match outcome {
             Ok(value) => return Ok(Some(value)),
             Err(error) => {
                 let error = RunnerError::database_anyhow(
@@ -78,7 +85,7 @@ impl PhaseRunner {
         mode: RunMode,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
-        self.run_phase_with_restart_inner(chain, phase_name, mode, cancellation, None, false)
+        self.run_phase_with_restart_inner(chain, phase_name, mode, cancellation, false)
             .await
     }
 
@@ -93,8 +100,52 @@ impl PhaseRunner {
             PhaseName::Ingest,
             RunMode::Redo(range),
             cancellation,
-            None,
             true,
+        )
+        .await
+    }
+
+    /// A required-redo read on the stop-observable path: `None` once a stop has
+    /// won, so the read cannot hold the stop while the database stalls.
+    pub(super) async fn required_redo_range_unless_stopped(
+        &self,
+        chain_id: &str,
+        phase: PhaseName,
+        cancellation: &CancellationToken,
+    ) -> RunnerResult<Option<Option<BlockRange>>> {
+        crate::shutdown::until_cancelled(
+            cancellation,
+            self.store.required_redo_range(chain_id, phase),
+        )
+        .await
+    }
+
+    /// `reject_pending_required_ingest` on the stop-observable path; `false`
+    /// means a stop won before the barrier could be read.
+    pub(super) async fn require_no_pending_ingest_unless_stopped(
+        &self,
+        chain_id: &str,
+        cancellation: &CancellationToken,
+    ) -> RunnerResult<bool> {
+        Ok(crate::shutdown::until_cancelled(
+            cancellation,
+            self.reject_pending_required_ingest(chain_id),
+        )
+        .await?
+        .is_some())
+    }
+
+    /// `None` means a stop won before the read; callers treat it as nothing left
+    /// to wait for, since the loops it guards only ever return clean on a stop.
+    async fn required_range_readable_unless_stopped(
+        &self,
+        chain_id: &str,
+        range: BlockRange,
+        cancellation: &CancellationToken,
+    ) -> RunnerResult<Option<bool>> {
+        crate::shutdown::until_cancelled(
+            cancellation,
+            required_range_is_readable(self.store.pool(), chain_id, range),
         )
         .await
     }
@@ -118,19 +169,23 @@ impl PhaseRunner {
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
         loop {
-            let Some(range) = self
-                .store
-                .required_redo_range(&chain.chain_id, PhaseName::Interpret)
+            let Some(Some(range)) = self
+                .required_redo_range_unless_stopped(
+                    &chain.chain_id,
+                    PhaseName::Interpret,
+                    &cancellation,
+                )
                 .await?
             else {
                 return Ok(());
             };
             self.catch_up_required_range(chain, range, cancellation.clone())
                 .await?;
-            if cancellation.is_cancelled() {
-                return Ok(());
-            }
-            if required_range_is_readable(self.store.pool(), &chain.chain_id, range).await? {
+            if self
+                .required_range_readable_unless_stopped(&chain.chain_id, range, &cancellation)
+                .await?
+                .unwrap_or(true)
+            {
                 return Ok(());
             }
             tokio::select! {
@@ -146,7 +201,11 @@ impl PhaseRunner {
         range: BlockRange,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
-        while !required_range_is_readable(self.store.pool(), &chain.chain_id, range).await? {
+        while !self
+            .required_range_readable_unless_stopped(&chain.chain_id, range, &cancellation)
+            .await?
+            .unwrap_or(true)
+        {
             self.run_phase_with_restart(
                 chain,
                 PhaseName::Live,
@@ -154,10 +213,11 @@ impl PhaseRunner {
                 cancellation.clone(),
             )
             .await?;
-            if cancellation.is_cancelled() {
-                return Ok(());
-            }
-            if !required_range_is_readable(self.store.pool(), &chain.chain_id, range).await? {
+            if !self
+                .required_range_readable_unless_stopped(&chain.chain_id, range, &cancellation)
+                .await?
+                .unwrap_or(true)
+            {
                 tokio::select! {
                     () = cancellation.cancelled() => return Ok(()),
                     () = tokio::time::sleep(self.timing.live_poll_interval) => {}
@@ -173,26 +233,26 @@ impl PhaseRunner {
         phase: PhaseName,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
-        if cancellation.is_cancelled() {
-            return Ok(());
-        }
-        if let Some(range) = self
-            .store
-            .required_redo_range(&chain.chain_id, phase)
+        let Some(required) = self
+            .required_redo_range_unless_stopped(&chain.chain_id, phase, &cancellation)
             .await?
-        {
+        else {
+            return Ok(());
+        };
+        if let Some(range) = required {
             if phase == PhaseName::Ingest {
                 let mut current = range;
                 loop {
                     self.catch_up_required_range(chain, current, cancellation.clone())
                         .await?;
-                    if cancellation.is_cancelled() {
-                        return Ok(());
-                    }
                     let Some(updated) = self
-                        .store
-                        .required_redo_range(&chain.chain_id, PhaseName::Ingest)
+                        .required_redo_range_unless_stopped(
+                            &chain.chain_id,
+                            PhaseName::Ingest,
+                            &cancellation,
+                        )
                         .await?
+                        .flatten()
                     else {
                         return self
                             .run_phase_with_restart(
@@ -228,7 +288,16 @@ impl PhaseRunner {
                 }
             }
             if phase == PhaseName::Interpret {
-                self.recover_stopped_live(chain).await?;
+                // Settling a stopped Live is required cleanup before the redo, so
+                // a pending stop bounds it instead of skipping it.
+                bounded_recovery(
+                    &self.chain_stop_clock(&chain.chain_id),
+                    "start-up stopped Live recovery",
+                    &chain.chain_id,
+                    &cancellation,
+                    self.recover_stopped_live(chain),
+                )
+                .await?;
                 self.run_phase_with_restart(
                     chain,
                     phase,
@@ -296,7 +365,12 @@ impl PhaseRunner {
                 }
                 continue;
             }
-            self.reject_pending_required_ingest(&chain.chain_id).await?;
+            if !self
+                .require_no_pending_ingest_unless_stopped(&chain.chain_id, &cancellation)
+                .await?
+            {
+                return Ok(());
+            }
             self.run_spine_phase(chain, PhaseName::Interpret, cancellation.clone())
                 .await?;
             if cancellation.is_cancelled() {
@@ -316,14 +390,23 @@ impl PhaseRunner {
                 }
                 continue;
             }
-            self.reject_pending_required_ingest(&chain.chain_id).await?;
-            if self
-                .store
-                .required_redo_range(&chain.chain_id, PhaseName::Interpret)
+            if !self
+                .require_no_pending_ingest_unless_stopped(&chain.chain_id, &cancellation)
                 .await?
-                .is_some()
             {
-                continue;
+                return Ok(());
+            }
+            match self
+                .required_redo_range_unless_stopped(
+                    &chain.chain_id,
+                    PhaseName::Interpret,
+                    &cancellation,
+                )
+                .await?
+            {
+                None => return Ok(()),
+                Some(Some(_)) => continue,
+                Some(None) => {}
             }
             return Ok(());
         }
@@ -392,135 +475,7 @@ impl PhaseRunner {
              before an operator retry"
         ))
     }
-
-    pub(super) async fn recover_stopped_live(&self, chain: &ChainConfig) -> RunnerResult<()> {
-        let mut live_lock = PhaseLock::acquire(
-            self.database.connect_options(),
-            &chain.chain_id,
-            PhaseName::Live,
-        )
-        .await?;
-        let result = self
-            .store
-            .complete_stopped_live(live_lock.connection(), &chain.chain_id)
-            .await;
-        let release = live_lock.release().await;
-        match (result, release) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Ok(()), Err(error)) | (Err(error), Ok(())) => Err(error),
-            (Err(error), Err(release_error)) => {
-                Err(error.with_secondary("release stopped live lock before redo", release_error))
-            }
-        }
-    }
-
-    pub(super) async fn recover_stopped_phases(&self, chain: &ChainConfig) -> RunnerResult<()> {
-        for phase in [
-            PhaseName::Ingest,
-            PhaseName::Interpret,
-            PhaseName::Project,
-            PhaseName::Verify,
-        ] {
-            let mut phase_lock =
-                PhaseLock::acquire(self.database.connect_options(), &chain.chain_id, phase).await?;
-            let result =
-                resolve_stopped_phase(phase_lock.connection(), &chain.chain_id, phase).await;
-            let release = phase_lock.release().await;
-            match (result, release) {
-                (Ok(()), Ok(())) => {}
-                (Ok(()), Err(error)) | (Err(error), Ok(())) => return Err(error),
-                (Err(error), Err(release_error)) => {
-                    return Err(error.with_secondary(
-                        "release stopped finite-phase lock during runner restart",
-                        release_error,
-                    ));
-                }
-            }
-        }
-        self.recover_stopped_live(chain).await
-    }
 }
-
-async fn resolve_stopped_phase(
-    lock_connection: &mut sqlx::PgConnection,
-    chain_id: &str,
-    phase: PhaseName,
-) -> RunnerResult<()> {
-    if phase == PhaseName::Ingest {
-        sqlx::query(
-            "UPDATE chain_phase_state
-             SET last_error = $3 || substring(last_error FROM char_length($4) + 1),
-                 updated_at = now()
-             WHERE chain_id = $1 AND phase_name = $2 AND redo_in_progress
-               AND last_error LIKE $5",
-        )
-        .bind(chain_id)
-        .bind(phase.as_str())
-        .bind(crate::redo_stamp::REQUIRED_REDO_PREFIX)
-        .bind(crate::redo_stamp::REQUIRED_REDO_ACTIVE_PREFIX)
-        .bind(format!(
-            "{}%",
-            crate::redo_stamp::REQUIRED_REDO_ACTIVE_PREFIX
-        ))
-        .execute(lock_connection)
-        .await
-        .map_err(|error| {
-            RunnerError::lock_connection_lost(format!(
-                "advisory-lock connection was lost while settling a stopped required Ingest redo \
-                 for chain {chain_id}; stopping so the next runner can recheck durable phase \
-                 state: {error}"
-            ))
-        })?;
-        return Ok(());
-    }
-    sqlx::query(
-        "UPDATE chain_phase_state
-         SET phase_status = CASE
-                 WHEN current_block_number IS NOT NULL
-                   AND current_block_number = target_block_number
-                   AND current_block_hash IS NOT NULL
-                   AND current_block_hash = target_block_hash
-                   AND phase_name <> 'verify'
-                 THEN 'completed'
-                 ELSE 'failed'
-             END,
-             last_error = CASE
-                 WHEN current_block_number IS NOT NULL
-                   AND current_block_number = target_block_number
-                   AND current_block_hash IS NOT NULL
-                   AND current_block_hash = target_block_hash
-                   AND phase_name <> 'verify'
-                 THEN NULL
-                 WHEN phase_name = 'verify'
-                   AND current_block_number IS NOT NULL
-                   AND current_block_number = target_block_number
-                   AND current_block_hash IS NOT NULL
-                   AND current_block_hash = target_block_hash
-                   AND verification_level IS NOT NULL
-                 THEN $3 || 'runner stopped after Verify saved its final checkpoint; \
-                     revalidate retained verification before completion'
-                 ELSE 'phase stopped before completion; its advisory lock was free at \
-                     runner restart'
-             END,
-             finished_at = now(), updated_at = now()
-         WHERE chain_id = $1 AND phase_name = $2
-           AND phase_status IN ('running', 'paused')
-           AND NOT redo_in_progress",
-    )
-    .bind(chain_id)
-    .bind(phase.as_str())
-    .bind(crate::error::COMPLETED_VALIDATION_FAILURE_PREFIX)
-    .execute(lock_connection)
-    .await
-    .map_err(|error| {
-        RunnerError::lock_connection_lost(format!(
-            "advisory-lock connection was lost while resolving stopped phase {phase} for chain \
-             {chain_id}; stopping so the next runner can recheck durable phase state: {error}"
-        ))
-    })?;
-    Ok(())
-}
-
 async fn required_range_is_readable(
     pool: &sqlx::PgPool,
     chain_id: &str,
