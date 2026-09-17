@@ -37,11 +37,14 @@ else
     exit 1
 fi
 
-# Every batch after set-up runs as a per-run role that owns the scratch schema
-# and holds no privilege on bigname_phase, so whatever a migration reaches for
-# outside the rewritten text -- an identifier assembled inside EXECUTE, a
-# search-path-relative name in a DO body -- fails on the production schema
-# instead of changing it unobserved. Only role set-up and teardown bypass it.
+# Every batch after set-up runs on a connection authenticated as a per-run
+# login role that owns the scratch schema and holds no privilege on
+# bigname_phase, so whatever a migration reaches for outside the rewritten
+# text -- an identifier assembled inside EXECUTE, a search-path-relative name
+# in a DO body -- fails on the production schema instead of changing it
+# unobserved. A separate login, not SET ROLE on the owner's session: RESET
+# ROLE would hand a migration the owner back. Only role set-up and teardown
+# use the owner's connection.
 run_psql_as_owner() {
     case "$psql_mode" in
         database-container)
@@ -58,7 +61,19 @@ run_psql_as_owner() {
     esac
 }
 run_psql() {
-    { printf 'SET ROLE "%s";\n' "$apply_check_role"; cat; } | run_psql_as_owner
+    case "$psql_mode" in
+        database-container)
+            docker exec -i "$container" \
+                psql -X -q -v ON_ERROR_STOP=1 -U "$apply_check_role" -d "$database"
+            ;;
+        host)
+            psql -X -q -v ON_ERROR_STOP=1 "$apply_check_url"
+            ;;
+        client-container)
+            docker run --rm --network host -i "$image" \
+                psql -X -q -v ON_ERROR_STOP=1 "$apply_check_url"
+            ;;
+    esac
 }
 
 render_phase_migration() {
@@ -619,6 +634,16 @@ if [[ ! "$scratch_schema" =~ ^[a-z0-9_]+$ ]]; then
     printf '%s\n' "invalid scratch schema name" >&2
     exit 1
 fi
+apply_check_role_password="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+# The owner's URL with its userinfo replaced by the run's login role.
+apply_check_url=""
+if [ -n "${BIGNAME_DATABASE_URL:-}" ]; then
+    url_scheme="${BIGNAME_DATABASE_URL%%://*}://"
+    url_rest="${BIGNAME_DATABASE_URL#*://}"
+    url_authority="${url_rest%%/*}"
+    url_path="${url_rest#"$url_authority"}"
+    apply_check_url="${url_scheme}${apply_check_role}:${apply_check_role_password}@${url_authority##*@}${url_path}"
+fi
 migration_application_log="$(
     mktemp "${TMPDIR:-/tmp}/schema-v2-migration-applications.XXXXXX"
 )"
@@ -653,7 +678,8 @@ trap cleanup EXIT
 
 # pg_read_all_stats lets the race probe below see another session's wait event.
 {
-    printf 'CREATE ROLE "%s" NOLOGIN IN ROLE pg_read_all_stats;\n' "$apply_check_role"
+    printf "CREATE ROLE \"%s\" LOGIN PASSWORD '%s' IN ROLE pg_read_all_stats;\n" \
+        "$apply_check_role" "$apply_check_role_password"
     printf "SELECT format('GRANT CREATE ON DATABASE %%I TO %%I', current_database(), '%s') \\gexec\n" "$apply_check_role"
 } | run_psql_as_owner
 
@@ -664,12 +690,15 @@ printf 'CREATE SCHEMA "%s";\n' "$scratch_schema" | run_psql
 # rewritten literal succeeds in the scratch schema.
 assert_dynamic_production_name_is_refused() {
     local probe_stderr statement
+    local prelude
+    for prelude in "" "RESET ROLE;" "RESET SESSION AUTHORIZATION;" "SET SESSION AUTHORIZATION DEFAULT;"; do
     for statement in \
         "CREATE TABLE bigname_' || 'phase.apply_check_probe (a int)" \
         "INSERT INTO bigname_' || 'phase.chain_phase_state (chain_id, phase_name) VALUES (''probe'', ''ingest'')"
     do
         if probe_stderr="$({
             printf 'SET search_path TO "%s";\n' "$scratch_schema"
+            [ -z "$prelude" ] || printf '%s\n' "$prelude"
             printf "DO \$\$ BEGIN EXECUTE '%s'; END \$\$;\n" "$statement"
         } | run_psql 2>&1 >/dev/null)"; then
             printf '%s\n' "dynamic production schema name was not refused: $statement" >&2
@@ -685,6 +714,19 @@ assert_dynamic_production_name_is_refused() {
                 ;;
         esac
     done
+    done
+    # The owner is not reachable from the login role at all.
+    local owner_login
+    owner_login="$(printf 'SELECT current_user AS owner_login \\gset\n\\echo :owner_login\n' | run_psql_as_owner)"
+    if [ -z "$owner_login" ]; then
+        printf '%s\n' "could not read the owner login" >&2
+        exit 1
+    fi
+    if printf 'SET ROLE "%s";\n' "$owner_login" | run_psql >/dev/null 2>&1 \
+        || printf 'SET SESSION AUTHORIZATION "%s";\n' "$owner_login" | run_psql >/dev/null 2>&1; then
+        printf '%s\n' "the conformance login could assume the owner" >&2
+        exit 1
+    fi
     if ! {
         printf 'SET search_path TO "%s";\n' "$scratch_schema"
         printf 'BEGIN;\n'
