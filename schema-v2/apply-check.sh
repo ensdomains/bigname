@@ -304,7 +304,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=7
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=30
+expected_predecessor_shape_proof_count=31
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -392,7 +392,8 @@ for migration_file in \
     "$ROOT/migrations/20260913130100_account_permission_state_wrapper_operators.sql" \
     "$ROOT/migrations/20260914120000_lookup_publication_revalidation.sql" \
     "$ROOT/migrations/20260914120100_address_records_current_comments.sql" \
-    "$ROOT/migrations/20260915120000_address_records_optional_authority.sql"
+    "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" \
+    "$ROOT/migrations/20260916120000_surface_bindings_name_history_idx.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -645,6 +646,33 @@ do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
 report_timing baseline-first
+# Recreate the additive historical binding index from its preceding schema shape.
+# Compare the resulting catalog definition to the fresh baseline, then prove reruns.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_binding_history_index AS
+SELECT pg_get_indexdef(indexrelid) AS definition
+FROM pg_index
+WHERE indexrelid = 'surface_bindings_chain_name_history_idx'::regclass;
+DROP INDEX surface_bindings_chain_name_history_idx;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260916120000_surface_bindings_name_history_idx.sql" preceding-shape
+    emit_phase_migration "$ROOT/migrations/20260916120000_surface_bindings_name_history_idx.sql" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index, expected_binding_history_index expected
+        WHERE indexrelid = 'surface_bindings_chain_name_history_idx'::regclass
+          AND indisvalid AND indisready AND indpred IS NULL
+          AND pg_get_indexdef(indexrelid) = expected.definition
+    ) THEN
+        RAISE EXCEPTION 'historical binding index upgrade differs from the baseline';
+    END IF;
+END $$;
+SQL
+} | run_psql
 # The address-record table shipped before its column comments. The additive
 # comment migration must restore all current comments without rewriting that migration.
 {
