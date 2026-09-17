@@ -355,13 +355,18 @@ not the resource on its active binding: retracting the latest disqualifying
 from the surviving wrapper history.
 
 ENSv1 BaseRegistrar lifecycle rows (`RegistrationGranted`, `RegistrationRenewed`,
-`ExpiryChanged`, `RegistrationReleased`) can carry no `logical_name_id`, because the registrar's
-own events identify a lease by labelhash only. Project attaches them to a name by exact identity
-and never by label or time:
+`ExpiryChanged`, `RegistrationReleased`, and the registrar's `TokenControlTransferred`) can carry
+no `logical_name_id`, because the registrar's own events identify a lease by labelhash only.
+Project gives such a row its name while staging a build, by exact identity and never by label or
+time. Only these `ens_v1_registrar_l1` rows are named this way. A row of any other source family
+that carries a resource but no name, for example an ENSv1 registry row written before the label
+was known, keeps no name: it stays out of the name's `created_at` and provenance lists, as
+before registrar rows were joined by resource identity.
 
 - **Through the lease's own binding.** A name-less row whose `resource_id` has a binding
-  candidate to a surface with the row's namehash is staged with that name. This is what a
-  controller event that names the lease later, or a registrar surface snapshot, makes possible.
+  candidate, open or closed, to a surface with the row's namehash is staged with that name. This
+  is what a controller event that names the lease later, or a
+  [registrar surface snapshot](glossary.md#registrar-surface-snapshot), makes possible.
   A row on the same resource with a different namehash is not attached.
 - **Through a wrap.** A wrapped `.eth` name is bound to its NameWrapper resource, so the lease is
   reached from the selected wrapper binding's `SurfaceBound` row by one of two rules:
@@ -374,7 +379,11 @@ and never by label or time:
      wrapped in a later transaction, the lease exists before `NameWrapped` and the wrap records
      its `resource_id` in `wrapped_registrar_resource_id`. The registrar rows are name-less, so
      there is nothing else to match on; the link plus equality of the wrap's node and the row's
-     namehash identifies them.
+     namehash identifies them. These rows are also named while staging, from any `NameWrapped`
+     binding row of the name that recorded the lease, so the statement that collects each
+     name's authority events joins events to names by a plain equality on the name and never
+     searches the rows that carry no name. The registrar `Transfer` into the NameWrapper in the
+     wrap's own transaction is not named this way.
 
   Both rules stay because both shapes exist in stored events: rule 1 alone cannot see name-less
   registrar rows, and rule 2 alone would drop the registrar lease, and with it `registered_at`
@@ -388,18 +397,23 @@ later NameWrapper transfer. The registrar `Transfer` that moves the token into t
 during a later wrap is left out of the registrant fold: it is custody moving to the wrapper
 contract, not a change of holder, and the person who holds the name afterwards is the
 `NameWrapped` owner recorded next in the same transaction.
-(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f) `declared_summary.registration.resource_id` names the registration. It is the
-selected registration's own resource, or the registrar lease the current wrapper binding
-recorded; when that lease was granted in the same transaction as a wrap that recorded it, it is
-the resource of that first wrapper binding, which stays the same through unwrap and rewrap.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f) `declared_summary.registration.resource_id` names the registration of an ENSv1 name by its
+BaseRegistrar lease: the selected registration's own resource, or the lease the current wrapper
+binding recorded. It is the lease whether the name was wrapped at registration or later, and
+stays the same through unwrap and rewrap. It is `null` for ENSv2 registrations. No API route
+reads this key yet.
 
-Incremental scope follows the same recorded link in both directions. A scoped wrapper resource
-or name adds the exact registrar resource its canonical `SurfaceBound` row names, and a changed
-registrar row adds the name and wrapper resource only when a canonical wrapper binding names that
-registrar resource. The closure runs for normal publication and for redo, so a wrapper-only
-transfer, resolver update, fuse change, retraction or registrar renewal stages the same
-registration rows, and serves the same `created_at` and `registered_at`, as a rebuild from block
-zero.
+Incremental scope brings in the same rows a rebuild names, in both directions. A scoped wrapper
+resource or name adds the exact registrar resource its canonical `SurfaceBound` row names, and a
+changed registrar row adds the name and wrapper resource only when a canonical wrapper binding
+names that registrar resource. A scoped name also adds every resource it was ever bound to that
+holds lease rows without a name, and a scoped resource that holds such rows adds every name it
+was bound to with the same namehash, whether or not that binding is still open: after a
+registrar token is transferred without `reclaim`, the registry-only binding is the open one and
+the lease's binding is closed, yet the lease rows still belong to the name. The closure runs
+for normal publication and for redo, so a wrapper-only transfer, resolver update, fuse change,
+retraction, registrar renewal or registry-only update stages the same registration rows, and
+serves the same `created_at`, `registered_at` and expiry, as a rebuild from block zero.
 
 A lease registered through the NameWrapper that lapses past grace is released like any other:
 the registrar's `ownerOf` reverts and the name is available again. Its registrar resource never
