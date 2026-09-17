@@ -304,7 +304,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=7
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=32
+expected_predecessor_shape_proof_count=33
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -394,7 +394,8 @@ for migration_file in \
     "$ROOT/migrations/20260914120100_address_records_current_comments.sql" \
     "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" \
     "$ROOT/migrations/20260917120000_discovery_edges_observation_history_idx.sql" \
-    "$ROOT/migrations/20260917130000_discovery_edges_reopen_idx.sql"
+    "$ROOT/migrations/20260917130000_discovery_edges_reopen_idx.sql" \
+    "$ROOT/migrations/20260917131000_project_scoped_history_indexes.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -784,6 +785,65 @@ BEGIN
     END IF;
 END $$;
 DROP TABLE expected_discovery_reopen_index;
+SQL
+} | run_psql
+# Recreate all eight additive project-scoped history indexes from their
+# preceding schema shape. Compare every resulting catalog definition to the
+# fresh baseline, then prove a rerun leaves them unchanged.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_project_scoped_history_indexes AS
+SELECT index_class.relname AS index_name,
+       pg_get_indexdef(pg_index.indexrelid) AS definition
+FROM pg_index
+JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
+WHERE pg_index.indrelid = 'normalized_events'::regclass
+  AND index_class.relname IN (
+      'normalized_events_project_name_node_idx',
+      'normalized_events_project_name_child_idx',
+      'normalized_events_project_name_after_target_idx',
+      'normalized_events_project_name_before_target_idx',
+      'normalized_events_project_primary_after_idx',
+      'normalized_events_project_primary_before_idx',
+      'normalized_events_project_primary_after_source_idx',
+      'normalized_events_project_primary_before_source_idx'
+  );
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM expected_project_scoped_history_indexes) <> 8 THEN
+        RAISE EXCEPTION 'fresh baseline does not define all eight project-scoped history indexes';
+    END IF;
+END $$;
+DROP INDEX
+    normalized_events_project_name_node_idx,
+    normalized_events_project_name_child_idx,
+    normalized_events_project_name_after_target_idx,
+    normalized_events_project_name_before_target_idx,
+    normalized_events_project_primary_after_idx,
+    normalized_events_project_primary_before_idx,
+    normalized_events_project_primary_after_source_idx,
+    normalized_events_project_primary_before_source_idx;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917131000_project_scoped_history_indexes.sql" preceding-shape
+    emit_phase_migration "$ROOT/migrations/20260917131000_project_scoped_history_indexes.sql" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF (
+        SELECT count(*)
+        FROM expected_project_scoped_history_indexes expected
+        JOIN pg_class index_class ON index_class.relname = expected.index_name
+        JOIN pg_index ON pg_index.indexrelid = index_class.oid
+        WHERE pg_index.indrelid = 'normalized_events'::regclass
+          AND pg_index.indisvalid AND pg_index.indisready
+          AND pg_index.indpred IS NOT NULL
+          AND pg_get_indexdef(pg_index.indexrelid) = expected.definition
+    ) <> 8 THEN
+        RAISE EXCEPTION 'project-scoped history index upgrade differs from the baseline';
+    END IF;
+END $$;
+DROP TABLE expected_project_scoped_history_indexes;
 SQL
 } | run_psql
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor
