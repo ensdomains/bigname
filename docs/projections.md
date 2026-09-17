@@ -380,6 +380,12 @@ and never by label or time:
   registrar rows, and rule 2 alone would drop the registrar lease, and with it `registered_at`
   and the registrar expiry, from every name registered through the NameWrapper under a manifest
   where the controller event grants the lease.
+  Registration-scoped history does not have rule 1. Under a manifest where the controller event
+  grants the lease, Project serves the lease as the name's registration while history still
+  uses the NameWrapper resource as that name's handle. `docs/api-v2.md`
+  [states this known gap](api-v2.md#known-gap-a-name-registered-through-the-namewrapper-where-the-controller-event-grants-the-lease).
+  It closes when registrations come from the BaseRegistrar's own events, and the two changes
+  must be deployed together.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L305 @ ens_v1@91c966f)
 
@@ -424,8 +430,20 @@ A tombstone keeps `registration.expiry`, the lapsed lease's own expiry, and adds
 `registration.lapsed_registration = {registrant, authority_kind, authority_key, released_at}`:
 the holder selected by the registrant fold at the release, and the authority the released
 lease binding's resource had before its closing epoch (the NameWrapper for a lease that lapsed
-while wrapped). The API serves `authority_kind` as `lapsed_registration.held_through` and does
-not serve `authority_key`. `registration.registrant`, `authority_kind` and
+while wrapped). The registrar's `RegistrationReleased` row names the BaseRegistrar token owner
+it ended. For an unwrapped lease that is the holder, and the fold reads it. For a wrapped lease
+it is the NameWrapper contract, so the fold skips the release and the holder is the NameWrapper
+token owner at the release: the `NameWrapped` owner, then each later NameWrapper transfer. The
+fold recognizes the wrapped lease by the same two rules as above, the recorded
+`wrapped_registrar_resource_id` or a named grant in the wrap's transaction, so the NameWrapper
+contract is never served as the lapsed holder under either manifest shape. An unwrapped lease
+becomes a tombstone only when no ENSv1 registry owner can take the node over at the release,
+for example after `registerOnly`, which does not write the registry; its `authority_kind` is
+`registrar`. `released_at` is the timestamp of the block at which the adapter settled the
+release, the first block whose timestamp is after the lease's expiry plus the 90-day grace
+period. The API serves `authority_kind` as `lapsed_registration.held_through`, only for the
+values `registrar` and `wrapper`, and does not serve `authority_key`.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L127 @ ens_v1@91c966f) `registration.registrant`, `authority_kind` and
 `authority_key` stay `null`, so nothing that reads current state (address-to-name relations,
 permissions, counts) sees the lapsed holder. No other row carries the block.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)

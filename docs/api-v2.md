@@ -1279,17 +1279,25 @@ state:
   "lapsed_registration": {
     "registrant": "0x…",
     "held_through": "wrapper",
-    "released_at": "2024-07-30T00:00:00Z"
+    "released_at": "2024-07-30T00:00:12Z"
   }
 }
 ```
 
-`registrant` is the last holder of the lapsed lease (the NameWrapper token owner
-for a wrapped name). `held_through` is `registrar` or `wrapper`, the contract
-the lapsed lease was held through; the top-level `authority` field is a
-different thing and names the `ens_v1` or `ens_v2` side. `released_at` is when the release
-was observed. Each field is omitted when unknown. The top-level `registrant`,
-`owner` and `manager` stay absent.
+`registrant` is the holder the lease had when it was released. For a wrapped
+name that is the NameWrapper token owner at the release, never the NameWrapper
+contract, which only holds the BaseRegistrar token on the owner's behalf. For an
+unwrapped name it is the BaseRegistrar token owner at the release. `held_through`
+is `registrar` or `wrapper`, the contract the lapsed lease was held through, and
+is omitted for any other value; the top-level `authority` field is a different
+thing and names the `ens_v1` or `ens_v2` side. `released_at` is the time of the
+block at which Bigname recorded the release. That is the first block whose
+timestamp is after `expires_at` plus the 90-day grace period, so it is always
+later than `expires_at` plus 90 days and never equal to it. Each field is
+omitted when unknown. The top-level `registrant`, `owner` and `manager` stay
+absent.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
 The block appears on `GET /v1/names/{name}` and on detail-profile
 `POST /v1/lookup` rows, only while the name is released, and is never an input
 to address-to-name relations, permissions or counts: the lapsed holder does not
@@ -1320,9 +1328,36 @@ events of a wrapped `.eth` name report the lease as their `registration_id`, and
 a `registration_id` read of the lease returns them together with the
 registrar's own rows. A NameWrapper resource that wraps a lease is not a public
 registration handle: `GET /v1/events?registration_id=` with it selects nothing,
-and `GET /v1/permissions` pairing the name with it is the proven-empty
-selection described above. `GET /v1/permissions?registration_id=<lease>` returns
+`GET /v1/permissions?registration_id=` with it answers `200` with empty `data`
+whether or not `address` is also given, and `GET /v1/permissions` pairing the
+name with it is the proven-empty selection described above. A wrapped subname
+has no lease, so its NameWrapper resource is its `registration_id` and selects
+its permissions as before. `GET /v1/permissions?registration_id=<lease>` returns
 the rows of the NameWrapper resource that currently controls the name.
+
+#### Known gap: a name registered through the NameWrapper where the controller event grants the lease
+
+Today's Mainnet manifest creates a `.eth` registration from the registrar
+controller's `NameRegistered` event. When a name is registered through the
+NameWrapper, that event comes after `NameWrapped` in the registration
+transaction, so the wrap records no lease. For such a name the routes do not
+yet agree on one handle:
+
+- `GET /v1/names/{name}`, `POST /v1/lookup` and `GET /v1/permissions` serve the
+  BaseRegistrar lease as `registration_id`, and permissions accept only the
+  lease.
+- History still uses the NameWrapper resource as that name's handle.
+  `GET /v1/names/{name}/history` and `GET /v1/events` report the NameWrapper
+  resource as the `registration_id` of the name's NameWrapper events, and
+  `GET /v1/events?registration_id=<lease>` returns the registrar's own rows
+  without the NameWrapper events. History cannot tell this name from a wrapped
+  subname, whose wrap also records no lease.
+
+The gap closes when registrations come from the BaseRegistrar's own events. The
+lease then exists before `NameWrapped`, every wrap records it, and history
+follows the recorded lease. The registration identity change described here and
+that manifest change must be deployed together. A name wrapped in a transaction
+after its registration is not affected, because its wrap records the lease.
 
 This is a client-visible change. Earlier releases served the NameWrapper
 resource as the `registration_id` of a wrapped `.eth` name. A client that stored
