@@ -420,6 +420,27 @@ for normal publication and for redo, so a wrapper-only transfer, resolver update
 retraction, registrar renewal or registry-only update stages the same registration rows, and
 serves the same `created_at`, `registered_at` and expiry, as a rebuild from block zero.
 
+A registry-only binding reads the events of the binding it replaced only up to the position where
+it opened; nothing later on that resource can decide control. The lease the name kept is the one
+exception. After a registrar token is transferred without `reclaim` the name still has its
+BaseRegistrar lease, and that lease goes on being renewed, and in the end lapses, under the
+registry-only binding. So `RegistrationRenewed`, `ExpiryChanged` and `RegistrationReleased` rows
+of the `ens_v1_registrar_l1` family on exactly that lease's resource still update the
+registration after the handoff: its expiry and `latest_event_kind`, and its `status` and
+`released_at` once the lease is released. `registered_at`, the registrant, the selected binding
+and every `control` field other than the repeated expiry stay as they were. Rows of any other
+kind or source family, and lease rows on any other resource even when they carry the name (an
+earlier lease of the same name, or a resource the name was never bound to), stay outside the
+window. `renew` writes only the lease's expiry, and the registrar writes the registry owner only
+when registering and in `reclaim`, so a token transfer alone leaves the registry owner unchanged.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L148-L150 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+A released lease under an open registry-only binding is not a
+[released v1 authority](glossary.md#released-v1-authority) tombstone: the registry keeps its owner
+record, so control is still served, as it is when the release itself hands the name to the
+registry-only binding.
+
 A lease registered through the NameWrapper that lapses past grace is released like any other:
 the registrar's `ownerOf` reverts and the name is available again. Its registrar resource never
 had a binding, so the [released v1 authority](glossary.md#released-v1-authority) tombstone
