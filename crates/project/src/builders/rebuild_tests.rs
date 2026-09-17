@@ -120,18 +120,18 @@ impl Rebuild {
         })
     }
 
-    /// Runs a statement that takes the chain and target as `$1`, `$2`, `$3` (and the full-rebuild
-    /// flag as `$4` when it has one).
+    /// Runs a statement whose parameters are the chain, the target number, the target hash and
+    /// the full-rebuild flag, as many of them as it uses.
     async fn execute(&mut self, statement: &str) -> Result<()> {
         let mut query = sqlx::query(statement);
-        if statement.contains("$1") {
-            query = query
-                .bind(CHAIN)
-                .bind(self.target.number)
-                .bind(&self.target.hash);
-        }
-        if statement.contains("$4") {
-            query = query.bind(true);
+        let parameters = (1..=4).filter(|n| statement.contains(&format!("${n}")));
+        for parameter in 1..=parameters.max().unwrap_or(0) {
+            query = match parameter {
+                1 => query.bind(CHAIN),
+                2 => query.bind(self.target.number),
+                3 => query.bind(&self.target.hash),
+                _ => query.bind(true),
+            };
         }
         query.execute(&mut *self.transaction).await?;
         Ok(())
@@ -140,14 +140,14 @@ impl Rebuild {
     async fn explain(&mut self, statement: &str) -> Result<Value> {
         let explain = format!("EXPLAIN (ANALYZE, FORMAT JSON) {statement}");
         let mut query = sqlx::query_scalar::<_, Value>(&explain);
-        if statement.contains("$1") {
-            query = query
-                .bind(CHAIN)
-                .bind(self.target.number)
-                .bind(&self.target.hash);
-        }
-        if statement.contains("$4") {
-            query = query.bind(true);
+        let parameters = (1..=4).filter(|n| statement.contains(&format!("${n}")));
+        for parameter in 1..=parameters.max().unwrap_or(0) {
+            query = match parameter {
+                1 => query.bind(CHAIN),
+                2 => query.bind(self.target.number),
+                3 => query.bind(&self.target.hash),
+                _ => query.bind(true),
+            };
         }
         Ok(query.fetch_one(&mut *self.transaction).await?[0]["Plan"].take())
     }
@@ -508,5 +508,104 @@ async fn resource_summary_reads_the_staged_permissions_a_fixed_number_of_times()
             "{relation} rows handled: {rows}; {plan}"
         );
     }
+    rebuild.finish().await
+}
+
+/// Whether a coin-60 `AddressChanged` event has its `AddrChanged` sibling at the next log index
+/// was an `EXISTS` with `IS NOT DISTINCT FROM` tests, which Postgres can only run as a search of
+/// every attributed event per `AddressChanged` event. It is now a join on the equality columns
+/// with the null-safe tests kept as join filters.
+#[tokio::test]
+async fn record_inventory_matches_the_correlated_sibling_search() -> Result<()> {
+    use super::record_inventory::BUILD_RECORD_INVENTORY;
+    let previous = swapped(
+        &with_previous(
+            &with_previous(
+                BUILD_RECORD_INVENTORY,
+                "        -- The `AddrChanged` half of each coin-60 write.",
+                "AND after_state ->> 'source_event' = 'AddrChanged'\n        ),\n",
+                "",
+            ),
+            "            -- At most one sibling matches",
+            "IS NOT DISTINCT FROM event.transaction_index\n",
+            "",
+        ),
+        "                   AND sibling.resource_id IS NOT NULL AS coin60_compatibility_source,\n",
+        include_str!("../../tests/rebuild_performance/previous_record_inventory_sibling.sql"),
+    );
+    ensure!(!previous.contains("coin60_siblings"));
+    let mut rebuild =
+        Rebuild::through("rebuild_equal_records", 600, Builder::RecordInventory).await?;
+    // The cleared-pointer and mirror rows are written after this statement; compare its own rows.
+    let stage = "project_stage_record_inventory_current";
+    raw_sql(&format!("TRUNCATE {stage}"))
+        .execute(&mut *rebuild.transaction)
+        .await?;
+    rebuild.execute(BUILD_RECORD_INVENTORY).await?;
+    rebuild.rerun_with(stage, &previous).await?;
+    rebuild.assert_same_rows("current_rows", stage).await?;
+    // The seed has coin-60 `AddressChanged` events with the sibling and without it.
+    let (with_sibling, without_sibling): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE sibling), count(*) FILTER (WHERE NOT sibling)
+         FROM (
+             SELECT EXISTS (
+                        SELECT 1 FROM project_events next
+                        WHERE next.transaction_hash = event.transaction_hash
+                          AND next.log_index = event.log_index + 1
+                          AND next.after_state ->> 'source_event' = 'AddrChanged'
+                    ) AS sibling
+             FROM project_events event
+             WHERE event.after_state ->> 'source_event' = 'AddressChanged'
+               AND event.after_state ->> 'record_key' = 'addr:60'
+         ) events",
+    )
+    .fetch_one(&mut *rebuild.transaction)
+    .await?;
+    ensure!(
+        with_sibling > 0 && without_sibling > 0,
+        "the seed must cover both answers: {with_sibling} with, {without_sibling} without"
+    );
+    // The comparison notices a wrong answer: a sibling that is never found changes which event
+    // supplies the coin-60 value.
+    let blind = swapped(
+        BUILD_RECORD_INVENTORY,
+        "sibling.log_index = event.log_index + 1",
+        "sibling.log_index = event.log_index + 2",
+    );
+    rebuild.rerun_with(stage, &blind).await?;
+    let (extra, missing) = rebuild.row_differences("current_rows", stage).await?;
+    ensure!(
+        extra > 0 && missing > 0,
+        "the rows do not depend on the sibling"
+    );
+    rebuild.finish().await
+}
+
+#[tokio::test]
+async fn record_inventory_reads_attributed_events_a_fixed_number_of_times() -> Result<()> {
+    let mut rebuild =
+        Rebuild::through("rebuild_plan_records", PLAN_NAMES, Builder::RecordInventory).await?;
+    let plan = rebuild
+        .explain(super::record_inventory::BUILD_RECORD_INVENTORY)
+        .await?;
+    for relation in ["attributed_events", "pointers"] {
+        let rows = rows_read(&plan, relation);
+        ensure!(
+            rows <= 40.0 * PLAN_NAMES as f64,
+            "{relation} rows handled: {rows}; {plan}"
+        );
+    }
+    // The history attribution staged just before joins the same pointers to the same events.
+    let statement = super::record_inventory::history::ATTRIBUTE_RECORD_HISTORY.replacen(
+        "TABLE project_record_history_attribution ",
+        "TABLE explained_record_history_attribution ",
+        1,
+    );
+    let plan = rebuild.explain(&statement).await?;
+    let rows = rows_read(&plan, "project_record_pointer_history");
+    ensure!(
+        rows <= 40.0 * PLAN_NAMES as f64,
+        "project_record_pointer_history rows handled: {rows}; {plan}"
+    );
     rebuild.finish().await
 }

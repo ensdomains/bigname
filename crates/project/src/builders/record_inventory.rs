@@ -1,5 +1,5 @@
 mod cleared;
-mod history;
+pub(in crate::builders) mod history;
 mod mirror;
 
 use sqlx::{Postgres, Transaction};
@@ -17,8 +17,21 @@ pub(super) async fn build(
     // surfaces, so an earlier event may win when a later event's name has no such surface. Once
     // selected, only that resolver contributes the boundary, selectors, and entries; a selected
     // clear suppresses the inventory row.
-    sqlx::query(
-        r#"
+    sqlx::query(BUILD_RECORD_INVENTORY)
+        .bind(chain_id)
+        .bind(target.number)
+        .bind(&target.hash)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to build record_inventory_current", error)
+        })?;
+    mirror::build(transaction, chain_id, target).await?;
+    cleared::build(transaction, chain_id, target).await?;
+    Ok(())
+}
+
+pub(in crate::builders) const BUILD_RECORD_INVENTORY: &str = r#"
         WITH pointers AS (
             -- Mirror-pointer resources are re-pointed at the ENSv1 resolver the mirror would call
             -- for the queried node (record_inventory/mirror.rs); same column order.
@@ -193,25 +206,24 @@ pub(super) async fn build(
         versions AS (
             SELECT * FROM ranked_versions WHERE version_rank = 1
         ),
+        -- The `AddrChanged` half of each coin-60 write. `eligible_records` asks of every
+        -- `AddressChanged` coin-60 event whether this half follows it at the next log index; with
+        -- the equality columns as a key that is a hash join, not a search per event.
+        coin60_siblings AS (
+            SELECT DISTINCT attributed_resource_id AS resource_id, chain_id, block_number,
+                   transaction_hash, transaction_index, log_index
+            FROM attributed_events
+            WHERE event_kind = 'RecordChanged'
+              AND after_state ->> 'record_key' = 'addr:60'
+              AND after_state ->> 'source_event' = 'AddrChanged'
+        ),
         eligible_records AS (
             SELECT event.*,
                    event.after_state ->> 'record_family' = 'addr'
                    AND event.after_state ->> 'selector_key' = '60'
                    AND event.after_state ->> 'source_event' = 'AddressChanged'
                    AND event.log_index IS NOT NULL
-                   AND EXISTS (
-                       SELECT 1
-                       FROM attributed_events sibling
-                       WHERE sibling.attributed_resource_id = event.attributed_resource_id
-                         AND sibling.chain_id = event.chain_id
-                         AND sibling.block_number = event.block_number
-                         AND sibling.transaction_hash IS NOT DISTINCT FROM event.transaction_hash
-                         AND sibling.transaction_index IS NOT DISTINCT FROM event.transaction_index
-                         AND sibling.log_index = event.log_index + 1
-                         AND sibling.event_kind = 'RecordChanged'
-                         AND sibling.after_state ->> 'record_key' = 'addr:60'
-                         AND sibling.after_state ->> 'source_event' = 'AddrChanged'
-                   ) AS coin60_compatibility_source,
+                   AND sibling.resource_id IS NOT NULL AS coin60_compatibility_source,
                    (
                        (
                            event.source_family = 'ens_v1_resolver_l1'
@@ -237,6 +249,14 @@ pub(super) async fn build(
                        AS coin60_zero_address_is_absent
             FROM attributed_events event
             LEFT JOIN versions version USING (attributed_resource_id)
+            -- At most one sibling matches: the join fixes every column of its distinct key.
+            LEFT JOIN coin60_siblings sibling
+              ON sibling.resource_id = event.attributed_resource_id
+             AND sibling.chain_id = event.chain_id
+             AND sibling.block_number = event.block_number
+             AND sibling.log_index = event.log_index + 1
+             AND sibling.transaction_hash IS NOT DISTINCT FROM event.transaction_hash
+             AND sibling.transaction_index IS NOT DISTINCT FROM event.transaction_index
             WHERE event.event_kind = 'RecordChanged'
               AND (
                   version.normalized_event_id IS NULL
@@ -577,15 +597,4 @@ pub(super) async fn build(
         LEFT JOIN latest_positions latest_position
           ON latest_position.resource_id = pointer.resource_id
         ORDER BY pointer.resource_id
-        "#,
-    )
-    .bind(chain_id)
-    .bind(target.number)
-    .bind(&target.hash)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to build record_inventory_current", error))?;
-    mirror::build(transaction, chain_id, target).await?;
-    cleared::build(transaction, chain_id, target).await?;
-    Ok(())
-}
+        "#;
