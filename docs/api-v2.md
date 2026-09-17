@@ -1278,16 +1278,16 @@ state:
   "expires_at": "2024-05-01T00:00:00Z",
   "lapsed_registration": {
     "registrant": "0x…",
-    "authority": "wrapper",
+    "held_through": "wrapper",
     "released_at": "2024-07-30T00:00:00Z"
   }
 }
 ```
 
 `registrant` is the last holder of the lapsed lease (the NameWrapper token owner
-for a wrapped name). `authority` here is `registrar` or `wrapper`, the contract
-the lapsed lease was held through; it is not the top-level `authority` field,
-which names the `ens_v1` or `ens_v2` side. `released_at` is when the release
+for a wrapped name). `held_through` is `registrar` or `wrapper`, the contract
+the lapsed lease was held through; the top-level `authority` field is a
+different thing and names the `ens_v1` or `ens_v2` side. `released_at` is when the release
 was observed. Each field is omitted when unknown. The top-level `registrant`,
 `owner` and `manager` stay absent.
 The block appears on `GET /v1/names/{name}` and on detail-profile

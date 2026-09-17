@@ -424,7 +424,8 @@ A tombstone keeps `registration.expiry`, the lapsed lease's own expiry, and adds
 `registration.lapsed_registration = {registrant, authority_kind, authority_key, released_at}`:
 the holder selected by the registrant fold at the release, and the authority the released
 lease binding's resource had before its closing epoch (the NameWrapper for a lease that lapsed
-while wrapped). `registration.registrant`, `authority_kind` and
+while wrapped). The API serves `authority_kind` as `lapsed_registration.held_through` and does
+not serve `authority_key`. `registration.registrant`, `authority_kind` and
 `authority_key` stay `null`, so nothing that reads current state (address-to-name relations,
 permissions, counts) sees the lapsed holder. No other row carries the block.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)

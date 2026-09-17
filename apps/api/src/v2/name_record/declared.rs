@@ -16,9 +16,10 @@ pub(crate) struct LapsedRegistration {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registrant: Option<String>,
     /// What held the lapsed lease: `registrar` for an unwrapped lease, `wrapper` for one held
-    /// through the NameWrapper.
+    /// through the NameWrapper. Not named `authority`: the record's top-level `authority` is
+    /// the protocol arm (`ens_v1` / `ens_v2`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) authority: Option<String>,
+    pub(crate) held_through: Option<String>,
     /// Block time of the first block at or past the end of the lease's grace period.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) released_at: Option<String>,
@@ -28,7 +29,7 @@ pub(crate) fn lapsed_registration(summary: &Value) -> Option<LapsedRegistration>
     let lapsed = object_field(declared_registration(summary)?, "lapsed_registration")?;
     Some(LapsedRegistration {
         registrant: json_address_at_paths(lapsed, &[&["registrant"]]),
-        authority: string_field(lapsed.get("authority_kind")),
+        held_through: string_field(lapsed.get("authority_kind")),
         released_at: json_timestamp_at_paths(lapsed, &[&["released_at"]]),
     })
 }

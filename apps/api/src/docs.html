@@ -580,7 +580,7 @@ const ROUTES = [
       ['name, display_name, namespace, namehash, chain_id, network', 'Identity and the chain the name is served from.'],
       ['registration_id, token_id, owner, manager, registrant', 'The current registration. <code>manager</code> is omitted when there is none.'],
       ['registered_at, created_at, expires_at, registration_status', 'The registration lifecycle. See <a href="#vocabulary/lifecycle">vocab(7)</a>.'],
-      ['lapsed_registration', 'Only on a released ENSv1 name: <code>{registrant, authority, released_at}</code>, the holder the lease had when it lapsed and whether it was held through the <code>registrar</code> or the <code>wrapper</code>. It is not current state and never lists the name under an address.'],
+      ['lapsed_registration', 'Only on a released ENSv1 name: <code>{registrant, held_through, released_at}</code>, the holder the lease had when it lapsed and whether it was held through the <code>registrar</code> or the <code>wrapper</code>. It is not current state and never lists the name under an address.'],
       ['wrapper_state, wrapper_fuses', 'The ENSv1 NameWrapper pair. See <a href="#vocabulary/wrapper">vocab(7)</a>.'],
       ['resolver', '<code>{chain_id, address}</code>. Omitted for unregistered names unless an ownerless ENSv1 or Basenames registry row, or an ENSv2 TLD with a current root-registry pointer and no projected authority, still carries a resolver pointer.'],
       ['addresses, text_records, content_hash, primary_name, primary_address', 'Convenience records. A map the index knows to be empty is <code>{}</code>.'],

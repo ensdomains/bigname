@@ -538,7 +538,7 @@ collection route carry neither header.
   [registration identity of wrapped names](api-v2.md#registration-identity-of-wrapped-names).
   A released ENSv1 name keeps its lapsed `expires_at`, serves no current
   `registrant`, and carries
-  `lapsed_registration: {registrant?, authority?, released_at?}` with the
+  `lapsed_registration: {registrant?, held_through?, released_at?}` with the
   holder the lease had when it lapsed; see
   [lapsed registration](api-v2.md#lapsed-registration). The block is omitted
   for every name that is not released. An ENSv1 wrapper-backed row also carries
@@ -1484,11 +1484,11 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   an explicitly different `registration_id` is a supported, proven-empty
   selection, so its empty page has no `completeness` or `unsupported_reason`.
   Rows of a wrapped `.eth` name carry the BaseRegistrar lease as
-  `registration_id`, the same handle name detail serves; a
-  `registration_id` read of the lease returns the rows of the NameWrapper
-  resource that currently controls the name, and the NameWrapper resource
-  itself is not the name's registration, so pairing the name with it is the
-  proven-empty selection.
+  `registration_id`, the same handle name detail serves.
+  `GET /v1/permissions?registration_id=<lease>` for a wrapped name returns the
+  permission rows of the NameWrapper resource that currently controls the name.
+  The NameWrapper resource itself is not the name's registration, so pairing
+  the name with it is the proven-empty selection.
   An unrecognized namespace returns `404 not_found`. A publication change
   during the read returns `409 stale`, as described above.
   When `name` or `registration_id` binds the read to a registration, the

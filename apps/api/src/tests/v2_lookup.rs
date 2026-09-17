@@ -776,7 +776,7 @@ async fn released_name_serves_its_lapsed_holder_only_in_the_lapsed_block() -> Re
     .await?;
     let expected_lapsed = json!({
         "registrant": HOLDER,
-        "authority": "wrapper",
+        "held_through": "wrapper",
         "released_at": "2024-02-12T22:13:20Z",
     });
     let lapsed = &payload["data"][0]["record"];
