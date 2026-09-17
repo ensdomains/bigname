@@ -142,6 +142,17 @@ CREATE INDEX IF NOT EXISTS discovery_edges_active_to_idx
     ON discovery_edges (chain_id, to_contract_instance_id, edge_kind)
     WHERE deactivated_at IS NULL;
 
+-- Interpret closes and orders historical observations as well as active ones.
+CREATE INDEX IF NOT EXISTS discovery_edges_observation_history_idx
+    ON discovery_edges (
+        chain_id,
+        from_contract_instance_id,
+        edge_kind,
+        (provenance ->> 'observation_key'),
+        active_from_block_number
+    )
+    WHERE canonicality_state <> 'orphaned';
+
 CREATE TABLE IF NOT EXISTS token_lineages (
     token_lineage_id uuid PRIMARY KEY,
     chain_id text NOT NULL,
