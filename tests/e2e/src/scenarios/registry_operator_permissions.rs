@@ -428,8 +428,17 @@ async fn verify_snapshot(
             } else {
                 "ens"
             };
-            let empty = api.get(&format!("/v1/permissions?registration_id={id}&namespace={other_namespace}&address={operator:#x}")).await?;
-            assert_eq!(empty["data"], json!([]));
+            // This run indexes one namespace only. A read scoped to the other namespace has no
+            // completed publication to bind to, so it is refused as retryable `stale` before
+            // any row is selected; the operator row must never be served under it. The
+            // both-namespaces-published case is covered by the API namespace-filter tests.
+            let other_uri = format!(
+                "/v1/permissions?registration_id={id}&namespace={other_namespace}&address={operator:#x}"
+            );
+            let (status, refused) = api.get_json(&other_uri).await?;
+            ensure!(status == 409, "{other_uri}: {status} {refused}");
+            assert_eq!(refused["error"]["code"], "stale", "{other_uri}: {refused}");
+            assert!(refused.get("data").is_none(), "{other_uri}: {refused}");
         }
         println!(
             "AUTHOR_OPERATING_OBSERVATION {}",
