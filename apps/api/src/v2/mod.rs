@@ -102,8 +102,8 @@ pub(crate) use resolvers::{
     build_resolver_overview, resolver_overview_include,
 };
 pub(crate) use resolvers::{
-    get_resolver, get_resolver_aliases, get_resolver_roles, parse_numeric_chain_id,
-    resolver_snapshot_scope,
+    get_resolver, get_resolver_aliases, get_resolver_links, get_resolver_roles,
+    parse_numeric_chain_id, resolver_snapshot_scope,
 };
 pub(crate) use search::get_search;
 #[cfg(test)]

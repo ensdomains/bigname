@@ -186,6 +186,86 @@ async fn record_history_survives_relinks_and_excludes_later_unselected_writes() 
     Ok(())
 }
 
+// The overview's link section follows the latest `Linked` per node: record 0 drops the node,
+// the empty-name node is the default record, and a name is attached only when a surface knows it.
+#[tokio::test]
+async fn resolver_links_summary_follows_latest_link_per_node() -> Result<()> {
+    let (db, pool) = database("record_id_link_summary").await?;
+    seed(&pool).await?;
+    run(&pool, 12, None, RunMode::Normal).await?;
+    let links = links_summary(&pool, RESOLVER).await?;
+    assert_eq!(links["status"], "supported", "{links}");
+    assert_eq!(links["count"], 3);
+    assert_eq!(links["record_count"], 2);
+    let items = links["items"].as_array().unwrap();
+    let mut first_record: Vec<_> = [node(1), node(2)].into();
+    first_record.sort();
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0]["record_id"], "1");
+    assert_eq!(items[0]["namehash"], first_record[0]);
+    assert_eq!(items[1]["record_id"], "1");
+    assert_eq!(items[1]["namehash"], first_record[1]);
+    for item in &items[..2] {
+        let n = if item["namehash"] == node(1) { 1 } else { 2 };
+        assert_eq!(item["name"], format!("record{n}.eth"));
+        assert_eq!(item["logical_name_id"], format!("ens:{}", node(n)));
+        assert_eq!(item["namespace"], "ens");
+        assert_eq!(item["default"], false);
+        assert_eq!(item["chain_position"]["block_number"], 11);
+    }
+    assert_eq!(
+        items[2],
+        json!({
+            "record_id": "2", "namehash": hash(0), "default": true,
+            "normalized_event_id": items[2]["normalized_event_id"],
+            "chain_position": {
+                "chain_id": CHAIN, "block_number": 12, "block_hash": hash(12),
+                "transaction_hash": hash(1200), "log_index": 0,
+                "timestamp": items[2]["chain_position"]["timestamp"],
+            }
+        })
+    );
+    assert!(items[2]["chain_position"]["timestamp"].is_string());
+
+    run(&pool, 18, Some(12), RunMode::Normal).await?;
+    let links = links_summary(&pool, RESOLVER).await?;
+    assert_eq!(links["count"], 2, "{links}");
+    assert_eq!(links["record_count"], 2);
+    let items = links["items"].as_array().unwrap();
+    assert_eq!(items[0]["record_id"], "2");
+    assert_eq!(items[0]["namehash"], node(2));
+    assert_eq!(items[0]["name"], "record2.eth");
+    assert_eq!(items[0]["chain_position"]["block_number"], 14);
+    assert_eq!(items[1]["record_id"], "3");
+    assert_eq!(items[1]["default"], true);
+    assert!(items[1].get("name").is_none());
+    assert_eq!(items[1]["chain_position"]["block_number"], 16);
+    let incremental = links.clone();
+    run(&pool, 18, None, RunMode::Normal).await?;
+    assert_eq!(
+        links_summary(&pool, RESOLVER).await?,
+        incremental,
+        "full rebuild drift"
+    );
+    run(&pool, 18, Some(18), RunMode::Redo).await?;
+    assert_eq!(
+        links_summary(&pool, RESOLVER).await?,
+        incremental,
+        "redo drift"
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+async fn links_summary(pool: &PgPool, resolver: &str) -> Result<Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT declared_summary -> 'links' FROM resolver_current WHERE resolver_address = $1",
+    )
+    .bind(resolver)
+    .fetch_one(pool)
+    .await?)
+}
+
 async fn assert_history(pool: &PgPool, id: i64, present: &[&str], absent: &[&str]) -> Result<()> {
     let page = bigname_storage::load_name_history_page(
         pool,
@@ -366,7 +446,7 @@ async fn seed(pool: &PgPool) -> Result<()> {
     for n in 10..=18 {
         sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,$3,to_timestamp($3::double precision),'canonical')").bind(CHAIN).bind(hash(n)).bind(n).execute(pool).await?;
     }
-    let payload = json!({"deployment_epoch":"record_id_fixture","resolver_implementations":[{"role":"permissioned_resolver","address":IMPLEMENTATION}],"contracts":[],"capability_flags":{}});
+    let payload = json!({"deployment_epoch":"record_id_fixture","resolver_implementations":[{"role":"permissioned_resolver","address":IMPLEMENTATION}],"contracts":[],"capability_flags":{},"abi":{"events":[{"name":"Linked","fragment":"event Linked(uint256 indexed recordId, bytes32 indexed node, bytes name)","normalized_events":["ResolverRecordLinked","PreimageObserved"]}]}});
     let manifest: i64 = sqlx::query_scalar("INSERT INTO manifest_versions (manifest_version,namespace,source_family,chain_id,deployment_label,rollout_status,normalizer_version,file_path,manifest_payload) VALUES (1,'ens','ens_v2_resolver_l1',$1,'record_id_fixture','active','fixture','fixture/record-id.toml',$2) RETURNING manifest_id").bind(CHAIN).bind(&payload).fetch_one(pool).await?;
     sqlx::query("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,source_manifest_id,chain_id,derivation_kind,canonicality_state,after_state) VALUES ('manifest','ens','SourceManifestUpdated','ens_v2_resolver_l1',1,$1,$2,'manifest_sync','canonical',$3)").bind(manifest).bind(CHAIN).bind(json!({"rollout_status":"active","normalizer_version":"fixture","manifest_payload":payload})).execute(pool).await?;
     sqlx::query("INSERT INTO manifest_versions (manifest_version,namespace,source_family,chain_id,deployment_label,rollout_status,normalizer_version,file_path,manifest_payload) VALUES (1,'ens','ens_v2_registry_l1',$1,'record_id_fixture','active','fixture','fixture/registry.toml','{}')").bind(CHAIN).execute(pool).await?;
@@ -545,6 +625,12 @@ async fn official_sepolia_direct_resolver_projects_ensip19_default_for_missing_e
     )
     .await?;
     run(&pool, target, None, RunMode::Normal).await?;
+    // A direct node-keyed declaration has no link state, so the section is unsupported
+    // by kind rather than reported empty.
+    assert_eq!(
+        links_summary(&pool, &address).await?,
+        json!({"status": "unsupported", "unsupported_reason": "record_links_not_applicable"})
+    );
     let row = inventory(&pool, 1).await?;
     assert_eq!(row["support"], "supported", "{row}");
     assert_eq!(

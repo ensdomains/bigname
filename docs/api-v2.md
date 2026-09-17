@@ -151,6 +151,9 @@ step-3-gate vocabulary needed by the route schemas:
 | `contract_address` | lower-cased emitting contract of an event row, exposed only with `include=data`; `null` for state-derived rows | `emitting_address` |
 | `resolver` (query) | `/v1/events` filter naming one resolver contract as `<chain_id>:<address>` (numeric chain id, case-insensitive address); matches rows the contract emitted plus `resolver` pointer rows naming it | new in v2 |
 | `mirror` | on the resolver overview, present only for a declared [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver): `{kind: "ensv1_registry", registry: {chain_id, address}}`, the ENSv1 registry whose resolvers answer for names bound to this resolver | `declared_summary.classification.mirror`, `ensv1_mirror_resolver` |
+| `links` | on the resolver overview (`include=links`, `counts.links`, `counts.linked_records`) and the `/links` collection: the nodes an ENSv2 record-ID resolver currently binds to a non-zero record, one item per node as `{record_id, namehash, default, namespace?, name?, display_name?, link_event}`; nodes sharing a `record_id` share one record's values, and `default: true` marks the empty-name node whose record answers every unlinked name | `ResolverRecordLinked` normalized events, `resolver_current.declared_summary.links` |
+| `record_id` | the decimal ID of a record on an ENSv2 record-ID resolver, as a string | `resolver_record_id` |
+| `link_event` | on resolver link items: `{block_number, timestamp, transaction_hash, log_index}` of the current `Linked` observation for that node | link `chain_position` |
 | `grant_event` | on resolver-overview `include=roles` items: `{block_number, timestamp, transaction_hash, log_index}` of the earliest permission event that granted the role; omitted when unresolvable | permission-row `provenance.normalized_event_ids` |
 
 An admitted controller-free ENSv1 numeric registration can retain its resource and token lifecycle

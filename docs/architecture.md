@@ -1571,7 +1571,7 @@ Queryable by `scope=surface|resource|both`. History reads are canonical normaliz
 
 ### Resolver overview
 
-Resolvers are first-class read targets. Sections: bindings, alias mappings, resolver-scoped permissions, role holders, events, counts. Each section is supported only when a projection owns the fan-in. Shared ENSv1 PublicResolver targets do not enumerate current-name fan-in for `bindings`, `aliases`, or event summaries — those return `UnsupportedSummary` with `resolver_binding_enumeration_not_projected`. Exact-name resolver state stays on exact-name routes.
+Resolvers are first-class read targets. Sections: bindings, alias mappings, record links (record-ID generation only), resolver-scoped permissions, role holders, events, counts. Each section is supported only when a projection owns the fan-in. Shared ENSv1 PublicResolver targets do not enumerate current-name fan-in for `bindings`, `aliases`, or event summaries — those return `UnsupportedSummary` with `resolver_binding_enumeration_not_projected`. Exact-name resolver state stays on exact-name routes.
 
 ### Explain by exact name
 

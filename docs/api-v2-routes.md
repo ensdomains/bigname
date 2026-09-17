@@ -2170,17 +2170,62 @@ For a registrar lease first identified by a later readable observation, registra
   different: its event-derived resolver
   binding is eligible for `bound_names` only where that resolver family's
   existing binding-enumeration capability is supported.
-  `counts.nodes`, `counts.aliases`, and `counts.role_holders` are total counts,
-  while the corresponding `include=nodes`, `include=aliases`, and
-  `include=roles` arrays are deterministic samples of at most 100 items. A
+  `counts.nodes`, `counts.aliases`, `counts.links`, and `counts.role_holders`
+  are total counts, while the corresponding `include=nodes`, `include=aliases`,
+  `include=links`, and `include=roles` arrays are deterministic samples of at
+  most 100 items. A
   count greater than the returned array length means that sample is truncated;
   omitted binding rows remain available through paginated name-side routes,
   and omitted permission rows remain available through permission routes.
-  Complete alias mappings and per-registration permission rows are available
-  through the `/aliases` and `/roles` collections below. Binding samples sort by name
+  Complete alias mappings, record links, and per-registration permission rows
+  are available through the `/aliases`, `/links`, and `/roles` collections
+  below. Binding samples sort by name
   and stable identity, alias samples place current binding aliases before
-  current alias-event rows and preserve each group’s stable order, and
+  current alias-event rows and preserve each group’s stable order, link
+  samples sort by numeric record ID and then namehash, and
   role-holder samples sort by address.
+  `include=links` serves the record links of a resolver of the ENSv2
+  record-ID generation (a proxy whose admitted implementation's manifest
+  declares `Linked`; see [manifests](manifests.md#record-id-resolver-generation)).
+  Such a resolver stores values per numeric record and binds names to records
+  with `Linked(recordId, node, name)`; the latest link per node is current,
+  record ID `0` unlinks the node, and a record linked at the empty-name node
+  (`namehash("")`, all zeros) is the resolver's default record, which answers
+  every node without a link of its own.
+  (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IRecordResolver.sol:L32-L38 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L379-L386 @ ens_v2@a971bd64)
+  Each item is one node with a non-zero current record: `{record_id, namehash,
+  default, namespace?, name?, display_name?, link_event}`. `record_id` is the
+  decimal record ID as a string; `default` is `true` for the empty-name node;
+  `name` and `display_name` are present only when bigname knows a name surface
+  for that namehash — a resolver may link a node bigname has never observed as
+  a name, which is then served by `namehash` alone; `link_event` is
+  `{block_number, timestamp, transaction_hash, log_index}` of the current
+  `Linked` observation. Nodes sharing a `record_id` share one record's values,
+  so grouping items by `record_id` yields the names each record serves;
+  `counts.linked_records` is the number of distinct records with at least one
+  linked node. On a node-keyed resolver — a direct `public_resolver_v2` or
+  ENSv1-mirror declaration, or any ENSv1 or Basenames resolver — the section
+  is unsupported with reason `record_links_not_applicable` and contributes no
+  counts; on a resolver whose enumeration is unsupported it carries that
+  resolver's enumeration reason. Example item:
+
+  ```json
+  {
+    "record_id": "7",
+    "namehash": "0x5f9c…",
+    "default": false,
+    "namespace": "ens",
+    "name": "shared.eth",
+    "display_name": "shared.eth",
+    "link_event": {
+      "block_number": 11710004,
+      "timestamp": "2026-09-16T10:04:12Z",
+      "transaction_hash": "0xlink…",
+      "log_index": 1
+    }
+  }
+  ```
   `include=roles` items are `{address, registration_count, permission_count,
   powers, grant_event?}`. `registration_count` is the number of distinct registrations with
   resolver-scoped permission rows for the role address. `permission_count` is
@@ -2254,7 +2299,7 @@ For a registrar lease first identified by a later readable observation, registra
 - Replaces (v1): `GET /v1/resolvers/{chain_id}/{resolver_address}/overview`
   and the `GET /v1/names?resolver=...` filter.
 
-### `GET /v1/resolvers/{chain_id}/{address}/aliases` and `/roles`
+### `GET /v1/resolvers/{chain_id}/{address}/aliases`, `/links`, and `/roles`
 
 - Tier: product read. These collections make the supported resolver overview
   tables fully pageable without enlarging its bounded previews.
@@ -2266,6 +2311,13 @@ For a registrar lease first identified by a later readable observation, registra
   identity, so equal display names cannot skip or duplicate entries. Counts
   cover both groups. This is a complete enumeration of the supported indexed
   mappings, not a claim to discover arbitrary custom resolver behavior.
+- `/links` returns the overview's record-link rows — one per node whose
+  current link names a non-zero record, in numeric `record_id` then
+  `namehash` order, the default record's empty-name node included — read from
+  the latest activated canonical `Linked` observation per node at or below
+  the selected height, with names attached from the canonical name surfaces
+  at that height. `page.total_count` counts those rows. It is unsupported,
+  with the same reason as the overview section, on a node-keyed resolver.
 - `/roles` returns one `{address, registration_id, name?, powers, grant_event?}` row
   for each current resolver-scoped permission row with at least one power.
   Rows sort by address and registration ID; multiple registrations for one
@@ -2287,9 +2339,9 @@ For a registrar lease first identified by a later readable observation, registra
   client must restart. These routes read current projections, so they do not
   synthesize historical permission/binding tables. A same-height rebuild also
   invalidates prior cursors. The generation is checked again after reading.
-- Alias events come from activated canonical normalized events bounded to the
-  selected height; bindings and permissions come from current projections
-  using their existing canonical-lineage predicates. Resolver classification
+- Alias and link events come from activated canonical normalized events
+  bounded to the selected height; bindings and permissions come from current
+  projections using their existing canonical-lineage predicates. Resolver classification
   and enumeration support remain the authority for whether either collection
   can make an indexed completeness claim. No manifest coverage is widened.
 

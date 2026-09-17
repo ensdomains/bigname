@@ -5,6 +5,29 @@ use sqlx::{Postgres, Transaction};
 use crate::{ProjectError, Result};
 
 pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+    // `project_resolver_links` (the latest `Linked` per node) is staged by the resolver
+    // builder, which also summarizes it on `resolver_current`.
+    let selected_records = format!(
+        r#"CREATE TEMP TABLE project_selected_records ON COMMIT DROP AS
+        SELECT pointer.resource_id,
+               pointer.resolver_address,
+               CASE WHEN exact.after_state ->> 'resolver_record_id' <> '0'
+                    THEN exact.after_state ->> 'resolver_record_id'
+                    ELSE defaults.after_state ->> 'resolver_record_id' END AS record_id,
+               exact.normalized_event_id AS exact_link_event_id,
+               CASE WHEN COALESCE(exact.after_state ->> 'resolver_record_id', '0') = '0'
+                    THEN defaults.normalized_event_id END AS default_link_event_id
+        FROM project_record_pointers pointer
+        LEFT JOIN project_resolver_links exact
+          ON lower(exact.after_state ->> 'resolver') = pointer.resolver_address
+         AND lower(exact.after_state ->> 'node') = pointer.namehash
+        LEFT JOIN project_resolver_links defaults
+          ON lower(defaults.after_state ->> 'resolver') = pointer.resolver_address
+         AND lower(defaults.after_state ->> 'node') = '{default_node}'
+        WHERE exact.normalized_event_id IS NOT NULL
+           OR defaults.normalized_event_id IS NOT NULL"#,
+        default_node = super::resolver::DEFAULT_RECORD_NODE
+    );
     for statement in [
         // Every readable resolver pointer the resource has ever selected, each carrying the chain
         // position of the pointer that superseded it (null on the latest). Record values are
@@ -85,35 +108,7 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
           AND resolver_address NOT IN (
               '0x0000000000000000000000000000000000000000', ''
           )"#,
-        r#"CREATE TEMP TABLE project_resolver_links ON COMMIT DROP AS
-        SELECT DISTINCT ON (chain_id, lower(after_state ->> 'resolver'),
-                            lower(after_state ->> 'node')) event.*
-        FROM project_events event
-        WHERE event_kind = 'ResolverRecordLinked'
-          AND after_state ->> 'storage_model' = 'resolver_record_id'
-        ORDER BY chain_id, lower(after_state ->> 'resolver'),
-                 lower(after_state ->> 'node'), block_number DESC NULLS LAST,
-                 transaction_index DESC NULLS LAST, log_index DESC NULLS LAST,
-                 normalized_event_id DESC"#,
-        r#"CREATE TEMP TABLE project_selected_records ON COMMIT DROP AS
-        SELECT pointer.resource_id,
-               pointer.resolver_address,
-               CASE WHEN exact.after_state ->> 'resolver_record_id' <> '0'
-                    THEN exact.after_state ->> 'resolver_record_id'
-                    ELSE defaults.after_state ->> 'resolver_record_id' END AS record_id,
-               exact.normalized_event_id AS exact_link_event_id,
-               CASE WHEN COALESCE(exact.after_state ->> 'resolver_record_id', '0') = '0'
-                    THEN defaults.normalized_event_id END AS default_link_event_id
-        FROM project_record_pointers pointer
-        LEFT JOIN project_resolver_links exact
-          ON lower(exact.after_state ->> 'resolver') = pointer.resolver_address
-         AND lower(exact.after_state ->> 'node') = pointer.namehash
-        LEFT JOIN project_resolver_links defaults
-          ON lower(defaults.after_state ->> 'resolver') = pointer.resolver_address
-         AND lower(defaults.after_state ->> 'node') =
-             '0x0000000000000000000000000000000000000000000000000000000000000000'
-        WHERE exact.normalized_event_id IS NOT NULL
-           OR defaults.normalized_event_id IS NOT NULL"#,
+        selected_records.as_str(),
         r#"CREATE TEMP TABLE project_linked_record_events ON COMMIT DROP AS
         SELECT selected.resource_id, event.normalized_event_id
         FROM project_selected_records selected

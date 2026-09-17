@@ -13,7 +13,8 @@ use super::{
     get_name_authority_diagnostic, get_name_binding_diagnostic, get_name_coverage_diagnostic,
     get_name_record, get_name_records, get_name_records_diagnostic, get_names, get_namespace,
     get_permissions, get_primary_name, get_registry, get_registry_labels, get_resolver,
-    get_resolver_aliases, get_resolver_roles, get_search, get_status, get_subnames,
+    get_resolver_aliases, get_resolver_links, get_resolver_roles, get_search, get_status,
+    get_subnames,
 };
 
 pub(super) fn router() -> Router<AppState> {
@@ -35,6 +36,10 @@ pub(super) fn router() -> Router<AppState> {
         .route(
             "/v1/resolvers/{chain_id}/{address}/aliases",
             get(get_resolver_aliases),
+        )
+        .route(
+            "/v1/resolvers/{chain_id}/{address}/links",
+            get(get_resolver_links),
         )
         .route(
             "/v1/resolvers/{chain_id}/{address}/roles",

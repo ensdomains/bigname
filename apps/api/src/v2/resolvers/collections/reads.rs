@@ -12,7 +12,9 @@ pub(super) async fn page(
     key: Option<&(String, String)>,
     page_size: u64,
 ) -> V2Result<(Vec<(String, String, Value)>, u64)> {
-    let source = if section == "roles" {
+    let source = if section == "links" {
+        include_str!("links.sql").to_owned()
+    } else if section == "roles" {
         format!(
             r#"WITH items AS (
             SELECT pc.subject AS key1, pc.resource_id::text AS key2,
