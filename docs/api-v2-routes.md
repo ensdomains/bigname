@@ -1777,7 +1777,9 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   Malformed addresses return `400 invalid_input`. Unsupported public namespaces
   return `404 not_found`. `include=role_summary`
   uses the same publication fence as the base collection, and current-state
-  publication changes produce `409 stale`. The expansion batch-loads
+  publication changes produce `409 stale`. The grant-budget `422 unsupported`
+  is returned only after that fence passes, so a publication change during an
+  overflowing read is also `409 stale`. The expansion batch-loads
   projection-owned permission summaries for every
   registration on the served page. A page with any unlisted permission surface
   returns `meta.completeness=partial`,
