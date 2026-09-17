@@ -517,7 +517,11 @@ registrar token and account approvals, resolver operators and delegates, and
 ENSv2 registry operators are not indexed. NameWrapper summaries are partial for
 a narrower reason described below: holders, operators, and per-token delegates
 are rows, while parent control of a non-emancipated wrapped subname and resolver
-operators/delegates are not.
+operators/delegates are not. For a grant on an ENSv2 record-ID resolver, whose
+resource is a setter argument rather than a name, `scope_detail` also keeps the
+selector the interpreter decoded from that argument (`resource_selector`) so
+reads can say which record the grant is about; a grant whose argument was never
+observed keeps a plain scope.
 
 `account_permission_state_current` separately folds `AccountPermissionChanged`
 events from the [`standard_approval`

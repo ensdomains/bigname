@@ -26,7 +26,13 @@ pub(super) async fn build(
         decoded AS (
             SELECT event.*,
                    lower(event.after_state ->> 'subject') AS subject,
-                   event.after_state -> 'scope' AS scope_detail,
+                   -- A record-ID resolver scopes a grant to a setter argument; the
+                   -- decoded selector says which record the resource is about.
+                   CASE WHEN event.after_state -> 'selector' ->> 'kind'
+                             IN ('address', 'text', 'abi', 'interface', 'data', 'argument')
+                        THEN event.after_state -> 'scope' || jsonb_build_object(
+                            'resource_selector', event.after_state -> 'selector')
+                        ELSE event.after_state -> 'scope' END AS scope_detail,
                    CASE event.after_state -> 'scope' ->> 'kind'
                        WHEN 'root' THEN 'root'
                        WHEN 'registry_root' THEN 'root'

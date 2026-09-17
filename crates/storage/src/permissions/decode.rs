@@ -25,6 +25,7 @@ pub(super) fn decode_permissions_current_row(row: PgRow) -> Result<PermissionsCu
         resource_id: row.try_get("resource_id")?,
         subject: row.try_get("subject")?,
         scope,
+        record_resource_selector: scope_detail.get("resource_selector").cloned(),
         effective_powers: row.try_get("effective_powers")?,
         grant_source: row.try_get("grant_source")?,
         revocation_source: row.try_get("revocation_source")?,

@@ -1405,8 +1405,20 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   registration outside the namespace returns an empty page without its resource
   restrictions or permission support metadata.
 - Response shape: `data` is an array of permission rows
-  `{address, grant_scope, powers, registration_id, name?, authority_context,
-  wrapper_state?, wrapper_fuses?}`. The two wrapper fields use the same atomic,
+  `{address, grant_scope, powers, registration_id, record_resource?, name?,
+  authority_context, wrapper_state?, wrapper_fuses?}`.
+  `record_resource` is present only for a grant on an ENSv2 record-ID resolver
+  (see [record links](#get-v2resolverschain_idaddress)), where the granted
+  resource is not a name but a setter argument — the record the holder may
+  set. It is the argument as the interpreter decoded it: `{kind: "address",
+  hash, coin_type}`, `{kind: "text" | "data", hash, key}`, `{kind: "abi",
+  hash, content_type}`, `{kind: "interface", hash, interface_id}`, or, when
+  one argument authorizes several setters, `{kind: "argument", hash,
+  selectors: [...]}` of those shapes. `hash` is the on-chain resource, the
+  keccak of the argument. A grant whose argument was never observed carries no
+  `record_resource`.
+  (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L252-L259 @ ens_v2@a971bd64) The two wrapper fields use the same atomic,
   [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word)
   contract as name detail and appear only for a returned current ENSv1 wrapper
   registration. For a current ENSv1 NameWrapper registration the rows are the
@@ -2266,8 +2278,12 @@ For a registrar lease first identified by a later readable observation, registra
   identity, so equal display names cannot skip or duplicate entries. Counts
   cover both groups. This is a complete enumeration of the supported indexed
   mappings, not a claim to discover arbitrary custom resolver behavior.
-- `/roles` returns one `{address, registration_id, name?, powers, grant_event?}` row
+- `/roles` returns one `{address, registration_id, name?, powers, grant_event?,
+  record_resource?}` row
   for each current resolver-scoped permission row with at least one power.
+  `record_resource` follows the `GET /v1/permissions` contract: on a record-ID
+  resolver it names the record a holder's argument-scoped grant is about, so
+  grouping rows by `record_resource.hash` lists the resolver's named resources.
   Rows sort by address and registration ID; multiple registrations for one
   holder remain separate. `name` is present when the registration has a current
   readable name. `grant_event` follows the overview provenance shape,

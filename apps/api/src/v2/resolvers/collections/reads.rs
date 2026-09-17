@@ -16,9 +16,11 @@ pub(super) async fn page(
         format!(
             r#"WITH items AS (
             SELECT pc.subject AS key1, pc.resource_id::text AS key2,
-                jsonb_build_object('address', pc.subject, 'registration_id', pc.resource_id,
-                    'powers', pc.effective_powers, 'event_ids',
-                    COALESCE(pc.provenance -> 'normalized_event_ids', '[]'::jsonb)) AS item
+                jsonb_strip_nulls(jsonb_build_object('address', pc.subject,
+                    'registration_id', pc.resource_id, 'powers', pc.effective_powers,
+                    'record_resource_selector', pc.scope_detail -> 'resource_selector',
+                    'event_ids',
+                    COALESCE(pc.provenance -> 'normalized_event_ids', '[]'::jsonb))) AS item
             FROM bigname_phase.permissions_current pc
             WHERE pc.scope_kind = 'resolver'
               AND pc.scope_detail ->> 'chain_id' = $1

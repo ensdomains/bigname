@@ -75,6 +75,62 @@ fn permission_scope_chain_id(storage_chain_id: &str) -> V2Result<u64> {
     })
 }
 
+/// The record an argument-scoped resolver resource is about, from the selector the
+/// interpreter decoded out of the setter argument: an address family keyed by coin
+/// type, a text or data key, an ABI content type, an interface id, or — when one
+/// argument authorizes several setters — the list of those. An argument the
+/// interpreter could not decode describes nothing and is omitted.
+/// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L252-L259 @ ens_v2@a971bd64)
+pub(crate) fn record_resource_value(selector: &Value) -> V2Result<Option<Value>> {
+    let Some(object) = selector.as_object() else {
+        return Err(record_resource_error());
+    };
+    let kind = object
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(record_resource_error)?;
+    if kind == "resource" {
+        return Ok(None);
+    }
+    let hash = object
+        .get("hash")
+        .and_then(Value::as_str)
+        .ok_or_else(record_resource_error)?;
+    let key = || {
+        object
+            .get("key")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(record_resource_error)
+    };
+    let value = match kind {
+        "address" => json!({"kind": "address", "hash": hash, "coin_type": key()?}),
+        "text" | "data" => json!({"kind": kind, "hash": hash, "key": key()?}),
+        "abi" => json!({"kind": "abi", "hash": hash, "content_type": key()?}),
+        "interface" => json!({"kind": "interface", "hash": hash, "interface_id": key()?}),
+        "argument" => {
+            let selectors = object
+                .get("selectors")
+                .and_then(Value::as_array)
+                .ok_or_else(record_resource_error)?
+                .iter()
+                .map(record_resource_value)
+                .collect::<V2Result<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            json!({"kind": "argument", "hash": hash, "selectors": selectors})
+        }
+        _ => return Err(record_resource_error()),
+    };
+    Ok(Some(value))
+}
+
+fn record_resource_error() -> V2Error {
+    V2Error::internal_error("failed to map resolver record resource")
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -220,6 +276,58 @@ mod tests {
         assert_eq!(
             product_permission_power("was_reserved").expect("must pass through"),
             "was_reserved"
+        );
+    }
+
+    #[test]
+    fn record_resource_maps_each_decoded_selector_and_omits_undecoded_ones() {
+        use serde_json::json;
+
+        use super::record_resource_value;
+
+        let hash = "0x00000000000000000000000000000000000000000000000000000000000000aa";
+        assert_eq!(
+            record_resource_value(&json!({"kind": "address", "key": "60", "hash": hash})).unwrap(),
+            Some(json!({"kind": "address", "hash": hash, "coin_type": "60"}))
+        );
+        assert_eq!(
+            record_resource_value(&json!({"kind": "text", "key": "url", "hash": hash,
+                "raw_selector_key": {"encoding": "hex", "bytes": "0x75726c"}}))
+            .unwrap(),
+            Some(json!({"kind": "text", "hash": hash, "key": "url"}))
+        );
+        assert_eq!(
+            record_resource_value(&json!({"kind": "data", "key": "0xdead", "hash": hash})).unwrap(),
+            Some(json!({"kind": "data", "hash": hash, "key": "0xdead"}))
+        );
+        assert_eq!(
+            record_resource_value(&json!({"kind": "abi", "key": "1", "hash": hash})).unwrap(),
+            Some(json!({"kind": "abi", "hash": hash, "content_type": "1"}))
+        );
+        assert_eq!(
+            record_resource_value(&json!({"kind": "interface", "key": "0x01ffc9a7", "hash": hash}))
+                .unwrap(),
+            Some(json!({"kind": "interface", "hash": hash, "interface_id": "0x01ffc9a7"}))
+        );
+        // One argument authorizing several setters keeps every applicable reading.
+        assert_eq!(
+            record_resource_value(&json!({"kind": "argument", "key": null, "hash": hash,
+                "argument_hex": "0x00", "selectors": [
+                    {"kind": "address", "key": "0", "hash": hash},
+                    {"kind": "abi", "key": "0", "hash": hash}]}))
+            .unwrap(),
+            Some(json!({"kind": "argument", "hash": hash, "selectors": [
+                {"kind": "address", "hash": hash, "coin_type": "0"},
+                {"kind": "abi", "hash": hash, "content_type": "0"}]}))
+        );
+        // An argument the interpreter never saw describes nothing.
+        assert_eq!(
+            record_resource_value(&json!({"kind": "resource", "key": null, "hash": null})).unwrap(),
+            None
+        );
+        assert!(record_resource_value(&json!({"kind": "text", "hash": hash})).is_err());
+        assert!(
+            record_resource_value(&json!({"kind": "mystery", "key": "x", "hash": hash})).is_err()
         );
     }
 }

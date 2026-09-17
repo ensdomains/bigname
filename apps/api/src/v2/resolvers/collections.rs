@@ -190,6 +190,13 @@ async fn collection(
     for (_, _, mut item) in rows {
         if section == "roles" {
             item["powers"] = permission_powers_value(&item["powers"])?;
+            if let Some(selector) = item
+                .as_object_mut()
+                .and_then(|object| object.remove("record_resource_selector"))
+                && let Some(resource) = crate::v2::record_resource_value(&selector)?
+            {
+                item["record_resource"] = resource;
+            }
             data.push(item);
         } else {
             data.push(compact_resolver_binding_item(&item)?);

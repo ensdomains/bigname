@@ -10,6 +10,9 @@ pub struct PermissionsCurrentRow {
     pub resource_id: Uuid,
     pub subject: String,
     pub scope: PermissionScope,
+    /// For a grant on an ENSv2 record-ID resolver: the decoded setter argument the
+    /// resource stands for (`{kind, key, hash, ...}`), absent on every other scope.
+    pub record_resource_selector: Option<Value>,
     pub effective_powers: Value,
     pub grant_source: Value,
     pub revocation_source: Option<Value>,

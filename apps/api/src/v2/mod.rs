@@ -88,7 +88,9 @@ pub(crate) use params::{
     AtSelector, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, QueryParams, RawQueryParams, RequestSource,
     SortOrder, parse_relation_set_param, validate_latest_collection_selectors,
 };
-pub(crate) use permission_values::{permission_powers_value, permission_scope_value};
+pub(crate) use permission_values::{
+    permission_powers_value, permission_scope_value, record_resource_value,
+};
 pub(crate) use permissions::get_permissions;
 pub(crate) use primary_name::get_primary_name;
 pub(crate) use registries::{

@@ -64,6 +64,62 @@ async fn record_id_resolver_permissions_preserve_generation_specific_powers() ->
     database.cleanup().await
 }
 
+// A grant on a record-ID resolver is scoped to a setter argument; the row says which
+// record that argument names, on /v1/permissions and on the resolver's /roles rows.
+#[tokio::test]
+async fn record_id_resolver_permissions_describe_the_argument_scoped_record() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let hash = "0x00000000000000000000000000000000000000000000000000000000000000aa";
+    sqlx::query("UPDATE bigname_phase.permissions_current SET scope_detail = scope_detail || $1 WHERE resource_id = $2 AND scope_kind = 'resolver'")
+        .bind(json!({"resource_selector": {"kind": "text", "key": "url", "hash": hash}}))
+        .bind(v2_permissions_current_resource_id()).execute(&database.pool).await?;
+    let payload = v2_permissions_payload_for_database(
+        &database,
+        &format!(
+            "/v1/permissions?registration_id={}",
+            v2_permissions_current_resource_id()
+        ),
+    )
+    .await?;
+    let rows = payload["data"].as_array().unwrap();
+    let row = rows
+        .iter()
+        .find(|row| row["grant_scope"]["kind"] == "resolver")
+        .expect("resolver permission");
+    assert_eq!(
+        row["record_resource"],
+        json!({"kind": "text", "hash": hash, "key": "url"})
+    );
+    assert!(
+        rows.iter()
+            .filter(|row| row["grant_scope"]["kind"] != "resolver")
+            .all(|row| row.get("record_resource").is_none()),
+        "only argument-scoped resolver grants describe a record"
+    );
+    assert!(row["grant_scope"]["detail"].get("resource_selector").is_none());
+
+    let resolver = resolver_current_row("ethereum-mainnet", "0x0000000000000000000000000000000000000abc");
+    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
+    let roles = v2_resolver_payload_for_database(
+        &database,
+        "/v1/resolvers/1/0x0000000000000000000000000000000000000abc/roles",
+    )
+    .await?;
+    let role = roles["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["registration_id"] == v2_permissions_current_resource_id().to_string())
+        .expect("role row for the argument-scoped resource");
+    assert_eq!(
+        role["record_resource"],
+        json!({"kind": "text", "hash": hash, "key": "url"})
+    );
+    assert!(role.get("record_resource_selector").is_none());
+    database.cleanup().await
+}
+
 #[tokio::test]
 async fn record_id_resolver_default_rule_derives_eth_address_in_indexed_and_auto() -> Result<()> {
     // The Project regression loads the actual manifest and checks rule emission;
