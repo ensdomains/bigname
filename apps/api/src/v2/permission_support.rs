@@ -4,17 +4,28 @@ use bigname_storage::{
     PermissionCoverageStatus, PermissionCoverageUnsupportedReason,
     PermissionsCurrentResourceSummary,
 };
+use serde::{Deserialize, Serialize};
 use sqlx::types::Uuid;
 
 use super::{Completeness, Meta};
 
 const PERMISSION_SUPPORT_UNKNOWN_REASON: &str = "permission_support_unknown";
-const REGISTRAR_RESOLVER_PARTIAL_REASON: &str =
-    "registrar_erc721_approvals_and_resolver_approvals_delegates_not_supported";
-const PARENT_AND_RESOLVER_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON: &str =
-    "parent_and_resolver_delegation_permissions_not_supported";
-const REGISTRAR_RESOLVER_WRAPPER_PARTIAL_REASON: &str =
-    "registrar_erc721_approvals_resolver_approvals_delegates_and_wrapper_permissions_not_supported";
+const PERMISSIONS_PARTIALLY_LISTED_REASON: &str = "permissions_partially_listed";
+
+/// A permission surface whose holders the served rows do not list. Declaration order is the
+/// serialized sort order. The list shrinks as later parts of issue #605 add these surfaces.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UnlistedPermissionSurface {
+    /// BaseRegistrar ERC-721 per-token and operator approvals.
+    RegistrarApprovals,
+    /// Resolver operator approvals and per-name delegates.
+    ResolverApprovals,
+    /// The parent name's control over a wrapped subname that is not emancipated.
+    WrapperParentControl,
+}
+
+use UnlistedPermissionSurface::{RegistrarApprovals, ResolverApprovals, WrapperParentControl};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PermissionRequestScope {
@@ -22,18 +33,16 @@ pub(crate) enum PermissionRequestScope {
     AccountWide,
 }
 
-/// How completely the served rows enumerate a registration's permissions. A mixed set of
-/// registrations reports the reason that covers every member's absent surfaces.
+/// Which permission surfaces the served rows leave unlisted. A set of registrations reports the
+/// union of its members' unlisted surfaces; indeterminate support takes precedence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PermissionSupport {
     Full,
-    /// Registrar- and registry-held rows with effective registry operators; registrar ERC-721
-    /// approvals and resolver approvals and delegates are not enumerated.
+    /// Registrar- and registry-held rows with effective registry operators.
     RegistrarResolverPartial,
-    /// NameWrapper holders, operators, and per-token delegates are enumerated; parent control and
-    /// resolver-side delegation are not.
+    /// NameWrapper holders, operators, and per-token delegates are rows.
     WrapperPartial,
-    /// A set that mixes NameWrapper and non-wrapper registrations.
+    /// A set that mixes NameWrapper and non-wrapper registrations, or an account-wide read.
     RegistrarResolverWrapperPartial,
     Unknown,
 }
@@ -42,26 +51,35 @@ impl PermissionSupport {
     fn merge(self, other: Self) -> Self {
         match (self, other) {
             (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
-            (Self::RegistrarResolverWrapperPartial, _)
-            | (_, Self::RegistrarResolverWrapperPartial) => Self::RegistrarResolverWrapperPartial,
-            (Self::WrapperPartial, Self::WrapperPartial) => Self::WrapperPartial,
-            (Self::WrapperPartial, _) | (_, Self::WrapperPartial) => {
-                Self::RegistrarResolverWrapperPartial
-            }
-            (Self::RegistrarResolverPartial, _) | (_, Self::RegistrarResolverPartial) => {
-                Self::RegistrarResolverPartial
-            }
-            (Self::Full, Self::Full) => Self::Full,
+            (Self::Full, support) | (support, Self::Full) => support,
+            (left, right) if left == right => left,
+            _ => Self::RegistrarResolverWrapperPartial,
         }
     }
 
-    fn product_reason(self) -> &'static str {
+    fn unlisted_surfaces(self) -> &'static [UnlistedPermissionSurface] {
         match self {
-            Self::Full | Self::RegistrarResolverPartial => REGISTRAR_RESOLVER_PARTIAL_REASON,
-            Self::WrapperPartial => PARENT_AND_RESOLVER_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON,
-            Self::RegistrarResolverWrapperPartial => REGISTRAR_RESOLVER_WRAPPER_PARTIAL_REASON,
-            Self::Unknown => PERMISSION_SUPPORT_UNKNOWN_REASON,
+            Self::Full | Self::Unknown => &[],
+            Self::RegistrarResolverPartial => &[RegistrarApprovals, ResolverApprovals],
+            Self::WrapperPartial => &[ResolverApprovals, WrapperParentControl],
+            Self::RegistrarResolverWrapperPartial => {
+                &[RegistrarApprovals, ResolverApprovals, WrapperParentControl]
+            }
         }
+    }
+
+    /// Returns whether any completeness metadata was written.
+    fn apply(self, meta: &mut Meta) -> bool {
+        let reason = match self {
+            Self::Full => return false,
+            Self::Unknown => PERMISSION_SUPPORT_UNKNOWN_REASON,
+            _ => PERMISSIONS_PARTIALLY_LISTED_REASON,
+        };
+        meta.completeness = Some(Completeness::Partial);
+        meta.unsupported_reason = Some(reason.to_owned());
+        let surfaces = self.unlisted_surfaces();
+        meta.unlisted_permission_surfaces = (!surfaces.is_empty()).then(|| surfaces.to_vec());
+        true
     }
 }
 
@@ -104,21 +122,21 @@ pub(crate) fn apply_permissions_collection_support_meta(
     support: PermissionSupport,
     request_scope: PermissionRequestScope,
 ) {
-    let reason = match (request_scope, support) {
-        (_, PermissionSupport::Unknown) => PERMISSION_SUPPORT_UNKNOWN_REASON,
-        // An address-only read cannot enumerate approvals and delegations across every
-        // registration the address may reach, whatever each visible registration supports.
-        (PermissionRequestScope::AccountWide, _) => REGISTRAR_RESOLVER_WRAPPER_PARTIAL_REASON,
-        (PermissionRequestScope::ResourceBound, support) => support.product_reason(),
+    // An address-only read cannot list approvals and parent control across every registration
+    // the address may reach, whatever each visible registration supports.
+    let support = match request_scope {
+        PermissionRequestScope::ResourceBound => support,
+        PermissionRequestScope::AccountWide => {
+            support.merge(PermissionSupport::RegistrarResolverWrapperPartial)
+        }
     };
-    meta.completeness = Some(Completeness::Partial);
-    meta.unsupported_reason = Some(reason.to_owned());
+    support.apply(meta);
 }
 
 pub(crate) fn apply_role_summary_support_meta(meta: &mut Meta, support: PermissionSupport) {
-    meta.completeness = Some(Completeness::Partial);
-    meta.unsupported_fields = Some(vec!["role_summary".to_owned()]);
-    meta.unsupported_reason = Some(support.product_reason().to_owned());
+    if support.apply(meta) {
+        meta.unsupported_fields = Some(vec!["role_summary".to_owned()]);
+    }
 }
 
 #[cfg(test)]
@@ -146,53 +164,57 @@ mod tests {
         }
     }
 
+    fn collection_meta(support: PermissionSupport, scope: PermissionRequestScope) -> Meta {
+        let mut meta = Meta::default();
+        apply_permissions_collection_support_meta(&mut meta, support, scope);
+        meta
+    }
+
     #[test]
-    fn permission_collection_support_distinguishes_resource_and_account_scope() {
-        let mut resource_meta = Meta::default();
-        apply_permissions_collection_support_meta(
-            &mut resource_meta,
-            PermissionSupport::WrapperPartial,
-            PermissionRequestScope::ResourceBound,
-        );
-        assert_eq!(resource_meta.completeness, Some(Completeness::Partial));
+    fn permission_collection_support_lists_unlisted_surfaces_by_scope() {
+        let resource = PermissionRequestScope::ResourceBound;
+        let full = collection_meta(PermissionSupport::Full, resource);
+        assert_eq!(full, Meta::default());
+
+        let registrar = collection_meta(PermissionSupport::RegistrarResolverPartial, resource);
+        assert_eq!(registrar.completeness, Some(Completeness::Partial));
         assert_eq!(
-            resource_meta.unsupported_reason.as_deref(),
-            Some(PARENT_AND_RESOLVER_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON)
+            registrar.unsupported_reason.as_deref(),
+            Some(PERMISSIONS_PARTIALLY_LISTED_REASON)
+        );
+        assert_eq!(
+            serde_json::to_value(&registrar.unlisted_permission_surfaces).unwrap(),
+            json!(["registrar_approvals", "resolver_approvals"])
         );
 
-        let mut mixed_meta = Meta::default();
-        apply_permissions_collection_support_meta(
-            &mut mixed_meta,
-            PermissionSupport::RegistrarResolverWrapperPartial,
-            PermissionRequestScope::ResourceBound,
-        );
+        let wrapper = collection_meta(PermissionSupport::WrapperPartial, resource);
         assert_eq!(
-            mixed_meta.unsupported_reason.as_deref(),
-            Some(REGISTRAR_RESOLVER_WRAPPER_PARTIAL_REASON)
+            serde_json::to_value(&wrapper.unlisted_permission_surfaces).unwrap(),
+            json!(["resolver_approvals", "wrapper_parent_control"])
         );
 
-        let mut account_meta = Meta::default();
-        apply_permissions_collection_support_meta(
-            &mut account_meta,
-            PermissionSupport::Full,
-            PermissionRequestScope::AccountWide,
-        );
-        assert_eq!(account_meta.completeness, Some(Completeness::Partial));
-        assert_eq!(
-            account_meta.unsupported_reason.as_deref(),
-            Some(REGISTRAR_RESOLVER_WRAPPER_PARTIAL_REASON)
-        );
+        for support in [PermissionSupport::Full, PermissionSupport::WrapperPartial] {
+            let account = collection_meta(support, PermissionRequestScope::AccountWide);
+            assert_eq!(account.completeness, Some(Completeness::Partial));
+            assert_eq!(
+                serde_json::to_value(&account.unlisted_permission_surfaces).unwrap(),
+                json!([
+                    "registrar_approvals",
+                    "resolver_approvals",
+                    "wrapper_parent_control"
+                ])
+            );
+        }
 
-        let mut wrapper_account_meta = Meta::default();
-        apply_permissions_collection_support_meta(
-            &mut wrapper_account_meta,
-            PermissionSupport::WrapperPartial,
-            PermissionRequestScope::AccountWide,
-        );
-        assert_eq!(
-            wrapper_account_meta.unsupported_reason.as_deref(),
-            Some(REGISTRAR_RESOLVER_WRAPPER_PARTIAL_REASON)
-        );
+        for scope in [resource, PermissionRequestScope::AccountWide] {
+            let unknown = collection_meta(PermissionSupport::Unknown, scope);
+            assert_eq!(unknown.completeness, Some(Completeness::Partial));
+            assert_eq!(
+                unknown.unsupported_reason.as_deref(),
+                Some(PERMISSION_SUPPORT_UNKNOWN_REASON)
+            );
+            assert_eq!(unknown.unlisted_permission_surfaces, None);
+        }
     }
 
     #[test]
@@ -235,7 +257,11 @@ mod tests {
         );
         assert_eq!(
             permission_support_for_resources(&[full_id, wrapper_id], &summaries),
-            PermissionSupport::RegistrarResolverWrapperPartial
+            PermissionSupport::WrapperPartial
+        );
+        assert_eq!(
+            permission_support_for_resources(&[full_id, partial_id], &summaries),
+            PermissionSupport::RegistrarResolverPartial
         );
         assert_eq!(
             permission_support_for_resources(&[wrapper_id, partial_id], &summaries),
@@ -254,24 +280,36 @@ mod tests {
             PermissionSupport::Unknown
         );
 
-        let mut wrapper_meta = Meta::default();
-        apply_role_summary_support_meta(&mut wrapper_meta, PermissionSupport::WrapperPartial);
-        assert_eq!(
-            wrapper_meta.unsupported_reason.as_deref(),
-            Some(PARENT_AND_RESOLVER_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON)
-        );
+        let mut full = Meta::default();
+        apply_role_summary_support_meta(&mut full, PermissionSupport::Full);
+        assert_eq!(full, Meta::default());
 
-        let mut meta = Meta::default();
-        apply_role_summary_support_meta(&mut meta, PermissionSupport::Unknown);
-
-        assert_eq!(meta.completeness, Some(Completeness::Partial));
+        let mut wrapper = Meta::default();
+        apply_role_summary_support_meta(&mut wrapper, PermissionSupport::WrapperPartial);
+        assert_eq!(wrapper.completeness, Some(Completeness::Partial));
         assert_eq!(
-            meta.unsupported_fields,
+            wrapper.unsupported_fields,
             Some(vec!["role_summary".to_owned()])
         );
         assert_eq!(
-            meta.unsupported_reason.as_deref(),
+            wrapper.unsupported_reason.as_deref(),
+            Some(PERMISSIONS_PARTIALLY_LISTED_REASON)
+        );
+        assert_eq!(
+            wrapper.unlisted_permission_surfaces,
+            Some(vec![ResolverApprovals, WrapperParentControl])
+        );
+
+        let mut unknown = Meta::default();
+        apply_role_summary_support_meta(&mut unknown, PermissionSupport::Unknown);
+        assert_eq!(
+            unknown.unsupported_fields,
+            Some(vec!["role_summary".to_owned()])
+        );
+        assert_eq!(
+            unknown.unsupported_reason.as_deref(),
             Some(PERMISSION_SUPPORT_UNKNOWN_REASON)
         );
+        assert_eq!(unknown.unlisted_permission_surfaces, None);
     }
 }

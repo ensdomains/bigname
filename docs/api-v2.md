@@ -120,6 +120,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `failure_reason` | reason code or short reason string for `failed`, `stale`, `not_found`, or `mismatch` details | route-specific failure detail fields |
 | `completeness` | `full`, `partial`, `unsupported` | `coverage.status` on product routes (full taxonomy moves to diagnostics) |
 | `powers` | effective permission powers, drawn from the [permission powers vocabulary](#permission-powers-vocabulary); storage `resource_control` is exposed as `registration_control`; `registry_control` is passed through from an effective registry-operator account row; ENSv2 registry `was_reserved` is a non-authorizing history marker retained here so marker-only transitions remain visible (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@a971bd64) | `effective_powers` |
+| `unlisted_permission_surfaces` | on permission reads, the sorted codes of permission surfaces whose holders the rows do not list: `registrar_approvals`, `resolver_approvals`, `wrapper_parent_control`; omitted when nothing is unlisted or support is unknown | new in v2 |
 | `unsupported_fields` | fields or expansions that could not be served or proved for a response item | `unsupported_filters`, coverage-derived unsupported field lists |
 | `keys` | comma-separated resolver record-key allowlist | `records` query parameter, selector token lists in record diagnostics |
 | `page` | pagination object on top-level collections, per-input lookup results, and the resolver overview `bound_names` nested collection | pagination sections with divergent field subsets |
@@ -201,13 +202,25 @@ Revoked (`approved=false`) rows remain replayable projection state but are
 served as absence.
 
 Permission-backed v2 reads also classify the served resources from the typed
-projection-owned per-resource permission summary. Every permissions response
-remains `meta.completeness=partial`. A non-wrapper resource-bound request uses
-`registrar_erc721_approvals_and_resolver_approvals_delegates_not_supported`:
-registrar ERC-721 per-token and account approvals plus resolver contract-wide
-approvals and per-name delegates remain absent. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) An ENSv1 NameWrapper
-registration instead uses
-`parent_and_resolver_delegation_permissions_not_supported`: its token holder,
+projection-owned per-resource permission summary, and report the permission
+surfaces whose holders the rows do not list. When any surface is unlisted the
+response carries `meta.completeness=partial`,
+`meta.unsupported_reason=permissions_partially_listed`, and
+`meta.unlisted_permission_surfaces`, a sorted list of short stable codes:
+
+| Code | Surface not listed |
+| --- | --- |
+| `registrar_approvals` | BaseRegistrar ERC-721 per-token and operator approvals |
+| `resolver_approvals` | resolver operator approvals and per-name delegates |
+| `wrapper_parent_control` | the parent name's control over a wrapped subname that is not emancipated |
+
+The list shrinks as later parts of issue #605 add these surfaces; consumers
+should read the list rather than infer gaps from the reason. A registrar- or
+registry-held (unwrapped) registration reports
+`["registrar_approvals","resolver_approvals"]`: registry `ApprovalForAll`
+operators are rows, while registrar ERC-721 approvals and resolver approvals
+and delegates are not. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) An ENSv1 NameWrapper
+registration reports `["resolver_approvals","wrapper_parent_control"]`: its token holder,
 the owner-wide operators that holder approved, and its per-token approved
 delegate are projected rows, while the parent name's control over a
 non-emancipated wrapped subname and resolver operator/delegate approvals are
@@ -218,12 +231,11 @@ service), not a per-registration permission, and is never a row.
 (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L162 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L186 @ ens_v1@91c966f)
-An account-wide request, or a role-summary page that mixes wrapper and
-non-wrapper registrations, uses
-`registrar_erc721_approvals_resolver_approvals_delegates_and_wrapper_permissions_not_supported`,
-which covers the registrar and resolver surfaces above together with the
-NameWrapper parent-control surface. Missing or indeterminate support uses
-`permission_support_unknown` and takes precedence.
+A set of registrations reports the sorted union of its members' lists. A
+summary that independently proves full coverage contributes nothing, and a
+resource-bound read of it omits all three fields. Missing or indeterminate
+support instead uses `meta.unsupported_reason=permission_support_unknown`
+without a list and takes precedence.
 
 A supplied `name` that is missing or unrecognized, whose current name is marked
 unsupported, or that resolves to a current name not bound to a registration
@@ -234,23 +246,22 @@ establish that the name has no permission rows. A supplied current name paired
 with an explicitly different `registration_id` is a supported empty
 intersection. That zero-row result uses the explicitly requested registration's
 support classification under the resource-bound rule—including the
-wrapper reason or `permission_support_unknown` when applicable—and
+wrapper list or `permission_support_unknown` when applicable—and
 does not claim complete permission coverage. A `registration_id` outside an
 explicit `namespace` instead returns an empty page without resource
 restrictions or permission support metadata.
 
-An address-only permissions read always uses the account-wide partial reason,
+An address-only permissions read always reports all three codes,
 including when it returns zero rows or its current page contains no wrapper
 resource, because returned registrations cannot establish the request's full
 permission set.
 For `include=role_summary`, any non-full resource summary makes the overall
 address-name response `partial`, lists `role_summary` in
-`meta.unsupported_fields`, and uses the same product reason mapping. Projected
+`meta.unsupported_fields`, and reports the same reason and surface list. Projected
 permission rows remain visible, but an empty or populated expansion is not
-authoritative when that metadata is present. A page containing only wrapper
-summaries uses the wrapper reason; a page containing both wrapper and
-non-wrapper summaries uses the combined reason; missing or unrecognized summary
-metadata still takes precedence.
+authoritative when that metadata is present. A page containing both wrapper
+and non-wrapper summaries reports the union of their lists; missing or
+unrecognized summary metadata still takes precedence.
 
 These classifications are request-relative. `/v1/permissions` continues to
 serve known permission rows that apply to each resource, but those rows and the

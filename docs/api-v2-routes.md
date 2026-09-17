@@ -1549,34 +1549,36 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   name has no permission rows. A resolved current name paired with an explicitly
   different `registration_id` is a supported empty intersection. Its empty page
   uses that explicit registration's resource-bound support classification,
-  including the wrapper reason or `permission_support_unknown` when
+  including the wrapper list or `permission_support_unknown` when
   applicable. A `registration_id` outside an explicit `namespace` instead
   returns an empty page without permission support metadata.
   An unrecognized namespace returns `404 not_found`. A publication change
   during the read returns `409 stale`, as described above.
   When `name` or `registration_id` binds the read to a registration, the
   projection-owned per-registration permission summary classifies the result.
-  Every response in this slice remains `meta.completeness=partial`. A
-  non-wrapper resource-bound request returns
-  `unsupported_reason=registrar_erc721_approvals_and_resolver_approvals_delegates_not_supported`.
+  When a permission surface is not listed, the response carries
+  `meta.completeness=partial`,
+  `unsupported_reason=permissions_partially_listed`, and
+  `meta.unlisted_permission_surfaces`, the sorted codes defined in
+  [api-v2.md](api-v2.md): `registrar_approvals`, `resolver_approvals`, and
+  `wrapper_parent_control`. The list shrinks as later parts of issue #605 add
+  these surfaces. An unwrapped registrar- or registry-held registration reports
+  `["registrar_approvals","resolver_approvals"]`.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) An
-  ENSv1 NameWrapper resource returns `meta.completeness=partial` with
-  `unsupported_reason=parent_and_resolver_delegation_permissions_not_supported`:
+  ENSv1 NameWrapper resource reports
+  `["resolver_approvals","wrapper_parent_control"]`:
   its holder, operators, and delegate are rows, while the parent name's control
   over a non-emancipated wrapped subname and resolver operator/delegate
   approvals are not enumerated; the NameWrapper `Ownable` owner is a
   deployment-wide administrator, not a per-registration permission.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565-L589 @ ens_v1@91c966f)
-  Missing or
+  Independently proven full support omits all three fields. Missing or
   unrecognized summary metadata returns `meta.completeness=partial` with
-  `unsupported_reason=permission_support_unknown` and takes precedence. A mixed
-  wrapper/non-wrapper request uses the combined reason
-  `registrar_erc721_approvals_resolver_approvals_delegates_and_wrapper_permissions_not_supported`,
-  which covers the registrar and resolver surfaces together with the
-  NameWrapper parent-control surface. An address-only read
-  always uses the combined account-wide reason, including for zero rows or a
+  `unsupported_reason=permission_support_unknown`, no list, and takes
+  precedence. A mixed wrapper/non-wrapper request reports the sorted union. An
+  address-only read always reports all three codes, including for zero rows or a
   page with no wrapper row, unless indeterminate support wins. Returned rows do
   not define the request denominator: zero rows
   do not prove that no account can mutate the selected name or registration.
@@ -1777,15 +1779,12 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   uses the same publication fence as the base collection, and current-state
   publication changes produce `409 stale`. The expansion batch-loads
   projection-owned permission summaries for every
-  registration on the served page. The expansion remains partial. A page of
-  non-wrapper resources returns `meta.completeness=partial`,
-  `meta.unsupported_fields=["role_summary"]`, and
-  `unsupported_reason=registrar_erc721_approvals_and_resolver_approvals_delegates_not_supported`.
-  An ENSv1 NameWrapper page uses the same partial classification and
-  unsupported field with
-  `unsupported_reason=parent_and_resolver_delegation_permissions_not_supported`.
-  A page mixing wrapper and non-wrapper registrations uses
-  `unsupported_reason=registrar_erc721_approvals_resolver_approvals_delegates_and_wrapper_permissions_not_supported`.
+  registration on the served page. A page with any unlisted permission surface
+  returns `meta.completeness=partial`,
+  `meta.unsupported_fields=["role_summary"]`,
+  `unsupported_reason=permissions_partially_listed`, and the sorted union of
+  its registrations' `meta.unlisted_permission_surfaces`, using the same codes
+  as `GET /v1/permissions`.
   Projected
   grants remain in `role_summary`, but the expansion is non-authoritative;
   therefore an empty summary is not a proven empty permission set. Missing or

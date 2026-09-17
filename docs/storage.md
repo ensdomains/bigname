@@ -1568,10 +1568,9 @@ Coverage wording is not an exhaustiveness claim. `support_status` and
 `unsupported_reason` carry admission separately from projection completeness.
 `operator_approval_surfaces_not_ingested` maps to partial, best-effort
 permission coverage. The stored projection retains that broad reason for every
-non-wrapper authority class. The serving layer narrows it to the documented
-request-relative registrar/resolver reason, widening that reason to include
-wrapper permissions for account-wide or mixed wrapper and non-wrapper
-role-summary reads. Every such permissions response remains partial.
+non-wrapper authority class. The serving layer maps each stored reason to the
+documented list of unlisted permission surfaces and reports the union for
+account-wide or mixed reads.
 `wrapper_parent_and_resolver_delegation_not_projected` marks NameWrapper
 resources partial: holders, operators, and per-token delegates are projected,
 while parent control of a wrapped subname and resolver delegation are not; the

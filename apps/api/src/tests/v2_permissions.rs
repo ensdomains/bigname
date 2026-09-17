@@ -89,10 +89,7 @@ async fn v2_get_permissions_empties_a_superseded_name_and_registration_pair() ->
     .await?;
     assert_eq!(paired["data"], json!([]));
     assert_eq!(paired["meta"]["completeness"], json!("partial"));
-    assert_eq!(
-        paired["meta"]["unsupported_reason"],
-        json!("parent_and_resolver_delegation_permissions_not_supported")
-    );
+    assert_unlisted_permission_surfaces(&paired, V2_WRAPPER_UNLISTED_SURFACES);
 
     upsert_phase_permissions_current_resource_summary(
         &database.pool,
@@ -102,7 +99,7 @@ async fn v2_get_permissions_empties_a_superseded_name_and_registration_pair() ->
         &database,
         &format!("/v1/permissions?name=perms.eth&registration_id={stale_resource_id}"),
     ).await?;
-    assert_eq!(paired["meta"]["unsupported_reason"], json!(V2_RESOURCE_PERMISSION_REASON));
+    assert_unlisted_permission_surfaces(&paired, V2_UNWRAPPED_UNLISTED_SURFACES);
 
     // Anti-vacuity: the same superseded registration is still readable as a resource audit.
     let audited = v2_permissions_payload_for_database(
@@ -320,10 +317,7 @@ async fn v2_get_permissions_maps_rows_and_lineage() -> Result<()> {
     assert!(payload["meta"].get("as_of").is_some());
     assert!(payload["meta"].get("as_of_token").is_none());
     assert_eq!(payload["meta"]["completeness"], json!("partial"));
-    assert_eq!(
-        payload["meta"]["unsupported_reason"],
-        json!(V2_ACCOUNT_PERMISSION_REASON)
-    );
+    assert_unlisted_permission_surfaces(&payload, V2_ALL_UNLISTED_SURFACES);
     assert!(payload["meta"].get("unsupported_fields").is_none());
 
     let rows = payload["data"]
@@ -583,7 +577,7 @@ async fn v2_permissions_namespace_filters_before_operator_paging() -> Result<()>
 #[tokio::test]
 async fn v2_permissions_resource_reason_names_registrar_and_resolver_gaps() -> Result<()> {
     let (database, payload) = v2_permissions_payload("/v1/permissions?name=perms.eth").await?;
-    assert_eq!(payload["meta"]["unsupported_reason"], json!(V2_RESOURCE_PERMISSION_REASON));
+    assert_unlisted_permission_surfaces(&payload, V2_UNWRAPPED_UNLISTED_SURFACES);
     database.cleanup().await
 }
 
@@ -592,7 +586,7 @@ async fn v2_permissions_account_reason_names_registrar_resolver_and_wrapper_gaps
     let (database, payload) = v2_permissions_payload(&format!(
         "/v1/permissions?address={V2_PERMISSIONS_SUBJECT}"
     )).await?;
-    assert_eq!(payload["meta"]["unsupported_reason"], json!(V2_ACCOUNT_PERMISSION_REASON));
+    assert_unlisted_permission_surfaces(&payload, V2_ALL_UNLISTED_SURFACES);
     database.cleanup().await
 }
 
@@ -604,7 +598,7 @@ async fn v2_permissions_empty_account_result_remains_request_relative_partial() 
     .await?;
     assert_eq!(payload["data"], json!([]));
     assert_eq!(payload["meta"]["completeness"], json!("partial"));
-    assert_eq!(payload["meta"]["unsupported_reason"], json!(V2_ACCOUNT_PERMISSION_REASON));
+    assert_unlisted_permission_surfaces(&payload, V2_ALL_UNLISTED_SURFACES);
     database.cleanup().await
 }
 
@@ -674,10 +668,7 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
             .all(|row| row["registration_id"] == json!(current_resource_id.to_string()))
     );
     assert_eq!(by_name["meta"]["completeness"], json!("partial"));
-    assert_eq!(
-        by_name["meta"]["unsupported_reason"],
-        json!(V2_RESOURCE_PERMISSION_REASON)
-    );
+    assert_unlisted_permission_surfaces(&by_name, V2_UNWRAPPED_UNLISTED_SURFACES);
 
     let by_registration = v2_permissions_payload_for_database(
         &database,
@@ -694,10 +685,7 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
             .all(|row| row["registration_id"] == json!(current_resource_id.to_string()))
     );
     assert_eq!(by_registration["meta"]["completeness"], json!("partial"));
-    assert_eq!(
-        by_registration["meta"]["unsupported_reason"],
-        json!(V2_RESOURCE_PERMISSION_REASON)
-    );
+    assert_unlisted_permission_surfaces(&by_registration, V2_UNWRAPPED_UNLISTED_SURFACES);
 
     let by_address_and_registration = v2_permissions_payload_for_database(
         &database,
@@ -721,10 +709,7 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
         by_address_and_registration["meta"]["completeness"],
         json!("partial")
     );
-    assert_eq!(
-        by_address_and_registration["meta"]["unsupported_reason"],
-        json!(V2_RESOURCE_PERMISSION_REASON)
-    );
+    assert_unlisted_permission_surfaces(&by_address_and_registration, V2_UNWRAPPED_UNLISTED_SURFACES);
 
     database.cleanup().await?;
     Ok(())
@@ -956,10 +941,7 @@ async fn v2_get_permissions_empty_results_return_empty_page() -> Result<()> {
     assert_eq!(by_address["page"]["has_more"], json!(false));
     assert_eq!(by_address["page"]["next_cursor"], Value::Null);
     assert_eq!(by_address["meta"]["completeness"], json!("partial"));
-    assert_eq!(
-        by_address["meta"]["unsupported_reason"],
-        json!(V2_ACCOUNT_PERMISSION_REASON)
-    );
+    assert_unlisted_permission_surfaces(&by_address, V2_ALL_UNLISTED_SURFACES);
 
     let by_missing_name =
         v2_permissions_payload_for_database(&database, "/v1/permissions?name=missing.eth").await?;
@@ -1023,10 +1005,7 @@ async fn v2_permissions_empty_resource_fails_closed_from_typed_support_summary()
     let partial = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(partial["data"], json!([]));
     assert_eq!(partial["meta"]["completeness"], json!("partial"));
-    assert_eq!(
-        partial["meta"]["unsupported_reason"],
-        json!(V2_RESOURCE_PERMISSION_REASON)
-    );
+    assert_unlisted_permission_surfaces(&partial, V2_UNWRAPPED_UNLISTED_SURFACES);
 
     sqlx::query(
         "UPDATE bigname_phase.permissions_current_resource_summary
@@ -1038,8 +1017,10 @@ async fn v2_permissions_empty_resource_fails_closed_from_typed_support_summary()
     .await?;
     let synthetic_full = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(synthetic_full["data"], json!([]));
-    assert_eq!(synthetic_full["meta"]["completeness"], json!("partial"));
-    assert_eq!(synthetic_full["meta"]["unsupported_reason"], json!(V2_RESOURCE_PERMISSION_REASON));
+    // Independently proven full support lists every surface, so nothing is reported.
+    for key in ["completeness", "unsupported_reason", "unlisted_permission_surfaces"] {
+        assert!(synthetic_full["meta"].get(key).is_none(), "{key}");
+    }
 
     upsert_phase_permissions_current_resource_summary(
         &database.pool,
@@ -1049,10 +1030,7 @@ async fn v2_permissions_empty_resource_fails_closed_from_typed_support_summary()
     let wrapper = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(wrapper["data"], json!([]));
     assert_eq!(wrapper["meta"]["completeness"], json!("partial"));
-    assert_eq!(
-        wrapper["meta"]["unsupported_reason"],
-        json!("parent_and_resolver_delegation_permissions_not_supported")
-    );
+    assert_unlisted_permission_surfaces(&wrapper, V2_WRAPPER_UNLISTED_SURFACES);
     assert!(wrapper.get("restrictions").is_none());
 
     database.cleanup().await
@@ -1100,10 +1078,7 @@ async fn v2_permissions_resource_bound_read_serves_wrapper_restrictions() -> Res
         })
     );
     assert_eq!(registration["meta"]["completeness"], json!("partial"));
-    assert_eq!(
-        registration["meta"]["unsupported_reason"],
-        json!("parent_and_resolver_delegation_permissions_not_supported")
-    );
+    assert_unlisted_permission_surfaces(&registration, V2_WRAPPER_UNLISTED_SURFACES);
 
     let by_name =
         v2_permissions_payload_for_database(&database, "/v1/permissions?name=perms.eth").await?;
@@ -1145,10 +1120,7 @@ async fn v2_permissions_resource_bound_read_serves_registry_locked_roles() -> Re
             "locked_roles": ["renew", "transfer"],
         })
     );
-    assert_eq!(
-        payload["meta"]["unsupported_reason"],
-        json!(V2_RESOURCE_PERMISSION_REASON)
-    );
+    assert_unlisted_permission_surfaces(&payload, V2_UNWRAPPED_UNLISTED_SURFACES);
 
     summary.resource_restrictions = None;
     upsert_phase_permissions_current_resource_summary(&database.pool, &summary).await?;
@@ -1226,10 +1198,7 @@ async fn v2_permissions_admit_project_vocabulary_and_exclude_orphaned_projection
     let readable = v2_permissions_payload_for_database(&database, &uri).await?;
     assert!(!readable["data"].as_array().is_none_or(Vec::is_empty));
     assert_eq!(readable["meta"]["completeness"], json!("partial"));
-    assert_eq!(
-        readable["meta"]["unsupported_reason"],
-        json!(V2_RESOURCE_PERMISSION_REASON)
-    );
+    assert_unlisted_permission_surfaces(&readable, V2_UNWRAPPED_UNLISTED_SURFACES);
 
     sqlx::query(
         r#"
@@ -1267,10 +1236,23 @@ const V2_PERMISSIONS_SUBJECT: &str = "0x0000000000000000000000000000000000000cc1
 const V2_PERMISSIONS_OTHER_SUBJECT: &str = "0x0000000000000000000000000000000000000cc2";
 const V2_OPERATOR_OWNER: &str = "0x0000000000000000000000000000000000000a11";
 const V2_OPERATOR_REGISTRY: &str = "0x0000000000000000000000000000000000000c33";
-const V2_RESOURCE_PERMISSION_REASON: &str =
-    "registrar_erc721_approvals_and_resolver_approvals_delegates_not_supported";
-const V2_ACCOUNT_PERMISSION_REASON: &str =
-    "registrar_erc721_approvals_resolver_approvals_delegates_and_wrapper_permissions_not_supported";
+const V2_UNWRAPPED_UNLISTED_SURFACES: &[&str] = &["registrar_approvals", "resolver_approvals"];
+const V2_WRAPPER_UNLISTED_SURFACES: &[&str] = &["resolver_approvals", "wrapper_parent_control"];
+const V2_ALL_UNLISTED_SURFACES: &[&str] = &[
+    "registrar_approvals",
+    "resolver_approvals",
+    "wrapper_parent_control",
+];
+
+// Known partial permission coverage: one generic reason plus the sorted unlisted surfaces.
+fn assert_unlisted_permission_surfaces(payload: &Value, surfaces: &[&str]) {
+    assert_eq!(payload["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        payload["meta"]["unsupported_reason"],
+        json!("permissions_partially_listed")
+    );
+    assert_eq!(payload["meta"]["unlisted_permission_surfaces"], json!(surfaces));
+}
 
 fn operator_row(payload: &Value) -> Option<&Value> {
     payload["data"].as_array()?.iter().find(|row| {

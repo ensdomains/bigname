@@ -821,10 +821,7 @@ async fn v2_address_role_summary_marks_wrapper_empty_as_non_authoritative() -> R
         payload["meta"]["unsupported_fields"],
         json!(["role_summary"])
     );
-    assert_eq!(
-        payload["meta"]["unsupported_reason"],
-        json!("parent_and_resolver_delegation_permissions_not_supported")
-    );
+    assert_unlisted_permission_surfaces(&payload, V2_WRAPPER_UNLISTED_SURFACES);
 
     database.cleanup().await
 }
@@ -907,10 +904,7 @@ async fn v2_address_role_summary_marks_uningested_approvals_non_authoritative() 
         payload["meta"]["unsupported_fields"],
         json!(["role_summary"])
     );
-    assert_eq!(
-        payload["meta"]["unsupported_reason"],
-        json!("registrar_erc721_approvals_and_resolver_approvals_delegates_not_supported")
-    );
+    assert_unlisted_permission_surfaces(&payload, V2_UNWRAPPED_UNLISTED_SURFACES);
 
     database.cleanup().await
 }
@@ -1029,10 +1023,7 @@ async fn v2_get_address_names_include_role_summary_groups_permissions_by_address
         payload["meta"]["unsupported_fields"],
         json!(["role_summary"])
     );
-    assert_eq!(
-        payload["meta"]["unsupported_reason"],
-        json!("registrar_erc721_approvals_and_resolver_approvals_delegates_not_supported")
-    );
+    assert_unlisted_permission_surfaces(&payload, V2_UNWRAPPED_UNLISTED_SURFACES);
 
     database.cleanup().await?;
     Ok(())
@@ -1090,9 +1081,7 @@ async fn v2_address_role_summary_uses_wrapper_reason_for_wrapper_page() -> Resul
         &database,
         &format!("/v1/addresses/{V2_ADDRESS}/names?q=beta&include=role_summary"),
     ).await?;
-    assert_eq!(payload["meta"]["unsupported_reason"], json!(
-        "parent_and_resolver_delegation_permissions_not_supported"
-    ));
+    assert_unlisted_permission_surfaces(&payload, V2_WRAPPER_UNLISTED_SURFACES);
     database.cleanup().await
 }
 
