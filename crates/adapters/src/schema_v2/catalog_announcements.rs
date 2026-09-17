@@ -57,7 +57,7 @@ impl Catalog {
         raw: &RawLogInput,
     ) -> Option<(i64, String)> {
         self.admissions
-            .iter()
+            .for_address(&raw.emitting_address)
             .filter(|admission| {
                 admission.discovery_edge_kind.is_some()
                     && admission
