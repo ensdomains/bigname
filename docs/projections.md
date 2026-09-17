@@ -522,7 +522,8 @@ resource is the keccak of a setter argument rather than a name
 (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64),
 `scope_detail` also keeps the selector the interpreter decoded from that
 argument (`resource_selector`) so reads can say which record the grant is
-about; the interpreter reads the argument under the union of the old and new
+about — recognized by the selector's hash being the resource itself, which
+the node-keyed generation's named-resource selectors never satisfy; the interpreter reads the argument under the union of the old and new
 role bitmaps, and reads keep only the readings the row's effective powers
 still hold. A grant whose argument was never observed keeps a plain scope.
 

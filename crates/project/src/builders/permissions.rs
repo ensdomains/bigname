@@ -30,7 +30,15 @@ pub(super) async fn build(
                    -- resource is the keccak of the argument); the decoded selector says
                    -- which record the resource is about.
                    -- (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64)
-                   CASE WHEN event.after_state -> 'selector' ->> 'kind'
+                   -- Only the record-ID generation's grants carry it: there the
+                   -- selector's hash is the resource itself (keccak of the setter
+                   -- argument). The node-keyed generation's named-resource selectors
+                   -- hash the key alone, or nothing, and describe a node.
+                   -- (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L336-L337 @ ens_v2@a971bd64)
+                   CASE WHEN jsonb_typeof(event.after_state -> 'selector' -> 'hash') = 'string'
+                         AND event.after_state -> 'selector' ->> 'hash' =
+                             event.after_state ->> 'upstream_resource'
+                         AND event.after_state -> 'selector' ->> 'kind'
                              IN ('address', 'text', 'abi', 'interface', 'data', 'argument')
                         THEN event.after_state -> 'scope' || jsonb_build_object(
                             'resource_selector', event.after_state -> 'selector')

@@ -81,7 +81,9 @@ fn permission_scope_chain_id(storage_chain_id: &str) -> V2Result<u64> {
 /// argument authorizes several setters — the list of those. The interpreter reads
 /// the argument under the union of the old and new role bitmaps so it can describe
 /// the revoked side of a change too; a served row keeps only the readings whose
-/// setter the holder currently has (`powers`), so a revoked family drops out. An
+/// setter the holder currently has (`powers`), so a revoked family drops out; an
+/// `admin_set_*` role is authority to grant or revoke the setter, not the setter,
+/// and does not count. An
 /// argument the interpreter could not decode describes nothing and is omitted, as
 /// is a resource whose every reading was revoked. A text or data key that is not
 /// printable UTF-8 is served as `key_bytes` (hex), never as a lookalike string.
@@ -111,9 +113,10 @@ pub(crate) fn record_resource_value(selector: &Value, powers: &Value) -> V2Resul
     };
     let held = |family: &str| {
         powers.as_array().is_some_and(|powers| {
-            powers.iter().filter_map(Value::as_str).any(|power| {
-                power == format!("set_{family}") || power == format!("admin_set_{family}")
-            })
+            powers
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|power| power == format!("set_{family}"))
         })
     };
     let value = match kind {
@@ -355,10 +358,19 @@ mod tests {
         assert_eq!(
             record_resource_value(
                 &json!({"kind": "interface", "key": "0x01ffc9a7", "hash": hash}),
-                &json!(["admin_set_interface"])
+                &json!(["set_interface"])
             )
             .unwrap(),
             Some(json!({"kind": "interface", "hash": hash, "interface_id": "0x01ffc9a7"}))
+        );
+        // The admin role grants the setter to others; it is not the setter.
+        assert_eq!(
+            record_resource_value(
+                &json!({"kind": "interface", "key": "0x01ffc9a7", "hash": hash}),
+                &json!(["admin_set_interface"])
+            )
+            .unwrap(),
+            None
         );
         // A reading whose setter the holder no longer has is not what the holder may set.
         assert_eq!(

@@ -221,6 +221,12 @@ async fn record_resolver_permission_rows_keep_the_decoded_argument_selector() ->
             502,
             json!({"kind": "resource", "key": null, "hash": null}),
         ),
+        // A node-keyed named-resource selector hashes the key, not the resource.
+        (
+            "grant-node-keyed",
+            503,
+            json!({"kind": "text", "key": "url", "hash": hash(777)}),
+        ),
     ] {
         sqlx::query("INSERT INTO resources (resource_id,chain_id,block_hash,block_number,canonicality_state) VALUES ($1::uuid,$2,$3,10,'canonical')")
             .bind(resource_uuid(resource)).bind(CHAIN).bind(hash(10)).execute(&pool).await?;
@@ -250,6 +256,11 @@ async fn record_resolver_permission_rows_keep_the_decoded_argument_selector() ->
     assert!(
         undescribed.get("resource_selector").is_none(),
         "{undescribed}"
+    );
+    let node_keyed = selector_of(503).await?;
+    assert!(
+        node_keyed.get("resource_selector").is_none(),
+        "{node_keyed}"
     );
     db.cleanup().await?;
     Ok(())
