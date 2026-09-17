@@ -94,8 +94,16 @@ the default-entry fallback only when that rule returns a positive chain ID
 `(upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)`
 `(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)`
 `(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)`.
-The official Sepolia resolvers share this fallback through `AbstractRecordResolver`
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractRecordResolver.sol:L168-L177 @ ens_v2_sepolia_20260916@366de741).
+The two official Sepolia resolvers that carry this fallback get it from different code.
+`PermissionedResolver` inherits it from `AbstractRecordResolver`
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L80-L83 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractRecordResolver.sol:L169-L178 @ ens_v2_sepolia_20260916@366de741).
+`PublicResolverV2` does not inherit `AbstractRecordResolver`; it composes the ENSv1 `AddrResolver`
+profile, and the profile source in its deployment compiler input carries the same fallback (the
+cited build-info line holds that whole source file)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PublicResolverV2.sol:L23-L35 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PublicResolverV2.json:L1272 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/build-info/solc-0_8_25-32c5cc51dc76e0217cc18fd81b550ff63339308e.json:L184 @ ens_v2_sepolia_20260916@366de741).
 
 | Address read | Indexed | Auto | Verified |
 | --- | --- | --- | --- |
