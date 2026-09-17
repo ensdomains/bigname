@@ -952,7 +952,7 @@ async fn v2_get_primary_name_rejects_malformed_address() -> Result<()> {
 // Forward verification consults the claimed name's selected exact-name authority before it
 // dispatches anything. The RPC endpoint here is dead, so reaching a provider at all would fail the
 // whole request with 500: a successful in-band unsupported answer is the proof no call went out.
-/// Widens the seeded `ens_execution` manifest to admit the ENSv2 arm, as the sepolia-hackathon
+/// Widens the seeded `ens_execution` manifest to admit the ENSv2 arm, as the `sepolia`
 /// profile declares (`docs/manifests.md` § `verified_authority_arms`). The seeded default admits
 /// only `ens_v1`.
 async fn admit_ens_v2_arm_on_execution_entrypoint(pool: &PgPool) -> Result<()> {
