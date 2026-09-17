@@ -719,6 +719,38 @@ CREATE INDEX IF NOT EXISTS normalized_events_project_primary_before_source_idx
       AND (before_state -> 'primary_claim_source' ->> 'coin_type') IS NOT NULL
       AND (before_state -> 'primary_claim_source' ->> 'namespace') IS NOT NULL;
 
+-- Interpret's per-batch ENSv1 lookahead loader reads prior state for the names one batch
+-- touches. The first index finds registrar events whose expiry falls in a time range; its
+-- expression parses any stored expiry without raising (strip leading zeros, bound the digit
+-- count before casting) and must stay identical to
+-- crates/interpret/src/load/lookahead/due_names.sql. The second finds every ENSv1 event of
+-- one name: a registry NewOwner is filed under its child, never under the parent, and an
+-- event with no name field falls back to its logical name. It must stay identical to
+-- crates/interpret/src/load/lookahead/events.sql.
+CREATE INDEX IF NOT EXISTS normalized_events_v1_due_probe_idx
+    ON normalized_events (
+        chain_id,
+        (CASE WHEN jsonb_typeof(after_state -> 'expiry') IN ('number','string')
+            AND after_state ->> 'expiry' ~ '^[+-]?[0-9]+$'
+            AND length(ltrim(after_state ->> 'expiry', '+-0')) <= 19
+          THEN ((CASE WHEN left(after_state ->> 'expiry', 1) = '-' THEN '-' ELSE '' END)
+            || COALESCE(NULLIF(ltrim(after_state ->> 'expiry', '+-0'), ''), '0'))::numeric
+        END),
+        block_number
+    )
+    WHERE canonicality_state IN ('canonical','safe','finalized')
+      AND source_family = 'ens_v1_registrar_l1'
+      AND event_kind IN ('RegistrationGranted','RegistrationRenewed','TokenControlTransferred');
+
+CREATE INDEX IF NOT EXISTS normalized_events_v1_direct_node_probe_idx
+    ON normalized_events (
+        chain_id,
+        (COALESCE(namespace || ':' || lower(COALESCE(after_state ->> 'child_node', after_state ->> 'namehash', after_state ->> 'node', after_state #>> '{grant_source,node}', after_state #>> '{revocation_source,node}')), logical_name_id)),
+        block_number
+    )
+    WHERE canonicality_state IN ('canonical','safe','finalized')
+      AND source_family LIKE 'ens\_v1\_%';
+
 CREATE INDEX IF NOT EXISTS normalized_events_projection_idx
     ON normalized_events (
         event_kind,

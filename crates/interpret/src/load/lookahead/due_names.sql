@@ -1,5 +1,6 @@
 -- Candidate superset, not a claim these registrations are still live.
--- Matches ops/experimental/v1-lookahead-indexes.sql; numeric arithmetic avoids overflow.
+-- The expiry expression must stay identical to normalized_events_v1_due_probe_idx in
+-- schema-v2/baseline/05_normalized_events.sql; numeric arithmetic avoids overflow.
 WITH candidates AS (
 SELECT DISTINCT event.namespace || ':' || lower(COALESCE(
     event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node'

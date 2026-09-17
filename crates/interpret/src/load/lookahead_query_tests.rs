@@ -22,12 +22,6 @@ async fn database() -> Result<TestDatabase> {
     }
     sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) SELECT $1,'block-'||n,n,to_timestamp(n),'canonical' FROM generate_series(1,8) n")
         .bind(CHAIN).execute(db.pool()).await?;
-    // The explicit experimental DDL must install on the actual baseline. Concurrent
-    // creation is an operator concern; fixtures install the same expressions normally.
-    let indexes = include_str!("../../../../ops/experimental/v1-lookahead-indexes.sql")
-        .replace("CONCURRENTLY ", "")
-        .replace("bigname_phase.", "public.");
-    sqlx::raw_sql(&indexes).execute(db.pool()).await?;
     Ok(db)
 }
 
