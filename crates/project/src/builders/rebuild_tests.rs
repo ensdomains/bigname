@@ -451,3 +451,62 @@ async fn address_names_read_authority_events_once() -> Result<()> {
     );
     rebuild.finish().await
 }
+
+/// `sql` with exactly one occurrence of `current` swapped for `previous`.
+fn swapped(sql: &str, current: &str, previous: &str) -> String {
+    assert_eq!(sql.matches(current).count(), 1, "rewritten text: {current}");
+    sql.replacen(current, previous, 1)
+}
+
+/// `locked_roles` asked, per resource and role, whether an admin row exists for the resource or
+/// its root. The `IN (resource, root)` test kept that from being a join, so every resource read
+/// all staged permission rows. It is now two joins on the per-resource admin set.
+#[tokio::test]
+async fn resource_summary_matches_the_correlated_admin_lookup() -> Result<()> {
+    let current = super::permissions::resource_summary::query();
+    let previous = swapped(
+        &swapped(
+            &swapped(&current, "v2_admin_powers AS MATERIALIZED (", "v2_admin_powers AS ("),
+            "        LEFT JOIN v2_admin_powers own_admins ON own_admins.resource_id = resource.resource_id
+        LEFT JOIN v2_admin_powers root_admins
+          ON root_admins.resource_id = root_resource.resource_id\n",
+            "",
+        ),
+        "            WHERE NOT COALESCE(role.admin = ANY(own_admins.admins), false)
+              AND NOT COALESCE(role.admin = ANY(root_admins.admins), false)\n",
+        include_str!("../../tests/rebuild_performance/previous_resource_summary_locks.sql"),
+    );
+    let mut rebuild = Rebuild::through("rebuild_equal_summary", 600, Builder::Permissions).await?;
+    let stage = "project_stage_permissions_current_resource_summary";
+    rebuild.rerun_with(stage, &previous).await?;
+    rebuild.assert_same_rows("current_rows", stage).await?;
+    // Registrations with their own admin holder, with only the root's, and the root itself.
+    let lock_sets: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT resource_restrictions -> 'locked_roles') FROM current_rows
+         WHERE resource_restrictions ->> 'kind' = 'ens_v2_registry'",
+    )
+    .fetch_one(&mut *rebuild.transaction)
+    .await?;
+    ensure!(
+        lock_sets >= 2,
+        "the seed yields {lock_sets} distinct locked-role sets"
+    );
+    rebuild.finish().await
+}
+
+#[tokio::test]
+async fn resource_summary_reads_the_staged_permissions_a_fixed_number_of_times() -> Result<()> {
+    let mut rebuild =
+        Rebuild::through("rebuild_plan_summary", PLAN_NAMES, Builder::Permissions).await?;
+    let plan = rebuild
+        .explain(&super::permissions::resource_summary::query())
+        .await?;
+    for relation in ["project_stage_permissions_current", "v2_admin_powers"] {
+        let rows = rows_read(&plan, relation);
+        ensure!(
+            rows <= 20.0 * PLAN_NAMES as f64,
+            "{relation} rows handled: {rows}; {plan}"
+        );
+    }
+    rebuild.finish().await
+}

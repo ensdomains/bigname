@@ -1,5 +1,5 @@
 mod expiry_retirement;
-mod resource_summary;
+pub(super) mod resource_summary;
 mod wrapper_operators;
 
 use crate::{Marker, ProjectError, Result};
