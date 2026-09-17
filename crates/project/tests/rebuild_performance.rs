@@ -8,6 +8,8 @@
 //! It seeds `rebuild_performance/seed.sql`, projects it from zero, and writes what `auto_explain`
 //! reports for every statement slower than `REBUILD_BENCHMARK_MIN_MS` (default 20) to the log
 //! file. The plans reach the client as `LOG` notices, so no access to the server log is needed.
+//! `auto_explain` does not report utility statements (`CREATE INDEX`, `ANALYZE`, `ALTER TABLE`),
+//! so the file also carries sqlx's own line per statement with its elapsed time.
 use std::{fs::File, sync::Mutex, time::Instant};
 
 use anyhow::{Context, Result};
@@ -40,7 +42,9 @@ async fn full_rebuild_statement_timings() -> Result<()> {
     let log = std::env::var("REBUILD_BENCHMARK_LOG").context("REBUILD_BENCHMARK_LOG")?;
     let min_ms = std::env::var("REBUILD_BENCHMARK_MIN_MS").unwrap_or_else(|_| "20".to_owned());
     fmt()
-        .with_env_filter(EnvFilter::new("off,sqlx::postgres::notice=trace"))
+        .with_env_filter(EnvFilter::new(
+            "off,sqlx::postgres::notice=trace,sqlx::query=debug",
+        ))
         .with_ansi(false)
         .with_writer(Mutex::new(File::create(&log)?))
         .init();
@@ -69,8 +73,13 @@ async fn full_rebuild_statement_timings() -> Result<()> {
     ] {
         raw_sql(script).execute(&mut *transaction).await?;
     }
+    // `REBUILD_BENCHMARK_SEED` swaps in another seed file, to repeat a run recorded earlier.
+    let seed = match std::env::var("REBUILD_BENCHMARK_SEED") {
+        Ok(file) => std::fs::read_to_string(file)?,
+        Err(_) => SEED.to_owned(),
+    };
     raw_sql(
-        &SEED
+        &seed
             .replace("__NAMES__", &names.to_string())
             .replace("__CHAIN__", CHAIN),
     )
