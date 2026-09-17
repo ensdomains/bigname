@@ -184,11 +184,14 @@ call, and any spelling of the phase schema other than `bigname_phase` is
 refused, so a search-path-relative name cannot be written outside the
 inventory whatever statement carries it. `schema-v2/migration-inventory.txt`
 lists every schema-migration file in order, and the directory must equal it
-exactly: sqlx applies whichever versions a database has not recorded, so a
-new file named to sort anywhere below the head would run on an initialized
-database while looking historical or already frozen, and the check refuses
-it — a schema-migration lands by joining the inventory and advancing the
-head in the same change. Inside the inventory the
+exactly; and because the inventory is itself editable, the check also reads
+the previous inventory — the base branch's on a pull request, the parent
+commit's on a push — and refuses any new entry that sorts at or below the
+previous head, and any previous entry that is gone: sqlx applies whichever
+versions a database has not recorded, so a file named to sort below the
+head would run on an initialized database while the freeze recorded
+nothing. A schema-migration lands by joining the inventory after the head
+and advancing the head in the same change. Inside the inventory the
 rewrite is textual — the literal `bigname_phase` becomes the scratch schema —
 so it cannot see a name a migration assembles at run time (`'bigname_' ||
 'phase.…'` inside `EXECUTE`, or a search-path-relative name in a `DO` body).
@@ -200,8 +203,9 @@ proves itself on every run against a planted set of the forms it refuses and
 the one it accepts, including an assembled production name that must be
 refused — after `RESET ROLE` too — and its rewritten twin that must succeed.
 Finally the frozen artifact itself is a checked-in catalog:
-`schema-v2/frozen-schema.txt` is every relation, column, default, constraint,
-index, view, routine, trigger, sequence, type and comment of the baseline
+`schema-v2/frozen-schema.txt` is every relation, column (type, nullability,
+default, identity, generation, collation), constraint, index, view, routine,
+trigger, sequence, type and comment of the baseline
 plus the inventoried schema-migrations, built into a fresh schema on every
 run and compared line for line, so a change to a baseline file or a
 schema-migration that moves the schema fails until the catalog is

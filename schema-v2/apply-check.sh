@@ -211,11 +211,22 @@ migration_uses_unicode_escape() {
 # SCHEMA_V2_APPLY_CHECK_WRITE_FINGERPRINT=1 in the change that moves the schema.
 frozen_schema_catalog_sql='
 SELECT line FROM (
-    SELECT 1 AS section, c.relname AS a, lpad(a.attnum::text, 4, '"'"'0'"'"') AS b,
-           format('"'"'column %s.%s %s %s %s'"'"', c.relname, a.attname,
+    SELECT 0 AS section, c.relname AS a, '"'"''"'"' AS b,
+           format('"'"'relation %s kind=%s persistence=%s'"'"', c.relname, c.relkind, c.relpersistence) AS line
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = current_schema() AND c.relkind IN ('"'"'r'"'"', '"'"'p'"'"', '"'"'v'"'"', '"'"'m'"'"', '"'"'S'"'"')
+    UNION ALL
+    SELECT 1, c.relname, lpad(a.attnum::text, 4, '"'"'0'"'"'),
+           format('"'"'column %s.%s %s %s default=%s identity=%s generated=%s collation=%s'"'"',
+                  c.relname, a.attname,
                   format_type(a.atttypid, a.atttypmod),
                   CASE WHEN a.attnotnull THEN '"'"'not null'"'"' ELSE '"'"'null'"'"' END,
-                  COALESCE(pg_get_expr(d.adbin, d.adrelid), '"'"'-'"'"')) AS line
+                  COALESCE(pg_get_expr(d.adbin, d.adrelid), '"'"'-'"'"'),
+                  COALESCE(NULLIF(a.attidentity, '"'"''"'"'), '"'"'-'"'"'),
+                  COALESCE(NULLIF(a.attgenerated, '"'"''"'"'), '"'"'-'"'"'),
+                  COALESCE((SELECT quote_ident(col.collname) FROM pg_collation col
+                            WHERE col.oid = a.attcollation AND a.attcollation <> 0), '"'"'-'"'"'))
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
     JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
@@ -326,6 +337,61 @@ assert_documented_head_is_newest_migration() {
             exit 1
         fi
     done
+}
+# The inventory and the catalog are editable in the same change, so a file
+# inserted below the head could join both. What tells an insertion from frozen
+# history is the previous inventory: on a pull request the base branch's, on a
+# push the parent commit's. Every entry that was not there before must sort
+# after the head that was, and nothing that was there may go.
+assert_no_migration_below_prior_head() {
+    local prior prior_head entry
+    prior="$(prior_migration_inventory)" || return 0
+    prior_head="$(printf '%s\n' "$prior" | tail -n 1)"
+    [ -n "$prior_head" ] || return 0
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        if ! printf '%s\n' "$prior" | grep -qxF -- "$entry"; then
+            if ! [[ "$entry" > "$prior_head" ]]; then
+                printf '%s\n' \
+                    "$entry is new but sorts at or below the previous head $prior_head; sqlx would apply it to an initialized database while the freeze recorded nothing" >&2
+                exit 1
+            fi
+        fi
+    done < "$migration_inventory"
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        if ! grep -qxF -- "$entry" "$migration_inventory"; then
+            printf '%s\n' "$entry was in the previous inventory and is gone; frozen history is immutable" >&2
+            exit 1
+        fi
+    done <<< "$prior"
+}
+# The previous inventory, or a nonzero status (with a note) when no history is
+# reachable, which only a checkout without git or without a base can produce.
+# SCHEMA_V2_PRIOR_INVENTORY_REF names the comparison point explicitly.
+prior_migration_inventory() {
+    local base
+    if ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+        printf '%s\n' "note: no git history, previous inventory not compared" >&2
+        return 1
+    fi
+    if [ -n "${SCHEMA_V2_PRIOR_INVENTORY_REF:-}" ]; then
+        base="$SCHEMA_V2_PRIOR_INVENTORY_REF"
+    elif [ -n "${GITHUB_BASE_REF:-}" ]; then
+        git -C "$ROOT" fetch -q --depth=1 origin "$GITHUB_BASE_REF" 2>/dev/null || true
+        base="FETCH_HEAD"
+    elif git -C "$ROOT" rev-parse --verify -q origin/main >/dev/null 2>&1 \
+        && ! git -C "$ROOT" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+        base="origin/main"
+    else
+        git -C "$ROOT" fetch -q --deepen=1 origin 2>/dev/null || true
+        base="HEAD~1"
+    fi
+    if ! git -C "$ROOT" cat-file -e "$base:schema-v2/migration-inventory.txt" 2>/dev/null; then
+        printf '%s\n' "note: $base has no migration inventory, previous inventory not compared" >&2
+        return 1
+    fi
+    git -C "$ROOT" show "$base:schema-v2/migration-inventory.txt"
 }
 assert_uninventoried_migrations_are_schema_qualified() {
     local migration_file migration_basename reason noncanonical
@@ -742,7 +808,7 @@ if [ -n "${BIGNAME_DATABASE_URL:-}" ]; then
         url_query="${url_path#*\?}"
         url_path="${url_path%%\?*}"
         url_query="$(printf '%s' "$url_query" | tr '&' '\n' \
-            | grep -vE '^(user|password|passfile)=' | paste -sd '&' -)"
+            | { grep -vE '^(user|password|passfile)=' || true; } | paste -sd '&' -)"
     fi
     apply_check_url="${url_scheme}${apply_check_role}:${apply_check_role_password}@${url_authority##*@}${url_path}${url_query:+?$url_query}"
 fi
@@ -787,7 +853,7 @@ trap cleanup EXIT
         "$apply_check_role" "$apply_check_role_password"
     printf 'CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public;\n'
     printf 'CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;\n'
-    printf "SELECT format('GRANT CREATE ON DATABASE %%I TO %%I', current_database(), '%s') \\gexec\n" "$apply_check_role"
+    printf "SELECT format('GRANT CONNECT, CREATE ON DATABASE %%I TO %%I', current_database(), '%s') \\gexec\n" "$apply_check_role"
 } | run_psql_as_owner
 
 frozen_schema="${scratch_schema}_frozen"
@@ -8033,6 +8099,7 @@ report_timing specialized-predecessor "$refusal_probe_seconds"
 if [ "${SCHEMA_V2_APPLY_CHECK_TIMING:-0}" = 1 ]; then printf 'schema-v2 timing: refusal-probes=%ss\n' "$refusal_probe_seconds"; fi
 assert_uninventoried_migrations_are_schema_qualified
 assert_documented_head_is_newest_migration
+assert_no_migration_below_prior_head
 assert_frozen_schema_fingerprint
 assert_reviewed_phase_migrations_applied
 if [ "$refusal_assertions_passed" -ne "$expected_refusal_assertions" ]; then
