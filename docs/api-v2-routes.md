@@ -1227,6 +1227,18 @@ They can be combined in any order. Other values return `400 invalid_input`.
 Without either payload flag, rows keep their lean shape and carry none of the
 fields below; requesting an exact total does not expand event rows.
 
+Every event row on the three collections carries `id`, an opaque
+64-character identifier that is unique per row and identical for the same
+event wherever it appears — on `/v1/events`, in name history, in address
+history, and across pages — so a consumer merging feeds can de-duplicate on
+it. Nothing else in the row is an identity: rows derived from interpreter
+state rather than from one log have no `transaction_hash` or `log_index`,
+and several rows can share one log. `id` is stable across pages, snapshots,
+and a redo that re-derives the same blocks on the same chain fork; a reorg
+that replaces a block yields new rows with new ids, and a
+[re-derivation boundary](glossary.md#re-derivation-boundary) may change
+every id, so it is a merge key, not a durable reference to store.
+
 `include=data` adds two fields to every returned row:
 
 - `contract_address`: the lower-cased address of the contract that emitted the
@@ -1305,8 +1317,9 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   `include=data` and `include=raw` add the [history event
   payloads](#history-event-payloads-includedata-includeraw).
 - Response shape: `data` is an array of dedicated lean event rows:
-  `{type, name, namespace, registration_id, block_number, timestamp,
-  transaction_hash, log_index}`. `registration_id` carries actual registration
+  `{id, type, name, namespace, registration_id, block_number, timestamp,
+  transaction_hash, log_index}`, `id` being the opaque row identity of the
+  [shared payload contract](#history-event-payloads-includedata-includeraw). `registration_id` carries actual registration
   lifecycle identity and is `null` when the event is not associated with a
   registration; reservation facts never carry one. The shared event-identity
   contract, including the committed companion change that adds `resource_id`

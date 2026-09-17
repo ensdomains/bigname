@@ -60,6 +60,7 @@ pub(crate) type EventsQuery = StrictQueryParams<EventsQueryParams>;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct Event {
+    pub(crate) id: String,
     #[serde(rename = "type")]
     pub(crate) event_type: HistoryEventType,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -219,6 +220,7 @@ pub(crate) fn build_event(
     let event_type = history_event_type(&row.event_kind)?;
 
     Some(Event {
+        id: super::history_event_id(row),
         event_type,
         name: name.map(str::to_owned),
         namespace: row.namespace.clone(),
