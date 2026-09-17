@@ -37,6 +37,8 @@ pub struct NameCurrentExpiringFilter {
 /// Load a bounded page of supported current names whose registration expiry falls in the window,
 /// ordered by expiry then by name identity. Rows with no numeric `registration.expiry` are never
 /// listed, so the page carries no null-expiry rows in either order.
+/// A released name keeps its lapsed registration's numeric expiry and stays listed: the window
+/// selects registrations by expiry, whether they are live, in grace or released.
 pub async fn load_name_current_expiring_page(
     pool: &PgPool,
     filter: &NameCurrentExpiringFilter,

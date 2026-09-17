@@ -497,6 +497,15 @@ collection route carry neither header.
   in another form (an RFC 3339 string at `control.expiry`, or no expiry at all)
   is outside this listing by design; `GET /v1/names/{name}` still serves its
   `expires_at`.
+- Released names: the listing means "registrations whose expiry falls in this
+  window", whether the registration is live, in grace or released. A released
+  name keeps the lapsed registration's expiry, so it appears in every window
+  that covers that old expiry, for ENSv1 `.eth` leases and ENSv2 registrations
+  alike. Its row has `registration_status: released`, its old `expires_at`, and
+  no `owner` or `registrant`. The row shape has no `lapsed_registration` field;
+  `GET /v1/names/{name}` serves that block, with the last holder, for a released
+  ENSv1 name. A client that wants only held names filters rows on
+  `registration_status`.
 - Pagination behavior: standard collection pagination by `expires_at` in the
   requested order, ties broken by namespace, name, and namehash. Cursors are
   bound to namespace, both bounds, and order. `page.total_count` is `null`.
