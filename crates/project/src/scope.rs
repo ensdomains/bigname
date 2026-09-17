@@ -18,6 +18,7 @@ mod resolver_dependents;
 mod retracted;
 mod topology;
 mod wrapper;
+mod wrapper_registrar;
 
 use binding_closure::close_binding_scope;
 

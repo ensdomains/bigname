@@ -9,6 +9,12 @@ pub(super) async fn close_binding_scope(
 ) -> Result<()> {
     super::authority::include_latest_arm_resources(transaction, chain_id, target.number).await?;
     super::resolver::include_registry_read_anchors(transaction, chain_id, target.number).await?;
+    super::wrapper_registrar::include_names_for_scoped_registrars(
+        transaction,
+        chain_id,
+        target.number,
+    )
+    .await?;
     sqlx::query(
         "INSERT INTO project_scope_resources
          SELECT binding.resource_id
@@ -40,6 +46,13 @@ pub(super) async fn close_binding_scope(
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to close resource binding scope", error))?;
+
+    super::wrapper_registrar::include_registrars_for_scoped_wrappers(
+        transaction,
+        chain_id,
+        target.number,
+    )
+    .await?;
 
     sqlx::query(
         "INSERT INTO project_scope_names

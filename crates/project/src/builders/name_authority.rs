@@ -6,7 +6,7 @@ pub(super) async fn build(
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
-    stage::ownerless_registry(transaction).await?;
+    stage::prepare(transaction).await?;
     sqlx::query(include_str!("name_authority/build.sql"))
         .bind(chain_id)
         .bind(target.number)
