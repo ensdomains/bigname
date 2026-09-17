@@ -10,6 +10,23 @@ normalizer_version = "ensip15@ens-normalize-0.1.1"
 roots = []
 discovery_rules = []
 
+# Constructor argument 1 (`nameWrapper`) of both declared migration controllers, and argument 7 of
+# the official ETHRenewerV1, fix the ENSv1 NameWrapper whose events are correlated. It is the
+# Sepolia ENSv1 NameWrapper deployment. This is correlation metadata, not a watched contract.
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/UnlockedMigrationController.sol:L56-L67 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/UnlockedMigrationController.json:L624 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/LockedMigrationController.json:L744 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRenewerV1.json:L949 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L2 @ ens_v1@91c966f)
+# The unlocked controller and the Graveyard read their BaseRegistrar from
+# `nameWrapper.registrar()`, which the Sepolia NameWrapper fixed at construction (constructor
+# argument 2) to the ENSv1 BaseRegistrar deployment.
+# BaseRegistrar logs are attributed by ens_v1_registrar_l1; this value does not widen the watch plan.
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/UnlockedMigrationController.sol:L66 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L78 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L59-L65 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L1517-L1521 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L2 @ ens_v1@91c966f)
 [correlation_addresses]
 ens_v1_name_wrapper = "0x0635513f179D50A207757E05759CbD106d7dFcE8"
 ens_v1_base_registrar = "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85"

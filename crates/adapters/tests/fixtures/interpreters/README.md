@@ -177,7 +177,7 @@ original receipt and manifest SHA-256 values. The actual order is numeric regist
 at 414, and the ten-log migration at 415. The numeric lease lasts 60 seconds; migration occurs
 49 seconds before that expiry. The V2 reservation retains the longer expiry.
 
-`numeric_short_lease.rs` is the shared test-input seam: it uses the shipped hackathon manifest
+`numeric_short_lease.rs` is the shared test-input seam: it uses the shipped Sepolia manifest
 ABIs and numeric admission with the fixture's disposable addresses and zero start blocks.
 It supplies no prior registrar state, controller event, fabricated renewal or cleanup event.
 Unknown execution-wallet receipt logs remain in the input and are not selected by those source
