@@ -1131,7 +1131,7 @@ registrar adapter runs the BaseRegistrar path for an event only when that event 
 `RegistrationGranted`. Where the BaseRegistrar's own numeric events create the lease, a reveal of
 the label is never a rewrite. A controller event that names the lease writes a binding and
 replays the current resolver onto the name, a wrap records the wrapped lease's `resource_id` on
-its own rows, and Project attaches the immutable resource-keyed lifecycle rows to the name
+the rows listed in [storage semantics](storage.md), and Project attaches the immutable resource-keyed lifecycle rows to the name
 through those two identities. See [storage semantics](storage.md) and
 [projections](projections.md#exact-name-projection).
 

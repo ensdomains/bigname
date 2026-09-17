@@ -356,7 +356,8 @@ from the surviving wrapper history.
 
 ENSv1 BaseRegistrar lifecycle rows (`RegistrationGranted`, `RegistrationRenewed`,
 `ExpiryChanged`, `RegistrationReleased`, and the registrar's `TokenControlTransferred`) can carry
-no `logical_name_id`, because the registrar's own events identify a lease by labelhash only.
+no `logical_name_id`, because the registrar's own events identify a lease by labelhash only
+(upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L10-L20 @ ens_v1@91c966f).
 Project gives such a row its name while staging a build, by exact identity and never by label or
 time. Only these `ens_v1_registrar_l1` rows are named this way. A row of any other source family
 that carries a resource but no name, for example an ENSv1 registry row written before the label
@@ -391,13 +392,17 @@ before registrar rows were joined by resource identity.
   where the controller event grants the lease.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L305 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
 
 The served registrant of a wrapped name follows the chain: the `NameWrapped` owner, then each
 later NameWrapper transfer. The registrar `Transfer` that moves the token into the NameWrapper
 during a later wrap is left out of the registrant fold: it is custody moving to the wrapper
 contract, not a change of holder, and the person who holds the name afterwards is the
 `NameWrapped` owner recorded next in the same transaction.
-(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f) `declared_summary.registration.resource_id` names the registration of an ENSv1 name by its
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f)
+
+`declared_summary.registration.resource_id` names the registration of an ENSv1 name by its
 BaseRegistrar lease: the selected registration's own resource, or the lease the current wrapper
 binding recorded. It is the lease whether the name was wrapped at registration or later, and
 stays the same through unwrap and rewrap. It is `null` for ENSv2 registrations. No API route
