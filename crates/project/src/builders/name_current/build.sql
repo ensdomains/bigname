@@ -39,7 +39,12 @@
                        END,
                        'authority_kind', authority_context.authority_kind,
                        'authority_key', authority_context.authority_key,
-                       'resource_id', product_registration.resource_id,
+                       -- The registration's identity is its BaseRegistrar lease, also while the
+                       -- name is wrapped and whether it was wrapped at or after registration.
+                       -- ENSv2 registrations keep the bound resource as their identity.
+                       'resource_id', CASE
+                           WHEN NOT COALESCE(selected_registration.is_v2_lifecycle, false)
+                               THEN lifecycle.registrar_resource_id END,
                        'registrant', registrant.registrant,
                        'expiry', CASE
                            WHEN selected_registration.is_v2_lifecycle
@@ -336,24 +341,6 @@
                 LIMIT 1
             ), selected_registration.resource_id) AS registrar_resource_id
         ) lifecycle CROSS JOIN LATERAL (
-            SELECT COALESCE((
-                SELECT born_wrapper.resource_id
-                FROM project_events registrar_grant
-                JOIN project_events born_wrapper
-                  ON born_wrapper.chain_id = registrar_grant.chain_id
-                 AND born_wrapper.logical_name_id = surface.logical_name_id
-                 AND born_wrapper.transaction_hash = registrar_grant.transaction_hash
-                 AND (born_wrapper.after_state ->> 'wrapped_registrar_resource_id')::uuid = registrar_grant.resource_id
-                WHERE registrar_grant.resource_id = lifecycle.registrar_resource_id
-                  AND registrar_grant.event_kind = 'RegistrationGranted'
-                  AND registrar_grant.source_family = 'ens_v1_registrar_l1'
-                  AND born_wrapper.event_kind = 'SurfaceBound'
-                  AND born_wrapper.source_family = 'ens_v1_wrapper_l1'
-                ORDER BY born_wrapper.block_number NULLS LAST,
-                         born_wrapper.normalized_event_id
-                LIMIT 1
-            ), lifecycle.registrar_resource_id) AS resource_id
-        ) product_registration CROSS JOIN LATERAL (
             SELECT CASE WHEN identity.mismatch THEN NULL ELSE binding.surface_binding_id END AS surface_binding_id,
                    CASE WHEN identity.mismatch THEN NULL ELSE binding.resource_id END AS resource_id, CASE WHEN identity.mismatch THEN NULL ELSE binding.binding_kind END AS binding_kind,
                    CASE WHEN identity.has_lifecycle THEN selected_registration.resource_id ELSE binding.resource_id END AS event_resource_id FROM (SELECT selected_registration.is_v2_lifecycle AND selected_registration.event_kind IS NOT NULL AS has_lifecycle,

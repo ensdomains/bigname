@@ -3638,8 +3638,8 @@ async fn project_later_wrapper_delta(
                 .await?;
                 assert_eq!(
                     unwrapped_registration.as_deref(),
-                    Some(CONTROL_RESOURCE),
-                    "the first wrapper handle changed while the lifecycle was unwrapped"
+                    Some(OWNERLESS_RESOURCE),
+                    "the registrar lease handle changed while the lifecycle was unwrapped"
                 );
             }
             seed_next_binding(
@@ -4081,8 +4081,11 @@ async fn later_wrapper_deltas_project_identically_incrementally_and_from_zero() 
     Ok(())
 }
 
+/// A name registered through the NameWrapper is identified by its BaseRegistrar lease, the same
+/// as a name wrapped later; a re-wrap mints a new NameWrapper resource and changes nothing.
 #[tokio::test]
-async fn born_wrapped_rewrap_keeps_the_first_wrapper_registration_identity() -> Result<()> {
+async fn rewrap_of_a_name_wrapped_at_registration_keeps_the_registrar_lease_identity() -> Result<()>
+{
     let incremental =
         project_later_wrapper_delta(LaterWrapperDelta::Rewrap, true, false, true).await?;
     let from_zero =
@@ -4093,8 +4096,9 @@ async fn born_wrapped_rewrap_keeps_the_first_wrapper_registration_identity() -> 
     );
     assert_eq!(
         incremental.registration_resource_id.as_deref(),
-        Some(CONTROL_RESOURCE),
-        "a later wrapper split the registrar-born lifecycle away from its first wrapper handle"
+        Some(OWNERLESS_RESOURCE),
+        "a name wrapped at registration must be identified by its registrar lease, not a \
+         NameWrapper resource"
     );
     assert_eq!(
         incremental.registrant.as_deref(),
@@ -4105,7 +4109,8 @@ async fn born_wrapped_rewrap_keeps_the_first_wrapper_registration_identity() -> 
 }
 
 #[tokio::test]
-async fn born_wrapped_release_keeps_the_wrapper_registration_identity() -> Result<()> {
+async fn release_of_a_name_wrapped_at_registration_keeps_the_registrar_lease_identity() -> Result<()>
+{
     let incremental =
         project_later_wrapper_delta(LaterWrapperDelta::RegistrarRelease, true, false, true).await?;
     let from_zero =
@@ -4115,7 +4120,7 @@ async fn born_wrapped_release_keeps_the_wrapper_registration_identity() -> Resul
     assert_eq!(incremental.registration_status.as_deref(), Some("released"));
     assert_eq!(
         incremental.registration_resource_id.as_deref(),
-        Some(CONTROL_RESOURCE)
+        Some(OWNERLESS_RESOURCE)
     );
     assert_eq!(
         incremental.address_registrant, None,
@@ -4148,11 +4153,7 @@ async fn registry_update_after_wrapper_release_preserves_registration_history() 
         assert_eq!(incremental.registration_status.as_deref(), Some("released"));
         assert_eq!(
             incremental.registration_resource_id.as_deref(),
-            Some(if born_wrapped {
-                CONTROL_RESOURCE
-            } else {
-                OWNERLESS_RESOURCE
-            })
+            Some(OWNERLESS_RESOURCE)
         );
         // Born-wrapped registration starts in the wrapping block; later wrapping
         // retains the earlier start. The unrelated block-10 grant cannot win.
