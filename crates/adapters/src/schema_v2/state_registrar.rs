@@ -6,6 +6,14 @@ pub(in crate::schema_v2) fn v1_key(namespace: &str, namehash: &str) -> String {
     key
 }
 
+/// Key of `known_surfaces`, which keeps the caller's spelling of the namehash. Reading it
+/// through this function reports the name to the lookahead coverage check, like `v1_key`.
+pub(in crate::schema_v2) fn v1_surface_key(namespace: &str, namehash: &str) -> String {
+    let key = format!("{namespace}:{namehash}");
+    super::super::lookahead::observe_node(&key);
+    key
+}
+
 impl State {
     // BaseRegistrar emits the same NameRegistered event for `register` and `registerOnly`, but the
     // latter deliberately skips the ENS registry write. Exact same-transaction registry evidence

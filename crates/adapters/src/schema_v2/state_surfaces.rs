@@ -626,9 +626,8 @@ impl State {
         namespace: &str,
         namehash: &str,
     ) -> bool {
-        let key = format!("{namespace}:{namehash}");
-        super::super::lookahead::observe_node(&key);
-        self.known_surfaces.contains(&key)
+        self.known_surfaces
+            .contains(&super::registrar::v1_surface_key(namespace, namehash))
     }
 
     pub(in crate::schema_v2) fn v1_surface_materialized(
