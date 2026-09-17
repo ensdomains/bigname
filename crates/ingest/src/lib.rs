@@ -7,6 +7,7 @@ mod manifest;
 mod plan;
 mod provider;
 #[cfg(test)]
+#[path = "tests/test_chain.rs"]
 mod test_chain;
 mod verification;
 mod write;

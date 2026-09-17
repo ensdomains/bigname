@@ -91,6 +91,29 @@ impl WatchFilter {
         }
     }
 
+    /// Builds a filter that selects `announcement_topic0` from every emitter and admits each
+    /// announcing emitter's `scoped_topic0s`, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn watching_registry_announcements(
+        from_block: i64,
+        to_block: i64,
+        announcement_topic0: &str,
+        scoped_topic0s: &[String],
+    ) -> Self {
+        Self {
+            all_emitter_ranges: vec![AllEmitterRange {
+                from_block,
+                to_block,
+                topic0s: vec![announcement_topic0.to_owned()],
+            }],
+            registry_announcements: Some(RegistryAnnouncementWatch {
+                announcement_topic0: announcement_topic0.to_owned(),
+                scoped_topic0s: scoped_topic0s.to_vec(),
+            }),
+            ..Self::default()
+        }
+    }
+
     /// Whether a log with these topics is watched; `topic0`-only callers use [`Self::includes`].
     pub fn includes_log(&self, address: &str, topics: &[String], block_number: i64) -> bool {
         let Some(topic0) = topics.first() else {

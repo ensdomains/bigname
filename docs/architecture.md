@@ -726,6 +726,18 @@ replay context are durable. The phase schema has no generic provider-payload
 cache or retained call-snapshot family. Empty historical blocks retain only
 lineage anchors and audit metadata.
 
+RPC ingest retries a provider integrity mismatch at most twice before writing
+any facts from that window. Each retry discards that provider's prefetched log
+ranges and re-reads the window's block identities, logs, headers, transactions,
+and receipts without prefetch. Every attempt must pass the same validation;
+persistent disagreement remains a data-integrity failure. The retried class is
+every provider read failure that ingest does not already treat as transient, so
+it also covers a truncated or otherwise unreadable response: a one-off
+truncation recovers within the same window, and one that outlasts both retries
+is terminal. Each retry logs a warning with the window, attempt, and cause.
+Database writes, Coinbase SQL intake, and local reth reads are outside this
+recovery loop.
+
 The phase runner persists exact per-source and per-phase block-hash cursors.
 Historical work is an explicit finite `ingest`, `interpret`, `project`, or
 `verify` redo. The old persisted backfill scheduler, coverage frontier, adapter

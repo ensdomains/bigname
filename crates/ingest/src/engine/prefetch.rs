@@ -106,6 +106,15 @@ impl<'a> Prefetcher<'a> {
         }
     }
 
+    /// A provider mismatch can affect any query in its cached range.
+    pub(crate) async fn invalidate(&self) {
+        self.cache
+            .lock()
+            .await
+            .ranges
+            .retain(|(provider, _), _| provider != &self.provider_key);
+    }
+
     /// Logs for `from..=to` of one persisted watch query, from cache where possible.
     pub(crate) async fn logs(
         &self,
