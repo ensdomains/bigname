@@ -140,6 +140,17 @@ fn name_wrapped(
     let token_lineage_id = stable_uuid(&format!("token-lineage:{authority_key}"));
     let logical_name_id = format!("{}:{raw_namehash}", selected.source.namespace);
     let previous = state.v1_name(&selected.source.namespace, &raw_namehash);
+    // Wrapping a .eth second-level name moves the BaseRegistrar token into the
+    // NameWrapper, so the lease stays on the registrar's resource. Record that
+    // resource so Project and history can follow the wrap by identity.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f)
+    let wrapped_registrar_resource_id = previous
+        .as_ref()
+        .filter(|authority| {
+            authority.authority_source_family == "ens_v1_registrar_l1"
+                && authority.token_lineage_id.is_some()
+        })
+        .map(|authority| authority.resource_id);
     // A freshly minted token carries no approval: `_burn` cleared any earlier one.
     // (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L275 @ ens_v1@91c966f)
     state.set_v1_wrapper_delegate(&selected.source.namespace, &raw_namehash, None);
@@ -169,7 +180,7 @@ fn name_wrapped(
         "PermissionScopeChanged",
     ];
     ensure_declared(selected, &["TokenControlTransferred"])?;
-    let after = json!({"source_event":"NameWrapped","node":raw_namehash,"owner":address_hex(event.owner),"fuses":wrapper_data.fuses,"wrapper_state":wrapper_state(wrapper_data.fuses),"expiry":wrapper_data.expiry,"token_lineage_id":token_lineage_id.to_string(),"authority_kind":"wrapper","authority_key":authority_key.clone(),"surface_known":surface_known});
+    let after = json!({"source_event":"NameWrapped","node":raw_namehash,"owner":address_hex(event.owner),"fuses":wrapper_data.fuses,"wrapper_state":wrapper_state(wrapper_data.fuses),"expiry":wrapper_data.expiry,"token_lineage_id":token_lineage_id.to_string(),"wrapped_registrar_resource_id":wrapped_registrar_resource_id,"authority_kind":"wrapper","authority_key":authority_key.clone(),"surface_known":surface_known});
     let mut output = events_linked(kinds, logical_name_id, resource_id, after.clone());
     if let Some(transfer) = output
         .events

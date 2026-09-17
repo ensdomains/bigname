@@ -488,6 +488,28 @@ mod v1_registrar {
             .iter()
             .find(|e| e.event_kind == "RegistrationGranted" && e.log_index == Some(1))
             .unwrap();
+        // Every NameWrapped-derived row records which registrar lease was wrapped.
+        let wrap_rows = first
+            .normalized_events
+            .iter()
+            .filter(|e| {
+                e.source_family == "ens_v1_wrapper_l1"
+                    && e.after_state["source_event"] == "NameWrapped"
+                    && matches!(
+                        e.event_kind.as_str(),
+                        "TokenControlTransferred" | "ExpiryChanged" | "PermissionScopeChanged"
+                    )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(wrap_rows.len(), 3, "{wrap_rows:#?}");
+        // Project follows the wrap from the wrapper's SurfaceBound row.
+        for row in wrap_rows.into_iter().chain([wrapped]) {
+            assert_eq!(
+                row.after_state["wrapped_registrar_resource_id"],
+                grant.resource_id.expect("registrar resource").to_string(),
+                "{row:#?}"
+            );
+        }
         let mut tail = first_input.clone();
         tail.raw_logs.clear();
         tail.blocks = vec![
@@ -2049,6 +2071,24 @@ fn wrapper_adapter_expands_the_manifest_wrapper_transition() -> anyhow::Result<(
     assert!(kinds.contains("AuthorityEpochChanged"));
     assert!(kinds.contains("PreimageObserved"));
     assert_eq!(output.name_surfaces[0].raw_name, "wrapped.eth");
+    // No registrar lease is known for this node, so the wrap records no link; the key is
+    // present and null rather than omitted.
+    for kind in [
+        "TokenControlTransferred",
+        "ExpiryChanged",
+        "PermissionScopeChanged",
+    ] {
+        let row = output
+            .normalized_events
+            .iter()
+            .find(|event| event.event_kind == kind)
+            .expect("NameWrapped-derived row");
+        let link = row
+            .after_state
+            .get("wrapped_registrar_resource_id")
+            .unwrap_or_else(|| panic!("{kind} must carry the wrapped registrar key: {row:#?}"));
+        assert!(link.is_null(), "{row:#?}");
+    }
     Ok(())
 }
 
