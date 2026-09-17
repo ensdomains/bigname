@@ -17,6 +17,27 @@ pub async fn transition(
     old: &SourceConfig,
     new: &SourceConfig,
 ) -> Result<Value> {
+    transition_with_readers(database, old, new, |source| {
+        let kind = normalized_source_kind(&source.source_kind);
+        Ok(VerificationProvider::new(
+            &source.chain_id,
+            &kind,
+            source.endpoint(),
+        )?)
+    })
+    .await
+}
+
+/// [`transition`] with the caller opening the reader for each descriptor. Tests use it to
+/// stand an HTTP node double in for the direct database reader, which otherwise needs a real
+/// Reth datadir; every check and the cursor update are the production ones.
+#[doc(hidden)]
+pub async fn transition_with_readers(
+    database: &RunnerDatabase,
+    old: &SourceConfig,
+    new: &SourceConfig,
+    open_reader: impl Fn(&SourceConfig) -> Result<VerificationProvider>,
+) -> Result<Value> {
     validate_pair(old, new)?;
     let chain = &old.chain_id;
     let from_kind = normalized_source_kind(&old.source_kind);
@@ -70,8 +91,8 @@ pub async fn transition(
     .bind(chain)
     .fetch_one(&mut *tx)
     .await?;
-    let old_provider = VerificationProvider::new(chain, &from_kind, old.endpoint())?;
-    let new_provider = VerificationProvider::new(chain, &to_kind, new.endpoint())?;
+    let old_provider = open_reader(old)?;
+    let new_provider = open_reader(new)?;
     let mut checked = Vec::new();
     for (row, number, hash) in [
         (
