@@ -109,29 +109,33 @@ CREATE TABLE IF NOT EXISTS discovery_edges (
                 'registry_announcement'
             )
         ),
-    CHECK (
+    -- The multi-column checks below carry explicit names. PostgreSQL numbers
+    -- unnamed ones in declaration order, so naming only the self-edge check
+    -- would rename its siblings on fresh installs but not on upgraded ones.
+    CONSTRAINT discovery_edges_self_edge_check CHECK (
         edge_kind = 'registry_announcement'
         OR (edge_kind = 'resolver' AND discovery_source = 'ResolverCreated')
         OR from_contract_instance_id <> to_contract_instance_id
     ),
     CHECK (btrim(discovery_source) <> ''),
     CHECK (btrim(admission_basis) <> ''),
-    CHECK (
+    CONSTRAINT discovery_edges_check1 CHECK (
         (active_from_block_number IS NULL)
         = (active_from_block_hash IS NULL)
     ),
-    CHECK (
+    CONSTRAINT discovery_edges_check2 CHECK (
         (active_to_block_number IS NULL)
         = (active_to_block_hash IS NULL)
     ),
     CHECK (active_from_block_number IS NULL OR active_from_block_number >= 0),
     CHECK (active_to_block_number IS NULL OR active_to_block_number >= 0),
-    CHECK (
+    CONSTRAINT discovery_edges_check3 CHECK (
         active_from_block_number IS NULL
         OR active_to_block_number IS NULL
         OR active_to_block_number >= active_from_block_number
     ),
-    CHECK (deactivated_at IS NULL OR deactivated_at >= admitted_at),
+    CONSTRAINT discovery_edges_check4
+        CHECK (deactivated_at IS NULL OR deactivated_at >= admitted_at),
     CHECK (jsonb_typeof(provenance) = 'object')
 );
 
