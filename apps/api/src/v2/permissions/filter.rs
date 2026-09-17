@@ -24,6 +24,9 @@ pub(super) enum EmptyPermissionsSelection {
     MissingOrUnsupportedNameAnchor,
     SupersededNameRegistrationPair,
     NamespaceRegistrationMismatch,
+    /// The requested id is the NameWrapper resource of a wrapped `.eth` name, whose
+    /// registration is its BaseRegistrar lease. History rejects the same value.
+    ResourceIsNotARegistration,
 }
 
 #[derive(Debug)]
@@ -112,15 +115,20 @@ pub(super) async fn resolve_permissions_filter(
     );
 
     let namespace = inputs.namespace.clone();
+    let mut resource_is_not_a_registration = false;
     let resource_id = match (name_resource_id, inputs.requested_resource_id) {
         (Some(name_resource_id), _) => Some(name_resource_id),
         (None, Some(requested)) if inputs.name_filter.is_none() => {
-            Some(control_resource_for_registration(state, requested).await?)
+            let control_resource = control_resource_for_registration(state, requested).await?;
+            resource_is_not_a_registration = control_resource.is_none();
+            Some(control_resource.unwrap_or(requested))
         }
         (None, requested) => requested,
     };
     let empty_selection = if superseded_pair {
         Some(EmptyPermissionsSelection::SupersededNameRegistrationPair)
+    } else if resource_is_not_a_registration {
+        Some(EmptyPermissionsSelection::ResourceIsNotARegistration)
     } else if inputs.name_filter.is_some() && name_resource_id.is_none() {
         Some(EmptyPermissionsSelection::MissingOrUnsupportedNameAnchor)
     } else {
@@ -190,11 +198,23 @@ fn registration_uuid(row: &NameCurrentRow) -> Option<Uuid> {
 /// The resource whose permission rows belong to `registration_id`. A BaseRegistrar lease that is
 /// currently wrapped is controlled through its name's NameWrapper resource; every other
 /// registration, and every audit read of a resource no current name serves, is its own resource.
+///
+/// `None` means the id is not a registration: it is the NameWrapper resource of a current name
+/// whose registration is a different resource, its BaseRegistrar lease. A wrapped subname has no
+/// lease, so its NameWrapper resource is its registration and still resolves to itself.
 async fn control_resource_for_registration(
     state: &AppState,
     registration_id: Uuid,
-) -> V2Result<Uuid> {
-    let failed = |_| V2Error::internal_error("failed to resolve registration resource");
+) -> V2Result<Option<Uuid>> {
+    let failed = |error| {
+        tracing::error!(
+            error = ?error,
+            %registration_id,
+            "failed to resolve the resource that controls a registration"
+        );
+        V2Error::internal_error("failed to resolve registration resource")
+    };
+    let mut stands_in_for_a_lease = false;
     let logical_name_ids =
         bigname_storage::load_logical_name_ids_for_registration_id(&state.pool, registration_id)
             .await
@@ -203,16 +223,18 @@ async fn control_resource_for_registration(
         let row = bigname_storage::load_name_current(&state.pool, &logical_name_id)
             .await
             .map_err(failed)?;
-        if let Some(resource_id) = row
-            .as_ref()
-            .filter(|row| current_registration_row(row))
-            .filter(|row| registration_uuid(row) == Some(registration_id))
-            .and_then(|row| row.resource_id)
-        {
-            return Ok(resource_id);
+        let Some(row) = row.as_ref().filter(|row| current_registration_row(row)) else {
+            continue;
+        };
+        if registration_uuid(row) == Some(registration_id) {
+            if let Some(resource_id) = row.resource_id {
+                return Ok(Some(resource_id));
+            }
+        } else if row.resource_id == Some(registration_id) {
+            stands_in_for_a_lease = true;
         }
     }
-    Ok(registration_id)
+    Ok((!stands_in_for_a_lease).then_some(registration_id))
 }
 
 fn normalized_name_filter(params: &QueryParams) -> V2Result<Option<NormalizedNameFilter>> {

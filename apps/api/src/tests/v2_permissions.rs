@@ -635,6 +635,64 @@ async fn wrapped_name_permissions_carry_the_registrar_lease_handle() -> Result<(
     .await?;
     assert_eq!(wrapper_pair["data"], json!([]));
 
+    // Nor does it select anything on its own: history rejects the same value, so permissions
+    // must not serve the wrapper's rows under it.
+    for uri in [
+        format!("/v1/permissions?registration_id={wrapper_resource_id}"),
+        format!(
+            "/v1/permissions?address={V2_PERMISSIONS_SUBJECT}&registration_id={wrapper_resource_id}"
+        ),
+    ] {
+        let response = v2_permissions_response_for_database(&database, &uri).await?;
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["data"], json!([]), "{uri}");
+        assert_eq!(payload["page"]["has_more"], json!(false), "{uri}");
+        assert_eq!(payload["page"]["next_cursor"], Value::Null, "{uri}");
+        assert_eq!(payload["meta"]["as_of"], by_lease["meta"]["as_of"], "{uri}");
+        assert!(payload.get("restrictions").is_none(), "{uri}");
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn wrapped_subname_permissions_read_by_the_name_wrapper_resource() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    // A wrapped subname has no BaseRegistrar lease: Project records no registration resource,
+    // so its NameWrapper resource is its registration_id.
+    let wrapper_resource_id = v2_permissions_current_resource_id();
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+             declared_summary,
+             '{registration}',
+             '{\"status\": \"wrapped\", \"authority_kind\": \"wrapper\"}'::jsonb,
+             true
+         )
+         WHERE raw_name = 'perms.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let name = v2_name_record_payload_for_database(&database, "/v1/names/Perms.eth").await?;
+    assert_eq!(
+        name["data"]["registration_id"],
+        json!(wrapper_resource_id.to_string())
+    );
+    let by_registration = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={wrapper_resource_id}"),
+    )
+    .await?;
+    let rows = by_registration["data"].as_array().expect("permissions data");
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(rows.iter().all(|row| {
+        row["registration_id"] == json!(wrapper_resource_id.to_string())
+            && row["authority_context"] == json!("resource_audit")
+    }));
+
     database.cleanup().await
 }
 

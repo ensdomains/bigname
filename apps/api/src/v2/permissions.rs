@@ -237,7 +237,8 @@ fn empty_permissions_response(
             apply_permissions_collection_support_meta(&mut meta, PermissionSupport::Unknown, false);
         }
         EmptyPermissionsSelection::SupersededNameRegistrationPair
-        | EmptyPermissionsSelection::NamespaceRegistrationMismatch => {}
+        | EmptyPermissionsSelection::NamespaceRegistrationMismatch
+        | EmptyPermissionsSelection::ResourceIsNotARegistration => {}
     }
 
     Json(PermissionsResponse {
