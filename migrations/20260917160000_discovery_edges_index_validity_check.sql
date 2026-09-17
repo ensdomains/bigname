@@ -5,7 +5,8 @@
 -- which matches on the name alone. An interrupted concurrent prebuild
 -- (ops/discovery-history-index/install.sql, ops/discovery-reopen-index/install.sql)
 -- leaves an invalid index under the right name, and a wrong manual prebuild
--- leaves a valid index with other keys or another predicate. Those two files
+-- leaves a valid index with other keys or another predicate, or a table, view,
+-- or other relation that is not an index under the right name. Those two files
 -- then succeed without building anything. This file stops the run instead of
 -- recording success over an index the intended queries cannot use.
 --
@@ -21,13 +22,23 @@
 -- is running, drop only the named index with DROP INDEX CONCURRENTLY, rerun
 -- install.sql, then run the schema-migrations again.
 --
--- Fresh migration databases may not yet contain the phase baseline, and an index
--- that does not exist is not this file's concern: both cases pass.
+-- Fresh migration databases may not yet contain the phase baseline; that case
+-- passes, and the baseline installed afterwards carries both indexes.
+--
+-- When bigname_phase.discovery_edges exists, a name that resolves to nothing
+-- fails too. The two earlier files build their index whenever the table exists,
+-- and every source revision that carries them also carries both indexes in
+-- schema-v2/baseline, so no supported order reaches this file with the table
+-- present and an index absent. It only happens when the index was dropped, or
+-- the table was installed without it after the earlier files were already
+-- recorded. Those files never run again, so passing here would leave the
+-- intended queries unindexed for good.
 DO $migration$
 DECLARE
     checked_index text;
     expected_definition text;
     found_definition text;
+    found_kind text;
 BEGIN
     IF to_regclass('bigname_phase.discovery_edges') IS NULL THEN
         RETURN;
@@ -41,6 +52,32 @@ BEGIN
              'CREATE INDEX discovery_edges_reopen_idx ON discovery_edges USING btree (chain_id, from_contract_instance_id, edge_kind, active_from_block_number, ((provenance ->> ''observation_key''::text)))')
         ) AS reviewed(index_name, definition)
     LOOP
+        SELECT CASE relkind
+                   WHEN 'i' THEN 'index'
+                   WHEN 'I' THEN 'partitioned index'
+                   WHEN 'r' THEN 'table'
+                   WHEN 'p' THEN 'partitioned table'
+                   WHEN 'v' THEN 'view'
+                   WHEN 'm' THEN 'materialized view'
+                   WHEN 'S' THEN 'sequence'
+                   WHEN 'f' THEN 'foreign table'
+                   WHEN 'c' THEN 'composite type'
+                   ELSE 'relation of kind ' || relkind::text
+               END
+        INTO found_kind
+        FROM pg_class
+        WHERE oid = to_regclass('bigname_phase.' || checked_index);
+        IF found_kind IS NULL THEN
+            RAISE EXCEPTION
+                '% does not exist although bigname_phase.discovery_edges does; build it with the matching install.sql as ops/discovery-history-index/README.md or ops/discovery-reopen-index/README.md describes, then run the schema-migrations again',
+                checked_index;
+        END IF;
+        IF found_kind <> 'index' THEN
+            RAISE EXCEPTION
+                'bigname_phase.% is a %, not an index, so the index was never built; remove or rename that relation, build the index with the matching install.sql as ops/discovery-history-index/README.md or ops/discovery-reopen-index/README.md describes, then run the schema-migrations again',
+                checked_index, found_kind;
+        END IF;
+
         IF EXISTS (
             SELECT 1
             FROM pg_index
