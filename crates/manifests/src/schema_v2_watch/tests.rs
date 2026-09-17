@@ -8,7 +8,7 @@ fn declared_resolver_implementations_compile_topic1_narrowed_upgraded_watches() 
         .manifests()
         .iter()
         .find(|loaded| loaded.manifest.source_family == crate::ENS_V2_RESOLVER_SOURCE_FAMILY)
-        .expect("hackathon resolver manifest")
+        .expect("official Sepolia resolver manifest")
         .manifest
         .clone();
     let upgraded = format!("{}", alloy_primitives::keccak256(b"Upgraded(address)"));
