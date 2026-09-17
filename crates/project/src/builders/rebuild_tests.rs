@@ -32,7 +32,6 @@ const PLAN_NAMES: i64 = 3_000;
 /// The builders in the order `build_all` runs them.
 #[derive(Clone, Copy, PartialEq, PartialOrd)]
 enum Builder {
-    Staged,
     NameAuthority,
     Permissions,
     NameCurrent,
