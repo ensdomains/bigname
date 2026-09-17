@@ -96,6 +96,11 @@ diagnostic described under [Surviving services](#surviving-services); other
 forgotten schema-migrations or release-specific index steps surface only as
 runtime query failures or unacceptable query plans.
 
+For the historical discovery lookup index, prebuild concurrently on a large live
+database following [the index runbook](../ops/discovery-history-index/README.md)
+before applying its matching schema-migration. Verify index validity and record
+the before/after query plans and completed-batch throughput.
+
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
 runtime configuration is documented in
