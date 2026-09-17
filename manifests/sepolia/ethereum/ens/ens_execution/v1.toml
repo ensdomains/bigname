@@ -9,6 +9,12 @@ rollout_status = "shadow"
 normalizer_version = "ensip15@ens-normalize-0.1.1"
 roots = []
 discovery_rules = []
+# Both arms dispatch through the one proxy declared below. The pinned artifacts prove that the
+# UniversalResolverV2 implementation was constructed with the declared RootRegistry, not that the
+# proxy currently targets it; docs/sepolia-deployment.md ("Resolver and discovery coverage") records
+# the 2026-09-17 on-chain `ROOT_REGISTRY()` read and the missing runtime check (issue #906).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/UniversalResolverV2.json:L1593 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L2 @ ens_v2_sepolia_20260916@366de741)
 verified_authority_arms = ["ens_v1", "ens_v2"]
 
 [capability_flags]
