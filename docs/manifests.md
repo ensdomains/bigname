@@ -1130,8 +1130,8 @@ Address-scoped interpretation begins at the `RegistryCreated()` block, including
 The current ENSv2 resolver manifest declares `ResolverCreated()` as an all-emitter
 event. The resolver emits it in its constructor and proxy initializer before
 initializer calls can write records.
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L107 @ ens_v2_sepolia_20260916@366de741)
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L119 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L108 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2_sepolia_20260916@366de741)
 Ingest fetches the announcing address's role-independent resolver events from
 the creation block through the end of that same window before advancing its
 cursor. Later windows load retained canonical creation logs. Verify uses the

@@ -70,7 +70,7 @@ pub(super) fn is_public_node_event(selected: &Selected) -> bool {
     }
 }
 
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L119 @ ens_v2_sepolia_20260916@366de741)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2_sepolia_20260916@366de741)
 pub(super) fn created(selected: &Selected, raw: &RawLogInput) -> anyhow::Result<Interpreted> {
     decode_event_log::<ResolverCreated>(
         &raw.topics,

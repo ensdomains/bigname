@@ -697,7 +697,7 @@ Per-entry format:
 The current PermissionedResolver creation event is captured across emitters,
 then its address-scoped record events are fetched from creation onward.
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/interfaces/IRecordResolver.sol:L31 @ ens_v2_sepolia_20260916@366de741)
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L119 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2_sepolia_20260916@366de741)
 Bigname deliberately separates capture from supported reads: an announcement
 alone proves neither a deployed implementation nor a name's resolver binding.
 Generic registry creation likewise establishes indexability, not membership in
