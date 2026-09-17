@@ -23,7 +23,8 @@ WHERE indexrelid = to_regclass('bigname_phase.discovery_edges_observation_histor
 
 -- IF NOT EXISTS matches on the name alone, so an interrupted concurrent build
 -- leaves an invalid index that the statement above then skips, and an earlier
--- manual build can leave a valid index with other keys or another predicate.
+-- manual build can leave a valid index with other keys or another predicate,
+-- or a table, view, or other relation that is not an index under this name.
 -- Fail here instead of reporting success; README.md describes the recovery.
 -- The definition check matches the one in the schema-migration
 -- 20260917160000_discovery_edges_index_validity_check.sql. PostgreSQL always
@@ -34,7 +35,29 @@ DECLARE
     expected_definition constant text :=
         'CREATE INDEX discovery_edges_observation_history_idx ON discovery_edges USING btree (chain_id, from_contract_instance_id, edge_kind, ((provenance ->> ''observation_key''::text)), active_from_block_number) WHERE (canonicality_state <> ''orphaned''::canonicality_state)';
     found_definition text;
+    found_kind text;
 BEGIN
+    SELECT CASE relkind
+               WHEN 'i' THEN 'index'
+               WHEN 'I' THEN 'partitioned index'
+               WHEN 'r' THEN 'table'
+               WHEN 'p' THEN 'partitioned table'
+               WHEN 'v' THEN 'view'
+               WHEN 'm' THEN 'materialized view'
+               WHEN 'S' THEN 'sequence'
+               WHEN 'f' THEN 'foreign table'
+               WHEN 'c' THEN 'composite type'
+               ELSE 'relation of kind ' || relkind::text
+           END
+    INTO found_kind
+    FROM pg_class
+    WHERE oid = to_regclass('bigname_phase.discovery_edges_observation_history_idx');
+    IF found_kind <> 'index' THEN
+        RAISE EXCEPTION
+            'bigname_phase.discovery_edges_observation_history_idx is a %, not an index, so the index was never built; remove or rename that relation, then follow ops/discovery-history-index/README.md before retrying',
+            found_kind;
+    END IF;
+
     IF NOT EXISTS (
         SELECT 1
         FROM pg_index

@@ -419,8 +419,11 @@ concurrent build leaves behind. The later
 `20260917160000_discovery_edges_index_validity_check.sql` closes that gap: in
 step 4 it fails, and `sqlx migrate run` stops without recording it, if either
 index exists but is not valid and ready, or is valid but does not have the
-reviewed definition. The error names the index and prints the definition it
-found beside the expected one. It never drops or rebuilds an index. If it
+reviewed definition. It also fails when `bigname_phase.discovery_edges` exists
+and either name is missing or belongs to a table, view, or other relation that
+is not an index. The error names the index and, for a definition mismatch,
+prints the definition it found beside the expected one. It never drops or
+rebuilds an index. If it
 fails, follow the recovery steps above or in the matching index runbook, then
 run `sqlx migrate run` again.
 
