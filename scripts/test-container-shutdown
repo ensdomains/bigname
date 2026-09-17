@@ -14,6 +14,7 @@ if [[ "${1:-}" == --serve ]]; then
   export BIGNAME_DATABASE_URL="$database"
   export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-container-shutdown-fixture}"
   export BIGNAME_PHASE_RUNNER_MINIMUM_FREE_DISK_BYTES=1
+  export POSTGRES_MEMORY_LIMIT=1g BIGNAME_API_MEMORY_LIMIT=1g BIGNAME_PHASE_RUNNER_MEMORY_LIMIT=1g
   export BIGNAME_PHASE_RUNNER_WRITABLE_PATH="$evidence/unused-capacity-probe"
   override="$evidence/override.yml"; rendered="$evidence/compose.json"
   python3 - "$override" "$metrics" <<'PY'
