@@ -41,6 +41,30 @@ mod tests {
         ))
     }
 
+    // A route the router serves but the guide omits is undiscoverable to a
+    // reader of the bundled reference, so the two are held together here.
+    #[test]
+    fn every_served_v1_route_is_documented_in_the_guide() {
+        let router_source = include_str!("v2/router.rs");
+        let guide = include_str!("docs.html");
+        let documented = guide
+            .split("path: '")
+            .skip(1)
+            .filter_map(|rest| rest.split('\'').next())
+            .collect::<std::collections::BTreeSet<_>>();
+        let undocumented = router_source
+            .split(".route(")
+            .skip(1)
+            .filter_map(|rest| rest.trim_start().strip_prefix('"'))
+            .filter_map(|rest| rest.split('"').next())
+            .filter(|path| path.starts_with("/v1/") && !documented.contains(path))
+            .collect::<Vec<_>>();
+        assert!(
+            undocumented.is_empty(),
+            "routes served but missing from apps/api/src/docs.html ENDPOINTS: {undocumented:?}"
+        );
+    }
+
     #[tokio::test]
     async fn docs_route_serves_the_reference_page_with_the_build_version() {
         for path in ["/docs", "/docs/"] {

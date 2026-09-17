@@ -14,6 +14,7 @@ use crate::{
 };
 use declaration_precedence::DISCOVERY_CTES;
 pub(super) use link_summary::DEFAULT_RECORD_NODE;
+pub(crate) use link_summary::LINK_DIGEST_SQL;
 use mirror::{DIRECT_MIRROR_DECLARED, MIRROR_CLASSIFICATION, MIRROR_ROLE};
 use read_features::{DECLARED_READ_FEATURES, IMPLEMENTATION_READ_FEATURES};
 use section_summaries::SECTION_SUMMARIES;
@@ -28,7 +29,7 @@ pub(super) async fn build(
 ) -> Result<()> {
     binding_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT, full_rebuild).await?;
     alias_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT).await?;
-    link_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT).await?;
+    link_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT, target.number).await?;
     permission_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT, full_rebuild).await?;
 
     let resolver_build = format!(
@@ -474,6 +475,7 @@ pub(super) async fn build(
                        AND supported.record_links_declared AS links_supported,
                    COALESCE(link.link_count, 0) AS link_count,
                    COALESCE(link.record_count, 0) AS linked_record_count,
+                   COALESCE(link.digest, md5('')) AS link_digest,
                    COALESCE(link.items, '[]'::jsonb) AS link_items,
                    COALESCE(permission.item_count, 0) AS permission_count,
                    COALESCE(permission.items, '[]'::jsonb) AS permission_items,

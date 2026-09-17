@@ -753,7 +753,13 @@ implementation's manifest declares `Linked` — and lists, per node with a
 non-zero current record, the record ID, the node, whether it is the default
 (empty-name) node, the name surface known for that node if any, and the
 current `Linked` observation's position; the latest `Linked` per node is the
-same staged table record selection reads, so the two cannot disagree. On a
+same staged table record selection reads, so the two cannot disagree. Names are
+looked up across every active canonical surface, not the run's scoped subset,
+and a surface entering scope pulls every resolver linking its node into scope,
+so a name observed after its link reaches the summary on that incremental run.
+The summary also carries a `digest` of the full link set (node, record, event
+identity); redo rebuilds any resolver whose digest no longer matches the
+canonical set, which covers a retracted link on a node nothing else consumes. On a
 node-keyed resolver the summary is `unsupported` with
 `record_links_not_applicable`. Full bound-name and permission collections
 remain on their name-side projections and routes instead of being duplicated

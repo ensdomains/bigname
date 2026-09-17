@@ -246,6 +246,44 @@ pub(super) async fn include_resource_pointers(
     Ok(())
 }
 
+/// A name surface entering scope may be the first readable name for a node some
+/// record-ID resolver links; that resolver's summary must pick the name up now, not
+/// on the next full rebuild.
+pub(super) async fn include_link_targets(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target_block: i64,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO project_scope_resolvers
+        SELECT DISTINCT lower(event.after_state ->> 'resolver')
+        FROM project_scope_names scope
+        JOIN name_surfaces surface
+          ON surface.logical_name_id = scope.logical_name_id
+         AND surface.chain_id = $1
+        JOIN normalized_events event
+          ON event.chain_id = $1
+         AND event.event_kind = 'ResolverRecordLinked'
+         AND event.after_state ->> 'storage_model' = 'resolver_record_id'
+         AND lower(event.after_state ->> 'node') = lower(surface.namehash)
+         AND event.block_number <= $2
+         AND event.consumer_visibility = 'activated'
+         AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        WHERE event.after_state ->> 'resolver' IS NOT NULL
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(chain_id)
+    .bind(target_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to scope resolvers linking scoped names", error)
+    })?;
+    Ok(())
+}
+
 pub(super) async fn classify_unchanged(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,

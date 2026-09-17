@@ -22,7 +22,7 @@ pub(super) const SECTION_SUMMARIES: &str = r#"
                    'links', CASE WHEN links_supported THEN jsonb_build_object(
                        'status', 'supported', 'count', link_count,
                        'total_count', link_count, 'record_count', linked_record_count,
-                       'sample_limit', $5,
+                       'digest', link_digest, 'sample_limit', $5,
                        'sample_count', jsonb_array_length(link_items),
                        'truncated', link_count > jsonb_array_length(link_items),
                        'items', link_items

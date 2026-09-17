@@ -253,9 +253,11 @@ async fn v2_resolver_collection_links_pages_latest_link_per_node_in_record_order
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
     sqlx::query("UPDATE bigname_phase.normalized_events SET consumer_visibility = 'candidate', migration_correlation_ids = ARRAY['candidate-2'] WHERE event_identity = 'candidate-2'")
         .execute(&database.pool).await?;
-    // Only node 4 has a name surface; every other node is served by namehash alone.
-    sqlx::query("INSERT INTO bigname_phase.name_surfaces (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state, chain_id, block_hash, block_number, canonicality_state) VALUES ('ens:' || $1, 'ens', 'Linked.eth', ARRAY['linked','eth'], '\\x066c696e6b656403657468'::bytea, $1, ARRAY['labelhash:linked','labelhash:eth'], 'fixture', 'active', 'ethereum-mainnet', '0xlinks150', 150, 'canonical')")
-        .bind(node(4)).execute(&database.pool).await?;
+    // Only node 4 has an active name surface; every other node is served by namehash
+    // alone. Node 5's surface is shadow -- withheld from readers, and its raw name is
+    // not even normalizable -- so it must neither be shown nor break the page.
+    sqlx::query("INSERT INTO bigname_phase.name_surfaces (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state, deactivation_reason, deactivated_at, chain_id, block_hash, block_number, canonicality_state) VALUES ('ens:' || $1, 'ens', 'Linked.eth', ARRAY['linked','eth'], '\\x066c696e6b656403657468'::bytea, $1, ARRAY['labelhash:linked','labelhash:eth'], 'fixture', 'active', NULL, NULL, 'ethereum-mainnet', '0xlinks150', 150, 'canonical'), ('ens:' || $2, 'ens', 'bad..name', ARRAY['bad','','name'], '\\x00'::bytea, $2, ARRAY['a','b','c'], 'fixture', 'shadow', 'fixture', now(), 'ethereum-mainnet', '0xlinks150', 150, 'canonical')")
+        .bind(node(4)).bind(node(5)).execute(&database.pool).await?;
 
     let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/links?page_size=40");
     let first = v2_resolver_payload_for_database(&database, &base).await?;
@@ -313,6 +315,7 @@ async fn v2_resolver_collection_links_pages_latest_link_per_node_in_record_order
             "log_index": 4
         })
     );
+    assert!(by_node[&node(5)].get("name").is_none(), "shadow surface must not name a link");
     assert!(all.iter().all(|row| row.get("logical_name_id").is_none()
         && row.get("normalized_event_id").is_none()
         && row.get("chain_position").is_none()));

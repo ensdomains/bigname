@@ -19,16 +19,18 @@ WITH latest_links AS (
         event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
         event.normalized_event_id DESC
 ), named_nodes AS (
-    SELECT DISTINCT ON (lower(surface.namehash))
-        lower(surface.namehash) AS node, surface.logical_name_id, surface.raw_name, surface.namespace
-    FROM bigname_phase.name_surfaces surface
+    -- Only an active surface is a name to show; a shadow surface is withheld from readers.
+    SELECT link.node, surface.logical_name_id, surface.raw_name, surface.namespace
+    FROM (SELECT DISTINCT node FROM latest_links) link
+    JOIN bigname_phase.name_surfaces surface
+      ON surface.logical_name_id = $7 || ':' || link.node
+     AND surface.chain_id = $1 AND surface.block_number <= $3
+     AND surface.visibility_state = 'active'
+     AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
     JOIN bigname_phase.chain_lineage lineage
       ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
      AND lineage.block_number = surface.block_number
-    WHERE surface.chain_id = $1 AND surface.block_number <= $3
-      AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-    ORDER BY lower(surface.namehash), surface.namespace, surface.logical_name_id
+     AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
 ), items AS (
     SELECT lpad(link.record_id, 78, '0') AS key1, link.node AS key2,
         jsonb_strip_nulls(jsonb_build_object(

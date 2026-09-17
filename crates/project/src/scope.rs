@@ -85,6 +85,7 @@ pub(crate) async fn initialize(
     close_binding_scope(transaction, chain_id, target).await?;
     inventory::close(transaction, chain_id, target).await?;
     resolver::include_resource_pointers(transaction, chain_id, target.number).await?;
+    resolver::include_link_targets(transaction, chain_id, target.number).await?;
     resolver::classify_unchanged(transaction, chain_id).await?;
     resolver::include_permission_resources(transaction, chain_id, target.number).await?;
     retracted::consume(transaction, chain_id, window.from_block, window.to_block).await?;

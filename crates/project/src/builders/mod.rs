@@ -11,6 +11,7 @@ mod permissions;
 mod primary_names;
 mod record_inventory;
 mod resolver;
+pub(crate) use resolver::LINK_DIGEST_SQL;
 
 use sqlx::{Postgres, Transaction};
 
