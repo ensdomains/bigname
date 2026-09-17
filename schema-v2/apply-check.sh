@@ -260,13 +260,15 @@ assert_index_install_refusal() {
 }
 # Prove one concurrent index installer from ops/ against the scratch schema:
 # from the shape without the index it builds the fresh-baseline definition and
-# passes its own validity check, a rerun is a no-op, an invalid index under the
-# same name makes it fail, and the documented drop-and-rerun recovery works.
+# passes its own validity and definition checks, a rerun is a no-op, an invalid
+# index or a valid index with other keys under the same name makes it fail, and
+# the documented drop-and-rerun recovery works.
 assert_concurrent_index_installer() {
     local label="$1"
     local index_name="$2"
     local install_file="$3"
     local readme_path="$4"
+    local reviewed_definition
     local matches_baseline_sql="DO \$\$
 BEGIN
     IF NOT EXISTS (
@@ -296,12 +298,42 @@ END \$\$;"
     } | run_psql >/dev/null
     assert_index_install_refusal "$label-invalid-prebuild" "$install_file" \
         "$index_name is missing from $scratch_schema.discovery_edges or is not valid and ready; follow the recovery steps in $readme_path before retrying"
+    # A wrong manual prebuild leaves a valid index with other keys under this
+    # name. The installer names the fresh-baseline definition as the expected one.
+    reviewed_definition="$(
+        {
+            printf 'SET search_path TO "%s";\n' "$scratch_schema"
+            printf '%s\n' \
+                '\pset tuples_only on' \
+                '\pset format unaligned' \
+                "SELECT replace(definition, '$scratch_schema.', '')" \
+                "FROM expected_installed_index;" \
+                "DROP INDEX $index_name;" \
+                "CREATE INDEX $index_name" \
+                "    ON discovery_edges (active_from_block_number, chain_id);"
+        } | run_psql
+    )"
+    assert_index_install_refusal "$label-wrong-keys-prebuild" "$install_file" \
+        "$index_name exists but does not have the reviewed definition; found \"CREATE INDEX $index_name ON discovery_edges USING btree (active_from_block_number, chain_id)\", expected \"$reviewed_definition\"; follow the recovery steps in $readme_path before retrying"
     {
         printf 'SET search_path TO "%s";\n' "$scratch_schema"
         printf '%s\n' "DROP INDEX $index_name;"
         render_phase_migration "$install_file"
         printf '%s\n' "$matches_baseline_sql" "DROP TABLE expected_installed_index;"
     } | run_psql >/dev/null
+}
+# The discovery index validity check must accept the reviewed definitions
+# however they were built. sqlx runs schema-migrations without the phase schema
+# on search_path, which makes PostgreSQL print the enum type in the predicate
+# with its schema name, so prove both spellings.
+assert_discovery_index_definitions_accepted() {
+    local context="$1"
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        emit_phase_migration "$discovery_index_validity_migration" "$context"
+        printf 'SET search_path TO public;\n'
+        emit_phase_migration "$discovery_index_validity_migration" "$context"
+    } | run_psql
 }
 assert_unconfigured_settlement_constraint() {
     local provenance="$1"
@@ -379,7 +411,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=11
+expected_refusal_assertions=17
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=34
 refusal_probe_seconds=0
@@ -834,6 +866,9 @@ SQL
 assert_migration_context_count "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" empty-schema 1
 assert_migration_context_count "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" preceding-shape 1
 assert_migration_context_count "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" baseline-first 2
+# Both discovery indexes are still the ones the fresh baseline built.
+discovery_index_validity_migration="$ROOT/migrations/20260917160000_discovery_edges_index_validity_check.sql"
+assert_discovery_index_definitions_accepted baseline-first
 # Recreate the additive discovery observation-history index from its preceding
 # schema shape. Compare the resulting catalog definition to the fresh baseline,
 # then prove a rerun leaves it unchanged.
@@ -863,6 +898,8 @@ END $$;
 DROP TABLE expected_discovery_history_index;
 SQL
 } | run_psql
+# The observation-history index is now the one its schema-migration built.
+assert_discovery_index_definitions_accepted preceding-shape
 # The live prebuild in ops/discovery-history-index/install.sql must build the
 # baseline definition, refuse an invalid index, and recover as its README says.
 assert_concurrent_index_installer discovery-history \
@@ -898,6 +935,8 @@ END $$;
 DROP TABLE expected_discovery_reopen_index;
 SQL
 } | run_psql
+# The reopen index is now the one its schema-migration built.
+assert_discovery_index_definitions_accepted preceding-shape
 # The live prebuild in ops/discovery-reopen-index/install.sql must build the
 # baseline definition, refuse an invalid index, and recover as its README says.
 assert_concurrent_index_installer discovery-reopen \
@@ -905,9 +944,9 @@ assert_concurrent_index_installer discovery-reopen \
     "$ROOT/ops/discovery-reopen-index/install.sql" \
     ops/discovery-reopen-index/README.md
 # The two index schema-migrations above adopt an existing index by name alone.
-# The validity check that follows them passes on the shape they leave, changes
-# nothing when rerun, and ignores an index that does not exist yet.
-discovery_index_validity_migration="$ROOT/migrations/20260917160000_discovery_edges_index_validity_check.sql"
+# Both indexes are now the ones the ops/ installers built. The validity check
+# passes on that shape too, changes nothing when rerun, and ignores an index
+# that does not exist yet.
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     emit_phase_migration "$discovery_index_validity_migration" preceding-shape
@@ -935,8 +974,8 @@ BEGIN
 END $$;
 SQL
 } | run_psql
-assert_migration_context_count "$discovery_index_validity_migration" preceding-shape 1
-assert_migration_context_count "$discovery_index_validity_migration" baseline-first 2
+assert_migration_context_count "$discovery_index_validity_migration" preceding-shape 5
+assert_migration_context_count "$discovery_index_validity_migration" baseline-first 4
 # An interrupted concurrent build leaves an invalid index under the right name.
 # Mark each scratch index invalid in turn, inside a transaction that rolls
 # back, and require the schema-migration to fail rather than record success.
@@ -951,6 +990,48 @@ UPDATE pg_index SET indisvalid = false
 WHERE indexrelid = '$discovery_index_name'::regclass;
 SQL
 done
+# A wrong manual prebuild leaves a valid index under the right name that the
+# intended queries cannot use. Give each index the other one's column order,
+# then the right columns with the wrong predicate, and require the
+# schema-migration to fail and name both definitions.
+discovery_history_index_columns="chain_id, from_contract_instance_id, edge_kind, (provenance ->> 'observation_key'), active_from_block_number"
+discovery_reopen_index_columns="chain_id, from_contract_instance_id, edge_kind, active_from_block_number, (provenance ->> 'observation_key')"
+discovery_history_index_printed_columns="chain_id, from_contract_instance_id, edge_kind, ((provenance ->> 'observation_key'::text)), active_from_block_number"
+discovery_reopen_index_printed_columns="chain_id, from_contract_instance_id, edge_kind, active_from_block_number, ((provenance ->> 'observation_key'::text))"
+discovery_history_index_reviewed="CREATE INDEX discovery_edges_observation_history_idx ON discovery_edges USING btree ($discovery_history_index_printed_columns) WHERE (canonicality_state <> 'orphaned'::canonicality_state)"
+discovery_reopen_index_reviewed="CREATE INDEX discovery_edges_reopen_idx ON discovery_edges USING btree ($discovery_reopen_index_printed_columns)"
+discovery_index_recovery="follow the recovery steps in ops/discovery-history-index/README.md or ops/discovery-reopen-index/README.md, then run the schema-migrations again"
+assert_migration_refusal wrong-column-order-discovery_edges_observation_history_idx \
+    "$discovery_index_validity_migration" \
+    "discovery_edges_observation_history_idx exists but does not have the reviewed definition; found \"CREATE INDEX discovery_edges_observation_history_idx ON discovery_edges USING btree ($discovery_reopen_index_printed_columns) WHERE (canonicality_state <> 'orphaned'::canonicality_state)\", expected \"$discovery_history_index_reviewed\"; $discovery_index_recovery" <<SQL
+DROP INDEX discovery_edges_observation_history_idx;
+CREATE INDEX discovery_edges_observation_history_idx
+    ON discovery_edges ($discovery_reopen_index_columns)
+    WHERE canonicality_state <> 'orphaned';
+SQL
+assert_migration_refusal wrong-predicate-discovery_edges_observation_history_idx \
+    "$discovery_index_validity_migration" \
+    "discovery_edges_observation_history_idx exists but does not have the reviewed definition; found \"CREATE INDEX discovery_edges_observation_history_idx ON discovery_edges USING btree ($discovery_history_index_printed_columns) WHERE (deactivated_at IS NULL)\", expected \"$discovery_history_index_reviewed\"; $discovery_index_recovery" <<SQL
+DROP INDEX discovery_edges_observation_history_idx;
+CREATE INDEX discovery_edges_observation_history_idx
+    ON discovery_edges ($discovery_history_index_columns)
+    WHERE deactivated_at IS NULL;
+SQL
+assert_migration_refusal wrong-column-order-discovery_edges_reopen_idx \
+    "$discovery_index_validity_migration" \
+    "discovery_edges_reopen_idx exists but does not have the reviewed definition; found \"CREATE INDEX discovery_edges_reopen_idx ON discovery_edges USING btree ($discovery_history_index_printed_columns)\", expected \"$discovery_reopen_index_reviewed\"; $discovery_index_recovery" <<SQL
+DROP INDEX discovery_edges_reopen_idx;
+CREATE INDEX discovery_edges_reopen_idx
+    ON discovery_edges ($discovery_history_index_columns);
+SQL
+assert_migration_refusal wrong-predicate-discovery_edges_reopen_idx \
+    "$discovery_index_validity_migration" \
+    "discovery_edges_reopen_idx exists but does not have the reviewed definition; found \"CREATE INDEX discovery_edges_reopen_idx ON discovery_edges USING btree ($discovery_reopen_index_printed_columns) WHERE (canonicality_state <> 'orphaned'::canonicality_state)\", expected \"$discovery_reopen_index_reviewed\"; $discovery_index_recovery" <<SQL
+DROP INDEX discovery_edges_reopen_idx;
+CREATE INDEX discovery_edges_reopen_idx
+    ON discovery_edges ($discovery_reopen_index_columns)
+    WHERE canonicality_state <> 'orphaned';
+SQL
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor
 # shape, then validate the additive tuple invariant independently. Both files
 # must remain idempotent after the upgrade completes.
