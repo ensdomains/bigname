@@ -312,6 +312,9 @@ async fn expiry_candidates_match_strict_grace_boundary_and_total_i64_parsing() -
     let predecessor = OffsetDateTime::from_unix_timestamp(ENS_GRACE_PERIOD_SECS + 100)?;
     let last = OffsetDateTime::from_unix_timestamp(ENS_GRACE_PERIOD_SECS + 200)?;
     let mut connection = db.pool().acquire().await?;
+    sqlx::query("SET plan_cache_mode = force_generic_plan")
+        .execute(&mut *connection)
+        .await?;
     assert_eq!(
         due_names(&mut connection, CHAIN, 3, Some(predecessor), last, 100).await?,
         ["ens:between", "ens:predecessor", "ens:zeros"]
@@ -387,6 +390,79 @@ async fn row_and_byte_limits_fail_instead_of_returning_partial_state() -> Result
         events(&mut connection, CHAIN, 2, &[], &[], 0)
             .await?
             .is_empty()
+    );
+    drop(connection);
+    db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn expiry_generic_plan_uses_both_timestamp_index_bounds() -> Result {
+    let db = database().await?;
+    sqlx::query(
+        "INSERT INTO normalized_events
+         (event_identity,namespace,event_kind,source_family,manifest_version,chain_id,
+          block_number,block_hash,transaction_hash,raw_fact_ref,derivation_kind,
+          canonicality_state,after_state)
+         SELECT 'expiry-plan-'||n,'ens','RegistrationGranted','ens_v1_registrar_l1',1,$1,
+                1,'block-1','tx',jsonb_build_object($2::text,n::text),
+                'ens_v1_unwrapped_authority','canonical',
+                jsonb_build_object('namehash','node-'||n,'expiry',n)
+         FROM generate_series(1,2000) n",
+    )
+    .bind(CHAIN)
+    .bind(INTERPRETER_STATE_KEY)
+    .execute(db.pool())
+    .await?;
+    let mut connection = db.pool().acquire().await?;
+    sqlx::raw_sql("ANALYZE normalized_events; SET plan_cache_mode=force_generic_plan;")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::raw_sql(&format!(
+        "PREPARE expiry_plan(text,bigint,bigint,bigint,bigint,bigint,bigint) AS {}",
+        super::DUE_NAMES
+    ))
+    .execute(&mut *connection)
+    .await?;
+    let plan: Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) EXECUTE expiry_plan(
+         '{CHAIN}',3,{}, {},100001,{ENS_GRACE_PERIOD_SECS},67108864)",
+        ENS_GRACE_PERIOD_SECS + 1900,
+        ENS_GRACE_PERIOD_SECS + 1910
+    ))
+    .fetch_one(&mut *connection)
+    .await?;
+    let mut pending = vec![&plan[0]["Plan"]];
+    let mut bounded = false;
+    while let Some(node) = pending.pop() {
+        if node["Index Name"] == "normalized_events_v1_due_probe_idx" {
+            let condition = node["Index Cond"].as_str().unwrap_or("");
+            bounded |= condition.contains("$3") && condition.contains("$4");
+        }
+        if let Some(children) = node["Plans"].as_array() {
+            pending.extend(children);
+        }
+    }
+    assert!(
+        bounded,
+        "generic expiry plan must index both timestamp bounds: {plan}"
+    );
+    let names = due_names(
+        &mut connection,
+        CHAIN,
+        3,
+        Some(OffsetDateTime::from_unix_timestamp(
+            ENS_GRACE_PERIOD_SECS + 1900,
+        )?),
+        OffsetDateTime::from_unix_timestamp(ENS_GRACE_PERIOD_SECS + 1910)?,
+        100,
+    )
+    .await?;
+    assert_eq!(
+        names,
+        (1900..1910)
+            .map(|n| format!("ens:node-{n}"))
+            .collect::<Vec<_>>()
     );
     drop(connection);
     db.cleanup().await?;
