@@ -248,7 +248,10 @@ pub(super) async fn include_resource_pointers(
 
 /// A name surface entering scope may be the first readable name for a node some
 /// record-ID resolver links; that resolver's summary must pick the name up now, not
-/// on the next full rebuild.
+/// on the next full rebuild. Driven from the resolvers, whose link history the
+/// emitter index covers (a record-ID resolver emits its own Linked logs), and
+/// joined to the scoped surfaces by primary key: the cost is the record-ID
+/// resolvers' link history, never a scan of the chain's events by node.
 pub(super) async fn include_link_targets(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -257,23 +260,23 @@ pub(super) async fn include_link_targets(
     sqlx::query(
         r#"
         INSERT INTO project_scope_resolvers
-        SELECT DISTINCT lower(event.after_state ->> 'resolver')
-        FROM project_scope_names scope
-        JOIN name_surfaces surface
-          ON surface.logical_name_id = scope.logical_name_id
-         AND surface.chain_id = $1
-        -- Link events carry no logical name, which is the partial predicate of
-        -- normalized_events_ens_v1_record_node_resolver_idx (chain, node, resolver).
+        SELECT DISTINCT lower(row.resolver_address)
+        FROM resolver_current row
         JOIN normalized_events event
           ON event.chain_id = $1
-         AND event.logical_name_id IS NULL
+         AND lower(event.raw_fact_ref ->> 'emitting_address') = lower(row.resolver_address)
          AND event.event_kind = 'ResolverRecordLinked'
          AND event.after_state ->> 'storage_model' = 'resolver_record_id'
-         AND lower(event.after_state ->> 'node') = lower(surface.namehash)
          AND event.block_number <= $2
          AND event.consumer_visibility = 'activated'
          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-        WHERE event.after_state ->> 'resolver' IS NOT NULL
+        JOIN name_surfaces surface
+          ON surface.logical_name_id =
+             event.namespace || ':' || lower(event.after_state ->> 'node')
+         AND surface.chain_id = $1
+        JOIN project_scope_names scope ON scope.logical_name_id = surface.logical_name_id
+        WHERE row.chain_id = $1
+          AND row.declared_summary #>> '{links,status}' = 'supported'
         ON CONFLICT DO NOTHING
         "#,
     )
