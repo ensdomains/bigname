@@ -4875,6 +4875,30 @@ async fn controller_granted_born_wrapped_name_keeps_its_registrar_lease() -> Res
         "a controller-granted born-wrapped name lost its registrar lease: {summary:?}"
     );
     assert!(summary.2.is_some(), "{summary:?}");
+    assert_eq!(
+        name_origin(&pool, OWNERLESS_LOGICAL).await?,
+        json!({
+            "created_at": "2026-08-01T00:00:08+00:00",
+            "selected_event_ids": [
+                "fixture:born-binding",
+                "fixture:born-expiry",
+                "fixture:born-grant",
+                "fixture:born-scope",
+                "fixture:born-wrapper-expiry",
+                "fixture:born-wrapper-transfer",
+            ],
+            "raw_fact_refs": 6,
+            "manifest_versions": 6,
+            "control": {
+                "expiry": "1970-01-01T01:10:42Z",
+                "latest_event_kind": "TokenControlTransferred",
+                "registrant": CONTROL_OWNER.to_lowercase(),
+                "registry_owner": null,
+                "status": null,
+            },
+        }),
+        "created_at, provenance or control changed for a controller-granted born-wrapped name"
+    );
     database.cleanup().await?;
     Ok(())
 }
@@ -5065,6 +5089,31 @@ async fn controller_granted_later_wrapped_name_serves_the_same_registrant_as_bef
         summary.2,
         Some(PRIOR_CONTROLLER.to_lowercase()),
         "a later-wrapped name serves the NameWrapped owner as registrant"
+    );
+    assert_eq!(
+        name_origin(&pool, OWNERLESS_LOGICAL).await?,
+        json!({
+            "created_at": "2026-08-01T00:00:08+00:00",
+            "selected_event_ids": [
+                "fixture:later-binding",
+                "fixture:later-custody",
+                "fixture:later-expiry",
+                "fixture:later-grant",
+                "fixture:later-scope",
+                "fixture:later-wrapper-expiry",
+                "fixture:later-wrapper-transfer",
+            ],
+            "raw_fact_refs": 7,
+            "manifest_versions": 7,
+            "control": {
+                "expiry": "1970-01-01T01:10:42Z",
+                "latest_event_kind": "TokenControlTransferred",
+                "registrant": PRIOR_CONTROLLER.to_lowercase(),
+                "registry_owner": null,
+                "status": null,
+            },
+        }),
+        "created_at, provenance or control changed for a controller-granted later-wrapped name"
     );
     database.cleanup().await?;
     Ok(())
