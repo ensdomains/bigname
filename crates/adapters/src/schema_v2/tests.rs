@@ -1552,6 +1552,305 @@ mod v1_registrar {
         assert!(output.surface_bindings.iter().any(|binding| binding.resource_id == registry_epoch.resource_id.expect("registry resource")), "known registry authority must receive an active binding: {:#?}", output.surface_bindings);
         Ok(())
     }
+
+    /// A registration through a controller the manifest does not admit, the
+    /// resolver set while the name is still unknown, then a renewal through an
+    /// admitted controller. The renewal names the surface: it must be bound to
+    /// the registrar authority the numeric registration created, and the
+    /// resolver set before the label was known must be replayed onto it, as it
+    /// is for a registry-only authority that a registrar event promotes.
+    #[test]
+    fn admitted_renewal_names_a_controller_free_registration_and_replays_its_resolver()
+    -> anyhow::Result<()> {
+        const HOLDER: &str = "0x0000000000000000000000000000000000000055";
+        const RESOLVER: &str = "0x0000000000000000000000000000000000000077";
+        let label = "late-named";
+        let labelhash = keccak256(label.as_bytes());
+        let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]);
+        let parent = super::common::namehash(&["eth".to_owned()]);
+        let logical_name_id = format!("ens:{node}");
+        let manifests = vec![lifecycle_manifest(), registry_manifest()];
+        let admissions = admissions()
+            .into_iter()
+            .chain([registry_admission()])
+            .collect::<Vec<_>>();
+        let setup = vec![
+            raw_at(
+                super::v1_registry::NewOwner {
+                    node: parent.parse()?,
+                    label: labelhash,
+                    owner: HOLDER.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                REGISTRY,
+            ),
+            raw_at(
+                with_topic0(
+                    BaseNameRegistered {
+                        id: U256::from_be_slice(labelhash.as_slice()),
+                        owner: HOLDER.parse()?,
+                        expires: U256::from(1_000),
+                    }
+                    .encode_log_data(),
+                    keccak256(b"NameRegistered(uint256,address,uint256)"),
+                ),
+                1,
+                1,
+                CONTRACT,
+            ),
+            raw_at(
+                super::v1_registry::NewResolver {
+                    node: node.parse()?,
+                    resolver: RESOLVER.parse()?,
+                }
+                .encode_log_data(),
+                2,
+                0,
+                REGISTRY,
+            ),
+        ];
+        let renewal = vec![
+            raw_at(
+                with_topic0(
+                    BaseNameRenewed {
+                        id: U256::from_be_slice(labelhash.as_slice()),
+                        expires: U256::from(20_000_000),
+                    }
+                    .encode_log_data(),
+                    keccak256(b"NameRenewed(uint256,uint256)"),
+                ),
+                3,
+                0,
+                CONTRACT,
+            ),
+            raw_at(
+                super::NameRenewed {
+                    name: label.to_owned(),
+                    label: labelhash,
+                    expires: U256::from(20_000_000),
+                }
+                .encode_log_data(),
+                3,
+                1,
+                CONTROLLER,
+            ),
+        ];
+        let run = |raw_logs: Vec<RawLogInput>| {
+            interpret_test_batch(BatchInput {
+                chain_id: CHAIN.to_owned(),
+                manifests: manifests.clone(),
+                discovery_rules: vec![],
+                admissions: admissions.clone(),
+                prior_events: vec![],
+                blocks: vec![test_block(1), test_block(2), test_block(3)],
+                raw_logs,
+            })
+        };
+        let replayed = |output: &BatchOutput| {
+            output
+                .normalized_events
+                .iter()
+                .filter(|event| {
+                    event.event_kind == "ResolverChanged"
+                        && event.after_state["state_derived"] == true
+                        && event.after_state["resolver"] == RESOLVER
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        // Before the renewal nothing names the surface: the grant is carried by the
+        // resource, and nothing is bound or replayed.
+        let before = run(setup.clone())?;
+        let grant = before
+            .normalized_events
+            .iter()
+            .find(|event| event.event_kind == "RegistrationGranted")
+            .expect("numeric registration grants a lease");
+        assert_eq!(grant.logical_name_id, None, "{grant:#?}");
+        let resource_id = grant.resource_id.expect("registrar resource");
+        assert!(
+            before.surface_bindings.is_empty(),
+            "{:#?}",
+            before.surface_bindings
+        );
+        assert!(
+            replayed(&before).is_empty(),
+            "{:#?}",
+            before.normalized_events
+        );
+
+        let mut logs = setup;
+        logs.extend(renewal);
+        let all_logs = logs.clone();
+        let output = run(logs)?;
+        let binding = output
+            .surface_bindings
+            .iter()
+            .find(|binding| binding.logical_name_id == logical_name_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the admitted renewal must bind the name to the registrar authority: {:#?}",
+                    output.surface_bindings
+                )
+            });
+        assert_eq!(binding.resource_id, resource_id);
+        let replayed = replayed(&output);
+        assert_eq!(
+            replayed.len(),
+            1,
+            "the resolver set before the label was known must be replayed onto the named \
+             surface: {:#?}",
+            output.normalized_events
+        );
+        assert_eq!(replayed[0].block_number, Some(3));
+        assert_eq!(
+            replayed[0].logical_name_id.as_deref(),
+            Some(logical_name_id.as_str())
+        );
+        assert_eq!(replayed[0].resource_id, Some(resource_id));
+        let renewed = output
+            .normalized_events
+            .iter()
+            .find(|event| event.event_kind == "RegistrationRenewed")
+            .expect("the renewal is a lifecycle fact");
+        assert_eq!(renewed.resource_id, Some(resource_id));
+
+        // A later resolver write carries the name whether the interpreter kept its
+        // state or restored it from the stored events.
+        const NEXT_RESOLVER: &str = "0x0000000000000000000000000000000000000088";
+        let later = raw_at(
+            super::v1_registry::NewResolver {
+                node: node.parse()?,
+                resolver: NEXT_RESOLVER.parse()?,
+            }
+            .encode_log_data(),
+            4,
+            0,
+            REGISTRY,
+        );
+        let restored = interpret_test_batch(BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: manifests.clone(),
+            discovery_rules: vec![],
+            admissions: admissions.clone(),
+            prior_events: output.normalized_events.iter().map(prior_event).collect(),
+            blocks: vec![test_block(4)],
+            raw_logs: vec![later.clone()],
+        })?;
+        let mut logs = all_logs;
+        logs.push(later);
+        let continuous = interpret_test_batch(BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: manifests.clone(),
+            discovery_rules: vec![],
+            admissions: admissions.clone(),
+            prior_events: vec![],
+            blocks: vec![test_block(1), test_block(2), test_block(3), test_block(4)],
+            raw_logs: logs,
+        })?;
+        let resolver_writes = |output: &BatchOutput| {
+            output
+                .normalized_events
+                .iter()
+                .filter(|event| {
+                    event.block_number == Some(4) && event.event_kind == "ResolverChanged"
+                })
+                .map(|event| {
+                    (
+                        event.event_identity.clone(),
+                        event.logical_name_id.clone(),
+                        event.resource_id,
+                        event.after_state["resolver"].clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let written = resolver_writes(&restored);
+        assert!(!written.is_empty(), "{:#?}", restored.normalized_events);
+        assert_eq!(written, resolver_writes(&continuous));
+        for (_, name, _, resolver) in &written {
+            assert_eq!(name.as_deref(), Some(logical_name_id.as_str()));
+            assert_eq!(resolver, NEXT_RESOLVER);
+        }
+        assert!(
+            written
+                .iter()
+                .any(|(_, _, resource, _)| *resource == Some(resource_id)),
+            "{written:#?}"
+        );
+        Ok(())
+    }
+
+    /// A registration no label has named serves no name link from its grant;
+    /// its boundary release must not name one either, fresh or restored, or a
+    /// later-named surface replays a release with no grant before it.
+    #[test]
+    fn a_controller_free_registration_releases_detached_from_the_name() -> anyhow::Result<()> {
+        let grace = 90 * 24 * 60 * 60;
+        let first_release = 1_000 + grace + 1;
+        let input =
+            |prior_events: Vec<PriorEventInput>, raw_logs: Vec<RawLogInput>, blocks| BatchInput {
+                chain_id: CHAIN.to_owned(),
+                manifests: vec![lifecycle_manifest()],
+                discovery_rules: vec![],
+                admissions: admissions(),
+                prior_events,
+                blocks,
+                raw_logs,
+            };
+        let expiry_block = RawBlockInput {
+            chain_id: CHAIN.to_owned(),
+            block_hash: "block-release".to_owned(),
+            block_number: 2,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(first_release),
+            canonicality_state: "canonical".to_owned(),
+        };
+        let fresh = interpret_test_batch(input(
+            vec![],
+            vec![base_registration("detached", 1_000, 0)],
+            vec![test_block(1), expiry_block.clone()],
+        ))?;
+        let grant = fresh
+            .normalized_events
+            .iter()
+            .find(|event| event.event_kind == "RegistrationGranted")
+            .expect("numeric registration grants a lease");
+        assert_eq!(grant.logical_name_id, None);
+        let releases = fresh
+            .normalized_events
+            .iter()
+            .filter(|event| event.event_kind == "RegistrationReleased")
+            .collect::<Vec<_>>();
+        assert_eq!(releases.len(), 1, "{:#?}", fresh.normalized_events);
+        assert_eq!(releases[0].logical_name_id, None, "{:#?}", releases[0]);
+        assert_eq!(releases[0].resource_id, grant.resource_id);
+
+        let registered = interpret_test_batch(input(
+            vec![],
+            vec![base_registration("detached", 1_000, 0)],
+            vec![test_block(1)],
+        ))?;
+        let restored = interpret_test_batch(input(
+            registered
+                .normalized_events
+                .iter()
+                .map(prior_event)
+                .collect(),
+            vec![],
+            vec![expiry_block],
+        ))?;
+        let releases = restored
+            .normalized_events
+            .iter()
+            .filter(|event| event.event_kind == "RegistrationReleased")
+            .collect::<Vec<_>>();
+        assert_eq!(releases.len(), 1, "{:#?}", restored.normalized_events);
+        assert_eq!(releases[0].logical_name_id, None, "{:#?}", releases[0]);
+        Ok(())
+    }
 }
 
 mod raw_v1_registrar {
