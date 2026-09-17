@@ -29,7 +29,7 @@ the observation key and start block. Separately measure completed Interpret
 batches; an isolated query improvement is not an end-to-end rate measurement.
 
 The fresh baseline and versioned schema-migration install the identical index.
-Following an online prebuild, the migration adopts it through `IF NOT EXISTS`
+Following an online prebuild, the schema-migration adopts it through `IF NOT EXISTS`
 during the usual SQLx release process. No runner restart or Interpret replay is
 required solely to preinstall this index.
 
@@ -39,5 +39,5 @@ holds the observation fixed while growing unrelated history from 1,000 to
 1,000,000 rows, compares before/after results, and verifies active, closed,
 orphaned, nullable-manifest, competing-target, and outside-range-close cases.
 UPDATE probes run inside rolled-back transactions. The test also requires fresh,
-migration, and online index definitions to match. Save its JSON output as release
+schema-migration, and online index definitions to match. Save its JSON output as release
 evidence; do not point it at a role without disposable-database privileges.
