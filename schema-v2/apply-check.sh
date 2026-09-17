@@ -252,9 +252,11 @@ SELECT line FROM (
     WHERE n.nspname = current_schema() AND c.relkind IN ('"'"'v'"'"', '"'"'m'"'"')
     UNION ALL
     SELECT 5, p.proname, pg_get_function_identity_arguments(p.oid),
-           format('"'"'routine %s(%s) returns %s kind=%s volatile=%s secdef=%s config=%s acl=%s body=%s'"'"',
+           format('"'"'routine %s(%s) returns %s kind=%s lang=%s volatile=%s strict=%s leakproof=%s parallel=%s secdef=%s config=%s acl=%s body=%s'"'"',
                   p.proname, pg_get_function_identity_arguments(p.oid),
-                  pg_get_function_result(p.oid), p.prokind, p.provolatile, p.prosecdef,
+                  pg_get_function_result(p.oid), p.prokind,
+                  (SELECT l.lanname FROM pg_language l WHERE l.oid = p.prolang),
+                  p.provolatile, p.proisstrict, p.proleakproof, p.proparallel, p.prosecdef,
                   COALESCE(array_to_string(p.proconfig, '"'"';'"'"'), '"'"'-'"'"'),
                   COALESCE(replace(array_to_string(p.proacl, '"'"','"'"'), current_user, '"'"'owner'"'"'), '"'"'default'"'"'),
                   md5(replace(p.prosrc, current_schema(), '"'"'bigname_phase'"'"')))
@@ -289,29 +291,44 @@ SELECT line FROM (
 ORDER BY section, a, b, line;
 '
 frozen_schema_catalog="$ROOT/schema-v2/frozen-schema.txt"
-build_frozen_artifact() {
-    local scratch_schema="$frozen_schema"
-    local migration_file
-    apply_baseline
-    for migration_file in "$ROOT"/migrations/*.sql; do
-        if phase_migration_uses_production_schema "$migration_file"; then
-            render_phase_migration "$migration_file" | run_psql
-        fi
-    done
-}
-assert_frozen_schema_fingerprint() {
-    local observed
-    observed="$(mktemp "${TMPDIR:-/tmp}/schema-v2-frozen-catalog.XXXXXX")"
-    build_frozen_artifact
+# A fresh database gets the baseline alone (the schema-migrations are no-ops
+# before it exists); an initialized one gets the baseline it was born with plus
+# every schema-migration since. Both must be the same artifact, so the catalog
+# is taken twice -- after the baseline, and again after the schema-migrations
+# -- and the two must agree before either is compared with the frozen file.
+frozen_schema_catalog() {
     {
         printf '\\pset format unaligned\n\\pset tuples_only on\n'
         printf 'SET search_path TO "%s";\n' "$frozen_schema"
         printf '%s\n' "$frozen_schema_catalog_sql"
-    } | run_psql | sed "s/$frozen_schema/bigname_phase/g" > "$observed"
-    if [ ! -s "$observed" ]; then
+    } | run_psql | sed "s/$frozen_schema/bigname_phase/g"
+}
+assert_frozen_schema_fingerprint() {
+    local observed after_baseline migration_file
+    observed="$(mktemp "${TMPDIR:-/tmp}/schema-v2-frozen-catalog.XXXXXX")"
+    after_baseline="$(mktemp "${TMPDIR:-/tmp}/schema-v2-baseline-catalog.XXXXXX")"
+    (
+        scratch_schema="$frozen_schema"
+        apply_baseline
+        frozen_schema_catalog > "$after_baseline"
+        for migration_file in "$ROOT"/migrations/*.sql; do
+            if phase_migration_uses_production_schema "$migration_file"; then
+                render_phase_migration "$migration_file" | run_psql
+            fi
+        done
+        frozen_schema_catalog > "$observed"
+    )
+    if [ ! -s "$observed" ] || [ ! -s "$after_baseline" ]; then
         printf '%s\n' "the frozen artifact produced an empty catalog" >&2
         exit 1
     fi
+    if ! diff -u "$after_baseline" "$observed" >&2; then
+        printf '%s\n' \
+            "the baseline alone (a fresh database) and the baseline plus every schema-migration (an initialized one) are different artifacts (diff above: - baseline, + migrated); a baseline edit needs the matching schema-migration, and a schema-migration needs the matching baseline edit" >&2
+        rm -f -- "$observed" "$after_baseline"
+        exit 1
+    fi
+    rm -f -- "$after_baseline"
     if [ "${SCHEMA_V2_APPLY_CHECK_WRITE_FINGERPRINT:-0}" = 1 ]; then
         cp "$observed" "$frozen_schema_catalog"
         printf '%s\n' "wrote $(basename "$frozen_schema_catalog") ($(wc -l < "$observed" | tr -d ' ') lines)"
@@ -398,7 +415,12 @@ prior_migration_inventory() {
     if [ -n "${SCHEMA_V2_PRIOR_INVENTORY_REF:-}" ]; then
         base="$SCHEMA_V2_PRIOR_INVENTORY_REF"
     elif [ -n "${GITHUB_BASE_REF:-}" ]; then
-        git -C "$ROOT" fetch -q --depth=1 origin "$GITHUB_BASE_REF" 2>/dev/null || true
+        # In CI the base is not optional: a guard that skips on a failed fetch
+        # is a guard a flaky network switches off.
+        if ! git -C "$ROOT" fetch -q --depth=1 origin "$GITHUB_BASE_REF"; then
+            printf '%s\n' "could not fetch the base branch $GITHUB_BASE_REF for the previous inventory" >&2
+            exit 1
+        fi
         base="FETCH_HEAD"
     elif git -C "$ROOT" rev-parse --verify -q origin/main >/dev/null 2>&1 \
         && ! git -C "$ROOT" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
@@ -406,6 +428,14 @@ prior_migration_inventory() {
     else
         git -C "$ROOT" fetch -q --deepen=1 origin 2>/dev/null || true
         base="HEAD~1"
+    fi
+    if ! git -C "$ROOT" rev-parse --verify -q "$base^{commit}" >/dev/null 2>&1; then
+        if [ -n "${GITHUB_ACTIONS:-}" ]; then
+            printf '%s\n' "the previous commit $base is not available for the previous inventory" >&2
+            exit 1
+        fi
+        printf '%s\n' "note: $base is not available, previous inventory not compared" >&2
+        return 1
     fi
     if ! git -C "$ROOT" cat-file -e "$base:schema-v2/migration-inventory.txt" 2>/dev/null; then
         printf '%s\n' "note: $base has no migration inventory, previous inventory not compared" >&2
@@ -820,8 +850,11 @@ apply_check_url=""
 if [ -n "${BIGNAME_DATABASE_URL:-}" ]; then
     url_scheme="${BIGNAME_DATABASE_URL%%://*}://"
     url_rest="${BIGNAME_DATABASE_URL#*://}"
-    url_authority="${url_rest%%/*}"
+    # The authority ends at the first of / ? # -- /dbname is optional in libpq's
+    # grammar, so a query may follow the host directly.
+    url_authority="$(printf '%s' "$url_rest" | sed -E 's#[/?\#].*$##')"
     url_path="${url_rest#"$url_authority"}"
+    url_path="${url_path%%#*}"
     # libpq also takes credentials as query parameters, which would override the
     # userinfo; keep every other connection option.
     url_query=""
@@ -867,13 +900,23 @@ cleanup() {
 trap cleanup EXIT
 
 # The owner keeps the race probe (another session's wait event is not visible
-# to an ordinary login) and installs the baseline's extensions, which need the
-# database CREATE the login loses below.
+# to an ordinary login) and installs the extensions the baseline declares,
+# which need the database CREATE the login loses below. The statements are
+# read from the baseline, not repeated here, and the two the baseline relies on
+# (btree_gist for its exclusion constraints, pgcrypto for public.digest) must
+# still be declared there: a real init-schema on an empty database has only
+# the baseline to install them.
+baseline_extension_statements="$(grep -hE '^CREATE EXTENSION IF NOT EXISTS ' "$ROOT"/schema-v2/baseline/*.sql || true)"
+for required_extension in btree_gist pgcrypto; do
+    if ! printf '%s\n' "$baseline_extension_statements" | grep -qE "^CREATE EXTENSION IF NOT EXISTS ${required_extension}( |;)"; then
+        printf '%s\n' "schema-v2/baseline no longer declares CREATE EXTENSION IF NOT EXISTS $required_extension; init-schema on an empty database needs it" >&2
+        exit 1
+    fi
+done
 {
     printf "CREATE ROLE \"%s\" LOGIN PASSWORD '%s';\n" \
         "$apply_check_role" "$apply_check_role_password"
-    printf 'CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public;\n'
-    printf 'CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;\n'
+    printf '%s\n' "$baseline_extension_statements"
     printf "SELECT format('GRANT CONNECT, CREATE ON DATABASE %%I TO %%I', current_database(), '%s') \\gexec\n" "$apply_check_role"
 } | run_psql_as_owner
 

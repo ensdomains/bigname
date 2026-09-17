@@ -215,7 +215,12 @@ plus the inventoried schema-migrations, built into a fresh schema on every
 run and compared line for line, so a change to a baseline file or a
 schema-migration that moves the schema fails until the catalog is
 regenerated (`SCHEMA_V2_APPLY_CHECK_WRITE_FINGERPRINT=1`) in the same
-change — whatever the object is called.
+change — whatever the object is called. The catalog is taken twice, after
+the baseline alone (what a fresh database gets, the schema-migrations being
+no-ops before it exists) and after the schema-migrations (what an
+initialized database gets), and the two must agree: a baseline edit without
+its schema-migration, or the reverse, is refused on that comparison before
+the frozen file is consulted.
 From acceptance on, a
 schema-migration of any of these kinds cannot land without moving the
 conformance test, which is where the carve-out or amendment is checked for.
