@@ -27,7 +27,12 @@ WHERE event.chain_id = $1 AND event.block_number < $2
   AND event.event_kind IN ('RegistrationGranted','RegistrationRenewed','TokenControlTransferred')
   -- The adapter releases only when timestamp > expiry + grace. At predecessor equality
   -- it was still live; at last-block equality it is still live. Shift grace to the bounds.
-  AND ($3::bigint IS NULL OR parsed.expiry >= $3::bigint::numeric - $6::bigint::numeric)
+  -- A parameter-NULL OR leaves the lower bound as a filter in generic plans.
+  -- The existing i64 bound below makes this minimum equivalent when no predecessor exists.
+  AND parsed.expiry >= COALESCE(
+      $3::bigint::numeric - $6::bigint::numeric,
+      '-9223372036854775808'::numeric
+  )
   AND parsed.expiry < $4::bigint::numeric - $6::bigint::numeric
   -- parse_i64 rejects out-of-range expiries; checked_add overflow means never due.
   AND parsed.expiry >= '-9223372036854775808'::numeric

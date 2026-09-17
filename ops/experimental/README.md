@@ -43,3 +43,14 @@ full retained state may still exceed blue-brain's memory limit. Returning to a
 different interpreter hash requires the normal redo/adoption procedure; merely
 swapping binaries is not a safe rollback. The optional indexes can remain while
 the runner is stopped and must not be removed during an active lookahead query.
+
+## Expiry lookup with generic prepared plans
+
+The optional predecessor bound uses a numeric `COALESCE` lower bound so both
+expiry endpoints remain index conditions in PostgreSQL's generic prepared plan.
+The fallback is the signed-64-bit minimum already enforced by the query. Null
+predecessors, strict grace boundaries, numeric parsing and overflow handling keep
+the same behavior. A mainnet read-only comparison returned the same 17 names,
+reducing the generic query from 40.2 seconds to 7.2 milliseconds. This SQL-only
+access-path repair retains the approved compatibility version; completed-batch
+throughput must still be measured after deployment.
