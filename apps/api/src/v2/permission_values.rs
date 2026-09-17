@@ -154,9 +154,20 @@ pub(crate) fn record_resource_value(selector: &Value, powers: &Value) -> V2Resul
                 .any(|power| power == format!("set_{family}"))
         })
     };
+    // coin_type and content_type are numbers on the wire (docs/api-v2.md vocabulary);
+    // an argument outside u64 is served as the decimal string the chain carried.
+    let numeric = |field: &str| -> V2Result<Value> {
+        let key = key()?;
+        Ok(match key.parse::<u64>() {
+            Ok(number) => json!({field: number}),
+            Err(_) => json!({format!("{field}_decimal"): key}),
+        })
+    };
     let value = match kind {
         "address" if held("addr") => {
-            json!({"kind": "address", "hash": hash, "coin_type": key()?})
+            let mut value = json!({"kind": "address", "hash": hash});
+            merge(&mut value, numeric("coin_type")?);
+            value
         }
         "text" | "data" if held(kind) => {
             if object.contains_key("raw_selector_key") {
@@ -165,7 +176,11 @@ pub(crate) fn record_resource_value(selector: &Value, powers: &Value) -> V2Resul
                 json!({"kind": kind, "hash": hash, "key": key()?})
             }
         }
-        "abi" if held("abi") => json!({"kind": "abi", "hash": hash, "content_type": key()?}),
+        "abi" if held("abi") => {
+            let mut value = json!({"kind": "abi", "hash": hash});
+            merge(&mut value, numeric("content_type")?);
+            value
+        }
         "interface" if held("interface") => {
             json!({"kind": "interface", "hash": hash, "interface_id": key()?})
         }
@@ -190,6 +205,12 @@ pub(crate) fn record_resource_value(selector: &Value, powers: &Value) -> V2Resul
         _ => return Err(record_resource_error()),
     };
     Ok(Some(value))
+}
+
+fn merge(target: &mut Value, fields: Value) {
+    if let (Some(target), Some(fields)) = (target.as_object_mut(), fields.as_object()) {
+        target.extend(fields.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
 }
 
 fn record_resource_error() -> V2Error {
@@ -377,7 +398,21 @@ mod tests {
         assert_eq!(
             record_resource_value(&json!({"kind": "address", "key": "60", "hash": hash}), &all)
                 .unwrap(),
-            Some(json!({"kind": "address", "hash": hash, "coin_type": "60"}))
+            Some(json!({"kind": "address", "hash": hash, "coin_type": 60}))
+        );
+        // A coin type past u64 keeps its decimal text under a distinct name.
+        let wide = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+        assert_eq!(
+            record_resource_value(&json!({"kind": "address", "key": wide, "hash": hash}), &all)
+                .unwrap(),
+            Some(json!({"kind": "address", "hash": hash, "coin_type_decimal": wide}))
+        );
+        assert!(
+            record_resource_value(&json!({"kind": "address", "key": "-1", "hash": hash}), &all)
+                .unwrap()
+                .unwrap()
+                .get("coin_type")
+                .is_none()
         );
         assert_eq!(
             record_resource_value(&json!({"kind": "text", "key": "url", "hash": hash}), &all)
@@ -404,7 +439,7 @@ mod tests {
         );
         assert_eq!(
             record_resource_value(&json!({"kind": "abi", "key": "1", "hash": hash}), &all).unwrap(),
-            Some(json!({"kind": "abi", "hash": hash, "content_type": "1"}))
+            Some(json!({"kind": "abi", "hash": hash, "content_type": 1}))
         );
         assert_eq!(
             record_resource_value(

@@ -1455,7 +1455,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   argument left with one held reading is served as that reading — so a row
   with no held reading, like a grant whose argument was never observed,
   carries no `record_resource`. A text or data key that is not printable UTF-8 is served
-  as `key_bytes` (hex) instead of `key`.
+  as `key_bytes` (hex) instead of `key`. `coin_type` and `content_type` are
+  numbers, as everywhere else in the API; an argument the chain carried beyond
+  64 bits is served as its decimal string under `coin_type_decimal` or
+  `content_type_decimal` instead.
   (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L252-L259 @ ens_v2@a971bd64) The two wrapper fields use the same atomic,
   [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word)

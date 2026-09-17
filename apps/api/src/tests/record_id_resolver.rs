@@ -122,8 +122,47 @@ async fn record_id_resolver_permissions_describe_the_argument_scoped_record() ->
     assert!(role.get("record_resource_selector").is_none());
     assert_eq!(role["powers"], json!(["set_text", "link"]));
 
+    // A coin type is a number on the wire, on both routes.
+    sqlx::query("UPDATE bigname_phase.permissions_current SET scope_detail = scope_detail || $1, effective_powers = $3 WHERE resource_id = $2 AND scope_kind = 'resolver'")
+        .bind(json!({"resource_selector": {"kind": "address", "key": "2147483658", "hash": hash}}))
+        .bind(v2_permissions_current_resource_id())
+        .bind(json!(["set_addr"])).execute(&database.pool).await?;
+    let payload = v2_permissions_payload_for_database(
+        &database,
+        &format!(
+            "/v1/permissions?registration_id={}",
+            v2_permissions_current_resource_id()
+        ),
+    )
+    .await?;
+    let row = payload["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["grant_scope"]["kind"] == "resolver")
+        .expect("resolver permission");
+    assert_eq!(
+        row["record_resource"],
+        json!({"kind": "address", "hash": hash, "coin_type": 2147483658u64})
+    );
+    let roles = v2_resolver_payload_for_database(
+        &database,
+        "/v1/resolvers/1/0x0000000000000000000000000000000000000abc/roles",
+    )
+    .await?;
+    let role = roles["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["registration_id"] == v2_permissions_current_resource_id().to_string())
+        .expect("role row for the argument-scoped resource");
+    assert!(role["record_resource"]["coin_type"].is_u64(), "{role}");
+
     // The text setter revoked: the argument still names the resource, but it is no
     // longer a record this holder may set, so neither row describes it.
+    sqlx::query("UPDATE bigname_phase.permissions_current SET scope_detail = scope_detail || $1 WHERE resource_id = $2 AND scope_kind = 'resolver'")
+        .bind(json!({"resource_selector": {"kind": "text", "key": "url", "hash": hash}}))
+        .bind(v2_permissions_current_resource_id()).execute(&database.pool).await?;
     sqlx::query("UPDATE bigname_phase.permissions_current SET effective_powers = $2 WHERE resource_id = $1 AND scope_kind = 'resolver'")
         .bind(v2_permissions_current_resource_id())
         .bind(json!(["link"])).execute(&database.pool).await?;
