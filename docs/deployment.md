@@ -101,6 +101,11 @@ database following [the index runbook](../ops/discovery-history-index/README.md)
 before applying its matching schema-migration. Verify index validity and record
 the before/after query plans and completed-batch throughput.
 
+The exact discovery observation reopen lookup has a separate unrestricted index
+because replay must also find orphaned and closed observations. Follow its
+[online index runbook](../ops/discovery-reopen-index/README.md) before applying
+the matching schema-migration on a large initialized database.
+
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
 runtime configuration is documented in
