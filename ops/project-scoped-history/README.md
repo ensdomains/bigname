@@ -29,17 +29,51 @@ should be recorded with the installation receipt.
 
 On an initialized database, prebuild the indexes with `psql -X -v ON_ERROR_STOP=1
 -f ops/project-scoped-history/install.sql`, outside a transaction, before applying
-the versioned schema-migration or starting the changed Project binary. The
-concurrent builds permit writes but can wait for an existing transaction. Inspect
-`pg_stat_progress_create_index`; do not restart an indexing batch to satisfy the
-build. The script bounds each build to thirty minutes.
+the versioned schema-migrations or starting the changed Project binary.
+[The production runbook](../../docs/runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+places this in step 3 of an upgrade. The concurrent builds permit writes but can
+wait for an existing transaction. Inspect `pg_stat_progress_create_index`; do not
+restart an indexing batch to satisfy the build. The script bounds each build to
+thirty minutes. Record its output.
 
-Require all eight result rows, `indisvalid` and `indisready` true, and definitions
-matching the fresh baseline. `IF NOT EXISTS` does not repair an invalid index.
-If a named replacement is invalid and no build is running, drop only that invalid
-index concurrently and retry its creation. Preserve valid indexes and existing
-access paths. The migration uses the same definitions for initialized databases
-and is a no-op before the phase schema exists.
+The script checks the eight names twice and fails, with a non-zero `psql` exit,
+instead of reporting success over an index the lookups cannot use. Before it
+builds anything, it refuses a name that is already taken by an index that is not
+both `indisvalid` and `indisready`, an index on another table, an index whose
+definition is not the reviewed one, or a table, view, or other relation that is
+not an index. Names that resolve to nothing pass this first check. After the
+builds it makes the same check and also requires all eight indexes to exist. It
+prints the index rows before the last check, so the receipt shows the flags and
+definitions either way. The definition is compared as `pg_get_indexdef` prints
+it, with the schema name removed and runs of whitespace collapsed, with how the
+fresh baseline index prints, so key order, expressions, the included column, and
+the predicate are all covered. On a mismatch the error prints the definition it
+found beside the expected one.
+
+An interrupted concurrent build, for example one cancelled or stopped by the
+thirty-minute limit, leaves an invalid index under the intended name.
+`IF NOT EXISTS` matches on the name alone, so it does not repair that index;
+rerunning the script stops at the first check and names it. Nothing drops or
+rebuilds an index automatically. To recover, first confirm in
+`pg_stat_progress_create_index` that no build is still running. Then drop only
+the named index with `DROP INDEX CONCURRENTLY bigname_phase.<index name>`, as the
+error's hint spells out, and rerun the script. Recover a valid index that fails
+the definition check the same way. If the name belongs to a table, view, or
+another table's index, remove or rename that relation first. Never drop a valid
+index with the reviewed definition, and preserve the existing access paths.
+
+The schema-migration `20260917131000_project_scoped_history_indexes.sql` uses the
+same definitions for initialized databases and is a no-op before the phase schema
+exists. After a prebuild it adopts the indexes through `IF NOT EXISTS`, by name
+alone. The later schema-migration
+`20260917161000_project_scoped_history_index_validity_check.sql` therefore makes
+the script's final check again: the SQLx run fails, without recording that
+version, if `bigname_phase.normalized_events` exists and any of the eight names
+is missing, is not an index on that table, is not valid and ready, or does not
+have the reviewed definition. It changes nothing; recover as described above,
+then run the schema-migrations again. `schema-v2/apply-check.sh` proves each
+refusal for the script and for the schema-migration, and that the fresh baseline,
+the schema-migration, and the script build the same definitions.
 
 This is an access-path change, with no new event or replay semantics. However,
 Project Rust and SQL sources are inputs to the shared interpreter content hash.
@@ -60,7 +94,9 @@ IDs, final UNION deduplication, empty scope, another chain, and target-boundary
 changes. They exercise candidate events, observed/orphaned history, before/after
 references, missing/null/empty keys, mixed address tuples, and case sensitivity.
 They verify the migration recreates the baseline indexes exactly and is
-repeatable. Actual production SQL is used in both tests.
+repeatable. For each index they also show that migration succeeding over an
+invalid index and over one with other keys, and the later validity check then
+refusing both and a missing index. Actual production SQL is used in both tests.
 
 The scale test grows unrelated event history from 50,000 to 200,000 rows with the
 changed keys fixed. Competing scans remain enabled. It requires all eight

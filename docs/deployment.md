@@ -90,6 +90,13 @@ because replay must also find orphaned and closed observations. Follow its
 [online index runbook](../ops/discovery-reopen-index/README.md) before applying
 the matching schema-migration on a large initialized database.
 
+Project's history lookups for changed names and primary names use eight indexes
+on `normalized_events`. Prebuild them concurrently on a large initialized
+database following [their index runbook](../ops/project-scoped-history/README.md)
+before applying the matching schema-migrations. The script fails unless all eight
+are valid, ready, and have the reviewed definition, and the later validity-check
+schema-migration refuses the same shapes.
+
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
 runtime configuration is documented in

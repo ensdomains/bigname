@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use anyhow::{Result, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
-use sqlx::{Postgres, Transaction, raw_sql};
+use sqlx::{Acquire, Postgres, Transaction, raw_sql};
 
 use super::{ANALYZE_HISTORY_SCOPES_SQL, SCOPED_NAME_HISTORY_SQL, SCOPED_PRIMARY_HISTORY_SQL};
 
@@ -21,6 +21,9 @@ const PREVIOUS_NAMES: &str = include_str!("../../../tests/scoped_history/previou
 const PREVIOUS_PRIMARY: &str = include_str!("../../../tests/scoped_history/previous_primary.sql");
 const MIGRATION: &str =
     include_str!("../../../../../migrations/20260917131000_project_scoped_history_indexes.sql");
+const VALIDITY_CHECK: &str = include_str!(
+    "../../../../../migrations/20260917161000_project_scoped_history_index_validity_check.sql"
+);
 const INDEX_SUFFIXES: &[&str] = &[
     "name_node",
     "name_child",
@@ -211,6 +214,53 @@ async fn verify_index_migration(transaction: &mut Transaction<'_, Postgres>) -> 
     // The initialized-database migration must recreate the fresh baseline and be repeatable.
     for _ in 0..2 {
         raw_sql(MIGRATION).execute(&mut **transaction).await?;
+    }
+    assert_eq!(
+        baseline,
+        definitions(names.clone())
+            .fetch_all(&mut **transaction)
+            .await?
+    );
+    raw_sql(VALIDITY_CHECK).execute(&mut **transaction).await?;
+    // IF NOT EXISTS adopts a relation by name alone. An interrupted concurrent build leaves an
+    // invalid index, and a wrong manual build leaves other keys; the later check must refuse both.
+    for name in &names {
+        for (broken_shape, refusal) in [
+            (
+                format!(
+                    "UPDATE pg_index SET indisvalid = false
+                     WHERE indexrelid = 'bigname_phase.{name}'::regclass"
+                ),
+                "exists but is not a valid and ready index",
+            ),
+            (
+                format!(
+                    "DROP INDEX bigname_phase.{name};
+                     CREATE INDEX {name} ON bigname_phase.normalized_events (block_number, chain_id)"
+                ),
+                "exists but does not have the reviewed definition",
+            ),
+            (
+                format!("DROP INDEX bigname_phase.{name}"),
+                "does not exist although bigname_phase.normalized_events does",
+            ),
+        ] {
+            let mut savepoint = transaction.begin().await?;
+            raw_sql(&broken_shape).execute(&mut *savepoint).await?;
+            if !refusal.starts_with("does not exist") {
+                // The index-building migration alone records success over the unusable index.
+                raw_sql(MIGRATION).execute(&mut *savepoint).await?;
+            }
+            let error = raw_sql(VALIDITY_CHECK)
+                .execute(&mut *savepoint)
+                .await
+                .expect_err("validity check accepted an unusable history index");
+            ensure!(
+                error.to_string().contains(&format!("{name} {refusal}")),
+                "unexpected refusal for {name}: {error}"
+            );
+            savepoint.rollback().await?;
+        }
     }
     assert_eq!(
         baseline,
