@@ -1543,17 +1543,19 @@ ERC-1967 `Upgraded(address)` logs from manifest-declared and event-announced con
 
 ### Resolver admission by implementation announcement
 
-A registry `ResolverUpdated` admits its target resolver from the pointer's
-block only, and Interpret performs no historical lookback for a newly admitted
-address: a resolver's earlier logs stay uninterpreted. On the Sepolia hackathon
-deployment every stored raw `Upgraded` from a discovered resolver preceded the
-registry pointer that discovered it (a census of bigname's stored Sepolia raw
-logs on 2026-09-13: 646 raw `Upgraded` logs and no normalized `Upgraded`; all
-148 from discovered resolvers preceded their admitting pointer, 21 of them
-earlier in the pointer's own block), so pointer-only discovery can never
-satisfy the implementation-based support rule.
-`ens_v2_resolver_l1` therefore also admits a resolver from the block in which
-it, or its factory, announces a declared implementation:
+A registry `ResolverUpdated` records which resolver a name uses and nothing
+more. It does not [admit](glossary.md#admission) the target resolver, so it
+never causes that resolver's events to be read
+(see [resolver creation capture](#resolver-creation-capture)). Interpret also
+performs no historical lookback for a newly admitted address: a resolver's logs
+from before its admission block stay uninterpreted.
+
+An ENSv2 resolver is therefore read only from a block in which it announces
+itself. `ResolverCreated()` is one such announcement. Resolvers deployed before
+that event existed never emit it, and the support rule needs the resolver's
+implementation observation in any case, so `ens_v2_resolver_l1` also admits a
+resolver from the block in which it, or its factory, announces a declared
+implementation:
 
 - `Upgraded(address indexed implementation)` from any emitter whose indexed
   `implementation` is in the same-namespace, same-deployment
@@ -1581,9 +1583,13 @@ instance; a self-announcement's edge runs from the implementation's contract
 instance (the same instance the log's `proxy_implementation` edge names),
 because only registry announcements and `ResolverCreated` observations may produce self-edges. The
 announcement edge never closes: a later registry pointer to another resolver
-closes only the pointer edge. Registry-pointer discovery is unchanged, and a
-resolver that announces nothing remains admitted only through its pointer and
-stays `unsupported` with `resolver_implementation_unknown`
+closes only the pointer edge. A registry-pointer edge is binding history only
+and admits nothing. A resolver that announces nothing (no `ResolverCreated()`,
+and no `Upgraded` or `ProxyDeployed` naming a declared implementation) is not
+admitted, so none of its events are read, including any record events it
+emitted before or after a registry pointed a name at it. This is expected
+behaviour, not a gap to repair. Names that point at such a resolver still show
+it, and it stays `unsupported` with `resolver_implementation_unknown`
 ([projections.md](projections.md#resolver-and-records)).
 
 Same-block admission: when a discovery observation admits an address at block
