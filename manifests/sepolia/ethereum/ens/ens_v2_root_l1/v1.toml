@@ -1,103 +1,117 @@
-# ENSv2 sepolia-dev RootRegistry admission for the alternate profile.
-# RootRegistry deployment address:
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/deployments/sepolia-dev/RootRegistry.json:L2 @ ens_v2_sepolia_dev@554c309).
+# Official 2026-09-15 Sepolia deployment; replaces the old Sepolia and hackathon corpora.
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/.deployment.json:L4 @ ens_v2_sepolia_20260916@366de741)
 manifest_version = 1
 namespace = "ens"
 source_family = "ens_v2_root_l1"
 chain = "ethereum-sepolia"
-deployment_epoch = "ens_v2_sepolia_dev"
-rollout_status = "deprecated"
+deployment_epoch = "ens_v2_sepolia_20260915"
+rollout_status = "active"
 normalizer_version = "ensip15@ens-normalize-0.1.1"
 
 [capability_flags]
 
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L2 @ ens_v2_sepolia_20260916@366de741)
 [[roots]]
 name = "RootRegistry"
-address = "0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3"
-# Start block follows the sepolia-dev deployment transaction.
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/deployments/sepolia-dev/RootRegistry.json:L2617 @ ens_v2_sepolia_dev@554c309).
-start_block = 10462881
+address = "0x9703dbd26dab89504490994138cf2c575251a9ce"
+start_block = 11708988
 
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L2 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L2995 @ ens_v2_sepolia_20260916@366de741)
 [[contracts]]
 role = "root_registry"
-address = "0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3"
+address = "0x9703dbd26dab89504490994138cf2c575251a9ce"
 proxy_kind = "none"
-# Start block follows the sepolia-dev deployment transaction.
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/deployments/sepolia-dev/RootRegistry.json:L2617 @ ens_v2_sepolia_dev@554c309).
-start_block = 10462881
+start_block = 11708988
 
 [[discovery_rules]]
 edge_kind = "subregistry"
 from_role = "root_registry"
 admission = "reachable_from_root"
 
-# RootRegistry follows the registry event ABI consumed by ENSv2 registry adapters.
-# LabelRegistered: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registry/interfaces/IRegistryEvents.sol:L15 @ ens_v2_sepolia_dev@554c309).
+[[discovery_rules]]
+edge_kind = "resolver"
+from_role = "root_registry"
+admission = "reachable_from_root"
+
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L461 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
 name = "LabelRegistered"
 fragment = "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)"
 emitter_roles = ["root_registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "RegistrationGranted", "PreimageObserved", "ResolverChanged", "SubregistryChanged"]
 
-# LabelReserved: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registry/interfaces/IRegistryEvents.sol:L30 @ ens_v2_sepolia_dev@554c309).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L498 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
 name = "LabelReserved"
 fragment = "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)"
 emitter_roles = ["root_registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "RegistrationReserved", "PreimageObserved", "ResolverChanged", "SubregistryChanged"]
 
-# LabelUnregistered: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registry/interfaces/IRegistryEvents.sol:L41 @ ens_v2_sepolia_dev@554c309).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L517 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
 name = "LabelUnregistered"
 fragment = "event LabelUnregistered(uint256 indexed tokenId, address indexed sender)"
 emitter_roles = ["root_registry"]
 normalized_events = ["RegistrationReleased", "SurfaceUnbound", "ResolverChanged", "SubregistryChanged"]
 
-# ExpiryUpdated: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registry/interfaces/IRegistryEvents.sol:L47 @ ens_v2_sepolia_dev@554c309).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L418 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
 name = "ExpiryUpdated"
 fragment = "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)"
 emitter_roles = ["root_registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "ExpiryChanged", "RegistrationRenewed", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ResolverChanged", "SubregistryChanged"]
 
-# SubregistryUpdated: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registry/interfaces/IRegistryEvents.sol:L53 @ ens_v2_sepolia_dev@554c309).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L598 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
 name = "SubregistryUpdated"
 fragment = "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)"
 emitter_roles = ["root_registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "SubregistryChanged", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged", "ResolverChanged"]
 
-# ResolverUpdated: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registry/interfaces/IRegistryEvents.sol:L63 @ ens_v2_sepolia_dev@554c309).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L573 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
 name = "ResolverUpdated"
 fragment = "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)"
 emitter_roles = ["root_registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "ResolverChanged"]
 
-# TokenResource: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L37 @ ens_v2_sepolia_dev@554c309).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L636 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
 name = "TokenResource"
 fragment = "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)"
 emitter_roles = ["root_registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenResourceLinked", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged"]
 
-# EACRolesChanged comes from the permissioned registry's inherited EnhancedAccessControl interface:
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L9 @ ens_v2_sepolia_dev@554c309)
-# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L24 @ ens_v2_sepolia_dev@554c309).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L710 @ ens_v2_sepolia_20260916@366de741)
+[[abi.events]]
+name = "TransferSingle"
+fragment = "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)"
+emitter_roles = ["root_registry"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenControlTransferred"]
+
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L673 @ ens_v2_sepolia_20260916@366de741)
+[[abi.events]]
+name = "TransferBatch"
+fragment = "event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)"
+emitter_roles = ["root_registry"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenControlTransferred"]
+
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L393 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
 name = "EACRolesChanged"
 fragment = "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)"
 emitter_roles = ["root_registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "PermissionChanged", "RootPermissionChanged"]
 
-# TokenRegenerated: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registry/interfaces/IRegistryEvents.sol:L73 @ ens_v2_sepolia_dev@554c309).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L617 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
 name = "TokenRegenerated"
 fragment = "event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId)"
 emitter_roles = ["root_registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenRegenerated", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged", "ResolverChanged", "SubregistryChanged"]
 
-# ParentUpdated: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registry/interfaces/IRegistryEvents.sol:L79 @ ens_v2_sepolia_dev@554c309).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L542 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
 name = "ParentUpdated"
 fragment = "event ParentUpdated(address indexed parent, string label, address indexed sender)"

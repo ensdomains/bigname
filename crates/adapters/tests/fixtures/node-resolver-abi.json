@@ -1,0 +1,80 @@
+[
+  {
+    "name": "AddressChanged",
+    "fragment": "event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress)",
+    "normalized_events": [
+      "RecordChanged"
+    ]
+  },
+  {
+    "name": "TextChanged",
+    "fragment": "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+    "normalized_events": [
+      "RecordChanged"
+    ]
+  },
+  {
+    "name": "ContenthashChanged",
+    "fragment": "event ContenthashChanged(bytes32 indexed node, bytes hash)",
+    "normalized_events": [
+      "RecordChanged"
+    ]
+  },
+  {
+    "name": "NameChanged",
+    "fragment": "event NameChanged(bytes32 indexed node, string name)",
+    "normalized_events": [
+      "RecordChanged"
+    ]
+  },
+  {
+    "name": "VersionChanged",
+    "fragment": "event VersionChanged(bytes32 indexed node, uint64 newVersion)",
+    "normalized_events": [
+      "RecordVersionChanged"
+    ]
+  },
+  {
+    "name": "AliasChanged",
+    "fragment": "event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)",
+    "normalized_events": [
+      "AliasChanged",
+      "PreimageObserved"
+    ]
+  },
+  {
+    "name": "NamedResource",
+    "fragment": "event NamedResource(uint256 indexed resource, bytes name)",
+    "normalized_events": [
+      "PreimageObserved"
+    ]
+  },
+  {
+    "name": "NamedTextResource",
+    "fragment": "event NamedTextResource(uint256 indexed resource, bytes name, bytes32 indexed keyHash, string key)",
+    "normalized_events": [
+      "PreimageObserved"
+    ]
+  },
+  {
+    "name": "NamedAddrResource",
+    "fragment": "event NamedAddrResource(uint256 indexed resource, bytes name, uint256 indexed coinType)",
+    "normalized_events": [
+      "PreimageObserved"
+    ]
+  },
+  {
+    "name": "EACRolesChanged",
+    "fragment": "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)",
+    "normalized_events": [
+      "PermissionChanged"
+    ]
+  },
+  {
+    "name": "Upgraded",
+    "fragment": "event Upgraded(address indexed implementation)",
+    "normalized_events": [
+      "Upgraded"
+    ]
+  }
+]

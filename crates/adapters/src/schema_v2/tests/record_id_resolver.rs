@@ -479,13 +479,13 @@ fn record_id_resolver_link_facts_do_not_require_a_name_surface() -> anyhow::Resu
 }
 
 #[test]
-fn record_id_resolver_hackathon_manifest_routes_both_resolver_generations() -> anyhow::Result<()> {
+fn record_id_resolver_official_manifest_routes_both_resolver_generations() -> anyhow::Result<()> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .parent()
         .unwrap();
-    let repository = bigname_manifests::load_repository(root.join("manifests/sepolia-hackathon"))?;
+    let repository = bigname_manifests::load_repository(root.join("manifests/sepolia"))?;
     assert_eq!(
         repository.summary().status,
         bigname_manifests::ManifestLoadStatus::Loaded
