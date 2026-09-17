@@ -20,6 +20,7 @@ pub struct RunnerError {
     message: String,
     lock_connection_lost: bool,
     redo_attempt_superseded: bool,
+    stop_bound_expired: bool,
 }
 
 impl RunnerError {
@@ -29,11 +30,22 @@ impl RunnerError {
             message: message.into(),
             lock_connection_lost: false,
             redo_attempt_superseded: false,
+            stop_bound_expired: false,
         }
     }
 
     pub fn transient(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Transient, message)
+    }
+
+    /// Required work outran the deadline an accepted stop put on it. Transient in
+    /// nature -- the next start repeats the work -- but not retried by this run,
+    /// which is stopping; it surfaces so the stop exits nonzero.
+    pub(crate) fn stop_bound_expired(message: impl Into<String>) -> Self {
+        Self {
+            stop_bound_expired: true,
+            ..Self::transient(message)
+        }
     }
 
     pub fn data_integrity(message: impl Into<String>) -> Self {
@@ -58,32 +70,33 @@ impl RunnerError {
     }
 
     pub(crate) fn with_secondary(self, action: &str, secondary: Self) -> Self {
+        // A retryable primary defers to the secondary's kind; a stop-bound
+        // expiry on either side keeps the combined error from being retried.
         let kind = if self.is_retryable() {
             secondary.kind
         } else {
             self.kind
         };
-        Self::new(
-            kind,
-            format!("{self}; additionally failed to {action}: {secondary}"),
-        )
+        Self {
+            stop_bound_expired: self.stop_bound_expired || secondary.stop_bound_expired,
+            ..Self::new(
+                kind,
+                format!("{self}; additionally failed to {action}: {secondary}"),
+            )
+        }
     }
 
     pub(crate) fn lock_connection_lost(message: impl Into<String>) -> Self {
         Self {
-            kind: ErrorKind::Transient,
-            message: message.into(),
             lock_connection_lost: true,
-            redo_attempt_superseded: false,
+            ..Self::transient(message)
         }
     }
 
     pub(crate) fn redo_attempt_superseded(message: impl Into<String>) -> Self {
         Self {
-            kind: ErrorKind::DataIntegrity,
-            message: message.into(),
-            lock_connection_lost: false,
             redo_attempt_superseded: true,
+            ..Self::data_integrity(message)
         }
     }
 
@@ -92,7 +105,7 @@ impl RunnerError {
     }
 
     pub fn is_retryable(&self) -> bool {
-        self.kind == ErrorKind::Transient
+        self.kind == ErrorKind::Transient && !self.stop_bound_expired
     }
 
     pub(crate) fn permits_pool_writes_after_error(&self) -> bool {
