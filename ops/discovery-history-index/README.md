@@ -43,7 +43,11 @@ the observation key and compare actual completed Interpret batches and consumed
 raw logs. A faster isolated query does not prove end-to-end throughput by itself.
 
 The matching versioned schema-migration installs the same definition on initialized
-databases; after a live prebuild, its `IF NOT EXISTS` is a no-op. Apply that migration
+databases; after a live prebuild, its `IF NOT EXISTS` is a no-op. That file
+matches on the name alone, so the later schema-migration
+`20260917160000_discovery_edges_index_validity_check.sql` fails the SQLx run if
+this index exists but is not valid and ready. It changes nothing; recover as
+described above, then run the schema-migrations again. Apply that migration
 through the usual SQLx release process when adopting this source revision. The
 fresh baseline also includes the index. No binary replacement or Interpret replay
 is needed solely to preinstall it on the current deployment.

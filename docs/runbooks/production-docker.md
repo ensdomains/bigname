@@ -346,6 +346,26 @@ to perform the first build against a populated production `discovery_edges`
 table: an ordinary index build blocks writes to the table until the
 schema-migration's transaction ends.
 
+The release containing `20260917130000_discovery_edges_reopen_idx.sql` adds the
+exact lookup Interpret uses to find a retained observation, orphaned and closed
+ones included, before it inserts a new row. On an initialized production
+namespace, build `discovery_edges_reopen_idx` concurrently in step 3 the same
+way: follow [its index runbook](../../ops/discovery-reopen-index/README.md) and
+run its [`install.sql`](../../ops/discovery-reopen-index/install.sql), which
+exits non-zero unless the index is valid and ready, and confirm the definition.
+This build can also be completed before the stop/start window opens. Then apply
+the schema-migration in step 4; do not allow it to perform the first build
+against a populated production `discovery_edges` table.
+
+Both discovery index schema-migrations adopt an existing index by name alone,
+so on their own they would also accept the invalid index an interrupted
+concurrent build leaves behind. The later
+`20260917160000_discovery_edges_index_validity_check.sql` closes that gap: in
+step 4 it fails, and `sqlx migrate run` stops without recording it, if either
+index exists but is not valid and ready. It never drops or rebuilds an index.
+If it fails, follow the recovery steps in the matching index runbook, then run
+`sqlx migrate run` again.
+
 The release containing
 `20260904120000_project_redo_child_registration_history.sql` adds the bounded
 Interpret-to-Project handoff for child and registry identifiers from deleted
@@ -664,6 +684,7 @@ indexes are additive; rollback may leave them in place.
    `20260902120000_normalized_events_basenames_record_node_resolver_idx.sql`,
    or `20260911120000_normalized_events_emitter_history_idx.sql`,
    or `20260917120000_discovery_edges_observation_history_idx.sql`,
+   or `20260917130000_discovery_edges_reopen_idx.sql`,
    apply and validate the applicable concurrent baseline indexes above;
    otherwise skip this step;
    For the release containing
