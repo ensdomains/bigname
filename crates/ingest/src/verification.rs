@@ -73,6 +73,15 @@ impl VerificationProvider {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_provider(provider: ChainProvider) -> Self {
+        Self {
+            kind: VerificationProviderKind::IndependentRpc,
+            provider,
+            fetch_lock: std::sync::Arc::new(Mutex::new(())),
+        }
+    }
+
     pub const fn kind(&self) -> VerificationProviderKind {
         self.kind
     }

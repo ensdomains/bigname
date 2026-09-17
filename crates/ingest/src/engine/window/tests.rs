@@ -229,3 +229,81 @@ async fn resolver_creation_fetches_same_transaction_and_later_records_before_ret
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn verification_expands_from_resolver_creation_the_same_way_indexing_does() -> Result<()> {
+    use crate::test_chain::{NOISE_ADDRESS, TestLog};
+    let creation = bigname_manifests::resolver_creation_topic0();
+    let mut chain = TestChain::synthetic(FIRST, 2, 1);
+    let first = &mut chain.blocks[0].transactions[1];
+    first.logs.insert(
+        0,
+        TestLog {
+            log_index: 1,
+            address: WATCHED_ADDRESS.to_owned(),
+            topics: vec![creation.clone()],
+            data: "0x".to_owned(),
+        },
+    );
+    for (index, log) in first.logs.iter_mut().enumerate() {
+        log.log_index = index as i64 + 1;
+    }
+    // Neither side starts with the resolver address: both must learn it from the creation log.
+    let filter = WatchFilter::watching_creation(
+        FIRST,
+        FIRST + 1,
+        creation.clone(),
+        vec![WATCHED_TOPIC.to_owned()],
+    );
+    assert!(
+        filter
+            .queries()
+            .iter()
+            .all(|query| query.addresses.is_empty())
+    );
+
+    let indexing = serve(chain.clone(), Tamper::None).await?;
+    let indexing_provider = Arc::new(indexing.provider);
+    let indexed = WindowReader {
+        provider: &indexing_provider,
+        coinbase: None,
+        prefetch: None,
+        filter: &filter,
+    }
+    .fetch(FIRST, FIRST + 1)
+    .await?
+    .selected
+    .into_iter()
+    .map(|log| (log.block_number, log.log_index, log.address, log.topics))
+    .collect::<Vec<_>>();
+
+    let reference = serve(chain, Tamper::None).await?;
+    let verified = crate::verification::VerificationProvider::from_provider(reference.provider)
+        .fetch(filter.clone(), FIRST, FIRST + 1)
+        .await?
+        .logs
+        .into_iter()
+        .map(|log| (log.block_number, log.log_index, log.address, log.topics))
+        .collect::<Vec<_>>();
+
+    assert_eq!(verified, indexed);
+    assert_eq!(
+        verified
+            .iter()
+            .map(|(block, index, _, topics)| (*block, *index, topics[0].clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (FIRST, 1, creation),
+            (FIRST, 2, WATCHED_TOPIC.to_owned()),
+            (FIRST, 4, WATCHED_TOPIC.to_owned()),
+            (FIRST + 1, 1, WATCHED_TOPIC.to_owned()),
+            (FIRST + 1, 3, WATCHED_TOPIC.to_owned()),
+        ]
+    );
+    assert!(
+        !verified
+            .iter()
+            .any(|(_, _, address, _)| address == NOISE_ADDRESS)
+    );
+    Ok(())
+}
