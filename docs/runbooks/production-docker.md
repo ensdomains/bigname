@@ -57,7 +57,43 @@ host measurement, and changes no direct CLI defaults or backup policy (#329).
    WAL, tablespace, socket, backup or other service content. It must contain only
    disposable probe content and no links into those trees. Reject overlap with
    every effective mount, including `RETH_DATA_DIR`.
-3. Record Docker/Compose versions, daemon host/context, Docker data root, volume
+3. Choose the container memory ceilings: `POSTGRES_MEMORY_LIMIT`,
+   `BIGNAME_API_MEMORY_LIMIT`, `BIGNAME_PHASE_RUNNER_MEMORY_LIMIT` and, with the
+   public overlay, `BIGNAME_PUBLIC_PROXY_MEMORY_LIMIT`, as positive Docker byte
+   values (`24g`, `2048m`). The kernel charges the file page cache a container
+   populates to that container's cgroup, so the cache PostgreSQL reads through
+   lives inside `POSTGRES_MEMORY_LIMIT`, not beside it: that ceiling must cover
+   `shared_buffers` + `maintenance_work_mem` + `max_connections` × `work_mem` ×
+   a few (a backend can hold several `work_mem` allocations at once, and shared
+   memory is charged too) **plus the page cache PostgreSQL is meant to have**,
+   which is what `POSTGRES_EFFECTIVE_CACHE_SIZE` tells the planner it has.
+   Lower `effective_cache_size` to fit the ceiling rather than the other way
+   round; the Compose default of `96GB` is not a fit for a `24g` ceiling. The
+   budget is the host's total RAM (`free -b`) minus an explicit host reserve
+   for what runs outside any ceiling — kernel, Docker daemon, monitoring,
+   shells — of at least 2 GiB or 5%, whichever is larger, minus an allowance
+   for the co-resident archive node that is its own ceiling if it has one and
+   otherwise a worst case, never its observed usage, which is not a bound.
+   The four ceilings must sum to no more than that budget; a budget that
+   forces a ceiling below its floor above means the host is too small for
+   both workloads, not that the reserve can be spent. An OOM kill of one
+   backend makes the postmaster restart every session. For the runner and the API, take the
+   peak RSS observed on this host under catch-up and under load respectively
+   and add headroom; where no observation exists yet, record that the ceiling
+   is provisional and revisit it after the first catch-up. A container that
+   reaches its ceiling is killed and restarted; check `docker inspect
+   --format '{{.State.OOMKilled}}'` on any unexplained restart. Compose only
+   refuses an empty value, and `0` renders as *no* limit, so validate the
+   rendered model with every active overlay before recreating anything:
+
+   ```sh
+   scripts/check-compose-memory-limits --env-file .env.server \
+     -f docker-compose.server.yml -f docker-compose.public.yml
+   ```
+
+   It fails unless every service carries a positive ceiling and `json-file`
+   logging with `max-size` and `max-file`.
+4. Record Docker/Compose versions, daemon host/context, Docker data root, volume
    driver/options, rootless/user-namespace settings and applicable security policy.
    Inspect PostgreSQL's effective mount rather than guessing from `postgres-data`:
 
@@ -79,7 +115,7 @@ host measurement, and changes no direct CLI defaults or backup policy (#329).
    both the actual database storage and probe. Require matching actual mounted
    filesystem/device, not merely matching path prefixes or equal free-byte counts.
    Check corresponding mount/device/`df -Pk` observations inside both containers.
-4. Prepare permissions for the effective service identity, including rootless,
+5. Prepare permissions for the effective service identity, including rootless,
    user-namespace, ACL and SELinux mappings. The image's nominal UID/GID is 10001;
    do not blindly `chown 10001:10001` on the host. Verify required diagnostic
    tools on the actual host/image rather than assuming they are installed.
@@ -87,7 +123,7 @@ host measurement, and changes no direct CLI defaults or backup policy (#329).
    successful create/remove operation. Also observe the real runner creating and
    deleting `.phase-runner-capacity-probe-*` with a host filesystem event observer,
    leaving no file behind. A manual touch by a different user is insufficient.
-5. Inspect effective settings before any recreation. Shell variables override
+6. Inspect effective settings before any recreation. Shell variables override
    `--env-file`; clear unintended overrides. Capture outputs privately and redact
    credentials before sharing. For each of server only, server/public,
    server/Reth and server/public/Reth, run the corresponding command above with
@@ -99,7 +135,11 @@ host measurement, and changes no direct CLI defaults or backup policy (#329).
    can render; their creation-time rejection remains a required control below.
    Require one dedicated read/write bind, identical absolute source/target and
    `create_host_path: false`. Both Reth sets must retain their separate read-only
-   mount. No unrelated service environment, command, port, network or volume may
+   mount. Require the chosen memory ceiling on every service
+   (`deploy.resources.limits.memory` in the rendered model — the check above —
+   and `HostConfig.Memory` greater than zero on every created container) and
+   the `json-file` logging options on each. No
+   unrelated service environment, command, port, network or volume may
    change. Inspect the created container as well; the env file alone is not proof:
 
    ```sh
@@ -107,6 +147,7 @@ host measurement, and changes no direct CLI defaults or backup policy (#329).
    docker inspect "$runner_container" --format '{{json .Config.Env}}'
    docker inspect "$runner_container" --format '{{json .Mounts}}'
    docker inspect "$runner_container" --format '{{json .Config.User}} {{json .Config.Entrypoint}} {{json .Config.Cmd}}'
+   docker inspect "$runner_container" --format '{{.HostConfig.Memory}} {{json .HostConfig.LogConfig}}'
    docker top "$runner_container"
    ```
 
@@ -166,10 +207,43 @@ normalized publication, API correctness, restore or production serving acceptanc
 ### Apply or roll back the wiring
 
 After the effective configuration and filesystem/permission checks pass, follow
-the approved deployment boundary and recreate only the intended phase-runner with
-all active overlays. Settings are read at startup. Changing the floor/ceiling does
-not require phase-row edits; genuine capacity breaches resume automatically after
-capacity recovers. Preserve the PostgreSQL volume during rollback: never use
+the approved deployment boundary and recreate the services whose wiring changed,
+with all active overlays. A change to the runner's floor or probe path touches
+only `phase-runner`. A change to the memory ceilings or log rotation touches
+every service: a running container keeps its old `HostConfig` and `LogConfig`
+until it is recreated, so recreating only the runner leaves PostgreSQL, the API
+and the proxy unlimited and unrotated. Pause indexing first
+([§ Pause and resume indexing](#pause-and-resume-indexing)), then recreate in
+dependency order — PostgreSQL (a short outage for every client), the API, the
+proxy where the public overlay is active, the runner — and inspect each created
+container before moving on. Build the command from the deployment's exact
+overlay set, the same `-f` list every other command in this runbook uses for
+it: `docker-compose.server.yml` always, `docker-compose.public.yml` only where
+the proxy runs, `docker-compose.reth-db.yml` only where the runner reads Reth.
+Recreating with an overlay missing rebuilds the container without that
+overlay's wiring — the runner loses its `eth_archive_node` network and the
+read-only `RETH_DATA_DIR` bind — and an overlay added that the deployment does
+not run demands variables it never set.
+
+```sh
+# Server + public + Reth shown; drop the overlays and services this deployment does not run.
+compose=(docker compose --env-file .env.server \
+  -f docker-compose.server.yml -f docker-compose.public.yml -f docker-compose.reth-db.yml)
+scripts/check-compose-memory-limits "${compose[@]:2}"
+"${compose[@]}" up -d --no-deps --force-recreate postgres
+"${compose[@]}" up -d --no-deps --force-recreate api public-proxy
+"${compose[@]}" up -d --no-deps --force-recreate phase-runner
+for service in postgres api public-proxy phase-runner; do
+  docker inspect "$("${compose[@]}" ps -q "$service")" \
+    --format "$service {{.HostConfig.Memory}} {{json .HostConfig.LogConfig}} {{json .HostConfig.Binds}}"
+done
+```
+
+Every line must show a memory value greater than zero and a `json-file` config
+with `max-size` and `max-file`; the runner's line must still show the Reth
+bind where that overlay is active. Settings are read at startup. Changing the
+floor/ceiling does not require phase-row edits; genuine capacity breaches
+resume automatically after capacity recovers. Preserve the PostgreSQL volume during rollback: never use
 `down -v`. Restore the reviewed configuration/image and inspect the effective
 settings again. The harmless dedicated probe directory may remain, but reverting
 this wiring restores the old disabled/misdirected defaults and loses its protection.
@@ -963,7 +1037,7 @@ indexes are additive; rollback may leave them in place.
    the supervisor's Verify completion output (`/v1/status` cannot be used here
    because the API is stopped; after startup, the API accepts every known verification level at or above Sepolia's `quick_synced` floor and rejects unknown
    levels);
-11. start the API built from the same commit and confirm `/v1/status` reports
+11. before starting the API, apply the explicit API-role `GRANT SELECT` inventory in [`deployment.md`](../deployment.md#surviving-services), including `account_permission_state_current`, and verify the configured login with `has_table_privilege`; then start the API built from the same commit and confirm `/v1/status` reports
    current phase state and no pending redo; and
 12. run the release smoke and public-edge checks before undraining traffic.
 

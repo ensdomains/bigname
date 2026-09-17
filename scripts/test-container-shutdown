@@ -14,6 +14,7 @@ if [[ "${1:-}" == --serve ]]; then
   export BIGNAME_DATABASE_URL="$database"
   export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-container-shutdown-fixture}"
   export BIGNAME_PHASE_RUNNER_MINIMUM_FREE_DISK_BYTES=1
+  export POSTGRES_MEMORY_LIMIT=1g BIGNAME_API_MEMORY_LIMIT=1g BIGNAME_PHASE_RUNNER_MEMORY_LIMIT=1g
   export BIGNAME_PHASE_RUNNER_WRITABLE_PATH="$evidence/unused-capacity-probe"
   override="$evidence/override.yml"; rendered="$evidence/compose.json"
   python3 - "$override" "$metrics" <<'PY'
@@ -21,6 +22,9 @@ import json,sys
 open(sys.argv[1],'w').write('services:\n  api:\n    network_mode: host\n    ports: !reset []\n    restart: "no"\n    environment:\n      BIGNAME_LOG_JSON: "1"\n      BIGNAME_API_METRICS_BIND_ADDR: '+json.dumps(sys.argv[2])+'\n')
 PY
   docker compose --env-file /dev/null -p "$project" -f "$ROOT/docker-compose.server.yml" -f "$override" config --format json > "$rendered"
+  # The ceilings above are fixture values; the check is that a rendered model
+  # never carries a missing or zero one.
+  "$ROOT/scripts/check-compose-memory-limits" --env-file /dev/null -p "$project" -f "$ROOT/docker-compose.server.yml" -f "$override" > "$evidence/memory-limits.txt"
   printf '%s' "$project" > "$evidence/project"
   python3 - "$rendered" "$evidence/config-result.json" "${BIGNAME_E2E_SHUTDOWN_BASE:-}" <<'PY'
 import json,sys,os
@@ -56,6 +60,14 @@ PY
   "${compose[@]}" up -d --no-deps api > "$evidence/up.log" 2>&1
   id="$("${compose[@]}" ps -q api)"
   docker inspect "$id" > "$evidence/container.json"
+  # The created container, not only the model, carries the ceiling and rotation.
+  python3 - "$evidence/container.json" <<'PY'
+import json,sys
+host=json.load(open(sys.argv[1]))[0]['HostConfig']
+assert host.get('Memory',0)>0, f"created container has no memory ceiling: {host.get('Memory')!r}"
+log=host.get('LogConfig',{})
+assert log.get('Type')=='json-file' and log.get('Config',{}).get('max-size') and log.get('Config',{}).get('max-file'), f"created container logs unbounded: {log!r}"
+PY
   docker image inspect "$BIGNAME_IMAGE" > "$evidence/image.json"
   docker exec "$id" sha256sum /usr/local/bin/bigname-api > "$evidence/binary.sha256"
   docker exec "$id" sh -c 'cat /proc/1/cmdline; echo; for child in $(cat /proc/1/task/1/children); do cat /proc/$child/cmdline; echo; done' > "$evidence/process-tree.txt"
