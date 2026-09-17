@@ -199,9 +199,9 @@ pub(in crate::builders) const BUILD_ADDRESS_NAMES: &str = r#"
                         COALESCE((selected_binding.provenance ->> 'log_index')::bigint, -1)
                     )
               )
-              -- Anti-join instead of a DISTINCT ON over the union: `project_authority_events` is
-              -- indexed on (logical_name_id, normalized_event_id) but not on the event id alone,
-              -- so deduplicating afterwards would sort the whole authority-event set on a rebuild.
+              -- Anti-join instead of a DISTINCT ON over the union: deduplicating afterwards would
+              -- sort the whole authority-event set on a rebuild, while this probes
+              -- `project_authority_events` by name and event id through its index.
               AND NOT EXISTS (
                   SELECT 1
                   FROM project_authority_events base

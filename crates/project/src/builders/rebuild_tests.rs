@@ -247,14 +247,23 @@ async fn name_authority_looks_resources_up_by_key() -> Result<()> {
     rebuild.finish().await
 }
 
-/// Whether any node of the plan satisfies `matches`.
-fn any_node(plan: &Value, matches: &dyn Fn(&Value) -> bool) -> bool {
+/// Whether any node of the plan satisfies `matches`. With `subplans` false only the statement's
+/// own plan tree is searched: subplans and init plans belong to correlated subqueries, which may
+/// sort a few rows of their own.
+fn any_node(plan: &Value, subplans: bool, matches: &dyn Fn(&Value) -> bool) -> bool {
     matches(plan)
         || plan["Plans"]
             .as_array()
             .into_iter()
             .flatten()
-            .any(|child| any_node(child, matches))
+            .filter(|child| {
+                subplans
+                    || !matches!(
+                        child["Parent Relationship"].as_str(),
+                        Some("SubPlan" | "InitPlan")
+                    )
+            })
+            .any(|child| any_node(child, subplans, matches))
 }
 
 const AUTHORITY_EVENTS: &str = include_str!("name_authority/authority_events.sql");
@@ -298,8 +307,12 @@ async fn authority_events_are_staged_without_sorting_them() -> Result<()> {
     );
     let plan = rebuild.explain(&statement).await?;
     ensure!(
-        !any_node(&plan, &|node| node["Node Type"] == "Sort"
-            || node["Node Type"] == "Unique"),
+        !any_node(&plan, false, &|node| {
+            matches!(
+                node["Node Type"].as_str(),
+                Some("Sort" | "Incremental Sort" | "Unique")
+            )
+        }),
         "the staged events were sorted or de-duplicated: {plan}"
     );
     let rows = rows_read(&plan, "project_events");
@@ -373,8 +386,9 @@ async fn name_current_reads_each_name_by_key() -> Result<()> {
         .explain(super::name_current::query::BUILD_NAME_CURRENT)
         .await?;
     ensure!(
-        !any_node(&plan, &|node| node["Node Type"] == "CTE Scan"),
-        "name_current scans a CTE again: {plan}"
+        !any_node(&plan, true, &|node| node["CTE Name"]
+            == "v2_lifecycle_events"),
+        "name_current scans the ENSv2 lifecycle CTE again: {plan}"
     );
     for relation in [
         "project_v2_lifecycle_events",
