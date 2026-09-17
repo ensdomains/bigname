@@ -76,14 +76,42 @@ rewrite. See [deployment replacement](deployment.md#replacing-an-initialized-pha
 
 ## Resolver and discovery coverage
 
-The canonical Universal Resolver proxy remains the request entrypoint. The
-manifest now explicitly admits both `ens_v1` and `ens_v2` verified authority arms.
-Check its managed-proxy implementation and the V2 implementation's root binding
-at a fixed chain position during rollout; address-list membership alone does not
-prove an activated proxy route.
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/UpgradableUniversalResolverProxy.json:L2 @ ens_v2_sepolia_20260916@366de741)
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ManagedUniversalResolverProxy.json:L2 @ ens_v2_sepolia_20260916@366de741)
+The canonical Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` remains the
+request entrypoint. The manifest admits both `ens_v1` and `ens_v2` verified authority arms through
+it. The evidence for the ENSv2 arm has two parts of different strength.
+
+What the pinned artifacts prove: the `UniversalResolverV2` implementation at
+`0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3` was constructed with the new RootRegistry
+`0x9703dbd26dab89504490994138cf2c575251a9ce` as its first argument, which the constructor stores
+as the immutable `ROOT_REGISTRY` that resolution starts from.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/UniversalResolverV2.json:L2 @ ens_v2_sepolia_20260916@366de741)
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/UniversalResolverV2.json:L1593 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UniversalResolverV2.sol:L20 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UniversalResolverV2.sol:L29-L38 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L2 @ ens_v2_sepolia_20260916@366de741)
+The pinned deployment notes also describe the intended route: on Sepolia the long-lived proxy
+already points at the managed proxy `0x6d80F2172CFdEc5730fE683860C33d26fC42e6F1`, and a fresh
+deployment's only on-chain change is `upgradeTo(newImplementation)` on that managed proxy.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/docs/universalResolver.md:L16-L17 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/docs/universalResolver.md:L24 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L10-L12 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ManagedUniversalResolverProxy.json:L2 @ ens_v2_sepolia_20260916@366de741)
+
+What the pinned artifacts do not prove: that the `upgradeTo` was executed. Both proxy artifacts
+carry an address and ABI only, with empty constructor arguments and no transaction receipt, so
+no checked-in file shows which implementation either proxy currently targets.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/UpgradableUniversalResolverProxy.json:L2 @ ens_v2_sepolia_20260916@366de741)
+
+The only evidence for the live route is one read-only on-chain call, which is not reproducible
+from the pins: on 2026-09-17 an `eth_call` of `ROOT_REGISTRY()` on the entrypoint proxy
+`0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` on Ethereum Sepolia returned
+`0x9703DBD26dAB89504490994138cF2c575251a9cE`, the new RootRegistry. The block it ran
+against was not recorded, so it is not a fixed-block proof. It shows the proxy route reached a V2
+implementation bound to the declared root at that time, and nothing about later blocks: either
+proxy's admin can re-point it. Bigname does not yet check the root binding at request time;
+[#906](https://github.com/ensdomains/bigname/issues/906) tracks that missing runtime check. Until
+it lands, repeat the `ROOT_REGISTRY()` call during rollout and after any announced Universal
+Resolver upgrade, and treat a different result as a reason to stop serving ENSv2 verified reads.
 
 Registry instances retain announcement-based admission. Resolver proxies require
 the declared PermissionedResolver implementation and canonical upgrade evidence.
