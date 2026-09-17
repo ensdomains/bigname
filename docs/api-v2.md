@@ -99,6 +99,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `contract_address` | event filter for the contract that emitted an event's source log | `emitting_address` |
 | `chain_id` | numeric EVM chain id (`1`, `8453`); string-keyed in maps | string chain ids (`"ethereum-mainnet"`), position slot keys |
 | `network` | display slug (`ethereum`, `base`) | `network` (unchanged, display-only) |
+| `id` (event row) | opaque 64-character identity of one event row, identical for the same event on `/v1/events`, name history, and address history and across pages; a merge key for consumers combining feeds, not a durable reference (it may change at a re-derivation boundary) | `event_identity`, `normalized_event_id` |
 | `registration_id` | the one opaque stable handle for a registration lifecycle | `resource_id`, `resource_hex`, `resource`, `token_lineage_id`, `surface_binding_id` |
 | `input` | caller-supplied lookup input echoed in a result | `input` (unchanged; now specified as result echo, not a parallel DTO family) |
 | `normalization` | name-normalization result for an input | `corrected_input_normalization`, `unnormalizable_input` status detail |
