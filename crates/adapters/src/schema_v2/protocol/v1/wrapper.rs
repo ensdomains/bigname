@@ -142,7 +142,9 @@ fn name_wrapped(
     let previous = state.v1_name(&selected.source.namespace, &raw_namehash);
     // Wrapping a .eth second-level name moves the BaseRegistrar token into the
     // NameWrapper, so the lease stays on the registrar's resource. Record that
-    // resource so Project and history can follow the wrap by identity.
+    // resource so Project and history can follow the wrap by identity. Only rows
+    // built from the shared `after` object carry the key; the holder
+    // `PermissionChanged` rows and the generated `PreimageObserved` row do not.
     // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f)
     let wrapped_registrar_resource_id = previous
         .as_ref()
