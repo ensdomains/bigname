@@ -88,8 +88,14 @@ refresh all storage providers with committed MDBX state
 (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L599 @ reth@189c0df3)
 (upstream: .refs/reth/crates/storage/provider/src/providers/database/mod.rs:L292 @ reth@189c0df3).
 See [Direct Reth reader](reth-db-reader.md) for the mount contract and bounded
-read-only validation command. The required Alloy dependency updates change the
-interpreter fingerprint and use the existing full-history replay mechanism.
+read-only validation command. The rotation also rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash): Reth v2.5.0
+requires the seven fingerprinted Alloy crates at 1.7.3 instead of 1.5.7, and the
+accompanying Rust 1.98 update edits the hashed
+`crates/interpret/src/recompute.rs`. An existing deployment needs the
+full-history Interpret and Project redo described under
+[interpretation replay](storage.md#interpretation-replay) before it serves with
+this build.
 
 ## Citation format
 

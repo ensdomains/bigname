@@ -274,8 +274,17 @@ Capacity, retry, and polling controls use the
 For that rollout, [source roles](glossary.md#source-role) are `intake`, `verification-only`, and `both`; omission defaults to `both`. Only intake-capable keys receive cursors or Ingest/Live requests, and only verification-only sources earn `cross_checked` or `node_checked`; `both` falls back to `quick_synced`. The runner rejects dRPC endpoints with the same parsed URL identity and reth paths that share the configured datadir or any provider-opened storage root (`db`, `static_files`, or `rocksdb`) by filesystem device and inode, without exposing either value. This catches symlink and bind-mount aliases; a missing or inaccessible root falls back individually to canonical or lexical spelling identity. Intake-membership changes require reset. Stronger levels are downgraded after provider-trusted revalidation, while `quick_synced` is not auto-upgraded.
 Sepolia's from-zero sources for the Issue #411 rollout are `ethereum-sepolia:sepolia-intake:drpc:ethereum_head:0:intake=SEPOLIA_INTAKE_RPC_URL` and `ethereum-sepolia:sepolia-verify:drpc:ethereum_head:0:verification-only=SEPOLIA_VERIFY_RPC_URL`.
 The server Compose file forwards the documented `RETH_DATA_DIR` source and the
-hydration URL map. Its reth overlay bind-mounts `RETH_DATA_DIR` read-only at the
-same container path. Add any differently named provider environment variable
+hydration URL map. Its reth overlay (`docker-compose.reth-db.yml`) builds the
+[direct reader's mount contract](reth-db-reader.md#mount-contract) at the same
+container path: a separate writable host directory (`RETH_READER_DIR`) as the
+wrapper at `RETH_DATA_DIR`, the node's `db`, `static_files` and `rocksdb`
+directories read-only inside it, and the node's existing `db/mdbx.lck` file
+writable. A single read-only bind of the datadir does not work: the reader must
+update the MDBX lock file, and Reth creates a temporary RocksDB directory beside
+`rocksdb`. The overlay also requires `RETH_READER_USER` (the numeric user that
+owns the node's lock file) and `RETH_NODE_PID_NAMESPACE` (the node's PID
+namespace), and accepts `RETH_NETWORK_NAME` for a node whose Docker network is
+not `eth-archive-node_default`. Add any differently named provider environment variable
 to the phase-runner service explicitly; `docker compose --env-file` supplies
 interpolation values but does not expose arbitrary variables to a container.
 Base intake requires Coinbase history
@@ -293,8 +302,8 @@ Base-aware local database verification is tracked by
 [issue #433](https://github.com/ensdomains/bigname/issues/433).
 An explicit verification-only Ethereum Mainnet
 `reth_db` records `node_checked`; intake-capable reth alone records
-`quick_synced`. `ethereum-sepolia` requires exactly one `drpc` intake source at
-block zero. A distinct verification-only dRPC records `cross_checked`;
+`quick_synced`. `ethereum-sepolia` requires exactly one `drpc` or `reth_db`
+intake source at block zero. A distinct verification-only dRPC records `cross_checked`;
 otherwise Verify records `quick_synced` when the intake cursor matches its
 configuration and covers the finalized target. That binding and coverage are
 checked when verification completes, and the returned final block-number/hash
@@ -930,12 +939,14 @@ completes the issue.
 
 ### Switching Sepolia from local RPC to direct Reth reads
 
-Build the runner against the node's pinned Reth version and test a bounded read-only sample before pausing ingestion. Supply the matching Sepolia chainspec, direct-reader mount and one `reth_db` intake descriptor; keep historical state RPC separate. Pause the adoption watcher, gracefully stop the runner, retain the cursor and phase-state evidence, and run the [same-node transport command](chain-intake.md#same-node-sepolia-transport-change). Save its receipt before resuming the existing replay range with the new intake descriptor. Do not reset the database or restart from block zero. The command may be reversed against the same node for rollback; keep the matching runtime/configuration until progress is verified.
+The direct reader is compiled against Reth v2.5.0 (`crates/ingest/Cargo.toml`) and selects Reth's built-in Sepolia chain specification from the chain id; there is no chain specification to supply and no other Reth version to build against. Run it only against a Reth v2.5.0 node, and test a [bounded read-only sample](reth-db-reader.md#bounded-sample) before pausing ingestion. Supply the [direct-reader mounts](reth-db-reader.md#mount-contract) and one `reth_db` intake descriptor; keep historical state RPC separate. Pause any host automation that would restart or recreate the runner during the change (for example an image auto-update job), gracefully stop the runner, retain the cursor and phase-state evidence, and run the [same-node transport command](chain-intake.md#same-node-sepolia-transport-change), which performs the [source transport](glossary.md#source-transport) change. Save its receipt before resuming the existing replay range with the new intake descriptor. Do not reset the database or restart from block zero. The command may be reversed against the same node for rollback; keep the matching runtime/configuration until progress is verified.
 
 The direct-reader container, including one-off smoke and source-transport
-commands, must share the Reth node's PID namespace. For this deployment use
-`pid: "container:bigname-sepolia-reth"` in the Compose reader service (or the
-corresponding Docker `--pid=container:bigname-sepolia-reth` option). MDBX uses
+commands, must share the Reth node's PID namespace. The reth overlay sets the
+phase runner's `pid:` from the required `RETH_NODE_PID_NAMESPACE`; for the
+Sepolia deployment that is `container:bigname-sepolia-reth` (the corresponding
+Docker option is `--pid=container:bigname-sepolia-reth`), and `host` for a node
+that runs directly on the host. MDBX uses
 `getpid()` and takes a byte-range lock at that numeric PID in the shared data
 file; a writer's exclusive byte lock conflicts with a reader using the same
 number. Separate container PID namespaces can therefore make unrelated
@@ -948,4 +959,4 @@ entrypoint for a successful smoke test can change the process's PID and hide
 this collision. Keep the existing read-only data mounts and writable MDBX lock
 file; do not disable MDBX locking to work around it.
 
-A Reth dependency update may change the interpreter content hash through shared decoding dependencies. In that case finish the supported Interpret replay and required Project work before adopting the matching API. An already-required full Interpret replay can discharge this obligation using the new binary; it must not be bypassed.
+This build rotates the [interpreter content hash](glossary.md#interpreter-content-hash), for every chain and whether or not direct reads are used: the Reth v2.5.0 update moves the seven Alloy crates the hash fingerprints from 1.5.7 to 1.7.3 in `Cargo.lock` (`crates/content-hash/src/lockfile.rs`), and the Rust 1.98 update edits `crates/interpret/src/recompute.rs`, a hashed source file (`crates/content-hash/src/compute.rs`). An existing deployment must therefore finish the full-history Interpret redo and the Project redo it installs, as [interpretation replay](storage.md#interpretation-replay) requires for any rotation, before the matching API serves; follow the runbook's [planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary). A full Interpret replay that is already required for another reason discharges this obligation when it runs under the new binary; it must not be bypassed. The source transport change itself neither requires nor performs that redo.

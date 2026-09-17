@@ -190,7 +190,8 @@ verification-mismatch prose does not, and an ordinary redo is not a substitute.
 
 `phase-runner source-transport --from-source OLD --to-source NEW --attest-same-node`
 is an explicit maintenance operation for switching the same Sepolia execution
-node between its HTTP (`drpc`) and direct database (`reth_db`) interfaces.
+node between its HTTP (`drpc`) and direct database (`reth_db`) interfaces: a
+[source transport](glossary.md#source-transport) change.
 Both descriptors must keep the same key, `ethereum_head` seed, start zero,
 and explicit `intake` role. This exception does not admit another source or
 claim new historical coverage. Stop every phase writer first. The command takes
