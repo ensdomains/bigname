@@ -1,54 +1,54 @@
-relation account_permission_state_current kind=r persistence=p
-relation address_names_current kind=r persistence=p
-relation address_records_current kind=r persistence=p
-relation chain_header_audit kind=r persistence=p
-relation chain_heads kind=r persistence=p
-relation chain_lineage kind=r persistence=p
-relation chain_phase_state kind=r persistence=p
-relation children_current kind=r persistence=p
-relation contract_instance_addresses kind=r persistence=p
-relation contract_instance_addresses_contract_instance_address_id_seq kind=S persistence=p
-relation contract_instances kind=r persistence=p
-relation discovery_edges kind=r persistence=p
-relation discovery_edges_discovery_edge_id_seq kind=S persistence=p
-relation discovery_watch_admissions kind=r persistence=p
-relation ens_names kind=r persistence=p
-relation ingest_cursors kind=r persistence=p
-relation interpret_decode_skips kind=r persistence=p
-relation label_preimages kind=r persistence=p
-relation manifest_authority_attestations kind=r persistence=p
-relation manifest_contract_instances kind=r persistence=p
-relation manifest_contract_instances_manifest_contract_instance_id_seq kind=S persistence=p
-relation manifest_discovery_rules kind=r persistence=p
-relation manifest_discovery_rules_manifest_discovery_rule_id_seq kind=S persistence=p
-relation manifest_versions kind=r persistence=p
-relation manifest_versions_manifest_id_seq kind=S persistence=p
-relation migration_candidate_discovery_effects kind=r persistence=p
-relation migration_candidate_identity_effects kind=r persistence=p
-relation migration_discovery_associations kind=r persistence=p
-relation migration_event_associations kind=r persistence=p
-relation name_current kind=r persistence=p
-relation name_surfaces kind=r persistence=p
-relation normalized_events kind=r persistence=p
-relation normalized_events_normalized_event_id_seq kind=S persistence=p
-relation permissions_current kind=r persistence=p
-relation permissions_current_resource_summary kind=r persistence=p
-relation primary_names_current kind=r persistence=p
-relation project_generation_failures kind=r persistence=p
-relation project_redo_child_registration_history kind=r persistence=p
-relation project_redo_expiry_roots kind=r persistence=p
-relation project_redo_resolver_evidence kind=r persistence=p
-relation raw_logs kind=r persistence=p
-relation raw_receipts kind=r persistence=p
-relation raw_transactions kind=r persistence=p
-relation record_inventory_current kind=r persistence=p
-relation resolution_divergences kind=r persistence=p
-relation resolver_current kind=r persistence=p
-relation resources kind=r persistence=p
-relation reverse_hydration_attempt_ordinal_seq kind=S persistence=p
-relation service_heartbeats kind=r persistence=p
-relation surface_bindings kind=r persistence=p
-relation token_lineages kind=r persistence=p
+relation account_permission_state_current kind=r persistence=p acl=default
+relation address_names_current kind=r persistence=p acl=default
+relation address_records_current kind=r persistence=p acl=default
+relation chain_header_audit kind=r persistence=p acl=default
+relation chain_heads kind=r persistence=p acl=default
+relation chain_lineage kind=r persistence=p acl=default
+relation chain_phase_state kind=r persistence=p acl=default
+relation children_current kind=r persistence=p acl=default
+relation contract_instance_addresses kind=r persistence=p acl=default
+relation contract_instance_addresses_contract_instance_address_id_seq kind=S persistence=p acl=default
+relation contract_instances kind=r persistence=p acl=default
+relation discovery_edges kind=r persistence=p acl=default
+relation discovery_edges_discovery_edge_id_seq kind=S persistence=p acl=default
+relation discovery_watch_admissions kind=r persistence=p acl=default
+relation ens_names kind=r persistence=p acl=default
+relation ingest_cursors kind=r persistence=p acl=default
+relation interpret_decode_skips kind=r persistence=p acl=default
+relation label_preimages kind=r persistence=p acl=default
+relation manifest_authority_attestations kind=r persistence=p acl=default
+relation manifest_contract_instances kind=r persistence=p acl=default
+relation manifest_contract_instances_manifest_contract_instance_id_seq kind=S persistence=p acl=default
+relation manifest_discovery_rules kind=r persistence=p acl=default
+relation manifest_discovery_rules_manifest_discovery_rule_id_seq kind=S persistence=p acl=default
+relation manifest_versions kind=r persistence=p acl=default
+relation manifest_versions_manifest_id_seq kind=S persistence=p acl=default
+relation migration_candidate_discovery_effects kind=r persistence=p acl=default
+relation migration_candidate_identity_effects kind=r persistence=p acl=default
+relation migration_discovery_associations kind=r persistence=p acl=default
+relation migration_event_associations kind=r persistence=p acl=default
+relation name_current kind=r persistence=p acl=default
+relation name_surfaces kind=r persistence=p acl=default
+relation normalized_events kind=r persistence=p acl=default
+relation normalized_events_normalized_event_id_seq kind=S persistence=p acl=default
+relation permissions_current kind=r persistence=p acl=default
+relation permissions_current_resource_summary kind=r persistence=p acl=default
+relation primary_names_current kind=r persistence=p acl=default
+relation project_generation_failures kind=r persistence=p acl=default
+relation project_redo_child_registration_history kind=r persistence=p acl=default
+relation project_redo_expiry_roots kind=r persistence=p acl=default
+relation project_redo_resolver_evidence kind=r persistence=p acl=default
+relation raw_logs kind=r persistence=p acl=default
+relation raw_receipts kind=r persistence=p acl=default
+relation raw_transactions kind=r persistence=p acl=default
+relation record_inventory_current kind=r persistence=p acl=default
+relation resolution_divergences kind=r persistence=p acl=default
+relation resolver_current kind=r persistence=p acl=default
+relation resources kind=r persistence=p acl=default
+relation reverse_hydration_attempt_ordinal_seq kind=S persistence=p acl=default
+relation service_heartbeats kind=r persistence=p acl=default
+relation surface_bindings kind=r persistence=p acl=default
+relation token_lineages kind=r persistence=p acl=default
 column account_permission_state_current.chain_id text not null default=- identity=- generated=- collation="default"
 column account_permission_state_current.authority_kind text not null default=- identity=- generated=- collation="default"
 column account_permission_state_current.authority_contract text not null default=- identity=- generated=- collation="default"
@@ -1251,16 +1251,16 @@ index surface_bindings.surface_bindings_surface_binding_id_logical_name_id_resou
 index token_lineages.token_lineages_block_idx CREATE INDEX token_lineages_block_idx ON bigname_phase.token_lineages USING btree (chain_id, block_hash)
 index token_lineages.token_lineages_chain_id_token_lineage_id_key CREATE UNIQUE INDEX token_lineages_chain_id_token_lineage_id_key ON bigname_phase.token_lineages USING btree (chain_id, token_lineage_id)
 index token_lineages.token_lineages_pkey CREATE UNIQUE INDEX token_lineages_pkey ON bigname_phase.token_lineages USING btree (token_lineage_id)
-routine clear_resolution_divergences_for_block() returns trigger kind=f volatile=v secdef=f config=- body=4b3eae30be62805b6081db11dcb479af
-routine enforce_chain_head_state() returns trigger kind=f volatile=v secdef=f config=- body=a11fb997e4230e0315fd65406b7dc982
-routine enforce_chain_lineage_canonicality_transition() returns trigger kind=f volatile=v secdef=f config=- body=4a020797aa711547a33552971c5381a2
-routine migration_correlation_ids_valid(correlation_ids text[]) returns boolean kind=f volatile=i secdef=f config=- body=2b558b1be0375244bbb8e202eb54d0e0
-routine protect_chain_head_state() returns trigger kind=f volatile=v secdef=f config=- body=728796a3417477a23027c62e0d945869
-routine protect_chain_lineage_identity() returns trigger kind=f volatile=v secdef=f config=- body=2d4f3bf8df1c7b595f88a433407e3575
-routine retire_direct_divergences_for_null_resolver() returns trigger kind=f volatile=v secdef=t config=search_path=pg_catalog, bigname_phase, pg_temp body=74566f5f46dd5136cb8a911bf484aeca
-routine revalidate_resolution_lookup_state(requested_authoritative_chain_id text, requested_authoritative_block_number bigint, requested_authoritative_block_hash text, requested_observed_positions jsonb, compared_execution_authority jsonb, compared_resource_id uuid, compared_boundary_key text, compared_row_xmin text) returns text kind=f volatile=v secdef=t config=search_path=pg_catalog, bigname_phase, pg_temp body=6be28d166162dc58c04045945f7b62fe
-routine validate_resolution_divergence_positions() returns trigger kind=f volatile=v secdef=f config=- body=a8a6152acd1e055afcfddbfaa04b89e4
-routine write_resolution_divergence(compared_resource_id uuid, compared_boundary_key text, compared_row_xmin text, requested_authoritative_chain_id text, requested_authoritative_block_number bigint, requested_authoritative_block_hash text, compared_execution_authority jsonb, requested_logical_name_id text, requested_resolver_chain_id text, requested_resolver_address text, requested_record_key text, compared_positions jsonb, live_answer jsonb, used_ccip_read boolean) returns text kind=f volatile=v secdef=t config=search_path=pg_catalog, bigname_phase, pg_temp body=f812982072049a87ba30f98b72cc8bee
+routine clear_resolution_divergences_for_block() returns trigger kind=f volatile=v secdef=f config=- acl=default body=4b3eae30be62805b6081db11dcb479af
+routine enforce_chain_head_state() returns trigger kind=f volatile=v secdef=f config=- acl=default body=a11fb997e4230e0315fd65406b7dc982
+routine enforce_chain_lineage_canonicality_transition() returns trigger kind=f volatile=v secdef=f config=- acl=default body=4a020797aa711547a33552971c5381a2
+routine migration_correlation_ids_valid(correlation_ids text[]) returns boolean kind=f volatile=i secdef=f config=- acl=default body=2b558b1be0375244bbb8e202eb54d0e0
+routine protect_chain_head_state() returns trigger kind=f volatile=v secdef=f config=- acl=default body=728796a3417477a23027c62e0d945869
+routine protect_chain_lineage_identity() returns trigger kind=f volatile=v secdef=f config=- acl=default body=2d4f3bf8df1c7b595f88a433407e3575
+routine retire_direct_divergences_for_null_resolver() returns trigger kind=f volatile=v secdef=t config=search_path=pg_catalog, bigname_phase, pg_temp acl=owner=X/owner body=74566f5f46dd5136cb8a911bf484aeca
+routine revalidate_resolution_lookup_state(requested_authoritative_chain_id text, requested_authoritative_block_number bigint, requested_authoritative_block_hash text, requested_observed_positions jsonb, compared_execution_authority jsonb, compared_resource_id uuid, compared_boundary_key text, compared_row_xmin text) returns text kind=f volatile=v secdef=t config=search_path=pg_catalog, bigname_phase, pg_temp acl=owner=X/owner body=6be28d166162dc58c04045945f7b62fe
+routine validate_resolution_divergence_positions() returns trigger kind=f volatile=v secdef=f config=- acl=default body=a8a6152acd1e055afcfddbfaa04b89e4
+routine write_resolution_divergence(compared_resource_id uuid, compared_boundary_key text, compared_row_xmin text, requested_authoritative_chain_id text, requested_authoritative_block_number bigint, requested_authoritative_block_hash text, compared_execution_authority jsonb, requested_logical_name_id text, requested_resolver_chain_id text, requested_resolver_address text, requested_record_key text, compared_positions jsonb, live_answer jsonb, used_ccip_read boolean) returns text kind=f volatile=v secdef=t config=search_path=pg_catalog, bigname_phase, pg_temp acl=owner=X/owner body=f812982072049a87ba30f98b72cc8bee
 trigger chain_heads.chain_heads_enforce_state CREATE TRIGGER chain_heads_enforce_state BEFORE INSERT OR UPDATE ON bigname_phase.chain_heads FOR EACH ROW EXECUTE FUNCTION enforce_chain_head_state()
 trigger chain_lineage.chain_lineage_clear_resolution_divergences CREATE TRIGGER chain_lineage_clear_resolution_divergences AFTER DELETE OR UPDATE OF canonicality_state ON bigname_phase.chain_lineage FOR EACH ROW EXECUTE FUNCTION clear_resolution_divergences_for_block()
 trigger chain_lineage.chain_lineage_enforce_canonicality_transition CREATE TRIGGER chain_lineage_enforce_canonicality_transition BEFORE UPDATE OF canonicality_state ON bigname_phase.chain_lineage FOR EACH ROW EXECUTE FUNCTION enforce_chain_lineage_canonicality_transition()

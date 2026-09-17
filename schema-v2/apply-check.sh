@@ -124,10 +124,13 @@ phase_migration_uses_production_schema() {
 # any statement it cannot read.
 legacy_public_schema_drop="20260806120000_drop_legacy_public_schema.sql"
 # migration-inventory.txt lists every schema-migration file, in order, up to
-# the documented head. sqlx applies any version a database has not recorded,
-# whatever its position, so a file named to sort anywhere below the head would
-# run on an initialized database while looking historical or already frozen;
-# the directory must therefore equal the inventory exactly, and a new
+# the documented head, each with the SHA-384 of its bytes -- the checksum sqlx
+# records when it applies the file and rejects on a later mismatch. sqlx
+# applies any version a database has not recorded, whatever its position, so
+# a file named to sort anywhere below the head would run on an initialized
+# database while looking historical or already frozen, and an edit to an
+# applied file breaks every initialized database; the directory must
+# therefore equal the inventory exactly, bytes included, and a new
 # schema-migration lands by joining the inventory and advancing the head in
 # the same change.
 migration_inventory="$ROOT/schema-v2/migration-inventory.txt"
@@ -212,7 +215,8 @@ migration_uses_unicode_escape() {
 frozen_schema_catalog_sql='
 SELECT line FROM (
     SELECT 0 AS section, c.relname AS a, '"'"''"'"' AS b,
-           format('"'"'relation %s kind=%s persistence=%s'"'"', c.relname, c.relkind, c.relpersistence) AS line
+           format('"'"'relation %s kind=%s persistence=%s acl=%s'"'"', c.relname, c.relkind, c.relpersistence,
+                  COALESCE(replace(array_to_string(c.relacl, '"'"','"'"'), current_user, '"'"'owner'"'"'), '"'"'default'"'"')) AS line
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = current_schema() AND c.relkind IN ('"'"'r'"'"', '"'"'p'"'"', '"'"'v'"'"', '"'"'m'"'"', '"'"'S'"'"')
@@ -248,10 +252,11 @@ SELECT line FROM (
     WHERE n.nspname = current_schema() AND c.relkind IN ('"'"'v'"'"', '"'"'m'"'"')
     UNION ALL
     SELECT 5, p.proname, pg_get_function_identity_arguments(p.oid),
-           format('"'"'routine %s(%s) returns %s kind=%s volatile=%s secdef=%s config=%s body=%s'"'"',
+           format('"'"'routine %s(%s) returns %s kind=%s volatile=%s secdef=%s config=%s acl=%s body=%s'"'"',
                   p.proname, pg_get_function_identity_arguments(p.oid),
                   pg_get_function_result(p.oid), p.prokind, p.provolatile, p.prosecdef,
                   COALESCE(array_to_string(p.proconfig, '"'"';'"'"'), '"'"'-'"'"'),
+                  COALESCE(replace(array_to_string(p.proacl, '"'"','"'"'), current_user, '"'"'owner'"'"'), '"'"'default'"'"'),
                   md5(replace(p.prosrc, current_schema(), '"'"'bigname_phase'"'"')))
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = current_schema()
@@ -343,24 +348,39 @@ assert_documented_head_is_newest_migration() {
 # history is the previous inventory: on a pull request the base branch's, on a
 # push the parent commit's. Every entry that was not there before must sort
 # after the head that was, and nothing that was there may go.
+# Each inventory line is `<sha384>  <file>`, as sha384sum prints it.
+current_migration_inventory() {
+    (cd "$ROOT/migrations" && sha384sum -- *.sql | sort -k2)
+}
 assert_no_migration_below_prior_head() {
-    local prior prior_head entry
+    local prior prior_head line entry checksum
     prior="$(prior_migration_inventory)" || return 0
-    prior_head="$(printf '%s\n' "$prior" | tail -n 1)"
+    prior_head="$(printf '%s\n' "$prior" | tail -n 1 | awk '{print $2}')"
     [ -n "$prior_head" ] || return 0
-    while IFS= read -r entry; do
-        [ -n "$entry" ] || continue
-        if ! printf '%s\n' "$prior" | grep -qxF -- "$entry"; then
-            if ! [[ "$entry" > "$prior_head" ]]; then
+    local prior_checksum
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        checksum="${line%% *}"; entry="${line##* }"
+        prior_checksum="$(printf '%s\n' "$prior" | awk -v entry="$entry" '$2 == entry { print $1 }')"
+        if [ -n "$prior_checksum" ]; then
+            # "-" is an inventory written before checksums were recorded.
+            if [ "$prior_checksum" != "-" ] && [ "$prior_checksum" != "$checksum" ]; then
                 printf '%s\n' \
-                    "$entry is new but sorts at or below the previous head $prior_head; sqlx would apply it to an initialized database while the freeze recorded nothing" >&2
+                    "$entry is in the previous inventory with different bytes; a listed schema-migration is immutable, sqlx rejects the edit on every initialized database (checksum now $checksum)" >&2
                 exit 1
             fi
+            continue
+        fi
+        if ! [[ "$entry" > "$prior_head" ]]; then
+            printf '%s\n' \
+                "$entry is new but sorts at or below the previous head $prior_head; sqlx would apply it to an initialized database while the freeze recorded nothing" >&2
+            exit 1
         fi
     done < "$migration_inventory"
-    while IFS= read -r entry; do
-        [ -n "$entry" ] || continue
-        if ! grep -qxF -- "$entry" "$migration_inventory"; then
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        entry="${line##* }"
+        if ! awk '{print $2}' "$migration_inventory" | grep -qxF -- "$entry"; then
             printf '%s\n' "$entry was in the previous inventory and is gone; frozen history is immutable" >&2
             exit 1
         fi
@@ -391,7 +411,8 @@ prior_migration_inventory() {
         printf '%s\n' "note: $base has no migration inventory, previous inventory not compared" >&2
         return 1
     fi
-    git -C "$ROOT" show "$base:schema-v2/migration-inventory.txt"
+    # A line with no checksum is an inventory written before checksums were recorded.
+    git -C "$ROOT" show "$base:schema-v2/migration-inventory.txt" | awk 'NF == 1 { print "-", $1; next } { print }'
 }
 assert_uninventoried_migrations_are_schema_qualified() {
     local migration_file migration_basename reason noncanonical
@@ -444,9 +465,9 @@ assert_uninventoried_migrations_are_schema_qualified() {
         printf '%s\n' "closed-form check refused the closed form" >&2
         exit 1
     fi
-    if ! diff -u "$migration_inventory" <(ls "$ROOT"/migrations/*.sql | xargs -n1 basename | sort) >&2; then
+    if ! diff -u "$migration_inventory" <(current_migration_inventory) >&2; then
         printf '%s\n' \
-            "migrations/ differs from $(basename "$migration_inventory") (see the diff above); a schema-migration lands by joining the inventory and advancing the documented head in the same change, and cannot be named to sort below the head" >&2
+            "migrations/ differs from $(basename "$migration_inventory") (see the diff above): a schema-migration lands by joining the inventory and advancing the documented head in the same change, cannot be named to sort below the head, and once listed its bytes are immutable (sqlx checks the same checksum on every initialized database)" >&2
         exit 1
     fi
     for migration_file in "$ROOT"/migrations/*.sql; do
