@@ -35,7 +35,7 @@ pub(super) fn event(address: u8, topic: u8, topic1: u8) -> EthLog {
 
 impl Fixture {
     // Real MDBX headers/body indices/senders plus transaction and receipt static files.
-    // Writer APIs: (upstream: .refs/reth/crates/storage/provider/src/providers/static_file/writer.rs:L1190 @ reth@88505c7f).
+    // Writer APIs: (upstream: .refs/reth/crates/storage/provider/src/providers/static_file/writer.rs:L1208 @ reth@189c0df3).
     pub fn new(blocks: u64, transactions: usize, selected: usize, missing: bool) -> Self {
         Self::with_fault(blocks, transactions, selected, missing, None)
     }

@@ -285,9 +285,9 @@ the intake dRPC records `quick_synced`. A moved verification source start or
 comparison redo above the seam is rejected before redo state is created. Base
 with `reth_db` is also rejected during configuration validation:
 the pinned reader uses reth's Ethereum node type and Ethereum transaction and
-receipt primitives (upstream: .refs/reth/crates/ethereum/node/src/node.rs:L121 @ reth@88505c7f)
-(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L27 @ reth@88505c7f)
-(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L51 @ reth@88505c7f). Bigname does not
+receipt primitives (upstream: .refs/reth/crates/ethereum/node/src/node.rs:L128 @ reth@189c0df3)
+(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L27 @ reth@189c0df3)
+(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L51 @ reth@189c0df3). Bigname does not
 implement a separate OP Stack transaction and receipt reader.
 Base-aware local database verification is tracked by
 [issue #433](https://github.com/ensdomains/bigname/issues/433).
@@ -816,3 +816,9 @@ External stop-timeout overrides must honor the same budget. This API-only
 slice is Part of #641: phase-runner SIGTERM, stop grace, batch settlement,
 heartbeat, restart, and redo behavior remain deferred. It does not authorize
 production rollout or complete the issue.
+
+### Switching Sepolia from local RPC to direct Reth reads
+
+Build the runner against the node's pinned Reth version and test a bounded read-only sample before pausing ingestion. Supply the matching Sepolia chainspec, direct-reader mount and one `reth_db` intake descriptor; keep historical state RPC separate. Pause the adoption watcher, gracefully stop the runner, retain the cursor and phase-state evidence, and run the [same-node transport command](chain-intake.md#same-node-sepolia-transport-change). Save its receipt before resuming the existing replay range with the new intake descriptor. Do not reset the database or restart from block zero. The command may be reversed against the same node for rollback; keep the matching runtime/configuration until progress is verified.
+
+A Reth dependency update may change the interpreter content hash through shared decoding dependencies. In that case finish the supported Interpret replay and required Project work before adopting the matching API. An already-required full Interpret replay can discharge this obligation using the new binary; it must not be bypassed.

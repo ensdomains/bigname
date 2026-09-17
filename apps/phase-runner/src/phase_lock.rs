@@ -138,6 +138,6 @@ impl PhaseLock {
     }
 }
 
-fn lock_name(chain_id: &str, phase: PhaseName) -> String {
+pub(crate) fn lock_name(chain_id: &str, phase: PhaseName) -> String {
     format!("phase-runner:{chain_id}:{phase}")
 }

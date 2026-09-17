@@ -17,7 +17,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
-  RUST_VERSION: 1.93.1
+  RUST_VERSION: 1.98.0
   FOUNDRY_VERSION: v1.7.1
   SCCACHE_GHA_ENABLED: "true"
 

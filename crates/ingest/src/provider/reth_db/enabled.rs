@@ -8,7 +8,7 @@ use alloy_consensus::BlockHeader as _;
 use alloy_primitives::B256;
 use anyhow::{Context, Result, bail};
 use reth_ethereum::{
-    chainspec::ChainSpecBuilder,
+    chainspec::{ChainSpec, MAINNET, SEPOLIA},
     node::{EthereumNode, api::NodeTypesWithDBAdapter},
     primitives::Block as _,
     provider::{
@@ -139,14 +139,9 @@ impl RethDbProvider {
 
 impl RethDbReader {
     fn factory(&self) -> Result<Arc<EthereumRethProviderFactory>> {
-        if self.chain != "ethereum-mainnet" {
-            bail!(
-                "Reth DB ingest supports ethereum-mainnet only, got {}",
-                self.chain
-            );
-        }
+        let chainspec = ethereum_chainspec(&self.chain)?;
         match self.factory.get_or_init(|| {
-            open_ethereum_factory(&self.datadir)
+            open_ethereum_factory(&self.datadir, chainspec)
                 .map(Arc::new)
                 .map_err(|error| format!("{error:#}"))
         }) {
@@ -183,12 +178,12 @@ impl RethDbReader {
     /// Reads the lowest block this datadir can still serve logs for.
     ///
     /// A pruned node answers reads below that block with no rows and no error
-    /// (upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1996 @ reth@88505c7f)
-    /// (upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1998 @ reth@88505c7f),
+    /// (upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L2047 @ reth@189c0df3)
+    /// (upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L2049 @ reth@189c0df3),
     /// so an intake reading the database would record the range as covered. reth's own
     /// `eth_getLogs` refuses a range below its expired-history floor
-    /// (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L584 @ reth@88505c7f)
-    /// (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L586 @ reth@88505c7f);
+    /// (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L597 @ reth@189c0df3)
+    /// (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L599 @ reth@189c0df3);
     /// this floor is deliberately stricter, per `docs/upstream.md` § Known divergences.
     fn earliest_available_block(&self) -> Result<i64> {
         let factory = self.factory()?;
@@ -325,16 +320,25 @@ impl RethDbReader {
     }
 }
 
-fn open_ethereum_factory(datadir: &Path) -> Result<EthereumRethProviderFactory> {
+fn ethereum_chainspec(chain: &str) -> Result<Arc<ChainSpec>> {
+    match chain {
+        "ethereum-mainnet" => Ok(MAINNET.clone()),
+        "ethereum-sepolia" => Ok(SEPOLIA.clone()),
+        _ => {
+            bail!("Reth DB ingest supports ethereum-mainnet and ethereum-sepolia only, got {chain}")
+        }
+    }
+}
+
+fn open_ethereum_factory(
+    datadir: &Path,
+    chainspec: Arc<ChainSpec>,
+) -> Result<EthereumRethProviderFactory> {
     validate_datadir(datadir)?;
     let runtime = reth_ethereum::tasks::Runtime::test();
     EthereumNode::provider_factory_builder()
-        .open_read_only(
-            ChainSpecBuilder::mainnet().build().into(),
-            ReadOnlyConfig::from_datadir(datadir),
-            runtime,
-        )
-        .map_err(|error| anyhow::anyhow!("failed to open read-only Reth DB: {error}"))
+        .open_read_only(chainspec, ReadOnlyConfig::from_datadir(datadir), runtime)
+        .map_err(|error| anyhow::anyhow!("failed to open read-only Reth DB: {error:#}"))
 }
 
 fn contiguous_resolved(blocks: &[ResolvedBlock]) -> Result<Option<(u64, u64)>> {
@@ -381,6 +385,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ethereum_chain_selection_uses_matching_genesis() {
+        assert_eq!(
+            ethereum_chainspec("ethereum-sepolia")
+                .unwrap()
+                .genesis_hash(),
+            SEPOLIA.genesis_hash(),
+        );
+        assert_eq!(
+            ethereum_chainspec("ethereum-mainnet")
+                .unwrap()
+                .genesis_hash(),
+            MAINNET.genesis_hash(),
+        );
+        assert_ne!(SEPOLIA.genesis_hash(), MAINNET.genesis_hash());
+    }
+
+    #[test]
     fn base_database_access_remains_explicitly_unsupported() {
         let reader = RethDbReader {
             chain: "base-mainnet".to_owned(),
@@ -394,7 +415,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("Reth DB ingest supports ethereum-mainnet only, got base-mainnet"),
+                .contains("Reth DB ingest supports ethereum-mainnet and ethereum-sepolia only, got base-mainnet"),
             "{error:#}"
         );
     }

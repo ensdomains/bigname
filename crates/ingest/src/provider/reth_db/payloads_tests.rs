@@ -17,6 +17,72 @@ use std::{
 mod fixture;
 use fixture::Fixture;
 
+#[tokio::test]
+async fn sepolia_read_only_provider_reads_while_writer_is_open() {
+    const CHILD_DATADIR: &str = "BIGNAME_RETH_SEPOLIA_TEST_DATADIR";
+    if let Ok(datadir) = std::env::var(CHILD_DATADIR) {
+        let reader = RethDbProvider::new("ethereum-sepolia", &datadir).unwrap();
+        let resolved = reader.resolve(&[0, 1]).await.unwrap();
+        let headers = reader.headers(&resolved).await.unwrap();
+        let bundles = reader.bundles(&resolved).await.unwrap();
+        assert_eq!(
+            headers,
+            bundles
+                .iter()
+                .map(|bundle| bundle.block.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            bundles
+                .iter()
+                .map(|bundle| bundle.receipts.len())
+                .sum::<usize>(),
+            6
+        );
+        let logs = reader
+            .logs(
+                &resolved,
+                &[address_hex(Address::repeat_byte(7))],
+                &[hash_hex(B256::repeat_byte(1))],
+                &[],
+            )
+            .await
+            .unwrap();
+        for (name, actual) in [
+            (
+                "BIGNAME_RETH_TEST_BLOCKS",
+                serde_json::to_value(resolved).unwrap(),
+            ),
+            (
+                "BIGNAME_RETH_TEST_LOGS",
+                serde_json::to_value(logs).unwrap(),
+            ),
+        ] {
+            let expected: serde_json::Value =
+                serde_json::from_str(&std::env::var(name).unwrap()).unwrap();
+            assert_eq!(actual, expected);
+        }
+        return;
+    }
+    // MDBX requires separate processes for independently opened environments on the
+    // same database without a test-only legacy mode
+    // (upstream: .refs/reth/crates/storage/db/src/lib.rs:L234 @ reth@189c0df3).
+    // Keep the primary factory alive while the child opens read-only.
+    let fixture = Fixture::new(2, 3, 2, false);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "provider::reth_db::enabled::payloads_tests::sepolia_read_only_provider_reads_while_writer_is_open", "--nocapture"])
+        .env(CHILD_DATADIR, &fixture.reader.datadir)
+        .env("BIGNAME_RETH_TEST_BLOCKS", serde_json::to_string(&fixture.blocks).unwrap())
+        .env("BIGNAME_RETH_TEST_LOGS", serde_json::to_string(&selected(&fixture)).unwrap())
+        .output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn selected(f: &Fixture) -> Vec<Log> {
     f.reader
         .logs(

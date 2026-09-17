@@ -24,3 +24,8 @@ pub use verification::{
     VerificationBatch, VerificationLog, VerificationMarker, VerificationProvider,
     VerificationProviderKind,
 };
+
+#[cfg(feature = "reth-db")]
+mod reth_diagnostics;
+#[cfg(feature = "reth-db")]
+pub use reth_diagnostics::read_reth_sample;

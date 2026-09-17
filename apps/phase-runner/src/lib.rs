@@ -37,6 +37,7 @@ pub mod rewind;
 pub mod runner;
 mod runner_support;
 pub mod schema;
+pub mod source_transport;
 pub mod state;
 mod state_heartbeat;
 mod state_ingest_progress;

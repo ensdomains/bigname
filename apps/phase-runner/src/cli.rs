@@ -25,6 +25,10 @@ mod inspect_resolution;
 mod label_preimages;
 #[path = "cli_monitoring.rs"]
 mod monitoring;
+#[path = "cli_source_transport.rs"]
+mod source_transport;
+use source_transport::SourceTransportArgs;
+
 #[path = "cli_source.rs"]
 mod source;
 #[path = "cli_attestation.rs"]
@@ -51,6 +55,8 @@ pub struct Cli {
 enum Command {
     /// Install the fresh schema-v2 baseline into an empty phase schema.
     InitSchema(InitSchemaArgs),
+    /// Change RPC/direct-DB transport for the same Sepolia node, preserving progress.
+    SourceTransport(SourceTransportArgs),
     /// Supervise every configured chain.
     Run(RunArgs),
     /// Run one phase over an explicit block range.
@@ -284,6 +290,11 @@ struct RewindArgs {
 }
 
 pub enum ResolvedCommand {
+    SourceTransport {
+        database_url: String,
+        old: SourceConfig,
+        new: SourceConfig,
+    },
     InitSchema {
         database_url: String,
     },
@@ -335,30 +346,21 @@ pub enum RedoChains {
 impl Cli {
     pub fn resolve(self) -> RunnerResult<ResolvedCommand> {
         match self.command {
+            Command::SourceTransport(args) => Ok(ResolvedCommand::SourceTransport {
+                database_url: args.database_url,
+                old: parse_source(&args.from_source)?,
+                new: parse_source(&args.to_source)?,
+            }),
             Command::InitSchema(args) => Ok(ResolvedCommand::InitSchema {
                 database_url: args.database_url,
             }),
             Command::Run(args) => resolve_run(args),
             Command::Redo(args) => resolve_redo(args),
-            Command::Rewind(args) => resolve_rewind(args),
+            Command::Rewind(args) => source_transport::resolve_rewind(args),
             Command::Inspect(args) => inspect_resolution::resolve(args),
             Command::LabelPreimages(args) => label_preimages::resolve(args),
         }
     }
-}
-
-fn resolve_rewind(args: RewindArgs) -> RunnerResult<ResolvedCommand> {
-    if args.chain.trim().is_empty() {
-        return Err(RunnerError::new(
-            ErrorKind::Configuration,
-            "rewind chain must not be empty",
-        ));
-    }
-    Ok(ResolvedCommand::Rewind {
-        database_url: args.connection.database_url,
-        chain_id: args.chain,
-        ancestor: crate::heads::BlockMarker::new(args.ancestor_block, args.ancestor_hash)?,
-    })
 }
 
 fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
