@@ -488,15 +488,15 @@ async fn database(name: &str) -> Result<(TestDatabase, PgPool)> {
 }
 
 #[tokio::test]
-async fn hackathon_direct_resolver_projects_ensip19_default_for_missing_eth_address() -> Result<()>
-{
+async fn official_sepolia_direct_resolver_projects_ensip19_default_for_missing_eth_address()
+-> Result<()> {
     use bigname_domain::resolver_read::{IndexedRecordStatus, evaluate_indexed_record};
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .parent()
         .unwrap();
-    let repository = bigname_manifests::load_repository(root.join("manifests/sepolia-hackathon"))?;
+    let repository = bigname_manifests::load_repository(root.join("manifests/sepolia"))?;
     let manifest = &repository
         .manifests()
         .iter()

@@ -132,94 +132,6 @@ pub const ENS_V1_SEPOLIA: World = World {
             family: "ens_v1_resolver_l1",
             version_file: "v1.toml",
         },
-    ],
-    roles: &[
-        RoleSlot {
-            family: "ens_v1_registry_l1",
-            role: "registry",
-        },
-        RoleSlot {
-            family: "ens_v1_registrar_l1",
-            role: "registrar",
-        },
-        RoleSlot {
-            family: "ens_v1_wrapper_l1",
-            role: "name_wrapper",
-        },
-        RoleSlot {
-            family: "ens_v1_resolver_l1",
-            role: "public_resolver",
-        },
-    ],
-};
-
-pub const ENS_V2_SEPOLIA: World = World {
-    label: "ens_v2_sepolia",
-    manifest_root: "sepolia",
-    namespace: "ens",
-    chain_id: "ethereum-sepolia",
-    deployment_epoch: "ens_v2_sepolia_post_audit",
-    address_base: 0x0002_0000,
-    sources: &[
-        SourceSlot {
-            family: "ens_v2_root_l1",
-            version_file: "v2.toml",
-        },
-        SourceSlot {
-            family: "ens_v2_registry_l1",
-            version_file: "v2.toml",
-        },
-        SourceSlot {
-            family: "ens_v2_registrar_l1",
-            version_file: "v3.toml",
-        },
-        SourceSlot {
-            family: "ens_v2_resolver_l1",
-            version_file: "v2.toml",
-        },
-    ],
-    roles: &[
-        RoleSlot {
-            family: "ens_v2_root_l1",
-            role: "root_registry",
-        },
-        RoleSlot {
-            family: "ens_v2_registry_l1",
-            role: "registry",
-        },
-        RoleSlot {
-            family: "ens_v2_registrar_l1",
-            role: "registrar",
-        },
-        RoleSlot {
-            family: "ens_v2_resolver_l1",
-            role: "resolver",
-        },
-    ],
-};
-
-pub const ENS_V1_SEPOLIA_HACKATHON: World = World {
-    label: "ens_v1_sepolia_hackathon",
-    manifest_root: "sepolia-hackathon",
-    deployment_epoch: "ens_v1_sepolia_hackathon",
-    address_base: 0x0004_0000,
-    sources: &[
-        SourceSlot {
-            family: "ens_v1_registry_l1",
-            version_file: "v1.toml",
-        },
-        SourceSlot {
-            family: "ens_v1_registrar_l1",
-            version_file: "v1.toml",
-        },
-        SourceSlot {
-            family: "ens_v1_wrapper_l1",
-            version_file: "v1.toml",
-        },
-        SourceSlot {
-            family: "ens_v1_resolver_l1",
-            version_file: "v1.toml",
-        },
         SourceSlot {
             family: "ens_v1_reverse_l1",
             version_file: "v1.toml",
@@ -247,13 +159,12 @@ pub const ENS_V1_SEPOLIA_HACKATHON: World = World {
             role: "reverse_registrar",
         },
     ],
-    ..ENS_V1_SEPOLIA
 };
 
-pub const ENS_V2_SEPOLIA_HACKATHON: World = World {
-    label: "ens_v2_sepolia_hackathon",
-    manifest_root: "sepolia-hackathon",
-    deployment_epoch: "ens_v2_sepolia_hackathon",
+pub const ENS_V2_SEPOLIA: World = World {
+    label: "ens_v2_sepolia",
+    manifest_root: "sepolia",
+    deployment_epoch: "ens_v2_sepolia_20260915",
     address_base: 0x0005_0000,
     sources: &[
         SourceSlot {
@@ -295,7 +206,8 @@ pub const ENS_V2_SEPOLIA_HACKATHON: World = World {
             role: "public_resolver_v2",
         },
     ],
-    ..ENS_V2_SEPOLIA
+    namespace: "ens",
+    chain_id: "ethereum-sepolia",
 };
 
 /// Active families whose event space is exercised by a dedicated corpus instead of the generic
@@ -383,6 +295,21 @@ impl Wiring {
             addresses,
             instances,
         })
+    }
+
+    /// Synthetic node-keyed resolver ABI for decoder/replay regressions. It carries
+    /// no retired deployment addresses, start blocks, or runtime profile.
+    pub fn with_node_resolver_abi(mut self) -> Result<Self> {
+        let source = self
+            .manifests
+            .iter_mut()
+            .find(|source| source.source_family == "ens_v2_resolver_l1")
+            .context("resolver source")?;
+        let mut payload: serde_json::Value = serde_json::from_str(&source.payload_json)?;
+        payload["abi"]["events"] =
+            serde_json::from_str(include_str!("../fixtures/node-resolver-abi.json"))?;
+        source.payload_json = serde_json::to_string(&payload)?;
+        Ok(self)
     }
 
     pub fn address(&self, family: &'static str, role: &'static str) -> &str {

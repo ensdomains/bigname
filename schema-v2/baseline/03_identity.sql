@@ -315,6 +315,11 @@ CREATE INDEX IF NOT EXISTS surface_bindings_name_idx
     )
     WHERE canonicality_state IN ('canonical', 'safe', 'finalized');
 
+-- Interpret redo also reads orphaned bindings when restoring historical closes.
+-- The canonical-only name index cannot serve that lookup.
+CREATE INDEX IF NOT EXISTS surface_bindings_chain_name_history_idx
+    ON surface_bindings (chain_id, logical_name_id);
+
 CREATE INDEX IF NOT EXISTS surface_bindings_resource_idx
     ON surface_bindings (
         resource_id,

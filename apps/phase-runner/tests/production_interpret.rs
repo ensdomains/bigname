@@ -4226,9 +4226,9 @@ async fn discovery_admission_applies_to_later_logs_in_the_same_batch() -> Result
 #[tokio::test]
 async fn declared_v1_resolver_precedes_v2_discovery_and_preserves_topology() -> Result<()> {
     const CHAIN: &str = "ethereum-sepolia";
-    const REGISTRY: &str = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    const REGISTRY: &str = "0x657ea849311d3d5823348dded7c2aaafb3ede09e";
     const RESOLVER: &str = "0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5";
-    const FIRST_BLOCK: i64 = 11_163_391;
+    const FIRST_BLOCK: i64 = 11_709_100;
 
     let scratch = ScratchDatabase::create("production_interpret_declared_v1_resolver").await?;
     let profile = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

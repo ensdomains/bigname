@@ -46,3 +46,7 @@ pub use views::*;
 pub use watch_policy::*;
 
 pub(crate) use repository::normalize_address;
+
+#[cfg(test)]
+#[path = "lib/official_sepolia_tests.rs"]
+mod official_sepolia_tests;
