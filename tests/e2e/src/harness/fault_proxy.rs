@@ -109,13 +109,24 @@ impl FaultSpec {
     }
 
     pub fn truncate_once(transaction_hash: impl Into<String>, trailing_bytes: usize) -> Self {
-        Self::once(
-            FaultKind::Truncate,
-            FaultAction::Truncate {
+        Self::truncate_times(transaction_hash, trailing_bytes, 1)
+    }
+
+    /// Truncate the next `times` matching log responses, so a scenario can outlast
+    /// ingest's bounded window re-fetch.
+    pub fn truncate_times(
+        transaction_hash: impl Into<String>,
+        trailing_bytes: usize,
+        times: usize,
+    ) -> Self {
+        Self {
+            kind: FaultKind::Truncate,
+            remaining: Some(times),
+            action: FaultAction::Truncate {
                 transaction_hash: normalize_hex(transaction_hash),
                 trailing_bytes,
             },
-        )
+        }
     }
 
     pub fn error_once(
