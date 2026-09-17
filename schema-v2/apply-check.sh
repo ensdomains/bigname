@@ -396,7 +396,7 @@ for migration_file in \
     "$ROOT/migrations/20260917120000_discovery_edges_observation_history_idx.sql" \
     "$ROOT/migrations/20260917130000_discovery_edges_reopen_idx.sql" \
     "$ROOT/migrations/20260917131000_project_scoped_history_indexes.sql" \
-    "$ROOT/migrations/20260917140000_normalized_events_v1_lookahead_indexes.sql"
+    "$ROOT/migrations/20260917150000_normalized_events_v1_lookahead_indexes.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -873,8 +873,8 @@ DROP INDEX
     normalized_events_v1_due_probe_idx,
     normalized_events_v1_direct_node_probe_idx;
 SQL
-    emit_phase_migration "$ROOT/migrations/20260917140000_normalized_events_v1_lookahead_indexes.sql" preceding-shape
-    emit_phase_migration "$ROOT/migrations/20260917140000_normalized_events_v1_lookahead_indexes.sql" baseline-first
+    emit_phase_migration "$ROOT/migrations/20260917150000_normalized_events_v1_lookahead_indexes.sql" preceding-shape
+    emit_phase_migration "$ROOT/migrations/20260917150000_normalized_events_v1_lookahead_indexes.sql" baseline-first
     cat <<'SQL'
 DO $$
 BEGIN
