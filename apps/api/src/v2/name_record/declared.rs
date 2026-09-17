@@ -15,21 +15,45 @@ pub(crate) struct LapsedRegistration {
     /// The lapsed lease's last holder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registrant: Option<String>,
-    /// What held the lapsed lease: `registrar` for an unwrapped lease, `wrapper` for one held
-    /// through the NameWrapper. Not named `authority`: the record's top-level `authority` is
-    /// the protocol arm (`ens_v1` / `ens_v2`).
+    /// What held the lapsed lease. Not named `authority`: the record's top-level `authority`
+    /// is the protocol arm (`ens_v1` / `ens_v2`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) held_through: Option<String>,
-    /// Block time of the first block at or past the end of the lease's grace period.
+    pub(crate) held_through: Option<LapsedHeldThrough>,
+    /// Block time of the block at which the release was recorded: the first block whose
+    /// timestamp is strictly past the lease's expiry plus the 90-day grace period.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) released_at: Option<String>,
+}
+
+/// The contract a lapsed ENSv1 lease was held through.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LapsedHeldThrough {
+    /// An unwrapped lease, held as the BaseRegistrar token.
+    Registrar,
+    /// A lease held through the NameWrapper.
+    Wrapper,
+}
+
+impl LapsedHeldThrough {
+    /// Project's other authority kinds (`registry_only`, the ENSv2 kinds) never hold an ENSv1
+    /// lease, so they are omitted rather than passed through.
+    fn from_authority_kind(authority_kind: &str) -> Option<Self> {
+        match authority_kind {
+            "registrar" => Some(Self::Registrar),
+            "wrapper" => Some(Self::Wrapper),
+            _ => None,
+        }
+    }
 }
 
 pub(crate) fn lapsed_registration(summary: &Value) -> Option<LapsedRegistration> {
     let lapsed = object_field(declared_registration(summary)?, "lapsed_registration")?;
     Some(LapsedRegistration {
         registrant: json_address_at_paths(lapsed, &[&["registrant"]]),
-        held_through: string_field(lapsed.get("authority_kind")),
+        held_through: string_field(lapsed.get("authority_kind"))
+            .as_deref()
+            .and_then(LapsedHeldThrough::from_authority_kind),
         released_at: json_timestamp_at_paths(lapsed, &[&["released_at"]]),
     })
 }
