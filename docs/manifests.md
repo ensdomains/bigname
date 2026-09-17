@@ -1302,9 +1302,10 @@ compiled from the resolver manifest's `ResolverCreated()` ABI declaration;
 adding it triggers ordinary watch-plan widening and one Ingest redo. Changes
 to the topology rule still invalidate derived interpretation.
 
-For the other address-admitting `resolver` rules (ENSv1 and Basenames registry
-pointers), adding or broadening a rule over an already-ingested range is an
-ordering problem. Replacing a declaration that emits an unchanged active
+Every other `resolver` rule is classified as address-admitting. Today that is
+the rule the mainnet ENSv1 registry manifest declares, although `NewResolver`
+produces no discovery edge. For these rules, adding or broadening a rule over
+an already-ingested range is an ordering problem. Replacing a declaration that emits an unchanged active
 resolver rule has the same problem: the replacement contract's discovery
 events name resolver addresses only after Interpret materializes their edges,
 so an Ingest redo cannot yet fetch those resolvers' address-scoped history.
@@ -1329,12 +1330,12 @@ history is rejected like any other widening.
 The runner repairs the ordinary case of this ordering problem by itself.
 On a database that is being built or replayed, Interpret can discover resolver
 address/topic intervals after the Ingest pass over those blocks has completed.
-This happens for ENSv1 and Basenames registry pointers and for the ENSv2
-`Upgraded` and `ProxyDeployed`
+This happens for the ENSv2 `Upgraded` and `ProxyDeployed`
 [implementation announcements](#resolver-admission-by-implementation-announcement).
-It does not happen for ENSv2 registry pointers, which admit nothing, or for
-`ResolverCreated()`, whose events Ingest already fetched in the creation
-window. When those
+It does not happen for registry resolver pointers in any family: ENSv1 and
+Basenames `NewResolver` and ENSv2 `ResolverUpdated` admit nothing. It also does
+not happen for `ResolverCreated()`, whose events Ingest already fetched in the
+creation window. When those
 intervals add coverage over already-ingested blocks, Interpret records required
 Ingest work. The runner automatically re-fetches the affected retained range
 with the discovery-aware filter and re-runs Interpret before Project and Verify

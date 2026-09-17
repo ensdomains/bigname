@@ -400,8 +400,8 @@ announcing address's remaining events in the same window. Adding the resolver
 creation ABI is ordinary [compiled-watch](#compiled-watch-plan) widening,
 requiring one historical fetch before interpretation. See
 [the watch-plan rules](manifests.md#mandatory-historical-fetch-after-watch-plan-widening).
-The rest of this entry therefore describes ENSv1 and Basenames `resolver`
-rules and ENSv2 `registry_announcement` rules.
+The rest of this entry therefore describes the remaining `resolver` rules
+and ENSv2 `registry_announcement` rules.
 
 For an active resolver discovery rule, widening also
 includes a registry/resolver pair whose desired manifest `deployment_epoch`
