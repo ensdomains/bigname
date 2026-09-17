@@ -45,7 +45,8 @@
                        'resource_id', CASE
                            WHEN NOT COALESCE(selected_registration.is_v2_lifecycle, false)
                                THEN lifecycle.registrar_resource_id END,
-                       'registrant', registrant.registrant,
+                       'registrant', CASE WHEN NOT effective_wrapper.owner_lapsed
+                           THEN registrant.registrant END,
                        'expiry', CASE
                            WHEN selected_registration.is_v2_lifecycle
                             AND selected_registration.event_kind IS NOT NULL
@@ -131,7 +132,8 @@
                                         wrapper_expiry.servable_expiry_seconds))
                                    AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
                            END,
-                           'registrant', registrant.registrant,
+                           'registrant', CASE WHEN NOT effective_wrapper.owner_lapsed
+                               THEN registrant.registrant END,
                            'registry_owner', control_owner.registry_owner,
                            'latest_event_kind', control.latest_event_kind
                        )
@@ -566,7 +568,15 @@
                          OR target_time.epoch_seconds IS NULL THEN NULL
                        WHEN wrapper_expiry.expiry_seconds < target_time.epoch_seconds THEN 0
                        ELSE wrapper.fuses
-                   END AS fuses
+                   END AS fuses,
+                   -- Past its own expiry the NameWrapper reports no owner for a name whose
+                   -- PARENT_CANNOT_CONTROL fuse was burned, also while the registrar lease is
+                   -- still live (a renewal made on the BaseRegistrar alone does not move it).
+                   -- (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
+                   COALESCE(wrapper.wrapper_state IN ('emancipated', 'locked')
+                       AND wrapper.fuses IS NOT NULL
+                       AND wrapper_expiry.expiry_seconds < target_time.epoch_seconds,
+                       false) AS owner_lapsed
         ) effective_wrapper ON TRUE
         LEFT JOIN LATERAL (
             SELECT lineage.block_timestamp

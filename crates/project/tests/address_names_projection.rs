@@ -4269,3 +4269,304 @@ async fn snapshot_grant_and_bound_original_grant_serve_one_registration() -> Res
     database.cleanup().await?;
     Ok(())
 }
+
+#[derive(Debug, PartialEq)]
+struct WrapperLapseStep {
+    status: Option<String>,
+    expiry: Option<i64>,
+    registrant: Option<String>,
+    wrapper_state: Option<String>,
+    has_lapsed_block: bool,
+    released_at: Option<String>,
+    relations: Vec<(String, String)>,
+}
+
+/// Issue #908, the four steps of its scenario. Renewing a wrapped `.eth` name directly on the
+/// BaseRegistrar extends the lease but not the NameWrapper's own expiry. Once that expiry passes
+/// the NameWrapper reports no owner for the name, although the lease is live and nothing was
+/// released; a later renewal through the NameWrapper restores the owner.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1013 @ ens_v1@91c966f)
+async fn wrapper_only_lapse_projection(step: i64, incremental: bool) -> Result<WrapperLapseStep> {
+    const GRACE: i64 = 7_776_000;
+    const EMANCIPATED_DOT_ETH: i64 = 65_536 + 131_072;
+    const WRAPPER_CONTRACT: &str = "0x9999999999999999999999999999999999999999";
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    seed_blocks(&pool, [11]).await?;
+    let block_time: i64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM block_timestamp)::bigint FROM chain_lineage
+         WHERE chain_id = $1 AND block_number = 9",
+    )
+    .bind(CHAIN)
+    .fetch_one(&pool)
+    .await?;
+    // The NameWrapper expiry falls between blocks 9 and 10; the renewed lease outlives it.
+    let wrapper_expiry = block_time;
+    let renewed_lease = wrapper_expiry + 9 * GRACE;
+    sqlx::query(
+        "INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state)
+         VALUES ($1::uuid, $2, $3, 8, 'canonical')",
+    )
+    .bind(OWNERLESS_RESOURCE)
+    .bind(CHAIN)
+    .bind(block_hash(8))
+    .execute(&pool)
+    .await?;
+    seed_surface(
+        &pool,
+        OWNERLESS_NAMEHASH,
+        "wrapper-only-lapse.eth",
+        CONTROL_RESOURCE,
+        CONTROL_BINDING,
+    )
+    .await?;
+    seed_binding_provenance(&pool, CONTROL_BINDING, 0, 2).await?;
+    sqlx::query(
+        "INSERT INTO token_lineages (
+             token_lineage_id, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1::uuid, $2, $3, 8, 'canonical')",
+    )
+    .bind(WRAPPER_LINEAGE)
+    .bind(CHAIN)
+    .bind(block_hash(8))
+    .execute(&pool)
+    .await?;
+    sqlx::query("UPDATE resources SET token_lineage_id = $1::uuid WHERE resource_id = $2::uuid")
+        .bind(WRAPPER_LINEAGE)
+        .bind(CONTROL_RESOURCE)
+        .execute(&pool)
+        .await?;
+    let lease = |expiry: i64| json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:lapse","registrant":WRAPPER_CONTRACT,"expiry":expiry,"namehash":OWNERLESS_NAMEHASH});
+    let wrapper = |expiry: i64| json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"authority_kind":"wrapper","authority_key":"wrapper:lapse","wrapped_registrar_resource_id":OWNERLESS_RESOURCE,"wrapper_state":"emancipated","fuses":EMANCIPATED_DOT_ETH,"expiry":expiry});
+    let mut holder = wrapper(wrapper_expiry);
+    holder["to"] = json!(CONTROL_OWNER);
+    // Step 1, block 8: the name is registered through the NameWrapper.
+    let mut events = vec![
+        (
+            "grant",
+            None,
+            OWNERLESS_RESOURCE,
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            8,
+            1,
+            lease(wrapper_expiry - GRACE),
+        ),
+        (
+            "lease-expiry",
+            None,
+            OWNERLESS_RESOURCE,
+            "ExpiryChanged",
+            "ens_v1_registrar_l1",
+            8,
+            1,
+            lease(wrapper_expiry - GRACE),
+        ),
+        (
+            "holder",
+            Some(OWNERLESS_LOGICAL),
+            CONTROL_RESOURCE,
+            "TokenControlTransferred",
+            "ens_v1_wrapper_l1",
+            8,
+            2,
+            holder,
+        ),
+        (
+            "wrapper-expiry",
+            Some(OWNERLESS_LOGICAL),
+            CONTROL_RESOURCE,
+            "ExpiryChanged",
+            "ens_v1_wrapper_l1",
+            8,
+            2,
+            wrapper(wrapper_expiry),
+        ),
+        (
+            "scope",
+            Some(OWNERLESS_LOGICAL),
+            CONTROL_RESOURCE,
+            "PermissionScopeChanged",
+            "ens_v1_wrapper_l1",
+            8,
+            2,
+            wrapper(wrapper_expiry),
+        ),
+        (
+            "binding",
+            Some(OWNERLESS_LOGICAL),
+            CONTROL_RESOURCE,
+            "SurfaceBound",
+            "ens_v1_wrapper_l1",
+            8,
+            2,
+            wrapper(wrapper_expiry),
+        ),
+        (
+            "epoch",
+            Some(OWNERLESS_LOGICAL),
+            CONTROL_RESOURCE,
+            "AuthorityEpochChanged",
+            "ens_v1_wrapper_l1",
+            8,
+            2,
+            wrapper(wrapper_expiry),
+        ),
+    ];
+    // Step 2, block 9: a renewal on the BaseRegistrar alone.
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
+    let renewal = json!({"source_event":"NameRenewed","authority_kind":"registrar","expiry":renewed_lease,"namehash":OWNERLESS_NAMEHASH});
+    events.push((
+        "direct-renewal",
+        None,
+        OWNERLESS_RESOURCE,
+        "RegistrationRenewed",
+        "ens_v1_registrar_l1",
+        9,
+        1,
+        renewal.clone(),
+    ));
+    events.push((
+        "direct-renewal-expiry",
+        None,
+        OWNERLESS_RESOURCE,
+        "ExpiryChanged",
+        "ens_v1_registrar_l1",
+        9,
+        2,
+        renewal,
+    ));
+    // Step 3, block 10, has no events: only the NameWrapper expiry passes.
+    // Step 4, block 11: a renewal through the NameWrapper restores its stored expiry.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L340 @ ens_v1@91c966f)
+    if step == 4 {
+        events.push(("wrapped-renewal", Some(OWNERLESS_LOGICAL), CONTROL_RESOURCE, "ExpiryChanged", "ens_v1_registrar_l1", 11, 1,
+            json!({"source_event":"NameRenewed","node":OWNERLESS_NAMEHASH,"authority_kind":"wrapper","emitter_role":"wrapped_registrar_controller","expiry":renewed_lease + GRACE,"registrar_expiry":renewed_lease})));
+    }
+    for (identity, logical, resource, kind, family, block, log, state) in events {
+        seed_normalized_event(
+            &pool,
+            &format!("fixture:wrapper-lapse-{identity}"),
+            logical,
+            Some(resource),
+            kind,
+            family,
+            block,
+            log,
+            state,
+            json!({"emitting_address":WRAPPER_CONTRACT}),
+        )
+        .await?;
+    }
+    let target = match step {
+        1 => 8,
+        2 => 9,
+        3 => 10,
+        _ => 11,
+    };
+    if incremental {
+        let mut previous = None;
+        for block in 8..=target {
+            run_project(&pool, block, previous.map_or(8, |_| block), previous).await?;
+            previous = Some(block);
+        }
+    } else {
+        run_project(&pool, target, 8, None).await?;
+    }
+    let (status, expiry, registrant, wrapper_state, has_lapsed_block, released_at) =
+        sqlx::query_as(
+            "SELECT declared_summary #>> '{registration,status}',
+                (declared_summary #>> '{registration,expiry}')::bigint,
+                declared_summary #>> '{registration,registrant}',
+                declared_summary ->> 'wrapper_state',
+                (declared_summary -> 'registration') ? 'lapsed_registration',
+                declared_summary #>> '{registration,released_at}'
+         FROM name_current WHERE logical_name_id = $1",
+        )
+        .bind(OWNERLESS_LOGICAL)
+        .fetch_one(&pool)
+        .await?;
+    let relations = sqlx::query_as(
+        "SELECT relation, address FROM address_names_current
+         WHERE logical_name_id = $1 ORDER BY relation, address",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .fetch_all(&pool)
+    .await?;
+    database.cleanup().await?;
+    Ok(WrapperLapseStep {
+        status,
+        expiry,
+        registrant,
+        wrapper_state,
+        has_lapsed_block,
+        released_at,
+        relations,
+    })
+}
+
+#[tokio::test]
+async fn wrapper_only_lapse_serves_no_registrant_until_a_wrapper_renewal() -> Result<()> {
+    const GRACE: i64 = 7_776_000;
+    let holder = CONTROL_OWNER.to_lowercase();
+    let mut steps = Vec::new();
+    for step in 1..=4 {
+        let incremental = wrapper_only_lapse_projection(step, true).await?;
+        let from_zero = wrapper_only_lapse_projection(step, false).await?;
+        assert_eq!(
+            incremental, from_zero,
+            "step {step} diverged from a rebuild"
+        );
+        steps.push(incremental);
+    }
+    let lease_expiry = steps[0].expiry.expect("step 1 lease expiry");
+    let renewed = lease_expiry + 10 * GRACE;
+    for (index, step) in steps.iter().enumerate() {
+        let number = index + 1;
+        assert_eq!(
+            step.status.as_deref(),
+            Some("active"),
+            "step {number}: {step:?}"
+        );
+        assert_eq!(
+            step.released_at, None,
+            "step {number}: nothing was released"
+        );
+        assert!(
+            !step.has_lapsed_block,
+            "step {number}: the name is not released"
+        );
+        assert_eq!(
+            step.expiry,
+            Some(if number == 1 { lease_expiry } else { renewed }),
+            "step {number} serves the live registrar expiry"
+        );
+        let lapsed = number == 3;
+        assert_eq!(
+            step.registrant.as_deref(),
+            (!lapsed).then_some(holder.as_str()),
+            "step {number}: {step:?}"
+        );
+        assert_eq!(
+            step.wrapper_state.as_deref(),
+            (!lapsed).then_some("emancipated"),
+            "step {number}: {step:?}"
+        );
+        assert_eq!(
+            step.relations
+                .iter()
+                .any(|(relation, address)| relation == "registrant" && *address == holder),
+            !lapsed,
+            "step {number}: {step:?}"
+        );
+        assert_eq!(
+            step.relations
+                .iter()
+                .any(|(relation, _)| relation == "token_holder"),
+            !lapsed,
+            "step {number}: {step:?}"
+        );
+    }
+    Ok(())
+}
