@@ -532,7 +532,16 @@ collection route carry neither header.
   The registration summary is not nested; it is represented by
   `registration_id`, `token_id`, `owner`, `manager`, `registrant`,
   `registered_at`, `created_at`, `expires_at`, and `registration_status` on
-  the same object when backed. An ENSv1 wrapper-backed row also carries
+  the same object when backed. For a `.eth` second-level name
+  `registration_id` is the BaseRegistrar lease whether or not the name is
+  wrapped; see
+  [registration identity of wrapped names](api-v2.md#registration-identity-of-wrapped-names).
+  A released ENSv1 name keeps its lapsed `expires_at`, serves no current
+  `registrant`, and carries
+  `lapsed_registration: {registrant?, authority?, released_at?}` with the
+  holder the lease had when it lapsed; see
+  [lapsed registration](api-v2.md#lapsed-registration). The block is omitted
+  for every name that is not released. An ENSv1 wrapper-backed row also carries
   `wrapper_state` with the current [`wrapped`](glossary.md#wrapped-namewrapper-state),
   [`emancipated`](glossary.md#emancipated-namewrapper-state), or
   [`locked`](glossary.md#locked-namewrapper-state) lifecycle value and the typed
@@ -1389,7 +1398,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   Registration-id anchored history from `GET /v1/history/resources/{resource_id}`
   moves to `GET /v1/events?registration_id=...`. `scope=registration` on this
   route is limited to registration lifecycles associated with the requested
-  name.
+  name. For a wrapped `.eth` name those are its BaseRegistrar leases: the read
+  follows each published NameWrapper binding of the name to the lease it
+  wrapped, so registrar rows recorded before the name was known are included,
+  and NameWrapper rows report the lease as their `registration_id`.
 
 ### `GET /v1/permissions`
 
@@ -1471,6 +1483,12 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   name has no permission rows. By contrast, a resolved current name paired with
   an explicitly different `registration_id` is a supported, proven-empty
   selection, so its empty page has no `completeness` or `unsupported_reason`.
+  Rows of a wrapped `.eth` name carry the BaseRegistrar lease as
+  `registration_id`, the same handle name detail serves; a
+  `registration_id` read of the lease returns the rows of the NameWrapper
+  resource that currently controls the name, and the NameWrapper resource
+  itself is not the name's registration, so pairing the name with it is the
+  proven-empty selection.
   An unrecognized namespace returns `404 not_found`. A publication change
   during the read returns `409 stale`, as described above.
   When `name` or `registration_id` binds the read to a registration, the
@@ -2075,7 +2093,16 @@ For a registrar lease first identified by a later readable observation, registra
   product `registration_id` filter likewise excludes V1 ownerless rows linked
   only to the registry resource retained for reads. Raw diagnostics keeps that
   resource attribution. The filter still returns resource-less events for names
-  bound to the requested registration. The served API currently exposes the old single-field shape, with
+  bound to the requested registration, but only events inside a binding of that
+  registration that was open at the event's position on the event's own chain
+  branch, so an older registration does not acquire a later registration's name
+  events. Record writes on the name's resolver that carry no resource are kept
+  through the same binding. A handle is a public registration only when a
+  registration grant backs it: directly, through a NameWrapper binding that
+  recorded the lease it wrapped, or, for a wrapped name with no registrar
+  lease, through the NameWrapper binding itself. A reservation, a
+  registry-only resource, or a NameWrapper resource that wraps a lease selects
+  no product rows; that also governs counts, summaries and cursor anchors. The served API currently exposes the old single-field shape, with
   `registration_id` only; the field change is the committed contract and lands
   in an immediate companion change. The
   slice-2 consumer activation contract maps each

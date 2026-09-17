@@ -99,7 +99,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `contract_address` | event filter for the contract that emitted an event's source log | `emitting_address` |
 | `chain_id` | numeric EVM chain id (`1`, `8453`); string-keyed in maps | string chain ids (`"ethereum-mainnet"`), position slot keys |
 | `network` | display slug (`ethereum`, `base`) | `network` (unchanged, display-only) |
-| `registration_id` | the one opaque stable handle for a registration lifecycle | `resource_id`, `resource_hex`, `resource`, `token_lineage_id`, `surface_binding_id` |
+| `registration_id` | the one opaque stable handle for a registration lifecycle; for a `.eth` second-level name it is always the BaseRegistrar lease, wrapped or not (see [registration identity of wrapped names](#registration-identity-of-wrapped-names)) | `resource_id`, `resource_hex`, `resource`, `token_lineage_id`, `surface_binding_id` |
 | `input` | caller-supplied lookup input echoed in a result | `input` (unchanged; now specified as result echo, not a parallel DTO family) |
 | `normalization` | name-normalization result for an input | `corrected_input_normalization`, `unnormalizable_input` status detail |
 | `finality` | `latest`, `safe`, `finalized` (JSON-RPC block-tag vocabulary) | `consistency` = `head`/`safe`/`finalized` |
@@ -1259,10 +1259,78 @@ without a current owner, resolver or records, and `GET /v1/names/{name}/history`
 keeps serving the name's history. An ENSv1 lease that lapses past grace with no
 revived custody, which is how a wrapped `.eth` name lapses, is served the same
 way as a [released v1 authority](glossary.md#released-v1-authority):
-`registration_status` `released` with the registration identity and
-timestamps, no owner, registrant, `expires_at`, resolver or records, and its
-history intact. Only a name that never had a readable surface
-answers `404 not_found`.
+`registration_status` `released` with the registration identity, timestamps and
+the lapsed lease's own `expires_at`, no current owner, `registrant`, resolver or
+records, and its history intact. Only a name that never had a
+readable surface answers `404 not_found`.
+
+### Lapsed registration
+
+A released ENSv1 name also carries `lapsed_registration`, the holder the lease
+had when it lapsed. It is a separate block so that nobody reads it as current
+state:
+
+```json
+{
+  "name": "example.eth",
+  "registration_status": "released",
+  "registration_id": "…",
+  "expires_at": "2024-05-01T00:00:00Z",
+  "lapsed_registration": {
+    "registrant": "0x…",
+    "authority": "wrapper",
+    "released_at": "2024-07-30T00:00:00Z"
+  }
+}
+```
+
+`registrant` is the last holder of the lapsed lease (the NameWrapper token owner
+for a wrapped name). `authority` here is `registrar` or `wrapper`, the contract
+the lapsed lease was held through; it is not the top-level `authority` field,
+which names the `ens_v1` or `ens_v2` side. `released_at` is when the release
+was observed. Each field is omitted when unknown. The top-level `registrant`,
+`owner` and `manager` stay absent.
+The block appears on `GET /v1/names/{name}` and on detail-profile
+`POST /v1/lookup` rows, only while the name is released, and is never an input
+to address-to-name relations, permissions or counts: the lapsed holder does not
+list the name under `GET /v1/addresses/{address}/names`. A name whose
+NameWrapper expiry alone has passed while its registrar lease is live is not
+released and carries no block; in that state the NameWrapper reports no owner,
+so the name serves no current `registrant` and no `registrant` relation until a
+renewal through the NameWrapper restores it.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
+
+### Registration identity of wrapped names
+
+For a `.eth` second-level name, `registration_id` always identifies the
+BaseRegistrar lease of the current registration: while the name is unwrapped,
+after it is wrapped in a later transaction, and when it was wrapped in its
+registration transaction. Wrapping, unwrapping and re-wrapping inside one lease
+keep the same `registration_id`; a new lease after a lapse gets a new one.
+`registration_status = "wrapped"`, `wrapper_state` and `wrapper_fuses` report
+the wrapper. Names with no registrar lease keep the identity they had: a
+wrapped subname is identified by its NameWrapper resource, and ENSv2 and
+Basenames registrations by their own registration resource.
+
+Exact-name detail, batch lookup, `GET /v1/permissions`, permission
+`restrictions`, and registration-scoped history (`GET /v1/names/{name}/history`
+and `GET /v1/events?registration_id=...`) all use this one handle. NameWrapper
+events of a wrapped `.eth` name report the lease as their `registration_id`, and
+a `registration_id` read of the lease returns them together with the
+registrar's own rows. A NameWrapper resource that wraps a lease is not a public
+registration handle: `GET /v1/events?registration_id=` with it selects nothing,
+and `GET /v1/permissions` pairing the name with it is the proven-empty
+selection described above. `GET /v1/permissions?registration_id=<lease>` returns
+the rows of the NameWrapper resource that currently controls the name.
+
+This is a client-visible change. Earlier releases served the NameWrapper
+resource as the `registration_id` of a wrapped `.eth` name. A client that stored
+a `registration_id` for a wrapped `.eth` name must read the name again and
+replace the stored value; the old value no longer selects history or
+permissions.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L278 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L110-L168 @ ens_v1@91c966f)
 
 Every collection uses `cursor`, `next_cursor`, `page_size`, nullable
 `total_count`, and `has_more`. Default `page_size` is 50; maximum is 200.

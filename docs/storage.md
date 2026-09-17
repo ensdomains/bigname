@@ -246,6 +246,23 @@ identity rather than by matching names or timestamps.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L305 @ ens_v1@91c966f)
 
+History reads follow the same recorded identity. A product read by `registration_id` reports
+the lease for NameWrapper rows whose wrapper `SurfaceBound` row names it, and the name and
+resource anchors of a history read include the leases a name's wrapper bindings recorded and the
+names whose wrapper bindings recorded a lease. Like every other anchor loader, the wrapper-link
+loader takes the read's publication block bounds, so a link recorded above the published block
+of its chain is not followed. A registration-scoped product read gathers its candidates from
+three index-keyed arms (the lease's names, the resources of those names, and resolver record
+writes attributed to them) and then keeps a row only when its product registration identity is
+the requested lease, or when the row has no resource and falls inside a binding of that lease
+that was open at the row's position.
+
+History loaders called with `canonical_only=false` also return rows of activated losing
+branches. For those reads every binding, grant and wrapper-link witness must lie on the event's
+own parent-hash path in `chain_lineage`; matching block numbers or canonicality states do not
+connect two retained forks. The HTTP product routes always read canonical rows only, where the
+check is skipped.
+
 A canonical, admitted, normalization-valid readable observation may also disclose a retained unnamed ENSv1 registrar lease to its exact namehash and labelhash only when that same live resource and token lineage are already the selected authority. Current admitted ENS registry ownership evidence must match the registrar's nonzero current owner; missing ownership evidence, a different authority, expiry, release, or migration retirement prevents attachment. A readable observation does not select authority. The binding begins at the observation. Earlier resource-only events remain unchanged.
 
 `registration_window` retains whether restoration reconciles preceding setup logs or the complete

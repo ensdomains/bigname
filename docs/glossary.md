@@ -1931,8 +1931,10 @@ is open and the registry owner is not a proven zero. The lease that lapsed
 while wrapped is the ordinary case: the NameWrapper's registry custody expired
 with the lease, so nothing current owns the node. The tombstone selects the
 released lease binding, serves the registration as `released` with its
-identity and timestamps, and serves no current registrant, authority, expiry,
-owner, control, resolver or records. It is positive proof that the
+identity, timestamps and the lapsed lease's expiry, and serves no current
+registrant, authority, owner, control, resolver or records. The holder and
+authority the lease had when it lapsed are kept apart in a
+`lapsed_registration` block that no current-state read uses. It is positive proof that the
 registration is absent, so the row is supported rather than
 `current_authority_not_projected`. A lease registered through the NameWrapper
 never has a binding of its own, so its released lease binding is the closed

@@ -388,10 +388,12 @@ later NameWrapper transfer. The registrar `Transfer` that moves the token into t
 during a later wrap is left out of the registrant fold: it is custody moving to the wrapper
 contract, not a change of holder, and the person who holds the name afterwards is the
 `NameWrapped` owner recorded next in the same transaction.
-(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f) `declared_summary.registration.resource_id` names the registration. It is the
-selected registration's own resource, or the registrar lease the current wrapper binding
-recorded; when that lease was granted in the same transaction as a wrap that recorded it, it is
-the resource of that first wrapper binding, which stays the same through unwrap and rewrap.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f) `declared_summary.registration.resource_id` names the registration of an ENSv1 name by its
+BaseRegistrar lease: the selected registration's own resource, or the lease the current wrapper
+binding leads to by the two rules above. It is the lease whether the name was wrapped at
+registration or later, and stays the same through unwrap and rewrap. It is `null` when the name
+has no registrar lease (a wrapped subname) and for ENSv2 registrations; the API then uses the
+bound resource.
 
 Incremental scope follows the same recorded link in both directions. A scoped wrapper resource
 or name adds the exact registrar resource its canonical `SurfaceBound` row names, and a changed
@@ -408,7 +410,23 @@ selects the closed NameWrapper binding that stands for the lease, found by the s
 above: the recorded `wrapped_registrar_resource_id`, or a named grant in the wrap's transaction.
 The rule starts from a registrar `RegistrationReleased`, so it does not fire when only the
 NameWrapper's own expiry has passed and the registrar lease, renewed on the BaseRegistrar
-directly, is still live; that name is not released.
+directly, is still live; that name is not released. In that state the NameWrapper reports no
+owner for a name whose `PARENT_CANNOT_CONTROL` fuse is burned, which every wrapped `.eth`
+second-level name has, so `registration.registrant` and `control.registrant` are `null` from the
+first block whose timestamp is past the NameWrapper expiry, together with the already cleared
+`wrapper_state` and token-holder relation. The `registrant` address-to-name relation reads the
+same field and is dropped with it. A renewal through the NameWrapper moves its expiry and
+restores all of them.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1013 @ ens_v1@91c966f)
+
+A tombstone keeps `registration.expiry`, the lapsed lease's own expiry, and adds
+`registration.lapsed_registration = {registrant, authority_kind, authority_key, released_at}`:
+the holder selected by the registrant fold at the release, and the authority the released
+lease binding's resource had before its closing epoch (the NameWrapper for a lease that lapsed
+while wrapped). `registration.registrant`, `authority_kind` and
+`authority_key` stay `null`, so nothing that reads current state (address-to-name relations,
+permissions, counts) sees the lapsed holder. No other row carries the block.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
