@@ -25,8 +25,10 @@ the named index belongs to `bigname_phase.discovery_edges`, is both
 `indisvalid` and `indisready`, and has the reviewed definition. It compares
 the `pg_get_indexdef` text, with the schema name removed, with how the fresh
 baseline index prints, and on a mismatch prints the definition it found beside
-the expected one. It prints the index row first, so the receipt shows the flags
-and definition either way.
+the expected one. It also fails, naming the kind of relation, when a table,
+view, or other relation that is not an index holds the name: remove or rename
+that relation before retrying. It prints the index row first, so the receipt
+shows the flags and definition either way.
 
 An interrupted concurrent build, for example one cancelled or stopped by the
 thirty-minute limit, leaves an invalid index under the intended name.
@@ -50,8 +52,9 @@ The matching versioned schema-migration installs the same definition on initiali
 databases; after a live prebuild, its `IF NOT EXISTS` is a no-op. That file
 matches on the name alone, so the later schema-migration
 `20260917160000_discovery_edges_index_validity_check.sql` fails the SQLx run if
-this index exists but is not valid and ready, or does not have the reviewed
-definition. It changes nothing; recover as
+this index is missing, exists but is not valid and ready, or does not have the
+reviewed definition, or if its name belongs to a relation that is not an index.
+It changes nothing; recover as
 described above, then run the schema-migrations again. Apply that migration
 through the usual SQLx release process when adopting this source revision. The
 fresh baseline also includes the index. No binary replacement or Interpret replay

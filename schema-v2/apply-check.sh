@@ -261,8 +261,8 @@ assert_index_install_refusal() {
 # Prove one concurrent index installer from ops/ against the scratch schema:
 # from the shape without the index it builds the fresh-baseline definition and
 # passes its own validity and definition checks, a rerun is a no-op, an invalid
-# index or a valid index with other keys under the same name makes it fail, and
-# the documented drop-and-rerun recovery works.
+# index, a valid index with other keys, or a table under the same name makes it
+# fail, and the documented drop-and-rerun recovery works.
 assert_concurrent_index_installer() {
     local label="$1"
     local index_name="$2"
@@ -315,9 +315,16 @@ END \$\$;"
     )"
     assert_index_install_refusal "$label-wrong-keys-prebuild" "$install_file" \
         "$index_name exists but does not have the reviewed definition; found \"CREATE INDEX $index_name ON discovery_edges USING btree (active_from_block_number, chain_id)\", expected \"$reviewed_definition\"; follow the recovery steps in $readme_path before retrying"
+    # IF NOT EXISTS also skips a table under this name.
     {
         printf 'SET search_path TO "%s";\n' "$scratch_schema"
-        printf '%s\n' "DROP INDEX $index_name;"
+        printf '%s\n' "DROP INDEX $index_name;" "CREATE TABLE $index_name ();"
+    } | run_psql >/dev/null
+    assert_index_install_refusal "$label-table-under-name" "$install_file" \
+        "$scratch_schema.$index_name is a table, not an index, so the index was never built; remove or rename that relation, then follow $readme_path before retrying"
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' "DROP TABLE $index_name;"
         render_phase_migration "$install_file"
         printf '%s\n' "$matches_baseline_sql" "DROP TABLE expected_installed_index;"
     } | run_psql >/dev/null
@@ -411,7 +418,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=17
+expected_refusal_assertions=25
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=34
 refusal_probe_seconds=0
@@ -945,20 +952,12 @@ assert_concurrent_index_installer discovery-reopen \
     ops/discovery-reopen-index/README.md
 # The two index schema-migrations above adopt an existing index by name alone.
 # Both indexes are now the ones the ops/ installers built. The validity check
-# passes on that shape too, changes nothing when rerun, and ignores an index
-# that does not exist yet.
+# passes on that shape too and changes nothing when rerun.
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     emit_phase_migration "$discovery_index_validity_migration" preceding-shape
     emit_phase_migration "$discovery_index_validity_migration" baseline-first
     cat <<'SQL'
-BEGIN;
-DROP INDEX discovery_edges_observation_history_idx;
-DROP INDEX discovery_edges_reopen_idx;
-SQL
-    emit_phase_migration "$discovery_index_validity_migration" baseline-first
-    cat <<'SQL'
-ROLLBACK;
 DO $$
 BEGIN
     IF (
@@ -975,7 +974,7 @@ END $$;
 SQL
 } | run_psql
 assert_migration_context_count "$discovery_index_validity_migration" preceding-shape 5
-assert_migration_context_count "$discovery_index_validity_migration" baseline-first 4
+assert_migration_context_count "$discovery_index_validity_migration" baseline-first 3
 # An interrupted concurrent build leaves an invalid index under the right name.
 # Mark each scratch index invalid in turn, inside a transaction that rolls
 # back, and require the schema-migration to fail rather than record success.
@@ -988,6 +987,26 @@ do
         "$discovery_index_name exists but is not a valid and ready index on $scratch_schema.discovery_edges; follow the recovery steps in ops/discovery-history-index/README.md or ops/discovery-reopen-index/README.md, then run the schema-migrations again" <<SQL
 UPDATE pg_index SET indisvalid = false
 WHERE indexrelid = '$discovery_index_name'::regclass;
+SQL
+    # The earlier files build the index whenever the table exists, so a missing
+    # index here was dropped or never installed, and nothing would rebuild it.
+    assert_migration_refusal "missing-$discovery_index_name" \
+        "$discovery_index_validity_migration" \
+        "$discovery_index_name does not exist although $scratch_schema.discovery_edges does; build it with the matching install.sql as ops/discovery-history-index/README.md or ops/discovery-reopen-index/README.md describes, then run the schema-migrations again" <<SQL
+DROP INDEX $discovery_index_name;
+SQL
+    # CREATE INDEX IF NOT EXISTS also skips a table or view under the name.
+    assert_migration_refusal "table-named-$discovery_index_name" \
+        "$discovery_index_validity_migration" \
+        "$scratch_schema.$discovery_index_name is a table, not an index, so the index was never built; remove or rename that relation, build the index with the matching install.sql as ops/discovery-history-index/README.md or ops/discovery-reopen-index/README.md describes, then run the schema-migrations again" <<SQL
+DROP INDEX $discovery_index_name;
+CREATE TABLE $discovery_index_name ();
+SQL
+    assert_migration_refusal "view-named-$discovery_index_name" \
+        "$discovery_index_validity_migration" \
+        "$scratch_schema.$discovery_index_name is a view, not an index, so the index was never built; remove or rename that relation, build the index with the matching install.sql as ops/discovery-history-index/README.md or ops/discovery-reopen-index/README.md describes, then run the schema-migrations again" <<SQL
+DROP INDEX $discovery_index_name;
+CREATE VIEW $discovery_index_name AS SELECT 1 AS occupied;
 SQL
 done
 # A wrong manual prebuild leaves a valid index under the right name that the
