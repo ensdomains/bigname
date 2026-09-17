@@ -1,5 +1,7 @@
 use crate::{Marker, ProjectError, Result};
 use sqlx::{Postgres, Transaction};
+#[cfg(test)]
+mod plan_tests;
 mod stage;
 pub(super) async fn build(
     transaction: &mut Transaction<'_, Postgres>,

@@ -16,6 +16,7 @@ pub(super) async fn prepare(transaction: &mut Transaction<'_, Postgres>) -> Resu
 /// leaves out the registrar transfer that moves the token into the NameWrapper in the wrap's own
 /// transaction: it names the NameWrapper contract, not a holder. Rows named the second way are
 /// listed in `project_wrapper_linked_events`.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L265 @ ens_v1@91c966f)
 async fn bind_resource_events(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     for statement in [
         "UPDATE project_events event SET logical_name_id = binding.logical_name_id
@@ -138,21 +139,26 @@ async fn ownerless_registry(transaction: &mut Transaction<'_, Postgres>) -> Resu
     Ok(())
 }
 
+/// What `build` runs before `AUTHORITY_EVENTS`; the plan test stages the same way.
+pub(super) const SELECTED_BINDINGS: [&str; 5] = [
+    // Temporary tables are never analyzed automatically, and the builders read every table
+    // staged here once per name. Without statistics the planner assumes a handful of rows
+    // and joins them by nested loop.
+    "ALTER TABLE project_name_authority ADD PRIMARY KEY (logical_name_id)",
+    "ANALYZE project_name_authority",
+    "CREATE TEMP TABLE project_bindings ON COMMIT DROP AS
+     SELECT candidate.*
+     FROM project_name_authority authority
+     JOIN project_binding_candidates candidate
+       ON candidate.surface_binding_id = authority.selected_binding_id",
+    "CREATE INDEX ON project_bindings (logical_name_id)",
+    "ANALYZE project_bindings",
+];
+pub(super) const AUTHORITY_EVENTS: &str = include_str!("authority_events.sql");
+
 pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
-    for statement in [
-        // Temporary tables are never analyzed automatically, and the builders read every table
-        // staged here once per name. Without statistics the planner assumes a handful of rows
-        // and joins them by nested loop.
-        "ALTER TABLE project_name_authority ADD PRIMARY KEY (logical_name_id)",
-        "ANALYZE project_name_authority",
-        "CREATE TEMP TABLE project_bindings ON COMMIT DROP AS
-         SELECT candidate.*
-         FROM project_name_authority authority
-         JOIN project_binding_candidates candidate
-           ON candidate.surface_binding_id = authority.selected_binding_id",
-        "CREATE INDEX ON project_bindings (logical_name_id)",
-        "ANALYZE project_bindings",
-        include_str!("authority_events.sql"),
+    for statement in SELECTED_BINDINGS.into_iter().chain([
+        AUTHORITY_EVENTS,
         // Each staged event joins at most one name, so the event id is the table's key.
         "ALTER TABLE project_authority_events ADD PRIMARY KEY (normalized_event_id)",
         "CREATE INDEX ON project_authority_events (logical_name_id, normalized_event_id)",
@@ -270,7 +276,7 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
         "CREATE INDEX ON project_name_serving (serving_resource_id)",
         "CREATE INDEX ON project_name_serving (resolver_chain_id, resolver_address)",
         "ANALYZE project_name_serving",
-    ] {
+    ]) {
         sqlx::query(statement)
             .execute(&mut **transaction)
             .await
@@ -285,7 +291,8 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
 mod tests {
     /// A full rebuild runs this statement once over every event and every name. With anything but
     /// a plain equality between the two, Postgres can neither hash- nor merge-join them and
-    /// instead re-reads every row that carries no name once per name.
+    /// instead re-reads every row that carries no name once per name. This checks the SQL text
+    /// only; `plan_tests` checks the plan Postgres chooses.
     #[test]
     fn authority_events_join_names_by_equality_only() {
         let statement = include_str!("authority_events.sql");

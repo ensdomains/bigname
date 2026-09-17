@@ -240,15 +240,22 @@ resolver is not replayed.
 Same-transaction reconciliation does not treat this replay as a successor authority epoch of the
 resource, so the binding made at that position survives.
 
-Every `NameWrapped`-derived row records `after_state.wrapped_registrar_resource_id`: the
+The `NameWrapped`-derived rows that inherit the wrap's shared observation object record
+`after_state.wrapped_registrar_resource_id`. Those rows are `TokenControlTransferred`,
+`ExpiryChanged` and `PermissionScopeChanged`, and the authority-transition rows the wrap emits
+from the same object: `AuthorityEpochChanged`, and `SurfaceBound`, `SurfaceUnbound` and the
+authority `ResolverChanged` whenever the wrap emits them. The value is the
 `resource_id` of the BaseRegistrar lease whose token the wrap moved into the NameWrapper, when a
 registrar lease with a token lineage is the node's current authority as the log is interpreted.
-The key is always present and is `null` otherwise: for a wrapped subname, which has no registrar
-lease, and for a registration where a controller event creates the lease only after `NameWrapped`
-in the same transaction. Project follows a wrap to its registrar lease through this recorded
+On those rows the key is always present and is `null` otherwise: for a wrapped subname, which has
+no registrar lease, and for a registration where a controller event creates the lease only after
+`NameWrapped` in the same transaction. The wrap's holder `PermissionChanged` rows and the
+`PreimageObserved` row generated for its name are built separately and do not carry the key.
+Project follows a wrap to its registrar lease through this recorded
 identity rather than by matching names or timestamps.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L305 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
 
 A canonical, admitted, normalization-valid readable observation may also disclose a retained unnamed ENSv1 registrar lease to its exact namehash and labelhash only when that same live resource and token lineage are already the selected authority. Current admitted ENS registry ownership evidence must match the registrar's nonzero current owner; missing ownership evidence, a different authority, expiry, release, or migration retirement prevents attachment. A readable observation does not select authority. The binding begins at the observation. Earlier resource-only events remain unchanged.
 
@@ -268,6 +275,8 @@ Numeric BaseRegistrar expiry above the signed timestamp range is retained as `i6
 The `ens_v1_registrar_l1` controller events that repeat that expiry next to the label use the same
 rule, so an out-of-range value does not fail interpretation and lose the label; Basenames expiry
 decoding stays strict.
+(upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L116-L124 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L133-L139 @ ens_v1@91c966f)
 Settlement treats an expiry whose grace addition overflows that range as live; public timestamp
 rendering keeps the existing `null` representation for unrepresentable dates. Co-admitted
 ENSv1→ENSv2 migration evidence retains over-`u64` expiry as decimal text and does not use it for
