@@ -42,17 +42,21 @@ six hours, because both indexes cover most of a mainnet `normalized_events`
 table. Retain its output in the deployment receipt.
 
 The script ends with a check that fails, with a non-zero `psql` exit, unless
-both indexes belong to `bigname_phase.normalized_events` and are `indisvalid` and
-`indisready`. It prints the index rows first, so the receipt shows the flags
-either way. The check does not compare definitions, so before treating the step
-as complete also confirm exactly two index rows with the expected definitions.
-`IF NOT EXISTS` matches on the name alone and does not fix an invalid index from
-an interrupted concurrent build: rerunning the script skips creation and then
-fails at the check. If one of these two indexes is invalid, first confirm in
+each name is an index on `bigname_phase.normalized_events`, is `indisvalid` and
+`indisready`, and has the reviewed definition. The definition is compared as
+`pg_get_indexdef` prints it, with the schema name removed and runs of whitespace
+collapsed, so key order, expressions, and the predicate are all covered. It
+prints the index rows first, so the receipt shows the flags either way.
+`IF NOT EXISTS` matches on the name alone: it fixes neither an invalid index
+from an interrupted concurrent build, nor a valid index with other keys, nor a
+table or view under the name. Rerunning the script skips creation and then
+fails at the check. To recover from an invalid or wrong index, first confirm in
 `pg_stat_progress_create_index` that no build is still running, drop only it with
-`DROP INDEX CONCURRENTLY bigname_phase.<index name>`, then rerun the script. Never drop a valid index merely because an installation was
-retried, and never drop one while a runner that uses the lookahead loader is
-processing batches.
+`DROP INDEX CONCURRENTLY bigname_phase.<index name>`, then rerun the script. If
+the name belongs to a table, view, or other relation, remove or rename that
+relation first. Never drop a valid index with the reviewed definition merely
+because an installation was retried, and never drop one while a runner that uses
+the lookahead loader is processing batches.
 
 After both builds finish, run `ANALYZE bigname_phase.normalized_events` (or
 confirm autovacuum has analyzed the table since). Expression indexes have no
@@ -62,9 +66,10 @@ not finish in several minutes, and took under four seconds after `ANALYZE`.
 
 The matching versioned schema-migration installs the same definitions on
 initialized databases; after a live prebuild, its `IF NOT EXISTS` is a no-op.
-It ends with the same validity check, so the SQLx run fails rather than recording
-success if either index exists but is not valid and ready; recover as described
-above, then run the schema-migrations again.
+It ends with the same check, so the SQLx run fails rather than recording
+success if either name is not an index, is not valid and ready, or does not have
+the reviewed definition; recover as described above, then run the
+schema-migrations again.
 Apply that schema-migration through the usual SQLx release process when adopting
 this source revision. The fresh baseline also includes both indexes.
 
