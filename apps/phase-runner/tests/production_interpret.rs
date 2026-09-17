@@ -978,7 +978,10 @@ async fn prior_state_is_loaded_once_and_folded_forward_across_500_block_batches(
     let scratch = ScratchDatabase::create("production_interpret_prior_state_session").await?;
     let chain = "interpret-prior-state-session";
     seed_fixture(scratch.pool(), chain, &[(1, "alice"), (501, "alice")]).await?;
-    let engine = Engine::new(scratch.pool().clone());
+    // This pins the full-state loader's carried session: the stored history is deleted
+    // between the batches. The lookahead loader, which this ENSv1-only chain would otherwise
+    // choose, keeps no session and reads that history for every batch.
+    let engine = Engine::new(scratch.pool().clone()).with_full_state_loader_forced(true);
     let first = engine
         .run_batch(BatchRequest {
             chain_id: chain.to_owned(),

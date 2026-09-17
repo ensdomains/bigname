@@ -800,8 +800,7 @@ fn restore_reads_outside_loaded_nodes_fail() -> anyhow::Result<()> {
     // arbitrary part of his history. Restore must refuse instead.
     let alice_only = BTreeSet::from([node("alice")]);
     let error = restore_schema_v2_lookahead_session(begin()?, prior, None, &alice_only)
-        .err()
-        .expect("restore outside the loaded names must fail");
+        .expect_err("restore outside the loaded names must fail");
     assert!(
         error.to_string().contains("accessed unloaded nodes")
             && error.to_string().contains(&node("bob").node),
@@ -892,8 +891,7 @@ fn covered_families_outside_ens_v1_cannot_interpret_a_log() {
         let mut manifest = registrar_manifest();
         manifest.source_family = family.to_owned();
         let error = interpret_schema_v2_batch(input(vec![manifest], vec![], vec![]))
-            .err()
-            .expect("a declared event must be refused");
+            .expect_err("a declared event must be refused");
         assert!(
             format!("{error:#}").contains("has no typed schema-v2 adapter"),
             "{family}: {error:#}"
