@@ -422,7 +422,9 @@ fn decode_hex(value: &str, logical_name_id: &str) -> Result<Vec<u8>> {
     }
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let high = hex_nibble(pair[0]).ok_or_else(|| {
                 InterpretError::data_integrity(format!(

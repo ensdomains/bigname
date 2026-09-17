@@ -267,7 +267,8 @@ fn sepolia_direct_intake_keeps_rpc_reference_and_provider_trust() -> RunnerResul
             provider_trusted_source("ethereum-sepolia", &[&intake])?.source_kind,
             kind
         );
-        let trusted = super::super::verification_plan("ethereum-sepolia", &[intake.clone()])?;
+        let trusted =
+            super::super::verification_plan("ethereum-sepolia", std::slice::from_ref(&intake))?;
         assert_eq!(trusted.verification_level(), VerificationLevel::QuickSynced);
         let reference = SourceConfig::new_with_role(
             "ethereum-sepolia",
