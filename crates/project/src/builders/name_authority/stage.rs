@@ -139,16 +139,21 @@ async fn ownerless_registry(transaction: &mut Transaction<'_, Postgres>) -> Resu
     Ok(())
 }
 
+/// What `build` runs before `AUTHORITY_EVENTS`; the plan test stages the same way.
+pub(super) const SELECTED_BINDINGS: [&str; 3] = [
+    "ALTER TABLE project_name_authority ADD PRIMARY KEY (logical_name_id)",
+    "CREATE TEMP TABLE project_bindings ON COMMIT DROP AS
+     SELECT candidate.*
+     FROM project_name_authority authority
+     JOIN project_binding_candidates candidate
+       ON candidate.surface_binding_id = authority.selected_binding_id",
+    "CREATE INDEX ON project_bindings (logical_name_id)",
+];
+pub(super) const AUTHORITY_EVENTS: &str = include_str!("authority_events.sql");
+
 pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
-    for statement in [
-        "ALTER TABLE project_name_authority ADD PRIMARY KEY (logical_name_id)",
-        "CREATE TEMP TABLE project_bindings ON COMMIT DROP AS
-         SELECT candidate.*
-         FROM project_name_authority authority
-         JOIN project_binding_candidates candidate
-           ON candidate.surface_binding_id = authority.selected_binding_id",
-        "CREATE INDEX ON project_bindings (logical_name_id)",
-        include_str!("authority_events.sql"),
+    for statement in SELECTED_BINDINGS.into_iter().chain([
+        AUTHORITY_EVENTS,
         "CREATE INDEX ON project_authority_events (logical_name_id, normalized_event_id)",
         "CREATE INDEX ON project_authority_events (resource_id, normalized_event_id)",
         include_str!("registration_events.sql"),
@@ -261,7 +266,7 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
         "CREATE UNIQUE INDEX ON project_name_serving (logical_name_id)",
         "CREATE INDEX ON project_name_serving (serving_resource_id)",
         "CREATE INDEX ON project_name_serving (resolver_chain_id, resolver_address)",
-    ] {
+    ]) {
         sqlx::query(statement)
             .execute(&mut **transaction)
             .await
@@ -276,7 +281,8 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
 mod tests {
     /// A full rebuild runs this statement once over every event and every name. With anything but
     /// a plain equality between the two, Postgres can neither hash- nor merge-join them and
-    /// instead re-reads every row that carries no name once per name.
+    /// instead re-reads every row that carries no name once per name. This checks the SQL text
+    /// only; `plan_tests` checks the plan Postgres chooses.
     #[test]
     fn authority_events_join_names_by_equality_only() {
         let statement = include_str!("authority_events.sql");
