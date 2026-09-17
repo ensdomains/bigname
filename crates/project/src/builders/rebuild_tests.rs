@@ -221,3 +221,66 @@ async fn name_authority_looks_resources_up_by_key() -> Result<()> {
     );
     rebuild.finish().await
 }
+
+/// Whether any node of the plan satisfies `matches`.
+fn any_node(plan: &Value, matches: &dyn Fn(&Value) -> bool) -> bool {
+    matches(plan)
+        || plan["Plans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|child| any_node(child, matches))
+}
+
+const AUTHORITY_EVENTS: &str = include_str!("name_authority/authority_events.sql");
+
+/// The statement used to de-duplicate and sort its output by event id. Every event joins at most
+/// one name, so both were no-ops that sorted each wide event row.
+#[tokio::test]
+async fn authority_events_match_the_deduplicated_and_sorted_statement() -> Result<()> {
+    let mut rebuild =
+        Rebuild::through("rebuild_equal_authority", 600, Builder::NameAuthority).await?;
+    let previous = format!(
+        "{}\nORDER BY event.normalized_event_id",
+        AUTHORITY_EVENTS
+            .replacen(
+                "TABLE project_authority_events ",
+                "TABLE previous_authority_events ",
+                1
+            )
+            .replacen(
+                "SELECT event.*",
+                "SELECT DISTINCT ON (event.normalized_event_id) event.*",
+                1
+            )
+    );
+    ensure!(previous.contains("previous_authority_events") && previous.contains("DISTINCT ON"));
+    rebuild.execute(&previous).await?;
+    rebuild
+        .assert_same_rows("project_authority_events", "previous_authority_events")
+        .await?;
+    rebuild.finish().await
+}
+
+#[tokio::test]
+async fn authority_events_are_staged_without_sorting_them() -> Result<()> {
+    let mut rebuild =
+        Rebuild::through("rebuild_plan_events", PLAN_NAMES, Builder::NameAuthority).await?;
+    let statement = AUTHORITY_EVENTS.replacen(
+        "TABLE project_authority_events ",
+        "TABLE explained_authority_events ",
+        1,
+    );
+    let plan = rebuild.explain(&statement).await?;
+    ensure!(
+        !any_node(&plan, &|node| node["Node Type"] == "Sort"
+            || node["Node Type"] == "Unique"),
+        "the staged events were sorted or de-duplicated: {plan}"
+    );
+    let rows = rows_read(&plan, "project_events");
+    ensure!(
+        rows <= 40.0 * PLAN_NAMES as f64,
+        "project_events rows handled: {rows}; {plan}"
+    );
+    rebuild.finish().await
+}
