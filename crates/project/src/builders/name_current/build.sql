@@ -435,8 +435,25 @@
                       WHERE wrapper_binding.logical_name_id = event.logical_name_id
                         AND wrapper_binding.source_family = 'ens_v1_wrapper_l1'
                         AND wrapper_binding.event_kind = 'SurfaceBound'
-                        AND wrapper_binding.after_state ->>
-                            'wrapped_registrar_resource_id' = event.resource_id::text
+                        -- The release names the BaseRegistrar token owner, which for a wrapped
+                        -- lease is the NameWrapper contract. The holder is the NameWrapper token
+                        -- owner, so the fold skips the release of a lease the name's wrap stands
+                        -- for: the wrap recorded the lease, or a controller event granted the
+                        -- lease in the wrap's transaction after NameWrapped recorded nothing.
+                        AND (
+                            wrapper_binding.after_state ->>
+                                'wrapped_registrar_resource_id' = event.resource_id::text
+                            OR EXISTS (
+                                SELECT 1 FROM project_events registration
+                                WHERE registration.resource_id = event.resource_id
+                                  AND registration.source_family = 'ens_v1_registrar_l1'
+                                  AND registration.event_kind = 'RegistrationGranted'
+                                  AND registration.logical_name_id =
+                                      wrapper_binding.logical_name_id
+                                  AND registration.transaction_hash =
+                                      wrapper_binding.transaction_hash
+                            )
+                        )
                   )
               )
               AND CASE event.event_kind
