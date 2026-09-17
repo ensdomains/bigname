@@ -60,7 +60,8 @@ For server deployment:
 
 ```sh
 cp .env.server.example .env.server         # configure credentials, image and capacity inputs
-# Set a positive disk floor and pre-create the dedicated probe directory.
+# Set a positive disk floor, pre-create the dedicated probe directory, and
+# choose a memory ceiling per service.
 # Complete docs/runbooks/production-docker.md#capacity-preflight before starting.
 docker compose --env-file .env.server -f docker-compose.server.yml up -d
 ```
