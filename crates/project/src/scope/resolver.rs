@@ -249,8 +249,9 @@ pub(super) async fn include_resource_pointers(
 /// A name surface entering scope may be the first readable name for a node some
 /// record-ID resolver links; that resolver's summary must pick the name up now, not
 /// on the next full rebuild. Driven from the resolvers, whose link history the
-/// emitter index covers (a record-ID resolver emits its own Linked logs), and
-/// joined to the scoped surfaces by primary key: the cost is the record-ID
+/// emitter index covers (a record-ID resolver emits its own Linked logs
+/// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64)),
+/// and joined to the scoped surfaces by primary key: the cost is the record-ID
 /// resolvers' link history, never a scan of the chain's events by node.
 pub(super) async fn include_link_targets(
     transaction: &mut Transaction<'_, Postgres>,

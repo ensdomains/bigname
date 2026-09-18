@@ -10,6 +10,7 @@ WITH latest_links AS (
      AND lineage.block_number = event.block_number
     -- The emitter predicate is the indexed one (normalized_events_emitter_history_idx);
     -- a record-ID resolver emits its own Linked logs.
+    -- (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64)
     WHERE event.chain_id = $1 AND event.event_kind = 'ResolverRecordLinked'
       AND event.after_state ->> 'storage_model' = 'resolver_record_id'
       AND lower(event.raw_fact_ref ->> 'emitting_address') = $2

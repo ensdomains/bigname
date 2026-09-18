@@ -208,6 +208,7 @@ async fn v2_resolver_collection_links_pages_latest_link_per_node_in_record_order
         event.after_state = json!({"source_event":"Linked", "storage_model":"resolver_record_id",
             "resolver":resolver, "node":node, "resolver_record_id":record});
         // A record-ID resolver emits its own Linked logs; the read filters on the emitter.
+        // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64)
         event.raw_fact_ref["emitting_address"] = json!(resolver);
         event
     };

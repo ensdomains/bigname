@@ -194,6 +194,7 @@ pub(super) async fn seed_relinked_resolvers(
     // with every row: the cost is the link history once, not once per resolver.
     // The emitter predicate is the indexed one (normalized_events_emitter_history_idx);
     // a record-ID resolver emits its own Linked logs.
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64)
     let statement = format!(
         r#"
         WITH latest AS (
