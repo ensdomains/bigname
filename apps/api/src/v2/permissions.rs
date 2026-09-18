@@ -132,7 +132,12 @@ pub(crate) async fn get_permissions(
 
     if let Some(selection) = resolved.empty_selection {
         let support = if selection == EmptyPermissionsSelection::SupersededNameRegistrationPair {
-            let ids = resolved.resource_id.into_iter().collect::<Vec<_>>();
+            // The explicitly requested registration classifies the empty page; the name's own
+            // control resource (its NameWrapper resource for a wrapped `.eth` name) does not.
+            let ids = filter_inputs
+                .requested_resource_id
+                .into_iter()
+                .collect::<Vec<_>>();
             let summaries =
                 bigname_storage::load_permissions_current_resource_summaries(&state.pool, &ids)
                     .await
