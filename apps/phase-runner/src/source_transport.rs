@@ -1,12 +1,18 @@
 //! Explicit same-node transport changes preserve the retained ingest extent.
-use anyhow::{Result, ensure};
-use bigname_ingest::{VerificationProvider, WatchFilter, load_persisted_watch_filter};
+use anyhow::{Context as _, Result, ensure};
+use bigname_ingest::{
+    Marker, SourceDescriptor, VerificationProvider, WatchFilter, admit_source_floor,
+    enforce_source_floor, load_persisted_watch_filter,
+};
 use serde_json::{Value, json};
+use sqlx::{Postgres, Transaction};
 
 use crate::{
     config::{SeedBasis, SourceConfig, SourceRole, normalized_source_kind},
     database::RunnerDatabase,
     phase::PhaseName,
+    state::PhaseStatus,
+    transitions::{lock_chain_phase_state, row_for},
 };
 
 /// The operator attests these endpoints expose the same node. This operation checks
@@ -141,6 +147,7 @@ pub async fn transition_with_readers(
         left.end == right.end && left.logs == right.logs,
         "next block data differs"
     );
+    admit_retention_floor(&mut tx, chain, new, &to_kind, &new_provider, &phase, next).await?;
     let affected = sqlx::query(
         "UPDATE ingest_cursors SET source_kind = $3 WHERE chain_id = $1 AND source_key = $2 AND source_kind = $4",
     )
@@ -155,6 +162,69 @@ pub async fn transition_with_readers(
         "checked_boundaries":checked,"next_block":next,"next_block_hash":right.end.hash,
         "next_block_log_count":right.logs.len(),"same_node_attested":true}),
     )
+}
+
+/// Applies, to the proposed descriptor, the source-floor admission that Ingest applies
+/// when it resumes after the change, so a reader that resumed Ingest would refuse is
+/// refused here instead of after a committed switch.
+///
+/// The rule is the engine's own (`bigname_ingest::admit_source_floor`) and keeps its
+/// distinction between the kinds of work Ingest resumes with: a redo in progress is
+/// judged on what remains of its range, Ingest that has not completed replans from the
+/// descriptor's declared start block, and Ingest that completed and handed off to live
+/// follow leaves only the suffix from the next block. Only a direct reader reports a
+/// floor, so a change back to the HTTP interface admits without one.
+async fn admit_retention_floor(
+    tx: &mut Transaction<'_, Postgres>,
+    chain: &str,
+    new: &SourceConfig,
+    to_kind: &str,
+    new_provider: &VerificationProvider,
+    phase: &Value,
+    next: i64,
+) -> Result<()> {
+    let Some(floor) = new_provider.earliest_available_block().await? else {
+        return Ok(());
+    };
+    let descriptor = SourceDescriptor {
+        key: new.source_key.clone(),
+        kind: to_kind.to_owned(),
+        start_block: new.start_block_number,
+        endpoint: new.endpoint().to_owned(),
+    };
+    let admitted = if phase["redo_in_progress"] == true {
+        let (Some(from), Some(to)) = (
+            phase["redo_from_block_number"].as_i64(),
+            phase["redo_to_block_number"].as_i64(),
+        ) else {
+            anyhow::bail!("ingest redo is in progress without a redo range");
+        };
+        let resumed = phase["redo_current_block_number"]
+            .as_i64()
+            .zip(phase["redo_current_block_hash"].as_str())
+            .map(|(number, hash)| Marker {
+                number,
+                hash: hash.to_owned(),
+            });
+        admit_source_floor(&descriptor, Some((from, to)), resumed.as_ref(), floor)
+    } else if ingest_replans_from_declared_start(tx, chain).await? {
+        admit_source_floor(&descriptor, None, None, floor)
+    } else {
+        enforce_source_floor(&descriptor.key, next, None, floor)
+    };
+    admitted
+        .context("the direct reader cannot serve the Ingest work that resumes after this change")
+}
+
+/// Whether Ingest plans another normal batch from its declared start when it resumes: the
+/// same completed-phase test the runner applies before it restarts Ingest.
+async fn ingest_replans_from_declared_start(
+    tx: &mut Transaction<'_, Postgres>,
+    chain: &str,
+) -> Result<bool> {
+    let rows = lock_chain_phase_state(tx, chain).await?;
+    let ingest = row_for(&rows, PhaseName::Ingest)?;
+    Ok(ingest.status()? != PhaseStatus::Completed || ingest.ingest_completion_is_incomplete())
 }
 
 fn validate_pair(old: &SourceConfig, new: &SourceConfig) -> Result<()> {

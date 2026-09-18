@@ -20,6 +20,8 @@ pub(crate) mod prefetch;
 pub(crate) mod query;
 mod redo;
 mod source_floor;
+
+pub use source_floor::admit_source_floor;
 mod window;
 
 use prefetch::{Prefetcher, RangeLogCache};

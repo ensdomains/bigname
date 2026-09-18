@@ -14,15 +14,15 @@ impl Engine {
             if normalized_kind(&source.kind) == ProviderKind::Coinbase {
                 continue;
             }
-            let Some((from, to)) =
-                planned_range(source, request.redo_range, request.resume_current.as_ref())
-            else {
-                continue;
-            };
             let Some(floor) = self.source_floor(&request.chain_id, source).await? else {
                 continue;
             };
-            enforce_source_floor(&source.key, from, to, floor)?;
+            admit_source_floor(
+                source,
+                request.redo_range,
+                request.resume_current.as_ref(),
+                floor,
+            )?;
         }
         Ok(())
     }
@@ -63,6 +63,24 @@ impl Engine {
             )
         })
     }
+}
+
+/// The admission a batch applies to one source before any ingest work, given the floor
+/// that source reports now: the range the batch would plan (see [`planned_range`]) must
+/// start at or above the floor.
+///
+/// Public so that a maintenance command which changes a source ahead of a resumed batch
+/// can apply the same admission to the proposed descriptor instead of restating the rule.
+pub fn admit_source_floor(
+    source: &SourceDescriptor,
+    redo_range: Option<(i64, i64)>,
+    resume_current: Option<&Marker>,
+    floor: i64,
+) -> Result<()> {
+    let Some((from, to)) = planned_range(source, redo_range, resume_current) else {
+        return Ok(());
+    };
+    enforce_source_floor(&source.key, from, to, floor)
 }
 
 /// The block range a batch plans for one source, or `None` when it plans nothing.

@@ -204,8 +204,10 @@ transport change* is the explicit `phase-runner source-transport` maintenance
 command that switches a Sepolia intake source between the two without
 re-ingesting. It rewrites only the stored source kind of the chain's one intake
 cursor, after confirming that every phase writer is stopped, that both
-interfaces report the hashes Ingest retained at its boundaries, and that both
-report the same watched logs for the next block Ingest will read. The operator
+interfaces report the hashes Ingest retained at its boundaries, that both
+report the same watched logs for the next block Ingest will read, and that the
+direct reader's retention floor admits the range Ingest plans when it resumes.
+The operator
 attests that both interfaces belong to the same node; the command cannot prove
 it. Progress, raw facts, redo state and the
 [verification level](#verification-level) are unchanged, and the change grants

@@ -250,6 +250,142 @@ async fn redo_that_has_not_started_checks_its_first_block() -> Result<()> {
     db.cleanup().await
 }
 
+#[tokio::test]
+async fn direct_reader_floor_above_the_declared_start_refuses_unfinished_normal_ingest()
+-> Result<()> {
+    let db = ScratchDatabase::create("source_transport_floor_normal").await?;
+    seed_watch_set(db.pool()).await?;
+    seed_ingest(db.pool(), "drpc", Redo::None).await?;
+    // Ingest still has catch-up work: it stands at block 5 with a target of 8.
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running', finished_at = NULL,
+             target_block_number = 8, target_block_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(8))
+    .execute(db.pool())
+    .await?;
+    let node = NodeDouble::through(8).with_watched_log(6);
+    let before = snapshot(db.pool()).await?;
+
+    // The node has pruned history below block 3. The retained boundary (5) and the next
+    // block (6) are both readable, so every comparison passes; only the floor differs.
+    let error = switch_to_direct_reader_with_floor(&db, &node, 3)
+        .await
+        .expect_err("resumed normal Ingest plans from the declared start block 0");
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("cannot serve the Ingest work that resumes after this change")
+            && message.contains("keeps history from block 3 only")
+            && message.contains("0..=head"),
+        "{message}"
+    );
+    assert_eq!(before, snapshot(db.pool()).await?);
+
+    // A node that still holds the declared range is admitted.
+    switch_to_direct_reader_with_floor(&db, &node, 0).await?;
+    assert_eq!(
+        snapshot(db.pool()).await?,
+        with_stored_kind(before, "reth_db")
+    );
+    db.cleanup().await
+}
+
+#[tokio::test]
+async fn direct_reader_floor_is_judged_on_the_remaining_redo_suffix() -> Result<()> {
+    let db = ScratchDatabase::create("source_transport_floor_redo").await?;
+    seed_watch_set(db.pool()).await?;
+    seed_ingest(db.pool(), "drpc", Redo::ResumedAt(3)).await?;
+    let node = NodeDouble::through(6)
+        .with_watched_log(4)
+        .with_watched_log(6);
+    let before = snapshot(db.pool()).await?;
+
+    // The redo of 2..=5 resumes at block 4; a floor of 5 leaves block 4 unreadable.
+    let error = switch_to_direct_reader_with_floor(&db, &node, 5)
+        .await
+        .expect_err("the redo still has to read block 4");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("keeps history from block 5 only") && message.contains("4..=5"),
+        "{message}"
+    );
+    assert_eq!(before, snapshot(db.pool()).await?);
+
+    // Blocks 2 and 3 are already re-read, so a floor of 4 admits what remains.
+    switch_to_direct_reader_with_floor(&db, &node, 4).await?;
+    assert_eq!(
+        snapshot(db.pool()).await?,
+        with_stored_kind(before, "reth_db")
+    );
+    db.cleanup().await
+}
+
+#[tokio::test]
+async fn direct_reader_floor_is_judged_on_the_whole_range_of_an_unstarted_redo() -> Result<()> {
+    let db = ScratchDatabase::create("source_transport_floor_redo_start").await?;
+    seed_watch_set(db.pool()).await?;
+    seed_ingest(db.pool(), "drpc", Redo::NotStarted).await?;
+    let node = NodeDouble::through(6).with_watched_log(2);
+    let before = snapshot(db.pool()).await?;
+
+    let error = switch_to_direct_reader_with_floor(&db, &node, 3)
+        .await
+        .expect_err("the redo of 2..=5 has not read block 2 yet");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("keeps history from block 3 only") && message.contains("2..=5"),
+        "{message}"
+    );
+    assert_eq!(before, snapshot(db.pool()).await?);
+
+    switch_to_direct_reader_with_floor(&db, &node, 2).await?;
+    assert_eq!(
+        snapshot(db.pool()).await?,
+        with_stored_kind(before, "reth_db")
+    );
+    db.cleanup().await
+}
+
+#[tokio::test]
+async fn direct_reader_floor_is_judged_on_the_live_suffix_after_ingest_completed() -> Result<()> {
+    let db = ScratchDatabase::create("source_transport_floor_live").await?;
+    seed_watch_set(db.pool()).await?;
+    seed_ingest(db.pool(), "drpc", Redo::None).await?;
+    // Ingest is complete: it handed block 5 to live follow, which reads from block 6.
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET live_handoff_block_number = 5, live_handoff_block_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(5))
+    .execute(db.pool())
+    .await?;
+    let node = NodeDouble::through(6).with_watched_log(6);
+    let before = snapshot(db.pool()).await?;
+
+    let error = switch_to_direct_reader_with_floor(&db, &node, 7)
+        .await
+        .expect_err("live follow reads block 6 next");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("keeps history from block 7 only") && message.contains("6..=head"),
+        "{message}"
+    );
+    assert_eq!(before, snapshot(db.pool()).await?);
+
+    switch_to_direct_reader_with_floor(&db, &node, 6).await?;
+    assert_eq!(
+        snapshot(db.pool()).await?,
+        with_stored_kind(before, "reth_db")
+    );
+    db.cleanup().await
+}
+
 /// Runs the production switch with each descriptor read through an HTTP node double. The
 /// direct database reader needs a real Reth datadir, so `direct` stands in for it; the locks,
 /// cursor checks, comparisons and update are the ones `transition` runs.
@@ -260,19 +396,49 @@ async fn switch(
     to_kind: &str,
     to_node: &NodeDouble,
 ) -> Result<Value> {
+    switch_with_readers(db, from_kind, from_node, to_kind, to_node, |source| {
+        Ok(VerificationProvider::new(
+            SEPOLIA,
+            "drpc",
+            source.endpoint(),
+        )?)
+    })
+    .await
+}
+
+/// [`switch`] from `drpc` to `reth_db` where the double standing in for the direct reader
+/// reports a retention floor, as a pruned datadir would.
+async fn switch_to_direct_reader_with_floor(
+    db: &ScratchDatabase,
+    node: &NodeDouble,
+    floor: i64,
+) -> Result<Value> {
+    switch_with_readers(db, "drpc", node, "reth_db", node, |source| {
+        let provider = VerificationProvider::new(SEPOLIA, "drpc", source.endpoint())?;
+        Ok(if source.source_kind == "reth_db" {
+            provider.with_declared_retention_floor(floor)
+        } else {
+            provider
+        })
+    })
+    .await
+}
+
+async fn switch_with_readers(
+    db: &ScratchDatabase,
+    from_kind: &str,
+    from_node: &NodeDouble,
+    to_kind: &str,
+    to_node: &NodeDouble,
+    open_reader: impl Fn(&SourceConfig) -> Result<VerificationProvider>,
+) -> Result<Value> {
     let (from_rpc, from_server) = from_node.spawn().await?;
     let (to_rpc, to_server) = to_node.spawn().await?;
     let result = transition_with_readers(
         &db.runner(),
         &source(from_kind, &from_rpc)?,
         &source(to_kind, &to_rpc)?,
-        |source| {
-            Ok(VerificationProvider::new(
-                SEPOLIA,
-                "drpc",
-                source.endpoint(),
-            )?)
-        },
+        open_reader,
     )
     .await;
     from_server.abort();
