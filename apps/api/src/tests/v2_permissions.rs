@@ -126,6 +126,78 @@ async fn v2_get_permissions_empties_a_superseded_name_and_registration_pair() ->
     Ok(())
 }
 
+// A name paired with another current name's registration is a superseded pair too. Its empty
+// page is classified like a standalone read of that registration: for a wrapped `.eth` lease, from
+// the NameWrapper resource the lease resolves to, not from the lease's own summary. The NameWrapper
+// resource itself is not a registration, so pairing the name with it keeps the raw resource
+// classification, and reading it alone still answers the empty not-a-registration page.
+#[tokio::test]
+async fn v2_get_permissions_classifies_a_paired_wrapped_lease_like_its_standalone_read()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    // alpha.eth serves lease L; its permission rows and wrapper summary live on NameWrapper
+    // resource W. beta.eth is a second supported current name serving its own registration.
+    let wrapper_resource_id = Uuid::from_u128(0xa100);
+    let lease_resource_id = Uuid::from_u128(0xe400);
+    seed_alpha_registrar_lease(&database, lease_resource_id).await?;
+    upsert_phase_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(wrapper_resource_id, Some("wrapper")),
+    )
+    .await?;
+    upsert_phase_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(lease_resource_id, Some("registrar")),
+    )
+    .await?;
+
+    let standalone = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={lease_resource_id}"),
+    )
+    .await?;
+    assert!(!standalone["data"].as_array().expect("lease rows").is_empty());
+    assert_unlisted_permission_surfaces(&standalone, V2_WRAPPER_UNLISTED_SURFACES);
+
+    let paired = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?name=beta.eth&registration_id={lease_resource_id}"),
+    )
+    .await?;
+    assert_eq!(paired["data"], json!([]));
+    assert!(paired.get("restrictions").is_none(), "{paired}");
+    assert_eq!(
+        paired["meta"], standalone["meta"],
+        "the paired read must classify support like the standalone read of the lease"
+    );
+
+    // Control: the NameWrapper resource is not a registration. Paired with the name it keeps its
+    // raw resource classification; alone it selects nothing and claims no completeness.
+    let paired_wrapper = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?name=beta.eth&registration_id={wrapper_resource_id}"),
+    )
+    .await?;
+    assert_eq!(paired_wrapper["data"], json!([]));
+    assert!(paired_wrapper.get("restrictions").is_none(), "{paired_wrapper}");
+    assert_unlisted_permission_surfaces(&paired_wrapper, V2_WRAPPER_UNLISTED_SURFACES);
+    let alone_wrapper = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={wrapper_resource_id}"),
+    )
+    .await?;
+    assert_eq!(alone_wrapper["data"], json!([]));
+    assert!(alone_wrapper.get("restrictions").is_none(), "{alone_wrapper}");
+    assert!(
+        alone_wrapper["meta"].get("completeness").is_none(),
+        "{}",
+        alone_wrapper["meta"]
+    );
+
+    database.cleanup().await
+}
+
 // A `.eth` lease that lapsed under a registry-only binding (a registrar token transferred
 // without `reclaim`) is released like any other lapse: a name-filtered request selects nothing,
 // as for every released name, while the resource audit keeps its rows.
