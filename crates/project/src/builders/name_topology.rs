@@ -27,6 +27,35 @@ pub(in crate::builders) async fn project(
     project_ownerless_ens_topology(transaction).await?;
     direct::build(transaction).await?;
     project_basenames_transport(transaction, chain_id, target).await?;
+    key_by_name(transaction).await?;
+    Ok(())
+}
+
+/// The serializer reads the staged names that have a topology a page at a time in key order and
+/// writes each page back by key, and the builders after it join the stage by name. The stage is
+/// created like the live table but without its key, and temporary tables are never analyzed
+/// automatically, so once its last topology writer is done it gets a name index and statistics.
+/// The statistics cover how many names have a topology: without them the planner takes that for
+/// one name in two hundred, expects a page to hold nearly every match, and reads the whole stage
+/// for each page instead of the page's stretch of the index. The index is not the live table's
+/// primary key: publication enforces that for the rows it publishes, and the stage may hold rows
+/// an incremental build never publishes.
+async fn key_by_name(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+    for statement in [
+        "CREATE INDEX ON project_stage_name_current (logical_name_id)",
+        // Unnamed, so the statistics object lives in the stage's own temporary namespace; a name
+        // would put it in the current schema and outlive the stage.
+        "CREATE STATISTICS ON (jsonb_typeof(declared_summary -> 'topology'))
+         FROM project_stage_name_current",
+        "ANALYZE project_stage_name_current",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to key the staged names by name", error)
+            })?;
+    }
     Ok(())
 }
 

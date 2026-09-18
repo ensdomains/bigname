@@ -97,6 +97,8 @@ fn serialize_page(rows: Vec<ProjectedTopologyRow>) -> Result<Vec<(String, Value)
 }
 
 /// The statement that writes one serialized page back, prefixed by `prefix` (empty to run it).
+/// The page was read in key order, so its first and last keys bound the names it touches, and
+/// the name index serves the write instead of a read of the whole stage.
 pub(in crate::builders) fn update_page<'a>(
     prefix: &str,
     page: &'a [(String, Value)],
@@ -112,5 +114,12 @@ pub(in crate::builders) fn update_page<'a>(
         ") AS serialized(logical_name_id, topology) \
          WHERE name.logical_name_id = serialized.logical_name_id",
     );
+    if let (Some((first, _)), Some((last, _))) = (page.first(), page.last()) {
+        update
+            .push(" AND name.logical_name_id >= ")
+            .push_bind(first)
+            .push(" AND name.logical_name_id <= ")
+            .push_bind(last);
+    }
     update
 }
