@@ -224,7 +224,9 @@ WHERE (
                             -- granted, renewed and released under the same binding. Only the
                             -- lifecycle rows of the one lease the name has pass; no control
                             -- fold reads their kinds, and the registration's authority fold
-                            -- leaves the successor grant out.
+                            -- leaves the successor grant out. A later transfer of that lease's
+                            -- token names a registrant but must not decide control, so it is
+                            -- not admitted here; `registration_events.sql` reads it.
                             -- (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
                             -- (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
                             -- (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L174 @ ens_v1@91c966f)
