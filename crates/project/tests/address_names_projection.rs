@@ -5038,8 +5038,9 @@ async fn release_of_the_retained_lease_reaches_a_handed_off_name() -> Result<()>
         );
         assert_eq!(projection.registered_at, handed_off.registered_at, "{mode}");
         assert_eq!(
-            projection.expiry, None,
-            "{mode}: a released name has no expiry"
+            projection.expiry,
+            Some(1_700_001_100),
+            "{mode}: a released name keeps the lapsed lease's own expiry"
         );
         assert_eq!(
             projection.registrant, None,
@@ -5251,8 +5252,9 @@ async fn successor_lease_by_register_only_is_served_under_the_registry_only_bind
             "{mode}"
         );
         assert_eq!(
-            projection.expiry, None,
-            "{mode}: a released name has no expiry"
+            projection.expiry,
+            Some(1_700_030_000),
+            "{mode}: a released name keeps the lapsed lease's own expiry"
         );
         assert_eq!(
             projection.registrant, None,
