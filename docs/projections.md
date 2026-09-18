@@ -817,7 +817,7 @@ or its registry root carries, because only a held admin role can grant or
 revoke that role and the registration cannot re-grant an admin role; it is
 `NULL` for every other resource. The registry root is read from the resource
 identity table rather than the build scope, the admin rows are the staged rows
-for in-scope resources plus the live rows for every other resource, and a
+for in-scope resources plus the live rows of their registry roots, and a
 changed root permission scopes every registration of that registry, so
 incremental, redo, and full builds converge on `locked_roles`.
 (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L418-L424 @ ens_v2@a971bd64)

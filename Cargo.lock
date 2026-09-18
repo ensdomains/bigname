@@ -1853,6 +1853,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]

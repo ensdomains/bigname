@@ -1,9 +1,10 @@
 -- Events that belong to each name's selected authority. The join is a plain equality on the
 -- name: `.eth` BaseRegistrar lifecycle rows written before the label was known are given their
 -- name while staging (`bind_resource_events`), so this statement never has to search the rows
--- that carry no name.
+-- that carry no name. `project_name_authority` has one row per name, so an event joins at most
+-- one of them and no event can come out twice.
 CREATE TEMP TABLE project_authority_events ON COMMIT DROP AS
-SELECT DISTINCT ON (event.normalized_event_id) event.*
+SELECT event.*
 FROM project_events event
 JOIN project_name_authority authority
   ON authority.logical_name_id = event.logical_name_id
@@ -340,4 +341,3 @@ WHERE (
           )
       )
   )
-ORDER BY event.normalized_event_id

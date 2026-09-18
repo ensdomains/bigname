@@ -225,6 +225,10 @@ async fn create_events(
         "CREATE INDEX ON project_events (resource_id, normalized_event_id)",
         "CREATE INDEX ON project_events (event_kind, normalized_event_id)",
         "CREATE INDEX ON project_events (event_kind, chain_id, normalized_event_id)",
+        // Resolver pointers and records are looked up by node, once per reverse claim in primary
+        // names. The index covers every row: the planner reads expression statistics only from
+        // a complete index, and with a partial one it guessed hundreds of rows per node.
+        "CREATE INDEX ON project_events (lower(after_state ->> 'node'))",
     ] {
         sqlx::query(statement)
             .execute(&mut **transaction)
@@ -577,14 +581,20 @@ async fn create_identity_views(
     .await
     .map_err(|error| ProjectError::database("failed to stage binding candidates", error))?;
 
-    sqlx::query(
-        "CREATE INDEX ON project_binding_candidates (
-             logical_name_id, authority_arm, block_number
-         )",
-    )
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to index binding candidates", error))?;
-
+    // The builders look these tables up once per name or per resource, so each gets its key and
+    // statistics. Temporary tables are never analyzed automatically.
+    for statement in [
+        "ALTER TABLE project_surfaces ADD PRIMARY KEY (logical_name_id)",
+        "ALTER TABLE project_resources ADD PRIMARY KEY (resource_id)",
+        "CREATE INDEX ON project_binding_candidates (logical_name_id, authority_arm, block_number)",
+        "ANALYZE project_surfaces",
+        "ANALYZE project_resources",
+        "ANALYZE project_binding_candidates",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| ProjectError::database("failed to index identity stages", error))?;
+    }
     Ok(())
 }
