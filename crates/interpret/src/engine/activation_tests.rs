@@ -75,6 +75,9 @@ mod unlocked_wrapped;
 #[path = "tests/registry_only_handoff.rs"]
 mod registry_only_handoff;
 
+#[path = "tests/mainnet_wrapped_registration.rs"]
+mod mainnet_wrapped_registration;
+
 #[path = "activation_tests/equivalence.rs"]
 mod equivalence;
 
