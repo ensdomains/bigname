@@ -242,6 +242,53 @@ async fn v2_get_permissions_cursor_binds_the_requested_registration_id() -> Resu
     database.cleanup().await
 }
 
+// The NameWrapper resource that wrapped a lease stays outside the public handle space after the
+// name leaves it. Once the name's current row no longer names the wrapper (unwrapped, released,
+// migrated, registered again, or, as here, unsupported), only the recorded wrap link can reject
+// the resource, as history does.
+#[tokio::test]
+async fn v2_get_permissions_rejects_a_historical_name_wrapper_resource() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (wrapper_resource_id, lease_resource_id) =
+        seed_perms_wrapped_lease(&database, WrappedLeaseShape::LinkRecorded).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET support_status = 'unsupported',
+             unsupported_reason = 'conflicting_current_ens_authority'
+         WHERE raw_name = 'perms.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    for uri in [
+        format!("/v1/permissions?registration_id={wrapper_resource_id}"),
+        format!(
+            "/v1/permissions?address={V2_PERMISSIONS_SUBJECT}&registration_id={wrapper_resource_id}"
+        ),
+    ] {
+        let response = v2_permissions_response_for_database(&database, &uri).await?;
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["data"], json!([]), "{uri}: {payload}");
+        assert!(payload.get("restrictions").is_none(), "{uri}");
+        assert!(
+            payload["meta"].get("completeness").is_none(),
+            "{uri}: {}",
+            payload["meta"]
+        );
+    }
+
+    // Control: the lease itself stays a registration handle.
+    let response = v2_permissions_response_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={lease_resource_id}"),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    database.cleanup().await
+}
+
 // A `.eth` lease that lapsed under a registry-only binding (a registrar token transferred
 // without `reclaim`) is released like any other lapse: a name-filtered request selects nothing,
 // as for every released name, while the resource audit keeps its rows.
@@ -954,12 +1001,14 @@ async fn controller_granted_wrapped_name_permissions_carry_the_registrar_lease_h
     .await
 }
 
-async fn assert_wrapped_name_permissions_carry_the_registrar_lease_handle(
+/// Give perms.eth the shape of a wrapped `.eth` name: the fixture's bound resource plays the
+/// NameWrapper resource and a new BaseRegistrar lease, which Project serves as the registration,
+/// is linked to it by the shape's rule. Returns `(wrapper_resource_id, lease_resource_id)`.
+async fn seed_perms_wrapped_lease(
+    database: &TestDatabase,
     shape: WrappedLeaseShape,
-) -> Result<()> {
-    const UNGRANTED_ADDRESS: &str = "0x00000000000000000000000000000000000000ee";
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_permissions_fixture(&database).await?;
+) -> Result<(Uuid, Uuid)> {
+    seed_v2_permissions_fixture(database).await?;
     // The fixture's bound resource plays the NameWrapper resource of a wrapped `.eth` name;
     // Project serves the BaseRegistrar lease it wrapped as the registration resource.
     let wrapper_resource_id = v2_permissions_current_resource_id();
@@ -1021,8 +1070,18 @@ async fn assert_wrapped_name_permissions_carry_the_registrar_lease_handle(
         "node": namehash,
         "wrapped_registrar_resource_id": link,
     });
-    seed_v2_history_blocks(&database, 120..=121).await?;
+    seed_v2_history_blocks(database, 120..=121).await?;
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant, binding]).await?;
+    Ok((wrapper_resource_id, lease_resource_id))
+}
+
+async fn assert_wrapped_name_permissions_carry_the_registrar_lease_handle(
+    shape: WrappedLeaseShape,
+) -> Result<()> {
+    const UNGRANTED_ADDRESS: &str = "0x00000000000000000000000000000000000000ee";
+    let database = TestDatabase::new_migrated().await?;
+    let (wrapper_resource_id, lease_resource_id) =
+        seed_perms_wrapped_lease(&database, shape).await?;
 
     let name = v2_name_record_payload_for_database(&database, "/v1/names/Perms.eth").await?;
     assert_eq!(
