@@ -1148,6 +1148,12 @@ event. The resolver emits it in its constructor and proxy initializer before
 initializer calls can write records.
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L108 @ ens_v2_sepolia_20260916@366de741)
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2_sepolia_20260916@366de741)
+Because the constructor emits it too, the implementation contract itself is
+admitted by its own construction log: the Sepolia `PermissionedResolverImpl`
+address is captured like any proxy and, since it never announces an
+implementation of its own, is served as an unsupported resolver with
+`resolver_implementation_unknown`.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2 @ ens_v2_sepolia_20260916@366de741)
 Ingest fetches the announcing address's role-independent resolver events from
 the creation block through the end of that same window before advancing its
 cursor. Later windows load retained canonical creation logs. Verify uses the
@@ -1159,13 +1165,30 @@ that precede the creation event; no earlier block is admitted.
 This is event-capture authority, not implementation or name authority. Project
 still requires the declared implementation evidence for supported resolver
 reads, and exact declared public resolvers retain their role-scoped node ABI.
+ENSv2 resolver events that declare `emitter_roles` are watched only at the
+declared role's address: on Sepolia, `AddrChanged`, `AddressChanged`,
+`TextChanged`, `ContenthashChanged`, and `VersionChanged` are read from the
+declared `public_resolver_v2` contract only, no longer from every declared
+resolver contract. Mainnet declares no ENSv2 family, so its watch plan is
+unchanged.
 `ResolverUpdated` supplies name-binding history only. Its topology edges do
-not widen the watch plan and must not cause historical fetching. The existing
+not widen the watch plan and must not cause historical fetching. Project's
+[declaration precedence](architecture.md#discovery-graph) is a different
+question and still reads these pointer edges: it decides how a name that uses
+the address is served, not whether the address's events are read, so a
+same-namespace exact declaration is paired with an ENSv2 registry or root
+pointer edge exactly as before. A declared ENSv1 resolver that ENSv2 names
+point at therefore keeps its supported `ens_v1_resolver_l1` classification and
+its node-keyed record attribution. The existing
 implementation/factory announcement paths remain independently supported.
 
 Adding this previously absent creation signature to an initialized database
 requires the ordinary manifest-driven one-time Ingest redo, followed by a full
 Interpret replay under the changed interpreter hash. Raw facts are preserved.
+On that replay, an ENSv2 resolver that was previously admitted only through a
+registry pointer edge stops being admitted until its own `ResolverCreated()` or
+`Upgraded` log is replayed, and records that were read only through the pointer
+are not served until then.
 Creation-derived capture is independently covered by Ingest's same-window
 fetch, so replaying its discovery edges does not schedule another fetch pass.
 
