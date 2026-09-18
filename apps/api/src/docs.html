@@ -133,6 +133,7 @@
   table.t td.n { color: var(--ink); } table.t td.code { font-family: var(--mono); font-size: 13px; white-space: nowrap; }
   details.note { margin: 4px 0; } details.note summary { cursor: pointer; list-style: none; font-weight: 500; display: flex; gap: 10px; align-items: baseline; padding: 4px 0; }
   details.note summary::-webkit-details-marker { display: none; }
+  details.note p.cite { font-family: var(--mono); font-size: 12px; color: var(--ink-faint); word-break: break-all; }
   details.note summary::before { content: "+"; font-family: var(--mono); color: var(--ink-faint); width: 14px; flex: none; } details.note[open] summary::before { content: "\2212"; }
   details.note .body { padding: 6px 0 10px 24px; }
   .also { margin-top: 44px; font-family: var(--mono); font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
@@ -773,19 +774,33 @@ const ROUTES = [
 },
 {
   id: 'resolver', method: 'GET', path: '/v1/resolvers/{chain_id}/{address}', title: 'Resolver overview',
-  summary: 'Describes a resolver contract: how many nodes, aliases, and role holders it has, small samples of each on request, and a paged list of the names currently bound to it.',
-  keywords: ['bound_names', 'counts', 'nodes', 'aliases', 'roles', 'events', 'by_type', 'role_holders', 'registration_count', 'permission_count'],
+  summary: 'Describes a resolver contract: how many nodes, aliases, record links, and role holders it has, small samples of each on request, and a paged list of the names currently bound to it.',
+  keywords: ['bound_names', 'counts', 'nodes', 'aliases', 'links', 'roles', 'events', 'by_type', 'role_holders', 'linked_records', 'record_id', 'registration_count', 'permission_count'],
   sample: { chain_id: '1', address: '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63' },
-  params: [{ name: 'chain_id', in: 'path', type: 'integer', required: true, desc: 'The chain the resolver is deployed on.' }, { name: 'address', in: 'path', required: true, desc: 'The resolver contract address.' }, { name: 'include', in: 'query', type: 'set', desc: 'Any of <code>nodes</code>, <code>aliases</code>, and <code>roles</code>, each a sample of at most 100, and <code>events</code>, which adds <code>{count, by_type}</code>.' }, P.at, P.finality, { ...P.cursor, desc: 'Pages the nested <code>bound_names</code> list.' }, { ...P.pageSize, desc: 'Sizes the nested <code>bound_names</code> list.' }],
+  params: [{ name: 'chain_id', in: 'path', type: 'integer', required: true, desc: 'The chain the resolver is deployed on.' }, { name: 'address', in: 'path', required: true, desc: 'The resolver contract address.' }, { name: 'include', in: 'query', type: 'set', desc: 'Any of <code>nodes</code>, <code>aliases</code>, <code>links</code>, and <code>roles</code>, each a sample of at most 100, and <code>events</code>, which adds <code>{count, by_type}</code>.' }, P.at, P.finality, { ...P.cursor, desc: 'Pages the nested <code>bound_names</code> list.' }, { ...P.pageSize, desc: 'Sizes the nested <code>bound_names</code> list.' }],
   response: {
-    fields: [['chain_id, address', 'The resolver\'s identity.'], ['counts', '<code>{nodes, aliases, role_holders}</code>. These are totals, not sample sizes.'], ['bound_names', '<code>{data, page}</code>, with record-shaped rows that carry the wrapper pair where it applies. There is no top-level <code>page</code>.'], ['nodes, aliases, role_holders, event_summary', 'Present with the matching <code>include</code>. A role sample is <code>{address, registration_count, permission_count, powers}</code>. An alias sample is either a binding alias <code>{namespace, name, display_name, namehash}</code> or an alias event <code>{namespace, from_name, to_name, state, resolver, to_registration_id?}</code>.']],
+    fields: [['chain_id, address', 'The resolver\'s identity.'], ['counts', '<code>{nodes, aliases, role_holders}</code>, plus <code>{links, linked_records}</code> on an ENSv2 record-ID resolver. These are totals, not sample sizes.'], ['bound_names', '<code>{data, page}</code>, with record-shaped rows that carry the wrapper pair where it applies. There is no top-level <code>page</code>.'], ['nodes, aliases, links, roles, events', 'Present with the matching <code>include</code>. A role sample is <code>{address, registration_count, permission_count, powers}</code>. An alias sample is either a binding alias <code>{namespace, name, display_name, namehash}</code> or an alias event <code>{namespace, from_name, to_name, state, resolver, to_registration_id?}</code>. A link sample is <code>{record_id, namehash, default, namespace?, name?, display_name?, link_event}</code>: one node bound to a record, <code>default</code> marking the empty-name node whose record answers every unlinked name; on a node-keyed resolver the section is unsupported with <code>record_links_not_applicable</code>.']],
     sample: { data: { chain_id: 1, address: '0x231b0ee14048e9dccd1d247744d114a4eb5e8e63', counts: { nodes: 182034, aliases: 12, role_holders: 3 }, bound_names: { data: [ { name: 'taytems.eth', display_name: 'taytems.eth', namespace: 'ens', namehash: '0x…', owner: '0x8e8d…3216', registration_status: 'active' } ], page: { cursor: null, next_cursor: 'opaque-token', page_size: 50, total_count: null, has_more: true } } }, meta: AS_OF },
   },
   outcomes: [['200', 'The overview, possibly with an empty nested list.'], ['400 invalid_input', 'The chain ID or address is malformed, or a parameter is unknown.'], ['404 not_found', 'There is no overview for this resolver at latest.'], ['409 stale', 'The generation changed, rows are ahead of the selected position, or a historical selector was given with no current projection.']],
   notes: [
     { h: 'Reading at an older position', html: `<p><code>bound_names</code> always reads the current projections, even with <code>at</code>, so a name that was bound at that time but has since been unbound is absent. The <a href="#resolver-aliases">aliases</a> and <a href="#resolver-roles">roles</a> collections page the supported indexed tables beyond these samples. They do not reconstruct historical bindings or permissions. A read at latest also checks for an Interpret redo; a historical read keeps only the generation check.</p>` },
   ],
-  related: ['resolver-aliases', 'resolver-roles', 'records', 'name', 'permissions'],
+  related: ['resolver-aliases', 'resolver-links', 'resolver-roles', 'records', 'name', 'permissions'],
+},
+{
+  id: 'resolver-links', method: 'GET', path: '/v1/resolvers/{chain_id}/{address}/links', title: 'Resolver record links',
+  summary: 'Pages the record links of an ENSv2 record-ID resolver: every node currently bound to a non-zero record, the default record\'s empty-name node included.',
+  keywords: ['links', 'record_id', 'namehash', 'default', 'link_event', 'linked_records', 'total_count'],
+  sample: { chain_id: '11155111', address: '' },
+  params: [{ name: 'chain_id', in: 'path', type: 'integer', required: true, desc: 'The numeric EVM chain ID.' }, P.address, P.at, P.finality, P.cursor, P.pageSize],
+  response: {
+    fields: [['data', 'Rows <code>{record_id, namehash, default, namespace?, name?, display_name?, link_event}</code>, in numeric <code>record_id</code> then <code>namehash</code> order. Rows sharing a <code>record_id</code> share one record\'s values. <code>name</code> is present only when an active name surface is known for the node. <code>link_event</code> is <code>{block_number, timestamp, transaction_hash, log_index}</code> of the current <code>Linked</code> observation.'], ['page.total_count', 'The exact number of linked nodes, including zero. A node-keyed resolver returns an empty page with a null total, <code>meta.completeness</code> unsupported, and <code>record_links_not_applicable</code>.']],
+    sample: { data: [{ record_id: '7', namehash: '0x…', default: false, namespace: 'ens', name: 'shared.eth', display_name: 'shared.eth', link_event: { block_number: 11710004, timestamp: '2026-09-16T10:04:12Z', transaction_hash: '0x…', log_index: 1 } }], page: { cursor: null, next_cursor: null, page_size: 50, total_count: 1, has_more: false }, meta: AS_OF },
+  },
+  outcomes: [['200', 'The page, including an explicitly unsupported empty page on a node-keyed resolver.'], ['400 invalid_input', 'The chain, address, parameter, or cursor is invalid, or a cursor belongs to another route or snapshot.'], ['404 not_found', 'The resolver is unknown.'], ['409 stale', 'The selected projection is unavailable or changed; restart without the cursor.']],
+  notes: [{ h: 'What a link is', html: '<p>A record-ID resolver stores values per numeric record and binds names to records with <code>Linked(recordId, node, name)</code>. The latest link per node is current; record ID <code>0</code> unlinks the node; a record linked at the empty-name node is the default, answering every node without a link of its own. Rows come from activated canonical link events at the selected block. Cursors bind the chain, resolver, collection, selected snapshot, and completed projection generation.</p><p class="cite">(upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IRecordResolver.sol:L32-L38 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L379-L386 @ ens_v2@a971bd64)</p>' }, { h: 'Choosing an address to try', html: '<p>The path address must be a record-ID resolver bigname has observed on that chain; an address it has never seen answers <code>404 not_found</code>, and the zero address is never a resolver row. Take one from the <code>resolver</code> field of <a href="#name">name detail</a> for an ENSv2 name, or from a <code>resolver</code> event on <a href="#events">the events feed</a>.</p>' }],
+  related: ['resolver', 'resolver-aliases', 'resolver-roles', 'records'],
 },
 {
   id: 'resolver-aliases', method: 'GET', path: '/v1/resolvers/{chain_id}/{address}/aliases', title: 'Resolver aliases',
@@ -819,7 +834,7 @@ const ROUTES = [
   id: 'registry', method: 'GET', path: '/v1/registries/{chain_id}/{address}', title: 'Registry overview',
   summary: 'Describes one indexed ENSv2 registry: its served name, parent registry, first observation, current label count, and names that point at it. ENSv1 and Basenames registries are outside this route.',
   keywords: ['registry', 'parent_registry', 'created_basis', 'counts', 'referenced_by'],
-  sample: { chain_id: '11155111', address: '0x0000000000000000000000000000000000000001' },
+  sample: { chain_id: '11155111', address: '' },
   params: [{ name: 'chain_id', in: 'path', type: 'integer', required: true, desc: 'The numeric EVM chain ID.' }, P.address, { name: 'include', in: 'query', type: 'enum', values: ['counts'], desc: 'Adds exact declared role-assignment and product-visible event counts.' }, P.at, P.finality, { ...P.cursor, desc: 'Pages the nested <code>referenced_by</code> collection.' }, { ...P.pageSize, desc: 'Sizes the nested <code>referenced_by</code> collection.' }],
   response: {
     fields: [['chain_id, address', 'The registry identity, with a lowercase address.'], ['name, parent_registry', '<code>name</code> is <code>{name, display_name, namespace, namehash}</code> for the earliest name currently pointing at the registry; <code>parent_registry</code> is <code>{chain_id, address}</code>. Both are null when no name points at it.'], ['created_block_number, created_at, created_transaction_hash, created_basis', 'First-observation evidence. <code>created_basis</code> is <code>registry_created</code>, <code>subregistry_pointer</code>, or <code>declared</code>. A declared registry with no creation event uses its configured start block and a null transaction hash.'], ['counts.labels', 'Exact current label count; zero when no name points at the registry, and null for a historical selection different from the current publication.'], ['counts.roles, counts.events', 'With <code>include=counts</code>: nonzero declared account/resource assignments and product-visible emitted events through the selected block. Several role bits count once per account/resource; this is not an effective-permission count.'], ['referenced_by', 'Nested <code>{data, page}</code> of name identity rows, sorted by display name. Its <code>page.total_count</code> is null. There is no top-level page.']],
@@ -833,7 +848,7 @@ const ROUTES = [
   id: 'registry-labels', method: 'GET', path: '/v1/registries/{chain_id}/{address}/labels', title: 'Registry labels',
   summary: 'Lists the current labels of one ENSv2 registry, sorted by display name. Only direct children whose selected ENSv2 registration was emitted by this registry are included.',
   keywords: ['labels', 'subregistry', 'subname_count', 'role_holder_count', 'counts'],
-  sample: { chain_id: '11155111', address: '0x0000000000000000000000000000000000000001' },
+  sample: { chain_id: '11155111', address: '' },
   params: [{ name: 'chain_id', in: 'path', type: 'integer', required: true, desc: 'The numeric EVM chain ID.' }, P.address, { name: 'include', in: 'query', type: 'enum', values: ['counts'], desc: 'Adds each label\'s <code>subname_count</code> and <code>role_holder_count</code>.' }, P.cursor, P.pageSize, P.finalityLatest],
   response: {
     fields: [['name, display_name, namespace, namehash, labelhash', 'The label\'s name identity, using the <a href="#subnames">subnames</a> row shape.'], ['owner, registrant, registration_status, registered_at, created_at, expires_at, subregistry', 'Current registration fields and optional <code>subregistry: {chain_id, address}</code>, when known.'], ['subname_count, role_holder_count', 'With <code>include=counts</code>: direct child count and distinct accounts with nonzero declared assignments on the label\'s current registration resource. Root roles, resolver roles, revoked grants, and older resource versions are excluded; inherited effective permissions are not counted.'], ['page.total_count', 'Exact current label count, matching <code>counts.labels</code> on the registry overview.']],
@@ -986,7 +1001,7 @@ const ROUTES = [
     ['names', ['names', 'name', 'records', 'subnames', 'history', 'permissions']],
     ['addresses', ['address-names', 'primary-name', 'address-history']],
     ['index', ['lookup', 'search', 'events', 'namespace']],
-    ['resolvers', ['resolver', 'resolver-aliases', 'resolver-roles']],
+    ['resolvers', ['resolver', 'resolver-aliases', 'resolver-links', 'resolver-roles']],
     ['registries', ['registry', 'registry-labels']],
     ['health', ['status', 'healthz', 'diag-coverage', 'diag-binding', 'diag-authority', 'diag-records', 'diag-manifests', 'diag-events']],
   ];

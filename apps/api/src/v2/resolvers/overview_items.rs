@@ -31,6 +31,12 @@ pub(super) fn projected_section_items(summary: &Value, field_key: &str) -> V2Res
                 .map(compact_resolver_role_item)
                 .collect::<V2Result<Vec<_>>>()?,
         ),
+        "links" => Value::Array(
+            items
+                .iter()
+                .map(super::link_items::compact_resolver_link_item)
+                .collect::<V2Result<Vec<_>>>()?,
+        ),
         _ => Value::Array(items.clone()),
     };
     Ok(Some(items))

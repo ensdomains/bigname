@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 #[path = "resolvers/collections.rs"]
 mod collections;
-pub(crate) use collections::{get_resolver_aliases, get_resolver_roles};
+pub(crate) use collections::{get_resolver_aliases, get_resolver_links, get_resolver_roles};
 
 use axum::{
     Json,
@@ -25,6 +25,13 @@ pub(crate) use bound_names_cursor::{
     BoundNamesCursorBinding, bound_names_cursor_payload, bound_names_storage_cursor,
 };
 
+#[path = "resolvers/include.rs"]
+mod include;
+pub(crate) use include::{ResolverOverviewInclude, resolver_overview_include};
+
+#[path = "resolvers/link_items.rs"]
+mod link_items;
+
 #[path = "resolvers/overview_items.rs"]
 mod overview_items;
 use overview_items::{projected_section_items, summary_is_supported};
@@ -46,12 +53,15 @@ use super::{
 };
 
 const BOUND_NAMES_SORT_TOKEN: &str = "name_asc";
-const RESOLVER_SECTIONS: [(&str, &str, &str); 4] = [
+const RESOLVER_SECTIONS: [(&str, &str, &str); 5] = [
     ("nodes", "nodes", "bindings"),
     ("aliases", "aliases", "aliases"),
+    ("links", "links", "links"),
     ("roles", "role_holders", "role_holders"),
     ("events", "events", "event_summary"),
 ];
+/// `counts.linked_records`: distinct records with at least one linked node.
+const LINKED_RECORDS_COUNT_KEY: &str = "linked_records";
 
 pub(crate) struct ResolverQueryParams;
 
@@ -70,6 +80,8 @@ pub(crate) struct ResolverOverview {
     pub(crate) nodes: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) aliases: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) links: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) roles: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,44 +102,6 @@ pub(crate) struct ResolverMirror {
 pub(crate) struct BoundNames {
     pub(crate) data: Vec<NameRecord>,
     pub(crate) page: Page,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ResolverOverviewInclude {
-    nodes: bool,
-    aliases: bool,
-    roles: bool,
-    events: bool,
-}
-
-impl ResolverOverviewInclude {
-    fn all() -> Self {
-        Self {
-            nodes: true,
-            aliases: true,
-            roles: true,
-            events: true,
-        }
-    }
-
-    fn empty() -> Self {
-        Self {
-            nodes: false,
-            aliases: false,
-            roles: false,
-            events: false,
-        }
-    }
-
-    fn requests(self, section: &str) -> bool {
-        match section {
-            "nodes" => self.nodes,
-            "aliases" => self.aliases,
-            "roles" => self.roles,
-            "events" => self.events,
-            _ => false,
-        }
-    }
 }
 
 pub(crate) async fn get_resolver(
@@ -309,6 +283,7 @@ pub(crate) fn build_resolver_overview(
     let mut counts = BTreeMap::new();
     let mut nodes = None;
     let mut aliases = None;
+    let mut links = None;
     let mut roles = None;
     let mut events = None;
 
@@ -316,6 +291,15 @@ pub(crate) fn build_resolver_overview(
         let section_summary = resolver_overview_summary(&row, summary_key);
         if let Some(count) = section_summary.and_then(projected_section_count) {
             counts.insert(count_key.to_owned(), count);
+            if field_key == "links" {
+                let records = section_summary
+                    .and_then(|summary| summary.get("record_count"))
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| {
+                        V2Error::internal_error("failed to map resolver link record count")
+                    })?;
+                counts.insert(LINKED_RECORDS_COUNT_KEY.to_owned(), records);
+            }
         }
 
         if include.requests(field_key) {
@@ -327,6 +311,7 @@ pub(crate) fn build_resolver_overview(
             match field_key {
                 "nodes" => nodes = Some(items),
                 "aliases" => aliases = Some(items),
+                "links" => links = Some(items),
                 "roles" => roles = Some(items),
                 "events" => events = Some(items),
                 _ => {}
@@ -341,6 +326,7 @@ pub(crate) fn build_resolver_overview(
         counts,
         nodes,
         aliases,
+        links,
         roles,
         events,
         mirror,
@@ -467,32 +453,6 @@ fn bound_name_cursor_from_row(row: &NameCurrentListRow) -> NameCurrentListCursor
         normalized_name: row.row.normalized_name.clone(),
         namehash: row.row.namehash.clone(),
     }
-}
-
-pub(crate) fn resolver_overview_include(include: &[String]) -> V2Result<ResolverOverviewInclude> {
-    let mut parsed = ResolverOverviewInclude::empty();
-    let mut saw_value = false;
-
-    for value in include {
-        saw_value = true;
-        match value.as_str() {
-            "nodes" => parsed.nodes = true,
-            "aliases" => parsed.aliases = true,
-            "roles" => parsed.roles = true,
-            "events" => parsed.events = true,
-            _ => {
-                return Err(V2Error::invalid_input(
-                    "include must contain only nodes, aliases, roles, or events",
-                ));
-            }
-        }
-    }
-
-    Ok(if saw_value {
-        parsed
-    } else {
-        ResolverOverviewInclude::all()
-    })
 }
 
 pub(crate) fn parse_numeric_chain_id(value: &str) -> V2Result<(u64, &'static str)> {

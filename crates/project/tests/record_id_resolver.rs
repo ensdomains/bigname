@@ -186,6 +186,232 @@ async fn record_history_survives_relinks_and_excludes_later_unselected_writes() 
     Ok(())
 }
 
+// The overview's link section follows the latest `Linked` per node: record 0 drops the node,
+// the empty-name node is the default record, and a name is attached only when a surface knows it.
+#[tokio::test]
+async fn resolver_links_summary_follows_latest_link_per_node() -> Result<()> {
+    let (db, pool) = database("record_id_link_summary").await?;
+    seed(&pool).await?;
+    run(&pool, 12, None, RunMode::Normal).await?;
+    let links = links_summary(&pool, RESOLVER).await?;
+    assert_eq!(links["status"], "supported", "{links}");
+    assert_eq!(links["count"], 3);
+    assert_eq!(links["record_count"], 2);
+    let items = links["items"].as_array().unwrap();
+    let mut first_record: Vec<_> = [node(1), node(2)].into();
+    first_record.sort();
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0]["record_id"], "1");
+    assert_eq!(items[0]["namehash"], first_record[0]);
+    assert_eq!(items[1]["record_id"], "1");
+    assert_eq!(items[1]["namehash"], first_record[1]);
+    for item in &items[..2] {
+        let n = if item["namehash"] == node(1) { 1 } else { 2 };
+        assert_eq!(item["name"], format!("record{n}.eth"));
+        assert_eq!(item["logical_name_id"], format!("ens:{}", node(n)));
+        assert_eq!(item["namespace"], "ens");
+        assert_eq!(item["default"], false);
+        assert_eq!(item["chain_position"]["block_number"], 11);
+    }
+    assert_eq!(
+        items[2],
+        json!({
+            "record_id": "2", "namehash": hash(0), "default": true,
+            "normalized_event_id": items[2]["normalized_event_id"],
+            "chain_position": {
+                "chain_id": CHAIN, "block_number": 12, "block_hash": hash(12),
+                "transaction_hash": hash(1200), "log_index": 0,
+                "timestamp": items[2]["chain_position"]["timestamp"],
+            }
+        })
+    );
+    assert!(items[2]["chain_position"]["timestamp"].is_string());
+
+    run(&pool, 18, Some(12), RunMode::Normal).await?;
+    let links = links_summary(&pool, RESOLVER).await?;
+    assert_eq!(links["count"], 2, "{links}");
+    assert_eq!(links["record_count"], 2);
+    let items = links["items"].as_array().unwrap();
+    assert_eq!(items[0]["record_id"], "2");
+    assert_eq!(items[0]["namehash"], node(2));
+    assert_eq!(items[0]["name"], "record2.eth");
+    assert_eq!(items[0]["chain_position"]["block_number"], 14);
+    assert_eq!(items[1]["record_id"], "3");
+    assert_eq!(items[1]["default"], true);
+    assert!(items[1].get("name").is_none());
+    assert_eq!(items[1]["chain_position"]["block_number"], 16);
+    let incremental = links.clone();
+    run(&pool, 18, None, RunMode::Normal).await?;
+    assert_eq!(
+        links_summary(&pool, RESOLVER).await?,
+        incremental,
+        "full rebuild drift"
+    );
+    run(&pool, 18, Some(18), RunMode::Redo).await?;
+    assert_eq!(
+        links_summary(&pool, RESOLVER).await?,
+        incremental,
+        "redo drift"
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+// Redo retracting the link of a node that no name and no resource consumes leaves
+// nothing else to scope the resolver; the section's digest against the canonical
+// link set is what rebuilds it. A second resolver isolates that: the redo window
+// carries record events for the first resolver only.
+#[tokio::test]
+async fn resolver_links_summary_follows_a_retracted_link_through_redo() -> Result<()> {
+    const OTHER: &str = "0x5555555555555555555555555555555555555555";
+    let (db, pool) = database("record_id_link_retraction").await?;
+    seed(&pool).await?;
+    event(
+        &pool,
+        "upgrade-other",
+        10,
+        8,
+        "Upgraded",
+        None,
+        json!({"proxy_address":OTHER,"implementation":IMPLEMENTATION}),
+    )
+    .await?;
+    // Node 7 has no surface, no resource, and nothing reads its record.
+    event(&pool,"link-orphan",17,9,"ResolverRecordLinked",None,json!({"source_event":"Linked","storage_model":"resolver_record_id","resolver":OTHER,"node":node(7),"resolver_record_id":"1","dns_encoded_name":"0x00"})).await?;
+    run(&pool, 18, None, RunMode::Normal).await?;
+    let before = links_summary(&pool, OTHER).await?;
+    assert_eq!(before["count"], 1, "{before}");
+    assert_eq!(before["items"][0]["namehash"], node(7));
+    assert!(before["digest"].is_string());
+    sqlx::query("DELETE FROM normalized_events WHERE event_identity = 'link-orphan'")
+        .execute(&pool)
+        .await?;
+    run(&pool, 18, Some(18), RunMode::Redo).await?;
+    let after = links_summary(&pool, OTHER).await?;
+    assert_eq!(after["count"], 0, "{after}");
+    assert_eq!(after["items"], json!([]));
+    assert_ne!(after["digest"], before["digest"]);
+    let redone = after.clone();
+    run(&pool, 18, None, RunMode::Normal).await?;
+    assert_eq!(
+        links_summary(&pool, OTHER).await?,
+        redone,
+        "redo differs from rebuild"
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+// A node linked before its name was observed gains the name in the resolver's
+// summary on the incremental run that discovers the surface -- on a resolver the
+// run has no other reason to touch -- and a shadow surface never counts as a name.
+#[tokio::test]
+async fn resolver_links_summary_picks_up_a_name_discovered_later() -> Result<()> {
+    const OTHER: &str = "0x5555555555555555555555555555555555555555";
+    let (db, pool) = database("record_id_link_late_name").await?;
+    seed(&pool).await?;
+    let late = bigname_domain::normalization::normalize_name("record9.eth")?;
+    let late_node = node(9);
+    event(
+        &pool,
+        "upgrade-other",
+        10,
+        8,
+        "Upgraded",
+        None,
+        json!({"proxy_address":OTHER,"implementation":IMPLEMENTATION}),
+    )
+    .await?;
+    event(&pool,"link-late",11,5,"ResolverRecordLinked",None,json!({"source_event":"Linked","storage_model":"resolver_record_id","resolver":OTHER,"node":late_node,"resolver_record_id":"1","dns_encoded_name":"0x00"})).await?;
+    // The root surface -- the empty name at the all-zero node -- exists on every ENS
+    // chain; the default record's link must not pick it up as a name.
+    sqlx::query("INSERT INTO name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state) VALUES ($1,'ens','',ARRAY[]::text[],'\\x00'::bytea,$2,ARRAY[]::text[],'fixture','active',$3,$4,10,'canonical')")
+        .bind(format!("ens:{}", hash(0))).bind(hash(0)).bind(CHAIN).bind(hash(10)).execute(&pool).await?;
+    // The node's surface does not exist yet, so the link is served by namehash alone.
+    run(&pool, 12, None, RunMode::Normal).await?;
+    let item = |links: &Value| {
+        links["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["namehash"] == late_node)
+            .cloned()
+            .unwrap()
+    };
+    let links = links_summary(&pool, OTHER).await?;
+    assert!(item(&links).get("name").is_none(), "{links}");
+    let default = links_summary(&pool, RESOLVER).await?;
+    let default = default["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["default"] == true)
+        .unwrap();
+    assert!(default.get("name").is_none(), "{default}");
+    // Block 13 observes the name: a surface plus the event that carries its logical name.
+    sqlx::query("INSERT INTO name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state) VALUES ($1,'ens','record9.eth',ARRAY['record9','eth'],$2,$3,ARRAY['a','b'],'fixture','active',$4,$5,13,'canonical')")
+        .bind(format!("ens:{late_node}")).bind(late.dns_encoded_name.clone()).bind(&late_node).bind(CHAIN).bind(hash(13)).execute(&pool).await?;
+    sqlx::query("INSERT INTO normalized_events (event_identity,namespace,logical_name_id,event_kind,source_family,manifest_version,source_manifest_id,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state,raw_fact_ref) SELECT 'preimage-late','ens',$1,'PreimageObserved','ens_v2_resolver_l1',1,manifest_id,$2,13,$3,$4,0,7,'ens_v2_resolver','canonical','{}'::jsonb,'{}'::jsonb FROM manifest_versions WHERE source_family='ens_v2_resolver_l1' AND chain_id=$2")
+        .bind(format!("ens:{late_node}")).bind(CHAIN).bind(hash(13)).bind(hash(1300)).execute(&pool).await?;
+    run(&pool, 13, Some(12), RunMode::Normal).await?;
+    let links = links_summary(&pool, OTHER).await?;
+    assert_eq!(item(&links)["name"], "record9.eth", "{links}");
+    assert_eq!(item(&links)["logical_name_id"], format!("ens:{late_node}"));
+    // A shadow surface is not a name to show: demote it and rebuild.
+    sqlx::query("UPDATE name_surfaces SET visibility_state = 'shadow', deactivation_reason = 'fixture', deactivated_at = now() WHERE logical_name_id = $1")
+        .bind(format!("ens:{late_node}")).execute(&pool).await?;
+    run(&pool, 13, None, RunMode::Normal).await?;
+    let links = links_summary(&pool, OTHER).await?;
+    assert!(item(&links).get("name").is_none(), "{links}");
+    db.cleanup().await?;
+    Ok(())
+}
+
+// A row built by an earlier deploy, before a section existed, is rebuilt on the
+// next run even when nothing it cites changed and no event in the run's range
+// names the resolver: the row's summary_version is what scopes it.
+#[tokio::test]
+async fn resolver_summary_reshaped_by_a_deploy_is_rebuilt_without_new_evidence() -> Result<()> {
+    const OTHER: &str = "0x5555555555555555555555555555555555555555";
+    let (db, pool) = database("record_id_summary_version").await?;
+    seed(&pool).await?;
+    event(
+        &pool,
+        "upgrade-other",
+        10,
+        8,
+        "Upgraded",
+        None,
+        json!({"proxy_address":OTHER,"implementation":IMPLEMENTATION}),
+    )
+    .await?;
+    run(&pool, 12, None, RunMode::Normal).await?;
+    let built = summary(&pool, OTHER).await?;
+    assert!(built["links"].is_object(), "{built}");
+    assert_eq!(built["summary_version"], json!(1), "{built}");
+    // The database an older deploy left behind: no links section, no version.
+    sqlx::query("UPDATE resolver_current SET declared_summary = declared_summary - 'links' - 'summary_version' WHERE resolver_address = $1")
+        .bind(OTHER).execute(&pool).await?;
+    // Nothing in 13..=18 names OTHER.
+    run(&pool, 18, Some(12), RunMode::Normal).await?;
+    assert_eq!(
+        summary(&pool, OTHER).await?,
+        built,
+        "stale row was not rebuilt"
+    );
+    // A row on the current version and untouched by the range is carried, not rebuilt.
+    sqlx::query("UPDATE resolver_current SET declared_summary = declared_summary || '{\"fixture_marker\": true}' WHERE resolver_address = $1")
+        .bind(OTHER).execute(&pool).await?;
+    run(&pool, 18, Some(18), RunMode::Normal).await?;
+    assert_eq!(
+        summary(&pool, OTHER).await?["fixture_marker"],
+        json!(true),
+        "a current row was rebuilt without a reason"
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
 // A grant scoped to a setter argument -- the resource is the keccak of the argument --
 // keeps the interpreter's decoded selector on the permission row, so reads can say
 // which record the resource is about; an argument the interpreter never saw leaves
@@ -265,6 +491,24 @@ async fn record_resolver_permission_rows_keep_the_decoded_argument_selector() ->
     );
     db.cleanup().await?;
     Ok(())
+}
+
+async fn summary(pool: &PgPool, resolver: &str) -> Result<Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT declared_summary FROM resolver_current WHERE resolver_address = $1",
+    )
+    .bind(resolver)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn links_summary(pool: &PgPool, resolver: &str) -> Result<Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT declared_summary -> 'links' FROM resolver_current WHERE resolver_address = $1",
+    )
+    .bind(resolver)
+    .fetch_one(pool)
+    .await?)
 }
 
 fn resource_uuid(n: i64) -> String {
@@ -451,7 +695,7 @@ async fn seed(pool: &PgPool) -> Result<()> {
     for n in 10..=18 {
         sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,$3,to_timestamp($3::double precision),'canonical')").bind(CHAIN).bind(hash(n)).bind(n).execute(pool).await?;
     }
-    let payload = json!({"deployment_epoch":"record_id_fixture","resolver_implementations":[{"role":"permissioned_resolver","address":IMPLEMENTATION}],"contracts":[],"capability_flags":{}});
+    let payload = json!({"deployment_epoch":"record_id_fixture","resolver_implementations":[{"role":"permissioned_resolver","address":IMPLEMENTATION}],"contracts":[],"capability_flags":{},"abi":{"events":[{"name":"Linked","fragment":"event Linked(uint256 indexed recordId, bytes32 indexed node, bytes name)","normalized_events":["ResolverRecordLinked","PreimageObserved"]}]}});
     let manifest: i64 = sqlx::query_scalar("INSERT INTO manifest_versions (manifest_version,namespace,source_family,chain_id,deployment_label,rollout_status,normalizer_version,file_path,manifest_payload) VALUES (1,'ens','ens_v2_resolver_l1',$1,'record_id_fixture','active','fixture','fixture/record-id.toml',$2) RETURNING manifest_id").bind(CHAIN).bind(&payload).fetch_one(pool).await?;
     sqlx::query("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,source_manifest_id,chain_id,derivation_kind,canonicality_state,after_state) VALUES ('manifest','ens','SourceManifestUpdated','ens_v2_resolver_l1',1,$1,$2,'manifest_sync','canonical',$3)").bind(manifest).bind(CHAIN).bind(json!({"rollout_status":"active","normalizer_version":"fixture","manifest_payload":payload})).execute(pool).await?;
     sqlx::query("INSERT INTO manifest_versions (manifest_version,namespace,source_family,chain_id,deployment_label,rollout_status,normalizer_version,file_path,manifest_payload) VALUES (1,'ens','ens_v2_registry_l1',$1,'record_id_fixture','active','fixture','fixture/registry.toml','{}')").bind(CHAIN).execute(pool).await?;
@@ -630,6 +874,12 @@ async fn official_sepolia_direct_resolver_projects_ensip19_default_for_missing_e
     )
     .await?;
     run(&pool, target, None, RunMode::Normal).await?;
+    // A direct node-keyed declaration has no link state, so the section is unsupported
+    // by kind rather than reported empty.
+    assert_eq!(
+        links_summary(&pool, &address).await?,
+        json!({"status": "unsupported", "unsupported_reason": "record_links_not_applicable"})
+    );
     let row = inventory(&pool, 1).await?;
     assert_eq!(row["support"], "supported", "{row}");
     assert_eq!(

@@ -154,6 +154,74 @@ fn v2_resolver_include_controls_overview_sections_and_rejects_unknown() {
 }
 
 #[test]
+fn v2_resolver_links_section_serves_record_links_with_counts() {
+    let include =
+        crate::v2::resolver_overview_include(&["links".to_owned()]).expect("links include parses");
+    let overview = crate::v2::build_resolver_overview(
+        resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS),
+        1,
+        include,
+        empty_bound_names(),
+    )
+    .expect("resolver overview must build");
+    let value = serde_json::to_value(overview).expect("overview must serialize");
+    assert_eq!(value["counts"]["links"], 2);
+    assert_eq!(value["counts"]["linked_records"], 2);
+    assert!(value.get("nodes").is_none());
+    assert_eq!(
+        value["links"],
+        json!([
+            {
+                "record_id": "1",
+                "namehash": "namehash:alice.eth",
+                "default": false,
+                "namespace": "ens",
+                "name": "alice.eth",
+                "display_name": "alice.eth",
+                "link_event": {
+                    "block_number": 180,
+                    "timestamp": "2026-04-16T00:00:00Z",
+                    "transaction_hash": "0xlink180tx",
+                    "log_index": 2
+                }
+            },
+            {
+                "record_id": "2",
+                "namehash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "default": true,
+                "link_event": {
+                    "block_number": 181,
+                    "timestamp": "2026-04-16T00:00:12Z",
+                    "transaction_hash": "0xlink181tx",
+                    "log_index": 0
+                }
+            }
+        ])
+    );
+    // A node-keyed resolver has no link state: the section is unsupported by kind and
+    // contributes no counts.
+    let mut resolver_row = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    resolver_row.declared_summary["links"] =
+        json!({"status": "unsupported", "unsupported_reason": "record_links_not_applicable"});
+    let overview =
+        crate::v2::build_resolver_overview(resolver_row, 1, include, empty_bound_names())
+            .expect("resolver overview must build");
+    let value = serde_json::to_value(overview).expect("overview must serialize");
+    assert_eq!(value["links"], Value::Null);
+    assert!(value["counts"].get("links").is_none());
+    assert!(value["counts"].get("linked_records").is_none());
+    // A link item without its event position is a projection defect, not a served row.
+    let mut resolver_row = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    resolver_row.declared_summary["links"]["items"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("chain_position");
+    let error = crate::v2::build_resolver_overview(resolver_row, 1, include, empty_bound_names())
+        .expect_err("a link item without provenance must fail loudly");
+    assert_eq!(error.code(), crate::v2::ErrorCode::InternalError);
+}
+
+#[test]
 fn v2_resolver_events_summary_maps_writer_by_kind_to_product_types() {
     let include =
         crate::v2::resolver_overview_include(&["events".to_owned()]).expect("events include parses");
@@ -295,11 +363,14 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
         json!({
             "nodes": 2,
             "aliases": 2,
+            "links": 2,
+            "linked_records": 2,
             "role_holders": 1,
             "events": 4,
         })
     );
     assert!(first_page["data"].get("aliases").is_none());
+    assert!(first_page["data"].get("links").is_none());
     assert!(first_page["data"].get("roles").is_none());
     assert!(first_page["data"].get("events").is_none());
     assert_eq!(first_page["data"]["nodes"][0]["namespace"], json!("ens"));
@@ -992,6 +1063,36 @@ async fn v2_get_resolver_reports_unsupported_requested_sections_in_meta() -> Res
     assert_eq!(
         payload["meta"]["unsupported_reason"],
         json!("resolver_family_pending")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_resolver_reports_links_unsupported_by_kind_as_partial() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let mut resolver = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    resolver.declared_summary["links"] =
+        json!({"status": "unsupported", "unsupported_reason": "record_links_not_applicable"});
+    database
+        .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
+        .await?;
+    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
+
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes,links"),
+    )
+    .await?;
+
+    assert!(payload["data"]["nodes"].is_array());
+    assert_eq!(payload["data"]["links"], Value::Null);
+    assert_eq!(payload["meta"]["unsupported_fields"], json!(["links"]));
+    assert_eq!(payload["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        payload["meta"]["unsupported_reason"],
+        json!("record_links_not_applicable")
     );
 
     database.cleanup().await?;

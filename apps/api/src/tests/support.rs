@@ -3016,6 +3016,48 @@ fn resolver_current_row(chain_id: &str, resolver_address: &str) -> ResolverCurre
                     "resource_ids": ["00000000-0000-0000-0000-00000000b100"],
                 }],
             },
+            "links": {
+                "status": "supported",
+                "count": 2,
+                "total_count": 2,
+                "record_count": 2,
+                "sample_limit": 100,
+                "sample_count": 2,
+                "truncated": false,
+                "items": [
+                    {
+                        "record_id": "1",
+                        "namehash": "namehash:alice.eth",
+                        "default": false,
+                        "logical_name_id": "ens:alice.eth",
+                        "name": "Alice.eth",
+                        "namespace": "ens",
+                        "normalized_event_id": 303,
+                        "chain_position": {
+                            "chain_id": chain_id,
+                            "block_number": 180,
+                            "block_hash": "0xlink180",
+                            "transaction_hash": "0xlink180tx",
+                            "log_index": 2,
+                            "timestamp": "2026-04-16T00:00:00Z",
+                        },
+                    },
+                    {
+                        "record_id": "2",
+                        "namehash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                        "default": true,
+                        "normalized_event_id": 304,
+                        "chain_position": {
+                            "chain_id": chain_id,
+                            "block_number": 181,
+                            "block_hash": "0xlink181",
+                            "transaction_hash": "0xlink181tx",
+                            "log_index": 0,
+                            "timestamp": "2026-04-16T00:00:12Z",
+                        },
+                    }
+                ],
+            },
             "event_summary": {
                 "status": "supported",
                 "count": 3,

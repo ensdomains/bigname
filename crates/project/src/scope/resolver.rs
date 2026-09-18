@@ -246,6 +246,51 @@ pub(super) async fn include_resource_pointers(
     Ok(())
 }
 
+/// A name surface entering scope may be the first readable name for a node some
+/// record-ID resolver links; that resolver's summary must pick the name up now, not
+/// on the next full rebuild. Driven from the resolvers, whose link history the
+/// emitter index covers (a record-ID resolver emits its own Linked logs
+/// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64)),
+/// and joined to the scoped surfaces by primary key: the cost is the record-ID
+/// resolvers' link history, never a scan of the chain's events by node.
+pub(super) async fn include_link_targets(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target_block: i64,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO project_scope_resolvers
+        SELECT DISTINCT lower(row.resolver_address)
+        FROM resolver_current row
+        JOIN normalized_events event
+          ON event.chain_id = $1
+         AND lower(event.raw_fact_ref ->> 'emitting_address') = lower(row.resolver_address)
+         AND event.event_kind = 'ResolverRecordLinked'
+         AND event.after_state ->> 'storage_model' = 'resolver_record_id'
+         AND event.block_number <= $2
+         AND event.consumer_visibility = 'activated'
+         AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        JOIN name_surfaces surface
+          ON surface.logical_name_id =
+             event.namespace || ':' || lower(event.after_state ->> 'node')
+         AND surface.chain_id = $1
+        JOIN project_scope_names scope ON scope.logical_name_id = surface.logical_name_id
+        WHERE row.chain_id = $1
+          AND row.declared_summary #>> '{links,status}' = 'supported'
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(chain_id)
+    .bind(target_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to scope resolvers linking scoped names", error)
+    })?;
+    Ok(())
+}
+
 pub(super) async fn classify_unchanged(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,

@@ -12,7 +12,9 @@ pub(super) async fn page(
     key: Option<&(String, String)>,
     page_size: u64,
 ) -> V2Result<(Vec<(String, String, Value)>, u64)> {
-    let source = if section == "roles" {
+    let source = if section == "links" {
+        include_str!("links.sql").to_owned()
+    } else if section == "roles" {
         format!(
             r#"WITH items AS (
             SELECT pc.subject AS key1, pc.resource_id::text AS key2,
@@ -51,19 +53,20 @@ pub(super) async fn page(
         COALESCE((SELECT jsonb_agg(jsonb_build_object('key1', key1, 'key2', key2, 'item', item)
                     ORDER BY key1, key2) FROM selected_page), '[]'::jsonb) AS rows"#
     );
-    let row = sqlx::query(&query)
+    let mut statement = sqlx::query(&query)
         .bind(chain)
         .bind(address)
         .bind(height)
         .bind(key.map(|k| k.0.as_str()))
         .bind(key.map(|k| k.1.as_str()))
-        .bind(page_size.saturating_add(1) as i64)
-        .fetch_one(pool)
-        .await
-        .map_err(|error| {
-            tracing::error!(?error, "resolver collection read failed");
-            read_error()
-        })?;
+        .bind(page_size.saturating_add(1) as i64);
+    if section == "links" {
+        statement = statement.bind(super::super::resolver_namespace(chain)?);
+    }
+    let row = statement.fetch_one(pool).await.map_err(|error| {
+        tracing::error!(?error, "resolver collection read failed");
+        read_error()
+    })?;
     let total: i64 = row.try_get("total").map_err(|_| read_error())?;
     let rows: Value = row.try_get("rows").map_err(|_| read_error())?;
     let mut result = rows
