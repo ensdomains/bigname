@@ -1425,7 +1425,11 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   name. For a wrapped `.eth` name those are its BaseRegistrar leases: the read
   follows each published NameWrapper binding of the name to the lease it
   wrapped, so registrar rows recorded before the name was known are included,
-  and NameWrapper rows report the lease as their `registration_id`.
+  and NameWrapper rows report the lease as their `registration_id`. A `.eth`
+  lease granted with `registerOnly` while the name stayed bound to a
+  registry-only resource (a registrar token transferred without `reclaim`) has
+  no binding of its own; the read reaches it, and every earlier such lease,
+  through the name its `RegistrationGranted` row carries.
 
 ### `GET /v1/permissions`
 

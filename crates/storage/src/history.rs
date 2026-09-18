@@ -42,7 +42,10 @@ pub use redo::{
     revalidate_interpret_redo_fence,
 };
 pub use redo::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
-pub use wrapped_registrar::load_wrapped_registrar_resource_ids_by_logical_name_id;
+pub use wrapped_registrar::{
+    load_registrar_grant_resource_ids_by_logical_name_id,
+    load_wrapped_registrar_resource_ids_by_logical_name_id,
+};
 
 /// Replay-stable normalized event exposed to history readers.
 #[derive(Clone, Debug, Eq, PartialEq)]

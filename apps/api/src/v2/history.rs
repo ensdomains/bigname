@@ -237,9 +237,12 @@ pub(crate) async fn get_history(
     }))
 }
 
-/// The BaseRegistrar leases behind a name that is, or was, wrapped. The name is bound to its
-/// NameWrapper resource, so the lease rows are reached through the link each `NameWrapped` row
-/// recorded, and through the registration resource Project selected.
+/// The BaseRegistrar leases behind a name that its surface bindings do not reach. A wrapped
+/// name is bound to its NameWrapper resource, so its lease rows are reached through the link
+/// each `NameWrapped` row recorded. A lease granted with `registerOnly` while the name stayed
+/// bound to a registry-only resource (a registrar token transferred without `reclaim`) has no
+/// binding or link at all, so every published registrar grant carrying the name's namehash is
+/// followed too, together with the registration resource Project selected.
 async fn registration_lease_resource_ids(
     state: &AppState,
     parent: &bigname_storage::NameCurrentRow,
@@ -259,6 +262,22 @@ async fn registration_lease_resource_ids(
         );
         V2Error::internal_error("failed to load name history")
     })?;
+    resource_ids.extend(
+        bigname_storage::load_registrar_grant_resource_ids_by_logical_name_id(
+            &state.pool,
+            &parent.logical_name_id,
+            Some(block_bounds),
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                logical_name_id = %parent.logical_name_id,
+                error = ?error,
+                "failed to load history registrar grant resources"
+            );
+            V2Error::internal_error("failed to load name history")
+        })?,
+    );
     if let Some(resource_id) = projected_registration_resource_id(&parent.declared_summary) {
         resource_ids.push(Uuid::parse_str(resource_id).map_err(|error| {
             tracing::error!(
@@ -270,6 +289,8 @@ async fn registration_lease_resource_ids(
             V2Error::internal_error("failed to load name history")
         })?);
     }
+    resource_ids.sort_unstable();
+    resource_ids.dedup();
     Ok(resource_ids)
 }
 

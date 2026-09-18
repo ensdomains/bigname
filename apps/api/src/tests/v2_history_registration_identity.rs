@@ -385,6 +385,26 @@ async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_
         "{earlier}"
     );
 
+    // The grants are found through the node probe index, not by scanning normalized_events.
+    let plan = bigname_storage::explain_registration_history_filter_for_test(
+        &database.pool,
+        earlier_lease,
+        &logical_name_id,
+        "ethereum-mainnet",
+        "ens",
+        &namehash,
+    )
+    .await?;
+    let grant_plan = plan
+        .split_once("registrar grants by name:\n")
+        .and_then(|(_, rest)| rest.split_once("\n\n"))
+        .map(|(grant_plan, _)| grant_plan)
+        .expect("combined plan must contain the registrar grant section");
+    assert!(
+        grant_plan.contains("normalized_events_v1_direct_node_probe_idx"),
+        "registrar grants by name must probe the node index:\n{grant_plan}"
+    );
+
     database.cleanup().await
 }
 

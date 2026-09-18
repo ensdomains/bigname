@@ -6,7 +6,7 @@ use super::{
     duplicates::push_product_history_duplicate_filter,
     paging::{push_history_filters, push_history_order, push_history_select},
     wrapped_registrar::{
-        ResourceNamehashAnchor, push_namehash_surfaces_query,
+        ResourceNamehashAnchor, push_namehash_surfaces_query, push_registrar_grant_resources_query,
         push_registrar_namehash_anchors_query, push_wrapped_registrar_resources_query,
     },
 };
@@ -28,6 +28,14 @@ pub(super) async fn explain_history_filter_for_test(
     let mut forward = QueryBuilder::<Postgres>::new("EXPLAIN (COSTS OFF) ");
     push_wrapped_registrar_resources_query(&mut forward, lookup.logical_name_id, canonical_only);
     let forward_plan = forward
+        .build_query_scalar::<String>()
+        .fetch_all(&mut *transaction)
+        .await?
+        .join("\n");
+
+    let mut grants = QueryBuilder::<Postgres>::new("EXPLAIN (COSTS OFF) ");
+    push_registrar_grant_resources_query(&mut grants, lookup.logical_name_id, canonical_only);
+    let grant_plan = grants
         .build_query_scalar::<String>()
         .fetch_all(&mut *transaction)
         .await?
@@ -66,7 +74,7 @@ pub(super) async fn explain_history_filter_for_test(
         .join("\n");
     transaction.rollback().await?;
     Ok(format!(
-        "name-to-registrar association:\n{forward_plan}\n\nregistrar namehash anchors:\n{anchor_plan}\n\nexact-namehash surfaces:\n{surface_plan}\n\nhistory page:\n{plan}"
+        "name-to-registrar association:\n{forward_plan}\n\nregistrar grants by name:\n{grant_plan}\n\nregistrar namehash anchors:\n{anchor_plan}\n\nexact-namehash surfaces:\n{surface_plan}\n\nhistory page:\n{plan}"
     ))
 }
 

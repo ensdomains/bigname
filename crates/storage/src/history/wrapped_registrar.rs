@@ -2,6 +2,9 @@
 //! BaseRegistrar lease it wrapped (`after_state.wrapped_registrar_resource_id`
 //! on the NameWrapper's `SurfaceBound` row). History follows that link in both
 //! directions so a wrapped `.eth` name keeps one registration handle: its lease.
+//! The name a BaseRegistrar grant carries (`after_state.namehash`) is followed
+//! the same way, so a lease that never received a binding of its own still
+//! reaches the name's registration history.
 
 use std::collections::BTreeMap;
 
@@ -17,6 +20,109 @@ pub async fn load_wrapped_registrar_resource_ids_by_logical_name_id(
     published: Option<&BTreeMap<String, i64>>,
 ) -> Result<Vec<Uuid>> {
     load_wrapped_registrar_resource_ids(pool, logical_name_id, true, published).await
+}
+
+/// Load the BaseRegistrar leases granted to one exact name: the canonical `ens_v1_registrar_l1`
+/// `RegistrationGranted` rows of registrar authority kind whose `after_state.namehash` is the
+/// name's surface namehash, on the surface's chain and namespace. A lease granted with
+/// `registerOnly` while the name stays bound to a registry-only resource (a registrar token
+/// transferred without `reclaim`) has no binding and no `NameWrapped` link of its own, so this is
+/// how its rows stay reachable once a later grant replaces it. `published` keeps only grants
+/// recorded at or below each chain's published block.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+pub async fn load_registrar_grant_resource_ids_by_logical_name_id(
+    pool: &PgPool,
+    logical_name_id: &str,
+    published: Option<&BTreeMap<String, i64>>,
+) -> Result<Vec<Uuid>> {
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    push_registrar_grant_resources_query(&mut builder, logical_name_id, true);
+    let grants: Vec<WrappedRegistrarLink> = builder
+        .build_query_as()
+        .fetch_all(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load registrar grant resources for logical_name_id {logical_name_id}"
+            )
+        })?;
+    Ok(published_resource_ids(grants, published))
+}
+
+fn published_resource_ids(
+    links: Vec<WrappedRegistrarLink>,
+    published: Option<&BTreeMap<String, i64>>,
+) -> Vec<Uuid> {
+    let mut resource_ids = links
+        .into_iter()
+        .filter(|link| {
+            published.is_none_or(|bounds| {
+                link.chain_id
+                    .as_ref()
+                    .and_then(|chain_id| bounds.get(chain_id))
+                    .zip(link.block_number)
+                    .is_some_and(|(bound, block_number)| block_number <= *bound)
+            })
+        })
+        .map(|link| link.registrar_resource_id)
+        .collect::<Vec<_>>();
+    resource_ids.sort_unstable();
+    resource_ids.dedup();
+    resource_ids
+}
+
+/// The grant rows are found through `normalized_events_v1_direct_node_probe_idx`, whose key is
+/// the namespace-qualified node an ENSv1 row carries, so the join repeats that expression.
+pub(super) fn push_registrar_grant_resources_query<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    logical_name_id: &'a str,
+    canonical_only: bool,
+) {
+    builder.push(
+        r#"
+        SELECT DISTINCT
+            lease.chain_id,
+            lease.block_number,
+            lease.resource_id AS registrar_resource_id
+        FROM bigname_phase.name_surfaces surface
+        LEFT JOIN bigname_phase.chain_lineage surface_lineage
+          ON surface_lineage.chain_id = surface.chain_id
+         AND surface_lineage.block_hash = surface.block_hash
+        JOIN bigname_phase.normalized_events lease
+          ON lease.chain_id = surface.chain_id
+         AND COALESCE(
+                 lease.namespace || ':' || lower(COALESCE(
+                     lease.after_state ->> 'child_node',
+                     lease.after_state ->> 'namehash',
+                     lease.after_state ->> 'node',
+                     lease.after_state #>> '{grant_source,node}',
+                     lease.after_state #>> '{revocation_source,node}'
+                 )),
+                 lease.logical_name_id
+             ) = surface.namespace || ':' || lower(surface.namehash)
+        LEFT JOIN bigname_phase.chain_lineage lease_lineage
+          ON lease_lineage.chain_id = lease.chain_id
+         AND lease_lineage.block_hash = lease.block_hash
+        WHERE surface.logical_name_id = "#,
+    );
+    builder.push_bind(logical_name_id);
+    builder.push(
+        r#"
+          AND lease.resource_id IS NOT NULL
+          AND lease.source_family LIKE 'ens\_v1\_%'
+          AND lease.source_family = 'ens_v1_registrar_l1'
+          AND lease.event_kind = 'RegistrationGranted'
+          AND lower(lease.after_state ->> 'namehash') = lower(surface.namehash)
+          AND COALESCE(NULLIF(lease.after_state ->> 'authority_kind', ''), 'registrar')
+              = 'registrar'
+        "#,
+    );
+    if canonical_only {
+        push_canonical_row_filter(builder, "surface", "surface_lineage");
+        push_canonical_row_filter(builder, "lease", "lease_lineage");
+    }
+    builder.push(" ORDER BY 3, 1, 2");
 }
 
 #[derive(sqlx::FromRow)]
@@ -43,22 +149,7 @@ pub(super) async fn load_wrapped_registrar_resource_ids(
                 "failed to load wrapped registrar resources for logical_name_id {logical_name_id}"
             )
         })?;
-    let mut resource_ids = links
-        .into_iter()
-        .filter(|link| {
-            published.is_none_or(|bounds| {
-                link.chain_id
-                    .as_ref()
-                    .and_then(|chain_id| bounds.get(chain_id))
-                    .zip(link.block_number)
-                    .is_some_and(|(bound, block_number)| block_number <= *bound)
-            })
-        })
-        .map(|link| link.registrar_resource_id)
-        .collect::<Vec<_>>();
-    resource_ids.sort_unstable();
-    resource_ids.dedup();
-    Ok(resource_ids)
+    Ok(published_resource_ids(links, published))
 }
 
 pub(super) fn push_wrapped_registrar_resources_query<'a>(
