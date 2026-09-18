@@ -66,14 +66,14 @@ pub(super) async fn close_lease_predecessor(
     // Evidence must be positioned strictly before the cleanup, with two exceptions for token
     // evidence positioned exactly at it. A registrar identity materialized at `NameUnwrapped` has
     // the cleanup transfer as its first and only evidence, and its binding is positioned at that
-    // same cleanup log. A lease the registrar family observed before the migration transaction,
-    // that is, one with an activated canonical lifecycle event of its own before the cleanup,
-    // token id or not, may likewise have the cleanup transfer as its only token-bearing event:
+    // same cleanup log. A lease the registrar family observed before the cleanup, that is, one
+    // with an activated canonical lifecycle event of its own positioned before the cleanup, token
+    // id or not, may likewise have the cleanup transfer as its only token-bearing event:
     // on Mainnet the controller grant carries no token id and the mint transfer is not indexed,
     // so a name registered straight into the NameWrapper moves at the BaseRegistrar level for the
     // first time when `unwrapETH2LD` sends the token from the NameWrapper to the Graveyard. Both
     // gates keep the cleanup transfer, which every migration emits on the lease resource, from
-    // standing in as the only evidence for a lease never observed before the transaction.
+    // standing in as the only evidence for a lease first seen at the cleanup itself.
     // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L128-L150 @ ens_v2@a971bd6)
     let leases: Vec<Uuid> = sqlx::query_scalar(&format!(

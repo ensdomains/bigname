@@ -685,12 +685,12 @@ token id only as successive leases of the same label, and a successor grant
 requires the earlier lease to be past its grace period, which the adapters
 settle as a `RegistrationReleased` no later than the grant's block, so the
 release guard leaves exactly one live lease. Evidence positioned at the cleanup
-itself counts only for a lease already known before the transaction: one whose
+itself counts only for a lease already seen before the cleanup: one whose
 binding sits at that same log (the registrar identity materialized at
-`NameUnwrapped`) or one with a registrar lifecycle event of its own before the
-cleanup, as set out below; otherwise the cleanup transfer, which every
-migration emits on the lease resource, could stand in as the only evidence for
-a lease never observed before the transaction.
+`NameUnwrapped`) or one with a registrar lifecycle event of its own positioned
+before the cleanup, as set out below; otherwise the cleanup transfer, which
+every migration emits on the lease resource, could stand in as the only
+evidence for a lease first seen at the cleanup itself.
 Which of the four kinds carries the token id depends on the deployment profile:
 the Sepolia profile indexes the BaseRegistrar's numeric `NameRegistered` and
 `NameRenewed` as lifecycle events with the token id, while the Mainnet profile
@@ -708,11 +708,13 @@ transfer precedes the cleanup. On the unlocked-wrapped path `unwrapETH2LD`
 moves the token from the NameWrapper straight to the Graveyard, so for a name
 registered straight into the NameWrapper that cleanup transfer is the lease's
 first and only token-bearing event. The writer admits token evidence positioned
-at the cleanup when the lease was observed before the migration transaction,
-that is, when the resource carries an activated canonical registrar lifecycle
-event positioned before the cleanup, token id or not, which on Mainnet is the
-controller grant; the cleanup transfer never vouches for a lease first seen in
-the transaction itself. Predecessor resolution therefore relies on those
+at the cleanup in two cases: when a canonical ENSv1 binding of that resource is
+positioned at the cleanup log, or when the resource carries an activated
+canonical registrar lifecycle event of an admitted kind, on a canonical lineage
+block, positioned before the cleanup, token id or not, which on Mainnet is the
+controller grant. Either way the token id, the BaseRegistrar instance, the
+release guard and the exactly-one rule still apply, and the cleanup transfer
+never vouches for a lease first seen at the cleanup itself. Predecessor resolution therefore relies on those
 transfers being activated with the name's `logical_name_id`, which the
 ordinary registrar adapter gives them whenever the surface is known.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
