@@ -379,8 +379,8 @@ fn validate_pair(old: &SourceConfig, new: &SourceConfig) -> Result<()> {
         "transport change must preserve key, seed, start, and intake-only role"
     );
     let kinds = (
-        normalized_source_kind(&old.source_kind),
-        normalized_source_kind(&new.source_kind),
+        canonical_reader_kind(&old.source_kind),
+        canonical_reader_kind(&new.source_kind),
     );
     ensure!(
         matches!(
@@ -390,6 +390,18 @@ fn validate_pair(old: &SourceConfig, new: &SourceConfig) -> Result<()> {
         "only same-node drpc/reth_db transport changes are supported"
     );
     Ok(())
+}
+
+/// The source kind with the direct reader's two accepted spellings, `reth` and `reth_db`,
+/// folded into one, for deciding which interfaces a change moves between. Everything that
+/// touches the cursor keeps the spelling the deployment configured, because that is what the
+/// cursor stores (`ingest_cursor_config` writes the kind as written) and what the runner
+/// expects to find there.
+fn canonical_reader_kind(kind: &str) -> String {
+    match normalized_source_kind(kind).as_str() {
+        "reth" => "reth_db".to_owned(),
+        kind => kind.to_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -448,5 +460,15 @@ mod tests {
         let mut changed = new;
         changed.chain_id = "ethereum-mainnet".into();
         assert!(validate_pair(&old, &changed).is_err());
+    }
+
+    #[test]
+    fn reth_is_the_direct_reader_spelled_differently() {
+        assert!(validate_pair(&source("reth"), &source("drpc")).is_ok());
+        assert!(validate_pair(&source("drpc"), &source("reth")).is_ok());
+        assert!(
+            validate_pair(&source("reth"), &source("reth_db")).is_err(),
+            "the same interface under two spellings is not a transport change"
+        );
     }
 }
