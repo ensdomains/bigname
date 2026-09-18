@@ -126,6 +126,54 @@ async fn v2_get_permissions_empties_a_superseded_name_and_registration_pair() ->
     Ok(())
 }
 
+// A `.eth` lease that lapsed under a registry-only binding (a registrar token transferred
+// without `reclaim`) is released like any other lapse: a name-filtered request selects nothing,
+// as for every released name, while the resource audit keeps its rows.
+#[tokio::test]
+async fn v2_get_permissions_empties_a_lapsed_handed_off_name() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let released_resource_id = v2_permissions_current_resource_id();
+
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+             jsonb_set(
+                 jsonb_set(
+                     declared_summary,
+                     '{registration,status}',
+                     '\"released\"'::jsonb
+                 ),
+                 '{registration,authority_kind}',
+                 '\"registry_only\"'::jsonb
+             ),
+             '{control}',
+             '{\"status\": \"unregistered\"}'::jsonb
+         )
+         WHERE resource_id = $1",
+    )
+    .bind(released_resource_id)
+    .execute(&database.pool)
+    .await?;
+
+    let by_name =
+        v2_permissions_payload_for_database(&database, "/v1/permissions?name=Perms.eth").await?;
+    assert_eq!(by_name["data"], json!([]), "{by_name}");
+
+    let audited = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={released_resource_id}"),
+    )
+    .await?;
+    let rows = audited["data"]
+        .as_array()
+        .expect("resource audit must return an array");
+    assert!(!rows.is_empty(), "the released resource lost its audit read");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 // An explicit ENSv2 release leaves retained permission rows available to a resource audit, but
 // the released name no longer has a current registration and cannot select those rows.
 #[tokio::test]

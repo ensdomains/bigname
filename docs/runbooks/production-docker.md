@@ -314,6 +314,25 @@ the ledger is reconciled by hand. A migration that drops legacy
 `public`-schema tables is destructive and additionally requires an explicit
 maintenance window.
 
+Run the migration session with `quote_all_identifiers` at its PostgreSQL
+default, `off`. Confirm with `SHOW quote_all_identifiers` as the migration
+role, and do not set it on for that role or database (`ALTER ROLE ... SET`,
+`ALTER DATABASE ... SET`) or in `PGOPTIONS`. The reason is
+`20260917140000_resolver_creation_self_edge.sql`: it finds the older
+self-edge CHECK on `bigname_phase.discovery_edges` by searching the text
+`pg_get_constraintdef` prints, and with the setting on PostgreSQL prints every
+identifier in double quotes, so the search misses the rule. The file would then
+leave the older rule in place beside the new one, which keeps rejecting the
+resolver self-edge, or fail on the duplicate name when the new rule already
+exists. That file cannot be changed to carry its own setting: it is already
+applied on Sepolia and recorded in `_sqlx_migrations` with its checksum, so an
+edited copy makes `sqlx migrate run` refuse the deploy as a modified applied
+migration, and a fresh database would apply the edited text while the live one
+keeps the original's result. The later
+`20260917141000_discovery_self_edge_check_name.sql` and the index validity
+checks turn the setting off themselves, transaction-locally, and put the
+caller's value back; `schema-v2/apply-check.sh` proves that for each of them.
+
 Adding, editing, or deleting a covered interpreter input rotates the compiled
 [interpreter content hash](../glossary.md#interpreter-content-hash);
 `docs/storage.md` names what is covered. Covered files are hashed whole, so
@@ -501,6 +520,62 @@ rebuilds an index. If it
 fails, follow the recovery steps above or in the matching index runbook, then
 run `sqlx migrate run` again.
 
+The release containing `20260917131000_project_scoped_history_indexes.sql` adds
+the eight indexes Project uses to look up the history of changed names and
+primary names. On an initialized production namespace, build them in step 3 by
+running
+[`ops/project-scoped-history/install.sql`](../../ops/project-scoped-history/install.sql)
+as [its runbook](../../ops/project-scoped-history/README.md) describes. This
+runbook carries no copy of the eight statements; `install.sql` is the only
+source, and `schema-v2/apply-check.sh` proves it builds what the fresh baseline
+and the schema-migration build. The builds are concurrent and permit writes, so
+they can finish while the existing runner is still processing, before the
+stop/start window opens; step 3 then only runs `install.sql` again as the check.
+
+`install.sql` is its own readiness check. It exits non-zero unless all eight
+names are valid and ready indexes on `bigname_phase.normalized_events` with the
+reviewed definition, and it refuses before building anything when one of the
+names is already taken by an invalid index, an index with another definition,
+or a relation that is not an index. An interrupted build leaves such an invalid
+index. To recover, first confirm in `pg_stat_progress_create_index` that no
+build is still running, then drop only the index the error names with
+`DROP INDEX CONCURRENTLY` and run `install.sql` again. Never drop a valid index
+with the reviewed definition.
+
+Keep the `install.sql` output with its start and end times in the release
+record. Then apply the schema-migrations in step 4. The `IF NOT EXISTS` builds
+in `20260917131000_project_scoped_history_indexes.sql` are no-ops when the
+indexes already exist; do not allow them to perform the first build against a
+populated production `normalized_events` table, because an ordinary index build
+blocks writes. That file adopts an index by name alone, so the later
+`20260917161000_project_scoped_history_index_validity_check.sql` makes the same
+check as `install.sql`: `sqlx migrate run` stops without recording it if any of
+the eight indexes is missing, invalid, not ready, on another table, not an
+index, or has another definition. It never drops or rebuilds an index. If it
+fails, recover as above, then run `sqlx migrate run` again.
+
+The release containing
+`20260917150000_normalized_events_v1_lookahead_indexes.sql` adds the two
+partial expression indexes Interpret's per-batch ENSv1
+[lookahead loader](../glossary.md#lookahead-loader) reads. On an initialized
+production namespace, build them in step 3 by running
+[`ops/v1-lookahead-indexes/install.sql`](../../ops/v1-lookahead-indexes/install.sql)
+as [its runbook](../../ops/v1-lookahead-indexes/README.md) describes, then run
+`ANALYZE bigname_phase.normalized_events`, because expression indexes have no
+statistics until the table is analyzed and the loader's queries depend on them.
+This runbook carries no copy of the two statements; `install.sql` is the only
+source, and `schema-v2/apply-check.sh` proves it builds what the fresh baseline
+and the schema-migration build. The builds are concurrent and permit writes, so
+they can finish while the existing runner is still processing, before the
+stop/start window opens; step 3 then only runs `install.sql` again as the check.
+`install.sql` is its own readiness check and never drops or rebuilds an index;
+recover an interrupted build as its runbook describes. Keep the `install.sql`
+output with its start and end times in the release record. Then apply the
+schema-migrations in step 4; the schema-migration's `IF NOT EXISTS` builds are
+no-ops when the indexes already exist, and it ends with the same check, so
+`sqlx migrate run` stops without recording it if either index is missing,
+invalid, not ready, on another table, not an index, or has another definition.
+
 The release containing
 `20260904120000_project_redo_child_registration_history.sql` adds the bounded
 Interpret-to-Project handoff for child and registry identifiers from deleted
@@ -639,6 +714,12 @@ EXISTS (
       AND index_state.indisvalid
       AND index_state.indisready
 ) AS normalized_events_emitter_history_index_ready;
+
+-- The next two queries compare key and predicate text as PostgreSQL prints it.
+-- With quote_all_identifiers on it prints every identifier in double quotes,
+-- and a healthy index would read as not ready, so turn it off for this session.
+-- The quotes are not stripped from the printed text instead.
+SET quote_all_identifiers = off;
 
 -- The schema qualifier on the enum type depends on the session search_path,
 -- so both spellings of the predicate are accepted. The printed text is not
@@ -902,6 +983,14 @@ indexes are additive; rollback may leave them in place.
    or `20260917130000_discovery_edges_reopen_idx.sql`,
    apply the applicable reviewed `CREATE INDEX CONCURRENTLY` statements from
    the block above, then validate each with the readiness query above it;
+   for the release containing
+   `20260917131000_project_scoped_history_indexes.sql`, run
+   `ops/project-scoped-history/install.sql` as described above and require it
+   to exit zero;
+   for the release containing
+   `20260917150000_normalized_events_v1_lookahead_indexes.sql`, run
+   `ops/v1-lookahead-indexes/install.sql` as described above, require it to
+   exit zero, then run `ANALYZE bigname_phase.normalized_events`;
    otherwise skip this step;
    For the release containing
    `20260814130000_surface_binding_authority_arm.sql`, a populated phase schema

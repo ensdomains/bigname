@@ -13,8 +13,9 @@
 -- compared as PostgreSQL prints them with search_path set to pg_catalog, so
 -- the table and the enum type carry the schema name; see
 -- 20260917160000_discovery_edges_index_validity_check.sql for why the printed
--- text is never rewritten. The search_path change is transaction-local and put
--- back before the block returns.
+-- text is never rewritten and why quote_all_identifiers is turned off while
+-- the definitions are read. Both changes are transaction-local and put back
+-- before the block returns.
 --
 -- On a large initialized database, prebuild each index first with
 --   CREATE INDEX CONCURRENTLY IF NOT EXISTS <name> ON bigname_phase.normalized_events (...)
@@ -31,6 +32,7 @@ DECLARE
     found_definition text;
     found_kind text;
     previous_search_path text;
+    previous_quote_all_identifiers text;
 BEGIN
     IF to_regclass('bigname_phase.normalized_events') IS NULL THEN
         RETURN;
@@ -38,6 +40,8 @@ BEGIN
 
     previous_search_path := current_setting('search_path');
     PERFORM set_config('search_path', 'pg_catalog', true);
+    previous_quote_all_identifiers := current_setting('quote_all_identifiers');
+    PERFORM set_config('quote_all_identifiers', 'off', true);
 
     FOR checked_index, expected_definition IN
         SELECT * FROM (VALUES
@@ -159,5 +163,6 @@ CREATE INDEX normalized_events_pointer_before_resolver_history_idx
     END LOOP;
 
     PERFORM set_config('search_path', previous_search_path, true);
+    PERFORM set_config('quote_all_identifiers', previous_quote_all_identifiers, true);
 END
 $migration$;

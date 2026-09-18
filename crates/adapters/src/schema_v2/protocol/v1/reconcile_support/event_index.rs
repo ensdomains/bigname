@@ -52,6 +52,9 @@ pub(super) struct EventFields {
     pub(super) grant: bool,
     pub(super) revocation: bool,
     pub(super) current_registry_setup: bool,
+    /// A state-derived replay onto a surface the event named -- a resolver set
+    /// before the label was known -- not a transition of the resource itself.
+    pub(super) surface_materialization: bool,
 }
 
 impl EventFields {
@@ -73,15 +76,13 @@ impl EventFields {
             position: event_position(event),
             family,
             source_event,
-            target_namehash: state
-                .get("child_node")
-                .or_else(|| state.get("node"))
-                .or_else(|| state.get("namehash"))
-                .and_then(Value::as_str)
+            target_namehash: crate::schema_v2::seam::v1_event_node(state)
                 .map(|value| value.to_ascii_lowercase()),
             resource_id: event.resource_id,
             registry_only: state.get("authority_kind").and_then(Value::as_str)
                 == Some("registry_only"),
+            surface_materialization: state.get("surface_materialization")
+                == Some(&Value::Bool(true)),
             permission: event.event_kind == "PermissionChanged",
             owner: state
                 .get("owner")

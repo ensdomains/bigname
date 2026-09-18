@@ -542,10 +542,9 @@ fn assert_four_way_and_restore_parity(
             .collect(),
         compact_prior(&prefix_output.normalized_events),
     ] {
-        let (restored, _) = interpret_test_batch_incremental(
-            input(manifests.clone(), admissions.clone(), prior, suffix.clone()),
-            None,
-        )?;
+        let restored_input = input(manifests.clone(), admissions.clone(), prior, suffix.clone());
+        super::lookahead::assert_scoped_matches(restored_input.clone())?;
+        let (restored, _) = interpret_test_batch_incremental(restored_input, None)?;
         assert_eq!(live, restored, "cold restore drift");
     }
     Ok((single, live))
@@ -2495,7 +2494,7 @@ mod public_v2_records {
                 assert_eq!(catalog.select(&event)?.is_some(), admitted);
             }
             let registry = manifest_with_events(6193, "ens", "ens_v2_registry_l1", &[]);
-            let mut discovery = admission(6193, "registry");
+            let mut discovery = admission(6191, "permissioned_resolver");
             discovery.discovery_edge_kind = Some("resolver".to_owned());
             for (namespace, full_abi) in [
                 ("ens", true),

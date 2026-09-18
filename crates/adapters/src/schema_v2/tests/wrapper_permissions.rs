@@ -383,6 +383,7 @@ fn wrapper_holder_operator_and_delegate_rows_follow_the_token_lifecycle() -> any
         seam::fold_prior_events(vec![], &first.normalized_events, &head.blocks)?,
     ] {
         tail.prior_events = prior;
+        super::lookahead::assert_scoped_matches(tail.clone())?;
         let restored = interpret_test_batch(tail.clone())?;
         assert_eq!(
             permission_rows(&restored),

@@ -30,8 +30,12 @@ WHERE indexrelid = to_regclass('bigname_phase.discovery_edges_reopen_idx');
 -- that out, because a text replacement would also change a string literal such
 -- as a JSON key. Instead search_path is pg_catalog while the definition is
 -- read, so both schema names are always printed, and the expected text keeps
--- them. The change is local to this DO statement's own transaction (this file
--- runs outside a transaction block), and the previous value is put back anyway.
+-- them. quote_all_identifiers is turned off for the same read: when the session
+-- has it on, PostgreSQL prints every identifier in double quotes and the healthy
+-- index would be refused. The quotes are not stripped from the printed text
+-- either. Both changes are local to this DO statement's own transaction (this
+-- file runs outside a transaction block), and the previous values are put back
+-- anyway.
 DO $check$
 DECLARE
     expected_definition constant text :=
@@ -39,9 +43,13 @@ DECLARE
     found_definition text;
     found_kind text;
     previous_search_path constant text := current_setting('search_path');
+    previous_quote_all_identifiers constant text :=
+        current_setting('quote_all_identifiers');
 BEGIN
     -- Every name below is schema-qualified or lives in pg_catalog.
     PERFORM set_config('search_path', 'pg_catalog', true);
+    -- The expected text above has no quoted identifiers.
+    PERFORM set_config('quote_all_identifiers', 'off', true);
 
     SELECT CASE relkind
                WHEN 'i' THEN 'index'
@@ -87,5 +95,6 @@ BEGIN
     END IF;
 
     PERFORM set_config('search_path', previous_search_path, true);
+    PERFORM set_config('quote_all_identifiers', previous_quote_all_identifiers, true);
 END
 $check$;

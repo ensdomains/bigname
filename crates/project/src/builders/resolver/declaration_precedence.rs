@@ -1,3 +1,10 @@
+// `active_discovery_admissions` lists every resolver an active `resolver` edge reaches, with
+// the edge's manifest namespace. ENSv2 registry and root `ResolverUpdated` pointer edges count
+// here even though they do not admit the resolver for event capture (Interpret's
+// `ADDRESS_ADMISSION_EDGE_SQL`, crates/adapters/src/schema_v2/seam.rs): declaration precedence
+// asks whether a name in the declaration's namespace uses the address, which is exactly what a
+// pointer proves. See docs/architecture.md § Discovery graph and docs/manifests.md § Resolver
+// creation capture.
 pub(super) const DISCOVERY_CTES: &str = r#"
 active_discovery_admissions AS (
     SELECT lower(address.address) AS resolver_address,

@@ -16,6 +16,8 @@ const ROOT: &str = "ens_v2_root_l1";
 const REGISTRY: &str = "ens_v2_registry_l1";
 const REGISTRAR: &str = "ens_v2_registrar_l1";
 const RESOLVER: &str = "ens_v2_resolver_l1";
+/// The resolver `created_resolver` deploys: no declared role and no registry pointer names it.
+pub const CREATED_RESOLVER: &str = "0x00000000000000000000000000000000e0000402";
 
 struct Wires<'a> {
     root: &'a str,
@@ -516,6 +518,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             )],
         ));
     }
+    if dimensions.resolver_creation {
+        actions.extend(created_resolver());
+    }
     if dimensions.has(Perturbation::ProxyUpgrade) {
         actions.push(action(
             "registry:upgraded",
@@ -545,6 +550,69 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         ));
     }
     actions
+}
+
+/// A resolver that no manifest role and no registry pointer admits: its own `ResolverCreated()` is
+/// the only thing that lets its record events derive. The initializer emits the creation first,
+/// then its role grants, then the record writes of its multicall, all in one transaction; a write
+/// in a later transaction follows, which a split may place in a later batch than the creation.
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L119-L126 @ ens_v2_sepolia_20260916@366de741)
+fn created_resolver() -> Vec<Action> {
+    let resolver = CREATED_RESOLVER;
+    let admin = actor(0x403);
+    let record_id = U256::from(1_u64);
+    vec![
+        action(
+            "created-resolver:initialized",
+            stage::ANNOUNCE,
+            vec![
+                emission(
+                    resolver,
+                    V2RecordResolver::ResolverCreated {}.encode_log_data(),
+                ),
+                emission(
+                    resolver,
+                    V2Resolver::EACRolesChanged {
+                        resource: U256::ZERO,
+                        account: admin,
+                        oldRoleBitmap: U256::ZERO,
+                        newRoleBitmap: U256::from(1_u64),
+                    }
+                    .encode_log_data(),
+                ),
+                emission(
+                    resolver,
+                    V2RecordResolver::Linked {
+                        recordId: record_id,
+                        node: namehash(&["created", "eth"]),
+                        name: dns_encode(&["created", "eth"]).into(),
+                    }
+                    .encode_log_data(),
+                ),
+                emission(
+                    resolver,
+                    V2RecordResolver::AddressUpdated {
+                        recordId: record_id,
+                        coinType: U256::from(60_u64),
+                        addressBytes: admin.to_vec().into(),
+                    }
+                    .encode_log_data(),
+                ),
+            ],
+        ),
+        action(
+            "created-resolver:late-record",
+            stage::LATE,
+            vec![emission(
+                resolver,
+                V2RecordResolver::NameUpdated {
+                    recordId: record_id,
+                    primaryName: "created.eth".to_owned(),
+                }
+                .encode_log_data(),
+            )],
+        ),
+    ]
 }
 
 fn expiry_for(window: ExpiryWindow, settle_timestamp: i64) -> i64 {

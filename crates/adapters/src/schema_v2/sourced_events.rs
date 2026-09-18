@@ -26,10 +26,7 @@ pub(super) fn prepare_v1_state_derived_events(
         let Some((node, resolver, resource_id)) = (event.event_kind == "ResolverChanged")
             .then(|| {
                 Some((
-                    event.after_state["child_node"]
-                        .as_str()
-                        .or_else(|| event.after_state["node"].as_str())
-                        .or_else(|| event.after_state["namehash"].as_str())?,
+                    super::seam::v1_event_node(&event.after_state)?,
                     event.after_state.get("resolver")?.as_str()?,
                     event.resource_id?,
                 ))

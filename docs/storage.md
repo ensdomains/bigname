@@ -233,6 +233,40 @@ from another ENS source alone does not choose registrar authority. A subsequent 
 bind a now-known name when the registrar remains current. Earlier resource-only rows are not rewritten.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f)
 
+When an admitted controller event names a registrar lease whose label was unknown, Interpret
+writes the binding and nothing else about the lease: the earlier grant, renewal, expiry and
+release rows keep their null `logical_name_id` and stay keyed by the registrar `resource_id`.
+A resolver set on the node before the label was known was linked to that resource alone, so the
+naming event also emits one named [state-derived normalized event](glossary.md#state-derived-normalized-event)
+of kind `ResolverChanged` for the current non-zero resolver. It is sourced to the registrar's
+manifest at the naming event's raw position, marked `state_derived=true` and
+`surface_materialization=true` with `pointer_reason=surface_materialization_current_resolver`,
+and copies the link's `resolver_source_role`. Restoration reads that key only for the
+`registry_old` role, so it does not rebuild the named resolver link from this row. Later
+resolver writes carry the name either way, whether the interpreter kept its state or restored it
+from stored events. The replay is sourced to the manifest recorded on the authority being named;
+a registry-only authority opened by a registrar transfer without `reclaim` records none, and its
+resolver is not replayed.
+Same-transaction reconciliation does not treat this replay as a successor authority epoch of the
+resource, so the binding made at that position survives.
+
+The `NameWrapped`-derived rows that inherit the wrap's shared observation object record
+`after_state.wrapped_registrar_resource_id`. Those rows are `TokenControlTransferred`,
+`ExpiryChanged` and `PermissionScopeChanged`, and the authority-transition rows the wrap emits
+from the same object: `AuthorityEpochChanged`, and `SurfaceBound`, `SurfaceUnbound` and the
+authority `ResolverChanged` whenever the wrap emits them. The value is the
+`resource_id` of the BaseRegistrar lease whose token the wrap moved into the NameWrapper, when a
+registrar lease with a token lineage is the node's current authority as the log is interpreted.
+On those rows the key is always present and is `null` otherwise: for a wrapped subname, which has
+no registrar lease, and for a registration where a controller event creates the lease only after
+`NameWrapped` in the same transaction. The wrap's holder `PermissionChanged` rows and the
+`PreimageObserved` row generated for its name are built separately and do not carry the key.
+Project follows a wrap to its registrar lease through this recorded
+identity rather than by matching names or timestamps.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L305 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
+
 A canonical, admitted, normalization-valid readable observation may also disclose a retained unnamed ENSv1 registrar lease to its exact namehash and labelhash only when that same live resource and token lineage are already the selected authority. Current admitted ENS registry ownership evidence must match the registrar's nonzero current owner; missing ownership evidence, a different authority, expiry, release, or migration retirement prevents attachment. A readable observation does not select authority. The binding begins at the observation. Earlier resource-only events remain unchanged.
 
 `registration_window` retains whether restoration reconciles preceding setup logs or the complete
@@ -248,6 +282,11 @@ independently of the registration marker.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L68 @ ens_v1@91c966f)
 
 Numeric BaseRegistrar expiry above the signed timestamp range is retained as `i64::MAX`.
+The `ens_v1_registrar_l1` controller events that repeat that expiry next to the label use the same
+rule, so an out-of-range value does not fail interpretation and lose the label; Basenames expiry
+decoding stays strict.
+(upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L116-L124 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L133-L139 @ ens_v1@91c966f)
 Settlement treats an expiry whose grace addition overflows that range as live; public timestamp
 rendering keeps the existing `null` representation for unrepresentable dates. Co-admitted
 ENSv1→ENSv2 migration evidence retains over-`u64` expiry as decimal text and does not use it for
@@ -1114,6 +1153,17 @@ so compacted restoration survives a later global resolver selection.
 
 The additive named `RegistrationGranted` is a [state-derived normalized event](glossary.md#state-derived-normalized-event), marked `state_derived`, `surface_materialization`, and `registrar_surface_snapshot`. It reports the retained lease's original registration timestamp and current expiry, owner, resolver, and ownership permissions. Its raw position is the readable trigger; a bounded provenance object retains the original numeric grant and latest registrar-owner, registry-owner, and resolver evidence. Subsequent retained state carries these references without accumulating history. Restoration handles the marked snapshot separately from an on-chain registration. Project uses the verified original timestamp only for this marked case; compact product history omits rows with both markers `state_derived=true` and `registrar_surface_snapshot=true` before pagination, while diagnostics retains them. Missing, null, or false markers do not exclude any row; other state-derived events and the original resource-only grant keep their existing history behavior.
 
+The marked snapshot (the [registrar surface snapshot](glossary.md#registrar-surface-snapshot)) and Project's join by resource identity coexist, and each covers reveals the
+other does not. The snapshot gives an immediate adapter-side binding when a source that is
+neither a registrar controller nor the NameWrapper discloses the label; the ENSv1→ENSv2 migration
+on Sepolia depends on that binding existing before the migration boundary. It is deliberately not
+emitted where a registrar controller event or a wrap names the lease, which is nearly every mainnet
+name, because copying a grant, an expiry and permission rows per registration would duplicate
+facts the original rows already hold. There Project attaches the original resource-keyed rows to
+the name (see [projections](projections.md#exact-name-projection)). When both exist for one name,
+they describe one registration: the original grant and the snapshot share a `resource_id`, and
+`registered_at` is the original grant's block time either way.
+
 For this disclosure rule, launch-bounded transfers to the manifest-declared Graveyard and admitted cleanup observations carry `registrar_surface_retired` in their existing event payload. The bounded retained evidence records that retirement separately from the ENSv1 current-registry fallback marker. It prevents a later preimage from reopening that lease and does not replace migration correlation or relax exact cleanup evidence. A subsequent independently proven new numeric grant has a new lease identity.
 
 Only active manifests participate in raw-log selection and watch authority.
@@ -1157,6 +1207,32 @@ current registry stores itself for a requested zero owner.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174-L182 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L34 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L55 @ ens_v1@91c966f)
+
+### Resolver creation replay
+
+`ResolverCreated` is stored as `ContractDiscovered` and an Interpret-owned
+`resolver` self-edge anchored to the raw creation log. This is the only permitted
+resolver self-edge. ENSv2 registry-pointer edges remain binding history and are
+excluded from emitter admission. Canonical raw creation logs drive Ingest's
+same-window capture and its subsequent windows; orphaned creation logs cannot
+expand a watch filter. Installing
+[creation capture](glossary.md#resolver-creation-capture) requires the normal
+manifest-driven Ingest redo and full Interpret replay, preserving raw facts.
+
+The rule is one validated CHECK on `discovery_edges` named
+`discovery_edges_self_edge_check`. The baseline creates it on a fresh install.
+Schema-migration `20260917140000_resolver_creation_self_edge.sql` replaces the
+older rule on an existing database; it is already applied on a live database,
+so its content is fixed. Schema-migration
+`20260917141000_discovery_self_edge_check_name.sql` then settles the name: it
+renames a rule that has the right text under a generated name, and replaces the
+rule only when its text differs. Both files find the existing rule by searching
+the text `pg_get_constraintdef` prints; `20260917141000` turns
+`quote_all_identifiers` off while it reads that text and restores the caller's
+value, while the fixed `20260917140000` needs the migration session to run with
+the setting at its default, `off`, as the
+[production runbook](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+states.
 
 ### Interpret process memory
 
@@ -1229,6 +1305,50 @@ or before the first retained lineage block. After replaying retained events,
 the adapter advances time-derived protocol state to that timestamp. Exact
 cold-restore reconstruction therefore depends on the predecessor remaining
 readable in the same input snapshot.
+
+On a chain whose manifests all belong to ENSv1 source families (or to the
+families that interpret no logs), Interpret instead restores state for each
+batch with the [lookahead loader](glossary.md#lookahead-loader). Before
+interpreting, the adapter decodes the batch's logs without interpreting them
+and lists every ENSv1 name (by namehash) and resource the logs can touch.
+Interpret adds the names whose registrar expiry plus the 90-day grace period
+falls inside the batch's time span, because time-derived releases touch names no
+log mentions. A registration is released at the first block whose timestamp is
+strictly greater than its expiry plus the grace period (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f), so the span runs from
+the timestamp of the block before the batch, inclusive, to the timestamp of the
+batch's last block, exclusive. One case lies below that span: a registrar event
+in the block just before the batch that recorded an expiry already lapsed at its
+own block. The adapter releases such a name at the next block boundary, which is
+the batch's first block, so Interpret adds those names too; every earlier block
+boundary has already settled. Interpret then reads, in the batch's input
+snapshot, the latest readable event per interpreter state key among the events
+of those names and resources, adds the names and resources those events
+reference, and repeats until a round adds nothing. There is no round limit: each
+continuing round adds a name or resource from the chain's finite stored history,
+so the repetition ends. Interpret restores a fresh adapter state from exactly those events under the
+same canonical-lineage and pre-batch boundary rules as a cold restore. The
+session is discarded after the batch. Two partial expression indexes on
+`normalized_events` serve these reads: `normalized_events_v1_direct_node_probe_idx`
+(events of one name) and `normalized_events_v1_due_probe_idx` (registrar expiry
+ranges). The loader is an access path, not a semantic: it must produce the same
+normalized events, identity rows and discovery edges as the full-state loader,
+and it is covered by the same interpreter content hash. The loader choice
+therefore looks past the manifests the batch interprets: the full-state loader
+restores every retained row regardless of family and lookahead reads only ENSv1
+families, so `normalized_events` history of a family lookahead does not cover,
+written while that family's manifest was `active` and still retained after the
+manifest moved to `draft` or `shadow`, would be restored by one loader and not
+the other. Before choosing lookahead, Interpret lists the chain's manifests in
+those two states and, for each uncovered family among them, asks whether a
+readable event of that family is retained before the batch; one such event
+chooses the full-state loader. The probe is bounded by the chain's manifests
+because every event is written under one of them and manifest rows are only
+ever moved between rollout states, never deleted. No index leads with
+`source_family`, so each probed family costs one scan of the chain's retained
+events, stopping at the first match; a chain with no uncovered manifest in those
+states runs no probe.
+It fails the batch, rather than publishing, if interpretation reads a name that
+was not loaded.
 
 For ENSv2, a retained registry/root `PreimageObserved` event for a canonical
 [name surface](glossary.md#surface-name-surface), or a retained resolver
