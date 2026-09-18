@@ -429,14 +429,33 @@ registry-only binding. So `RegistrationRenewed`, `ExpiryChanged` and `Registrati
 of the `ens_v1_registrar_l1` family on exactly that lease's resource still reach the
 registration after the handoff. A renewal updates its expiry and `latest_event_kind`;
 `registered_at`, the registrant, the selected binding and every `control` field other than the
-repeated expiry stay as they were. Rows of any other kind or source family, and lease rows on any
-other resource even when they carry the name (an earlier lease of the same name, or a resource
-the name was never bound to), stay outside the window. `renew` writes only the lease's expiry,
-and the registrar writes the registry owner only when registering and in `reclaim`, so a token
-transfer alone leaves the registry owner unchanged.
+repeated expiry stay as they were. `renew` writes only the lease's expiry, and the registrar
+writes the registry owner only when registering and in `reclaim`, so a token transfer alone
+leaves the registry owner unchanged.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L148-L150 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+
+The registry-only binding stands for one lease at a time, and that lease can change. After the
+retained lease has been released, a controller can grant the name again with `registerOnly`,
+which mints a new token and writes the expiry without touching the registry: the registry-only
+binding stays the name's only open one and the successor lease gets no binding of its own. The
+binding then stands for the successor lease. A grant qualifies when it is a
+`RegistrationGranted` of the `ens_v1_registrar_l1` family and registrar authority kind that
+carries the name and the surface's namehash on another resource, positioned after the binding
+opened and after a `RegistrationReleased` of the lease the binding replaced; the latest
+qualifying grant is the name's lease, so a further release and `registerOnly` move it again,
+and that lease's grant, renewals, expiry changes and release reach the registration the same
+way the retained lease's did. The registration takes the successor
+lease's `resource_id`, `registered_at`, expiry and registrant, and is `active` again with no
+`released_at`; the selected binding, its `registry_only` authority kind, the registry owner and
+every other `control` field stay as they were. Rows of any other kind or source family, and
+lease rows on any other resource even when they carry the name (an earlier lease of the same
+name, granted before the binding opened; a grant observed before the lease the binding stands
+for was released; or a resource the name was never bound to), stay outside the window. A grant by
+`register` writes the registry owner in its own transaction, so it opens a binding of its own
+and is selected the way any re-registration is.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
 
 The release of the retained lease releases the name like any other lapse. On chain the registry
 keeps the owner and resolver it held after an ordinary lapse too; what makes a lapsed `.eth`
@@ -449,13 +468,15 @@ the lease's `released_at`, and no current owner, manager, registrant, authority,
 resolver or records; the address listing drops it and a name-filtered permissions request
 selects nothing, as for any released name. The tombstone selects the registry-only binding,
 which stands for the released lease the way the closed NameWrapper binding stands for a wrapped
-one. It fires only for the lease that binding replaced (the exact predecessor whose lifecycle
-rows the window admits past its position), released by a registrar row that arrived after the
-binding opened, and only when that binding is the name's only open one. A release of an earlier
-lease carrying the name, whether it came before the name was registered again or is observed
-after the handoff, does not release the live registration. A release at the very position where
-a registry-only binding opened is the release that handed the name over itself; that revived
-registry-only custody is unchanged.
+one. It fires only for the lease that binding stands for (the lease it replaced or, once that
+was released, the successor lease `registerOnly` granted under it: the one lease whose lifecycle
+rows the window admits past the binding's position), released by a registrar row that arrived
+after the binding opened, and only when that binding is the name's only open one. A successor
+lease needs no binding of its own for this. A release of an earlier lease carrying the name,
+whether it came before the name was registered again or is observed after the handoff, does not
+release the live registration, and neither does the replaced lease's release once a successor
+lease is the name's. A release at the very position where a registry-only binding opened is the
+release that handed the name over itself; that revived registry-only custody is unchanged.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L249-L257 @ ens_v2@a971bd64)
