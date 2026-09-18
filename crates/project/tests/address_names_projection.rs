@@ -4198,6 +4198,47 @@ async fn later_wrapper_retraction_projects_identically_incrementally_and_from_ze
     Ok(())
 }
 
+type EnrichedRegistryOnlyRow = (
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    serde_json::Value,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+/// The state-derived release of the earlier lease of the name, carrying the name.
+async fn seed_earlier_lease_release(
+    pool: &PgPool,
+    block_number: i64,
+    log_index: i64,
+) -> Result<()> {
+    seed_normalized_event(
+        pool,
+        "fixture:enriched-earlier-lease-release",
+        Some(OWNERLESS_LOGICAL),
+        Some(EARLIER_LEASE_RESOURCE),
+        "RegistrationReleased",
+        "ens_v1_registrar_l1",
+        block_number,
+        log_index,
+        json!({
+            "source_event": "RegistrationReleased",
+            "released_at": 1_600_000_000,
+            "expiry": 1_592_224_000,
+            "namehash": OWNERLESS_NAMEHASH,
+        }),
+        json!({}),
+    )
+    .await
+}
+
 #[derive(Debug, PartialEq)]
 struct EnrichedRegistryOnlyProjection {
     expiry: Option<i64>,
@@ -4211,6 +4252,14 @@ struct EnrichedRegistryOnlyProjection {
     /// `declared_summary.control` without its `expiry`, which repeats the lease expiry.
     control: serde_json::Value,
     registration_status: Option<String>,
+    authority_kind: Option<String>,
+    released_at: Option<String>,
+    /// The resolver `name_current` serves for the name, if any.
+    resolver: Option<String>,
+    /// `released_tombstone` from the selection's resource authority context.
+    released_tombstone: Option<String>,
+    /// Every `(address, relation)` row the address listing holds for the name.
+    address_relations: Vec<(String, String)>,
 }
 
 async fn project_enriched_registry_only(
@@ -4233,6 +4282,10 @@ enum LaterBatch {
     RenewalAndOtherLeases,
     /// The retained lease lapses past grace: the registrar resource's state-derived release.
     ReleaseOfRetainedLease,
+    /// An earlier lease of the name is released. Before the re-registration it is released in
+    /// the on-chain order, ahead of the retained lease's grant, and the block-11 batch renews
+    /// the retained lease; otherwise its release is observed at block 11, after the handoff.
+    ReleaseOfAnEarlierLease { before_reregistration: bool },
 }
 
 const EARLIER_LEASE_RESOURCE: &str = "60000000-0000-0000-0000-000000000001";
@@ -4271,7 +4324,10 @@ async fn project_enriched_registry_only_batches(
         .await?;
         seed_binding_provenance(&pool, OWNERLESS_BINDING, 0, 1).await?;
     }
-    if matches!(later_batch, Some(LaterBatch::RenewalAndOtherLeases)) {
+    if matches!(
+        later_batch,
+        Some(LaterBatch::RenewalAndOtherLeases | LaterBatch::ReleaseOfAnEarlierLease { .. })
+    ) {
         for resource in [EARLIER_LEASE_RESOURCE, UNBOUND_LEASE_RESOURCE] {
             sqlx::query(
                 "INSERT INTO resources (
@@ -4302,6 +4358,14 @@ async fn project_enriched_registry_only_batches(
         .execute(&pool)
         .await?;
         seed_binding_provenance(&pool, EARLIER_LEASE_BINDING, 0, 0).await?;
+    }
+    if matches!(
+        later_batch,
+        Some(LaterBatch::ReleaseOfAnEarlierLease {
+            before_reregistration: true
+        })
+    ) {
+        seed_earlier_lease_release(&pool, 8, 0).await?;
     }
     for (identity, kind, block, log, expiry) in [
         (
@@ -4375,6 +4439,42 @@ async fn project_enriched_registry_only_batches(
         "registry_only",
     )
     .await?;
+    // The registry owner the transfer left behind: the registrar wrote it when registering and a
+    // token transfer without `reclaim` does not touch it.
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L148-L150 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+    seed_authority_transferred(
+        &pool,
+        "fixture:enriched-registry-only-owner",
+        OWNERLESS_NAMEHASH,
+        REGISTRY_RESOURCE,
+        10,
+        8,
+        json!({
+            "node": OWNERLESS_NAMEHASH,
+            "owner": ALICE,
+            "owner_getter": ALICE,
+            "authority_kind": "registry_only",
+        }),
+    )
+    .await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:enriched-registry-only-resolver",
+        Some(OWNERLESS_LOGICAL),
+        Some(REGISTRY_RESOURCE),
+        "ResolverChanged",
+        "ens_v1_registry_l1",
+        10,
+        2,
+        json!({
+            "source_event": "NewResolver",
+            "node": OWNERLESS_NAMEHASH,
+            "resolver": RESOLVER_ADDRESS,
+        }),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
     seed_normalized_event(
         &pool,
         "fixture:enriched-unreclaimed-transfer",
@@ -4443,7 +4543,16 @@ async fn project_enriched_registry_only_batches(
                 )
                 .await?;
             }
-            LaterBatch::RenewalWithoutName | LaterBatch::RenewalAndOtherLeases => {
+            LaterBatch::ReleaseOfAnEarlierLease {
+                before_reregistration: false,
+            } => {
+                seed_earlier_lease_release(&pool, 11, 3).await?;
+            }
+            LaterBatch::RenewalWithoutName
+            | LaterBatch::RenewalAndOtherLeases
+            | LaterBatch::ReleaseOfAnEarlierLease {
+                before_reregistration: true,
+            } => {
                 for (kind, log) in [("RegistrationRenewed", 1), ("ExpiryChanged", 2)] {
                     seed_normalized_event(
                         &pool,
@@ -4522,14 +4631,22 @@ async fn project_enriched_registry_only_batches(
         selected_resource_id,
         control,
         registration_status,
-    ) = sqlx::query_as(
+        authority_kind,
+        released_at,
+        resolver,
+        released_tombstone,
+    ): EnrichedRegistryOnlyRow = sqlx::query_as(
         "SELECT (declared_summary #>> '{registration,expiry}')::bigint,
              declared_summary #>> '{registration,registered_at}',
              declared_summary #>> '{registration,resource_id}',
              declared_summary #>> '{registration,registrant}',
              surface_binding_id::text, resource_id::text,
              (declared_summary -> 'control') - 'expiry',
-             declared_summary #>> '{registration,status}'
+             declared_summary #>> '{registration,status}',
+             declared_summary #>> '{registration,authority_kind}',
+             declared_summary #>> '{registration,released_at}',
+             declared_summary #>> '{resolver,address}',
+             provenance #>> '{authority_selection,resource_authority_context,released_tombstone}'
          FROM name_current
          WHERE logical_name_id = $1",
     )
@@ -4545,7 +4662,27 @@ async fn project_enriched_registry_only_batches(
     .bind(OWNERLESS_LOGICAL)
     .fetch_optional(&pool)
     .await?;
-    let serving = serving_projection_snapshot(&pool).await?;
+    let address_relations = sqlx::query_as(
+        "SELECT address, relation
+         FROM address_names_current
+         WHERE logical_name_id = $1
+         ORDER BY relation, address",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .fetch_all(&pool)
+    .await?;
+    let mut serving = serving_projection_snapshot(&pool).await?;
+    if matches!(
+        later_batch,
+        Some(LaterBatch::ReleaseOfAnEarlierLease { .. })
+    ) {
+        // A lease resource that no later batch touches keeps, in its permission summary row,
+        // the target block of the batch that last projected it, as in
+        // `project_released_then_reregistered`: the earlier lease's resource when it was
+        // released before the re-registration, the retained lease's when the block-11 batch
+        // touches only the earlier lease's.
+        serving.retain(|(table, _)| table != "permissions_current_resource_summary");
+    }
     database.cleanup().await?;
     Ok(EnrichedRegistryOnlyProjection {
         expiry,
@@ -4557,6 +4694,11 @@ async fn project_enriched_registry_only_batches(
         selected_binding: (selected_binding_id, selected_resource_id),
         control,
         registration_status,
+        authority_kind,
+        released_at,
+        resolver,
+        released_tombstone,
+        address_relations,
     })
 }
 
@@ -4651,15 +4793,26 @@ async fn renewal_of_another_lease_does_not_extend_a_handed_off_name() -> Result<
     Ok(())
 }
 
-/// The retained lease also ends under the registry-only binding. Its release marks the
-/// registration released, as it does when the release itself hands the name to the registry-only
-/// binding, and leaves the binding and control alone: the registry keeps its owner record when
-/// the registrar lease lapses.
+/// The retained lease also ends under the registry-only binding, and its release releases the
+/// name like any other lapse: the registrar's `ownerOf` reverts and the name is available again,
+/// whatever the registry still records. The name serves a released tombstone on the registry-only
+/// binding that stands for the lapsed lease: `released` with its `released_at`, no registrant,
+/// authority, expiry, control or resolver, and no row in the address listing.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f)
 #[tokio::test]
 async fn release_of_the_retained_lease_reaches_a_handed_off_name() -> Result<()> {
     let handed_off = project_enriched_registry_only_batches(false, false, None).await?;
     assert_eq!(handed_off.registration_status.as_deref(), Some("active"));
+    assert_eq!(
+        handed_off.resolver.as_deref(),
+        Some(RESOLVER_ADDRESS),
+        "the handed-off name must serve the resolver its registry owner set"
+    );
+    assert!(
+        !handed_off.address_relations.is_empty(),
+        "the handed-off name must be listed under an address before the lease lapses"
+    );
     let later = Some(LaterBatch::ReleaseOfRetainedLease);
     let incremental = project_enriched_registry_only_batches(false, true, later).await?;
     let from_zero = project_enriched_registry_only_batches(false, false, later).await?;
@@ -4670,10 +4823,107 @@ async fn release_of_the_retained_lease_reaches_a_handed_off_name() -> Result<()>
             Some("released"),
             "{mode}: the retained lease's release did not reach the name"
         );
-        assert_eq!(projection.expiry, Some(1_700_001_100));
-        assert_eq!(projection.selected_binding, handed_off.selected_binding);
-        assert_eq!(projection.control, handed_off.control, "{mode}");
-        assert_eq!(projection.registered_at, handed_off.registered_at);
+        assert_eq!(
+            projection.released_at.as_deref(),
+            Some("1707777101"),
+            "{mode}: the release's released_at was not served"
+        );
+        assert_eq!(
+            projection.released_tombstone.as_deref(),
+            Some("ens_v1"),
+            "{mode}: the lapsed lease did not leave a released tombstone"
+        );
+        assert_eq!(
+            projection.selected_binding, handed_off.selected_binding,
+            "{mode}: the tombstone must stand on the registry-only binding"
+        );
+        assert_eq!(
+            projection.registration_resource_id.as_deref(),
+            Some(OWNERLESS_RESOURCE),
+            "{mode}: the released registration must keep its lease identity"
+        );
+        assert_eq!(projection.registered_at, handed_off.registered_at, "{mode}");
+        assert_eq!(
+            projection.expiry, None,
+            "{mode}: a released name has no expiry"
+        );
+        assert_eq!(
+            projection.registrant, None,
+            "{mode}: a released name has no registrant"
+        );
+        assert_eq!(
+            projection.authority_kind, None,
+            "{mode}: a released name has no authority"
+        );
+        assert_eq!(
+            projection.control,
+            json!({"status": "unregistered"}),
+            "{mode}: a released name has no current control"
+        );
+        assert_eq!(
+            projection.resolver, None,
+            "{mode}: a released name has no resolver"
+        );
+        assert_eq!(
+            projection.address_relations,
+            Vec::<(String, String)>::new(),
+            "{mode}: a released name is listed under no address"
+        );
+        assert_eq!(projection.address_registrant, None, "{mode}");
+    }
+    Ok(())
+}
+
+/// A name released on an earlier lease and registered again on a new one, which is then handed
+/// off without `reclaim`: the earlier lease's release must not tombstone the name. In the
+/// on-chain order the release precedes the new grant; a release of that lease observed after the
+/// handoff is not the retained lease's either.
+#[tokio::test]
+async fn release_of_an_earlier_lease_does_not_tombstone_a_handed_off_name() -> Result<()> {
+    let handed_off = project_enriched_registry_only_batches(false, false, None).await?;
+    for before_reregistration in [true, false] {
+        let later = Some(LaterBatch::ReleaseOfAnEarlierLease {
+            before_reregistration,
+        });
+        let incremental = project_enriched_registry_only_batches(false, true, later).await?;
+        let from_zero = project_enriched_registry_only_batches(false, false, later).await?;
+        assert_eq!(
+            incremental, from_zero,
+            "before_reregistration={before_reregistration}"
+        );
+        for (mode, projection) in [("incremental", &incremental), ("from zero", &from_zero)] {
+            let shape = format!("{mode}, before_reregistration={before_reregistration}");
+            assert_eq!(
+                projection.released_tombstone, None,
+                "{shape}: the earlier lease's release tombstoned the live registration"
+            );
+            assert_eq!(projection.released_at, None, "{shape}");
+            assert_eq!(projection.resolver, handed_off.resolver, "{shape}");
+            assert_eq!(projection.control, handed_off.control, "{shape}");
+            assert_eq!(
+                projection.address_relations, handed_off.address_relations,
+                "{shape}"
+            );
+            if before_reregistration {
+                assert_renewed_after_handoff(&shape, projection, &handed_off);
+            } else {
+                assert_eq!(
+                    projection.registration_status.as_deref(),
+                    Some("active"),
+                    "{shape}"
+                );
+                assert_eq!(projection.expiry, Some(1_700_001_100), "{shape}");
+                assert_eq!(
+                    projection.selected_binding, handed_off.selected_binding,
+                    "{shape}"
+                );
+                assert_eq!(projection.registrant, handed_off.registrant, "{shape}");
+                assert_eq!(
+                    projection.registered_at, handed_off.registered_at,
+                    "{shape}"
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -4713,6 +4963,12 @@ fn assert_renewed_after_handoff(
     assert_eq!(projection.registration_status.as_deref(), Some("active"));
     assert_eq!(projection.registrant, handed_off.registrant);
     assert_eq!(projection.address_registrant, handed_off.address_registrant);
+    assert_eq!(projection.released_tombstone, None, "{mode}");
+    assert_eq!(projection.resolver, handed_off.resolver, "{mode}");
+    assert_eq!(
+        projection.address_relations, handed_off.address_relations,
+        "{mode}"
+    );
 }
 
 /// Today's mainnet manifest shape: controller events grant leases, so registrar rows carry the

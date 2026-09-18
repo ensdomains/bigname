@@ -1630,6 +1630,47 @@ async fn v2_get_name_withholds_retained_inventory_for_released_tombstone() -> Re
     Ok(())
 }
 
+/// A `.eth` lease that lapsed under the registry-only binding a transfer without `reclaim`
+/// opened is released like any other lapse. Project serves it as a released tombstone on that
+/// binding, with `registry_only` still named as the authority kind of the registration, and the
+/// API serves what it serves for every released name: no owner, registrant, expiry, resolver or
+/// records.
+#[tokio::test]
+async fn v2_get_name_serves_a_lapsed_handed_off_lease_as_released() -> Result<()> {
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
+        row.declared_summary["registration"] = json!({
+            "status": "released",
+            "authority_kind": "registry_only",
+            "released_at": "2026-06-14T00:00:00Z",
+            "registrant": null,
+            "expiry": null,
+            "registered_at": "2024-06-14T00:00:00Z",
+            "latest_event_kind": "RegistrationReleased"
+        });
+        row.declared_summary["control"] = json!({"status": "unregistered"});
+        row.declared_summary["resolver"] = json!({
+            "chain_id": null,
+            "address": null,
+            "latest_event_kind": "ResolverChanged"
+        });
+    })
+    .await?;
+
+    let data = payload["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("status"), Some(&json!("ok")));
+    assert_eq!(data.get("registration_status"), Some(&json!("released")));
+    assert!(data["owner"].is_null(), "{payload}");
+    assert!(data["manager"].is_null(), "{payload}");
+    assert!(data["registrant"].is_null(), "{payload}");
+    assert!(data["expires_at"].is_null(), "{payload}");
+    assert!(data.get("resolver").is_none(), "{payload}");
+    assert!(data.get("addresses").is_none(), "{payload}");
+    assert!(data.get("text_records").is_none(), "{payload}");
+    assert!(data.get("content_hash").is_none(), "{payload}");
+    assert!(data.get("primary_address").is_none(), "{payload}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_get_name_skips_stale_inventory_for_released_tombstone() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
