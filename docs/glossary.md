@@ -667,7 +667,8 @@ transaction's own holder-to-controller transfer, which precedes the cleanup; on
 the unlocked-wrapped path, where `unwrapETH2LD` moves the token from the
 NameWrapper straight to the Graveyard, the cleanup transfer itself, admitted
 for a name registered straight into the NameWrapper because its controller
-grant had already been observed on the lease before the transaction. The
+grant is a registrar lifecycle event of the lease positioned before the
+cleanup. The
 Sepolia profile also indexes the numeric BaseRegistrar lifecycle events.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L128-L150 @ ens_v2@a971bd6)
