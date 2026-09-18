@@ -742,11 +742,19 @@ The successor proof ends at its initial mint/resource-link/role-grant sequence;
 subsequent same-transaction token transfers and role changes remain ordinary.
 (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRegistry.json:L2347 @ ens_v2@a971bd64)
 Reconciliation retains raw facts and normalized ownership/cleanup observations,
-but removes intervening ENSv1 authority bindings and their derived permission
-changes. Registry metadata remains attached to the existing registrar resource
-without fields that would restore temporary registry-only authority. Thus the
-actual registrar lease stays the predecessor at cleanup, and
-no replacement ENSv1 binding survives the strict cross-arm transition. Missing,
+but removes intervening ENSv1 authority bindings and the permission grants
+those temporary authorities derive. Permission revocations stay on the resource
+whose grant they close. On the lease every revocation is kept for audit. On the
+registry-only resource a transfer without `reclaim` left the name bound to, a
+revocation is kept when it closes a grant made before the transaction: the
+controller's reclaim revokes the registry owner's handoff grants there, and
+dropping those revocations would leave the grants as the latest permission rows
+Project folds. A revocation that closes a grant the reconciliation itself
+removed is removed with it. Registry metadata observations remain attached
+to the existing registrar resource without fields that would restore temporary
+registry-only authority. Thus the actual registrar lease stays the predecessor
+at cleanup, and no replacement ENSv1 binding survives the strict cross-arm
+transition. Missing,
 ambiguous, or mismatched proof leaves ordinary interpretation unchanged; zero
 or multiple eligible predecessors remain integrity errors in the writer.
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
