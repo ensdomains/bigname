@@ -5,23 +5,27 @@ use axum::{
     extract::{Path, State},
 };
 use bigname_storage::{
-    HistoryBlockWindow, HistoryCursor, HistoryEvent as StorageHistoryEvent, HistoryOrder,
-    HistoryPageOptions, HistorySummary, HistorySummaryMode, SnapshotAt, SnapshotSelectionScope,
+    HistoryBlockWindow, HistoryEvent as StorageHistoryEvent, HistoryOrder, HistoryPageOptions,
+    HistorySummary, HistorySummaryMode, SnapshotAt, SnapshotSelectionScope,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::types::time::{OffsetDateTime, UtcOffset};
+use sqlx::types::{
+    Uuid,
+    time::{OffsetDateTime, UtcOffset},
+};
 
 use crate::AppState;
 
-use super::cursor::{cursor_value, invalid_cursor_error};
+use super::cursor::invalid_cursor_error;
+use super::name_record::projected_registration_resource_id;
 use super::support::{
     ExactNameSnapshotSelector, exact_name_snapshot_scope, normalize_inferred_route_name,
 };
 use super::{
-    AtSelector, CursorPayload, Envelope, EventDetail, HistoryEventType, HistoryInclude,
-    HistoryScope, Page, QueryParamAllowlist, QueryParams, SortOrder, StrictQueryParams, V2Error,
-    V2Result, all_chain_slugs, api_error_to_v2, build_event_detail, decode, decode_at_token,
-    encode, history_include, raw_event_kind, validate_latest_collection_selectors,
+    AtSelector, Envelope, EventDetail, HistoryEventType, HistoryInclude, HistoryScope, Page,
+    QueryParamAllowlist, QueryParams, SortOrder, StrictQueryParams, V2Error, V2Result,
+    all_chain_slugs, api_error_to_v2, build_event_detail, decode, decode_at_token, encode,
+    history_include, raw_event_kind, validate_latest_collection_selectors,
 };
 
 const HISTORY_SORT_DESC: &str = "chain_position_desc";
@@ -178,6 +182,7 @@ pub(crate) async fn get_history(
                 .is_some_and(|block| binding.block_number <= *block)
         })
         .map(|binding| binding.resource_id)
+        .chain(registration_lease_resource_ids(&state, &parent, &snapshot.block_bounds()).await?)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -230,6 +235,63 @@ pub(crate) async fn get_history(
         }),
         meta: snapshot.finish(&state).await?,
     }))
+}
+
+/// The BaseRegistrar leases behind a name that its surface bindings do not reach. A wrapped
+/// name is bound to its NameWrapper resource, so its lease rows are reached through the link
+/// each `NameWrapped` row recorded. A lease granted with `registerOnly` while the name stayed
+/// bound to a registry-only resource (a registrar token transferred without `reclaim`) has no
+/// binding or link at all, so every published registrar grant carrying the name's namehash is
+/// followed too, together with the registration resource Project selected.
+async fn registration_lease_resource_ids(
+    state: &AppState,
+    parent: &bigname_storage::NameCurrentRow,
+    block_bounds: &BTreeMap<String, i64>,
+) -> V2Result<Vec<Uuid>> {
+    let mut resource_ids = bigname_storage::load_wrapped_registrar_resource_ids_by_logical_name_id(
+        &state.pool,
+        &parent.logical_name_id,
+        Some(block_bounds),
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(
+            logical_name_id = %parent.logical_name_id,
+            error = ?error,
+            "failed to load history wrapped registrar resources"
+        );
+        V2Error::internal_error("failed to load name history")
+    })?;
+    resource_ids.extend(
+        bigname_storage::load_registrar_grant_resource_ids_by_logical_name_id(
+            &state.pool,
+            &parent.logical_name_id,
+            Some(block_bounds),
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                logical_name_id = %parent.logical_name_id,
+                error = ?error,
+                "failed to load history registrar grant resources"
+            );
+            V2Error::internal_error("failed to load name history")
+        })?,
+    );
+    if let Some(resource_id) = projected_registration_resource_id(&parent.declared_summary) {
+        resource_ids.push(Uuid::parse_str(resource_id).map_err(|error| {
+            tracing::error!(
+                logical_name_id = %parent.logical_name_id,
+                resource_id,
+                error = ?error,
+                "projected registration resource id is invalid"
+            );
+            V2Error::internal_error("failed to load name history")
+        })?);
+    }
+    resource_ids.sort_unstable();
+    resource_ids.dedup();
+    Ok(resource_ids)
 }
 
 /// History routes default to newest-first; `order=asc` is the exact reverse.
@@ -420,84 +482,6 @@ fn history_redo_stale_error() -> V2Error {
     V2Error::stale("history is temporarily unavailable while Interpret redo is in progress")
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct HistoryCursorBinding<'a> {
-    pub(crate) namespace: &'a str,
-    pub(crate) parent_logical_name_id: &'a str,
-    pub(crate) scope: HistoryScope,
-    pub(crate) order: HistoryOrder,
-    pub(crate) params: &'a QueryParams,
-}
-
-fn history_cursor_filters(binding: &HistoryCursorBinding<'_>) -> BTreeMap<String, String> {
-    let mut filters = BTreeMap::from([
-        (
-            NAMESPACE_FILTER_KEY.to_owned(),
-            binding.namespace.to_owned(),
-        ),
-        (
-            NAME_FILTER_KEY.to_owned(),
-            binding.parent_logical_name_id.to_owned(),
-        ),
-        (
-            SCOPE_FILTER_KEY.to_owned(),
-            binding.scope.as_str().to_owned(),
-        ),
-    ]);
-    insert_history_filter_keys(&mut filters, binding.params);
-    filters
-}
-
-pub(crate) fn history_cursor_payload(
-    cursor: &HistoryCursor,
-    binding: &HistoryCursorBinding<'_>,
-) -> CursorPayload {
-    CursorPayload::new(
-        history_sort_token(binding.order),
-        history_cursor_filters(binding),
-        BTreeMap::from([
-            (
-                NORMALIZED_EVENT_ID_CURSOR_KEY.to_owned(),
-                cursor.normalized_event_id.to_string(),
-            ),
-            (
-                EVENT_IDENTITY_CURSOR_KEY.to_owned(),
-                cursor.event_identity.clone(),
-            ),
-        ]),
-        None,
-    )
-}
-
-pub(crate) fn history_storage_cursor(
-    payload: &CursorPayload,
-    binding: &HistoryCursorBinding<'_>,
-) -> V2Result<HistoryCursor> {
-    if payload.sort != history_sort_token(binding.order) {
-        return Err(invalid_cursor_error());
-    }
-    if payload.filters != history_cursor_filters(binding) {
-        return Err(invalid_cursor_error());
-    }
-    if payload.last_item.len() != 2 {
-        return Err(invalid_cursor_error());
-    }
-
-    let normalized_event_id = cursor_value(
-        payload,
-        NORMALIZED_EVENT_ID_CURSOR_KEY,
-        invalid_cursor_error,
-    )?
-    .parse::<i64>()
-    .map_err(|_| invalid_cursor_error())?;
-    let event_identity = cursor_value(payload, EVENT_IDENTITY_CURSOR_KEY, invalid_cursor_error)?;
-
-    Ok(HistoryCursor {
-        normalized_event_id,
-        event_identity,
-    })
-}
-
 fn history_event_name(row: &StorageHistoryEvent, anchor_name: &str) -> String {
     let _ = row;
     anchor_name.to_owned()
@@ -565,6 +549,12 @@ pub(crate) fn format_timestamp(value: OffsetDateTime) -> String {
         value.second()
     )
 }
+
+mod cursor;
+
+pub(crate) use self::cursor::{
+    HistoryCursorBinding, history_cursor_payload, history_storage_cursor,
+};
 
 #[cfg(test)]
 mod tests;

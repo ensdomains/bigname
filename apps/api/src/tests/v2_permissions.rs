@@ -126,6 +126,210 @@ async fn v2_get_permissions_empties_a_superseded_name_and_registration_pair() ->
     Ok(())
 }
 
+// A name paired with another current name's registration is a superseded pair too. Its empty
+// page is classified like a standalone read of that registration: for a wrapped `.eth` lease, from
+// the NameWrapper resource the lease resolves to, not from the lease's own summary. The NameWrapper
+// resource itself is not a registration, so pairing the name with it keeps the raw resource
+// classification, and reading it alone still answers the empty not-a-registration page.
+#[tokio::test]
+async fn v2_get_permissions_classifies_a_paired_wrapped_lease_like_its_standalone_read()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    // alpha.eth serves lease L; its permission rows and wrapper summary live on NameWrapper
+    // resource W. beta.eth is a second supported current name serving its own registration.
+    let wrapper_resource_id = Uuid::from_u128(0xa100);
+    let lease_resource_id = Uuid::from_u128(0xe400);
+    seed_alpha_registrar_lease(&database, lease_resource_id).await?;
+    upsert_phase_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(wrapper_resource_id, Some("wrapper")),
+    )
+    .await?;
+    upsert_phase_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(lease_resource_id, Some("registrar")),
+    )
+    .await?;
+
+    let standalone = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={lease_resource_id}"),
+    )
+    .await?;
+    assert!(!standalone["data"].as_array().expect("lease rows").is_empty());
+    assert_unlisted_permission_surfaces(&standalone, V2_WRAPPER_UNLISTED_SURFACES);
+
+    let paired = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?name=beta.eth&registration_id={lease_resource_id}"),
+    )
+    .await?;
+    assert_eq!(paired["data"], json!([]));
+    assert!(paired.get("restrictions").is_none(), "{paired}");
+    assert_eq!(
+        paired["meta"], standalone["meta"],
+        "the paired read must classify support like the standalone read of the lease"
+    );
+
+    // Control: the NameWrapper resource is not a registration. Paired with the name it keeps its
+    // raw resource classification; alone it selects nothing and claims no completeness.
+    let paired_wrapper = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?name=beta.eth&registration_id={wrapper_resource_id}"),
+    )
+    .await?;
+    assert_eq!(paired_wrapper["data"], json!([]));
+    assert!(paired_wrapper.get("restrictions").is_none(), "{paired_wrapper}");
+    assert_unlisted_permission_surfaces(&paired_wrapper, V2_WRAPPER_UNLISTED_SURFACES);
+    let alone_wrapper = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={wrapper_resource_id}"),
+    )
+    .await?;
+    assert_eq!(alone_wrapper["data"], json!([]));
+    assert!(alone_wrapper.get("restrictions").is_none(), "{alone_wrapper}");
+    assert!(
+        alone_wrapper["meta"].get("completeness").is_none(),
+        "{}",
+        alone_wrapper["meta"]
+    );
+
+    database.cleanup().await
+}
+
+// A cursor is bound to the registration handle the request named, not to the resource that
+// handle reads. A page of `?registration_id=<lease>` continues under the lease; under the
+// NameWrapper resource the lease reads, which is a different request, the cursor is rejected.
+#[tokio::test]
+async fn v2_get_permissions_cursor_binds_the_requested_registration_id() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let wrapper_resource_id = Uuid::from_u128(0xa100);
+    let lease_resource_id = Uuid::from_u128(0xe400);
+    seed_alpha_registrar_lease(&database, lease_resource_id).await?;
+
+    let first = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={lease_resource_id}&page_size=1"),
+    )
+    .await?;
+    assert_eq!(first["data"].as_array().expect("first page").len(), 1);
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .expect("the lease has more than one permission row")
+        .to_owned();
+
+    let continued = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={lease_resource_id}&page_size=1&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(continued["data"].as_array().expect("second page").len(), 1);
+    assert_ne!(continued["data"][0], first["data"][0]);
+
+    let response = v2_permissions_response_for_database(
+        &database,
+        &format!(
+            "/v1/permissions?registration_id={wrapper_resource_id}&page_size=1&cursor={cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("invalid_input"));
+
+
+    // A name-only page binds the name's public registration, the lease, not the NameWrapper
+    // resource that holds its rows. The same name continues it, the same name with the lease
+    // continues it (one collection), and the same name with the NameWrapper resource, the
+    // proven-empty pair, is a different request and is rejected.
+    let first = v2_permissions_payload_for_database(
+        &database,
+        "/v1/permissions?name=alpha.eth&page_size=1",
+    )
+    .await?;
+    assert_eq!(first["data"].as_array().expect("first name page").len(), 1);
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .expect("the name has more than one permission row")
+        .to_owned();
+    let continued = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?name=alpha.eth&page_size=1&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(continued["data"].as_array().expect("second name page").len(), 1);
+    assert_ne!(continued["data"][0], first["data"][0]);
+    let with_lease = v2_permissions_payload_for_database(
+        &database,
+        &format!(
+            "/v1/permissions?name=alpha.eth&registration_id={lease_resource_id}&page_size=1&cursor={cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(with_lease["data"], continued["data"], "{with_lease}");
+    let response = v2_permissions_response_for_database(
+        &database,
+        &format!(
+            "/v1/permissions?name=alpha.eth&registration_id={wrapper_resource_id}&page_size=1&cursor={cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("invalid_input"), "{payload}");
+
+    database.cleanup().await
+}
+
+// The NameWrapper resource that wrapped a lease stays outside the public handle space after the
+// name leaves it. Once the name's current row no longer names the wrapper (unwrapped, released,
+// migrated, registered again, or, as here, unsupported), only the recorded wrap link can reject
+// the resource, as history does.
+#[tokio::test]
+async fn v2_get_permissions_rejects_a_historical_name_wrapper_resource() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (wrapper_resource_id, lease_resource_id) =
+        seed_perms_wrapped_lease(&database, WrappedLeaseShape::LinkRecorded).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET support_status = 'unsupported',
+             unsupported_reason = 'conflicting_current_ens_authority'
+         WHERE raw_name = 'perms.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    for uri in [
+        format!("/v1/permissions?registration_id={wrapper_resource_id}"),
+        format!(
+            "/v1/permissions?address={V2_PERMISSIONS_SUBJECT}&registration_id={wrapper_resource_id}"
+        ),
+    ] {
+        let response = v2_permissions_response_for_database(&database, &uri).await?;
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["data"], json!([]), "{uri}: {payload}");
+        assert!(payload.get("restrictions").is_none(), "{uri}");
+        assert!(
+            payload["meta"].get("completeness").is_none(),
+            "{uri}: {}",
+            payload["meta"]
+        );
+    }
+
+    // Control: the lease itself stays a registration handle.
+    let response = v2_permissions_response_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={lease_resource_id}"),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    database.cleanup().await
+}
+
 // A `.eth` lease that lapsed under a registry-only binding (a registrar token transferred
 // without `reclaim`) is released like any other lapse: a name-filtered request selects nothing,
 // as for every released name, while the resource audit keeps its rows.
@@ -805,6 +1009,251 @@ async fn v2_name_and_name_filtered_permissions_select_the_same_live_registration
     assert!(rows.iter().all(|row| {
         row["registration_id"] == name["data"]["registration_id"]
             && row["authority_context"] == json!("current_for_name")
+    }));
+
+    database.cleanup().await
+}
+
+/// How a wrapped `.eth` name's NameWrapper resource came to hold its BaseRegistrar lease.
+#[derive(Clone, Copy, Debug)]
+enum WrappedLeaseShape {
+    /// The name was wrapped after its registration, so `NameWrapped` recorded the lease.
+    LinkRecorded,
+    /// The name was registered through the NameWrapper: `NameWrapped` recorded no lease and
+    /// the registrar controller's later grant names the lease. The lease has no binding of its
+    /// own; Project selects it as the name's registration.
+    ControllerGranted,
+}
+
+#[tokio::test]
+async fn wrapped_name_permissions_carry_the_registrar_lease_handle() -> Result<()> {
+    assert_wrapped_name_permissions_carry_the_registrar_lease_handle(
+        WrappedLeaseShape::LinkRecorded,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn controller_granted_wrapped_name_permissions_carry_the_registrar_lease_handle()
+-> Result<()> {
+    assert_wrapped_name_permissions_carry_the_registrar_lease_handle(
+        WrappedLeaseShape::ControllerGranted,
+    )
+    .await
+}
+
+/// Give perms.eth the shape of a wrapped `.eth` name: the fixture's bound resource plays the
+/// NameWrapper resource and a new BaseRegistrar lease, which Project serves as the registration,
+/// is linked to it by the shape's rule. Returns `(wrapper_resource_id, lease_resource_id)`.
+async fn seed_perms_wrapped_lease(
+    database: &TestDatabase,
+    shape: WrappedLeaseShape,
+) -> Result<(Uuid, Uuid)> {
+    seed_v2_permissions_fixture(database).await?;
+    // The fixture's bound resource plays the NameWrapper resource of a wrapped `.eth` name;
+    // Project serves the BaseRegistrar lease it wrapped as the registration resource.
+    let wrapper_resource_id = v2_permissions_current_resource_id();
+    let lease_resource_id = Uuid::from_u128(0xe300);
+    upsert_test_resources(&database.pool, &[resource(lease_resource_id)]).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+             declared_summary,
+             '{registration,resource_id}',
+             to_jsonb($1::text),
+             true
+         )
+         WHERE raw_name = 'perms.eth'",
+    )
+    .bind(lease_resource_id)
+    .execute(&database.pool)
+    .await?;
+    let logical_name_id: String =
+        sqlx::query_scalar("SELECT logical_name_id FROM bigname_phase.name_current WHERE raw_name = 'perms.eth'")
+            .fetch_one(&database.pool)
+            .await?;
+    let namehash = bigname_lookup::ens_namehash_hex("perms.eth")?;
+    // The wrapper's constraint model must be served under the lease's handle on every page.
+    let mut summary = permission_current_resource_summary(wrapper_resource_id, Some("wrapper"));
+    summary.resource_restrictions = Some(json!({
+        "kind": "ens_v1_wrapper",
+        "wrapper_state": "wrapped",
+        "fuses": 0,
+        "expiry_seconds": 1_800_000_000,
+    }));
+    upsert_phase_permissions_current_resource_summary(&database.pool, &summary).await?;
+    // The lease's own rows carry the node. With a recorded link the NameWrapped binding names
+    // the lease; without one the later controller grant names the name.
+    let (grant_block, grant_logical_name_id, binding_block, link) = match shape {
+        WrappedLeaseShape::LinkRecorded => (120, None, 121, json!(lease_resource_id)),
+        WrappedLeaseShape::ControllerGranted => {
+            (121, Some(logical_name_id.as_str()), 120, Value::Null)
+        }
+    };
+    let mut grant = v2_history_event(
+        "perms-lease-grant",
+        grant_logical_name_id,
+        Some(lease_resource_id),
+        "RegistrationGranted",
+        grant_block,
+    );
+    grant.after_state["namehash"] = json!(namehash);
+    let mut binding = v2_history_event(
+        "perms-wrapper-binding",
+        Some(&logical_name_id),
+        Some(wrapper_resource_id),
+        "SurfaceBound",
+        binding_block,
+    );
+    binding.source_family = "ens_v1_wrapper_l1".to_owned();
+    binding.after_state = json!({
+        "source_event": "NameWrapped",
+        "node": namehash,
+        "wrapped_registrar_resource_id": link,
+    });
+    seed_v2_history_blocks(database, 120..=121).await?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant, binding]).await?;
+    Ok((wrapper_resource_id, lease_resource_id))
+}
+
+async fn assert_wrapped_name_permissions_carry_the_registrar_lease_handle(
+    shape: WrappedLeaseShape,
+) -> Result<()> {
+    const UNGRANTED_ADDRESS: &str = "0x00000000000000000000000000000000000000ee";
+    let database = TestDatabase::new_migrated().await?;
+    let (wrapper_resource_id, lease_resource_id) =
+        seed_perms_wrapped_lease(&database, shape).await?;
+
+    let name = v2_name_record_payload_for_database(&database, "/v1/names/Perms.eth").await?;
+    assert_eq!(
+        name["data"]["registration_id"],
+        json!(lease_resource_id.to_string())
+    );
+    let by_name =
+        v2_permissions_payload_for_database(&database, "/v1/permissions?name=Perms.eth").await?;
+    let rows = by_name["data"].as_array().expect("permissions data");
+    assert!(!rows.is_empty());
+    assert!(
+        rows.iter().all(|row| {
+            row["registration_id"] == name["data"]["registration_id"]
+                && row["authority_context"] == json!("current_for_name")
+        }),
+        "{shape:?}: permission rows must carry the registration_id the name serves: {rows:?}"
+    );
+    assert_eq!(
+        by_name["restrictions"]["registration_id"],
+        json!(lease_resource_id.to_string()),
+        "{shape:?}: {}",
+        by_name["restrictions"]
+    );
+
+    let paired = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?name=Perms.eth&registration_id={lease_resource_id}"),
+    )
+    .await?;
+    assert_eq!(paired["data"], by_name["data"], "{shape:?}");
+    assert_eq!(paired["restrictions"], by_name["restrictions"], "{shape:?}");
+
+    // The registration_id read from the name selects the same permissions on its own.
+    let by_lease = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={lease_resource_id}"),
+    )
+    .await?;
+    let lease_rows = by_lease["data"].as_array().expect("lease permissions");
+    assert_eq!(lease_rows.len(), rows.len(), "{shape:?}: {lease_rows:?}");
+    assert!(lease_rows.iter().all(|row| {
+        row["registration_id"] == json!(lease_resource_id.to_string())
+            && row["authority_context"] == json!("resource_audit")
+    }), "{shape:?}: {lease_rows:?}");
+    assert_eq!(
+        by_lease["restrictions"]["registration_id"],
+        json!(lease_resource_id.to_string()),
+        "{shape:?}: {}",
+        by_lease["restrictions"]
+    );
+
+    // An address with no grant leaves the page empty, not the registration unidentified.
+    for uri in [
+        format!("/v1/permissions?name=Perms.eth&address={UNGRANTED_ADDRESS}"),
+        format!("/v1/permissions?registration_id={lease_resource_id}&address={UNGRANTED_ADDRESS}"),
+    ] {
+        let payload = v2_permissions_payload_for_database(&database, &uri).await?;
+        assert_eq!(payload["data"], json!([]), "{shape:?}: {uri}");
+        assert_eq!(
+            payload["restrictions"]["registration_id"],
+            json!(lease_resource_id.to_string()),
+            "{shape:?}: {uri}: {}",
+            payload["restrictions"]
+        );
+        assert_eq!(payload["restrictions"]["kind"], json!("ens_v1_wrapper"), "{shape:?}: {uri}");
+    }
+
+    // The NameWrapper resource is not the name's registration.
+    let wrapper_pair = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?name=Perms.eth&registration_id={wrapper_resource_id}"),
+    )
+    .await?;
+    assert_eq!(wrapper_pair["data"], json!([]), "{shape:?}");
+
+    // Nor does it select anything on its own: history rejects the same value, so permissions
+    // must not serve the wrapper's rows under it.
+    for uri in [
+        format!("/v1/permissions?registration_id={wrapper_resource_id}"),
+        format!(
+            "/v1/permissions?address={V2_PERMISSIONS_SUBJECT}&registration_id={wrapper_resource_id}"
+        ),
+    ] {
+        let response = v2_permissions_response_for_database(&database, &uri).await?;
+        assert_eq!(response.status(), StatusCode::OK, "{shape:?}: {uri}");
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["data"], json!([]), "{shape:?}: {uri}");
+        assert_eq!(payload["page"]["has_more"], json!(false), "{shape:?}: {uri}");
+        assert_eq!(payload["page"]["next_cursor"], Value::Null, "{shape:?}: {uri}");
+        assert_eq!(payload["meta"]["as_of"], by_lease["meta"]["as_of"], "{shape:?}: {uri}");
+        assert!(payload.get("restrictions").is_none(), "{shape:?}: {uri}");
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn wrapped_subname_permissions_read_by_the_name_wrapper_resource() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    // A wrapped subname has no BaseRegistrar lease: Project records no registration resource,
+    // so its NameWrapper resource is its registration_id.
+    let wrapper_resource_id = v2_permissions_current_resource_id();
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+             declared_summary,
+             '{registration}',
+             '{\"status\": \"wrapped\", \"authority_kind\": \"wrapper\"}'::jsonb,
+             true
+         )
+         WHERE raw_name = 'perms.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let name = v2_name_record_payload_for_database(&database, "/v1/names/Perms.eth").await?;
+    assert_eq!(
+        name["data"]["registration_id"],
+        json!(wrapper_resource_id.to_string())
+    );
+    let by_registration = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={wrapper_resource_id}"),
+    )
+    .await?;
+    let rows = by_registration["data"].as_array().expect("permissions data");
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(rows.iter().all(|row| {
+        row["registration_id"] == json!(wrapper_resource_id.to_string())
+            && row["authority_context"] == json!("resource_audit")
     }));
 
     database.cleanup().await

@@ -103,6 +103,32 @@ pub async fn load_permissions_current_resource_summaries(
 }
 
 /// Namespace membership for resource audit reads, including registrations with no current name.
+/// Whether `resource_id` is a NameWrapper resource whose canonical `NameWrapped` row recorded the
+/// BaseRegistrar lease it wrapped. Such a resource is never a public registration handle: the
+/// lease is the registration, also after the name was unwrapped, released or registered again.
+/// History rejects the same value by the same link.
+pub async fn resource_wrapped_a_registrar_lease(pool: &PgPool, resource_id: Uuid) -> Result<bool> {
+    sqlx::query_scalar(
+        r#"SELECT EXISTS (
+            SELECT 1 FROM bigname_phase.normalized_events ne
+            LEFT JOIN bigname_phase.chain_lineage lineage
+              ON lineage.chain_id = ne.chain_id AND lineage.block_hash = ne.block_hash
+            WHERE ne.resource_id = $1
+              AND ne.source_family = 'ens_v1_wrapper_l1'
+              AND ne.event_kind = 'SurfaceBound'
+              AND ne.after_state ->> 'wrapped_registrar_resource_id' IS NOT NULL
+              AND ne.consumer_visibility = 'activated'
+              AND ne.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND (ne.block_hash IS NULL
+                   OR lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
+        )"#,
+    )
+    .bind(resource_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to check whether a resource wrapped a registrar lease")
+}
+
 pub async fn permission_resource_matches_namespace(
     pool: &PgPool,
     resource_id: Uuid,

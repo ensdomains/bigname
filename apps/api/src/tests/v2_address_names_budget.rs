@@ -194,6 +194,136 @@ async fn v2_address_names_grant_budget_counts_repeated_resource_summaries() -> R
     database.cleanup().await
 }
 
+/// Give alpha.eth the shape of a wrapped `.eth` name: its permission resource plays the
+/// NameWrapper resource, and the BaseRegistrar lease it wrapped, whose own grant names the node,
+/// is the registration the name serves.
+async fn seed_alpha_registrar_lease(database: &TestDatabase, lease_resource_id: Uuid) -> Result<()> {
+    let specs = v2_address_name_specs();
+    let alpha = specs
+        .iter()
+        .find(|spec| spec.name == "alpha.eth")
+        .expect("alpha address-name fixture must exist");
+    upsert_test_resources(&database.pool, &[resource(lease_resource_id)]).await?;
+    let (chain_id, namehash): (String, String) = sqlx::query_as(
+        "SELECT chain_id, namehash FROM bigname_phase.name_surfaces WHERE raw_name = 'alpha.eth'",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    let mut grant = history_event(
+        "alpha-lease-grant",
+        None,
+        Some(lease_resource_id),
+        Some(&chain_id),
+        Some(alpha.block_number),
+        Some(alpha.block_hash),
+        Some("0xtx-alpha-lease"),
+        Some(0),
+        CanonicalityState::Canonical,
+    );
+    grant.namespace = "ens".to_owned();
+    grant.event_kind = "RegistrationGranted".to_owned();
+    grant.source_family = "ens_v1_registrar_l1".to_owned();
+    grant.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+    grant.before_state = json!({});
+    grant.after_state = json!({
+        "authority_kind": "registrar",
+        "authority_key": "registrar:ethereum-mainnet:alpha",
+        "registrant": alpha.registrant,
+        "expiry": 1_900_000_000_i64,
+        "namehash": namehash,
+    });
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant]).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+             declared_summary, '{registration,resource_id}', to_jsonb($1::text), true)
+         WHERE raw_name = 'alpha.eth'",
+    )
+    .bind(lease_resource_id.to_string())
+    .execute(&database.pool)
+    .await?;
+    Ok(())
+}
+
+// A wrapped `.eth` name serves its BaseRegistrar lease as `permission_resource_id`, the same
+// handle `registration_id` serves everywhere else, and the permissions route resolves that handle
+// to the NameWrapper resource's rows, with and without `address`. The NameWrapper resource itself
+// is not a public registration handle.
+#[tokio::test]
+async fn v2_address_names_wrapped_name_permission_resource_id_is_the_registrar_lease()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    seed_v2_address_registry_operator(&database).await?;
+    let wrapper_resource_id = Uuid::from_u128(0xa100);
+    let lease_resource_id = Uuid::from_u128(0xe400);
+    seed_permission_namespace_event(&database, "ens", wrapper_resource_id).await?;
+    upsert_phase_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(wrapper_resource_id, Some("wrapper")),
+    )
+    .await?;
+    seed_alpha_registrar_lease(&database, lease_resource_id).await?;
+    let lease = lease_resource_id.to_string();
+
+    for namespace in ["", "&namespace=ens"] {
+        let uri = format!("/v1/addresses/{V2_ADDRESS}/names?q=alpha{namespace}");
+        let plain = v2_address_names_payload_for_database(&database, &uri).await?;
+        let included = v2_address_names_payload_for_database(
+            &database,
+            &format!("{uri}&include=role_summary"),
+        )
+        .await?;
+        for payload in [&plain, &included] {
+            assert_eq!(payload["data"][0]["name"], json!("alpha.eth"));
+            assert_eq!(
+                payload["data"][0]["permission_resource_id"],
+                json!(lease),
+                "{namespace:?}: {}",
+                payload["data"][0]
+            );
+        }
+        let expected = address_name_inline_grants(&included["data"][0]);
+        assert!(!expected.is_empty());
+        assert_eq!(
+            expected,
+            address_name_permission_grants(&database, &lease, namespace).await?,
+            "{namespace:?}"
+        );
+        assert!(
+            address_name_permission_grants(&database, &wrapper_resource_id.to_string(), namespace)
+                .await?
+                .is_empty(),
+            "{namespace:?}: the NameWrapper resource must not be a public registration handle"
+        );
+
+        let summaries = included["data"][0]["role_summary"]
+            .as_array()
+            .expect("role summary");
+        for summary in summaries {
+            let subject = summary["address"].as_str().expect("subject");
+            let payload = v2_permissions_payload_for_database(
+                &database,
+                &format!("/v1/permissions?registration_id={lease}&address={subject}{namespace}"),
+            )
+            .await?;
+            let rows = payload["data"].as_array().expect("permissions data");
+            assert_eq!(
+                rows.len(),
+                summary["grants"].as_array().expect("grants").len(),
+                "{namespace:?} {subject}: {rows:?}"
+            );
+            assert!(
+                rows.iter().all(|row| {
+                    row["address"] == json!(subject) && row["registration_id"] == json!(lease)
+                }),
+                "{namespace:?} {subject}: {rows:?}"
+            );
+        }
+    }
+    database.cleanup().await
+}
+
 #[tokio::test]
 async fn v2_address_names_permission_id_recovery_ignores_name_anchor_and_product_registration()
 -> Result<()> {
@@ -202,10 +332,17 @@ async fn v2_address_names_permission_id_recovery_ignores_name_anchor_and_product
     seed_v2_address_registry_operator(&database).await?;
     let id = Uuid::from_u128(0xa100);
     seed_permission_namespace_event(&database, "ens", id).await?;
-    // Prepare distinct and matching declared product IDs for the #816 name-detail
-    // preference. This baseline does not yet expose that preference through name detail;
-    // the test checks that this metadata cannot redirect permission-resource reads.
-    for product_id in [Uuid::from_u128(0xb100), id] {
+    // A declared registration that differs from the permission resource is the shape of a
+    // wrapped `.eth` name: the name serves its BaseRegistrar lease, bound to it by the lease's
+    // own binding, while its permission rows live on the NameWrapper resource.
+    let lease_id = Uuid::from_u128(0xe400);
+    seed_alpha_registrar_lease(&database, lease_id).await?;
+    // Alternate matching and distinct declared product IDs, and every authority kind and
+    // support status of the permission resource. The row's `permission_resource_id` must always
+    // be the handle the permissions route resolves to the resource: the registration a
+    // supported current name serves, or the resource itself when no such name claims it. The
+    // name anchor never redirects the read.
+    for product_id in [lease_id, id] {
         for kind in ["registry_only", "registrar", "wrapper"] {
             for unsupported in [false, true] {
                 sqlx::query(
@@ -222,6 +359,7 @@ async fn v2_address_names_permission_id_recovery_ignores_name_anchor_and_product
                 // Preserve the registry binding that supplies the operator grant.
                 sqlx::query("UPDATE bigname_phase.permissions_current_resource_summary SET authority_kind=$1 WHERE resource_id=$2")
                     .bind(kind).bind(id).execute(&database.pool).await?;
+                let served = if unsupported { id } else { product_id }.to_string();
                 for namespace in ["", "&namespace=ens"] {
                     for dedupe in ["name", "registration"] {
                         let uri = format!(
@@ -233,16 +371,19 @@ async fn v2_address_names_permission_id_recovery_ignores_name_anchor_and_product
                             &format!("{uri}&include=role_summary"),
                         )
                         .await?;
-                        assert_eq!(
-                            plain["data"][0]["permission_resource_id"],
-                            json!(id.to_string())
-                        );
+                        for payload in [&plain, &included] {
+                            assert_eq!(
+                                payload["data"][0]["permission_resource_id"],
+                                json!(served),
+                                "{product_id} {kind} unsupported={unsupported} {namespace:?} {dedupe}"
+                            );
+                        }
                         let expected = address_name_inline_grants(&included["data"][0]);
                         assert!(!expected.is_empty());
                         assert_eq!(
                             expected,
-                            address_name_permission_grants(&database, &id.to_string(), namespace)
-                                .await?
+                            address_name_permission_grants(&database, &served, namespace).await?,
+                            "{product_id} {kind} unsupported={unsupported} {namespace:?} {dedupe}"
                         );
                     }
                 }

@@ -1,16 +1,16 @@
 use anyhow::{Context, Result};
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder};
-use uuid::Uuid;
 
 use super::redo::{InterpretRedoFence, ensure_interpret_redo_fence};
 use super::{
-    EventHistoryReadFilter, HistoryBlockWindow, HistoryCursor, HistoryEvent, HistoryOrder,
-    HistoryPage, HistorySummaryMode, InvalidHistoryCursor,
+    EventHistoryReadFilter, HistoryCursor, HistoryEvent, HistoryOrder, HistoryPage,
+    HistorySummaryMode, InvalidHistoryCursor,
     decoders::decode_history_event,
     duplicates::push_product_history_duplicate_filter,
-    registration_identity::{push_product_event_kind_predicate, push_product_registration_id},
+    filters::{push_history_block_window, push_selector_filter, push_string_filter},
+    registration_identity::{push_product_registration_id, push_registration_filter},
     selectors::HistorySelector,
-    source::{push_history_canonicality_filter, push_history_source_with_visibility},
+    source::{push_history_canonicality_filter, push_history_source_for_filter},
     summary::load_history_summary,
 };
 use crate::projection_helpers::{
@@ -132,7 +132,13 @@ pub(super) async fn load_history_page(
     if let Some(cursor) = cursor {
         push_history_cursor_cte(&mut builder, cursor);
     }
-    push_history_select(&mut builder, cursor.is_some(), include_candidates);
+    push_history_select(
+        &mut builder,
+        &filter,
+        canonical_only,
+        cursor.is_some(),
+        include_candidates,
+    );
     push_history_filters(&mut builder, &filter, canonical_only);
     if !include_candidates {
         push_product_history_duplicate_filter(&mut builder, &filter, canonical_only);
@@ -186,7 +192,7 @@ async fn load_history_internal(
     }
 
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_history_select(&mut builder, false, false);
+    push_history_select(&mut builder, &filter, canonical_only, false, false);
     push_history_filters(&mut builder, &filter, canonical_only);
     push_product_history_duplicate_filter(&mut builder, &filter, canonical_only);
     push_history_order(&mut builder, filter.order);
@@ -204,8 +210,10 @@ async fn load_history_internal(
     rows.into_iter().map(decode_history_event).collect()
 }
 
-fn push_history_select(
-    builder: &mut QueryBuilder<'_, Postgres>,
+pub(super) fn push_history_select<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    filter: &'a EventHistoryReadFilter,
+    canonical_only: bool,
     include_cursor_row: bool,
     include_candidates: bool,
 ) {
@@ -219,7 +227,7 @@ fn push_history_select(
             ne.resource_id,
         "#,
     );
-    push_product_registration_id(builder);
+    push_product_registration_id(builder, canonical_only);
     builder.push(
         r#" AS registration_id,
             ne.event_kind,
@@ -299,7 +307,13 @@ fn push_history_select(
             ) AS coverage
         "#,
     );
-    push_history_source_with_visibility(builder, include_cursor_row, include_candidates);
+    push_history_source_for_filter(
+        builder,
+        filter,
+        canonical_only,
+        include_cursor_row,
+        include_candidates,
+    );
 }
 
 pub(super) fn push_history_filters<'a>(
@@ -322,15 +336,7 @@ pub(super) fn push_history_filters<'a>(
         builder.push_bind(contract_address);
     }
 
-    if let Some(registration_id) = filter.registration_id.as_ref() {
-        builder.push(" AND ((ne.resource_id IS NULL AND ");
-        push_product_event_kind_predicate(builder);
-        builder.push(") OR (");
-        push_product_registration_id(builder);
-        builder.push(" = ");
-        builder.push_bind(registration_id);
-        builder.push("))");
-    }
+    push_registration_filter(builder, filter, canonical_only);
 
     if !filter.event_kinds.is_empty() {
         builder.push(" AND ");
@@ -375,8 +381,9 @@ pub(super) async fn load_history_events_by_ids(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
+    let filter = EventHistoryReadFilter::default();
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_history_select(&mut builder, false, false);
+    push_history_select(&mut builder, &filter, true, false, false);
     builder.push(" AND ne.normalized_event_id = ANY(");
     builder.push_bind(ids);
     builder.push("::bigint[])");
@@ -391,39 +398,7 @@ pub(super) async fn load_history_events_by_ids(
     rows.into_iter().map(decode_history_event).collect()
 }
 
-/// One inclusive block range per chain; a window without ranges matches nothing.
-fn push_history_block_window<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    window: &'a HistoryBlockWindow,
-) {
-    if window.ranges.is_empty() {
-        builder.push(" AND FALSE");
-        return;
-    }
-    builder.push(" AND (");
-    for (index, range) in window.ranges.iter().enumerate() {
-        if index > 0 {
-            builder.push(" OR ");
-        }
-        builder.push("(ne.chain_id = ");
-        builder.push_bind(&range.chain_id);
-        if let Some(from_block) = range.from_block {
-            builder.push(" AND ne.block_number >= ");
-            builder.push_bind(from_block);
-        }
-        if let Some(to_block) = range.to_block {
-            builder.push(" AND ne.block_number <= ");
-            builder.push_bind(to_block);
-        }
-        if range.from_block.is_none() && range.to_block.is_none() {
-            builder.push(" AND ne.block_number IS NOT NULL");
-        }
-        builder.push(")");
-    }
-    builder.push(")");
-}
-
-fn push_history_order(builder: &mut QueryBuilder<'_, Postgres>, order: HistoryOrder) {
+pub(super) fn push_history_order(builder: &mut QueryBuilder<'_, Postgres>, order: HistoryOrder) {
     builder.push(" ORDER BY ");
     push_history_order_terms(builder, order);
 }
@@ -472,11 +447,17 @@ async fn ensure_history_cursor_exists(
             SELECT 1
         "#,
     );
-    push_history_source_with_visibility(&mut builder, false, include_candidates);
     let mut cursor_filter = filter.clone();
     if !cursor_filter.bind_cursor_anchor_to_event_kinds {
         cursor_filter.event_kinds.clear();
     }
+    push_history_source_for_filter(
+        &mut builder,
+        &cursor_filter,
+        canonical_only,
+        false,
+        include_candidates,
+    );
     push_history_filters(&mut builder, &cursor_filter, canonical_only);
     if !include_candidates {
         push_product_history_duplicate_filter(&mut builder, &cursor_filter, canonical_only);
@@ -602,93 +583,4 @@ fn history_cursor_from_row(row: &HistoryEvent) -> HistoryCursor {
         normalized_event_id: row.normalized_event_id,
         event_identity: row.event_identity.clone(),
     }
-}
-
-fn push_selector_filter<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    selector: &'a HistorySelector,
-) {
-    match selector {
-        HistorySelector::LogicalNames(logical_name_ids) => {
-            push_string_filter(builder, "ne.logical_name_id", logical_name_ids);
-        }
-        HistorySelector::Resources(resource_ids) => {
-            builder.push("(");
-            push_uuid_filter(builder, "ne.resource_id", resource_ids);
-            push_attributed_record_filter(builder, resource_ids);
-            builder.push(")");
-        }
-        HistorySelector::LogicalNamesOrResources {
-            logical_name_ids,
-            resource_ids,
-        } => {
-            builder.push("(");
-            push_string_filter(builder, "ne.logical_name_id", logical_name_ids);
-            builder.push(" OR ");
-            push_uuid_filter(builder, "ne.resource_id", resource_ids);
-            push_attributed_record_filter(builder, resource_ids);
-            builder.push(")");
-        }
-        HistorySelector::None => {
-            builder.push("FALSE");
-        }
-    }
-}
-
-/// Node-keyed record observations carry no logical name or resource of their own; Project
-/// attributes them to a resource through its selected resolver pointer and publishes the
-/// attributed event ids in the record inventory provenance. Resource-scoped history reads them
-/// back through that provenance so a name's history lists the same writes its records serve.
-fn push_attributed_record_filter<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    resource_ids: &'a [Uuid],
-) {
-    builder.push(
-        r#"
-        OR ne.normalized_event_id IN (
-            SELECT attributed.event_id::bigint
-            FROM bigname_phase.record_inventory_current inventory
-            CROSS JOIN LATERAL jsonb_array_elements_text(
-                CASE WHEN jsonb_typeof(inventory.provenance -> 'attributed_event_ids') = 'array'
-                     THEN inventory.provenance -> 'attributed_event_ids'
-                     ELSE '[]'::jsonb END
-            ) attributed(event_id)
-            WHERE inventory.resource_id = ANY("#,
-    );
-    builder.push_bind(resource_ids);
-    builder.push(
-        r#"::uuid[])
-              AND attributed.event_id ~ '^[0-9]+$'
-        )"#,
-    );
-}
-
-fn push_string_filter<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    column: &str,
-    values: &'a [String],
-) {
-    builder.push(column);
-    push_string_filter_tail(builder, values);
-}
-
-fn push_string_filter_tail<'a>(builder: &mut QueryBuilder<'a, Postgres>, values: &'a [String]) {
-    builder.push(" = ANY(");
-    builder.push_bind(values);
-    builder.push("::text[])");
-}
-
-fn push_uuid_filter<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    column: &str,
-    values: &'a [Uuid],
-) {
-    builder.push(column);
-    push_uuid_filter_tail(builder, values);
-}
-
-fn push_uuid_filter_tail<'a>(builder: &mut QueryBuilder<'a, Postgres>, values: &'a [Uuid]) {
-    builder.push(" = ANY(");
-    builder.push_bind(values);
-    builder.push("::uuid[])");
 }
