@@ -1757,11 +1757,18 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 - Response shape: `data` is an array of record-shaped rows with `name`,
   `display_name`, `namespace`, `namehash`, `owner`, `registrant`,
   `registration_status`, `registered_at`, `created_at`, and `expires_at`.
-  Address-name rows also return `permission_resource_id`, the selected
-  permission authority resource UUID used by its inline summary. It remains
-  available without `include=role_summary` and does not redefine name detail's
-  `registration_id`. A `relation=resolves_to` row whose name has only a retained
-  serving resource, and therefore no permission authority, omits it.
+  Address-name rows also return `permission_resource_id`, the handle
+  `GET /v1/permissions?registration_id=` resolves to the permission authority
+  resource behind the row's inline summary. While the name serves a supported
+  current registration it is that registration's `registration_id`, the same
+  value name detail serves: for a wrapped `.eth` name the BaseRegistrar lease,
+  although its permission rows live on the NameWrapper resource, which is not a
+  public registration handle. A wrapped subname has no lease and keeps its
+  NameWrapper resource. When no supported current name claims the resource,
+  the value is the resource UUID itself, which the permissions route reads as a
+  resource audit. It remains available without `include=role_summary`. A
+  `relation=resolves_to` row whose name has only a retained serving resource,
+  and therefore no permission authority, omits it.
   Address-name rows add `is_primary` and `relations`, where `relations` is the
   subset of `owner`, `manager`, and `registrant` that matched, or
   `["resolves_to"]` on a `relation=resolves_to` read. A `resolves_to` row also
