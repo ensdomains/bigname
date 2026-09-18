@@ -105,9 +105,12 @@ requirement below exists.
    rather than ingesting Mainnet facts under the Sepolia chain id. The bounded
    sample and the `source-transport` command apply the same check.
 
-Check the result on the created container, not only the rendered file:
+Check the result on the created container, not only the rendered file. Resolve
+the phase-runner container with the same Compose files that created it:
 
 ```sh
+runner_container=$(docker compose --env-file .env.server \
+  -f docker-compose.server.yml -f docker-compose.reth-db.yml ps -q phase-runner)
 docker inspect "$runner_container" --format '{{json .Config.User}} {{json .HostConfig.PidMode}}'
 docker inspect "$runner_container" --format '{{json .Mounts}}'
 ```
