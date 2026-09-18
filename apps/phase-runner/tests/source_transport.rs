@@ -68,6 +68,37 @@ async fn direct_reader_without_a_datadir_is_refused_and_changes_nothing() -> Res
 }
 
 #[tokio::test]
+async fn a_refused_change_releases_the_phase_writer_locks_before_it_returns() -> Result<()> {
+    let db = ScratchDatabase::create("source_transport_refusal_locks").await?;
+    seed_watch_set(db.pool()).await?;
+    seed_ingest(db.pool(), "drpc", Redo::None).await?;
+    let node = NodeDouble::through(6).with_watched_log(6);
+    let forked = node.clone().with_hash(5, block_hash(1_005));
+    // A second session is open before the refusal, so its lock probe is the next statement
+    // the server sees after the error is reported; nothing else may run in between.
+    let mut probe = db.pool().begin().await?;
+
+    switch(&db, "drpc", &node, "reth_db", &forked)
+        .await
+        .expect_err("the two interfaces disagree at the retained boundary");
+
+    for phase in PhaseName::ALL {
+        let free: bool = sqlx::query_scalar(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0::bigint))",
+        )
+        .bind(format!("phase-runner:{SEPOLIA}:{phase}"))
+        .fetch_one(&mut *probe)
+        .await?;
+        assert!(
+            free,
+            "the refused change still holds the {phase} writer lock after reporting its error"
+        );
+    }
+    probe.rollback().await?;
+    db.cleanup().await
+}
+
+#[tokio::test]
 async fn matching_node_interfaces_change_only_the_stored_source_kind() -> Result<()> {
     let db = ScratchDatabase::create("source_transport_success").await?;
     seed_watch_set(db.pool()).await?;
