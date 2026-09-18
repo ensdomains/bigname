@@ -155,6 +155,7 @@ One name per concept, applied on every `v2` route:
 | `chain_id` | numeric EVM chain id (`1`, `8453`); string-keyed in maps | string chain ids (`"ethereum-mainnet"`), position slot keys |
 | `network` | display slug (`ethereum`, `base`) | `network` (unchanged, display-only) |
 | `registration_id` | the one opaque stable handle for a registration lifecycle | `resource_id`, `resource_hex`, `resource`, `token_lineage_id`, `surface_binding_id` |
+| `permission_resource_id` | selected permission authority handle on address-name rows; pass to the permissions route’s `registration_id` filter | new, address-name rows only |
 | `finality` | `latest`, `safe`, `finalized` (JSON-RPC block-tag vocabulary) | `consistency` = `head`/`safe`/`finalized` |
 | `source` | `indexed`, `verified` (the records route adds `auto`) | `mode` = `declared`/`verified`/`both`/`auto`; `declared_state`/`verified_state` |
 | `as_of` | readable per-chain `{block_number, block_hash, timestamp}`, keyed by `chain_id` | `chain_positions` (and the `execution_checkpoint` pseudo-slot is diagnostics-only) |
@@ -167,6 +168,14 @@ One name per concept, applied on every `v2` route:
 
 Rules:
 
+- `permission_resource_id` is a narrow naming exception only on direct rows in
+  `GET /v2/addresses/{address}/names` `data`. It identifies the selected authority
+  used by that row's permission summary and is present even without the include.
+  It does not redefine name detail's `registration_id` or restore the bare
+  `resource`/`resource_id` aliases. Other routes, nested objects, and plural or
+  extended spellings remain subject to the existing resource-term bans. This
+  exact row field is exempt from resource-term naming and pipeline-vocabulary
+  checks only at that location; the exception does not apply to error messages.
 - Timestamps are RFC 3339 UTC everywhere, including the lookup route. partner-1
   requested unix-seconds `expiration`; the partner shim performs that format
   mapping. Field semantics, not field format, are the requirement per the

@@ -419,3 +419,110 @@ async fn verification_expands_from_resolver_creation_the_same_way_indexing_does(
     );
     Ok(())
 }
+
+/// Announces the same resolver at the first, an interior, and the last block of one window.
+fn chain_announcing_watched_in_every_block(creation: &str) -> TestChain {
+    let mut chain = TestChain::synthetic(FIRST, 3, 1);
+    for block in &mut chain.blocks {
+        let watched = &mut block.transactions[1];
+        watched.logs.insert(
+            0,
+            TestLog {
+                log_index: 1,
+                address: WATCHED_ADDRESS.to_owned(),
+                topics: vec![creation.to_owned()],
+                data: "0x".to_owned(),
+            },
+        );
+        for (index, log) in watched.logs.iter_mut().enumerate() {
+            log.log_index = index as i64 + 1;
+        }
+    }
+    chain
+}
+
+#[tokio::test]
+async fn repeated_resolver_creation_reads_one_suffix_for_indexing_and_verification() -> Result<()> {
+    let creation = bigname_manifests::resolver_creation_topic0();
+    let chain = chain_announcing_watched_in_every_block(&creation);
+    let filter = WatchFilter::watching_creation(
+        FIRST,
+        FIRST + 2,
+        creation.clone(),
+        vec![WATCHED_TOPIC.to_owned()],
+    );
+    let scoped_query = format!("eth_getLogs({WATCHED_ADDRESS})");
+    let expected = vec![
+        (FIRST, 1, creation.clone()),
+        (FIRST, 2, WATCHED_TOPIC.to_owned()),
+        (FIRST, 4, WATCHED_TOPIC.to_owned()),
+        (FIRST + 1, 1, creation.clone()),
+        (FIRST + 1, 2, WATCHED_TOPIC.to_owned()),
+        (FIRST + 1, 4, WATCHED_TOPIC.to_owned()),
+        (FIRST + 2, 1, creation.clone()),
+        (FIRST + 2, 2, WATCHED_TOPIC.to_owned()),
+        (FIRST + 2, 4, WATCHED_TOPIC.to_owned()),
+    ];
+
+    let indexing = serve(chain.clone(), Tamper::None).await?;
+    let indexing_provider = Arc::new(indexing.provider);
+    let indexed = WindowReader {
+        provider: &indexing_provider,
+        coinbase: None,
+        prefetch: None,
+        filter: &filter,
+    }
+    .fetch(FIRST, FIRST + 2)
+    .await?;
+    assert_eq!(
+        indexed.queries.len(),
+        2,
+        "creation scan plus one scoped suffix from the earliest announcement: {:?}",
+        indexed.queries
+    );
+    assert_eq!(
+        indexing.counts.get(&scoped_query),
+        1,
+        "one address-scoped range read for the announcing resolver"
+    );
+    assert_eq!(
+        indexed
+            .selected
+            .iter()
+            .map(|log| (log.block_number, log.log_index, log.topics[0].clone()))
+            .collect::<Vec<_>>(),
+        expected,
+        "same-block setup records and the final block's records stay selected"
+    );
+
+    let reference = serve(chain, Tamper::None).await?;
+    let reference_counts = Arc::clone(&reference.counts);
+    let verified = crate::verification::VerificationProvider::from_provider(reference.provider)
+        .fetch(filter, FIRST, FIRST + 2)
+        .await?
+        .logs;
+    assert_eq!(
+        reference_counts.get(&scoped_query),
+        1,
+        "verification reads the same single suffix"
+    );
+    assert_eq!(
+        verified
+            .iter()
+            .map(|log| (log.block_number, log.log_index, log.topics[0].clone()))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        verified
+            .into_iter()
+            .map(|log| (log.block_number, log.log_index, log.address, log.topics))
+            .collect::<Vec<_>>(),
+        indexed
+            .selected
+            .into_iter()
+            .map(|log| (log.block_number, log.log_index, log.address, log.topics))
+            .collect::<Vec<_>>()
+    );
+    Ok(())
+}

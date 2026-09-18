@@ -110,6 +110,22 @@ never closes, registry-pointer discovery. Defined in [`manifests.md` §
 Resolver admission by implementation
 announcement](manifests.md#resolver-admission-by-implementation-announcement).
 
+<a id="resolver-creation-capture"></a>
+## Resolver creation capture
+
+the admission of an ENSv2 resolver as an `ens_v2_resolver_l1` instance from
+the block of its own `ResolverCreated()` log, recorded as `ContractDiscovered`
+and a `resolver` self-edge with `discovery_source = "ResolverCreated"` and
+`admission_basis = "resolver_created"`. Ingest selects the creation log across
+emitters and fetches the address's remaining resolver events in the same
+window. Capture is not support: the resolver is served as unsupported until an
+implementation observation or an exact declaration classifies it. A registry
+`ResolverUpdated` pointer edge records only which resolver a name uses and
+never admits its target for capture; Project's declaration precedence still
+reads it as proof that a name in its namespace uses the address. Defined in
+[`manifests.md` § Resolver creation
+capture](manifests.md#resolver-creation-capture).
+
 ## Shared ENS infrastructure
 
 the exact ENS root, `eth`, `reverse`, and `addr.reverse` names. When an active
@@ -388,7 +404,8 @@ admits an emitter or only records topology. In particular, a registry
 announcement admits an ENSv2 registry independently of parent reachability,
 while subregistry and ENSv2 registry-to-resolver edges record relationships
 without admitting their targets. A `resolver` self-edge whose source is
-`ResolverCreated` records independent creation-based capture; it does not bind
+`ResolverCreated` records independent
+[creation-based capture](#resolver-creation-capture); it does not bind
 a name or authorize resolver reads.
 
 ## Discovery-watch admission snapshot
@@ -415,8 +432,9 @@ an emitter's start later.
 ENSv2 is the exception. Its registry `SubregistryUpdated` and `ResolverUpdated`
 edges only record relationships, so an ENSv2 registry's or root's `resolver`
 rule is left out of these classifications and changing it widens nothing.
-`RegistryCreated` and `ResolverCreated` supply independent creation-based
-capture instead: Ingest selects creation logs across emitters and fetches the
+`RegistryCreated` and `ResolverCreated` supply independent
+[creation-based capture](#resolver-creation-capture) instead: Ingest selects
+creation logs across emitters and fetches the
 announcing address's remaining events in the same window. Adding the resolver
 creation ABI is ordinary [compiled-watch](#compiled-watch-plan) widening,
 requiring one historical fetch before interpretation. See
@@ -1494,6 +1512,30 @@ subject, and relation, independent of any currently known name. A revoked
 state remains stored with `approved=false` so projection replay and reorg repair
 can recover either a losing-fork grant or a losing-fork revocation without
 creating per-name approval rows.
+
+<a id="account-permission-scope"></a>
+## Account permission scope
+
+a permission scope whose authority starts from an account-wide approval rather
+than a grant persisted for one resource. The public `grant_scope.kind` is
+`account`; its detail contains `chain_id`, `authority_kind`,
+`authority_contract`, and `owner`. Applicability to a resource is evaluated at
+read time through that resource's current
+[registry-owner binding](#registry-owner-binding).
+
+<a id="grant-relation"></a>
+## Grant relation
+
+the optional public classification of how a permission subject relates to its
+authority. `operator` identifies the owner-scoped, registry-wide—not
+per-name—`ApprovalForAll` relation. Direct resource permission rows have no
+classified relation and omit the field. (upstream:
+.refs/ens_v1/contracts/registry/ENS.sol:L18-L21 @ ens_v1@91c966f) (upstream:
+.refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L117 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L159-L167 @
+ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L150-L157 @
+basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L202-L207 @
+basenames@1809bbc)
 
 ## Registry-owner binding
 

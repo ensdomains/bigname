@@ -23,9 +23,10 @@ minutes. Retain its output in the deployment receipt.
 The script ends with a check that fails, with a non-zero `psql` exit, unless
 the named index belongs to `bigname_phase.discovery_edges`, is both
 `indisvalid` and `indisready`, and has the reviewed definition. It compares
-the `pg_get_indexdef` text, with the schema name removed, with how the fresh
-baseline index prints, and on a mismatch prints the definition it found beside
-the expected one. It also fails, naming the kind of relation, when a table,
+the `pg_get_indexdef` text, read with `search_path` set to `pg_catalog` and `quote_all_identifiers` off, so
+every schema name is printed and nothing in the text has to be rewritten, with
+how the fresh baseline index prints, and on a mismatch prints the definition it
+found beside the expected one. It also fails, naming the kind of relation, when a table,
 view, or other relation that is not an index holds the name: remove or rename
 that relation before retrying. It prints the index row first, so the receipt
 shows the flags and definition either way.
@@ -59,3 +60,13 @@ described above, then run the schema-migrations again. Apply that migration
 through the usual SQLx release process when adopting this source revision. The
 fresh baseline also includes the index. No binary replacement or Interpret replay
 is needed solely to preinstall it on the current deployment.
+
+Run the schema-migrations with `quote_all_identifiers` at its PostgreSQL
+default, `off`. `20260917140000_resolver_creation_self_edge.sql` finds the
+older self-edge CHECK on `bigname_phase.discovery_edges` by searching the text
+`pg_get_constraintdef` prints, which is quoted when the setting is on, and the
+file cannot carry its own setting because it is already applied on Sepolia and
+checksummed in `_sqlx_migrations`. The
+[production runbook](../../docs/runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+has the full requirement; the later schema-migrations, including the validity
+check above, turn the setting off themselves and restore it.

@@ -1155,7 +1155,8 @@ current registry stores itself for a requested zero owner.
 resolver self-edge. ENSv2 registry-pointer edges remain binding history and are
 excluded from emitter admission. Canonical raw creation logs drive Ingest's
 same-window capture and its subsequent windows; orphaned creation logs cannot
-expand a watch filter. Installing creation capture requires the normal
+expand a watch filter. Installing
+[creation capture](glossary.md#resolver-creation-capture) requires the normal
 manifest-driven Ingest redo and full Interpret replay, preserving raw facts.
 
 The rule is one validated CHECK on `discovery_edges` named
@@ -1165,7 +1166,13 @@ older rule on an existing database; it is already applied on a live database,
 so its content is fixed. Schema-migration
 `20260917141000_discovery_self_edge_check_name.sql` then settles the name: it
 renames a rule that has the right text under a generated name, and replaces the
-rule only when its text differs.
+rule only when its text differs. Both files find the existing rule by searching
+the text `pg_get_constraintdef` prints; `20260917141000` turns
+`quote_all_identifiers` off while it reads that text and restores the caller's
+value, while the fixed `20260917140000` needs the migration session to run with
+the setting at its default, `off`, as the
+[production runbook](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+states.
 
 ### Interpret process memory
 
@@ -1557,8 +1564,16 @@ rows remain in the current-state table so losing-fork grants and losing-fork
 revocations both rebuild from surviving canonical history. Interpret re-walks
 retained raw facts through the [`standard_approval`
 derivation](glossary.md#standard-approval-derivation); Project then rebuilds both state legs without a provider
-refetch. App-facing synthesis from those two state legs is deferred to the
-follow-up serving change.
+refetch. Storage serving combines those two state legs into effective
+registry-operator permission rows without persisting per-resource fan-out.
+For namespace-scoped reads, direct and effective registry-operator rows share
+one membership rule: a resource is a member when a retained, activated
+normalized event for that resource carries the namespace, and both the event
+and its `chain_lineage` anchor are canonical, safe, or finalized. Membership
+therefore does not need a current name binding, so unnamed and superseded
+registrations stay readable through a namespace-filtered [resource
+audit](glossary.md#resource-audit-context) read. A resource with no such event
+has no namespace membership but remains visible to unscoped reads.
 
 For ENSv2, a latest state-derived `RegistryPathExpired` release removes that resource's effective
 permission rows without removing its partial-coverage summary. A later
@@ -1578,9 +1593,10 @@ ens_v2@a971bd64)
 Coverage wording is not an exhaustiveness claim. `support_status` and
 `unsupported_reason` carry admission separately from projection completeness.
 `operator_approval_surfaces_not_ingested` maps to partial, best-effort
-permission coverage. This interpretation-and-projection change retains that
-broad reason for every authority class; the follow-up serving change owns any
-request-relative narrowing based on a proven registry-owner binding.
+permission coverage. The stored projection retains that broad reason for every
+non-wrapper authority class. The serving layer maps each stored reason to the
+documented list of unlisted permission surfaces and reports the union for
+account-wide or mixed reads.
 `wrapper_parent_and_resolver_delegation_not_projected` marks NameWrapper
 resources partial: holders, operators, and per-token delegates are projected,
 while parent control of a wrapped subname and resolver delegation are not; the
