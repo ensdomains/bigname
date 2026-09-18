@@ -77,8 +77,10 @@
                                'registrant', NULL, 'expiry', NULL
                            )
                        -- A released ENSv1 lease whose custody was not revived is a tombstone:
-                       -- the registrar lease is gone and nothing current owns the node, so the
-                       -- lapsed registrant, authority and expiry are history only.
+                       -- the registrar lease is gone, and whether nothing current owns the node
+                       -- or the registry still holds the owner a transfer without `reclaim`
+                       -- left behind, the lapsed registrant, authority and expiry are history
+                       -- only.
                        WHEN COALESCE(selected_authority.released_v1_tombstone, false)
                            THEN jsonb_build_object('authority_kind', NULL, 'authority_key', NULL,
                                'registrant', NULL, 'expiry', NULL)
