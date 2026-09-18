@@ -7,9 +7,10 @@ use axum::{Json, Router, extract::State, routing::post};
 use bigname_ingest::VerificationProvider;
 use phase_runner::{
     config::{SeedBasis, SourceConfig, SourceRole},
-    phase::PhaseName,
+    phase::{PhaseName, RunMode},
     phase_lock::PhaseLock,
     source_transport::{transition, transition_with_readers},
+    state::{PhaseStore, StartDisposition},
 };
 use serde_json::{Value, json};
 use support::ScratchDatabase;
@@ -485,6 +486,81 @@ async fn caught_up_live_follow_compares_the_published_head_and_admits_the_direct
     db.cleanup().await
 }
 
+#[tokio::test]
+async fn retained_completion_awaiting_revalidation_is_judged_as_handed_off() -> Result<()> {
+    let db = ScratchDatabase::create("source_transport_floor_retained_completion").await?;
+    seed_watch_set(db.pool()).await?;
+    seed_ingest(db.pool(), "drpc", Redo::None).await?;
+    hand_off_to_live(db.pool()).await?;
+    seed_published_head(db.pool(), 5).await?;
+    // A completed-phase validation failed after the handoff. The runner keeps the completed
+    // extent and revalidates it on the next start instead of rescanning from block 0.
+    fail_completed_validation(
+        db.pool(),
+        "completed phase validation failed: source changed",
+    )
+    .await?;
+    let node = NodeDouble::through(6).with_watched_log(6);
+    let before = snapshot(db.pool()).await?;
+    assert_eq!(
+        PhaseStore::new(db.pool().clone())
+            .start_phase(SEPOLIA, PhaseName::Ingest, &RunMode::Normal)
+            .await?,
+        StartDisposition::RecoveringCompleted,
+        "the runner revalidates this state without a historical rescan"
+    );
+
+    let receipt = switch_to_direct_reader_with_floor(&db, &node, 3).await?;
+
+    assert_eq!(receipt["next_block"], 6);
+    assert_eq!(receipt["compared_block"], 6);
+    assert_eq!(receipt["compared_block_log_count"], 1);
+    assert_eq!(
+        snapshot(db.pool()).await?,
+        with_stored_kind(before, "reth_db"),
+        "the failed status, its error and the completed markers are untouched"
+    );
+    db.cleanup().await
+}
+
+#[tokio::test]
+async fn ordinary_failed_or_incomplete_ingest_still_replans_from_the_declared_start() -> Result<()>
+{
+    let db = ScratchDatabase::create("source_transport_floor_failed_ingest").await?;
+    seed_watch_set(db.pool()).await?;
+    seed_ingest(db.pool(), "drpc", Redo::None).await?;
+    seed_published_head(db.pool(), 5).await?;
+    let node = NodeDouble::through(6).with_watched_log(6);
+
+    // Failed without the completed-validation marker: a normal restart from block 0.
+    fail_completed_validation(db.pool(), "provider unreachable").await?;
+    let before = snapshot(db.pool()).await?;
+    let error = switch_to_direct_reader_with_floor(&db, &node, 3)
+        .await
+        .expect_err("a failed catch-up replans from the declared start block 0");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("keeps history from block 3 only") && message.contains("0..=head"),
+        "{message}"
+    );
+    assert_eq!(before, snapshot(db.pool()).await?);
+
+    // The marker alone is not a retained completion: this pass never handed off to live
+    // follow, so the runner restarts it from the declared start as well.
+    fail_completed_validation(
+        db.pool(),
+        "completed phase validation failed: source changed",
+    )
+    .await?;
+    let before = snapshot(db.pool()).await?;
+    let error = switch_to_direct_reader_with_floor(&db, &node, 3)
+        .await
+        .expect_err("without a live handoff the completed extent is not retained");
+    assert!(format!("{error:#}").contains("0..=head"), "{error:#}");
+    assert_eq!(before, snapshot(db.pool()).await?);
+    db.cleanup().await
+}
+
 /// Runs the production switch with each descriptor read through an HTTP node double. The
 /// direct database reader needs a real Reth datadir, so `direct` stands in for it; the locks,
 /// cursor checks, comparisons and update are the ones `transition` runs.
@@ -742,6 +818,22 @@ async fn hand_off_to_live(pool: &sqlx::PgPool) -> Result<()> {
     )
     .bind(SEPOLIA)
     .bind(block_hash(5))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// The seeded completed Ingest pass failed its completed-phase validation with `message`,
+/// the way `PhaseStore::fail_completed_validation` records it: the status changes and the
+/// error is kept, the completed markers stay.
+async fn fail_completed_validation(pool: &sqlx::PgPool, message: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'failed', last_error = $2, finished_at = now(), updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(SEPOLIA)
+    .bind(message)
     .execute(pool)
     .await?;
     Ok(())
