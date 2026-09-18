@@ -99,6 +99,10 @@ impl VerificationProvider {
         self.kind
     }
 
+    pub(crate) const fn chain_provider(&self) -> &ChainProvider {
+        &self.provider
+    }
+
     /// Lowest block this endpoint can still serve, when it can report one.
     ///
     /// Only a direct datadir reader answers; an RPC endpoint keeps its retention behind the

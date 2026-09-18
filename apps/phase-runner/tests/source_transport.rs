@@ -89,8 +89,10 @@ async fn matching_node_interfaces_change_only_the_stored_source_kind() -> Result
         "the cursor boundary and the Ingest phase boundary are both checked"
     );
     assert_eq!(receipt["next_block"], 6);
-    assert_eq!(receipt["next_block_hash"], block_hash(6));
-    assert_eq!(receipt["next_block_log_count"], 1);
+    assert_eq!(receipt["compared_block"], 6);
+    assert_eq!(receipt["compared_block_hash"], block_hash(6));
+    assert_eq!(receipt["compared_block_log_count"], 1);
+    assert_eq!(receipt["live_continuation"], Value::Null);
     assert_eq!(
         snapshot(db.pool()).await?,
         with_stored_kind(before, "reth_db"),
@@ -218,7 +220,7 @@ async fn redo_in_progress_checks_the_redo_position_and_keeps_the_redo() -> Resul
     let receipt = switch(&db, "drpc", &node, "reth_db", &node).await?;
 
     assert_eq!(receipt["next_block"], 4);
-    assert_eq!(receipt["next_block_log_count"], 1);
+    assert_eq!(receipt["compared_block_log_count"], 1);
     assert_eq!(
         receipt["checked_boundaries"][2],
         json!({"block": 3, "hash": block_hash(3)})
@@ -242,7 +244,7 @@ async fn redo_that_has_not_started_checks_its_first_block() -> Result<()> {
     let receipt = switch(&db, "drpc", &node, "reth_db", &node).await?;
 
     assert_eq!(receipt["next_block"], 2);
-    assert_eq!(receipt["next_block_log_count"], 1);
+    assert_eq!(receipt["compared_block_log_count"], 1);
     assert_eq!(
         snapshot(db.pool()).await?,
         with_stored_kind(before, "reth_db")

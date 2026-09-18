@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
-
 use crate::{
     IngestError, Result,
-    engine::{BLOCKS_PER_BATCH, BatchRequest, Engine, LiveBatchOutcome, LiveBatchRequest, Marker},
+    engine::{
+        BLOCKS_PER_BATCH, BatchRequest, Engine, LiveBatchOutcome, LiveBatchRequest, Marker,
+        live_plan::published_ancestor,
+    },
     plan::{primary_source, publishable_heads, sort_sources, validate_request},
-    provider::{ResolvedBlock, SharedProvider, provider_error},
+    provider::provider_error,
 };
 
 impl Engine {
@@ -27,53 +28,21 @@ impl Engine {
             ));
         }
 
-        let published = self
-            .load_published_head(&request.chain_id)
-            .await?
-            .ok_or_else(|| {
-                IngestError::data_integrity(format!(
-                    "live follow requires a published ingest head for chain {}",
-                    request.chain_id
-                ))
-            })?;
-        if snapshot.latest.number < published.latest.number {
-            let stored = self
-                .load_readable_hashes(
-                    &request.chain_id,
-                    snapshot.latest.number,
-                    snapshot.latest.number,
-                )
-                .await?;
-            if stored.get(&snapshot.latest.number) == Some(&snapshot.latest.hash) {
-                return Ok(LiveBatchOutcome {
-                    caught_up: true,
-                    current: published.latest.clone(),
-                    target: published.latest,
-                    heads: None,
-                    estimated_write_bytes: 0,
-                });
-            }
-        }
-        let floor = published
-            .finalized
-            .as_ref()
-            .map_or(0, |marker| marker.number);
-        let common = self
-            .find_common_ancestor(
-                &request.chain_id,
-                &provider,
-                published.latest.number.min(snapshot.latest.number),
-                floor,
-            )
-            .await?;
-        if let Some(finalized) = &published.finalized
-            && common.number < finalized.number
-        {
-            return Err(IngestError::data_integrity(format!(
-                "live provider fork for chain {} does not include finalized block {} at {}",
-                request.chain_id, finalized.hash, finalized.number
-            )));
-        }
+        let node_latest = Marker {
+            number: snapshot.latest.number,
+            hash: snapshot.latest.hash.clone(),
+        };
+        let (published, common) =
+            published_ancestor(&self.pool, &request.chain_id, &provider, &node_latest).await?;
+        let Some(common) = common else {
+            return Ok(LiveBatchOutcome {
+                caught_up: true,
+                current: published.latest.clone(),
+                target: published.latest,
+                heads: None,
+                estimated_write_bytes: 0,
+            });
+        };
 
         let load_to = snapshot
             .latest
@@ -112,77 +81,6 @@ impl Engine {
             current,
             target,
             estimated_write_bytes,
-        })
-    }
-
-    async fn find_common_ancestor(
-        &self,
-        chain_id: &str,
-        provider: &SharedProvider,
-        mut from: i64,
-        floor: i64,
-    ) -> Result<Marker> {
-        if from < floor {
-            return Err(IngestError::data_integrity(format!(
-                "live head for chain {chain_id} is below the finalized boundary {floor}"
-            )));
-        }
-        while from >= floor {
-            let chunk_floor = floor.max(from.saturating_sub(BLOCKS_PER_BATCH - 1));
-            let numbers = (chunk_floor..=from).collect::<Vec<_>>();
-            let resolved = provider.resolve(&numbers).await.map_err(|error| {
-                provider_error(
-                    &format!("failed to walk live head ancestry {chunk_floor}..={from}"),
-                    error,
-                )
-            })?;
-            let stored = self
-                .load_readable_hashes(chain_id, chunk_floor, from)
-                .await?;
-            if let Some(block) = resolved
-                .iter()
-                .rev()
-                .find(|block| stored.get(&block.number) == Some(&block.hash))
-            {
-                return Ok(marker(block));
-            }
-            if chunk_floor == floor {
-                break;
-            }
-            from = chunk_floor - 1;
-        }
-        Err(IngestError::data_integrity(format!(
-            "live provider path for chain {chain_id} has no stored canonical ancestor at or above \
-             block {floor}"
-        )))
-    }
-
-    async fn load_readable_hashes(
-        &self,
-        chain_id: &str,
-        from: i64,
-        to: i64,
-    ) -> Result<BTreeMap<i64, String>> {
-        sqlx::query_as::<_, (i64, String)>(
-            "
-            SELECT block_number, block_hash
-            FROM chain_lineage
-            WHERE chain_id = $1
-              AND block_number BETWEEN $2 AND $3
-              AND canonicality_state IN ('canonical', 'safe', 'finalized')
-            ",
-        )
-        .bind(chain_id)
-        .bind(from)
-        .bind(to)
-        .fetch_all(&self.pool)
-        .await
-        .map(|rows| rows.into_iter().collect())
-        .map_err(|error| {
-            IngestError::database(
-                format!("failed to load readable ancestry {from}..={to} for chain {chain_id}"),
-                error,
-            )
         })
     }
 
@@ -232,65 +130,6 @@ impl Engine {
         }
         Ok(())
     }
-
-    async fn load_published_head(&self, chain_id: &str) -> Result<Option<PublishedHead>> {
-        type Row = (
-            i64,
-            String,
-            Option<i64>,
-            Option<String>,
-            Option<i64>,
-            Option<String>,
-        );
-        let row: Option<Row> = sqlx::query_as(
-            "
-            SELECT latest_block_number,
-                   latest_block_hash,
-                   safe_block_number,
-                   safe_block_hash,
-                   finalized_block_number,
-                   finalized_block_hash
-            FROM chain_heads
-            WHERE chain_id = $1
-            ",
-        )
-        .bind(chain_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| {
-            IngestError::database(
-                format!("failed to load published head for chain {chain_id}"),
-                error,
-            )
-        })?;
-        row.map(
-            |(
-                latest_number,
-                latest_hash,
-                safe_number,
-                safe_hash,
-                finalized_number,
-                finalized_hash,
-            )| {
-                Ok(PublishedHead {
-                    latest: Marker {
-                        number: latest_number,
-                        hash: latest_hash,
-                    },
-                    safe: optional_marker(safe_number, safe_hash)?,
-                    finalized: optional_marker(finalized_number, finalized_hash)?,
-                })
-            },
-        )
-        .transpose()
-    }
-}
-
-struct PublishedHead {
-    latest: Marker,
-    #[allow(dead_code)]
-    safe: Option<Marker>,
-    finalized: Option<Marker>,
 }
 
 fn validate_live_request(request: &LiveBatchRequest) -> Result<()> {
@@ -307,21 +146,4 @@ fn validate_live_request(request: &LiveBatchRequest) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-fn marker(block: &ResolvedBlock) -> Marker {
-    Marker {
-        number: block.number,
-        hash: block.hash.clone(),
-    }
-}
-
-fn optional_marker(number: Option<i64>, hash: Option<String>) -> Result<Option<Marker>> {
-    match (number, hash) {
-        (Some(number), Some(hash)) => Ok(Some(Marker { number, hash })),
-        (None, None) => Ok(None),
-        _ => Err(IngestError::data_integrity(
-            "stored chain head marker has only a number or only a hash",
-        )),
-    }
 }

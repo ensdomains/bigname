@@ -1,11 +1,11 @@
 //! Explicit same-node transport changes preserve the retained ingest extent.
 use anyhow::{Context as _, Result, ensure};
 use bigname_ingest::{
-    Marker, SourceDescriptor, VerificationProvider, WatchFilter, admit_source_floor,
-    enforce_source_floor, load_persisted_watch_filter,
+    LiveContinuation, Marker, SourceDescriptor, VerificationProvider, WatchFilter,
+    admit_source_floor, enforce_source_floor, load_persisted_watch_filter, plan_live_continuation,
 };
 use serde_json::{Value, json};
-use sqlx::{Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::{
     config::{SeedBasis, SourceConfig, SourceRole, normalized_source_kind},
@@ -131,23 +131,34 @@ pub async fn transition_with_readers(
         !checked.is_empty(),
         "transport change requires a retained boundary"
     );
-    let next = if phase["redo_in_progress"] == true {
-        phase["redo_current_block_number"]
-            .as_i64()
-            .map(|n| n + 1)
-            .or(phase["redo_from_block_number"].as_i64())
-    } else {
-        cursor["next_block_number"].as_i64()
-    }
-    .ok_or_else(|| anyhow::anyhow!("missing next ingest block"))?;
-    let filter = load_persisted_watch_filter(database.pool(), chain, next, next).await?;
-    let left = old_provider.fetch(filter.clone(), next, next).await?;
-    let right = new_provider.fetch(filter, next, next).await?;
+    let resume = resume_point(
+        &mut tx,
+        database.pool(),
+        chain,
+        cursor,
+        &phase,
+        &new_provider,
+    )
+    .await?;
+    let compared = resume.compared_block();
+    let filter = load_persisted_watch_filter(database.pool(), chain, compared, compared).await?;
+    let left = old_provider
+        .fetch(filter.clone(), compared, compared)
+        .await?;
+    let right = new_provider.fetch(filter, compared, compared).await?;
     ensure!(
         left.end == right.end && left.logs == right.logs,
         "next block data differs"
     );
-    admit_retention_floor(&mut tx, chain, new, &to_kind, &new_provider, &phase, next).await?;
+    if let ResumePoint::Live(continuation) = &resume
+        && compared == continuation.ancestor.number
+    {
+        ensure!(
+            right.end.hash == continuation.ancestor.hash,
+            "published head differs at block {compared}"
+        );
+    }
+    admit_retention_floor(chain, new, &to_kind, &new_provider, &phase, &resume).await?;
     let affected = sqlx::query(
         "UPDATE ingest_cursors SET source_kind = $3 WHERE chain_id = $1 AND source_key = $2 AND source_kind = $4",
     )
@@ -159,29 +170,107 @@ pub async fn transition_with_readers(
     Ok(
         json!({"chain":chain,"source_key":old.source_key,"from_kind":from_kind,
         "to_kind":to_kind,"previous_cursor":cursor,"ingest_phase":phase,
-        "checked_boundaries":checked,"next_block":next,"next_block_hash":right.end.hash,
-        "next_block_log_count":right.logs.len(),"same_node_attested":true}),
+        "checked_boundaries":checked,"next_block":resume.next_block(),
+        "compared_block":compared,"compared_block_hash":right.end.hash,
+        "compared_block_log_count":right.logs.len(),
+        "live_continuation":resume.live_continuation_receipt(),"same_node_attested":true}),
     )
 }
 
-/// Applies, to the proposed descriptor, the source-floor admission that Ingest applies
-/// when it resumes after the change, so a reader that resumed Ingest would refuse is
-/// refused here instead of after a committed switch.
+/// The work Ingest resumes with after the change, read from the persisted runner state the
+/// way the runner reads it. Every check after the retained boundaries is judged on it.
+enum ResumePoint {
+    /// A redo in progress reads this block next and is judged on what remains of its range.
+    Redo(i64),
+    /// Ingest plans another normal batch from the descriptor's declared start block; the
+    /// cursor's next block is the one it fetches first.
+    DeclaredStart(i64),
+    /// Ingest completed and handed off, so only live follow reads this node. The historical
+    /// cursor stops moving at the handoff while live progress goes through `record_progress`,
+    /// so the position is selected from the published chain head with the live engine's own
+    /// common-ancestor rule instead.
+    Live(LiveContinuation),
+}
+
+impl ResumePoint {
+    /// The block Ingest or live follow reads next.
+    fn next_block(&self) -> i64 {
+        match self {
+            Self::Redo(next) | Self::DeclaredStart(next) => *next,
+            Self::Live(continuation) => continuation.next_block(),
+        }
+    }
+
+    /// The block both interfaces are compared on: the next block, except when live follow
+    /// has published the node's head and the next block does not exist yet. The published
+    /// head is then the boundary live follow extends and the block whose retention matters,
+    /// so it is compared instead; the floor is still applied to the block after it.
+    fn compared_block(&self) -> i64 {
+        match self {
+            Self::Live(continuation) if !continuation.next_block_is_available() => {
+                continuation.ancestor.number
+            }
+            _ => self.next_block(),
+        }
+    }
+
+    fn live_continuation_receipt(&self) -> Value {
+        let Self::Live(continuation) = self else {
+            return Value::Null;
+        };
+        let marker = |marker: &Marker| json!({"number": marker.number, "hash": marker.hash});
+        json!({
+            "ancestor": marker(&continuation.ancestor),
+            "node_head": marker(&continuation.node_head),
+        })
+    }
+}
+
+async fn resume_point(
+    tx: &mut Transaction<'_, Postgres>,
+    pool: &PgPool,
+    chain: &str,
+    cursor: &Value,
+    phase: &Value,
+    new_provider: &VerificationProvider,
+) -> Result<ResumePoint> {
+    if phase["redo_in_progress"] == true {
+        return phase["redo_current_block_number"]
+            .as_i64()
+            .map(|n| n + 1)
+            .or(phase["redo_from_block_number"].as_i64())
+            .map(ResumePoint::Redo)
+            .ok_or_else(|| anyhow::anyhow!("missing next ingest block"));
+    }
+    if ingest_replans_from_declared_start(tx, chain).await? {
+        return cursor["next_block_number"]
+            .as_i64()
+            .map(ResumePoint::DeclaredStart)
+            .ok_or_else(|| anyhow::anyhow!("missing next ingest block"));
+    }
+    plan_live_continuation(pool, chain, new_provider)
+        .await
+        .map(ResumePoint::Live)
+        .context("failed to select where live follow resumes on the proposed reader")
+}
+
+/// Applies, to the proposed descriptor, the source-floor admission that Ingest or live
+/// follow applies when it resumes after the change, so a reader that resumed work would
+/// refuse is refused here instead of after a committed switch.
 ///
 /// The rule is the engine's own (`bigname_ingest::admit_source_floor`) and keeps its
-/// distinction between the kinds of work Ingest resumes with: a redo in progress is
-/// judged on what remains of its range, Ingest that has not completed replans from the
-/// descriptor's declared start block, and Ingest that completed and handed off to live
-/// follow leaves only the suffix from the next block. Only a direct reader reports a
-/// floor, so a change back to the HTTP interface admits without one.
+/// distinction between the kinds of work that resume: a redo in progress is judged on what
+/// remains of its range, Ingest that has not completed replans from the descriptor's
+/// declared start block, and live follow is judged on the suffix from the block after its
+/// common ancestor with the node. Only a direct reader reports a floor, so a change back
+/// to the HTTP interface admits without one.
 async fn admit_retention_floor(
-    tx: &mut Transaction<'_, Postgres>,
     chain: &str,
     new: &SourceConfig,
     to_kind: &str,
     new_provider: &VerificationProvider,
     phase: &Value,
-    next: i64,
+    resume: &ResumePoint,
 ) -> Result<()> {
     let Some(floor) = new_provider.earliest_available_block().await? else {
         return Ok(());
@@ -192,25 +281,27 @@ async fn admit_retention_floor(
         start_block: new.start_block_number,
         endpoint: new.endpoint().to_owned(),
     };
-    let admitted = if phase["redo_in_progress"] == true {
-        let (Some(from), Some(to)) = (
-            phase["redo_from_block_number"].as_i64(),
-            phase["redo_to_block_number"].as_i64(),
-        ) else {
-            anyhow::bail!("ingest redo is in progress without a redo range");
-        };
-        let resumed = phase["redo_current_block_number"]
-            .as_i64()
-            .zip(phase["redo_current_block_hash"].as_str())
-            .map(|(number, hash)| Marker {
-                number,
-                hash: hash.to_owned(),
-            });
-        admit_source_floor(&descriptor, Some((from, to)), resumed.as_ref(), floor)
-    } else if ingest_replans_from_declared_start(tx, chain).await? {
-        admit_source_floor(&descriptor, None, None, floor)
-    } else {
-        enforce_source_floor(&descriptor.key, next, None, floor)
+    let admitted = match resume {
+        ResumePoint::Redo(_) => {
+            let (Some(from), Some(to)) = (
+                phase["redo_from_block_number"].as_i64(),
+                phase["redo_to_block_number"].as_i64(),
+            ) else {
+                anyhow::bail!("ingest redo is in progress for chain {chain} without a redo range");
+            };
+            let resumed = phase["redo_current_block_number"]
+                .as_i64()
+                .zip(phase["redo_current_block_hash"].as_str())
+                .map(|(number, hash)| Marker {
+                    number,
+                    hash: hash.to_owned(),
+                });
+            admit_source_floor(&descriptor, Some((from, to)), resumed.as_ref(), floor)
+        }
+        ResumePoint::DeclaredStart(_) => admit_source_floor(&descriptor, None, None, floor),
+        ResumePoint::Live(continuation) => {
+            enforce_source_floor(&descriptor.key, continuation.next_block(), None, floor)
+        }
     };
     admitted
         .context("the direct reader cannot serve the Ingest work that resumes after this change")
