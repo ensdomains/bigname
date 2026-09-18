@@ -610,6 +610,42 @@ async fn resource_summary_reads_the_staged_permissions_a_fixed_number_of_times()
     rebuild.finish().await
 }
 
+/// Whether an ENSv2 registration has a staged permission row is an `EXISTS` in the
+/// `resource_restrictions` block. Postgres either hashes the staged rows once or searches the
+/// staged table per registration, and it searches once it estimates the rows will not fit hash
+/// memory, which is a few tens of thousands of rows under the default `work_mem`. The stage is
+/// created like the live table but without its key, so the search read the whole stage for every
+/// registration, and a chain the size of Sepolia never finished. The stage is now indexed by
+/// resource and analyzed, so the search is a keyed probe. Hash memory is at its minimum here so
+/// the seeded rows exceed it.
+#[tokio::test]
+async fn resource_summary_looks_the_staged_permissions_up_by_key() -> Result<()> {
+    let mut rebuild =
+        Rebuild::through("rebuild_plan_summary_key", PLAN_NAMES, Builder::Permissions).await?;
+    raw_sql("SET LOCAL work_mem = '64kB'; SET LOCAL hash_mem_multiplier = 1")
+        .execute(&mut *rebuild.transaction)
+        .await?;
+    let staged: i64 = sqlx::query_scalar("SELECT count(*) FROM project_stage_permissions_current")
+        .fetch_one(&mut *rebuild.transaction)
+        .await?;
+    // A hashed row is 40 bytes, so the minimum 64kB holds about 1,600; the stage must be well
+    // past that even as the planner estimates it.
+    ensure!(
+        staged >= 2_500,
+        "the seed stages {staged} permission rows, too few to exceed hash memory"
+    );
+    let plan = rebuild
+        .explain(&super::permissions::resource_summary::query())
+        .await?;
+    let rows = rows_read(&plan, "project_stage_permissions_current");
+    eprintln!("project_stage_permissions_current rows handled: {rows} of {staged}");
+    ensure!(
+        rows <= 2.0 * staged as f64,
+        "project_stage_permissions_current rows handled: {rows} of {staged}; {plan}"
+    );
+    rebuild.finish().await
+}
+
 /// An incremental batch takes its own resources' permissions from the staged rows, whatever the
 /// live table still says about them, and its registry root's from the live rows, since an
 /// unchanged root lies outside the scope. The live rows used to be read for the whole chain.
