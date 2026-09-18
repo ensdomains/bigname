@@ -1676,6 +1676,64 @@ async fn v2_get_name_serves_a_lapsed_handed_off_lease_as_released() -> Result<()
     Ok(())
 }
 
+/// A live `.eth` lease under the registry-only binding a transfer without `reclaim` opened,
+/// after its token changed hands again without `reclaim`: Project serves the registry owner the
+/// handoff left behind as the name's control and the token's latest holder as its registrant,
+/// with the lease's own identity and dates. The API then serves owner and registrant as two
+/// different addresses, with the registry-only shape's `registered` status.
+#[tokio::test]
+async fn v2_get_name_serves_a_transferred_lease_under_the_registry_only_binding() -> Result<()> {
+    const REGISTRY_OWNER: &str = "0x00000000000000000000000000000000000000bb";
+    const LATER_HOLDER: &str = "0x00000000000000000000000000000000000000cc";
+    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
+        row.declared_summary["registration"] = json!({
+            "status": "active",
+            "authority_kind": "registry_only",
+            "authority_key": "registry:ethereum-mainnet:alice",
+            "released_at": null,
+            "registrant": LATER_HOLDER,
+            "expiry": "2027-01-02T03:04:05Z",
+            "registered_at": "2024-06-14T00:00:00Z",
+            "resource_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+            "latest_event_kind": "RegistrationRenewed"
+        });
+        row.declared_summary["control"] = json!({
+            "status": "active",
+            "expiry": "2027-01-02T03:04:05Z",
+            "registry_owner": REGISTRY_OWNER,
+            "registrant": LATER_HOLDER,
+            "latest_event_kind": "AuthorityEpochChanged"
+        });
+    })
+    .await?;
+
+    let data = payload["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("status"), Some(&json!("ok")), "{payload}");
+    assert_eq!(
+        data.get("registration_status"),
+        Some(&json!("registered")),
+        "{payload}"
+    );
+    assert_eq!(data.get("owner"), Some(&json!(REGISTRY_OWNER)), "{payload}");
+    assert_eq!(
+        data.get("registrant"),
+        Some(&json!(LATER_HOLDER)),
+        "{payload}"
+    );
+    assert_eq!(
+        data.get("registered_at"),
+        Some(&json!("2024-06-14T00:00:00Z")),
+        "{payload}"
+    );
+    assert_eq!(
+        data.get("expires_at"),
+        Some(&json!("2027-01-02T03:04:05Z")),
+        "{payload}"
+    );
+    assert!(data.get("manager").is_none(), "{payload}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_get_name_skips_stale_inventory_for_released_tombstone() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
