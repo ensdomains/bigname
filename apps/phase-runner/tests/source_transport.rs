@@ -678,6 +678,62 @@ async fn exhausted_redo_with_the_node_ahead_compares_the_block_live_follow_loads
     db.cleanup().await
 }
 
+#[tokio::test]
+async fn compared_block_is_judged_with_the_watch_set_ingest_would_use() -> Result<()> {
+    let db = ScratchDatabase::create("source_transport_announced_emitter").await?;
+    seed_watch_set(db.pool()).await?;
+    seed_ingest(db.pool(), "drpc", Redo::None).await?;
+    seed_published_head(db.pool(), 5).await?;
+    // An ENSv2 resolver announced itself in canonical block 4. Ingest has retained that
+    // announcement as a raw log but Interpret has not yet persisted a discovery edge for it,
+    // so only the announcement supplement Ingest applies to its watch set knows the emitter.
+    let (announced_emitter, scoped_topic0) = seed_resolver_announcement(db.pool(), 4).await?;
+    let node =
+        NodeDouble::through(6)
+            .with_watched_log(6)
+            .with_log(6, announced_emitter, &scoped_topic0);
+    let candidate_missing_the_log = NodeDouble::through(6).with_watched_log(6);
+    let before = snapshot(db.pool()).await?;
+
+    let error = switch(&db, "drpc", &node, "reth_db", &candidate_missing_the_log)
+        .await
+        .expect_err("the next Ingest batch reads the announced emitter's logs at block 6");
+
+    assert!(
+        error.to_string().contains("next block data differs"),
+        "{error:#}"
+    );
+    assert_eq!(before, snapshot(db.pool()).await?);
+
+    let receipt = switch(&db, "drpc", &node, "reth_db", &node).await?;
+    assert_eq!(receipt["compared_block_log_count"], 2);
+    db.cleanup().await
+}
+
+#[tokio::test]
+async fn reth_spelled_direct_reader_can_roll_back_to_the_http_interface() -> Result<()> {
+    let db = ScratchDatabase::create("source_transport_reth_alias").await?;
+    seed_watch_set(db.pool()).await?;
+    // A Sepolia deployment configured with source kind `reth`, the accepted spelling of the
+    // direct reader that the cursor stores as written.
+    seed_ingest(db.pool(), "reth", Redo::None).await?;
+    let node = NodeDouble::through(6).with_watched_log(6);
+    let before = snapshot(db.pool()).await?;
+
+    let receipt = switch(&db, "reth", &node, "drpc", &node).await?;
+
+    assert_eq!(receipt["from_kind"], "reth");
+    assert_eq!(receipt["to_kind"], "drpc");
+    assert_eq!(
+        snapshot(db.pool()).await?,
+        with_stored_kind(before.clone(), "drpc")
+    );
+    let receipt = switch(&db, "drpc", &node, "reth", &node).await?;
+    assert_eq!(receipt["to_kind"], "reth");
+    assert_eq!(snapshot(db.pool()).await?, before);
+    db.cleanup().await
+}
+
 /// Runs the production switch with each descriptor read through an HTTP node double. The
 /// direct database reader needs a real Reth datadir, so `direct` stands in for it; the locks,
 /// cursor checks, comparisons and update are the ones `transition` runs.
@@ -790,18 +846,23 @@ impl NodeDouble {
         self
     }
 
-    fn with_watched_log(mut self, number: i64) -> Self {
+    fn with_watched_log(self, number: i64) -> Self {
+        self.with_log(number, CONTRACT, TRANSFER_TOPIC)
+    }
+
+    fn with_log(mut self, number: i64, address: &str, topic0: &str) -> Self {
+        let logs = self.logs.entry(number).or_default();
         let log = json!({
             "blockHash": self.hashes[&number],
             "blockNumber": format!("{number:#x}"),
             "transactionHash": format!("0x{:064x}", 0x7a00_i64 + number),
             "transactionIndex": "0x0",
-            "logIndex": "0x0",
-            "address": CONTRACT,
-            "topics": [TRANSFER_TOPIC],
+            "logIndex": format!("{:#x}", logs.len()),
+            "address": address,
+            "topics": [topic0],
             "data": "0x"
         });
-        self.logs.entry(number).or_default().push(log);
+        logs.push(log);
         self
     }
 
@@ -994,6 +1055,73 @@ async fn seed_published_head(pool: &sqlx::PgPool, through: i64) -> Result<()> {
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// An active ENSv2 resolver manifest whose emitters announce themselves with
+/// `ResolverCreated()`, and one such announcement retained as a canonical raw log in block
+/// `announced_at` with no discovery edge persisted yet. Returns the announced emitter and the
+/// `topic0` of the resolver event Ingest then watches on it.
+async fn seed_resolver_announcement(
+    pool: &sqlx::PgPool,
+    announced_at: i64,
+) -> Result<(&'static str, String)> {
+    const EMITTER: &str = "0x00000000000000000000000000000000000000aa";
+    let created = bigname_manifests::resolver_creation_topic0();
+    let text_updated = format!(
+        "{}",
+        alloy_primitives::keccak256("TextUpdated(uint256,string,string,string)")
+    );
+    let payload = json!({
+        "manifest_version": 1, "namespace": "ens", "source_family": "ens_v2_resolver_l1",
+        "chain": SEPOLIA, "deployment_epoch": "test", "rollout_status": "active",
+        "normalizer_version": "test", "capability_flags": {},
+        "roots": [], "contracts": [], "discovery_rules": [],
+        "abi": {"events": [
+            {"name": "ResolverCreated", "fragment": "event ResolverCreated()",
+             "emitter_roles": [], "normalized_events": []},
+            {"name": "TextUpdated",
+             "fragment": "event TextUpdated(uint256 indexed recordId, string indexed keyHash, string key, string value)",
+             "emitter_roles": [], "normalized_events": []}
+        ]}
+    });
+    sqlx::query(
+        "INSERT INTO manifest_versions (
+            manifest_version, namespace, source_family, chain_id, deployment_label,
+            rollout_status, normalizer_version, file_path, manifest_payload
+         ) VALUES (1, 'ens', 'ens_v2_resolver_l1', $1, 'test', 'active', 'test', $2, $3::jsonb)",
+    )
+    .bind(SEPOLIA)
+    .bind(format!("tests/{SEPOLIA}-resolver.toml"))
+    .bind(payload.to_string())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO raw_transactions (
+            chain_id, block_hash, block_number, transaction_hash, transaction_index, from_address
+         ) VALUES ($1, $2, $3, $4, 0, $5)",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(announced_at))
+    .bind(announced_at)
+    .bind(format!("0x{:064x}", 0x7a00_i64 + announced_at))
+    .bind(EMITTER)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO raw_logs (
+            chain_id, block_hash, block_number, transaction_hash, transaction_index, log_index,
+            emitting_address, topics
+         ) VALUES ($1, $2, $3, $4, 0, 0, $5, $6)",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(announced_at))
+    .bind(announced_at)
+    .bind(format!("0x{:064x}", 0x7a00_i64 + announced_at))
+    .bind(EMITTER)
+    .bind(vec![created])
+    .execute(pool)
+    .await?;
+    Ok((EMITTER, text_updated))
 }
 
 /// Everything the command is documented to preserve, plus the cursor it may edit.
