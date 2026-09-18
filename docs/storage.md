@@ -685,10 +685,12 @@ token id only as successive leases of the same label, and a successor grant
 requires the earlier lease to be past its grace period, which the adapters
 settle as a `RegistrationReleased` no later than the grant's block, so the
 release guard leaves exactly one live lease. Evidence positioned at the cleanup
-itself counts only for a lease whose binding sits at that same log, the
-registrar identity materialized at `NameUnwrapped`; otherwise the cleanup
-transfer, which every migration emits on the lease resource, could stand in
-as the only evidence for a lease never observed before the transaction.
+itself counts only for a lease already known before the transaction: one whose
+binding sits at that same log (the registrar identity materialized at
+`NameUnwrapped`) or one with a registrar lifecycle event of its own before the
+cleanup, as set out below; otherwise the cleanup transfer, which every
+migration emits on the lease resource, could stand in as the only evidence for
+a lease never observed before the transaction.
 Which of the four kinds carries the token id depends on the deployment profile:
 the Sepolia profile indexes the BaseRegistrar's numeric `NameRegistered` and
 `NameRenewed` as lifecycle events with the token id, while the Mainnet profile

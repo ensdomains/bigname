@@ -6,9 +6,10 @@
 //! controller's reclaim at migration moves the registry record away from A and revokes those
 //! grants on the registry-only resource. Permissions fold per resource, subject and scope taking
 //! the latest surviving row, so the projection only clears A's control when Interpret keeps those
-//! revocations: it does not infer a revocation from the binding's closure. The rows below are the
-//! shapes the adapter emits for this scenario (see the adapter test
-//! `registry_only_handoff_cleanup_keeps_the_registrant_revocations_on_the_registry_resource`).
+//! revocations: it does not infer a revocation from the binding's closure. The rows below carry
+//! the fields the adapter emits for this scenario and that the projection reads (see the adapter
+//! test `registry_only_handoff_cleanup_keeps_the_registrant_revocations_on_the_registry_resource`);
+//! the authority keys are abbreviated, which the projection does not parse.
 //! (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
 //! (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
 

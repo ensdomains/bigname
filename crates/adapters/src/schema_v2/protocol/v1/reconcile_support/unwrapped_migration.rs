@@ -1,4 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde_json::Value;
 
 use super::super::refresh_interpreter_state_key;
 use crate::schema_v2::{
@@ -6,14 +8,21 @@ use crate::schema_v2::{
     model::{BatchOutput, NormalizedEvent},
 };
 
-/// The subject and scope a permission row is about.
+/// The subject and scope a permission row is about. The scope is compared by its fields, not by
+/// the order its producer wrote them in.
 fn permission_key(event: &NormalizedEvent) -> (String, String) {
+    let scope = &event.after_state["scope"];
+    let scope = match scope.as_object() {
+        Some(fields) => serde_json::to_string(&fields.iter().collect::<BTreeMap<_, _>>())
+            .unwrap_or_else(|_| scope.to_string()),
+        None => scope.to_string(),
+    };
     (
         event.after_state["subject"]
             .as_str()
             .unwrap_or_default()
             .to_ascii_lowercase(),
-        event.after_state["scope"].to_string(),
+        scope,
     )
 }
 
