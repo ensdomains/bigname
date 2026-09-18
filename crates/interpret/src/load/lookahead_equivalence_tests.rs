@@ -12,7 +12,7 @@ use bigname_manifests::{load_repository, sync_schema_v2_repository};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use sqlx::PgPool;
 
-use crate::{BatchRequest, Engine, Marker, RunMode, StateLoader, load};
+use crate::{BatchRequest, Engine, FullStateReason, Marker, RunMode, StateLoader, load};
 
 type TestResult<T = ()> = anyhow::Result<T>;
 
@@ -27,6 +27,8 @@ const OWNER: &str = "0x0000000000000000000000000000000000000051";
 const SECOND_OWNER: &str = "0x0000000000000000000000000000000000000052";
 const RESOLVER: &str = "0x4976fb03c32e5b8cfe2b6ccb31c09ba78ebaba41";
 const CAPACITY: StateCacheCapacity = StateCacheCapacity::Entries(65_536);
+/// An ENSv2 family lookahead does not cover, under which the drift tests retain history.
+const UNCOVERED_FAMILY: &str = "ens_v2_registry_l1";
 
 mod registry {
     alloy_sol_types::sol! {
@@ -704,6 +706,169 @@ async fn lookahead_matches_full_state_for_every_batch() -> TestResult {
             stored, full_state,
             "stored events differ for {blocks_per_batch} blocks per batch"
         );
+    }
+    Ok(())
+}
+
+async fn run_batch(
+    engine: &Engine,
+    current: Option<Marker>,
+    last_block: i64,
+) -> TestResult<Marker> {
+    let outcome = engine
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            from_block: FIRST_BLOCK,
+            to_block: last_block,
+            resume_current: current,
+            mode: RunMode::Normal,
+        })
+        .await?;
+    Ok(outcome.current)
+}
+
+/// Adds a manifest of `source_family` to the chain in `rollout_status`, as a manifest file
+/// moved to that state would be synced.
+async fn add_manifest(pool: &PgPool, source_family: &str, rollout_status: &str) -> TestResult<i64> {
+    Ok(sqlx::query_scalar(
+        "INSERT INTO manifest_versions (
+             manifest_version, namespace, source_family, chain_id, deployment_label,
+             rollout_status, normalizer_version, file_path, manifest_payload
+         ) VALUES (1, 'ens', $1, $2, 'test', $3, 'test', 'test/' || $1, '{}')
+         RETURNING manifest_id",
+    )
+    .bind(source_family)
+    .bind(CHAIN)
+    .bind(rollout_status)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// Retains one event of `UNCOVERED_FAMILY` at the chain's second block, attributed to a
+/// manifest that was active when the event was written, and then moves that manifest to
+/// `rollout_status`. The event carries no state scope, so restoring it changes no ENSv1
+/// state: the two loaders differ only in whether they read it.
+async fn retain_uncovered_family(pool: &PgPool, rollout_status: &str) -> TestResult {
+    let manifest_id = add_manifest(pool, UNCOVERED_FAMILY, "active").await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, event_kind, source_family, manifest_version,
+             source_manifest_id, chain_id, block_number, block_hash, transaction_hash,
+             transaction_index, log_index, raw_fact_ref, derivation_kind,
+             canonicality_state, after_state
+         ) VALUES ($1, 'ens', 'SubregistryChanged', $2, 1, $3, $4, $5, $6, $7, 0, 99, '{}',
+                   'ens_v2_registry_resource_surface', 'canonical', '{}')",
+    )
+    .bind(format!("test:{UNCOVERED_FAMILY}:retained"))
+    .bind(UNCOVERED_FAMILY)
+    .bind(manifest_id)
+    .bind(CHAIN)
+    .bind(FIRST_BLOCK + 1)
+    .bind(block_hash(FIRST_BLOCK + 1))
+    .bind(transaction_hash(FIRST_BLOCK + 1))
+    .execute(pool)
+    .await?;
+    sqlx::query("UPDATE manifest_versions SET rollout_status = $1 WHERE manifest_id = $2")
+        .bind(rollout_status)
+        .bind(manifest_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Interprets the Lifecycle history three blocks per batch. After the first batch an
+/// uncovered manifest with no history joins the chain, which must not change the loader;
+/// then history of `UNCOVERED_FAMILY` is retained under a manifest moved to
+/// `rollout_status`, which must. The second engine stands in for a restart. Returns the
+/// stored events and each engine's final loader choice.
+async fn walk_with_retained_uncovered_family(
+    rollout_status: &'static str,
+    force_full_state: bool,
+) -> TestResult<(Vec<String>, Vec<Option<StateLoader>>)> {
+    let database = database("interpret_lookahead_retained_family").await?;
+    let pool = database.pool();
+    seed_history(pool, History::Lifecycle).await?;
+    let last_block = History::Lifecycle.last_block();
+    let engine = || {
+        Engine::new(pool.clone())
+            .with_blocks_per_batch(NonZeroU32::new(3).expect("positive batch"))
+            .with_full_state_loader_forced(force_full_state)
+    };
+    let first = engine();
+    let mut current = run_batch(&first, None, last_block).await?;
+    let (from, to) = (current.number + 1, current.number + 3);
+    add_manifest(pool, "ens_v2_root_l1", rollout_status).await?;
+    if !force_full_state {
+        match super::batch_input(pool, CHAIN, from, to, None, CAPACITY, None).await? {
+            super::Attempt::Loaded(_) => {}
+            super::Attempt::FullStateRequired(choice) => {
+                anyhow::bail!(
+                    "a {rollout_status} manifest with no retained history chose {choice:?}"
+                )
+            }
+        }
+    }
+    retain_uncovered_family(pool, rollout_status).await?;
+    if !force_full_state {
+        match super::batch_input(pool, CHAIN, from, to, None, CAPACITY, None).await? {
+            super::Attempt::Loaded(_) => anyhow::bail!(
+                "lookahead was chosen although {UNCOVERED_FAMILY} history is retained under a \
+                 {rollout_status} manifest"
+            ),
+            super::Attempt::FullStateRequired(choice) => assert_eq!(
+                choice,
+                StateLoader::FullState {
+                    reason: FullStateReason::UnsupportedSourceFamily {
+                        source_family: UNCOVERED_FAMILY.to_owned(),
+                        rollout_status,
+                    },
+                }
+            ),
+        }
+    }
+    current = run_batch(&first, Some(current), last_block).await?;
+    let second = engine();
+    while current.number < last_block {
+        current = run_batch(&second, Some(current), last_block).await?;
+    }
+    let choices = vec![first.chosen_loader(CHAIN)?, second.chosen_loader(CHAIN)?];
+    let stored = stored_events(pool).await?;
+    database.cleanup().await?;
+    Ok((stored, choices))
+}
+
+/// History retained from a family whose manifest has since left the `active` and
+/// `deprecated` states is restored by the full-state loader and read by no lookahead query.
+/// Its presence must therefore choose the full-state loader, on the engine that saw the
+/// change and on one started afterwards, and what is stored must equal a forced full-state
+/// run. A manifest in such a state with no retained history changes nothing.
+#[tokio::test]
+async fn retained_history_of_an_uncovered_family_requires_full_state() -> TestResult {
+    for rollout_status in ["draft", "shadow"] {
+        let (stored, choices) = walk_with_retained_uncovered_family(rollout_status, false).await?;
+        let full_state = StateLoader::FullState {
+            reason: FullStateReason::UnsupportedSourceFamily {
+                source_family: UNCOVERED_FAMILY.to_owned(),
+                rollout_status,
+            },
+        };
+        assert_eq!(
+            choices,
+            vec![Some(full_state.clone()), Some(full_state)],
+            "{rollout_status}: both engines must end on the full-state loader"
+        );
+        let (forced, forced_choices) =
+            walk_with_retained_uncovered_family(rollout_status, true).await?;
+        assert!(forced_choices.iter().all(|choice| {
+            matches!(
+                choice,
+                Some(StateLoader::FullState {
+                    reason: FullStateReason::OperatorOverride
+                })
+            )
+        }));
+        assert_eq!(stored, forced, "{rollout_status}: stored events differ");
+        assert!(stored.iter().any(|row| row.contains(UNCOVERED_FAMILY)));
     }
     Ok(())
 }
