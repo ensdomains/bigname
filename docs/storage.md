@@ -1155,7 +1155,8 @@ current registry stores itself for a requested zero owner.
 resolver self-edge. ENSv2 registry-pointer edges remain binding history and are
 excluded from emitter admission. Canonical raw creation logs drive Ingest's
 same-window capture and its subsequent windows; orphaned creation logs cannot
-expand a watch filter. Installing creation capture requires the normal
+expand a watch filter. Installing
+[creation capture](glossary.md#resolver-creation-capture) requires the normal
 manifest-driven Ingest redo and full Interpret replay, preserving raw facts.
 
 The rule is one validated CHECK on `discovery_edges` named

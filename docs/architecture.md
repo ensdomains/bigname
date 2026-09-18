@@ -628,7 +628,7 @@ ENSv2 resolver bindings and capture are separate. `ResolverUpdated` changes a
 name's target, while `ResolverCreated()` admits the emitting resolver from its
 creation block. Same-window ingestion includes initializer writes and earlier
 construction logs in that block; later binding changes cannot trigger capture
-backfill. See [resolver creation capture](manifests.md#resolver-creation-capture).
+backfill. See [resolver creation capture](glossary.md#resolver-creation-capture).
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2_sepolia_20260916@366de741)
 
 Discovery expands the canonical graph through time-versioned indexability and relationship edges. The schema-v2 baseline constrains `edge_kind` to exactly five values: `resolver`, `subregistry`, `proxy_implementation`, `registry_announcement`, and `migration`. Four of the five have producers; nothing writes `migration`, which is [reserved surface](glossary.md#reserved-surface). (The legacy `public` schema built from `migrations/` never constrained the column, so historical rows there are not bounded by this list.) Each edge stores `edge_id`, `from_contract_instance_id`, `to_contract_instance_id`, `discovered_by`, `edge_kind`, `active_from`, `active_to`, provenance, and canonicality.
@@ -677,7 +677,12 @@ Registry-name suffix labels are retained verbatim. Raw label text keys the live 
 Project applies the same declaration precedence when it classifies an active
 resolver-discovery admission for serving. An applicable exact resolver
 declaration in the same namespace has classification rank 0, ahead of the
-original discovery admission at rank 1. This changes only the address's
+original discovery admission at rank 1. For this purpose an ENSv2 registry or
+root `ResolverUpdated` pointer edge still counts, as does a
+[creation self-edge](glossary.md#resolver-creation-capture): the pointer does
+not admit the resolver for event capture, but it proves that a name in its
+namespace uses the address, which is what the declaration is matched against.
+This changes only the address's
 Project family classification: it does not remove or rewrite the discovery
 edge, the ENSv2-origin `ResolverChanged` event, its `logical_name_id`, or their
 provenance. When one manifest has repeated applicable declarations for the
