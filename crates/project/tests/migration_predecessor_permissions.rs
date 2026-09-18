@@ -10,6 +10,15 @@
 //! the fields the adapter emits for this scenario and that the projection reads (see the adapter
 //! test `registry_only_handoff_cleanup_keeps_the_registrant_revocations_on_the_registry_resource`);
 //! the authority keys are abbreviated, which the projection does not parse.
+//!
+//! In the second shape A sends the registry record to the Graveyard with `setOwner` after the
+//! handoff, so the Graveyard holds both grants on the registry-only resource when B migrates. The
+//! reclaim then revokes the Graveyard's grants, and the migration's own registry transfer to the
+//! Graveyard grants the same subject and scopes again one log later before the cleanup revokes
+//! them; reconciliation drops those transient rows and must still hand Project the reclaim's
+//! revocations (see the adapter test
+//! `registry_only_handoff_cleanup_keeps_the_reclaim_revocations_of_a_prior_graveyard_owner`).
+//! (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L68 @ ens_v1@91c966f)
 //! (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
 //! (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
 
@@ -276,10 +285,12 @@ async fn binding(
     Ok(())
 }
 
-/// Seeds the registration, the handoff and the migration transaction. With `reclaim_revokes`
-/// false the migration transaction carries no revocation of the registrant's registry-only
-/// grants, which is what the reconciliation consumer used to hand Project.
-async fn seed(pool: &PgPool, reclaim_revokes: bool) -> Result<()> {
+/// Seeds the registration, the handoff and the migration transaction. `registry_owner` is the
+/// registry owner when the migration starts: the registrant, or the Graveyard after the registrant
+/// hands it the registry record in the block of the handoff. With `reclaim_revokes` false the
+/// migration transaction carries no revocation of that owner's registry-only grants, which is
+/// what the reconciliation consumer used to hand Project.
+async fn seed(pool: &PgPool, reclaim_revokes: bool, registry_owner: &str) -> Result<()> {
     for block in [REGISTRATION_BLOCK, HANDOFF_BLOCK, MIGRATION_BLOCK] {
         sqlx::query(
             "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number, block_timestamp, canonicality_state)
@@ -464,6 +475,44 @@ async fn seed(pool: &PgPool, reclaim_revokes: bool) -> Result<()> {
         kind: "AuthorityEpochChanged", suffix: "handoff", before: json!({}),
         after: json!({"source_event": "Transfer", "authority_kind": "registry_only", "registry_owner": REGISTRANT}),
     }).await?;
+    if registry_owner == GRAVEYARD {
+        // The registrant's `setOwner` moves the registry record to the Graveyard: the registrant's
+        // registry-only grants close and the Graveyard is granted the same scopes there.
+        event(
+            pool,
+            Event {
+                resource: Some(REGISTRY_RESOURCE),
+                family: REGISTRY,
+                block: HANDOFF_BLOCK,
+                log: 1,
+                kind: "AuthorityTransferred",
+                suffix: "graveyard-owner",
+                before: json!({}),
+                after: json!({"source_event": "Transfer", "node": NAMEHASH, "owner": GRAVEYARD}),
+            },
+        )
+        .await?;
+        for (subject, grant) in [(REGISTRANT, false), (GRAVEYARD, true)] {
+            for (scope, power) in [
+                (resource_scope(), "resource_control"),
+                (resolver_scope(), "resolver_control"),
+            ] {
+                permission(
+                    pool,
+                    REGISTRY_RESOURCE,
+                    REGISTRY,
+                    HANDOFF_BLOCK,
+                    1,
+                    subject,
+                    scope,
+                    power,
+                    grant,
+                    "AuthorityTransferred",
+                )
+                .await?;
+            }
+        }
+    }
 
     // Migration: the holder sends the token to the controller, the controller reclaims the
     // registry record, hands the record and the token to the Graveyard, and registers the name
@@ -507,7 +556,7 @@ async fn seed(pool: &PgPool, reclaim_revokes: bool) -> Result<()> {
             REGISTRY,
             MIGRATION_BLOCK,
             1,
-            REGISTRANT,
+            registry_owner,
             resource_scope(),
             "resource_control",
             false,
@@ -520,7 +569,7 @@ async fn seed(pool: &PgPool, reclaim_revokes: bool) -> Result<()> {
             REGISTRY,
             MIGRATION_BLOCK,
             1,
-            REGISTRANT,
+            registry_owner,
             resolver_scope(),
             "resolver_control",
             false,
@@ -726,8 +775,8 @@ async fn run(pool: &PgPool, target: i64, resume: Option<i64>) -> Result<()> {
     Ok(())
 }
 
-/// The registrant's rows on the registry-only resource as `(scope, effective_powers, revoked)`.
-async fn registrant_rows(pool: &PgPool) -> Result<Vec<(String, Value, bool)>> {
+/// `subject`'s rows on the registry-only resource as `(scope, effective_powers, revoked)`.
+async fn registry_rows(pool: &PgPool, subject: &str) -> Result<Vec<(String, Value, bool)>> {
     Ok(sqlx::query_as(
         "SELECT scope, effective_powers, revocation_source IS NOT NULL
          FROM permissions_current
@@ -735,9 +784,13 @@ async fn registrant_rows(pool: &PgPool) -> Result<Vec<(String, Value, bool)>> {
          ORDER BY scope",
     )
     .bind(REGISTRY_RESOURCE)
-    .bind(REGISTRANT)
+    .bind(subject)
     .fetch_all(pool)
     .await?)
+}
+
+fn powers(rows: &[(String, Value, bool)]) -> Vec<Value> {
+    rows.iter().map(|(_, powers, _)| powers.clone()).collect()
 }
 
 async fn selected_name(pool: &PgPool) -> Result<(Option<String>, Option<String>, Option<String>)> {
@@ -752,33 +805,30 @@ async fn selected_name(pool: &PgPool) -> Result<(Option<String>, Option<String>,
     .await?)
 }
 
-/// `permissions_current` keeps only rows with effective powers, so a registrant whose latest row
-/// on the registry-only resource is a revocation has no row there at all.
-fn assert_registrant_has_no_control(rows: &[(String, Value, bool)], shape: &str) {
+/// `permissions_current` keeps only rows with effective powers, so a subject whose latest row on
+/// the registry-only resource is a revocation has no row there at all.
+fn assert_no_control(rows: &[(String, Value, bool)], shape: &str) {
     assert!(
         rows.is_empty(),
-        "{shape}: the registrant keeps effective powers on the registry-only resource: {rows:?}"
+        "{shape}: the prior registry owner keeps effective powers on the registry-only resource: {rows:?}"
     );
 }
 
 #[tokio::test]
 async fn reclaim_revocations_clear_the_registrant_on_the_registry_only_resource() -> Result<()> {
     let (database, pool) = test_database("migration_predecessor_permissions").await?;
-    seed(&pool, true).await?;
+    seed(&pool, true, REGISTRANT).await?;
     run(&pool, HANDOFF_BLOCK, None).await?;
-    let handed_off = registrant_rows(&pool).await?;
+    let handed_off = registry_rows(&pool, REGISTRANT).await?;
     assert_eq!(
-        handed_off
-            .iter()
-            .map(|(_, powers, _)| powers.clone())
-            .collect::<Vec<_>>(),
+        powers(&handed_off),
         [json!(["resolver_control"]), json!(["resource_control"])],
         "before the migration the registrant controls the registry-only resource: {handed_off:?}"
     );
 
     run(&pool, MIGRATION_BLOCK, Some(HANDOFF_BLOCK)).await?;
-    let incremental = registrant_rows(&pool).await?;
-    assert_registrant_has_no_control(&incremental, "incremental");
+    let incremental = registry_rows(&pool, REGISTRANT).await?;
+    assert_no_control(&incremental, "incremental");
     let (resource, binding, arm) = selected_name(&pool).await?;
     assert_eq!(
         (resource.as_deref(), binding.as_deref(), arm.as_deref()),
@@ -788,11 +838,59 @@ async fn reclaim_revocations_clear_the_registrant_on_the_registry_only_resource(
     database.cleanup().await?;
 
     let (database, pool) = test_database("migration_predecessor_permissions_zero").await?;
-    seed(&pool, true).await?;
+    seed(&pool, true, REGISTRANT).await?;
     run(&pool, MIGRATION_BLOCK, None).await?;
-    let from_zero = registrant_rows(&pool).await?;
-    assert_registrant_has_no_control(&from_zero, "from zero");
+    let from_zero = registry_rows(&pool, REGISTRANT).await?;
+    assert_no_control(&from_zero, "from zero");
     assert_eq!(from_zero, incremental);
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// The Graveyard became registry owner before the migration, so the reclaim's revocations name
+/// the Graveyard. Reconciliation removes the migration's own grants to the Graveyard on the
+/// registry-only resource and the revocations that close them, but the reclaim's revocations
+/// close grants made before the transaction and reach Project; without them the Graveyard's
+/// handoff-block grants would stay the latest rows on that resource.
+#[tokio::test]
+async fn reclaim_revocations_clear_a_prior_graveyard_owner_on_the_registry_only_resource()
+-> Result<()> {
+    let (database, pool) = test_database("migration_predecessor_permissions_graveyard").await?;
+    seed(&pool, true, GRAVEYARD).await?;
+    run(&pool, HANDOFF_BLOCK, None).await?;
+    assert_no_control(&registry_rows(&pool, REGISTRANT).await?, "handoff");
+    let handed_off = registry_rows(&pool, GRAVEYARD).await?;
+    assert_eq!(
+        powers(&handed_off),
+        [json!(["resolver_control"]), json!(["resource_control"])],
+        "before the migration the Graveyard controls the registry-only resource: {handed_off:?}"
+    );
+
+    run(&pool, MIGRATION_BLOCK, Some(HANDOFF_BLOCK)).await?;
+    let incremental = registry_rows(&pool, GRAVEYARD).await?;
+    assert_no_control(&incremental, "incremental");
+    assert_no_control(&registry_rows(&pool, REGISTRANT).await?, "incremental");
+    let (resource, binding, arm) = selected_name(&pool).await?;
+    assert_eq!(
+        (resource.as_deref(), binding.as_deref(), arm.as_deref()),
+        (Some(V2_RESOURCE), Some(V2_BINDING), Some("ens_v2")),
+        "the ENSv2 registration stays the selected name"
+    );
+    database.cleanup().await?;
+
+    let (database, pool) =
+        test_database("migration_predecessor_permissions_graveyard_zero").await?;
+    seed(&pool, true, GRAVEYARD).await?;
+    run(&pool, MIGRATION_BLOCK, None).await?;
+    let from_zero = registry_rows(&pool, GRAVEYARD).await?;
+    assert_no_control(&from_zero, "from zero");
+    assert_no_control(&registry_rows(&pool, REGISTRANT).await?, "from zero");
+    assert_eq!(from_zero, incremental);
+    let (resource, _, arm) = selected_name(&pool).await?;
+    assert_eq!(
+        (resource.as_deref(), arm.as_deref()),
+        (Some(V2_RESOURCE), Some("ens_v2"))
+    );
     database.cleanup().await?;
     Ok(())
 }
@@ -804,13 +902,11 @@ async fn reclaim_revocations_clear_the_registrant_on_the_registry_only_resource(
 #[tokio::test]
 async fn without_the_reclaim_revocations_the_handoff_grants_stay_effective() -> Result<()> {
     let (database, pool) = test_database("migration_predecessor_permissions_dropped").await?;
-    seed(&pool, false).await?;
+    seed(&pool, false, REGISTRANT).await?;
     run(&pool, MIGRATION_BLOCK, None).await?;
-    let rows = registrant_rows(&pool).await?;
+    let rows = registry_rows(&pool, REGISTRANT).await?;
     assert_eq!(
-        rows.iter()
-            .map(|(_, powers, _)| powers.clone())
-            .collect::<Vec<_>>(),
+        powers(&rows),
         [json!(["resolver_control"]), json!(["resource_control"])],
         "{rows:?}"
     );
