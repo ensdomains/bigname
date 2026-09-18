@@ -1590,7 +1590,15 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   permission rows of the NameWrapper resource that currently controls the name,
   matched through the name's current `registration_id`; a name registered
   through the NameWrapper, whose wrap recorded no lease, is matched the same
-  way. `restrictions.registration_id` is the lease on every page of a read
+  way. Registering through the NameWrapper registers the lease to the wrapper
+  and wraps it in one call, and the registrar mints and emits before the wrap,
+  so the controller event that creates the registration comes after
+  `NameWrapped` and the wrap records no lease.
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L305 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L902 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
+  `restrictions.registration_id` is the lease on every page of a read
   bound to it, including an empty page filtered by `address`.
   The NameWrapper resource itself is not the name's registration, so pairing
   the name with it is the supported empty intersection described above, and

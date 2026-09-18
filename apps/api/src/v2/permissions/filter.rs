@@ -228,7 +228,14 @@ fn registration_uuid(row: &NameCurrentRow) -> Option<Uuid> {
 /// candidate name (one the resource is bound to, or an exact name of the node the resource's
 /// own rows carry) belongs to the lease only when its current row names the lease as its
 /// registration. A name registered through the NameWrapper, whose wrap recorded no lease and
-/// whose lease has no binding of its own, is found this way.
+/// whose lease has no binding of its own, is found this way: the NameWrapper registers the lease
+/// to itself and wraps it in one call, the registrar mints and emits before the wrap, so the
+/// controller event a manifest creates the registration from comes after `NameWrapped`, and the
+/// registry write happens through the wrapper rather than through the lease's own binding.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L305 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L902 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
 ///
 /// `None` means the id is not a registration: it is the NameWrapper resource of a current name
 /// whose registration is a different resource, its BaseRegistrar lease. A wrapped subname has no
