@@ -284,6 +284,110 @@ async fn assert_registry_binding_does_not_witness_registration(released: bool) -
     database.cleanup().await
 }
 
+// A registry-only binding (a registrar token transferred without `reclaim`) can outlive several
+// `registerOnly` re-registrations. Each successor lease has no binding of its own and no
+// `NameWrapped` link, and only the latest one is the declared registration, so an earlier
+// successor's grant, renewal, and release stay in registration-scoped name history through the
+// name their grant carries.
+#[tokio::test]
+async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_only_binding()
+-> Result<()> {
+    const NAME: &str = "registry-successors.eth";
+    const SEED_LOGICAL_NAME_ID: &str = "ens:registry-successors.eth";
+    const HOLDER: &str = "0x0000000000000000000000000000000000007170";
+    let database = TestDatabase::new_migrated().await?;
+    let registry = Uuid::from_u128(0x7170);
+    let earlier_lease = Uuid::from_u128(0x7171);
+    let current_lease = Uuid::from_u128(0x7172);
+    let namehash = bigname_lookup::ens_namehash_hex(NAME)?;
+    let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
+
+    // The name is bound to the registry-only resource throughout.
+    seed_identity_name(
+        &database,
+        SEED_LOGICAL_NAME_ID,
+        NAME,
+        NAME,
+        "node:registry-successors.eth",
+        registry,
+        Uuid::from_u128(0x8170),
+        Uuid::from_u128(0x9170),
+        HOLDER,
+        bigname_storage::AddressNameRelation::EffectiveController,
+        80,
+    )
+    .await?;
+    upsert_test_resources(
+        &database.pool,
+        &[
+            address_name_resource(earlier_lease, None, "0xearlier-lease-resource", 78),
+            address_name_resource(current_lease, None, "0xcurrent-lease-resource", 79),
+        ],
+    )
+    .await?;
+    seed_v2_history_blocks(&database, 120..=125).await?;
+    // Project selected the latest successor lease as the name's registration.
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+             declared_summary, '{registration,resource_id}', to_jsonb($2::text)
+         )
+         WHERE resource_id = $1",
+    )
+    .bind(registry)
+    .bind(current_lease.to_string())
+    .execute(&database.pool)
+    .await?;
+
+    let lease_event = |identity: &str, resource: Uuid, kind: &str, block_number: i64| {
+        let mut event =
+            v2_history_event(identity, Some(&logical_name_id), Some(resource), kind, block_number);
+        event.after_state["namehash"] = json!(&namehash);
+        event
+    };
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            lease_event("successor-earlier-grant", earlier_lease, "RegistrationGranted", 120),
+            lease_event("successor-earlier-renewal", earlier_lease, "RegistrationRenewed", 121),
+            lease_event("successor-earlier-release", earlier_lease, "RegistrationReleased", 122),
+            lease_event("successor-current-grant", current_lease, "RegistrationGranted", 124),
+        ],
+    )
+    .await?;
+
+    let registration = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/names/{NAME}/history?scope=registration&page_size=20"),
+    )
+    .await?;
+    assert_eq!(
+        history_transaction_hashes(&registration),
+        vec!["0xtx124", "0xtx122", "0xtx121", "0xtx120"],
+        "registration-scoped name history lost the earlier successor lease: {registration}"
+    );
+    let rows = registration["data"].as_array().expect("registration rows");
+    assert_eq!(rows[0]["registration_id"], json!(current_lease.to_string()));
+    for row in &rows[1..] {
+        assert_eq!(row["registration_id"], json!(earlier_lease.to_string()), "{row}");
+    }
+    assert_eq!(registration["page"]["total_count"], json!(4));
+
+    // The earlier lease is still a registration in its own right.
+    let earlier = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?registration_id={earlier_lease}&page_size=20"),
+    )
+    .await?;
+    assert_eq!(
+        history_transaction_hashes(&earlier),
+        vec!["0xtx122", "0xtx121", "0xtx120"],
+        "{earlier}"
+    );
+
+    database.cleanup().await
+}
+
 #[tokio::test]
 async fn noncanonical_history_of_a_name_wrapped_at_registration_keeps_the_registrar_lease_handle() -> Result<()> {
     const NAME: &str = "noncanonical-born-wrapped.eth";
