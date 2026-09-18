@@ -144,6 +144,7 @@ pub use permissions::{
     load_permissions_current_for_resolver_scope_subjects, load_permissions_current_page,
     load_permissions_current_resolver_targets, load_permissions_current_resource_summaries,
     load_permissions_current_resource_summary, permission_resource_matches_namespace,
+    resource_wrapped_a_registrar_lease,
 };
 pub use phase_projection_reads::{
     DEFAULT_RESOLVER_CURRENT_READ_FILTER, PHASE_EXPECTED_CHAIN_IDS_SELECT,

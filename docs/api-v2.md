@@ -1397,7 +1397,7 @@ Exact-name detail, batch lookup, `GET /v1/permissions`, permission
 and `GET /v1/events?registration_id=...`) all use this one handle. NameWrapper
 events of a wrapped `.eth` name report the lease as their `registration_id`, and
 a `registration_id` read of the lease returns them together with the
-registrar's own rows. A NameWrapper resource that wraps a lease is not a public
+registrar's own rows. A NameWrapper resource that wraps or wrapped a lease is never a public
 registration handle: `GET /v1/events?registration_id=` with it selects nothing,
 `GET /v1/permissions?registration_id=` with it answers `200` with empty `data`
 whether or not `address` is also given, and `GET /v1/permissions` pairing the

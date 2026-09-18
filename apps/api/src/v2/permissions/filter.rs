@@ -239,9 +239,11 @@ fn registration_uuid(row: &NameCurrentRow) -> Option<Uuid> {
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L902 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
 ///
-/// `None` means the id is not a registration: it is the NameWrapper resource of a current name
-/// whose registration is a different resource, its BaseRegistrar lease. A wrapped subname has no
-/// lease, so its NameWrapper resource is its registration and still resolves to itself.
+/// `None` means the id is not a registration: a NameWrapper resource whose wrap recorded the
+/// lease it wrapped, also once the name is unwrapped, released or registered again, or the
+/// NameWrapper resource of a current name whose registration is a different resource, its
+/// BaseRegistrar lease. A wrapped subname has no lease, so its NameWrapper resource is its
+/// registration and still resolves to itself.
 async fn control_resource_for_registration(
     state: &AppState,
     registration_id: Uuid,
@@ -254,6 +256,14 @@ async fn control_resource_for_registration(
         );
         V2Error::internal_error("failed to resolve registration resource")
     };
+    // The recorded wrap link outlives the name's current row, so a historical NameWrapper
+    // resource is rejected by it, as history rejects the same value.
+    if bigname_storage::resource_wrapped_a_registrar_lease(&state.pool, registration_id)
+        .await
+        .map_err(failed)?
+    {
+        return Ok(None);
+    }
     let mut stands_in_for_a_lease = false;
     let logical_name_ids = bigname_storage::load_candidate_logical_name_ids_for_registration_id(
         &state.pool,
