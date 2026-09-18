@@ -204,6 +204,10 @@ jobs:
         include:
           - name: api
             packages: "-p bigname-api"
+            # The API plan tests assert that a page or count plan does not
+            # cross PostgreSQL's JIT threshold, as production API connections
+            # would. They need JIT on to see it.
+            postgres_initdb_args: ""
           - name: core
             packages: >-
               -p bigname-domain
@@ -211,6 +215,7 @@ jobs:
               -p bigname-manifests
               -p bigname-adapters
               -p bigname-test-support
+            postgres_initdb_args: "--set=jit=off"
     services:
       postgres:
         image: postgres:16-alpine
@@ -218,7 +223,7 @@ jobs:
           POSTGRES_DB: bigname
           POSTGRES_USER: bigname
           POSTGRES_PASSWORD: bigname
-          POSTGRES_INITDB_ARGS: "--set=jit=off"
+          POSTGRES_INITDB_ARGS: ${{ matrix.postgres_initdb_args }}
         ports:
           - 5432:5432
         options: >-

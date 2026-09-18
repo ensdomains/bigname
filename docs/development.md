@@ -58,9 +58,13 @@ Do not run DB-backed tests directly unless `BIGNAME_DATABASE_URL` or
 `DATABASE_URL` already points at a reachable local PostgreSQL server. The
 harness starts or reuses `postgres:16-alpine` on `127.0.0.1:55432` with JIT off,
 exports both variables, and does not source `.env`. A container created before
-JIT was turned off keeps JIT on; recreate it with `docker rm -f
-bigname-test-postgres` or the Project suites spend most of their time compiling
-statements.
+JIT was turned off keeps JIT on; remove it (`docker rm -f bigname-test-postgres`,
+or the name set in `BIGNAME_TEST_POSTGRES_CONTAINER`) so the harness recreates
+it, or the [Project](projections.md) suites, which build the served projections,
+spend most of their time compiling statements. The API plan tests in
+`apps/api/src/tests/graphql_generated_domain_filter_plans.rs` check that a plan
+does not reach the JIT threshold; with JIT off locally they cannot see it, so CI
+runs the API job with JIT on.
 
 Pass a focused command after `--`:
 
