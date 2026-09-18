@@ -432,6 +432,18 @@ registration after the handoff. A renewal updates its expiry and `latest_event_k
 repeated expiry stay as they were. `renew` writes only the lease's expiry, and the registrar
 writes the registry owner only when registering and in `reclaim`, so a token transfer alone
 leaves the registry owner unchanged.
+
+That lease's token can be transferred again, still without `reclaim`. Such a
+`TokenControlTransferred` row of the `ens_v1_registrar_l1` family on exactly that lease's
+resource, positioned after the binding opened, reaches the registrant and nothing else: the
+registration's `registrant`, the repeated `control.registrant` and
+`provenance.registrant_event_id` follow the token to its new holder, while the registry owner,
+the owner served, the selected binding, its `registry_only` authority kind, the resolver,
+`latest_event_kind` and the lease's `resource_id`, `registered_at` and expiry stay as they were.
+The transfer is read into the registrant-naming rows only; it never enters the event stream the
+control folds read, so a registrar token transfer cannot decide control while the registry-only
+binding is the authority. A later renewal and the lease's release then behave as they do without
+the transfer.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L148-L150 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
