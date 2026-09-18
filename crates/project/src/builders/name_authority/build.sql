@@ -452,6 +452,9 @@
         ), latest_v1_lifecycle AS (
             SELECT DISTINCT ON (event.logical_name_id)
                    event.logical_name_id, event.resource_id, event.event_kind,
+                   event.source_family,
+                   COALESCE(NULLIF(event.after_state ->> 'authority_kind', ''), 'registrar')
+                       AS authority_kind,
                    event.block_number, event.transaction_index, event.log_index
             FROM project_events event
             WHERE event.logical_name_id IS NOT NULL
@@ -463,20 +466,51 @@
             ORDER BY event.logical_name_id, event.block_number DESC,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
+        ), registry_only_handoffs AS (
+            -- A name whose only open binding is a registry-only binding of the ENSv1 arm, with
+            -- the BaseRegistrar lease the name has under it. After a registrar token is
+            -- transferred without `reclaim` the registry keeps the owner the registrar wrote, so
+            -- the name is bound to a registry-only resource while its lease goes on under it:
+            -- the lease of the binding it replaced, or a successor lease granted by
+            -- `registerOnly` after that lease was released. `project_registry_only_handoffs`
+            -- decides which; the authority-event window reads the same table.
+            -- (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
+            -- (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+            SELECT handoff.logical_name_id, handoff.surface_binding_id, handoff.block_number,
+                   handoff.transaction_index, handoff.log_index, handoff.lease_resource_id
+            FROM project_registry_only_handoffs handoff
+            JOIN open_bindings open
+              ON open.surface_binding_id = handoff.surface_binding_id
+            WHERE handoff.authority_arm = 'ens_v1'
+              AND NOT EXISTS (
+                  SELECT 1 FROM open_bindings other
+                  WHERE other.logical_name_id = open.logical_name_id
+                    AND other.surface_binding_id <> open.surface_binding_id
+              )
         ), released_v1_authority AS (
-            -- A released ENSv1 lease whose custody was not revived (a lease that lapsed
-            -- while wrapped: the NameWrapper's registry entry expired with it, so nothing
-            -- current owns the node) leaves a released tombstone on its lease binding
+            -- A released ENSv1 lease whose custody was not revived leaves a released tombstone
             -- instead of an unresolved selection: the release is positive proof that the
-            -- registration is absent, not a gap in projection. A live registry owner of
-            -- zero stays the supported ownerless-registry profile.
+            -- registration is absent, not a gap in projection. Custody is not revived when the
+            -- lease lapsed while wrapped (the NameWrapper's registry entry expired with it, so
+            -- nothing current owns the node), and not when the lease lapsed under the
+            -- registry-only binding a transfer without `reclaim` opened: the registry still
+            -- holds the owner the lapsed lease left behind, but a lapsed lease releases the
+            -- name whatever the registry records, as it does for every other lapse. That
+            -- registry-only binding then stands for the released lease, as the closed
+            -- NameWrapper binding does for a wrapped one. A live registry owner of zero stays
+            -- the supported ownerless-registry profile.
+            -- (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
             -- (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f)
             -- (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L143-L154 @ ens_v1@91c966f)
             -- (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L268 @ ens_v1@91c966f)
             SELECT lifecycle.logical_name_id, lifecycle.resource_id AS released_v1_resource_id,
-                   binding.surface_binding_id AS released_v1_binding_id
+                   COALESCE(handoff.surface_binding_id, binding.surface_binding_id)
+                       AS released_v1_binding_id
             FROM latest_v1_lifecycle lifecycle
-            JOIN LATERAL (
+            -- The lease's own binding, or the closed NameWrapper binding that stands for it. A
+            -- successor lease granted by `registerOnly` under a registry-only binding has
+            -- neither; the registry-only binding stands for it below.
+            LEFT JOIN LATERAL (
                 SELECT candidate.surface_binding_id
                 FROM project_binding_candidates candidate
                 WHERE candidate.logical_name_id = lifecycle.logical_name_id
@@ -526,10 +560,35 @@
                          candidate.surface_binding_id DESC
                 LIMIT 1
             ) binding ON TRUE
+            -- The lease that lapsed under a registry-only binding: exactly the lease the name
+            -- has under that binding (the lease of the binding it replaced, or the successor
+            -- lease granted by `registerOnly` once that lease was released), released by a
+            -- registrar row that arrived after the binding opened. Those are the lifecycle rows
+            -- the authority-event window admits past its position. A release of any other lease
+            -- carrying the name (an earlier lease, released before or after the name was
+            -- registered again, or the replaced lease once a successor lease is the name's)
+            -- selects nothing, and neither does a release at the position where a
+            -- registry-only binding opened: that release handed the name over itself.
+            LEFT JOIN registry_only_handoffs handoff
+              ON handoff.logical_name_id = lifecycle.logical_name_id
+             AND handoff.lease_resource_id = lifecycle.resource_id
+             AND lifecycle.source_family = 'ens_v1_registrar_l1'
+             AND lifecycle.authority_kind = 'registrar'
+             AND (handoff.block_number, handoff.transaction_index, handoff.log_index) < (
+                 lifecycle.block_number,
+                 COALESCE(lifecycle.transaction_index, -1),
+                 COALESCE(lifecycle.log_index, -1)
+             )
             WHERE lifecycle.event_kind = 'RegistrationReleased'
-              AND NOT EXISTS (
-                  SELECT 1 FROM open_bindings open
-                  WHERE open.logical_name_id = lifecycle.logical_name_id
+              AND (
+                  handoff.surface_binding_id IS NOT NULL
+                  OR (
+                      binding.surface_binding_id IS NOT NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM open_bindings open
+                          WHERE open.logical_name_id = lifecycle.logical_name_id
+                      )
+                  )
               )
               AND NOT EXISTS (
                   SELECT 1 FROM project_latest_registry_owner ownerless

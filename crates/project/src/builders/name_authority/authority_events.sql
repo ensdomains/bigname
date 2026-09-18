@@ -148,49 +148,17 @@ WHERE (
                   AND EXISTS (
                       SELECT 1
                       FROM project_bindings selected_binding
-                      JOIN LATERAL (
-                          SELECT predecessor.*
-                          FROM project_binding_candidates predecessor
-                          WHERE predecessor.logical_name_id =
-                                selected_binding.logical_name_id
-                            AND predecessor.authority_arm =
-                                authority.selected_authority_arm
-                            AND (
-                                predecessor.block_number,
-                                COALESCE(
-                                    (predecessor.provenance ->> 'transaction_index')::bigint,
-                                    -1
-                                ),
-                                COALESCE(
-                                    (predecessor.provenance ->> 'log_index')::bigint, -1
-                                )
-                            ) < (
-                                selected_binding.block_number,
-                                COALESCE(
-                                    (selected_binding.provenance ->> 'transaction_index')::bigint,
-                                    -1
-                                ),
-                                COALESCE(
-                                    (selected_binding.provenance ->> 'log_index')::bigint,
-                                    -1
-                                )
-                            )
-                          ORDER BY predecessor.block_number DESC,
-                                   COALESCE(
-                                       (predecessor.provenance ->> 'transaction_index')::bigint,
-                                       -1
-                                   ) DESC,
-                                   COALESCE(
-                                       (predecessor.provenance ->> 'log_index')::bigint,
-                                       -1
-                                   ) DESC,
-                                   predecessor.surface_binding_id DESC
-                          LIMIT 1
-                      ) predecessor ON TRUE
+                      -- The binding this one replaced and the BaseRegistrar lease the name
+                      -- has under it, staged once for this window and the released-tombstone
+                      -- rule alike.
+                      JOIN project_registry_only_handoffs handoff
+                        ON handoff.surface_binding_id = selected_binding.surface_binding_id
                       WHERE selected_binding.logical_name_id =
                             authority.logical_name_id
                         AND (
-                            predecessor.resource_id = event.resource_id
+                            event.resource_id IN (
+                                handoff.predecessor_resource_id, handoff.lease_resource_id
+                            )
                             OR (
                                 event.event_kind IN (
                                     'RegistrationGranted', 'RegistrationReleased'
@@ -203,7 +171,7 @@ WHERE (
                                     WHERE wrapper.logical_name_id =
                                           authority.logical_name_id
                                       AND wrapper.resource_id =
-                                          predecessor.resource_id
+                                          handoff.predecessor_resource_id
                                       AND wrapper.source_family =
                                           'ens_v1_wrapper_l1'
                                       AND wrapper.event_kind = 'SurfaceBound'
@@ -219,7 +187,10 @@ WHERE (
                             (
                                 event.source_family = 'ens_v1_registrar_l1'
                                 AND (
-                                    predecessor.resource_id = event.resource_id
+                                    event.resource_id IN (
+                                        handoff.predecessor_resource_id,
+                                        handoff.lease_resource_id
+                                    )
                                     OR event.event_kind = 'RegistrationGranted'
                                 )
                             )
@@ -228,14 +199,9 @@ WHERE (
                                 COALESCE(event.transaction_index, -1),
                                 COALESCE(event.log_index, -1)
                             ) >= (
-                                predecessor.block_number,
-                                COALESCE(
-                                    (predecessor.provenance ->> 'transaction_index')::bigint,
-                                    -1
-                                ),
-                                COALESCE(
-                                    (predecessor.provenance ->> 'log_index')::bigint, -1
-                                )
+                                handoff.predecessor_block_number,
+                                handoff.predecessor_transaction_index,
+                                handoff.predecessor_log_index
                             )
                         )
                         AND (
@@ -244,36 +210,36 @@ WHERE (
                                 COALESCE(event.transaction_index, -1),
                                 COALESCE(event.log_index, -1)
                             ) <= (
-                                selected_binding.block_number,
-                                COALESCE(
-                                    (selected_binding.provenance ->> 'transaction_index')::bigint,
-                                    -1
-                                ),
-                                COALESCE(
-                                    (selected_binding.provenance ->> 'log_index')::bigint, -1
-                                )
+                                handoff.block_number,
+                                handoff.transaction_index,
+                                handoff.log_index
                             )
                             -- The window above bounds what can decide control. The lease the
-                            -- name kept is not bounded by it: a registrar token transferred
+                            -- name has is not bounded by it: a registrar token transferred
                             -- without `reclaim` leaves the registry owner as it was, and a
                             -- later `renew` writes only the lease's expiry, so the retained
                             -- lease goes on being renewed, and lapses, under the registry-only
-                            -- binding. Only those lifecycle rows of that exact lease pass; no
-                            -- control fold reads their kinds.
+                            -- binding; and once it lapsed, `registerOnly` can grant the name
+                            -- again without touching the registry, so the successor lease is
+                            -- granted, renewed and released under the same binding. Only the
+                            -- lifecycle rows of the one lease the name has pass; no control
+                            -- fold reads their kinds, and the registration's authority fold
+                            -- leaves the successor grant out.
+                            -- (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
                             -- (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
                             -- (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L174 @ ens_v1@91c966f)
                             OR (
                                 authority.selected_authority_arm = 'ens_v1'
                                 AND event.source_family = 'ens_v1_registrar_l1'
                                 AND event.event_kind IN (
-                                    'RegistrationRenewed', 'ExpiryChanged',
-                                    'RegistrationReleased'
+                                    'RegistrationGranted', 'RegistrationRenewed',
+                                    'ExpiryChanged', 'RegistrationReleased'
                                 )
                                 AND COALESCE(
                                     NULLIF(event.after_state ->> 'authority_kind', ''),
                                     'registrar'
                                 ) = 'registrar'
-                                AND predecessor.resource_id = event.resource_id
+                                AND handoff.lease_resource_id = event.resource_id
                             )
                         )
                   )

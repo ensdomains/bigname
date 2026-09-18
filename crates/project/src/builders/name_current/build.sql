@@ -78,11 +78,12 @@
                                'registrant', NULL, 'expiry', NULL
                            )
                        -- A released ENSv1 lease whose custody was not revived is a tombstone:
-                       -- the registrar lease is gone and nothing current owns the node, so no
-                       -- current registrant or authority is served. `expiry` stays the lapsed
-                       -- lease's own expiry, and the holder and authority the lease had when it
-                       -- lapsed move into `lapsed_registration`, a block only a tombstone
-                       -- carries and nothing reads as current state.
+                       -- the registrar lease is gone, and whether nothing current owns the node
+                       -- or the registry still holds the owner a transfer without `reclaim`
+                       -- left behind, no current registrant or authority is served. `expiry`
+                       -- stays the lapsed lease's own expiry, and the holder and authority the
+                       -- lease had when it lapsed move into `lapsed_registration`, a block only
+                       -- a tombstone carries and nothing reads as current state.
                        WHEN COALESCE(selected_authority.released_v1_tombstone, false)
                            THEN jsonb_build_object('authority_kind', NULL, 'authority_key', NULL,
                                'registrant', NULL,
@@ -392,6 +393,19 @@
                     event.event_kind IN ('RegistrationGranted', 'AuthorityEpochChanged')
                  OR (event.event_kind = 'SurfaceBound' AND event.after_state @>
                      '{"state_derived":true,"authority_kind":"registry_only"}')
+              )
+              -- A successor lease granted by `registerOnly` under a registry-only binding names
+              -- the registration, not the authority: the registrar did not touch the registry,
+              -- so the binding's registry-only epoch stays the authority the name is under.
+              -- (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
+              AND NOT (
+                  event.event_kind = 'RegistrationGranted'
+                  AND EXISTS (
+                      SELECT 1 FROM project_registry_only_handoffs handoff
+                      WHERE handoff.surface_binding_id = binding.surface_binding_id
+                        AND handoff.lease_resource_id = event.resource_id
+                        AND handoff.lease_resource_id <> handoff.predecessor_resource_id
+                  )
               )
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,

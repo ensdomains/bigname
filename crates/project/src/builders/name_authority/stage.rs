@@ -4,8 +4,135 @@ use crate::{ProjectError, Result};
 
 pub(super) async fn prepare(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     bind_resource_events(transaction).await?;
+    registry_only_handoffs(transaction).await?;
     ownerless_registry(transaction).await
 }
+
+/// One row per registry-only binding: the binding it replaced and the BaseRegistrar lease the
+/// name has under it. Both the authority-event window and the released-tombstone rule read this
+/// table, so they agree on which lease a registry-only binding stands for.
+///
+/// A registry-only binding opens when a registrar token is transferred without `reclaim`: the
+/// registry keeps the owner the registrar wrote, so the name is bound to a registry-only
+/// resource while its lease goes on under it. The replaced binding is the latest same-arm binding
+/// strictly before the registry-only one, and to begin with the name's lease is that binding's
+/// resource. The association moves to a successor lease when a controller grants the same name
+/// again with `registerOnly`, which mints a new token and writes the expiry without touching the
+/// registry: the registry-only binding stays open and the successor lease never gets a binding
+/// of its own. Exactly one grant qualifies: an `ens_v1_registrar_l1` `RegistrationGranted` of
+/// registrar authority kind that carries the name and the surface's namehash on another
+/// resource, positioned after the binding opened and after a `RegistrationReleased` of the
+/// replaced lease; the latest such grant is the lease. A grant before the binding opened (an
+/// earlier lease of the name) or before the replaced lease was released never qualifies, and a
+/// grant by `register` writes the registry in its own transaction, so it opens a binding of its
+/// own and is not read here.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+async fn registry_only_handoffs(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+    for statement in [
+        REGISTRY_ONLY_HANDOFFS,
+        "CREATE INDEX ON project_registry_only_handoffs (surface_binding_id)",
+        "CREATE INDEX ON project_registry_only_handoffs (logical_name_id)",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to stage registry-only handoffs", error)
+            })?;
+    }
+    Ok(())
+}
+
+const REGISTRY_ONLY_HANDOFFS: &str = "
+    CREATE TEMP TABLE project_registry_only_handoffs ON COMMIT DROP AS
+    SELECT binding.logical_name_id, binding.surface_binding_id, binding.authority_arm,
+           binding.resource_id, binding.block_number,
+           COALESCE((binding.provenance ->> 'transaction_index')::bigint, -1)
+               AS transaction_index,
+           COALESCE((binding.provenance ->> 'log_index')::bigint, -1) AS log_index,
+           predecessor.resource_id AS predecessor_resource_id,
+           predecessor.block_number AS predecessor_block_number,
+           COALESCE((predecessor.provenance ->> 'transaction_index')::bigint, -1)
+               AS predecessor_transaction_index,
+           COALESCE((predecessor.provenance ->> 'log_index')::bigint, -1)
+               AS predecessor_log_index,
+           COALESCE(successor.resource_id, predecessor.resource_id) AS lease_resource_id
+    FROM project_binding_candidates binding
+    JOIN project_surfaces surface
+      ON surface.logical_name_id = binding.logical_name_id
+    JOIN LATERAL (
+        SELECT predecessor.resource_id, predecessor.block_number, predecessor.provenance
+        FROM project_binding_candidates predecessor
+        WHERE predecessor.logical_name_id = binding.logical_name_id
+          AND predecessor.authority_arm = binding.authority_arm
+          AND (
+              predecessor.block_number,
+              COALESCE((predecessor.provenance ->> 'transaction_index')::bigint, -1),
+              COALESCE((predecessor.provenance ->> 'log_index')::bigint, -1)
+          ) < (
+              binding.block_number,
+              COALESCE((binding.provenance ->> 'transaction_index')::bigint, -1),
+              COALESCE((binding.provenance ->> 'log_index')::bigint, -1)
+          )
+        ORDER BY predecessor.block_number DESC,
+                 COALESCE((predecessor.provenance ->> 'transaction_index')::bigint, -1) DESC,
+                 COALESCE((predecessor.provenance ->> 'log_index')::bigint, -1) DESC,
+                 predecessor.surface_binding_id DESC
+        LIMIT 1
+    ) predecessor ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT successor_grant.resource_id
+        FROM project_events successor_grant
+        WHERE binding.authority_arm = 'ens_v1'
+          AND successor_grant.logical_name_id = binding.logical_name_id
+          AND successor_grant.resource_id IS NOT NULL
+          AND successor_grant.resource_id <> predecessor.resource_id
+          AND successor_grant.source_family = 'ens_v1_registrar_l1'
+          AND successor_grant.event_kind = 'RegistrationGranted'
+          AND COALESCE(NULLIF(successor_grant.after_state ->> 'authority_kind', ''), 'registrar')
+              = 'registrar'
+          AND lower(successor_grant.after_state ->> 'namehash') = lower(surface.namehash)
+          AND (
+              successor_grant.block_number,
+              COALESCE(successor_grant.transaction_index, -1),
+              COALESCE(successor_grant.log_index, -1)
+          ) > (
+              binding.block_number,
+              COALESCE((binding.provenance ->> 'transaction_index')::bigint, -1),
+              COALESCE((binding.provenance ->> 'log_index')::bigint, -1)
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM project_events release
+              WHERE release.logical_name_id = binding.logical_name_id
+                AND release.resource_id = predecessor.resource_id
+                AND release.source_family = 'ens_v1_registrar_l1'
+                AND release.event_kind = 'RegistrationReleased'
+                AND (
+                    release.block_number,
+                    COALESCE(release.transaction_index, -1),
+                    COALESCE(release.log_index, -1)
+                ) < (
+                    successor_grant.block_number,
+                    COALESCE(successor_grant.transaction_index, -1),
+                    COALESCE(successor_grant.log_index, -1)
+                )
+          )
+        ORDER BY successor_grant.block_number DESC,
+                 COALESCE(successor_grant.transaction_index, -1) DESC,
+                 COALESCE(successor_grant.log_index, -1) DESC,
+                 successor_grant.normalized_event_id DESC
+        LIMIT 1
+    ) successor ON TRUE
+    WHERE EXISTS (
+        SELECT 1
+        FROM project_events epoch
+        WHERE epoch.logical_name_id = binding.logical_name_id
+          AND epoch.resource_id = binding.resource_id
+          AND epoch.event_kind = 'AuthorityEpochChanged'
+          AND epoch.after_state ->> 'authority_kind' = 'registry_only'
+    )";
 
 /// Names the `.eth` BaseRegistrar lifecycle rows that were written before the label was known.
 /// Rows of every other source family keep the name Interpret gave them, or none.
