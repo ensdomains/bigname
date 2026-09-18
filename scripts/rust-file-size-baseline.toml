@@ -31,11 +31,6 @@ loc = 604
 justification = "Name-surface materialization distinguishes active from shadow V1 surfaces so a later registry resolver can link only to a serving-visible name; the four-line active-surface notification keeps that identity decision at its operating boundary."
 
 [[files]]
-path = "crates/adapters/src/schema_v2/protocol/v1/registrar.rs"
-loc = 614
-justification = "The selected numeric registrar import keeps transfer authority convergence beside lifecycle dispatch; numeric ABI decoding and label enrichment are split into bounded child modules, while source10 migration correlation remains unchanged."
-
-[[files]]
 path = "crates/adapters/src/schema_v2/protocol/v1/registry.rs"
 loc = 638
 justification = "Registry event decoding and its atomic control/read transition remain together while shared owner classification and authority emission live in the bounded authority-transition sibling; the file remains below the review threshold."
@@ -117,11 +112,6 @@ justification = "Index timing, rebuild, throughput, memory measurement, and red-
 path = "apps/phase-runner/src/heads.rs"
 loc = 616
 justification = "Head-marker validation, retained provider finality, and publication checks share this module; database persistence is already split into heads/persist.rs. Preserve that boundary for this integration."
-
-[[files]]
-path = "crates/ingest/src/engine.rs"
-loc = 610
-justification = "Batch request types and orchestration share the ingestion entry point; live-follow, prefetch, query, redo, and source-floor logic already live in child modules. Preserve the existing orchestration boundary for this integration."
 
 [[files]]
 path = "crates/project/src/scope/topology.rs"

@@ -3758,7 +3758,7 @@ async fn migrated_child_in_a_migration_created_registry_serves_the_exact_profile
         chain,
         "ens_v2_registry_l1",
         1,
-        "ens_v2_sepolia_post_audit",
+        "ens_v2_sepolia_20260915",
         "tests/project-exact-profile-created-registry.toml",
         json!({"contracts":[]}),
     )
@@ -3769,7 +3769,7 @@ async fn migrated_child_in_a_migration_created_registry_serves_the_exact_profile
         chain,
         "ens_v2_registrar_l1",
         1,
-        "ens_v2_sepolia_post_audit",
+        "ens_v2_sepolia_20260915",
         "tests/project-exact-profile-created-registrar.toml",
         json!({"capability_flags":{"exact_name_profile":{"status":"shadow"}}}),
     )
@@ -3780,7 +3780,7 @@ async fn migrated_child_in_a_migration_created_registry_serves_the_exact_profile
         chain,
         "ens_v2_migration_l1",
         1,
-        "ens_v2_sepolia_post_audit",
+        "ens_v2_sepolia_20260915",
         "tests/project-exact-profile-created-migration.toml",
         json!({}),
     )
@@ -4909,9 +4909,9 @@ fn interpreted_direct_v2_release_after_state() -> Result<Value> {
         .find(|loaded| {
             loaded.manifest.chain == ADAPTER_CHAIN
                 && loaded.manifest.source_family == "ens_v2_registry_l1"
-                && loaded.version_tag == "v2"
+                && loaded.version_tag == "v1"
         })
-        .expect("the checked-in post-audit ENSv2 registry manifest must exist");
+        .expect("the checked-in official ENSv2 registry manifest must exist");
     let mut payload = serde_json::to_value(&loaded.manifest)?;
     payload["manifest_version"] = Value::from(1);
     let manifest = ManifestInput {
@@ -11841,7 +11841,7 @@ async fn authority_classifier_covers_every_ens_binding_event_arm_combination() -
         chain,
         "ens_v2_registry_l1",
         1,
-        "ens_v2_sepolia_post_audit",
+        "ens_v2_sepolia_20260915",
         "tests/project-authority-classifier-v2-registry.toml",
         json!({}),
     )
@@ -11852,7 +11852,7 @@ async fn authority_classifier_covers_every_ens_binding_event_arm_combination() -
         chain,
         "ens_v2_registrar_l1",
         1,
-        "ens_v2_sepolia_post_audit",
+        "ens_v2_sepolia_20260915",
         "tests/project-authority-classifier-v2-registrar.toml",
         json!({"capability_flags":{"exact_name_profile":{"status":"supported"}}}),
     )
@@ -12494,7 +12494,7 @@ async fn reservation_release_event_vote_requires_a_preexisting_binding() -> Resu
         chain,
         "ens_v2_registry_l1",
         1,
-        "ens_v2_sepolia_post_audit",
+        "ens_v2_sepolia_20260915",
         "tests/project-authority-release-event-causality.toml",
         json!({}),
     )
@@ -12505,7 +12505,7 @@ async fn reservation_release_event_vote_requires_a_preexisting_binding() -> Resu
         chain,
         "ens_v2_registrar_l1",
         1,
-        "ens_v2_sepolia_post_audit",
+        "ens_v2_sepolia_20260915",
         "tests/project-authority-release-event-causality-registrar.toml",
         json!({"capability_flags":{"exact_name_profile":{"status":"supported"}}}),
     )
@@ -12968,7 +12968,7 @@ async fn bindingless_resolver_summary_ignores_selected_head_resource_shape() -> 
             chain,
             "ens_v2_registry_l1",
             1,
-            "ens_v2_sepolia_post_audit",
+            "ens_v2_sepolia_20260915",
             "tests/project-bindingless-resolver-head-resource-registry.toml",
             json!({}),
         )
@@ -12979,7 +12979,7 @@ async fn bindingless_resolver_summary_ignores_selected_head_resource_shape() -> 
             chain,
             "ens_v2_registrar_l1",
             1,
-            "ens_v2_sepolia_post_audit",
+            "ens_v2_sepolia_20260915",
             "tests/project-bindingless-resolver-head-resource-registrar.toml",
             json!({"capability_flags":{"exact_name_profile":{"status":"supported"}}}),
         )
@@ -13374,8 +13374,8 @@ async fn checked_in_sepolia_v1_resolver_logs_flow_through_interpret_and_project(
     scratch.cleanup().await
 }
 
-/// The separately evidenced `sepolia-hackathon` deployment profile declares its own
-/// ENSv1 ReverseRegistrar under `ens_v1_reverse_l1`. A wallet's `setName` on it emits
+/// The `sepolia` deployment profile declares the ENSv1 ReverseRegistrar under
+/// `ens_v1_reverse_l1`. A wallet's `setName` on it emits
 /// `ReverseClaimed`, then the registry's `NewOwner`/`NewResolver` for `<addr>.addr.reverse`, then
 /// the default PublicResolver's `NameChanged`
 /// (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83-L84 @ ens_v1@91c966f)
@@ -13385,19 +13385,19 @@ async fn checked_in_sepolia_v1_resolver_logs_flow_through_interpret_and_project(
 /// resolver. Project joins the retained name-family `RecordChanged` to that reverse node
 /// and selected resolver, publishing the indexed claim value without a provider call.
 #[tokio::test]
-async fn checked_in_hackathon_reverse_claim_flows_through_interpret_and_project() -> Result<()> {
+async fn checked_in_sepolia_reverse_claim_flows_through_interpret_and_project() -> Result<()> {
     const CHAIN: &str = "ethereum-sepolia";
-    const REVERSE_REGISTRAR: &str = "0x060D5a54a8751eEc63B756E32Ef66f5eEf418e60";
-    const REGISTRY: &str = "0x82080Cc8ca78597BdE586A003D0a080c79a1814B";
-    const RESOLVER: &str = "0xaec512a71de820A57DC2aafc197a743D035b82df";
+    const REVERSE_REGISTRAR: &str = "0xa0a1abcdae1a2a4a2ef8e9113ff0e02dd81dc0c6";
+    const REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
+    const RESOLVER: &str = "0xe99638b40e4fff0129d56f03b55b6bbc4bbe49b5";
     const WALLET: &str = "0x14da852647954d90b2e313d9cde524db31ce7cbc";
-    // Block of the observed `setName("bigname-verify.eth")` transaction on the hackathon deployment.
+    // Synthetic reverse claim using the canonical Sepolia contracts.
     const CLAIM_BLOCK: i64 = 11_698_738;
 
-    let scratch = ScratchDatabase::create("production_project_hackathon_reverse_claim").await?;
+    let scratch = ScratchDatabase::create("production_project_sepolia_reverse_claim").await?;
     let profile = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("manifests/sepolia-hackathon");
+        .join("manifests/sepolia");
     sync_schema_v2_repository(scratch.pool(), &load_repository(profile)?).await?;
     insert_lineage_block(scratch.pool(), CHAIN, CLAIM_BLOCK).await?;
 
@@ -13506,7 +13506,7 @@ async fn checked_in_hackathon_reverse_claim_flows_through_interpret_and_project(
     );
 
     // The PublicResolver's NameChanged for the reverse node is name-family record history for the
-    // hackathon `ens_v1_resolver_l1` declaration, not an attributed primary-name claim.
+    // Sepolia `ens_v1_resolver_l1` declaration, not an attributed primary-name claim.
     let name_record: (String, String, bool) = sqlx::query_as(
         "SELECT source_family, lower(raw_fact_ref ->> 'emitting_address'),
                 after_state ? 'primary_claim_source'
@@ -24184,10 +24184,10 @@ async fn seed_raw_v2_reservation_fixture(
     if source_family == "ens_v2_root_l1" {
         sqlx::query(
             "UPDATE manifest_versions
-             SET deployment_label = 'ens_v2_sepolia_post_audit',
+             SET deployment_label = 'ens_v2_sepolia_20260915',
                  manifest_payload = jsonb_set(
                      manifest_payload, '{deployment_epoch}',
-                     '\"ens_v2_sepolia_post_audit\"'::jsonb
+                     '\"ens_v2_sepolia_20260915\"'::jsonb
                  )
              WHERE manifest_id = $1",
         )
@@ -24373,7 +24373,7 @@ async fn seed_authority_classifier_case(
         let manifest_id: i64 = sqlx::query_scalar(
             "SELECT manifest_id FROM manifest_versions
              WHERE chain_id = $1 AND source_family = $2
-               AND deployment_label = 'ens_v2_sepolia_post_audit'",
+               AND deployment_label = 'ens_v2_sepolia_20260915'",
         )
         .bind(chain)
         .bind(source_family)
@@ -24547,10 +24547,10 @@ async fn seed_raw_reservation_release_then_registration_before_v1(
     .await?;
     sqlx::query(
         "UPDATE manifest_versions
-         SET deployment_label = 'ens_v2_sepolia_post_audit',
+         SET deployment_label = 'ens_v2_sepolia_20260915',
              manifest_payload = jsonb_set(
                  manifest_payload, '{deployment_epoch}',
-                 '\"ens_v2_sepolia_post_audit\"'::jsonb
+                 '\"ens_v2_sepolia_20260915\"'::jsonb
              )
          WHERE manifest_id = $1",
     )
@@ -24864,7 +24864,7 @@ async fn seed_closed_predecessor_cross_arm_fixture(
             chain,
             source_family,
             1,
-            "ens_v2_sepolia_post_audit",
+            "ens_v2_sepolia_20260915",
             &format!("tests/{chain}-{source_family}.toml"),
             json!({"capability_flags":{"exact_name_profile":{"status":"supported"}}}),
         )
@@ -24922,14 +24922,14 @@ async fn declare_sepolia_post_audit_profile(pool: &PgPool, chain: &str) -> Resul
         chain,
         "ens_v2_root_l1",
         1,
-        "ens_v2_sepolia_post_audit",
+        "ens_v2_sepolia_20260915",
         &format!("tests/raw-{chain}-sepolia-post-audit.toml"),
         json!({
             "manifest_version": 1,
             "namespace": "ens",
             "source_family": "ens_v2_root_l1",
             "chain": chain,
-            "deployment_epoch": "ens_v2_sepolia_post_audit",
+            "deployment_epoch": "ens_v2_sepolia_20260915",
             "rollout_status": "active",
             "normalizer_version": NORMALIZER,
             "capability_flags": {},

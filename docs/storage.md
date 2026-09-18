@@ -1198,6 +1198,32 @@ current registry stores itself for a requested zero owner.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L34 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L55 @ ens_v1@91c966f)
 
+### Resolver creation replay
+
+`ResolverCreated` is stored as `ContractDiscovered` and an Interpret-owned
+`resolver` self-edge anchored to the raw creation log. This is the only permitted
+resolver self-edge. ENSv2 registry-pointer edges remain binding history and are
+excluded from emitter admission. Canonical raw creation logs drive Ingest's
+same-window capture and its subsequent windows; orphaned creation logs cannot
+expand a watch filter. Installing
+[creation capture](glossary.md#resolver-creation-capture) requires the normal
+manifest-driven Ingest redo and full Interpret replay, preserving raw facts.
+
+The rule is one validated CHECK on `discovery_edges` named
+`discovery_edges_self_edge_check`. The baseline creates it on a fresh install.
+Schema-migration `20260917140000_resolver_creation_self_edge.sql` replaces the
+older rule on an existing database; it is already applied on a live database,
+so its content is fixed. Schema-migration
+`20260917141000_discovery_self_edge_check_name.sql` then settles the name: it
+renames a rule that has the right text under a generated name, and replaces the
+rule only when its text differs. Both files find the existing rule by searching
+the text `pg_get_constraintdef` prints; `20260917141000` turns
+`quote_all_identifiers` off while it reads that text and restores the caller's
+value, while the fixed `20260917140000` needs the migration session to run with
+the setting at its default, `off`, as the
+[production runbook](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+states.
+
 ### Interpret process memory
 
 `normalized_events` is the working store for each [interpreter state
@@ -1269,6 +1295,50 @@ or before the first retained lineage block. After replaying retained events,
 the adapter advances time-derived protocol state to that timestamp. Exact
 cold-restore reconstruction therefore depends on the predecessor remaining
 readable in the same input snapshot.
+
+On a chain whose manifests all belong to ENSv1 source families (or to the
+families that interpret no logs), Interpret instead restores state for each
+batch with the [lookahead loader](glossary.md#lookahead-loader). Before
+interpreting, the adapter decodes the batch's logs without interpreting them
+and lists every ENSv1 name (by namehash) and resource the logs can touch.
+Interpret adds the names whose registrar expiry plus the 90-day grace period
+falls inside the batch's time span, because time-derived releases touch names no
+log mentions. A registration is released at the first block whose timestamp is
+strictly greater than its expiry plus the grace period (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f), so the span runs from
+the timestamp of the block before the batch, inclusive, to the timestamp of the
+batch's last block, exclusive. One case lies below that span: a registrar event
+in the block just before the batch that recorded an expiry already lapsed at its
+own block. The adapter releases such a name at the next block boundary, which is
+the batch's first block, so Interpret adds those names too; every earlier block
+boundary has already settled. Interpret then reads, in the batch's input
+snapshot, the latest readable event per interpreter state key among the events
+of those names and resources, adds the names and resources those events
+reference, and repeats until a round adds nothing. There is no round limit: each
+continuing round adds a name or resource from the chain's finite stored history,
+so the repetition ends. Interpret restores a fresh adapter state from exactly those events under the
+same canonical-lineage and pre-batch boundary rules as a cold restore. The
+session is discarded after the batch. Two partial expression indexes on
+`normalized_events` serve these reads: `normalized_events_v1_direct_node_probe_idx`
+(events of one name) and `normalized_events_v1_due_probe_idx` (registrar expiry
+ranges). The loader is an access path, not a semantic: it must produce the same
+normalized events, identity rows and discovery edges as the full-state loader,
+and it is covered by the same interpreter content hash. The loader choice
+therefore looks past the manifests the batch interprets: the full-state loader
+restores every retained row regardless of family and lookahead reads only ENSv1
+families, so `normalized_events` history of a family lookahead does not cover,
+written while that family's manifest was `active` and still retained after the
+manifest moved to `draft` or `shadow`, would be restored by one loader and not
+the other. Before choosing lookahead, Interpret lists the chain's manifests in
+those two states and, for each uncovered family among them, asks whether a
+readable event of that family is retained before the batch; one such event
+chooses the full-state loader. The probe is bounded by the chain's manifests
+because every event is written under one of them and manifest rows are only
+ever moved between rollout states, never deleted. No index leads with
+`source_family`, so each probed family costs one scan of the chain's retained
+events, stopping at the first match; a chain with no uncovered manifest in those
+states runs no probe.
+It fails the batch, rather than publishing, if interpretation reads a name that
+was not loaded.
 
 For ENSv2, a retained registry/root `PreimageObserved` event for a canonical
 [name surface](glossary.md#surface-name-surface), or a retained resolver
@@ -1588,8 +1658,16 @@ rows remain in the current-state table so losing-fork grants and losing-fork
 revocations both rebuild from surviving canonical history. Interpret re-walks
 retained raw facts through the [`standard_approval`
 derivation](glossary.md#standard-approval-derivation); Project then rebuilds both state legs without a provider
-refetch. App-facing synthesis from those two state legs is deferred to the
-follow-up serving change.
+refetch. Storage serving combines those two state legs into effective
+registry-operator permission rows without persisting per-resource fan-out.
+For namespace-scoped reads, direct and effective registry-operator rows share
+one membership rule: a resource is a member when a retained, activated
+normalized event for that resource carries the namespace, and both the event
+and its `chain_lineage` anchor are canonical, safe, or finalized. Membership
+therefore does not need a current name binding, so unnamed and superseded
+registrations stay readable through a namespace-filtered [resource
+audit](glossary.md#resource-audit-context) read. A resource with no such event
+has no namespace membership but remains visible to unscoped reads.
 
 For ENSv2, a latest state-derived `RegistryPathExpired` release removes that resource's effective
 permission rows without removing its partial-coverage summary. A later
@@ -1609,9 +1687,10 @@ ens_v2@a971bd64)
 Coverage wording is not an exhaustiveness claim. `support_status` and
 `unsupported_reason` carry admission separately from projection completeness.
 `operator_approval_surfaces_not_ingested` maps to partial, best-effort
-permission coverage. This interpretation-and-projection change retains that
-broad reason for every authority class; the follow-up serving change owns any
-request-relative narrowing based on a proven registry-owner binding.
+permission coverage. The stored projection retains that broad reason for every
+non-wrapper authority class. The serving layer maps each stored reason to the
+documented list of unlisted permission surfaces and reports the union for
+account-wide or mixed reads.
 `wrapper_parent_and_resolver_delegation_not_projected` marks NameWrapper
 resources partial: holders, operators, and per-token delegates are projected,
 while parent control of a wrapped subname and resolver delegation are not; the

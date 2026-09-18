@@ -36,7 +36,7 @@ Canonicality promotion follows the stored transition graph one edge at a time. W
 
 `contract_instances`, `contract_instance_addresses`, `discovery_edges`, `token_lineages`, `resources`, `name_surfaces`, and `surface_bindings` store stable contract, token, authority-object, raw-name, and name-to-authority identities. Manifest sync writes declared contract rows. The interpreter writes event-derived identity rows. [Projection](../docs/glossary.md) and request-scoped lookup code read them. The [identity storage census](../simplification-audit-20260730.md#cratesstorage-fable), the [raw-label normalization decision](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity), and the [event-announcement discovery design](../simplification-audit-20260730.md#discovery-design-decided-2026-07-30) authorize these tables.
 
-A [`registry_announcement` discovery edge](../docs/glossary.md#registry-announcement-edge-registry_announcement) is the announcing registry's self-edge admitted forward-only by `RegistryCreated`; every other discovery kind still requires distinct endpoints, as ruled by the audit's [discovery design](../simplification-audit-20260730.md#discovery-design-decided-2026-07-30).
+A [`registry_announcement` discovery edge](../docs/glossary.md#registry-announcement-edge-registry_announcement) is the announcing registry's self-edge admitted forward-only by `RegistryCreated`; a `resolver` self-edge is also admitted by `ResolverCreated`; all other edges require distinct endpoints, as ruled by the audit's [discovery design](../simplification-audit-20260730.md#discovery-design-decided-2026-07-30).
 
 The logical identity of an on-chain name is `<namespace>:<namehash>`. On chain, a name is its namehash: ENSv1 registry records are keyed by `bytes32` node `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L13 @ ens_v1@91c966f)`, ENSv2 resolver permissions and records use the namehash/node `(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L68 @ ens_v2_sepolia_20260629@ccaeb58)` `(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L133 @ ens_v2_sepolia_20260629@ccaeb58)`, and Basenames defines the resolver node as the namehash of the name `(upstream: .refs/basenames/src/L2/L2Resolver.sol:L88 @ basenames@1809bbc)`. Identity is therefore chain-native and independent of normalization rules. Normalization is only a per-label visibility flag; it never participates in identity. The current [surface and resource identity ADR](../docs/adrs/0002-surface-resource-identity.md) records this rule, following the audit's [Normalization as a gate, not stored identity](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity) decision.
 
@@ -119,8 +119,7 @@ by the canonical
 `record_inventory_current`, `resolver_current`, `address_names_current`, and
 `primary_names_current` are the current-state tables written by the project
 phase. The project phase is their single writer. The API and GraphQL read the
-existing serving families; `account_permission_state_current` has no serving
-reader until the follow-up storage and API change. The [historical
+existing serving families; `/v1/permissions` and address-name role summaries read `account_permission_state_current` through storage's effective-permission readers. The [historical
 simplification census](../simplification-audit-20260730.md#appsworker--cratesexecution-fable)
 and the [storage
 census](../simplification-audit-20260730.md#cratesstorage-fable) authorize this

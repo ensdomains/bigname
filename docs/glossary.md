@@ -110,6 +110,22 @@ never closes, registry-pointer discovery. Defined in [`manifests.md` §
 Resolver admission by implementation
 announcement](manifests.md#resolver-admission-by-implementation-announcement).
 
+<a id="resolver-creation-capture"></a>
+## Resolver creation capture
+
+the admission of an ENSv2 resolver as an `ens_v2_resolver_l1` instance from
+the block of its own `ResolverCreated()` log, recorded as `ContractDiscovered`
+and a `resolver` self-edge with `discovery_source = "ResolverCreated"` and
+`admission_basis = "resolver_created"`. Ingest selects the creation log across
+emitters and fetches the address's remaining resolver events in the same
+window. Capture is not support: the resolver is served as unsupported until an
+implementation observation or an exact declaration classifies it. A registry
+`ResolverUpdated` pointer edge records only which resolver a name uses and
+never admits its target for capture; Project's declaration precedence still
+reads it as proof that a name in its namespace uses the address. Defined in
+[`manifests.md` § Resolver creation
+capture](manifests.md#resolver-creation-capture).
+
 ## Shared ENS infrastructure
 
 the exact ENS root, `eth`, `reverse`, and `addr.reverse` names. When an active
@@ -147,7 +163,8 @@ repair path, or checkpoint-promotion consumer for these records.
 ## Batch grid
 
 the partition of one interpret walk into consecutive physical
-batches (today 500-block ranges). Grids never split a block: the block is the
+batches (500-block ranges unless the operator sets
+`BIGNAME_INTERPRET_BLOCKS_PER_BATCH`). Grids never split a block: the block is the
 atomic unit every grid loads. Where the boundaries fall is an execution
 detail, not an input to interpretation. After a walk completes, surviving identity rows,
 discovery edges, and normalized events must be identical across grids over identical input.
@@ -324,7 +341,7 @@ never merged; `mode`/`source` selects which a route returns.
 
 the manifest label naming which
 protocol deployment generation a source family belongs to (for example
-`ens_v2_sepolia_post_audit`), so facts from different deployments of the same
+`ens_v2_sepolia_20260915`), so facts from different deployments of the same
 protocol never mix silently.
 
 ## Deployment profile
@@ -365,8 +382,11 @@ schema-v2 baseline constrains an edge's kind to five values: `resolver`,
 [`migration`](#migration-edge-migration). An edge's kind decides whether it
 admits an emitter or only records topology. In particular, a registry
 announcement admits an ENSv2 registry independently of parent reachability,
-while a subregistry edge records parent-child reachability without admitting
-its target.
+while subregistry and ENSv2 registry-to-resolver edges record relationships
+without admitting their targets. A `resolver` self-edge whose source is
+`ResolverCreated` records independent
+[creation-based capture](#resolver-creation-capture); it does not bind
+a name or authorize resolver reads.
 
 ## Discovery-watch admission snapshot
 
@@ -381,13 +401,28 @@ work and redo authority.
 
 ## Discovery-rule widening and narrowing
 
-manifest-synchronization
+Manifest-synchronization
 classifications for address-admitting `resolver` and `registry_announcement`
 discovery rules and their emitting declarations. Widening adds a rule or
 emitter, adds the first emitter to a rule that previously matched no
 declaration, or moves an emitter's inclusive start block earlier. Narrowing
 removes rules or emitters, including removal of a rule's last emitter, or moves
-an emitter's start later. For an active resolver discovery rule, widening also
+an emitter's start later.
+
+ENSv2 is the exception. Its registry `SubregistryUpdated` and `ResolverUpdated`
+edges only record relationships, so an ENSv2 registry's or root's `resolver`
+rule is left out of these classifications and changing it widens nothing.
+`RegistryCreated` and `ResolverCreated` supply independent
+[creation-based capture](#resolver-creation-capture) instead: Ingest selects
+creation logs across emitters and fetches the
+announcing address's remaining events in the same window. Adding the resolver
+creation ABI is ordinary [compiled-watch](#compiled-watch-plan) widening,
+requiring one historical fetch before interpretation. See
+[the watch-plan rules](manifests.md#mandatory-historical-fetch-after-watch-plan-widening).
+The rest of this entry therefore describes the remaining `resolver` rules
+and ENSv2 `registry_announcement` rules.
+
+For an active resolver discovery rule, widening also
 includes a registry/resolver pair whose desired manifest `deployment_epoch`
 values newly match after the preceding active pair did not, or whose matching
 source epoch changes. Replacing the rule-bearing source manifest within one
@@ -396,7 +431,9 @@ edges retain the preceding manifest identity; changing the pair from matching
 to nonmatching is narrowing. Resolver widening or source replacement whose
 earliest desired emitter candidate intersects retained history is rejected
 because the admitted addresses are not known until Interpret materializes their
-discovery edges. Direct declarations contribute their inclusive starts floored
+discovery edges.
+
+Direct declarations contribute their inclusive starts floored
 by the earliest persisted address admission. Declaration history is scoped by
 namespace, family, role, and address, while contract-address active ranges are
 shared by chain and address. Synchronization reconstructs the floor from current active
@@ -429,42 +466,28 @@ finitely retired manifest-declared range as coordination state. Later manifest
 re-admission therefore retains its persisted floor, while a later event
 observation may append a bounded active range or backdate an existing later
 active range without changing retired history. A rule with no matching
-declaration contributes block zero, and an ENSv2 registry manifest with an
-active `registry_announcement` rule contributes a distinct block-zero,
-role-free emitter path even when an emitterless candidate or direct
-declarations already exist. Adding that path is widening because an
-announcement-admitted registry can emit `ResolverUpdated` and match the
-resolver rule.
-(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L478 @ ens_v2@a971bd64)
-Removing the last direct emitter narrows only the
-declaration-backed part of such a rule. Registry-announcement widening instead
+declaration contributes block zero.
+
+Registry-announcement widening is handled differently: it
 stamps a required Ingest redo for the ENSv2 registry family from the earlier of
 that declaration start and the earliest retained canonical announcement
 selected by its [all-emitter watch plan](#watch-plan--watched-tuple); intake
 then discovers each registry and fetches its remaining events in the same
 window. Other families reject the historical transition. Narrowing introduces
 no missing historical discovery input.
-For ENSv2, a canonical discovery producer is effective only when its ABI event
-is present, Interpret selection admits its emitter role (or the announcement path
-bypasses roles), and it declares Interpret's required normalized output. Newly
-enabling `RegistryCreated()`/`RegistryCreated` or
-`ResolverUpdated(uint256,address,address)`/`ResolverChanged` through any of those
+For ENSv2, the `RegistryCreated` discovery producer is effective only when its
+ABI event is present and it declares Interpret's required normalized output;
+the announcement path does not depend on an emitter role. Newly
+enabling `RegistryCreated()`/`RegistryCreated` through either of those
 fields is discovery widening even without a manifest-version change; other
-event-set growth is ordinary watch-plan widening. Removing a resolver producer
-from a direct declaration is conservatively rejected over retained history.
+event-set growth is ordinary watch-plan widening.
 Dropping `RegistryCreated` from `normalized_events` for a declaration-backed
-`registry_announcement` rule is instead accepted with a required Ingest redo;
+`registry_announcement` rule is accepted with a required Ingest redo;
 Interpret then halts loudly on the selected undeclared event, and the
 [manifest-authority marker](#manifest-authority-marker) guarantees the initial
 invalidation. It is
 not a permanent manifest-validity guard: an empty redo can clear before a later
-`RegistryCreated` halts normal Interpret. Resolver-producer removal from an
-announcement-only/emitterless path is unclassified: ABI removal can leave
-retained coverage without a reproducible desired rule, while a
-`normalized_events` drop with the ABI topic still present makes Interpret halt
-loudly and recoverably on `ResolverUpdated`; an empty rebuild can likewise
-clear the preceding invalidation first.
+`RegistryCreated` halts normal Interpret.
 
 ## Durable composite cursor
 
@@ -1470,6 +1493,30 @@ state remains stored with `approved=false` so projection replay and reorg repair
 can recover either a losing-fork grant or a losing-fork revocation without
 creating per-name approval rows.
 
+<a id="account-permission-scope"></a>
+## Account permission scope
+
+a permission scope whose authority starts from an account-wide approval rather
+than a grant persisted for one resource. The public `grant_scope.kind` is
+`account`; its detail contains `chain_id`, `authority_kind`,
+`authority_contract`, and `owner`. Applicability to a resource is evaluated at
+read time through that resource's current
+[registry-owner binding](#registry-owner-binding).
+
+<a id="grant-relation"></a>
+## Grant relation
+
+the optional public classification of how a permission subject relates to its
+authority. `operator` identifies the owner-scoped, registry-wide—not
+per-name—`ApprovalForAll` relation. Direct resource permission rows have no
+classified relation and omit the field. (upstream:
+.refs/ens_v1/contracts/registry/ENS.sol:L18-L21 @ ens_v1@91c966f) (upstream:
+.refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L117 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L159-L167 @
+ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L150-L157 @
+basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L202-L207 @
+basenames@1809bbc)
+
 ## Registry-owner binding
 
 the current, evidence-backed association between an ENSv1 or Basenames permission
@@ -1501,6 +1548,22 @@ physical Interpret batches for one chain (`AdapterSession` in code). It holds
 protocol topology and current authority needed by the next batch, plus a
 bounded cache of persisted event values. It is disposable: a cold restore
 rebuilds it from readable `normalized_events` rows.
+
+## Lookahead loader
+
+the way Interpret restores prior adapter state for one batch on a chain
+whose `active` and `deprecated` manifests all belong to source families it
+covers (`ens_v1_registrar_l1`, `ens_v1_registry_l1`, `ens_v1_resolver_l1`,
+`ens_v1_wrapper_l1`, `ens_v1_reverse_l1`, `basenames_l1_compat`, and every
+`*_execution` family) and whose retained `normalized_events` hold no history of
+an uncovered family under a `draft` or `shadow` manifest: it loads only the
+history of the names and resources the batch can touch (those its logs
+mention, those earlier events link to them, and registrations falling due in
+the batch) instead of all retained history. The other way is the *full-state
+loader*, which restores everything once and then carries the
+[interpreter session](#interpreter-session) between batches. Interpret chooses
+between them automatically for each chain and batch; both must produce identical
+output. See [Interpret process memory](storage.md#interpret-process-memory).
 
 ## Interpreter state key
 

@@ -191,13 +191,22 @@ pub(super) async fn get_address_resolves_to(
             .collect::<Vec<_>>()
     });
     let permissions_by_resource = if let Some(resource_ids) = role_resource_ids.as_deref() {
-        bigname_storage::load_permissions_current_by_resource_ids(&state.pool, resource_ids)
-            .await
-            .map_err(|_| {
-                V2Error::internal_error(format!(
-                    "failed to load role summaries for names resolving to {normalized_address}"
-                ))
-            })?
+        super::role_summary::load_rows(
+            state,
+            &snapshot,
+            resource_ids,
+            params.namespace.as_deref(),
+            entries.iter().filter_map(|entry| entry.resource_id),
+        )
+        .await?
+        .into_iter()
+        .fold(BTreeMap::new(), |mut grouped, row| {
+            grouped
+                .entry(row.resource_id)
+                .or_insert_with(Vec::new)
+                .push(row);
+            grouped
+        })
     } else {
         BTreeMap::new()
     };
@@ -273,6 +282,7 @@ pub(super) async fn get_address_resolves_to(
                 display_name: entry.canonical_display_name.clone(),
                 namespace: entry.namespace.clone(),
                 namehash: entry.namehash.clone(),
+                permission_resource_id: entry.resource_id.map(|id| id.to_string()),
                 owner: registration.owner,
                 registrant: registration.registrant,
                 registration_status: registration.registration_status,

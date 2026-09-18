@@ -388,6 +388,8 @@ include!("tests/v2_history_redo.rs");
 include!("tests/v2_history_paging.rs");
 include!("tests/v2_diag_events.rs");
 include!("tests/v2_address_names.rs");
+include!("tests/v2_address_names_budget.rs");
+include!("tests/v2_address_names_budget_fence.rs");
 include!("tests/v2_address_resolves_to.rs");
 include!("tests/v2_permissions.rs");
 include!("tests/v2_resolvers.rs");
@@ -401,7 +403,7 @@ include!("tests/v2_search.rs");
 include!("tests/v2_names.rs");
 include!("tests/v2_query_params.rs");
 include!("tests/v2_status.rs");
-include!("tests/v2_namespaces_hackathon.rs");
+include!("tests/v2_namespaces_sepolia.rs");
 include!("tests/v2_envelope_conformance.rs");
 include!("tests/api_storage_quick_wins.rs");
 

@@ -2,9 +2,11 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{Marker, ProjectError, Result};
 
+mod history;
 mod linked_records;
 pub(crate) mod node_record_events;
 
+use history::{ANALYZE_HISTORY_SCOPES_SQL, SCOPED_NAME_HISTORY_SQL, SCOPED_PRIMARY_HISTORY_SQL};
 use node_record_events::SCOPED_NODE_RECORD_EVENT_IDS_SQL;
 
 const PROJECTION_TABLES: &[&str] = &[
@@ -243,6 +245,17 @@ async fn create_scoped_event_ids(
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
+    for statement in ANALYZE_HISTORY_SCOPES_SQL
+        .split(';')
+        .filter(|statement| !statement.trim().is_empty())
+    {
+        sqlx::query(statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to analyze scoped history keys", error)
+            })?;
+    }
     sqlx::query(
         "CREATE TEMP TABLE project_event_ids (
              normalized_event_id bigint PRIMARY KEY
@@ -326,32 +339,7 @@ async fn create_scoped_event_ids(
         SELECT normalized_event_id
         FROM project_scope_resolver_candidate_events
         UNION
-        SELECT event.normalized_event_id
-        FROM normalized_events event
-        CROSS JOIN LATERAL (
-            VALUES
-                (event.namespace || ':' || lower(event.after_state ->> 'node')),
-                (event.namespace || ':' || lower(event.after_state ->> 'child_node')),
-                (event.after_state ->> 'to_logical_name_id'),
-                (event.before_state ->> 'to_logical_name_id')
-        ) candidate(logical_name_id)
-        JOIN (
-            SELECT logical_name_id FROM project_scope_names
-            UNION
-            SELECT logical_name_id FROM project_scope_children
-        ) scope
-          ON scope.logical_name_id = candidate.logical_name_id
-        WHERE event.chain_id = $1 AND event.block_number <= $2
-          AND (
-              event.event_kind IN ('SubregistryChanged', 'AliasChanged')
-              OR (
-                  event.event_kind = 'AuthorityTransferred'
-                  AND event.source_family IN (
-                      'ens_v1_registry_l1', 'basenames_base_registry'
-                  )
-              )
-          )
-          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        __SCOPED_NAME_HISTORY_SQL__
         UNION
         SELECT event.normalized_event_id
         FROM normalized_events event
@@ -419,30 +407,7 @@ async fn create_scoped_event_ids(
           )
           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
         UNION
-        SELECT event.normalized_event_id
-        FROM normalized_events event
-        CROSS JOIN LATERAL (
-            VALUES
-                (lower(event.after_state ->> 'address'),
-                 event.after_state ->> 'coin_type',
-                 event.after_state ->> 'namespace'),
-                (lower(event.before_state ->> 'address'),
-                 event.before_state ->> 'coin_type',
-                 event.before_state ->> 'namespace'),
-                (lower(event.after_state -> 'primary_claim_source' ->> 'address'),
-                 event.after_state -> 'primary_claim_source' ->> 'coin_type',
-                 event.after_state -> 'primary_claim_source' ->> 'namespace'),
-                (lower(event.before_state -> 'primary_claim_source' ->> 'address'),
-                 event.before_state -> 'primary_claim_source' ->> 'coin_type',
-                 event.before_state -> 'primary_claim_source' ->> 'namespace')
-        ) candidate(address, coin_type, namespace)
-        JOIN project_scope_primary scope
-          ON scope.address = candidate.address
-         AND scope.coin_type = candidate.coin_type
-         AND scope.namespace = candidate.namespace
-        WHERE event.chain_id = $1 AND event.block_number <= $2
-          AND event.event_kind IN ('ReverseChanged', 'RecordChanged')
-          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        __SCOPED_PRIMARY_HISTORY_SQL__
         UNION
         SELECT resolver.normalized_event_id
         FROM project_scope_primary scope
@@ -468,7 +433,9 @@ async fn create_scoped_event_ids(
     .replace(
         "__SCOPED_NODE_RECORD_EVENT_IDS_SQL__",
         SCOPED_NODE_RECORD_EVENT_IDS_SQL,
-    );
+    )
+    .replace("__SCOPED_NAME_HISTORY_SQL__", SCOPED_NAME_HISTORY_SQL)
+    .replace("__SCOPED_PRIMARY_HISTORY_SQL__", SCOPED_PRIMARY_HISTORY_SQL);
     sqlx::query(&scoped_event_ids)
         .bind(chain_id)
         .bind(target_block)

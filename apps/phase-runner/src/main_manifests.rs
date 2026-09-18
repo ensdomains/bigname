@@ -53,14 +53,21 @@ pub(super) fn load_hashed_manifest_repository(
     Ok((repository, profile))
 }
 
-/// Bind the loaded manifest profile's start blocks into the chain configs and
-/// validate the deployment table set against them.
+/// Check the configured start blocks and validate the deployment table set.
 pub(super) fn bind_runtime_manifests(
-    repository: &bigname_manifests::ManifestRepository,
-    profile: &'static str,
+    _repository: &bigname_manifests::ManifestRepository,
+    _profile: &'static str,
     chains: &mut [phase_runner::config::ChainConfig],
 ) -> Result<()> {
-    phase_runner::config::bind_profile_start(chains, repository, profile)?;
+    if chains.iter().any(|chain| {
+        chain.chain_id == "ethereum-sepolia"
+            && chain
+                .sources
+                .iter()
+                .any(|source| source.start_block_number != 0)
+    }) {
+        bail!("Sepolia intake must start at block zero");
+    }
     validate_deployment_table_set(chains, COMPILED_CHAIN_NAMESPACES.iter().copied())?;
     Ok(())
 }

@@ -52,7 +52,6 @@ pub struct SourceConfig {
     pub start_block_number: i64,
     pub role: SourceRole,
     endpoint: Arc<str>,
-    admitted_hackathon_start: Option<i64>,
 }
 
 impl SourceConfig {
@@ -91,7 +90,6 @@ impl SourceConfig {
             start_block_number,
             role,
             endpoint: Arc::from(endpoint.into()),
-            admitted_hackathon_start: None,
         };
         source.validate()?;
         Ok(source)
@@ -102,7 +100,6 @@ impl SourceConfig {
 
     pub(crate) fn sepolia_start_is_admitted(&self) -> bool {
         self.start_block_number == 0
-            || self.admitted_hackathon_start == Some(self.start_block_number)
     }
 
     fn validate(&self) -> RunnerResult<()> {
@@ -140,10 +137,6 @@ impl SourceConfig {
 pub(crate) fn normalized_source_kind(kind: &str) -> String {
     kind.trim().to_ascii_lowercase().replace('-', "_")
 }
-
-#[path = "config/hackathon_start.rs"]
-mod hackathon_start;
-pub use hackathon_start::bind_profile_start;
 
 impl fmt::Debug for SourceConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -267,6 +260,9 @@ impl ChainConfig {
 
 #[derive(Clone, Debug)]
 pub struct CapacityConfig {
+    pub interpret_blocks_per_batch: std::num::NonZeroU32,
+    pub interpret_force_full_state_loader: bool,
+    pub interpret_lookahead_statement_timeout_secs: Option<std::num::NonZeroU32>,
     pub database_max_bytes: Option<u64>,
     pub minimum_free_disk_bytes: u64,
     pub writable_path: PathBuf,
@@ -277,6 +273,9 @@ pub struct CapacityConfig {
 impl Default for CapacityConfig {
     fn default() -> Self {
         Self {
+            interpret_blocks_per_batch: bigname_interpret::DEFAULT_INTERPRET_BLOCKS_PER_BATCH,
+            interpret_force_full_state_loader: false,
+            interpret_lookahead_statement_timeout_secs: None,
             database_max_bytes: None,
             minimum_free_disk_bytes: 0,
             writable_path: PathBuf::from("."),

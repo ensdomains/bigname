@@ -98,12 +98,6 @@ pub(super) async fn validate(pool: &PgPool, chain_id: &str) -> Result<()> {
               AND source_manifest.source_family = 'ens_v1_registry_l1'
                  THEN 'ens_v1_resolver_l1'
              WHEN edge.edge_kind = 'resolver'
-              AND source_manifest.source_family IN (
-                  'ens_v2_registry_l1',
-                  'ens_v2_root_l1'
-              )
-                 THEN 'ens_v2_resolver_l1'
-             WHEN edge.edge_kind = 'resolver'
               AND source_manifest.source_family = 'basenames_base_registry'
                  THEN 'basenames_base_resolver'
              ELSE NULL
@@ -115,12 +109,21 @@ pub(super) async fn validate(pool: &PgPool, chain_id: &str) -> Result<()> {
           AND source_manifest.rollout_status = 'active'
           AND edge.canonicality_state <> 'orphaned'
           AND edge.edge_kind IN ('resolver', 'registry_announcement')
+          -- An ENSv2 registry pointer only records which resolver a name uses.
+          -- It never opens a watch window, so it has no window to compare.
+          -- A ResolverCreated self-edge comes from the resolver manifest and
+          -- is still checked.
+          AND NOT (
+              edge.edge_kind = 'resolver'
+              AND source_manifest.source_family IN (
+                  'ens_v2_registry_l1',
+                  'ens_v2_root_l1'
+              )
+          )
           AND (
               edge.edge_kind <> 'resolver'
               OR source_manifest.source_family NOT IN (
                   'ens_v1_registry_l1',
-                  'ens_v2_registry_l1',
-                  'ens_v2_root_l1',
                   'basenames_base_registry'
               )
               OR target_manifest.manifest_id IS NOT NULL

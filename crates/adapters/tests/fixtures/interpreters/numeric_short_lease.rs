@@ -36,12 +36,12 @@ fn integer(value: &Value) -> anyhow::Result<i64> {
     })
 }
 
-/// Uses shipped hackathon ABI/event admission, with disposable addresses and zero start blocks
+/// Uses shipped Sepolia ABI/event admission, with disposable addresses and zero start blocks
 /// from the retained fixture. It introduces no controller logs or registrar predecessor state.
 pub fn input() -> anyhow::Result<BatchInput> {
     let fixture = fixture()?;
     let repository = bigname_manifests::load_repository(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/sepolia-hackathon"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/sepolia"),
     )?;
     let local = fixture["local_contracts"]
         .as_object()

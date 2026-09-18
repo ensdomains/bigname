@@ -3,13 +3,12 @@ use super::*;
 #[test]
 fn declared_resolver_implementations_compile_topic1_narrowed_upgraded_watches() -> Result<()> {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let repository =
-        crate::load_repository(workspace_root.join("manifests").join("sepolia-hackathon"))?;
+    let repository = crate::load_repository(workspace_root.join("manifests/sepolia"))?;
     let resolver = repository
         .manifests()
         .iter()
         .find(|loaded| loaded.manifest.source_family == crate::ENS_V2_RESOLVER_SOURCE_FAMILY)
-        .expect("hackathon resolver manifest")
+        .expect("official Sepolia resolver manifest")
         .manifest
         .clone();
     let upgraded = format!("{}", alloy_primitives::keccak256(b"Upgraded(address)"));

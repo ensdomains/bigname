@@ -80,8 +80,14 @@ pub async fn load_discovery_watch_coverage(
     .context("failed to load active manifests for discovery watch coverage")?;
     let mut topics_by_target = BTreeMap::<(String, String, String), BTreeSet<String>>::new();
     let mut global_all_emitter = BTreeSet::new();
+    let mut created_resolver_topics = BTreeSet::new();
     for (namespace, family, deployment, payload) in manifests {
         let (topics, all_emitter) = payload_topics(&family, payload)?;
+        if family == "ens_v2_resolver_l1"
+            && all_emitter.contains(&crate::resolver_creation_topic0())
+        {
+            created_resolver_topics.extend(topics.iter().cloned());
+        }
         topics_by_target.insert((namespace, family, deployment), topics);
         global_all_emitter.extend(all_emitter);
     }
@@ -113,9 +119,6 @@ pub async fn load_discovery_watch_coverage(
              WHEN edge.edge_kind = 'resolver'
               AND source_manifest.source_family = 'ens_v1_registry_l1'
                  THEN 'ens_v1_resolver_l1'
-             WHEN edge.edge_kind = 'resolver'
-              AND source_manifest.source_family IN ('ens_v2_registry_l1', 'ens_v2_root_l1')
-                 THEN 'ens_v2_resolver_l1'
              WHEN edge.edge_kind = 'resolver'
               AND source_manifest.source_family = 'basenames_base_registry'
                  THEN 'basenames_base_resolver'
@@ -224,6 +227,30 @@ pub async fn load_discovery_watch_coverage(
             .entry((address, topic0))
             .or_default()
             .push(interval);
+    }
+    if !created_resolver_topics.is_empty() {
+        let creations: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT lower(raw.emitting_address), min(raw.block_number)
+             FROM raw_logs raw JOIN chain_lineage lineage
+               ON lineage.chain_id = raw.chain_id AND lineage.block_hash = raw.block_hash
+              AND lineage.block_number = raw.block_number
+             WHERE raw.chain_id = $1 AND cardinality(raw.topics) > 0 AND lower(raw.topics[1]) = $2
+               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+             GROUP BY lower(raw.emitting_address)",
+        )
+        .bind(chain_id)
+        .bind(crate::resolver_creation_topic0())
+        .fetch_all(&mut *connection)
+        .await
+        .context("failed to load resolver creation capture coverage")?;
+        for (address, from) in creations {
+            for topic in &created_resolver_topics {
+                independently_covered
+                    .entry((address.clone(), topic.clone()))
+                    .or_default()
+                    .push(DiscoveryWatchInterval { from, to: i64::MAX });
+            }
+        }
     }
     for intervals in independently_covered.values_mut() {
         normalize_intervals(intervals);

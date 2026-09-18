@@ -43,7 +43,7 @@ mod renew_referrer {
     sol! { event RawNameRenewed(bytes name, bytes32 indexed label, uint256 cost, uint256 expires, bytes32 referrer); }
 }
 
-pub(super) fn name(
+pub(in crate::schema_v2) fn name(
     selected: &Selected,
     raw: &RawLogInput,
 ) -> anyhow::Result<(Vec<u8>, B256, Value)> {

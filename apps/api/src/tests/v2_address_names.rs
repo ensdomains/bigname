@@ -537,6 +537,42 @@ async fn v2_address_names_registration_dedupe_preserves_role_summary() -> Result
         )],
     )
     .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.permissions_current_resource_summary
+         SET registry_owner = '0x0000000000000000000000000000000000000a11',
+             registry_contract = '0x0000000000000000000000000000000000000b22',
+             registry_binding_provenance = jsonb_build_object(
+                 'kind', 'raw_log', 'chain_id', provenance->>'chain_id'),
+             registry_binding_chain_positions = jsonb_build_object(
+                 'block_number', chain_positions->>'target_block_number',
+                 'block_hash', chain_positions->>'target_block_hash')
+         WHERE resource_id = $1",
+    )
+    .bind(shared_resource_id)
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        r#"INSERT INTO bigname_phase.account_permission_state_current (
+            chain_id, authority_kind, authority_contract, authority_contract_instance_id,
+            owner, subject, relation_kind, approved, effective_powers, grant_source,
+            inheritance_path, transfer_behavior, provenance, chain_positions,
+            canonicality_summary, manifest_version
+        ) SELECT 'ethereum-mainnet', 'registry',
+            '0x0000000000000000000000000000000000000b22',
+            '00000000-0000-0000-0000-000000000605',
+            '0x0000000000000000000000000000000000000a11', $2, 'operator', true,
+            '["registry_control"]', '{"kind":"raw_log"}', '[]',
+            '{"mode":"owner_scoped"}', '{"chain_id":"ethereum-mainnet"}',
+            summary.chain_positions,
+            jsonb_set(summary.canonicality_summary, '{state}', '"canonical"'),
+            summary.manifest_version
+        FROM bigname_phase.permissions_current_resource_summary summary
+        WHERE summary.resource_id = $1"#,
+    )
+    .bind(shared_resource_id)
+    .bind(V2_PERMISSION_SUBJECT)
+    .execute(&database.pool)
+    .await?;
 
     let payload = v2_address_names_payload_for_database(
         &database,
@@ -561,10 +597,25 @@ async fn v2_address_names_registration_dedupe_preserves_role_summary() -> Result
         shared_rows[0]["role_summary"],
         json!([{
             "address": V2_PERMISSION_SUBJECT,
-            "grants": [{
-                "grant_scope": {"kind": "registry", "detail": {}},
-                "powers": ["set_resolver", "create_subnames"]
-            }]
+            "grants": [
+                {
+                    "grant_relation": "operator",
+                    "grant_scope": {
+                        "kind": "account",
+                        "detail": {
+                            "chain_id": 1,
+                            "authority_kind": "registry",
+                            "authority_contract": "0x0000000000000000000000000000000000000b22",
+                            "owner": "0x0000000000000000000000000000000000000a11"
+                        }
+                    },
+                    "powers": ["registry_control"]
+                },
+                {
+                    "grant_scope": {"kind": "registry", "detail": {}},
+                    "powers": ["set_resolver", "create_subnames"]
+                }
+            ]
         }])
     );
 
@@ -770,10 +821,7 @@ async fn v2_address_role_summary_marks_wrapper_empty_as_non_authoritative() -> R
         payload["meta"]["unsupported_fields"],
         json!(["role_summary"])
     );
-    assert_eq!(
-        payload["meta"]["unsupported_reason"],
-        json!("parent_and_resolver_delegation_permissions_not_supported")
-    );
+    assert_unlisted_permission_surfaces(&payload, V2_WRAPPER_UNLISTED_SURFACES);
 
     database.cleanup().await
 }
@@ -856,10 +904,7 @@ async fn v2_address_role_summary_marks_uningested_approvals_non_authoritative() 
         payload["meta"]["unsupported_fields"],
         json!(["role_summary"])
     );
-    assert_eq!(
-        payload["meta"]["unsupported_reason"],
-        json!("approval_and_delegation_permissions_not_supported")
-    );
+    assert_unlisted_permission_surfaces(&payload, V2_UNWRAPPED_UNLISTED_SURFACES);
 
     database.cleanup().await
 }
@@ -978,13 +1023,96 @@ async fn v2_get_address_names_include_role_summary_groups_permissions_by_address
         payload["meta"]["unsupported_fields"],
         json!(["role_summary"])
     );
-    assert_eq!(
-        payload["meta"]["unsupported_reason"],
-        json!("approval_and_delegation_permissions_not_supported")
-    );
+    assert_unlisted_permission_surfaces(&payload, V2_UNWRAPPED_UNLISTED_SURFACES);
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn v2_address_role_summary_includes_registry_operator_grant() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    seed_v2_address_registry_operator(&database).await?;
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"),
+    ).await?;
+    let grants = payload["data"][0]["role_summary"].as_array().unwrap();
+    assert!(grants.iter().flat_map(|role| role["grants"].as_array().unwrap()).any(|grant| {
+        grant.get("grant_relation") == Some(&json!("operator"))
+            && grant["powers"] == json!(["registry_control"])
+    }));
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_address_role_summary_does_not_change_address_membership() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let uri = format!("/v1/addresses/{V2_ADDRESS}/names");
+    let before = v2_address_names_payload_for_database(&database, &uri).await?;
+    seed_v2_address_registry_operator(&database).await?;
+    let after = v2_address_names_payload_for_database(&database, &uri).await?;
+    assert_eq!(before["data"], after["data"]);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_address_role_summary_omits_relation_for_direct_grants() -> Result<()> {
+    let (database, payload) = v2_address_names_payload(&format!(
+        "/v1/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"
+    )).await?;
+    assert!(payload["data"][0]["role_summary"].as_array().unwrap().iter()
+        .flat_map(|role| role["grants"].as_array().unwrap())
+        .all(|grant| grant.get("grant_relation").is_none()));
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_address_role_summary_uses_wrapper_reason_for_wrapper_page() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    upsert_phase_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(Uuid::from_u128(0xb100), Some("wrapper")),
+    ).await?;
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=beta&include=role_summary"),
+    ).await?;
+    assert_unlisted_permission_surfaces(&payload, V2_WRAPPER_UNLISTED_SURFACES);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_address_role_summary_reports_sorted_union_for_ens_v1_and_ens_v2_page() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    // alpha.eth keeps its ENSv1 registrar summary; beta.eth becomes an ENSv2 registry resource.
+    upsert_phase_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(Uuid::from_u128(0xb100), Some("ens_v2_registry")),
+    ).await?;
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?include=role_summary"),
+    ).await?;
+    let names = payload["data"].as_array().unwrap().iter()
+        .map(|row| row["name"].as_str().unwrap()).collect::<Vec<_>>();
+    assert!(names.contains(&"alpha.eth") && names.contains(&"beta.eth"), "{names:?}");
+    assert_eq!(payload["meta"]["unsupported_fields"], json!(["role_summary"]));
+    assert_unlisted_permission_surfaces(
+        &payload,
+        &["ens_v2_registry_operators", "registrar_approvals", "resolver_approvals"],
+    );
+
+    let ens_v2_only = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=beta&include=role_summary"),
+    ).await?;
+    assert_unlisted_permission_surfaces(&ens_v2_only, V2_ENS_V2_REGISTRY_UNLISTED_SURFACES);
+    database.cleanup().await
 }
 
 #[tokio::test]
@@ -1753,6 +1881,34 @@ fn v2_address_name_boundary_specs() -> Vec<V2AddressNameSpec> {
             relations: &[bigname_storage::AddressNameRelation::TokenHolder],
         },
     ]
+}
+
+async fn seed_v2_address_registry_operator(database: &TestDatabase) -> Result<()> {
+    let resource_id = Uuid::from_u128(0xa100);
+    sqlx::query(
+        "UPDATE bigname_phase.permissions_current_resource_summary
+         SET registry_owner='0x0000000000000000000000000000000000000a11',
+             registry_contract='0x0000000000000000000000000000000000000b22',
+             registry_binding_provenance=jsonb_build_object(
+                 'chain_id', provenance->>'chain_id'),
+             registry_binding_chain_positions=jsonb_build_object(
+                 'block_hash', chain_positions->>'target_block_hash')
+         WHERE resource_id=$1",
+    ).bind(resource_id).execute(&database.pool).await?;
+    sqlx::query(
+        r#"INSERT INTO bigname_phase.account_permission_state_current (
+            chain_id, authority_kind, authority_contract, authority_contract_instance_id,
+            owner, subject, relation_kind, approved, effective_powers, grant_source,
+            inheritance_path, transfer_behavior, provenance, chain_positions,
+            canonicality_summary, manifest_version)
+        SELECT provenance->>'chain_id', 'registry', registry_contract,
+            '00000000-0000-0000-0000-000000000605', registry_owner,
+            $2, 'operator', true, '["registry_control"]', '{"kind":"event"}',
+            '[]', '{}', jsonb_build_object('chain_id', provenance->>'chain_id'),
+            chain_positions, '{"state":"canonical"}', manifest_version
+        FROM bigname_phase.permissions_current_resource_summary WHERE resource_id=$1"#,
+    ).bind(resource_id).bind(V2_PERMISSION_SUBJECT).execute(&database.pool).await?;
+    Ok(())
 }
 
 struct V2AddressNameSpec {
