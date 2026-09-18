@@ -1659,10 +1659,12 @@ async fn v2_get_name_serves_a_lapsed_handed_off_lease_as_released() -> Result<()
     let data = payload["data"].as_object().expect("data must be an object");
     assert_eq!(data.get("status"), Some(&json!("ok")));
     assert_eq!(data.get("registration_status"), Some(&json!("released")));
-    assert!(data["owner"].is_null(), "{payload}");
-    assert!(data["manager"].is_null(), "{payload}");
-    assert!(data["registrant"].is_null(), "{payload}");
-    assert!(data["expires_at"].is_null(), "{payload}");
+    for field in ["owner", "manager", "registrant", "expires_at"] {
+        assert!(
+            data.get(field).is_none_or(Value::is_null),
+            "{field} must be absent for a released name: {payload}"
+        );
+    }
     assert!(data.get("resolver").is_none(), "{payload}");
     assert!(data.get("addresses").is_none(), "{payload}");
     assert!(data.get("text_records").is_none(), "{payload}");
