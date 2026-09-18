@@ -2104,7 +2104,7 @@ mod handoff_scenario {
         AdapterSession, AddressAdmissionInput, BatchInput, BatchOutput, ManifestInput,
         RawBlockInput, RawLogInput, StateCacheCapacity, prepare_schema_v2_batch_incremental,
     };
-    use serde_json::json;
+    use bigname_manifests::load_repository;
     use sqlx::PgPool;
     use time::OffsetDateTime;
     use uuid::Uuid;
@@ -2207,19 +2207,6 @@ mod handoff_scenario {
         }
     }
 
-    fn manifest(manifest_id: i64, source_family: &str, events: serde_json::Value) -> ManifestInput {
-        ManifestInput {
-            manifest_id,
-            manifest_version: 1,
-            namespace: "ens".to_owned(),
-            source_family: source_family.to_owned(),
-            chain_id: CHAIN.to_owned(),
-            deployment_label: "fixture".to_owned(),
-            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
-            payload_json: json!({"abi": {"events": events}}).to_string(),
-        }
-    }
-
     fn admission(
         manifest_id: i64,
         instance: u128,
@@ -2239,74 +2226,47 @@ mod handoff_scenario {
         }
     }
 
-    /// The registrar and registry declarations as the production ENS mainnet manifests admit
-    /// them (`manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml` and
-    /// `manifests/mainnet/ethereum/ens/ens_v1_registry_l1/v3.toml`): the registrar's numeric
-    /// `NameRegistered` only releases, the legacy controller's cost-bearing `NameRegistered`
-    /// grants, and the ERC-721 `Transfer` comes from the registrar.
+    /// The checked-in production ENS mainnet manifests, loaded from `manifests/mainnet`: the
+    /// active registry manifest (`ens_v1_registry_l1` v3) and the registrar manifest
+    /// (`ens_v1_registrar_l1` v1), whose registrar numeric `NameRegistered` only releases, whose
+    /// legacy controller `NameRegistered` grants, and whose ERC-721 `Transfer` comes from the
+    /// registrar. The fixture manifest ids replace the checked-in ones.
     pub fn manifests() -> Vec<ManifestInput> {
-        const GRANTED: &[&str] = &[
-            "RegistrationGranted",
-            "ExpiryChanged",
-            "PermissionChanged",
-            "SurfaceUnbound",
-            "SurfaceBound",
-            "AuthorityEpochChanged",
-            "ResolverChanged",
-            "PreimageObserved",
-        ];
-        const TRANSFERRED: &[&str] = &[
-            "TokenControlTransferred",
-            "PermissionChanged",
-            "SurfaceUnbound",
-            "SurfaceBound",
-            "AuthorityEpochChanged",
-            "ResolverChanged",
-        ];
-        vec![
-            manifest(
-                REGISTRY_MANIFEST,
-                "ens_v1_registry_l1",
-                json!([
-                    {
-                        "name": "NewOwner",
-                        "fragment": "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
-                        "emitter_roles": ["registry"],
-                        "normalized_events": ["SubregistryChanged", "AuthorityTransferred"],
-                    },
-                    {
-                        "name": "Transfer",
-                        "fragment": "event Transfer(bytes32 indexed node, address owner)",
-                        "emitter_roles": ["registry"],
-                        "normalized_events": ["AuthorityTransferred"],
-                    },
-                ]),
-            ),
-            manifest(
-                REGISTRAR_MANIFEST,
-                "ens_v1_registrar_l1",
-                json!([
-                    {
-                        "name": "NameRegistered",
-                        "fragment": "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)",
-                        "emitter_roles": ["registrar"],
-                        "normalized_events": ["RegistrationReleased"],
-                    },
-                    {
-                        "name": "NameRegistered",
-                        "fragment": "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires)",
-                        "emitter_roles": ["legacy_registrar_controller"],
-                        "normalized_events": GRANTED,
-                    },
-                    {
-                        "name": "Transfer",
-                        "fragment": "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
-                        "emitter_roles": ["registrar"],
-                        "normalized_events": TRANSFERRED,
-                    },
-                ]),
-            ),
+        let repository = load_repository(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/mainnet"),
+        )
+        .expect("the checked-in mainnet manifests must load");
+        [
+            (REGISTRY_MANIFEST, "ens_v1_registry_l1", "v3"),
+            (REGISTRAR_MANIFEST, "ens_v1_registrar_l1", "v1"),
         ]
+        .into_iter()
+        .map(|(manifest_id, source_family, version_tag)| {
+            let loaded = repository
+                .manifests()
+                .iter()
+                .find(|loaded| {
+                    loaded.manifest.chain == CHAIN
+                        && loaded.manifest.source_family == source_family
+                        && loaded.version_tag == version_tag
+                })
+                .unwrap_or_else(|| {
+                    panic!("the checked-in {source_family} {version_tag} manifest must exist")
+                });
+            ManifestInput {
+                manifest_id,
+                manifest_version: i64::try_from(loaded.manifest.manifest_version)
+                    .expect("manifest version fits i64"),
+                namespace: loaded.manifest.namespace.clone(),
+                source_family: loaded.manifest.source_family.clone(),
+                chain_id: loaded.manifest.chain.clone(),
+                deployment_label: loaded.manifest.deployment_epoch.clone(),
+                normalizer_version: loaded.manifest.normalizer_version.clone(),
+                payload_json: serde_json::to_string(&loaded.manifest)
+                    .expect("the checked-in manifest serializes"),
+            }
+        })
+        .collect()
     }
 
     fn batch(block_number: i64, raw_logs: Vec<RawLogInput>) -> BatchInput {
@@ -2636,6 +2596,15 @@ mod handoff_scenario {
     }
 }
 
+async fn selected_resource(pool: &PgPool) -> Result<Option<String>> {
+    Ok(
+        sqlx::query_scalar("SELECT resource_id::text FROM name_current WHERE logical_name_id = $1")
+            .bind(handoff_scenario::logical_name_id())
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
 async fn handoff_control(pool: &PgPool) -> Result<serde_json::Value> {
     Ok(sqlx::query_scalar(
         "SELECT declared_summary -> 'control' FROM name_current WHERE logical_name_id = $1",
@@ -2727,15 +2696,39 @@ async fn registrar_handoff_without_reclaim_keeps_the_registry_owner_across_a_lat
     let (database, pool) = migrated_pool().await?;
     seed_blocks(&pool, [REGISTRATION_BLOCK, HANDOFF_BLOCK, LATER_BLOCK]).await?;
     handoff_scenario::persist(&pool, &registration).await?;
-    handoff_scenario::persist(&pool, &handoff).await?;
-    run_project(&pool, HANDOFF_BLOCK, REGISTRATION_BLOCK, None).await?;
-    let selected: Option<String> =
-        sqlx::query_scalar("SELECT resource_id::text FROM name_current WHERE logical_name_id = $1")
-            .bind(handoff_scenario::logical_name_id())
-            .fetch_one(&pool)
-            .await?;
+    run_project(&pool, REGISTRATION_BLOCK, REGISTRATION_BLOCK, None).await?;
+    let registered = handoff_control(&pool).await?;
+    let registrar_resource = registration
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RegistrationGranted")
+        .and_then(|event| event.resource_id)
+        .expect("the registration mints the registrar resource");
     assert_eq!(
-        selected.as_deref(),
+        selected_resource(&pool).await?.as_deref(),
+        Some(registrar_resource.to_string().as_str())
+    );
+    assert_eq!(registered["registrant"], json!(RETAINED_OWNER));
+    // A fresh registration serves no control owner: the registration's own registry setup is
+    // not projected as a later control transfer, which the end-to-end suite pins in
+    // `tests/e2e/src/scenarios/registry_driven_reads.rs`. The handoff below is what first
+    // publishes a registry owner for this name.
+    assert!(
+        registered["registry_owner"].is_null(),
+        "registration: first-ownership setup is not a control transfer, got {registered}"
+    );
+
+    // The handoff arrives as its own batch and resumes the materialized projection.
+    handoff_scenario::persist(&pool, &handoff).await?;
+    run_project(
+        &pool,
+        HANDOFF_BLOCK,
+        HANDOFF_BLOCK,
+        Some(REGISTRATION_BLOCK),
+    )
+    .await?;
+    assert_eq!(
+        selected_resource(&pool).await?.as_deref(),
         Some(registry_resource.to_string().as_str())
     );
     let after_handoff = handoff_control(&pool).await?;
