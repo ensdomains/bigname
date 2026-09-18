@@ -500,8 +500,12 @@ collection route carry neither header.
 - Released names: the listing means "registrations whose expiry falls in this
   window", whether the registration is live, in grace or released. A released
   name keeps the lapsed registration's expiry, so it appears in every window
-  that covers that old expiry, for ENSv1 `.eth` leases and ENSv2 registrations
-  alike. Its row has `registration_status: released`, its old `expires_at`, and
+  that covers that old expiry: every released ENSv1 `.eth` lease, and an ENSv2
+  registration that lapsed by path expiry, whose registry entry still holds
+  the expiry. An ENSv2 registration ended by an explicit release loses its
+  expiry with the entry, so it is outside every window; `GET /v1/names/{name}`
+  serves it as `released` without `expires_at`. A released row has
+  `registration_status: released`, its old `expires_at`, and
   no `owner` or `registrant`. The row shape has no `lapsed_registration` field;
   `GET /v1/names/{name}` serves that block, with the last holder, for a released
   ENSv1 name. A client that wants only held names filters rows on
