@@ -20,9 +20,11 @@ on `normalized_events` serve its reads:
   `crates/interpret/src/load/lookahead/due_names.sql`. The same query also reads
   the block just before the batch through `normalized_events_chain_block_number_idx`,
   for registrar events that recorded an already-lapsed expiry. That query keeps both
-  expiry bounds as index conditions in PostgreSQL's generic prepared plan; a
-  mainnet read-only comparison returned the same 17 names in 7.2 milliseconds
-  instead of 40.2 seconds.
+  expiry bounds as index conditions in PostgreSQL's generic prepared plan. That
+  was measured on the #903 experiment, before this release rewrote the
+  installer and its checks: a mainnet read-only comparison returned the same
+  17 names in 7.2 milliseconds instead of 40.2 seconds. The figure has not been
+  re-measured on the current tree.
 
 These change access paths only: no normalized event, canonicality state, raw
 intake or [interpreter content hash](../../docs/glossary.md#interpreter-content-hash)
