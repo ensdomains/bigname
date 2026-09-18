@@ -561,6 +561,67 @@ async fn ordinary_failed_or_incomplete_ingest_still_replans_from_the_declared_st
     db.cleanup().await
 }
 
+#[tokio::test]
+async fn exhausted_redo_at_the_node_head_is_judged_on_the_work_that_follows_it() -> Result<()> {
+    let db = ScratchDatabase::create("source_transport_redo_exhausted").await?;
+    seed_watch_set(db.pool()).await?;
+    // The redo of 2..=5 read its last block, and the process stopped before finish_redo
+    // cleared the marker. The pass it interrupted had completed and handed block 5 to live
+    // follow, so once the marker clears the runner's next act is live follow, not a fetch of
+    // block 6 for the redo.
+    seed_ingest(db.pool(), "drpc", Redo::ResumedAt(5)).await?;
+    hand_off_to_live(db.pool()).await?;
+    seed_published_head(db.pool(), 5).await?;
+    // The redo ended at the node's head: there is no block 6 to read anywhere.
+    let node = NodeDouble::through(5).with_watched_log(5);
+    let before = snapshot(db.pool()).await?;
+
+    let receipt = switch_to_direct_reader_with_floor(&db, &node, 3).await?;
+
+    assert_eq!(receipt["next_block"], 6);
+    assert_eq!(receipt["compared_block"], 5);
+    assert_eq!(receipt["compared_block_log_count"], 1);
+    assert_eq!(
+        receipt["checked_boundaries"][2],
+        json!({"block": 5, "hash": block_hash(5)}),
+        "the redo's own boundary is still checked"
+    );
+    assert_eq!(
+        snapshot(db.pool()).await?,
+        with_stored_kind(before, "reth_db"),
+        "the redo marker, its position and the interrupted lifecycle are untouched"
+    );
+    db.cleanup().await
+}
+
+#[tokio::test]
+async fn candidate_reader_without_checkpoint_heads_is_refused_before_live_follow_would_be()
+-> Result<()> {
+    let db = ScratchDatabase::create("source_transport_live_checkpoints").await?;
+    seed_watch_set(db.pool()).await?;
+    seed_ingest(db.pool(), "drpc", Redo::None).await?;
+    hand_off_to_live(db.pool()).await?;
+    seed_published_head(db.pool(), 5).await?;
+    // The candidate answers for its latest block but has no safe or finalized head. Live
+    // follow refuses such a provider on its first batch, so the switch must refuse it now.
+    let node = NodeDouble::through(6)
+        .with_watched_log(6)
+        .without_checkpoint_heads();
+    let before = snapshot(db.pool()).await?;
+
+    let error = switch(&db, "drpc", &node, "reth_db", &node)
+        .await
+        .expect_err("live follow would reject this reader on its first batch");
+
+    assert!(
+        format!("{error:#}")
+            .contains("live provider must report safe and finalized checkpoint heads"),
+        "{error:#}"
+    );
+    assert_eq!(before, snapshot(db.pool()).await?);
+    db.cleanup().await
+}
+
 /// Runs the production switch with each descriptor read through an HTTP node double. The
 /// direct database reader needs a real Reth datadir, so `direct` stands in for it; the locks,
 /// cursor checks, comparisons and update are the ones `transition` runs.
@@ -648,6 +709,8 @@ fn block_hash(number: i64) -> String {
 struct NodeDouble {
     hashes: BTreeMap<i64, String>,
     logs: BTreeMap<i64, Vec<Value>>,
+    /// Whether the node reports safe and finalized heads; a synced node does.
+    checkpoint_heads: bool,
 }
 
 impl NodeDouble {
@@ -657,7 +720,13 @@ impl NodeDouble {
                 .map(|number| (number, block_hash(number)))
                 .collect(),
             logs: BTreeMap::new(),
+            checkpoint_heads: true,
         }
+    }
+
+    fn without_checkpoint_heads(mut self) -> Self {
+        self.checkpoint_heads = false;
+        self
     }
 
     fn with_hash(mut self, number: i64, hash: String) -> Self {
@@ -703,10 +772,12 @@ impl NodeDouble {
         };
         let result = match request["method"].as_str().unwrap_or_default() {
             "eth_getBlockByNumber" => {
+                let head = || self.hashes.keys().next_back().copied();
                 let number = match request["params"][0].as_str() {
-                    Some("latest") => self.hashes.keys().next_back().copied(),
-                    // The double is a node without checkpoint heads.
-                    Some("safe" | "finalized") => None,
+                    Some("latest") => head(),
+                    // The double reports its head as its checkpoints; only their presence
+                    // matters here.
+                    Some("safe" | "finalized") => self.checkpoint_heads.then(head).flatten(),
                     _ => Some(number(&request["params"][0])),
                 };
                 let block =
