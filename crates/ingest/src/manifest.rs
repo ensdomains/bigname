@@ -204,13 +204,22 @@ impl WatchFilter {
         if topics.is_empty() {
             return Vec::new();
         }
-        let mut addresses_by_start = BTreeMap::<i64, BTreeSet<String>>::new();
+        // One address may announce itself in several blocks of one window. Every
+        // suffix from a later announcement lies inside the suffix from the earliest
+        // one, so each address is read once, from its earliest announcement.
+        let mut earliest_start_by_address = BTreeMap::<String, i64>::new();
         for (address, announced_at) in announcements {
             let start = announced_at.max(from_block);
             if start > to_block {
                 continue;
             }
-            let address = address.to_ascii_lowercase();
+            earliest_start_by_address
+                .entry(address.to_ascii_lowercase())
+                .and_modify(|earliest| *earliest = (*earliest).min(start))
+                .or_insert(start);
+        }
+        let mut addresses_by_start = BTreeMap::<i64, BTreeSet<String>>::new();
+        for (address, start) in earliest_start_by_address {
             addresses_by_start
                 .entry(start)
                 .or_default()
