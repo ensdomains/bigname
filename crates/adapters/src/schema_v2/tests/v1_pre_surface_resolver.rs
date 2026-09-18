@@ -2495,7 +2495,7 @@ mod public_v2_records {
                 assert_eq!(catalog.select(&event)?.is_some(), admitted);
             }
             let registry = manifest_with_events(6193, "ens", "ens_v2_registry_l1", &[]);
-            let mut discovery = admission(6193, "registry");
+            let mut discovery = admission(6191, "permissioned_resolver");
             discovery.discovery_edge_kind = Some("resolver".to_owned());
             for (namespace, full_abi) in [
                 ("ens", true),

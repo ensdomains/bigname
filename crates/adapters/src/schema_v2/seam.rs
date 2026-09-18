@@ -28,6 +28,9 @@ pub const REGISTRY_ANNOUNCEMENT_EDGE_KIND: &str = "registry_announcement";
 
 pub const ADMISSION_DISCOVERY_EDGE_KINDS: &[&str] = &["resolver", REGISTRY_ANNOUNCEMENT_EDGE_KIND];
 
+/// Registry resolver pointers retain topology but never authorize emitter capture.
+pub const ADDRESS_ADMISSION_EDGE_SQL: &str = "NOT (edge.edge_kind = 'resolver' AND manifest.source_family IN ('ens_v2_registry_l1', 'ens_v2_root_l1'))";
+
 /// The only normalized event kinds a child migration boundary's recorded ENSv1 cleanup can be: the
 /// wrapper token parked in the graveyard
 /// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58),

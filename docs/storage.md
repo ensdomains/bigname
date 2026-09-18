@@ -1148,6 +1148,32 @@ current registry stores itself for a requested zero owner.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L34 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L55 @ ens_v1@91c966f)
 
+### Resolver creation replay
+
+`ResolverCreated` is stored as `ContractDiscovered` and an Interpret-owned
+`resolver` self-edge anchored to the raw creation log. This is the only permitted
+resolver self-edge. ENSv2 registry-pointer edges remain binding history and are
+excluded from emitter admission. Canonical raw creation logs drive Ingest's
+same-window capture and its subsequent windows; orphaned creation logs cannot
+expand a watch filter. Installing
+[creation capture](glossary.md#resolver-creation-capture) requires the normal
+manifest-driven Ingest redo and full Interpret replay, preserving raw facts.
+
+The rule is one validated CHECK on `discovery_edges` named
+`discovery_edges_self_edge_check`. The baseline creates it on a fresh install.
+Schema-migration `20260917140000_resolver_creation_self_edge.sql` replaces the
+older rule on an existing database; it is already applied on a live database,
+so its content is fixed. Schema-migration
+`20260917141000_discovery_self_edge_check_name.sql` then settles the name: it
+renames a rule that has the right text under a generated name, and replaces the
+rule only when its text differs. Both files find the existing rule by searching
+the text `pg_get_constraintdef` prints; `20260917141000` turns
+`quote_all_identifiers` off while it reads that text and restores the caller's
+value, while the fixed `20260917140000` needs the migration session to run with
+the setting at its default, `off`, as the
+[production runbook](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+states.
+
 ### Interpret process memory
 
 `normalized_events` is the working store for each [interpreter state
