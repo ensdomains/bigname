@@ -4,9 +4,9 @@ use crate::{Marker, ProjectError, Result};
 
 /// Per-resource permission summary, including the `resource_restrictions` block. ENSv2
 /// `locked_roles` reads the registry root from the identity table and the admin rows from the
-/// staged rows for in-scope resources plus the live rows for every other resource, so an
-/// incremental build sees a root that its own window never touched; a full rebuild has every
-/// row staged.
+/// staged rows for in-scope resources plus the live rows of their registry roots, so an
+/// incremental build sees a root that its own window never touched without reading the rest of
+/// the chain; a full rebuild has every row staged.
 pub(super) async fn build(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
