@@ -356,15 +356,8 @@ async fn direct_reader_floor_is_judged_on_the_live_suffix_after_ingest_completed
     seed_watch_set(db.pool()).await?;
     seed_ingest(db.pool(), "drpc", Redo::None).await?;
     // Ingest is complete: it handed block 5 to live follow, which reads from block 6.
-    sqlx::query(
-        "UPDATE chain_phase_state
-         SET live_handoff_block_number = 5, live_handoff_block_hash = $2
-         WHERE chain_id = $1 AND phase_name = 'ingest'",
-    )
-    .bind(SEPOLIA)
-    .bind(block_hash(5))
-    .execute(db.pool())
-    .await?;
+    hand_off_to_live(db.pool()).await?;
+    seed_published_head(db.pool(), 5).await?;
     let node = NodeDouble::through(6).with_watched_log(6);
     let before = snapshot(db.pool()).await?;
 
@@ -379,6 +372,110 @@ async fn direct_reader_floor_is_judged_on_the_live_suffix_after_ingest_completed
     assert_eq!(before, snapshot(db.pool()).await?);
 
     switch_to_direct_reader_with_floor(&db, &node, 6).await?;
+    assert_eq!(
+        snapshot(db.pool()).await?,
+        with_stored_kind(before, "reth_db")
+    );
+    db.cleanup().await
+}
+
+#[tokio::test]
+async fn direct_reader_floor_is_judged_where_live_follow_resumes_not_at_the_handoff() -> Result<()>
+{
+    let db = ScratchDatabase::create("source_transport_floor_live_resumed").await?;
+    seed_watch_set(db.pool()).await?;
+    seed_ingest(db.pool(), "drpc", Redo::None).await?;
+    hand_off_to_live(db.pool()).await?;
+    // Live follow has since published through block 10. The historical Ingest cursor still
+    // says 6: live progress never advances it. The node is unchanged and stands at 11.
+    seed_published_head(db.pool(), 10).await?;
+    let node = NodeDouble::through(11)
+        .with_watched_log(6)
+        .with_watched_log(11);
+    let before = snapshot(db.pool()).await?;
+
+    // The node pruned history below block 7. Live follow needs block 11 next, which it holds.
+    let receipt = switch_to_direct_reader_with_floor(&db, &node, 7).await?;
+
+    assert_eq!(receipt["next_block"], 11);
+    assert_eq!(receipt["compared_block"], 11);
+    assert_eq!(receipt["compared_block_hash"], block_hash(11));
+    assert_eq!(receipt["compared_block_log_count"], 1);
+    assert_eq!(
+        receipt["live_continuation"],
+        json!({
+            "ancestor": {"number": 10, "hash": block_hash(10)},
+            "node_head": {"number": 11, "hash": block_hash(11)}
+        })
+    );
+    assert_eq!(
+        snapshot(db.pool()).await?,
+        with_stored_kind(before, "reth_db"),
+        "the historical Ingest cursor keeps its next block 6; only the stored kind changes"
+    );
+    db.cleanup().await
+}
+
+#[tokio::test]
+async fn live_continuation_below_the_direct_reader_floor_is_refused() -> Result<()> {
+    let db = ScratchDatabase::create("source_transport_floor_live_reorg").await?;
+    seed_watch_set(db.pool()).await?;
+    seed_ingest(db.pool(), "drpc", Redo::None).await?;
+    hand_off_to_live(db.pool()).await?;
+    seed_published_head(db.pool(), 10).await?;
+    // The node reorganized: from block 6 on it holds other blocks than live follow published,
+    // so live follow resumes from block 6, the last block both still share.
+    let mut node = NodeDouble::through(11);
+    for number in 6..=11 {
+        node = node.with_hash(number, block_hash(1_000 + number));
+    }
+    let node = node.with_watched_log(6);
+    let before = snapshot(db.pool()).await?;
+
+    let error = switch_to_direct_reader_with_floor(&db, &node, 7)
+        .await
+        .expect_err("live follow has to read block 6, which the node pruned");
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("keeps history from block 7 only") && message.contains("6..=head"),
+        "{message}"
+    );
+    assert_eq!(before, snapshot(db.pool()).await?);
+    db.cleanup().await
+}
+
+#[tokio::test]
+async fn caught_up_live_follow_compares_the_published_head_and_admits_the_direct_reader()
+-> Result<()> {
+    let db = ScratchDatabase::create("source_transport_floor_live_caught_up").await?;
+    seed_watch_set(db.pool()).await?;
+    seed_ingest(db.pool(), "drpc", Redo::None).await?;
+    hand_off_to_live(db.pool()).await?;
+    // Live follow published the node's head. Its next block, 11, does not exist yet, so the
+    // block both interfaces are compared on is the published head itself.
+    seed_published_head(db.pool(), 10).await?;
+    let node = NodeDouble::through(10)
+        .with_watched_log(6)
+        .with_watched_log(10);
+    let before = snapshot(db.pool()).await?;
+
+    let error = switch_to_direct_reader_with_floor(&db, &node, 12)
+        .await
+        .expect_err("the floor still applies to the block live follow loads next");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("keeps history from block 12 only") && message.contains("11..=head"),
+        "{message}"
+    );
+    assert_eq!(before, snapshot(db.pool()).await?);
+
+    let receipt = switch_to_direct_reader_with_floor(&db, &node, 7).await?;
+
+    assert_eq!(receipt["next_block"], 11);
+    assert_eq!(receipt["compared_block"], 10);
+    assert_eq!(receipt["compared_block_hash"], block_hash(10));
+    assert_eq!(receipt["compared_block_log_count"], 1);
     assert_eq!(
         snapshot(db.pool()).await?,
         with_stored_kind(before, "reth_db")
@@ -528,8 +625,15 @@ impl NodeDouble {
         };
         let result = match request["method"].as_str().unwrap_or_default() {
             "eth_getBlockByNumber" => {
-                let number = number(&request["params"][0]);
-                self.hashes.get(&number).map_or(Value::Null, |hash| {
+                let number = match request["params"][0].as_str() {
+                    Some("latest") => self.hashes.keys().next_back().copied(),
+                    // The double is a node without checkpoint heads.
+                    Some("safe" | "finalized") => None,
+                    _ => Some(number(&request["params"][0])),
+                };
+                let block =
+                    number.and_then(|number| self.hashes.get(&number).map(|hash| (number, hash)));
+                block.map_or(Value::Null, |(number, hash)| {
                     json!({
                         "hash": hash,
                         "parentHash": block_hash(number - 1),
@@ -621,6 +725,51 @@ async fn seed_ingest(pool: &sqlx::PgPool, stored_kind: &str, redo: Redo) -> Resu
     .bind(SEPOLIA)
     .bind(resumed_at)
     .bind(resumed_at.map(block_hash))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// The seeded Ingest pass handed block 5 to live follow, so Ingest is complete and has no
+/// catch-up work of its own.
+async fn hand_off_to_live(pool: &sqlx::PgPool) -> Result<()> {
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET live_handoff_block_number = 5, live_handoff_block_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(5))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Live follow published the chain through block `through`: the canonical lineage holds
+/// every block up to it with the hashes the node double reports, and the chain head points
+/// at it. Live progress never touches the Ingest cursor, which keeps saying block 6.
+async fn seed_published_head(pool: &sqlx::PgPool, through: i64) -> Result<()> {
+    for number in 0..=through {
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                chain_id, block_hash, parent_hash, block_number, block_timestamp,
+                canonicality_state
+             ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'canonical')",
+        )
+        .bind(SEPOLIA)
+        .bind(block_hash(number))
+        .bind((number > 0).then(|| block_hash(number - 1)))
+        .bind(number)
+        .execute(pool)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(through))
+    .bind(through)
     .execute(pool)
     .await?;
     Ok(())
