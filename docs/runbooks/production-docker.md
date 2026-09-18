@@ -44,9 +44,11 @@ of that deployment's Compose project with `docker-compose.reth-db.yml` applied,
 and the same service definition runs the one-off sample and
 `source-transport` commands through `docker compose run`: the image ships the
 sample as `/usr/local/bin/reth-db-smoke` next to `phase-runner`, so
-`docker compose ... run --rm phase-runner reth-db-smoke ethereum-sepolia
-"$RETH_DATA_DIR" <block,block,...>` reads through the production mounts, user
-and PID namespace ([bounded sample](../reth-db-reader.md#bounded-sample)). A Sepolia deployment
+`docker compose ... run --rm phase-runner sh -c 'reth-db-smoke ethereum-sepolia
+"$RETH_DATA_DIR" <block,block,...>'` reads through the production mounts, user
+and PID namespace ([bounded sample](../reth-db-reader.md#bounded-sample); the
+container-side shell is what expands `RETH_DATA_DIR` from the service
+environment, since the host shell does not source `.env.server`). A Sepolia deployment
 is its own Compose project with its own `.env.server`
 (`BIGNAME_PHASE_RUNNER_CHAINS=ethereum-sepolia`,
 `BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT=/app/manifests/sepolia`, a Sepolia

@@ -125,8 +125,18 @@ user and PID namespace through the phase runner's service definition:
 docker compose --env-file .env.server \
   -f docker-compose.server.yml \
   -f docker-compose.reth-db.yml \
-  run --rm phase-runner reth-db-smoke ethereum-sepolia "$RETH_DATA_DIR" 11550000,11550001
+  run --rm phase-runner \
+  sh -c 'reth-db-smoke ethereum-sepolia "$RETH_DATA_DIR" 11550000,11550001'
 ```
+
+The single quotes matter: `RETH_DATA_DIR` usually lives only in `.env.server`,
+which Compose reads for the service environment (the server Compose file
+forwards it to the `phase-runner` service) but which the host shell never
+sources. Double-quoted, the host shell would expand the variable to an empty
+string before Compose runs; inside the container-side `sh -c` the service
+environment expands it to the mounted datadir path. Writing the container path
+literally in place of `"$RETH_DATA_DIR"` works as well, since the overlay mounts
+the datadir at the same path inside the container.
 
 Outside the image, build and run it from a checkout:
 
