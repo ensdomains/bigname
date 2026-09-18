@@ -13,6 +13,8 @@ use crate::provider::RethDbProvider;
 /// optional topic0-filtered logs, and elapsed milliseconds for independent RPC comparison.
 /// Binary fields in the JSON are byte arrays. The datadir must allow MDBX lock updates and
 /// RocksDB secondary files; all three underlying storage children are opened read-only.
+/// Opening fails, before any block is read, when the datadir's stored genesis block hash
+/// is not the selected chain's, so the printed `chain` is the chain the datadir holds.
 pub async fn read_reth_sample(
     chain: &str,
     datadir: &str,

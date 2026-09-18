@@ -92,6 +92,12 @@ requirement below exists.
    on `main` by [PR #917](https://github.com/ensdomains/bigname/pull/917)),
    that page cache counts against it. Choose the ceiling from a measured run
    with direct reads enabled; this runbook gives no figure.
+8. **Chain.** `RETH_DATA_DIR` must hold the chain the deployment indexes. The
+   reader compares the datadir's stored genesis block hash with the configured
+   chain's when it opens, and refuses on a mismatch with an error naming both
+   hashes; a Sepolia deployment pointed at a Mainnet datadir fails to start
+   rather than ingesting Mainnet facts under the Sepolia chain id. The bounded
+   sample and the `source-transport` command apply the same check.
 
 Check the result on the created container, not only the rendered file:
 

@@ -215,7 +215,9 @@ A mismatch or held writer lock aborts before the update. The inverse change is
 supported for rollback after the same checks. An ordinary startup still rejects
 an unreviewed source-kind change.
 
-The direct reader must retain the next required Ingest range. Switching
+The direct reader must retain the next required Ingest range, and it refuses to
+open a datadir whose stored genesis block hash is not Sepolia's
+([direct Reth reader](reth-db-reader.md)). Switching
 transport does not recover pruned history, grant historical state access or
 make the node independent of its former HTTP interface. Keep a separate state
 RPC where needed. A verification-only endpoint that previously supplied any

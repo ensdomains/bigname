@@ -6,6 +6,24 @@ unsupported. The dependency, reference pin, lockfile and Rust 1.98.0 build
 toolchain move together. Sepolia uses Reth's genesis and hardfork schedule
 (upstream: .refs/reth/crates/chainspec/src/spec.rs:L146 @ reth@189c0df3).
 
+Selecting a chain specification does not by itself check that the datadir holds
+that chain: Reth's read-only open builds the factory around whatever
+specification it is given
+(upstream: .refs/reth/crates/storage/provider/src/providers/database/builder.rs:L95 @ reth@189c0df3)
+and reads canonical block hashes from the stored headers, not from the
+specification
+(upstream: .refs/reth/crates/storage/provider/src/providers/database/mod.rs:L694 @ reth@189c0df3).
+The reader therefore checks the datadir itself when it opens it: it compares the
+stored canonical hash of block 0 with the selected specification's genesis hash
+and refuses to open on a mismatch, with an error that names both hashes and the
+configured chain, or when no block 0 header is stored
+(`crates/ingest/src/provider/reth_db/enabled.rs`, `verify_stored_chain`). The
+check reads one header and does not need the genesis body or receipts, which a
+pruned node may no longer hold. It applies to every use of the reader: intake,
+verification, the source-transport command and the bounded sample below. It
+does not check the node's version or configuration, only which chain the
+datadir holds.
+
 Use the reader with a matching v2.5.0 node. Its monitored read-only factory opens
 MDBX and static files read-only and RocksDB as a secondary, and refreshes the
 secondary and static-file indexes as committed MDBX state changes
@@ -66,6 +84,19 @@ The overlay also requires two settings that have no safe default:
   `host` when it runs directly on the host. The reason is explained under
   [Switching Sepolia from local RPC to direct Reth reads](deployment.md#switching-sepolia-from-local-rpc-to-direct-reth-reads).
 
+The reader is a trusted peer of the node, not a process the node is isolated
+from. It runs as the node's user, shares the node's PID namespace, and writes
+the node's real MDBX lock file, which is coordination state the node depends on
+(see below); a reader that damages that file damages the node. The read-only
+binds are cooperative, not isolating: they stop a correct reader from writing
+node data by mistake, but they do not confine a compromised reader, which on a
+host whose process-access checks permit it can reach the node's own mount view,
+writable mounts included, through `/proc/<node pid>/root`. Treat the reader's
+image and configuration with the same care as the node's. A deployment that
+needs the reader confined from the node must use a different design, such as
+RPC intake or an enforced credential and security-policy boundary; this overlay
+does not provide one.
+
 The reader and the node must run on the same host, against the same local
 filesystem. MDBX coordinates readers and the writer through the shared lock file
 and process IDs, and refuses a database on a network filesystem
@@ -100,7 +131,9 @@ retention floor, headers, full transactions, receipts, logs, optional filtered
 logs, and elapsed milliseconds. Binary fields are byte arrays. It rechecks the
 selected canonical hashes before returning and fails on incomplete receipts.
 This is a storage read: it does not run ingestion, change the source descriptor,
-write PostgreSQL, migrate node storage, or repair the node.
+write PostgreSQL, migrate node storage, or repair the node. It fails to open a
+datadir that does not hold the named chain, with the same genesis-hash error as
+intake.
 
 Compare the selected canonical block hashes, transaction identities, receipts
 and logs against independent RPC before switching intake. Expect one difference

@@ -141,7 +141,7 @@ impl RethDbReader {
     fn factory(&self) -> Result<Arc<EthereumRethProviderFactory>> {
         let chainspec = ethereum_chainspec(&self.chain)?;
         match self.factory.get_or_init(|| {
-            open_ethereum_factory(&self.datadir, chainspec)
+            open_ethereum_factory(&self.chain, &self.datadir, chainspec)
                 .map(Arc::new)
                 .map_err(|error| format!("{error:#}"))
         }) {
@@ -331,14 +331,53 @@ fn ethereum_chainspec(chain: &str) -> Result<Arc<ChainSpec>> {
 }
 
 fn open_ethereum_factory(
+    chain: &str,
     datadir: &Path,
     chainspec: Arc<ChainSpec>,
 ) -> Result<EthereumRethProviderFactory> {
     validate_datadir(datadir)?;
     let runtime = reth_ethereum::tasks::Runtime::test();
-    EthereumNode::provider_factory_builder()
-        .open_read_only(chainspec, ReadOnlyConfig::from_datadir(datadir), runtime)
-        .map_err(|error| anyhow::anyhow!("failed to open read-only Reth DB: {error:#}"))
+    let factory = EthereumNode::provider_factory_builder()
+        .open_read_only(
+            Arc::clone(&chainspec),
+            ReadOnlyConfig::from_datadir(datadir),
+            runtime,
+        )
+        .map_err(|error| anyhow::anyhow!("failed to open read-only Reth DB: {error:#}"))?;
+    verify_stored_chain(chain, &chainspec, &factory)?;
+    Ok(factory)
+}
+
+/// Establishes that the datadir holds the chain the caller selected.
+///
+/// Opening a datadir with a chain specification does not check the two agree: the
+/// read-only open builds the factory around whatever specification it is given
+/// (upstream: .refs/reth/crates/storage/provider/src/providers/database/builder.rs:L95 @ reth@189c0df3),
+/// and canonical block hashes are then read from the stored headers, not derived from
+/// that specification
+/// (upstream: .refs/reth/crates/storage/provider/src/providers/database/mod.rs:L694 @ reth@189c0df3).
+/// A Mainnet datadir opened as Sepolia would therefore serve Mainnet facts under the
+/// Sepolia chain id. This compares the stored canonical hash of block 0 with the
+/// specification's genesis hash, a header lookup only: it does not need the genesis
+/// body or receipts, which a pruned node may no longer hold.
+fn verify_stored_chain(
+    chain: &str,
+    chainspec: &ChainSpec,
+    factory: &EthereumRethProviderFactory,
+) -> Result<()> {
+    let stored = factory.block_hash(0)?.context(
+        "cannot establish which chain the Reth DB holds: no canonical block 0 header is stored",
+    )?;
+    let expected = chainspec.genesis_hash();
+    if stored != expected {
+        bail!(
+            "Reth DB holds a chain whose genesis block hash is {}, but {chain} expects genesis \
+             block hash {}",
+            hash_hex(stored),
+            hash_hex(expected)
+        );
+    }
+    Ok(())
 }
 
 fn contiguous_resolved(blocks: &[ResolvedBlock]) -> Result<Option<(u64, u64)>> {

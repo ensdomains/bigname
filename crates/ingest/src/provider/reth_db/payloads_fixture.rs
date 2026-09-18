@@ -5,6 +5,7 @@ use alloy_consensus::{Header, TxLegacy};
 use alloy_primitives::{Address, B256, Bloom, Bytes, Log as EthLog, Signature, TxKind, U256};
 use reth_ethereum::{
     Receipt, TransactionSigned,
+    chainspec::{ChainSpec, MAINNET},
     provider::{
         ProviderFactory, StaticFileSegment, StaticFileWriter,
         db::{
@@ -52,10 +53,37 @@ impl Fixture {
             &vec![selected; blocks as usize],
             missing,
             fault,
+            None,
         )
     }
     pub fn mixed(transactions: usize, selected: &[usize]) -> Self {
-        Self::build(selected.len() as u64, transactions, selected, false, None)
+        Self::build(
+            selected.len() as u64,
+            transactions,
+            selected,
+            false,
+            None,
+            None,
+        )
+    }
+    /// A datadir whose block 0 is `chainspec`'s real genesis header, so its stored
+    /// canonical genesis hash is that chain's, and whose factory uses that specification.
+    /// Later blocks stay artificial. `chain` is the bigname chain id the reader is given.
+    pub fn anchored(
+        chain: &'static str,
+        chainspec: Arc<ChainSpec>,
+        blocks: u64,
+        transactions: usize,
+        selected: usize,
+    ) -> Self {
+        Self::build(
+            blocks,
+            transactions,
+            &vec![selected; blocks as usize],
+            false,
+            None,
+            Some((chain, chainspec)),
+        )
     }
     fn build(
         blocks: u64,
@@ -63,6 +91,7 @@ impl Fixture {
         selections: &[usize],
         missing: bool,
         fault: Option<&str>,
+        anchor: Option<(&'static str, Arc<ChainSpec>)>,
     ) -> Self {
         let path = std::env::temp_dir().join(format!(
             "bigname-reth-payload-test-{}",
@@ -158,14 +187,17 @@ impl Fixture {
                         .unwrap();
                 }
             }
-            let header = Header {
-                number,
-                parent_hash,
-                timestamp: 1_600_000_000 + number * 12,
-                gas_limit: 30_000_000,
-                gas_used: transactions as u64 * 21_000,
-                logs_bloom: bloom,
-                ..Default::default()
+            let header = match &anchor {
+                Some((_, chainspec)) if number == 0 => chainspec.genesis_header().clone(),
+                _ => Header {
+                    number,
+                    parent_hash,
+                    timestamp: 1_600_000_000 + number * 12,
+                    gas_limit: 30_000_000,
+                    gas_used: transactions as u64 * 21_000,
+                    logs_bloom: bloom,
+                    ..Default::default()
+                },
             };
             let hash = header.hash_slow();
             headers.append_header(&header, &hash).unwrap();
@@ -184,9 +216,10 @@ impl Fixture {
         drop(txs);
         drop(receipts);
         write.commit().unwrap();
+        let (chain, chainspec) = anchor.unwrap_or(("ethereum-mainnet", MAINNET.clone()));
         let factory = ProviderFactory::new(
             db,
-            reth_ethereum::chainspec::MAINNET.clone(),
+            chainspec,
             files,
             RocksDBProvider::builder(path.join("rocksdb"))
                 .with_default_tables()
@@ -197,7 +230,7 @@ impl Fixture {
         .unwrap();
         Self {
             reader: RethDbReader {
-                chain: "ethereum-mainnet".into(),
+                chain: chain.into(),
                 datadir: path.clone(),
                 factory: OnceLock::from(Ok(Arc::new(factory))),
             },
