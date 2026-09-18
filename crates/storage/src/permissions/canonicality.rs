@@ -6,6 +6,7 @@ pub const DEFAULT_PERMISSIONS_CURRENT_READ_FILTER: &str = r#"
       JOIN bigname_phase.chain_lineage resource_lineage
         ON resource_lineage.chain_id = resource.chain_id
        AND resource_lineage.block_hash = resource.block_hash
+       AND resource_lineage.block_number = resource.block_number
       WHERE resource.resource_id = pc.resource_id
         AND resource.canonicality_state IN (
             'canonical'::bigname_phase.canonicality_state,
@@ -39,6 +40,7 @@ pub(super) const CURRENT_PERMISSION_SUMMARY_READ_FILTER: &str = r#"
       JOIN bigname_phase.chain_lineage resource_lineage
         ON resource_lineage.chain_id = resource.chain_id
        AND resource_lineage.block_hash = resource.block_hash
+       AND resource_lineage.block_number = resource.block_number
       WHERE resource.resource_id = summary.resource_id
         AND resource.canonicality_state IN (
             'canonical'::bigname_phase.canonicality_state,

@@ -91,6 +91,68 @@ async fn v2_get_history_returns_lean_product_rows_newest_first() -> Result<()> {
     Ok(())
 }
 
+// `id` is the one handle a consumer merging feeds can de-duplicate on: opaque, unique per
+// row, and the same for the same event on every history route and page.
+#[tokio::test]
+async fn v2_history_rows_carry_one_opaque_identity_across_routes_and_pages() -> Result<()> {
+    let (database, history) =
+        v2_history_payload("/v1/names/History.eth/history?page_size=20").await?;
+    let history_rows = history["data"].as_array().expect("history rows");
+    let ids = history_rows
+        .iter()
+        .map(|row| row["id"].as_str().expect("id is a string").to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(ids.len(), 10);
+    assert!(ids.iter().all(|id| id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())));
+    assert_eq!(
+        ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+        ids.len(),
+        "ids must be distinct per row"
+    );
+    assert!(ids.iter().all(|id| !id.contains(':')), "ids must not leak the storage identity");
+
+    let events =
+        v2_history_payload_for_database(&database, "/v1/events?name=history.eth&page_size=20")
+            .await?;
+    let event_ids = events["data"]
+        .as_array()
+        .expect("event rows")
+        .iter()
+        .map(|row| row["id"].as_str().expect("id is a string").to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    for (row, id) in history_rows.iter().zip(&ids) {
+        assert!(
+            event_ids.contains(id),
+            "history row {} at block {} must carry the same id on /v1/events",
+            row["type"],
+            row["block_number"]
+        );
+    }
+
+    let first = v2_history_payload_for_database(
+        &database,
+        "/v1/names/History.eth/history?page_size=4",
+    )
+    .await?;
+    let cursor = first["page"]["next_cursor"].as_str().expect("second page");
+    let second = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/names/History.eth/history?page_size=4&cursor={cursor}"),
+    )
+    .await?;
+    let paged = first["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(second["data"].as_array().unwrap())
+        .map(|row| row["id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(paged, ids[..8], "ids are stable across pages");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_history_lists_pointer_attributed_record_writes_for_the_registration() -> Result<()> {
     const ADDRESS: &str = "0x0000000000000000000000000000000000007130";

@@ -18,6 +18,7 @@ use crate::schema_v2::{
     state::{State, V1NameState},
 };
 pub(in crate::schema_v2) mod identity;
+mod registry_only_fallback;
 use identity::{new_registrar_identity, registrar_namehash};
 pub(super) mod base;
 pub(in crate::schema_v2) mod decode;
@@ -181,49 +182,15 @@ fn transfer(
         &raw_namehash,
         raw.block_timestamp.unix_timestamp(),
     );
-    if active_after.is_none()
-        && state
-            .v1_registry_owner(&selected.source.namespace, &raw_namehash)
-            .is_some_and(|owner| !owner.eq_ignore_ascii_case(ZERO_ADDRESS))
-    {
-        let registry_owner = state
-            .v1_registry_owner(&selected.source.namespace, &raw_namehash)
-            .expect("checked registry owner");
-        let authority = V1NameState {
-            logical_name_id: linked.logical_name_id.clone(),
-            surface_known: linked.surface_known,
-            resource_id: stable_uuid(&format!(
-                "resource:registry-only:{}:{raw_namehash}",
-                raw.chain_id
-            )),
-            token_lineage_id: None,
-            authority_source_family: if selected.source.source_family == "basenames_base_registrar"
-            {
-                "basenames_base_registry"
-            } else {
-                "ens_v1_registry_l1"
-            }
-            .to_owned(),
-            source_manifest_id: None,
-            labelhash: Some(format!("{labelhash:#x}")),
-            expiry: None,
-            owner: Some(registry_owner),
-            registry_contract: None,
-            authority_key: Some(format!("registry-only:{}:{raw_namehash}", raw.chain_id)),
-            wrapper_fallback: false,
-        };
-        state.remember_v1_registry_authority(
-            &selected.source.namespace,
-            &raw_namehash,
-            authority.clone(),
-        );
-        state.activate_v1_authority(
-            &selected.source.namespace,
-            &raw_namehash,
-            Some(authority.clone()),
-        );
-        active_after = Some(authority);
-    }
+    registry_only_fallback::activate_registry_only_authority(
+        selected,
+        raw,
+        state,
+        &raw_namehash,
+        labelhash,
+        &linked,
+        &mut active_after,
+    );
     let linked = state
         .v1_registrar(&selected.source.namespace, &raw_namehash)
         .context("transferred registrar remains retained")?;
@@ -271,14 +238,30 @@ fn transfer(
         &raw_namehash,
         active_after.as_ref(),
     );
+    let registry_binding = state.v1_registry_binding(&selected.source.namespace, &raw_namehash);
+    let mut observation = json!({"source_event":"Transfer"});
+    if let (Some(active), Some((owner, _))) = (active_after.as_ref(), registry_binding.as_ref())
+        && active.token_lineage_id.is_none()
+        && matches!(
+            active.authority_source_family.as_str(),
+            "ens_v1_registry_l1" | "basenames_base_registry"
+        )
+        && !owner.eq_ignore_ascii_case(ZERO_ADDRESS)
+        && active
+            .owner
+            .as_deref()
+            .is_some_and(|selected_owner| selected_owner.eq_ignore_ascii_case(owner))
+    {
+        observation["registry_owner"] = json!(owner);
+    }
     append_authority_transition(
         &mut output,
         super::authority_arm(&selected.source.namespace),
         previous_active.as_ref(),
         active_after.as_ref(),
-        state.v1_registry_binding(&selected.source.namespace, &raw_namehash),
+        registry_binding,
         raw,
-        &json!({"source_event":"Transfer"}),
+        &observation,
         linked_resolver,
         fallback_active_from,
     );

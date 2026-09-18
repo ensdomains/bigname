@@ -14,9 +14,26 @@
 -- key order, expressions, ordering, operator classes, uniqueness, and the
 -- predicate are all covered. PostgreSQL adds the schema name to the table
 -- always and to the enum type only when the session search_path does not
--- include it, so the schema name is removed before comparing. The expected
--- text is how the fresh baseline index prints; schema-v2/apply-check.sh proves
--- it for the baseline, these schema-migrations, and both install.sql files.
+-- include it. The printed text is never rewritten to even that out, because a
+-- text replacement cannot tell a schema name from the same characters inside
+-- a string literal: an index on provenance ->> 'bigname_phase.observation_key'
+-- would then compare equal to the reviewed one. Instead search_path is set to
+-- pg_catalog while the definitions are read, so PostgreSQL always prints both
+-- schema names, and the expected text keeps them. The expected text is how the
+-- fresh baseline index prints under that search_path; schema-v2/apply-check.sh
+-- proves it for the baseline, these schema-migrations, and both install.sql
+-- files.
+--
+-- quote_all_identifiers is turned off while the definitions are read, for the
+-- same reason: when a caller has it on, PostgreSQL prints every identifier in
+-- double quotes, starting with the index name, and a healthy index would be
+-- refused. The quotes are not stripped from the printed text, because a text
+-- replacement would also change a double quote inside a string literal.
+--
+-- Both changes are transaction-local, and the block puts the previous values
+-- back before it returns, so later statements in the same transaction see the
+-- settings they would have seen without this file. When the block raises, the
+-- transaction, or the savepoint around it, rolls the changes back.
 --
 -- To recover, follow the README beside the matching install.sql: confirm no build
 -- is running, drop only the named index with DROP INDEX CONCURRENTLY, rerun
@@ -39,17 +56,26 @@ DECLARE
     expected_definition text;
     found_definition text;
     found_kind text;
+    previous_search_path text;
+    previous_quote_all_identifiers text;
 BEGIN
     IF to_regclass('bigname_phase.discovery_edges') IS NULL THEN
         RETURN;
     END IF;
 
+    -- Every name below is schema-qualified or lives in pg_catalog.
+    previous_search_path := current_setting('search_path');
+    PERFORM set_config('search_path', 'pg_catalog', true);
+    -- The expected text below has no quoted identifiers.
+    previous_quote_all_identifiers := current_setting('quote_all_identifiers');
+    PERFORM set_config('quote_all_identifiers', 'off', true);
+
     FOR checked_index, expected_definition IN
         SELECT * FROM (VALUES
             ('discovery_edges_observation_history_idx',
-             'CREATE INDEX discovery_edges_observation_history_idx ON discovery_edges USING btree (chain_id, from_contract_instance_id, edge_kind, ((provenance ->> ''observation_key''::text)), active_from_block_number) WHERE (canonicality_state <> ''orphaned''::canonicality_state)'),
+             'CREATE INDEX discovery_edges_observation_history_idx ON bigname_phase.discovery_edges USING btree (chain_id, from_contract_instance_id, edge_kind, ((provenance ->> ''observation_key''::text)), active_from_block_number) WHERE (canonicality_state <> ''orphaned''::bigname_phase.canonicality_state)'),
             ('discovery_edges_reopen_idx',
-             'CREATE INDEX discovery_edges_reopen_idx ON discovery_edges USING btree (chain_id, from_contract_instance_id, edge_kind, active_from_block_number, ((provenance ->> ''observation_key''::text)))')
+             'CREATE INDEX discovery_edges_reopen_idx ON bigname_phase.discovery_edges USING btree (chain_id, from_contract_instance_id, edge_kind, active_from_block_number, ((provenance ->> ''observation_key''::text)))')
         ) AS reviewed(index_name, definition)
     LOOP
         SELECT CASE relkind
@@ -93,7 +119,7 @@ BEGIN
                 checked_index;
         END IF;
 
-        SELECT replace(pg_get_indexdef(indexrelid), 'bigname_phase.', '')
+        SELECT pg_get_indexdef(indexrelid)
         INTO found_definition
         FROM pg_index
         WHERE indexrelid = to_regclass('bigname_phase.' || checked_index);
@@ -105,5 +131,8 @@ BEGIN
                 checked_index, found_definition, expected_definition;
         END IF;
     END LOOP;
+
+    PERFORM set_config('search_path', previous_search_path, true);
+    PERFORM set_config('quote_all_identifiers', previous_quote_all_identifiers, true);
 END
 $migration$;

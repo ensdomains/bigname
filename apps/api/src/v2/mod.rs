@@ -41,6 +41,8 @@ mod vocab;
 pub(crate) use address_history::get_address_history;
 #[cfg(test)]
 pub(crate) use address_history::{AddressHistoryCursorBinding, address_history_cursor_payload};
+#[cfg(test)]
+pub(crate) use address_names::grant_read_test_hooks as address_names_grant_read_test_hooks;
 pub(crate) use address_names::{AddressNameGrant, AddressNameResolution, get_address_names};
 pub(crate) use chains::{
     all_chain_slugs, numeric_to_slug, slug_to_numeric, snapshot_slot_for_slug,
@@ -63,7 +65,7 @@ pub(crate) use events::{
     Event, build_event, events_cursor_payload, events_storage_cursor, get_events,
 };
 pub(crate) use history::{
-    HISTORY_TOTAL_COUNT_CAP, format_timestamp, get_history, history_event_type,
+    HISTORY_TOTAL_COUNT_CAP, format_timestamp, get_history, history_event_id, history_event_type,
     history_page_options, history_sort_token, history_storage_order, history_storage_scope,
     history_total_count, insert_history_filter_keys, map_history_page_error,
     product_history_event_kinds, resolve_history_block_window, v2_exact_name_snapshot_scope,
@@ -88,7 +90,10 @@ pub(crate) use params::{
     AtSelector, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, QueryParams, RawQueryParams, RequestSource,
     SortOrder, parse_relation_set_param, validate_latest_collection_selectors,
 };
-pub(crate) use permission_values::{permission_powers_value, permission_scope_value};
+pub(crate) use permission_values::{
+    GrantRelation, effective_permission_scope_value, permission_grant_relation,
+    permission_powers_value,
+};
 pub(crate) use permissions::get_permissions;
 pub(crate) use primary_name::get_primary_name;
 pub(crate) use registries::{
