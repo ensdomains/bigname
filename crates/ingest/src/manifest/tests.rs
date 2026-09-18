@@ -35,6 +35,62 @@ fn registry_announcements_are_collected_from_all_emitters() {
 }
 
 #[test]
+fn repeated_announcements_of_one_address_collapse_to_the_earliest_suffix() {
+    let mut filter = WatchFilter {
+        address_ranges: Vec::new(),
+        all_emitter_ranges: Vec::new(),
+        implementation_ranges: Vec::new(),
+        creation_watches: vec![CreationWatch {
+            announcement_topic0: "0xaa".to_owned(),
+            scoped_topic0s: vec!["0xbb".to_owned()],
+        }],
+    };
+
+    let queries = filter.admit_creation_announcements(
+        "0xaa",
+        [
+            ("0x01".to_owned(), 15),
+            ("0x01".to_owned(), 10),
+            ("0x01".to_owned(), 20),
+            ("0x02".to_owned(), 15),
+            ("0x02".to_owned(), 12),
+            ("0x03".to_owned(), 12),
+        ],
+        10,
+        20,
+    );
+
+    assert_eq!(
+        queries,
+        [
+            WatchQuery {
+                from_block: 10,
+                to_block: 20,
+                addresses: vec!["0x01".to_owned()],
+                topic0s: vec!["0xbb".to_owned()],
+                topic1s: Vec::new(),
+            },
+            WatchQuery {
+                from_block: 12,
+                to_block: 20,
+                addresses: vec!["0x02".to_owned(), "0x03".to_owned()],
+                topic0s: vec!["0xbb".to_owned()],
+                topic1s: Vec::new(),
+            },
+        ],
+        "one suffix per address, starting at its earliest announcement"
+    );
+    assert_eq!(
+        filter.address_ranges.len(),
+        3,
+        "one admitted range per announcing address"
+    );
+    assert!(filter.includes("0x01", "0xbb", 10));
+    assert!(filter.includes("0x02", "0xbb", 12));
+    assert!(!filter.includes("0x02", "0xbb", 11));
+}
+
+#[test]
 fn announced_registry_topics_are_address_scoped_forward_only() {
     let mut filter = WatchFilter {
         address_ranges: Vec::new(),
