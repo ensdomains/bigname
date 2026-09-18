@@ -4909,6 +4909,13 @@ fn assert_synchronized_pair(output: &BatchOutput) -> String {
 // (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
 // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174-L188 @ ens_v1@91c966f)
 fn plain_unwrapped_input() -> anyhow::Result<BatchInput> {
+    unwrapped_input(None)
+}
+
+/// U-01's plain registration and eleven-log migration transaction. With `handoff`, the registrar
+/// token is transferred to that holder without `reclaim` in the block between registration and
+/// migration, and the holder is the party migrating.
+fn unwrapped_input(handoff: Option<Address>) -> anyhow::Result<BatchInput> {
     sol! { event NewTTL(bytes32 indexed node, uint64 ttl); }
     let fixture = fixture()?;
     let addresses = &fixture["addresses"];
@@ -4919,7 +4926,13 @@ fn plain_unwrapped_input() -> anyhow::Result<BatchInput> {
     let node = scenario["namehash"].as_str().unwrap().parse::<B256>()?;
     let eth_node = super::common::namehash(&["eth".to_owned()]).parse()?;
     let token = decimal_u256(&scenario["v2_token_id"])?;
-    let owner = Address::from([0x51; 20]);
+    let registrant = Address::from([0x51; 20]);
+    let owner = handoff.unwrap_or(registrant);
+    let registration_block = if handoff.is_some() {
+        block - 2
+    } else {
+        block - 1
+    };
     let controller = address(addresses, "unlocked_controller")?;
     let graveyard = address(addresses, "graveyard")?;
     let registrar = addresses["base_registrar"].as_str().unwrap();
@@ -4928,146 +4941,155 @@ fn plain_unwrapped_input() -> anyhow::Result<BatchInput> {
     let registration_controller = "0x0000000000000000000000000000000000000098";
     let resolver = Address::from([0x61; 20]);
     let at = |event, at, log, emitter| raw_at_transaction(event, at, 0, log, emitter);
-    let mut input = batch(
-        vec![
-            at(
-                super::v1_registry::NewOwner {
-                    node: eth_node,
-                    label: labelhash,
-                    owner,
-                }
-                .encode_log_data(),
-                block - 1,
-                0,
-                registry,
-            ),
-            at(
-                super::NameRegistered {
-                    name: label.to_owned(),
-                    label: labelhash,
-                    owner,
-                    expires: U256::from(scenario["stored_expiry"].as_u64().unwrap()),
-                }
-                .encode_log_data(),
-                block - 1,
-                1,
-                registration_controller,
-            ),
-            at(
-                super::v1_registry::NewResolver { node, resolver }.encode_log_data(),
-                block - 1,
-                2,
-                registry,
-            ),
-            at(
-                NewTTL { node, ttl: 60 }.encode_log_data(),
-                block - 1,
-                3,
-                registry,
-            ),
-            registrar_transfer_at(owner, controller, labelhash, block, 0, registrar),
-            at(
-                super::v1_registry::NewOwner {
-                    node: eth_node,
-                    label: labelhash,
-                    owner: controller,
-                }
-                .encode_log_data(),
-                block,
-                1,
-                registry,
-            ),
-            at(
-                super::v1_registry::Transfer {
-                    node,
-                    owner: graveyard,
-                }
-                .encode_log_data(),
-                block,
-                2,
-                registry,
-            ),
-            at(
-                super::v1_registry::NewResolver {
-                    node,
-                    resolver: Address::ZERO,
-                }
-                .encode_log_data(),
-                block,
-                3,
-                registry,
-            ),
-            at(
-                NewTTL { node, ttl: 0 }.encode_log_data(),
-                block,
-                4,
-                registry,
-            ),
-            registrar_transfer_at(controller, graveyard, labelhash, block, 5, registrar),
-            at(
-                super::v2_registry::LabelRegistered {
-                    tokenId: token,
-                    labelHash: labelhash,
-                    label: label.to_owned(),
-                    owner,
-                    expiry: scenario["stored_expiry"].as_u64().unwrap(),
-                    sender: controller,
-                }
-                .encode_log_data(),
-                block,
-                6,
-                v2,
-            ),
-            at(
-                super::v2_registry::TransferSingle {
-                    operator: controller,
-                    from: Address::ZERO,
-                    to: owner,
-                    id: token,
-                    value: U256::from(1),
-                }
-                .encode_log_data(),
-                block,
-                7,
-                v2,
-            ),
-            at(
-                super::v2_registry::TokenResource {
-                    tokenId: token,
-                    resource: token,
-                }
-                .encode_log_data(),
-                block,
-                8,
-                v2,
-            ),
-            at(
-                super::EACRolesChanged {
-                    resource: token,
-                    account: owner,
-                    oldRoleBitmap: U256::ZERO,
-                    newRoleBitmap: U256::from(0x1100000_u64) | (U256::from(0x11100000_u64) << 128),
-                }
-                .encode_log_data(),
-                block,
-                9,
-                v2,
-            ),
-            at(
-                super::v2_registry::ResolverUpdated {
-                    tokenId: token,
-                    resolver,
-                    sender: controller,
-                }
-                .encode_log_data(),
-                block,
-                10,
-                v2,
-            ),
-        ],
-        &fixture,
-        true,
-    );
+    let mut raw_logs = vec![
+        at(
+            super::v1_registry::NewOwner {
+                node: eth_node,
+                label: labelhash,
+                owner: registrant,
+            }
+            .encode_log_data(),
+            registration_block,
+            0,
+            registry,
+        ),
+        at(
+            super::NameRegistered {
+                name: label.to_owned(),
+                label: labelhash,
+                owner: registrant,
+                expires: U256::from(scenario["stored_expiry"].as_u64().unwrap()),
+            }
+            .encode_log_data(),
+            registration_block,
+            1,
+            registration_controller,
+        ),
+        at(
+            super::v1_registry::NewResolver { node, resolver }.encode_log_data(),
+            registration_block,
+            2,
+            registry,
+        ),
+        at(
+            NewTTL { node, ttl: 60 }.encode_log_data(),
+            registration_block,
+            3,
+            registry,
+        ),
+    ];
+    if let Some(holder) = handoff {
+        raw_logs.push(registrar_transfer_at(
+            registrant,
+            holder,
+            labelhash,
+            block - 1,
+            0,
+            registrar,
+        ));
+    }
+    raw_logs.extend([
+        registrar_transfer_at(owner, controller, labelhash, block, 0, registrar),
+        at(
+            super::v1_registry::NewOwner {
+                node: eth_node,
+                label: labelhash,
+                owner: controller,
+            }
+            .encode_log_data(),
+            block,
+            1,
+            registry,
+        ),
+        at(
+            super::v1_registry::Transfer {
+                node,
+                owner: graveyard,
+            }
+            .encode_log_data(),
+            block,
+            2,
+            registry,
+        ),
+        at(
+            super::v1_registry::NewResolver {
+                node,
+                resolver: Address::ZERO,
+            }
+            .encode_log_data(),
+            block,
+            3,
+            registry,
+        ),
+        at(
+            NewTTL { node, ttl: 0 }.encode_log_data(),
+            block,
+            4,
+            registry,
+        ),
+        registrar_transfer_at(controller, graveyard, labelhash, block, 5, registrar),
+        at(
+            super::v2_registry::LabelRegistered {
+                tokenId: token,
+                labelHash: labelhash,
+                label: label.to_owned(),
+                owner,
+                expiry: scenario["stored_expiry"].as_u64().unwrap(),
+                sender: controller,
+            }
+            .encode_log_data(),
+            block,
+            6,
+            v2,
+        ),
+        at(
+            super::v2_registry::TransferSingle {
+                operator: controller,
+                from: Address::ZERO,
+                to: owner,
+                id: token,
+                value: U256::from(1),
+            }
+            .encode_log_data(),
+            block,
+            7,
+            v2,
+        ),
+        at(
+            super::v2_registry::TokenResource {
+                tokenId: token,
+                resource: token,
+            }
+            .encode_log_data(),
+            block,
+            8,
+            v2,
+        ),
+        at(
+            super::EACRolesChanged {
+                resource: token,
+                account: owner,
+                oldRoleBitmap: U256::ZERO,
+                newRoleBitmap: U256::from(0x1100000_u64) | (U256::from(0x11100000_u64) << 128),
+            }
+            .encode_log_data(),
+            block,
+            9,
+            v2,
+        ),
+        at(
+            super::v2_registry::ResolverUpdated {
+                tokenId: token,
+                resolver,
+                sender: controller,
+            }
+            .encode_log_data(),
+            block,
+            10,
+            v2,
+        ),
+    ]);
+    let mut input = batch(raw_logs, &fixture, true);
     let kinds = &[
         "SubregistryChanged",
         "AuthorityTransferred",
@@ -5214,6 +5236,98 @@ fn plain_unwrapped_cleanup_keeps_one_predecessor_without_v1_reopenings() -> anyh
             .iter()
             .any(|event| event.after_state["source_event"] == "NewResolver"
                 && event.after_state["resolver"] == ZERO_ADDRESS)
+    );
+    Ok(())
+}
+
+/// The Sepolia shape of `bnmig-0109-pw-unwrapped-012-r02.eth`: the registrar token was transferred
+/// without `reclaim` before the migration, so the name enters the migration transaction bound to
+/// a registry-only resource while its lease goes on under it. The migration transaction is the
+/// same complete unwrapped sequence, with the token holder as the migrating party. Reconciliation
+/// must treat it exactly like the plain case: no ENSv1 binding opens or closes inside the
+/// transaction, the registry cleanup observations sit on the lease, and the boundary is derived.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
+#[test]
+fn registry_only_handoff_cleanup_keeps_the_lease_without_v1_reopenings() -> anyhow::Result<()> {
+    let holder = Address::from([0x52; 20]);
+    let input = unwrapped_input(Some(holder))?;
+    let block = input.raw_logs.last().unwrap().block_number;
+    let output = interpret_test_batch(input)?;
+    let lease = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.source_family == "ens_v1_registrar_l1"
+                && event.event_kind == "RegistrationGranted"
+        })
+        .unwrap()
+        .resource_id
+        .unwrap();
+    let handoff_bindings = output
+        .surface_bindings
+        .iter()
+        .filter(|binding| binding.block_number == block - 1 && binding.authority_arm == "ens_v1")
+        .collect::<Vec<_>>();
+    assert_eq!(handoff_bindings.len(), 1, "{handoff_bindings:?}");
+    assert_ne!(
+        handoff_bindings[0].resource_id, lease,
+        "the handoff binds the name to a registry-only resource"
+    );
+    assert!(
+        output.binding_closures.iter().any(|closure| {
+            closure.block_number == block - 1 && closure.authority_arm == "ens_v1"
+        }),
+        "the handoff closes the lease binding"
+    );
+
+    assert_eq!(output.migration_authority_transitions.len(), 1);
+    assert!(
+        output
+            .surface_bindings
+            .iter()
+            .all(|binding| binding.block_number < block || binding.authority_arm != "ens_v1"),
+        "no ENSv1 binding opens inside the migration transaction: {:?}",
+        output
+            .surface_bindings
+            .iter()
+            .filter(|binding| binding.block_number == block)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        output
+            .binding_closures
+            .iter()
+            .all(|closure| closure.block_number < block || closure.authority_arm != "ens_v1")
+    );
+    let migrated = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.block_number == Some(block) && event.source_family.starts_with("ens_v1_")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        migrated
+            .iter()
+            .filter(|event| event.event_kind == "TokenControlTransferred"
+                && event.resource_id == Some(lease))
+            .count(),
+        2
+    );
+    assert!(migrated.iter().all(|event| !matches!(
+        event.event_kind.as_str(),
+        "SurfaceBound" | "SurfaceUnbound" | "AuthorityEpochChanged"
+    )));
+    assert!(
+        migrated
+            .iter()
+            .filter(|event| event.source_family == "ens_v1_registry_l1")
+            .all(|event| {
+                event.resource_id == Some(lease)
+                    && event.after_state.get("authority_kind").is_none()
+                    && event.after_state.get("authority_key").is_none()
+            })
     );
     Ok(())
 }
