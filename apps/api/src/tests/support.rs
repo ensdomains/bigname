@@ -591,7 +591,14 @@ async fn upsert_phase_permissions_current_rows(
         .bind(row.subject.to_ascii_lowercase())
         .bind(row.scope.storage_key())
         .bind(row.scope.kind())
-        .bind(row.scope.detail())
+        .bind(match &row.record_resource_selector {
+            Some(selector) => {
+                let mut detail = row.scope.detail();
+                detail["resource_selector"] = selector.clone();
+                detail
+            }
+            None => row.scope.detail(),
+        })
         .bind(&row.effective_powers)
         .bind(&row.grant_source)
         .bind(&row.revocation_source)
@@ -2833,6 +2840,7 @@ fn permission_current_row(
         resource_id,
         subject: subject.to_owned(),
         scope,
+        record_resource_selector: None,
         effective_powers: json!([
             "set_resolver",
             if manifest_version % 2 == 0 {

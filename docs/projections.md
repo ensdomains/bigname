@@ -708,7 +708,19 @@ registrar token and account approvals, resolver operators and delegates, and
 ENSv2 registry operators are not indexed. NameWrapper summaries are partial for
 a narrower reason described below: holders, operators, and per-token delegates
 are rows, while parent control of a non-emancipated wrapped subname and resolver
-operators/delegates are not.
+operators/delegates are not. For a grant on an ENSv2 record-ID resolver, whose
+resource is the keccak of a setter argument rather than a name
+(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64),
+`scope_detail` also keeps the selector the interpreter decoded from that
+argument (`resource_selector`) so reads can say which record the grant is
+about — recognized by the selector's hash being the resource itself
+(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L336-L337 @ ens_v2@a971bd64),
+which the node-keyed generation's named-resource selectors never satisfy:
+`NamedTextResource` hashes the key alone and `NamedAddrResource` carries no
+hash at all
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L144-L153 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L168-L172 @ ens_v2_sepolia_20260629@ccaeb58); the interpreter reads the argument under the union of the old and new
+role bitmaps, and reads keep only the readings the row's effective powers
+still hold. A grant whose argument was never observed keeps a plain scope.
 
 `account_permission_state_current` separately folds `AccountPermissionChanged`
 events from the [`standard_approval`
@@ -784,9 +796,18 @@ registry state, not an owner-change argument from the registrar `Transfer` log.
 Missing, zero, inconsistent or unmasked owner evidence contributes no value;
 a selected wrapper or registrar authority does not qualify. Project consumes
 this value through its existing owner fold without changing resource selection.
+A later registrar token transfer that leaves the registry-only authority selected
+emits no new epoch, so the retained `registry_owner` stays the served owner; that
+transfer does not update the served registrant. The Basenames registrar behaves
+the same way: its token transfer is the inherited ERC-721 ownership write, and it
+writes the registry owner only from `reclaim` and registration.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L20 @ ens_v1@91c966f)
 (upstream: .refs/basenames/src/L2/Registry.sol:L49-L52 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L24 @ basenames@1809bbc)
+(upstream: .refs/basenames/lib/solady/src/tokens/ERC721.sol:L744-L745 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327-L329 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L421-L423 @ basenames@1809bbc)
 
 This transfer-only observation does not apply to release. A release that restores
 a retained direct-registry authority carries that authority's owner. A genuinely

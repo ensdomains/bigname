@@ -10,6 +10,11 @@ pub struct PermissionsCurrentRow {
     pub resource_id: Uuid,
     pub subject: String,
     pub scope: PermissionScope,
+    /// For a grant on an ENSv2 record-ID resolver, whose resource is the keccak of a
+    /// setter argument: that argument as the interpreter decoded it
+    /// (`{kind, key, hash, ...}`), absent on every other scope.
+    /// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64)
+    pub record_resource_selector: Option<Value>,
     pub effective_powers: Value,
     pub grant_source: Value,
     pub revocation_source: Option<Value>,
@@ -353,6 +358,10 @@ pub struct EffectivePermissionRow {
     pub resource_id: Uuid,
     pub subject: String,
     pub scope: EffectivePermissionScope,
+    /// As on [`PermissionsCurrentRow`]: the decoded setter argument of a grant on an
+    /// ENSv2 record-ID resolver, absent on every other scope and on operator rows.
+    /// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64)
+    pub record_resource_selector: Option<Value>,
     pub grant_relation: Option<PermissionGrantRelation>,
     pub effective_powers: Value,
     pub grant_source: Value,
