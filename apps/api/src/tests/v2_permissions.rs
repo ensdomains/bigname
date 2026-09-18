@@ -239,6 +239,47 @@ async fn v2_get_permissions_cursor_binds_the_requested_registration_id() -> Resu
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["error"]["code"], json!("invalid_input"));
 
+
+    // A name-only page binds the name's public registration, the lease, not the NameWrapper
+    // resource that holds its rows. The same name continues it, the same name with the lease
+    // continues it (one collection), and the same name with the NameWrapper resource, the
+    // proven-empty pair, is a different request and is rejected.
+    let first = v2_permissions_payload_for_database(
+        &database,
+        "/v1/permissions?name=alpha.eth&page_size=1",
+    )
+    .await?;
+    assert_eq!(first["data"].as_array().expect("first name page").len(), 1);
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .expect("the name has more than one permission row")
+        .to_owned();
+    let continued = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?name=alpha.eth&page_size=1&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(continued["data"].as_array().expect("second name page").len(), 1);
+    assert_ne!(continued["data"][0], first["data"][0]);
+    let with_lease = v2_permissions_payload_for_database(
+        &database,
+        &format!(
+            "/v1/permissions?name=alpha.eth&registration_id={lease_resource_id}&page_size=1&cursor={cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(with_lease["data"], continued["data"], "{with_lease}");
+    let response = v2_permissions_response_for_database(
+        &database,
+        &format!(
+            "/v1/permissions?name=alpha.eth&registration_id={wrapper_resource_id}&page_size=1&cursor={cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("invalid_input"), "{payload}");
+
     database.cleanup().await
 }
 
