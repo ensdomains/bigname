@@ -2096,176 +2096,397 @@ async fn registry_only_binding_preserves_the_same_arm_divergent_owner() -> Resul
 const HANDOFF_NAMEHASH: &str = "0x1212121212121212121212121212121212121212121212121212121212121212";
 const HANDOFF_LOGICAL: &str =
     "ens:0x1212121212121212121212121212121212121212121212121212121212121212";
-const HANDOFF_TOKEN_ID: &str = "0x3434343434343434343434343434343434343434343434343434343434343434";
+const HANDOFF_PARENT_HASH: &str =
+    "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae";
+const HANDOFF_LABELHASH: &str =
+    "0x3434343434343434343434343434343434343434343434343434343434343434";
+const HANDOFF_TOKEN_LINEAGE: &str = "30000000-0000-0000-0000-000000000099";
 const HANDOFF_REGISTRAR_RESOURCE: &str = "30000000-0000-0000-0000-000000000001";
 const HANDOFF_REGISTRY_RESOURCE: &str = "30000000-0000-0000-0000-000000000002";
 const HANDOFF_REGISTRAR_BINDING: &str = "30000000-0000-0000-0000-000000000011";
 const HANDOFF_REGISTRY_BINDING: &str = "30000000-0000-0000-0000-000000000012";
+const HANDOFF_REGISTRAR_MANIFEST: i64 = 912;
+/// The BaseRegistrar emits the ERC-721 `Transfer`; the controller emits `NameRegistered`.
+const HANDOFF_REGISTRAR_ADDRESS: &str = "0x5757575757575757575757575757575757575757";
+const HANDOFF_CONTROLLER_ADDRESS: &str = "0x2828282828282828282828282828282828282828";
 const RETAINED_OWNER: &str = "0x99999999999999999999999999999999999999Aa";
 const SECOND_HOLDER: &str = "0x99999999999999999999999999999999999999Bb";
 const THIRD_HOLDER: &str = "0x99999999999999999999999999999999999999Cc";
 
-/// Seeds a live registrar name whose registry owner and token holder are both R, then the
-/// registrar transfer R -> S without reclaim, exactly as the adapter emits it: the token
-/// transfer stays on the registrar resource, the registrar binding closes, the registry-only
-/// resource is bound, and one `AuthorityEpochChanged` carries `registry_owner` R. No extra
-/// registry `AuthorityTransferred` follows the handoff, because a registrar token transfer
-/// writes no registry state
-/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175
-/// @ ens_v1@91c966f).
+fn handoff_registrar_authority_key() -> String {
+    format!(
+        "registrar:{CHAIN}:{HANDOFF_REGISTRAR_MANIFEST}:{HANDOFF_LABELHASH}:{}:2",
+        block_hash(8)
+    )
+}
+
+fn handoff_registry_authority_key() -> String {
+    format!("registry-only:{CHAIN}:{HANDOFF_NAMEHASH}")
+}
+
+/// The `raw_fact_ref` the adapter attaches to every event it derives from one log: the log's
+/// position and the contract that emitted it.
+fn handoff_fact_ref(
+    emitting_address: &str,
+    block_number: i64,
+    log_index: i64,
+) -> serde_json::Value {
+    json!({
+        "kind": "raw_log",
+        "chain_id": CHAIN,
+        "block_hash": block_hash(block_number),
+        "block_number": block_number,
+        "transaction_hash": format!("0x{:064x}", 1_000 + log_index),
+        "transaction_index": 0,
+        "log_index": log_index,
+        "emitting_address": emitting_address
+    })
+}
+
+/// Binds a resource with the provenance the adapter records for a binding created by one log.
+#[allow(clippy::too_many_arguments)]
+async fn seed_handoff_binding(
+    pool: &PgPool,
+    resource: &str,
+    binding: &str,
+    block_number: i64,
+    log_index: i64,
+    active_from: &str,
+    active_to: Option<&str>,
+    emitting_address: &str,
+    source_event: &str,
+    source_manifest_id: i64,
+) -> Result<()> {
+    let mut provenance = handoff_fact_ref(emitting_address, block_number, log_index);
+    provenance["source"] = json!("raw_log");
+    provenance["source_event"] = json!(source_event);
+    provenance["source_manifest_id"] = json!(source_manifest_id);
+    provenance
+        .as_object_mut()
+        .expect("provenance is an object")
+        .remove("kind");
+    sqlx::query(
+        "INSERT INTO surface_bindings (
+             surface_binding_id, logical_name_id, resource_id, binding_kind,
+             authority_arm, active_from, active_to, chain_id, block_hash, block_number,
+             canonicality_state, provenance
+         ) VALUES (
+             $1::uuid, $2, $3::uuid, 'declared_registry_path', 'ens_v1',
+             $4::timestamptz, $5::timestamptz, $6, $7, $8, 'canonical', $9
+         )",
+    )
+    .bind(binding)
+    .bind(HANDOFF_LOGICAL)
+    .bind(resource)
+    .bind(active_from)
+    .bind(active_to)
+    .bind(CHAIN)
+    .bind(block_hash(block_number))
+    .bind(block_number)
+    .bind(provenance)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Seeds one event of the handoff scenario with the provenance the adapter gives it: the
+/// source family of the manifest whose log produced it and that log's emitting contract.
+#[allow(clippy::too_many_arguments)]
+async fn seed_handoff_event(
+    pool: &PgPool,
+    identity: &str,
+    resource: &str,
+    event_kind: &str,
+    source_family: &str,
+    emitting_address: &str,
+    block_number: i64,
+    log_index: i64,
+    after_state: serde_json::Value,
+) -> Result<()> {
+    seed_normalized_event(
+        pool,
+        identity,
+        Some(HANDOFF_LOGICAL),
+        Some(resource),
+        event_kind,
+        source_family,
+        block_number,
+        log_index,
+        after_state,
+        handoff_fact_ref(emitting_address, block_number, log_index),
+    )
+    .await
+}
+
+/// Seeds a live ENSv1 registrar name whose registry owner and token holder are both R, then the
+/// registrar transfer R -> S without reclaim, with the provenance and payloads the adapter
+/// emits for that history (copied from the adapter test
+/// `registrar_transfers_without_reclaim_keep_the_retained_registry_owner_on_the_epoch`):
+///
+/// - block 8, log 0, registry contract: the registration's `NewOwner` lands on the registrar
+///   resource as `AuthorityTransferred` with owner R;
+/// - block 8, log 2, registrar controller: `RegistrationGranted`, `ExpiryChanged`,
+///   `SurfaceBound` and `AuthorityEpochChanged` on the registrar resource under the registrar
+///   source family, and the registrar binding;
+/// - block 9, log 0, BaseRegistrar: `TokenControlTransferred` to S on the registrar resource,
+///   `SurfaceUnbound` on it, then `SurfaceBound` and `AuthorityEpochChanged` on the registry-only
+///   resource carrying `registry_owner` R, and the registry-only binding.
+///
+/// No registry event follows the handoff, because a registrar token transfer writes no registry
+/// state (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175
+/// @ ens_v1@91c966f). The adapter's `PermissionChanged`, `SubregistryChanged` and
+/// `PreimageObserved` rows and the `registrar_surface_evidence` payload are left out: the
+/// exact-name control fold does not read them.
 async fn seed_registrar_handoff_without_reclaim(pool: &PgPool) -> Result<()> {
     seed_blocks(pool, [8, 9, 10]).await?;
-    seed_surface(
-        pool,
-        HANDOFF_NAMEHASH,
-        "handoff-fixture.eth",
-        HANDOFF_REGISTRAR_RESOURCE,
-        HANDOFF_REGISTRAR_BINDING,
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+             namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state
+         ) VALUES (
+             $1, 'ens', 'handoff.eth', ARRAY['handoff', 'eth'], '\\x00', $2,
+             ARRAY[$3, $4], 'test', 'active', $5, $6, 8, 'canonical'
+         )",
     )
+    .bind(HANDOFF_LOGICAL)
+    .bind(HANDOFF_NAMEHASH)
+    .bind(HANDOFF_LABELHASH)
+    .bind(format!("0x{:064x}", 2_u64))
+    .bind(CHAIN)
+    .bind(block_hash(8))
+    .execute(pool)
     .await?;
-    seed_binding_provenance(pool, HANDOFF_REGISTRAR_BINDING, 0, 1).await?;
-    // Registration: the registry NewOwner names R and the registrar grants R the lease.
-    seed_authority_transferred(
+    for resource in [HANDOFF_REGISTRY_RESOURCE, HANDOFF_REGISTRAR_RESOURCE] {
+        sqlx::query(
+            "INSERT INTO resources (
+                 resource_id, chain_id, block_hash, block_number, canonicality_state
+             ) VALUES ($1::uuid, $2, $3, 8, 'canonical')",
+        )
+        .bind(resource)
+        .bind(CHAIN)
+        .bind(block_hash(8))
+        .execute(pool)
+        .await?;
+    }
+    let registrar_key = handoff_registrar_authority_key();
+    let registry_key = handoff_registry_authority_key();
+    let registration = json!({
+        "authority_key": registrar_key,
+        "authority_kind": "registrar",
+        "cost": "7",
+        "decoded_label": "handoff",
+        "expiry": 4_102_444_800_i64,
+        "labelhash": HANDOFF_LABELHASH,
+        "namehash": HANDOFF_NAMEHASH,
+        "raw_label_hex": "68616e646f6666",
+        "registrant": RETAINED_OWNER,
+        "source_event": "NameRegistered",
+        "surface_known": true,
+        "token_lineage_id": HANDOFF_TOKEN_LINEAGE
+    });
+
+    // Block 8: the registration transaction. The registry NewOwner names R.
+    seed_handoff_event(
         pool,
         "fixture:handoff-registered-owner",
-        HANDOFF_NAMEHASH,
         HANDOFF_REGISTRAR_RESOURCE,
+        "AuthorityTransferred",
+        "ens_v1_registry_l1",
+        REGISTRY_ADDRESS,
         8,
         0,
         json!({
-            "source_event": "NewOwner",
-            "node": HANDOFF_NAMEHASH,
+            "child_node": HANDOFF_NAMEHASH,
+            "emitter_role": "registry",
+            "labelhash": HANDOFF_LABELHASH,
+            "node": HANDOFF_PARENT_HASH,
             "owner": RETAINED_OWNER,
             "owner_getter": RETAINED_OWNER,
-            "authority_kind": "registrar"
+            "source_event": "NewOwner"
         }),
     )
     .await?;
-    seed_normalized_event(
+    let mut granted = registration.clone();
+    granted["authority_owner"] = json!(RETAINED_OWNER);
+    seed_handoff_event(
         pool,
         "fixture:handoff-registration",
-        Some(HANDOFF_LOGICAL),
-        Some(HANDOFF_REGISTRAR_RESOURCE),
+        HANDOFF_REGISTRAR_RESOURCE,
         "RegistrationGranted",
         "ens_v1_registrar_l1",
+        HANDOFF_CONTROLLER_ADDRESS,
         8,
-        1,
-        json!({
-            "status": "registered",
-            "registrant": RETAINED_OWNER,
-            "token_id": HANDOFF_TOKEN_ID,
-            "expiry": 4_102_444_800_i64
-        }),
-        json!({"emitting_address": REGISTRY_ADDRESS}),
+        2,
+        granted,
     )
     .await?;
-    // Block 9: the token moves R -> S without reclaim. The adapter emits everything below
-    // from that one log.
-    seed_normalized_event(
+    seed_handoff_event(
+        pool,
+        "fixture:handoff-expiry",
+        HANDOFF_REGISTRAR_RESOURCE,
+        "ExpiryChanged",
+        "ens_v1_registrar_l1",
+        HANDOFF_CONTROLLER_ADDRESS,
+        8,
+        2,
+        registration.clone(),
+    )
+    .await?;
+    seed_handoff_binding(
+        pool,
+        HANDOFF_REGISTRAR_RESOURCE,
+        HANDOFF_REGISTRAR_BINDING,
+        8,
+        2,
+        "2026-08-01T00:00:08.000002Z",
+        Some("2026-08-01T00:00:09Z"),
+        HANDOFF_CONTROLLER_ADDRESS,
+        "NameRegistered",
+        HANDOFF_REGISTRAR_MANIFEST,
+    )
+    .await?;
+    let mut bound = registration.clone();
+    bound["active_from"] = json!(8);
+    bound["binding_kind"] = json!("declared_registry_path");
+    bound["owner_getter"] = json!(RETAINED_OWNER);
+    bound["registry_contract"] = json!(REGISTRY_ADDRESS);
+    seed_handoff_event(
+        pool,
+        "fixture:handoff-registrar-bound",
+        HANDOFF_REGISTRAR_RESOURCE,
+        "SurfaceBound",
+        "ens_v1_registrar_l1",
+        HANDOFF_CONTROLLER_ADDRESS,
+        8,
+        2,
+        bound,
+    )
+    .await?;
+    seed_handoff_event(
+        pool,
+        "fixture:handoff-registrar-epoch",
+        HANDOFF_REGISTRAR_RESOURCE,
+        "AuthorityEpochChanged",
+        "ens_v1_registrar_l1",
+        HANDOFF_CONTROLLER_ADDRESS,
+        8,
+        2,
+        registration,
+    )
+    .await?;
+
+    // Block 9: the BaseRegistrar Transfer R -> S without reclaim. Every row below comes from
+    // that one registrar log.
+    seed_handoff_event(
         pool,
         "fixture:handoff-token-transfer",
-        Some(HANDOFF_LOGICAL),
-        Some(HANDOFF_REGISTRAR_RESOURCE),
+        HANDOFF_REGISTRAR_RESOURCE,
         "TokenControlTransferred",
         "ens_v1_registrar_l1",
+        HANDOFF_REGISTRAR_ADDRESS,
         9,
         0,
         json!({
+            "namehash": HANDOFF_NAMEHASH,
             "source_event": "Transfer",
             "to": SECOND_HOLDER,
-            "token_id": HANDOFF_TOKEN_ID,
-            "namehash": HANDOFF_NAMEHASH
+            "token_id": HANDOFF_LABELHASH,
+            "token_lineage_id": HANDOFF_TOKEN_LINEAGE
         }),
-        json!({"emitting_address": REGISTRY_ADDRESS}),
     )
     .await?;
-    seed_normalized_event(
+    seed_handoff_event(
         pool,
         "fixture:handoff-unbound",
-        Some(HANDOFF_LOGICAL),
-        Some(HANDOFF_REGISTRAR_RESOURCE),
+        HANDOFF_REGISTRAR_RESOURCE,
         "SurfaceUnbound",
         "ens_v1_registrar_l1",
+        HANDOFF_REGISTRAR_ADDRESS,
         9,
         0,
         json!({
-            "source_event": "Transfer",
+            "active_to": 9,
+            "authority_key": registrar_key,
             "authority_kind": "registrar",
-            "authority_key": "registrar:fixture",
-            "active_to": 9
+            "registry_owner": RETAINED_OWNER,
+            "source_event": "Transfer"
         }),
-        json!({"emitting_address": REGISTRY_ADDRESS}),
     )
     .await?;
-    seed_next_binding(
+    seed_handoff_binding(
         pool,
-        HANDOFF_NAMEHASH,
         HANDOFF_REGISTRY_RESOURCE,
         HANDOFF_REGISTRY_BINDING,
         9,
+        0,
         "2026-08-01T00:00:09Z",
+        None,
+        HANDOFF_REGISTRAR_ADDRESS,
+        "Transfer",
+        HANDOFF_REGISTRAR_MANIFEST,
     )
     .await?;
-    seed_binding_provenance(pool, HANDOFF_REGISTRY_BINDING, 0, 0).await?;
-    seed_normalized_event(
+    seed_handoff_event(
         pool,
         "fixture:handoff-bound",
-        Some(HANDOFF_LOGICAL),
-        Some(HANDOFF_REGISTRY_RESOURCE),
+        HANDOFF_REGISTRY_RESOURCE,
         "SurfaceBound",
         "ens_v1_registrar_l1",
+        HANDOFF_REGISTRAR_ADDRESS,
         9,
         0,
         json!({
-            "source_event": "Transfer",
-            "registry_owner": RETAINED_OWNER,
+            "active_from": 9,
+            "authority_key": registry_key,
+            "authority_kind": "registry_only",
+            "binding_kind": "declared_registry_path",
             "owner_getter": RETAINED_OWNER,
             "registry_contract": REGISTRY_ADDRESS,
-            "authority_kind": "registry_only",
-            "authority_key": "registry-only:fixture",
-            "active_from": 9,
-            "binding_kind": "declared_registry_path"
+            "registry_owner": RETAINED_OWNER,
+            "source_event": "Transfer"
         }),
-        json!({"emitting_address": REGISTRY_ADDRESS}),
     )
     .await?;
-    seed_authority_epoch(
+    seed_handoff_event(
         pool,
         "fixture:handoff-epoch",
-        HANDOFF_NAMEHASH,
         HANDOFF_REGISTRY_RESOURCE,
+        "AuthorityEpochChanged",
+        "ens_v1_registrar_l1",
+        HANDOFF_REGISTRAR_ADDRESS,
         9,
         0,
         json!({
-            "source_event": "Transfer",
-            "registry_owner": RETAINED_OWNER,
+            "authority_key": registry_key,
             "authority_kind": "registry_only",
-            "authority_key": "registry-only:fixture"
+            "registry_owner": RETAINED_OWNER,
+            "source_event": "Transfer"
         }),
     )
     .await
 }
 
-/// Seeds the later registrar transfer S -> T, still without reclaim: the adapter emits only
+/// Seeds the later BaseRegistrar transfer S -> T, still without reclaim: the adapter emits only
 /// the token transfer on the registrar resource because the registry-only authority stays
-/// selected.
+/// selected, so no binding, `SurfaceBound` or `AuthorityEpochChanged` accompanies it.
 async fn seed_later_registrar_transfer(pool: &PgPool) -> Result<()> {
-    seed_normalized_event(
+    seed_handoff_event(
         pool,
         "fixture:handoff-later-token-transfer",
-        Some(HANDOFF_LOGICAL),
-        Some(HANDOFF_REGISTRAR_RESOURCE),
+        HANDOFF_REGISTRAR_RESOURCE,
         "TokenControlTransferred",
         "ens_v1_registrar_l1",
+        HANDOFF_REGISTRAR_ADDRESS,
         10,
         0,
         json!({
+            "namehash": HANDOFF_NAMEHASH,
             "source_event": "Transfer",
             "to": THIRD_HOLDER,
-            "token_id": HANDOFF_TOKEN_ID,
-            "namehash": HANDOFF_NAMEHASH
+            "token_id": HANDOFF_LABELHASH,
+            "token_lineage_id": HANDOFF_TOKEN_LINEAGE
         }),
-        json!({"emitting_address": REGISTRY_ADDRESS}),
     )
     .await
 }
