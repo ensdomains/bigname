@@ -384,7 +384,12 @@ async fn canonical_fixture_builds_all_eight_projection_families() -> Result<()> 
                         "status": "unsupported",
                         "unsupported_reason":
                             "resolver_binding_enumeration_not_projected"
-                    }
+                    },
+                    "links": {
+                        "status": "unsupported",
+                        "unsupported_reason": "record_links_not_applicable"
+                    },
+                    "summary_version": 1
                 },
                 "manifest_version": 1,
                 "provenance": {
