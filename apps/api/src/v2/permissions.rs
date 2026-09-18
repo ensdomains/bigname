@@ -34,6 +34,7 @@ mod current_name;
 use current_name::load_current_name_row;
 
 mod filter;
+pub(crate) use filter::current_registration_row;
 use filter::{EmptyPermissionsSelection, permissions_filter_inputs, resolve_permissions_filter};
 
 const PERMISSIONS_SORT: &str = "address_registration_scope_asc";

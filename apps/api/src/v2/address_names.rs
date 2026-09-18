@@ -16,6 +16,7 @@ use super::name_filter::normalize_name_prefix;
 use super::permission_support::{
     apply_role_summary_support_meta, permission_support_for_resources,
 };
+use super::permissions::current_registration_row;
 use super::support::{ensure_public_namespace, parse_evm_address};
 use super::{
     Authority, Envelope, GrantRelation, Page, QueryParamAllowlist, RegistrationStatus, Relation,
@@ -478,7 +479,7 @@ pub(crate) fn build_address_name(
         display_name: entry.canonical_display_name.clone(),
         namespace: entry.namespace.clone(),
         namehash: entry.namehash.clone(),
-        permission_resource_id: Some(entry.resource_id.to_string()),
+        permission_resource_id: Some(permission_resource_handle(name_row, entry.resource_id)),
         owner: registration.owner,
         registrant: registration.registrant,
         registration_status: registration.registration_status,
@@ -500,6 +501,20 @@ pub(crate) fn build_address_name(
         role_summary,
         restrictions: None,
     }
+}
+
+/// The value `GET /v1/permissions?registration_id=` resolves to this row's permission resource:
+/// the registration the name currently serves (its BaseRegistrar lease for a wrapped `.eth`
+/// name, whose rows live on the NameWrapper resource), or the resource itself when no supported
+/// current name claims it. A wrapped subname has no lease, so it keeps its NameWrapper resource.
+pub(crate) fn permission_resource_handle(
+    name_row: Option<&NameCurrentRow>,
+    resource_id: sqlx::types::Uuid,
+) -> String {
+    name_row
+        .filter(|row| current_registration_row(row))
+        .and_then(|row| registration_id(&row.declared_summary, None))
+        .unwrap_or_else(|| resource_id.to_string())
 }
 
 pub(crate) fn build_address_name_role_summary(

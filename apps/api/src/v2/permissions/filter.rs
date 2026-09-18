@@ -188,7 +188,9 @@ pub(super) async fn resolve_permissions_filter(
     })
 }
 
-fn current_registration_row(row: &NameCurrentRow) -> bool {
+/// Whether `row` currently serves a supported registration, the condition under which a
+/// `registration_id` read resolves to the resource that controls the name.
+pub(crate) fn current_registration_row(row: &NameCurrentRow) -> bool {
     string_field(row.coverage.get("status")).as_deref() != Some("unsupported")
         && matches!(
             name_registration_fields(Some(row), &row.namespace).registration_status,

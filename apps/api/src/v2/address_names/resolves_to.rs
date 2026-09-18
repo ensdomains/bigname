@@ -282,7 +282,9 @@ pub(super) async fn get_address_resolves_to(
                 display_name: entry.canonical_display_name.clone(),
                 namespace: entry.namespace.clone(),
                 namehash: entry.namehash.clone(),
-                permission_resource_id: entry.resource_id.map(|id| id.to_string()),
+                permission_resource_id: entry
+                    .resource_id
+                    .map(|id| super::permission_resource_handle(name_row, id)),
                 owner: registration.owner,
                 registrant: registration.registrant,
                 registration_status: registration.registration_status,
