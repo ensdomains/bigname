@@ -777,6 +777,70 @@ async fn reth_spelled_direct_reader_can_roll_back_to_the_http_interface() -> Res
     db.cleanup().await
 }
 
+#[tokio::test]
+async fn candidate_reader_without_checkpoint_heads_is_refused_before_normal_ingest_would_be()
+-> Result<()> {
+    let db = ScratchDatabase::create("source_transport_ingest_checkpoints").await?;
+    seed_watch_set(db.pool()).await?;
+    // Ingest is completed but never handed off, so it replans a normal batch from the
+    // declared start; that batch requires safe and finalized heads before it plans anything.
+    seed_ingest(db.pool(), "drpc", Redo::None).await?;
+    let node = NodeDouble::through(6)
+        .with_watched_log(6)
+        .without_checkpoint_heads();
+    let before = snapshot(db.pool()).await?;
+
+    let error = switch(&db, "drpc", &node, "reth_db", &node)
+        .await
+        .expect_err("the next normal Ingest batch would reject this reader");
+
+    assert!(
+        format!("{error:#}")
+            .contains("ingest provider must report safe and finalized checkpoint heads"),
+        "{error:#}"
+    );
+    assert_eq!(before, snapshot(db.pool()).await?);
+    db.cleanup().await
+}
+
+#[tokio::test]
+async fn redo_target_missing_on_the_candidate_is_refused() -> Result<()> {
+    let db = ScratchDatabase::create("source_transport_redo_target").await?;
+    seed_watch_set(db.pool()).await?;
+    // Ingest handed off at 5 and live follow published through 10, so an Ingest redo may
+    // extend up to the published head (redo_extent): this one covers 2..=8 and resumes at
+    // block 4. A redo batch first resolves the range's last block on its source.
+    seed_ingest(db.pool(), "drpc", Redo::ResumedAt(3)).await?;
+    hand_off_to_live(db.pool()).await?;
+    seed_published_head(db.pool(), 10).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET redo_to_block_number = 8
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(SEPOLIA)
+    .execute(db.pool())
+    .await?;
+    let node = NodeDouble::through(10).with_watched_log(4);
+    // Holds every retained boundary and the next block, but not block 8.
+    let candidate_behind_the_target = NodeDouble::through(6).with_watched_log(4);
+    let before = snapshot(db.pool()).await?;
+
+    let error = switch(&db, "drpc", &node, "reth_db", &candidate_behind_the_target)
+        .await
+        .expect_err("the resumed redo batch resolves block 8 first");
+
+    assert!(format!("{error:#}").contains("redo target"), "{error:#}");
+    assert_eq!(before, snapshot(db.pool()).await?);
+
+    let receipt = switch(&db, "drpc", &node, "reth_db", &node).await?;
+    assert_eq!(receipt["next_block"], 4);
+    assert_eq!(
+        receipt["redo_target"],
+        json!({"block": 8, "hash": block_hash(8)})
+    );
+    db.cleanup().await
+}
+
 /// Runs the production switch with each descriptor read through an HTTP node double. The
 /// direct database reader needs a real Reth datadir, so `direct` stands in for it; the locks,
 /// cursor checks, comparisons and update are the ones `transition` runs.
