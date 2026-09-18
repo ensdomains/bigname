@@ -198,6 +198,50 @@ async fn v2_get_permissions_classifies_a_paired_wrapped_lease_like_its_standalon
     database.cleanup().await
 }
 
+// A cursor is bound to the registration handle the request named, not to the resource that
+// handle reads. A page of `?registration_id=<lease>` continues under the lease; under the
+// NameWrapper resource the lease reads, which is a different request, the cursor is rejected.
+#[tokio::test]
+async fn v2_get_permissions_cursor_binds_the_requested_registration_id() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let wrapper_resource_id = Uuid::from_u128(0xa100);
+    let lease_resource_id = Uuid::from_u128(0xe400);
+    seed_alpha_registrar_lease(&database, lease_resource_id).await?;
+
+    let first = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={lease_resource_id}&page_size=1"),
+    )
+    .await?;
+    assert_eq!(first["data"].as_array().expect("first page").len(), 1);
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .expect("the lease has more than one permission row")
+        .to_owned();
+
+    let continued = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={lease_resource_id}&page_size=1&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(continued["data"].as_array().expect("second page").len(), 1);
+    assert_ne!(continued["data"][0], first["data"][0]);
+
+    let response = v2_permissions_response_for_database(
+        &database,
+        &format!(
+            "/v1/permissions?registration_id={wrapper_resource_id}&page_size=1&cursor={cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("invalid_input"));
+
+    database.cleanup().await
+}
+
 // A `.eth` lease that lapsed under a registry-only binding (a registrar token transferred
 // without `reclaim`) is released like any other lapse: a name-filtered request selects nothing,
 // as for every released name, while the resource audit keeps its rows.
