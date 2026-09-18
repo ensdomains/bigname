@@ -28,6 +28,8 @@ const BASELINE: &[&str] = &[
 ];
 /// Enough names that reading a staged table once per name costs visibly more than a keyed lookup.
 const PLAN_NAMES: i64 = 3_000;
+/// How many ENSv2 registrations an incremental batch rebuilds; the live tables hold every name.
+const BATCH_RESOURCES: i64 = 40;
 
 /// The builders in the order `build_all` runs them.
 #[derive(Clone, Copy, PartialEq, PartialOrd)]
@@ -44,6 +46,8 @@ struct Rebuild {
     database: TestDatabase,
     transaction: Transaction<'static, Postgres>,
     target: Marker,
+    /// What `$4` binds to: `through` stages a full rebuild, `narrow_to_incremental_batch` flips it.
+    full_rebuild: bool,
 }
 
 impl Rebuild {
@@ -116,7 +120,74 @@ impl Rebuild {
             database,
             transaction,
             target,
+            full_rebuild: true,
         })
+    }
+
+    /// Turns the full-rebuild staging into an incremental batch of `BATCH_RESOURCES` ENSv2
+    /// registrations that hold an admin role. Every staged permission row is published as the
+    /// live table first, so the registry root, which is outside the batch, has its admin row only
+    /// there. The batch's own rows stay staged, except that the first registration loses its
+    /// staged admin row while the live table keeps it: a rebuild that removed a permission. Then
+    /// the chain grows by `extra` registrations outside the batch, each holding a live admin
+    /// row, one of every hundred being the root of a registry no staged resource uses.
+    async fn narrow_to_incremental_batch(&mut self, extra: i64) -> Result<()> {
+        raw_sql(&format!(
+            "CREATE TEMP TABLE incremental_batch ON COMMIT DROP AS
+             SELECT resource_id, row_number() OVER (ORDER BY resource_id) = 1 AS admin_removed
+             FROM (
+                 SELECT DISTINCT resource_id FROM project_stage_permissions_current
+                 WHERE scope_kind = 'registry' AND effective_powers ? 'admin_set_resolver'
+                 ORDER BY resource_id LIMIT {BATCH_RESOURCES}
+             ) chosen;
+             INSERT INTO permissions_current SELECT * FROM project_stage_permissions_current;
+             INSERT INTO project_scope_resources SELECT resource_id FROM incremental_batch;
+             DELETE FROM project_resources resource
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM incremental_batch batch WHERE batch.resource_id = resource.resource_id
+             );
+             DELETE FROM project_stage_permissions_current staged
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM incremental_batch batch
+                 WHERE batch.resource_id = staged.resource_id
+                   AND NOT (batch.admin_removed AND staged.effective_powers ? 'admin_set_resolver')
+             );
+             INSERT INTO resources (
+                 resource_id, chain_id, block_hash, block_number, provenance, canonicality_state
+             )
+             SELECT ('00000000-0000-0000-00ee-' || lpad(to_hex(n), 12, '0'))::uuid, '{CHAIN}',
+                    '0x' || lpad('1', 64, '0'), 1,
+                    jsonb_build_object(
+                        'adapter', 'ens_v2_permissions', 'source_family', 'ens_v2_registry_l1',
+                        'registry_contract_instance_id', CASE WHEN n % 100 = 0
+                            THEN '00000000-0000-0000-0000-' || lpad(to_hex(n), 12, '0')
+                            ELSE '00000000-0000-0000-0000-000000000001' END,
+                        'upstream_resource', CASE WHEN n % 100 = 0
+                            THEN '0x' || lpad('0', 64, '0')
+                            ELSE '0x' || lpad(to_hex(n), 64, '0') END
+                    ),
+                    'canonical'
+             FROM generate_series(1, {extra}) extra(n);
+             INSERT INTO permissions_current (
+                 resource_id, subject, scope, scope_kind, effective_powers, provenance,
+                 manifest_version
+             )
+             SELECT ('00000000-0000-0000-00ee-' || lpad(to_hex(n), 12, '0'))::uuid,
+                    '0x' || lpad(to_hex(n), 40, '0'),
+                    CASE WHEN n % 100 = 0 THEN 'root' ELSE 'registry' END,
+                    CASE WHEN n % 100 = 0 THEN 'root' ELSE 'registry' END,
+                    '[\"admin_renew\", \"admin_unregister\"]'::jsonb,
+                    jsonb_build_object('chain_id', '{CHAIN}'), 1
+             FROM generate_series(1, {extra}) extra(n);
+             ANALYZE permissions_current;
+             ANALYZE project_resources;
+             ANALYZE project_stage_permissions_current;
+             ANALYZE project_scope_resources"
+        ))
+        .execute(&mut *self.transaction)
+        .await?;
+        self.full_rebuild = false;
+        Ok(())
     }
 
     /// Runs a statement whose parameters are the chain, the target number, the target hash and
@@ -129,7 +200,7 @@ impl Rebuild {
                 1 => query.bind(CHAIN),
                 2 => query.bind(self.target.number),
                 3 => query.bind(&self.target.hash),
-                _ => query.bind(true),
+                _ => query.bind(self.full_rebuild),
             };
         }
         query.execute(&mut *self.transaction).await?;
@@ -145,7 +216,7 @@ impl Rebuild {
                 1 => query.bind(CHAIN),
                 2 => query.bind(self.target.number),
                 3 => query.bind(&self.target.hash),
-                _ => query.bind(true),
+                _ => query.bind(self.full_rebuild),
             };
         }
         Ok(query.fetch_one(&mut *self.transaction).await?[0]["Plan"].take())
@@ -471,15 +542,22 @@ fn swapped(sql: &str, current: &str, previous: &str) -> String {
     sql.replacen(current, previous, 1)
 }
 
-/// `locked_roles` asked, per resource and role, whether an admin row exists for the resource or
-/// its root. The `IN (resource, root)` test kept that from being a join, so every resource read
-/// all staged permission rows. It is now two joins on the per-resource admin set.
-#[tokio::test]
-async fn resource_summary_matches_the_correlated_admin_lookup() -> Result<()> {
+/// The resource summary as it was: the admin sets aggregated once over every staged row and,
+/// on an incremental build, every live row on the chain, then searched per resource and role.
+fn previous_resource_summary() -> String {
     let current = super::permissions::resource_summary::query();
-    let previous = swapped(
+    swapped(
         &swapped(
-            &swapped(&current, "v2_admin_powers AS MATERIALIZED (", "v2_admin_powers AS ("),
+            &swapped(
+                &swapped(
+                    &current,
+                    "            FROM admin_resources needed
+            JOIN permissions_current live ON live.resource_id = needed.resource_id\n",
+                    "            FROM permissions_current live\n",
+                ),
+                "v2_admin_powers AS MATERIALIZED (",
+                "v2_admin_powers AS (",
+            ),
             "        LEFT JOIN v2_admin_powers own_admins ON own_admins.resource_id = resource.resource_id
         LEFT JOIN v2_admin_powers root_admins
           ON root_admins.resource_id = root_resource.resource_id\n",
@@ -488,7 +566,15 @@ async fn resource_summary_matches_the_correlated_admin_lookup() -> Result<()> {
         "            WHERE NOT COALESCE(role.admin = ANY(own_admins.admins), false)
               AND NOT COALESCE(role.admin = ANY(root_admins.admins), false)\n",
         include_str!("../../tests/rebuild_performance/previous_resource_summary_locks.sql"),
-    );
+    )
+}
+
+/// `locked_roles` asked, per resource and role, whether an admin row exists for the resource or
+/// its root. The `IN (resource, root)` test kept that from being a join, so every resource read
+/// all staged permission rows. It is now two joins on the per-resource admin set.
+#[tokio::test]
+async fn resource_summary_matches_the_correlated_admin_lookup() -> Result<()> {
+    let previous = previous_resource_summary();
     let mut rebuild = Rebuild::through("rebuild_equal_summary", 600, Builder::Permissions).await?;
     let stage = "project_stage_permissions_current_resource_summary";
     rebuild.rerun_with(stage, &previous).await?;
@@ -521,6 +607,77 @@ async fn resource_summary_reads_the_staged_permissions_a_fixed_number_of_times()
             "{relation} rows handled: {rows}; {plan}"
         );
     }
+    rebuild.finish().await
+}
+
+/// An incremental batch takes its own resources' permissions from the staged rows, whatever the
+/// live table still says about them, and its registry root's from the live rows, since an
+/// unchanged root lies outside the scope. The live rows used to be read for the whole chain.
+#[tokio::test]
+async fn resource_summary_matches_the_chain_wide_live_read_on_an_incremental_batch() -> Result<()> {
+    let mut rebuild =
+        Rebuild::through("rebuild_equal_incremental", 600, Builder::Permissions).await?;
+    rebuild.narrow_to_incremental_batch(300).await?;
+    let stage = "project_stage_permissions_current_resource_summary";
+    raw_sql(&format!("TRUNCATE {stage}"))
+        .execute(&mut *rebuild.transaction)
+        .await?;
+    rebuild
+        .execute(&super::permissions::resource_summary::query())
+        .await?;
+    rebuild
+        .rerun_with(stage, &previous_resource_summary())
+        .await?;
+    rebuild.assert_same_rows("current_rows", stage).await?;
+    // The root's live `admin_renew` unlocks `renew` for the whole batch; the registration whose
+    // staged admin row is gone locks `set_resolver` and `transfer` although the live table still
+    // holds that row.
+    let (rows, root_unlocked, own_unlocked, own_removed): (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT count(*),
+                count(*) FILTER (WHERE NOT locked ? 'renew'),
+                count(*) FILTER (WHERE locked = '[\"unregister\", \"set_subregistry\"]'),
+                count(*) FILTER (WHERE locked = '[\"unregister\", \"set_subregistry\", \"set_resolver\", \"transfer\"]')
+         FROM current_rows, LATERAL (SELECT resource_restrictions -> 'locked_roles' AS locked) roles",
+    )
+    .fetch_one(&mut *rebuild.transaction)
+    .await?;
+    ensure!(
+        (rows, root_unlocked, own_unlocked, own_removed)
+            == (BATCH_RESOURCES, BATCH_RESOURCES, BATCH_RESOURCES - 1, 1),
+        "{rows} rows, {root_unlocked} with renew unlocked by the root, {own_unlocked} with their \
+         own admin, {own_removed} with the admin removed"
+    );
+    rebuild.finish().await
+}
+
+/// The live rows the batch needs are those of its own resources and of their registry roots. The
+/// admin aggregate is materialized, so that restriction cannot reach it from the joins below and
+/// has to be its input; without it every live permission row on the chain is aggregated per batch.
+#[tokio::test]
+async fn resource_summary_reads_live_permissions_for_the_batch_only() -> Result<()> {
+    let mut rebuild =
+        Rebuild::through("rebuild_plan_incremental", PLAN_NAMES, Builder::Permissions).await?;
+    rebuild.narrow_to_incremental_batch(12_000).await?;
+    let bound = 20.0 * BATCH_RESOURCES as f64;
+    let live: i64 = sqlx::query_scalar("SELECT count(*) FROM permissions_current")
+        .fetch_one(&mut *rebuild.transaction)
+        .await?;
+    ensure!(
+        live as f64 >= 4.0 * bound,
+        "the live table holds {live} rows, too few to tell a keyed read from a chain-wide one"
+    );
+    raw_sql("TRUNCATE project_stage_permissions_current_resource_summary")
+        .execute(&mut *rebuild.transaction)
+        .await?;
+    let plan = rebuild
+        .explain(&super::permissions::resource_summary::query())
+        .await?;
+    let rows = rows_read(&plan, "permissions_current");
+    eprintln!("permissions_current rows handled: {rows} of {live}");
+    ensure!(
+        rows <= bound,
+        "permissions_current rows handled: {rows} of {live}; {plan}"
+    );
     rebuild.finish().await
 }
 
