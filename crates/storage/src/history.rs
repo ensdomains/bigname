@@ -483,13 +483,14 @@ pub async fn load_history_events_by_ids(pool: &PgPool, ids: &[i64]) -> Result<Ve
         .context("failed to load normalized events by id")
 }
 
-/// The exact names a `registration_id` belongs to: the names its resource is bound to, and the
-/// names whose `NameWrapped` rows recorded it as the BaseRegistrar lease they wrapped.
-pub async fn load_logical_name_ids_for_registration_id(
+/// The exact names `registration_id` may currently serve as their registration: the names its
+/// resource is bound to, and the exact names of the node its own rows carry. These are
+/// candidates only; the caller proves membership from each name's current projection row.
+pub async fn load_candidate_logical_name_ids_for_registration_id(
     pool: &PgPool,
     registration_id: Uuid,
 ) -> Result<Vec<String>> {
-    binding_anchors::load_logical_name_ids_for_resource_id(pool, registration_id, true, None)
+    binding_anchors::load_candidate_logical_name_ids_for_resource_id(pool, registration_id)
         .await
         .with_context(|| format!("failed to load names for registration_id {registration_id}"))
 }

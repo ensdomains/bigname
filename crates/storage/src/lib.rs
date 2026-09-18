@@ -72,12 +72,12 @@ pub use history::{
     HistoryPage, HistoryPageOptions, HistoryScope, HistorySummary, HistorySummaryMode,
     InterpretRedoFence, InterpretRedoInProgress, InvalidHistoryCursor,
     capture_interpret_redo_fence, load_address_history, load_address_history_for_relations,
-    load_address_history_page, load_address_history_page_for_relations, load_event_history,
+    load_address_history_page, load_address_history_page_for_relations,
+    load_candidate_logical_name_ids_for_registration_id, load_event_history,
     load_event_history_page, load_event_history_page_with_redo_policy, load_history_events_by_ids,
-    load_logical_name_ids_for_registration_id, load_name_history, load_name_history_head,
-    load_name_history_page, load_resource_history, load_resource_history_page,
-    load_wrapped_registrar_resource_ids_by_logical_name_id, resolve_chain_block_ranges,
-    revalidate_interpret_redo_fence,
+    load_name_history, load_name_history_head, load_name_history_page, load_resource_history,
+    load_resource_history_page, load_wrapped_registrar_resource_ids_by_logical_name_id,
+    resolve_chain_block_ranges, revalidate_interpret_redo_fence,
 };
 pub use history::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
 pub use identity::{

@@ -101,10 +101,7 @@ pub(super) async fn load_wrapping_logical_name_ids(
     canonical_only: bool,
     published: Option<&BTreeMap<String, i64>>,
 ) -> Result<Vec<String>> {
-    let mut candidates = std::collections::BTreeSet::new();
-    for anchor in load_registrar_namehash_anchors(pool, resource_id, canonical_only).await? {
-        candidates.extend(load_namehash_surfaces(pool, &anchor, canonical_only).await?);
-    }
+    let candidates = load_node_logical_name_ids(pool, resource_id, canonical_only).await?;
     let mut logical_name_ids = Vec::new();
     for logical_name_id in candidates {
         let wrapped_registrars =
@@ -115,6 +112,20 @@ pub(super) async fn load_wrapping_logical_name_ids(
         }
     }
     Ok(logical_name_ids)
+}
+
+/// The exact names of the node a resource's own rows carry (a BaseRegistrar lease's grant names
+/// its node). These are candidates only: nothing here proves the resource serves the name.
+pub(super) async fn load_node_logical_name_ids(
+    pool: &PgPool,
+    resource_id: Uuid,
+    canonical_only: bool,
+) -> Result<std::collections::BTreeSet<String>> {
+    let mut candidates = std::collections::BTreeSet::new();
+    for anchor in load_registrar_namehash_anchors(pool, resource_id, canonical_only).await? {
+        candidates.extend(load_namehash_surfaces(pool, &anchor, canonical_only).await?);
+    }
+    Ok(candidates)
 }
 
 #[derive(sqlx::FromRow)]

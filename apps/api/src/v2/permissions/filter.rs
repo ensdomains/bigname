@@ -199,6 +199,12 @@ fn registration_uuid(row: &NameCurrentRow) -> Option<Uuid> {
 /// currently wrapped is controlled through its name's NameWrapper resource; every other
 /// registration, and every audit read of a resource no current name serves, is its own resource.
 ///
+/// The lease is matched to its name through Project's current registration identity: a
+/// candidate name (one the resource is bound to, or an exact name of the node the resource's
+/// own rows carry) belongs to the lease only when its current row names the lease as its
+/// registration. A name registered through the NameWrapper, whose wrap recorded no lease and
+/// whose lease has no binding of its own, is found this way.
+///
 /// `None` means the id is not a registration: it is the NameWrapper resource of a current name
 /// whose registration is a different resource, its BaseRegistrar lease. A wrapped subname has no
 /// lease, so its NameWrapper resource is its registration and still resolves to itself.
@@ -215,10 +221,12 @@ async fn control_resource_for_registration(
         V2Error::internal_error("failed to resolve registration resource")
     };
     let mut stands_in_for_a_lease = false;
-    let logical_name_ids =
-        bigname_storage::load_logical_name_ids_for_registration_id(&state.pool, registration_id)
-            .await
-            .map_err(failed)?;
+    let logical_name_ids = bigname_storage::load_candidate_logical_name_ids_for_registration_id(
+        &state.pool,
+        registration_id,
+    )
+    .await
+    .map_err(failed)?;
     for logical_name_id in logical_name_ids {
         let row = bigname_storage::load_name_current(&state.pool, &logical_name_id)
             .await
