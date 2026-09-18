@@ -14934,6 +14934,239 @@ fn registrar_transfer_retained_owner_matches_actual_output_restore() -> anyhow::
     Ok(())
 }
 
+/// A registrar token transfer writes no registry state; after registration only `reclaim`
+/// writes the registry owner
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175
+/// @ ens_v1@91c966f). So when a transfer R -> S without reclaim hands the name to the
+/// registry-only authority, the handoff epoch must carry the retained registry owner R, not
+/// the new token holder S, and a later transfer S -> T must neither replace nor drop it.
+/// Checked live (one session) and cold (restored from the prior batches' events).
+#[test]
+fn registrar_transfers_without_reclaim_keep_the_retained_registry_owner_on_the_epoch()
+-> anyhow::Result<()> {
+    const OWNER: &str = "0x00000000000000000000000000000000000000ab";
+    const SECOND_HOLDER: &str = "0x00000000000000000000000000000000000000cd";
+    const THIRD_HOLDER: &str = "0x00000000000000000000000000000000000000ef";
+    for (namespace, registry_family, registrar_family, parent_labels) in [
+        (
+            "ens",
+            "ens_v1_registry_l1",
+            "ens_v1_registrar_l1",
+            vec!["eth"],
+        ),
+        (
+            "basenames",
+            "basenames_base_registry",
+            "basenames_base_registrar",
+            vec!["base", "eth"],
+        ),
+    ] {
+        let parent_labels = parent_labels
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let parent = super::common::namehash(&parent_labels).parse::<B256>()?;
+        let mut labels = vec!["handoff".to_owned()];
+        labels.extend(parent_labels);
+        let namehash = super::common::namehash(&labels);
+        let label = keccak256(b"handoff");
+        let registry_manifest = manifest_with_events(
+            911,
+            namespace,
+            registry_family,
+            &[
+                (
+                    "NewOwner",
+                    "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+                    &["registry"],
+                    &["SubregistryChanged", "AuthorityTransferred"],
+                ),
+                (
+                    "Transfer",
+                    "event Transfer(bytes32 indexed node, address owner)",
+                    &["registry"],
+                    &["AuthorityTransferred"],
+                ),
+            ],
+        );
+        let registrar_manifest = manifest_with_events(
+            912,
+            namespace,
+            registrar_family,
+            &[
+                (
+                    "NameRegistered",
+                    "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+                    &["registrar"],
+                    &["RegistrationGranted"],
+                ),
+                (
+                    "Transfer",
+                    "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+                    &["registrar"],
+                    &["TokenControlTransferred"],
+                ),
+            ],
+        );
+        let mut registry_admission = admission(911, "registry");
+        registry_admission.address = BASENAMES_REGISTRY.to_owned();
+        let input = BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![registry_manifest, registrar_manifest],
+            discovery_rules: Vec::new(),
+            admissions: vec![registry_admission, admission(912, "registrar")],
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: vec![
+                raw_at(
+                    v1_registry::NewOwner {
+                        node: parent,
+                        label,
+                        owner: OWNER.parse()?,
+                    }
+                    .encode_log_data(),
+                    1,
+                    0,
+                    BASENAMES_REGISTRY,
+                ),
+                raw_at(
+                    NameRegistered {
+                        name: "handoff".to_owned(),
+                        label,
+                        owner: OWNER.parse()?,
+                        expires: U256::from(1_000_000),
+                    }
+                    .encode_log_data(),
+                    1,
+                    1,
+                    CONTRACT,
+                ),
+            ],
+        };
+        let (preceding, session) = interpret_test_batch_incremental(input.clone(), None)?;
+        let registrar_resource = preceding
+            .normalized_events
+            .iter()
+            .find(|event| event.event_kind == "RegistrationGranted")
+            .and_then(|event| event.resource_id)
+            .expect("registration must be interpreted");
+        let registry_resource =
+            super::common::stable_uuid(&format!("resource:registry-only:{CHAIN}:{namehash}"));
+        let token_id = U256::from_be_bytes(*label);
+
+        // R -> S without reclaim: the registry still names R.
+        let handoff_input = BatchInput {
+            raw_logs: vec![raw_at(
+                v1_registrar::Transfer {
+                    from: OWNER.parse()?,
+                    to: SECOND_HOLDER.parse()?,
+                    tokenId: token_id,
+                }
+                .encode_log_data(),
+                3,
+                0,
+                CONTRACT,
+            )],
+            ..input.clone()
+        };
+        let (handoff_live, session) =
+            interpret_test_batch_incremental(handoff_input.clone(), Some(session))?;
+        let handoff_cold = interpret_test_batch(BatchInput {
+            prior_events: preceding
+                .normalized_events
+                .iter()
+                .map(prior_event)
+                .collect(),
+            ..handoff_input
+        })?;
+        assert_eq!(
+            handoff_live, handoff_cold,
+            "{namespace}: the handoff must restore identically from prior events"
+        );
+        let epochs = handoff_live
+            .normalized_events
+            .iter()
+            .filter(|event| event.event_kind == "AuthorityEpochChanged")
+            .collect::<Vec<_>>();
+        assert_eq!(epochs.len(), 1, "{namespace}: the handoff emits one epoch");
+        let epoch = epochs[0];
+        assert_eq!(epoch.resource_id, Some(registry_resource));
+        assert_eq!(epoch.after_state["source_event"], "Transfer");
+        assert_eq!(epoch.after_state["authority_kind"], "registry_only");
+        assert_eq!(
+            epoch.after_state["registry_owner"], OWNER,
+            "{namespace}: the handoff epoch must carry the retained registry owner, got {}",
+            epoch.after_state
+        );
+        assert_ne!(
+            epoch.after_state["registry_owner"], SECOND_HOLDER,
+            "{namespace}: the token holder is not the registry owner"
+        );
+        assert!(epoch.after_state.get("owner").is_none());
+
+        // S -> T, still without reclaim: nothing may replace or drop R.
+        let later_input = BatchInput {
+            raw_logs: vec![raw_at(
+                v1_registrar::Transfer {
+                    from: SECOND_HOLDER.parse()?,
+                    to: THIRD_HOLDER.parse()?,
+                    tokenId: token_id,
+                }
+                .encode_log_data(),
+                4,
+                0,
+                CONTRACT,
+            )],
+            ..input.clone()
+        };
+        let (later_live, _) = interpret_test_batch_incremental(later_input.clone(), Some(session))?;
+        let later_cold = interpret_test_batch(BatchInput {
+            prior_events: preceding
+                .normalized_events
+                .iter()
+                .chain(handoff_live.normalized_events.iter())
+                .map(prior_event)
+                .collect(),
+            ..later_input
+        })?;
+        assert_eq!(
+            later_live, later_cold,
+            "{namespace}: the later transfer must restore identically from prior events"
+        );
+        let token = later_live
+            .normalized_events
+            .iter()
+            .find(|event| event.event_kind == "TokenControlTransferred")
+            .expect("the later registrar transfer must be interpreted");
+        assert_eq!(token.resource_id, Some(registrar_resource));
+        assert_eq!(token.before_state["from"], SECOND_HOLDER);
+        assert_eq!(token.after_state["to"], THIRD_HOLDER);
+        assert!(
+            !later_live.normalized_events.iter().any(|event| matches!(
+                event.event_kind.as_str(),
+                "SurfaceBound" | "SurfaceUnbound"
+            )),
+            "{namespace}: the registry-only authority stays selected across S -> T"
+        );
+        for event in &later_live.normalized_events {
+            if event.event_kind == "AuthorityEpochChanged" {
+                assert_eq!(
+                    event.after_state["registry_owner"], OWNER,
+                    "{namespace}: a later epoch must keep the retained registry owner, got {}",
+                    event.after_state
+                );
+            }
+            if let Some(registry_owner) = event.after_state.get("registry_owner") {
+                assert_eq!(
+                    registry_owner, OWNER,
+                    "{namespace}: no event may republish a token holder as registry owner"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn released_registration_restores_registry_authority_across_batches() -> anyhow::Result<()> {
     const OLD_REGISTRY: &str = "0x0000000000000000000000000000000000000065";

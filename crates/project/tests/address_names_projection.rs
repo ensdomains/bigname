@@ -1953,6 +1953,28 @@ async fn seed_authority_epoch_changed(
     block_number: i64,
     authority_kind: &str,
 ) -> Result<()> {
+    seed_authority_epoch(
+        pool,
+        identity,
+        namehash,
+        resource,
+        block_number,
+        7,
+        json!({"authority_kind": authority_kind}),
+    )
+    .await
+}
+
+/// Seeds an `AuthorityEpochChanged` with the full `after_state` the adapter would carry.
+async fn seed_authority_epoch(
+    pool: &PgPool,
+    identity: &str,
+    namehash: &str,
+    resource: &str,
+    block_number: i64,
+    log_index: i64,
+    after_state: serde_json::Value,
+) -> Result<()> {
     sqlx::query(
         "INSERT INTO normalized_events (
              event_identity, namespace, logical_name_id, resource_id, event_kind,
@@ -1962,7 +1984,7 @@ async fn seed_authority_epoch_changed(
          ) VALUES (
              $1, 'ens', $2, $3::uuid, 'AuthorityEpochChanged',
              'ens_v1_registry_l1', 1, $4, $5, $6,
-             $7, 0, 7, 'ens_v1_unwrapped_authority',
+             $7, 0, $9, 'ens_v1_unwrapped_authority',
              'canonical', $8
          )",
     )
@@ -1973,7 +1995,8 @@ async fn seed_authority_epoch_changed(
     .bind(block_number)
     .bind(block_hash(block_number))
     .bind(format!("0x{:064x}", 700 + block_number))
-    .bind(json!({"authority_kind": authority_kind}))
+    .bind(after_state)
+    .bind(log_index)
     .execute(pool)
     .await?;
     Ok(())
@@ -2066,6 +2089,259 @@ async fn registry_only_binding_preserves_the_same_arm_divergent_owner() -> Resul
         "the same-arm divergent registry owner lost its relation"
     );
 
+    database.cleanup().await?;
+    Ok(())
+}
+
+const HANDOFF_NAMEHASH: &str = "0x1212121212121212121212121212121212121212121212121212121212121212";
+const HANDOFF_LOGICAL: &str =
+    "ens:0x1212121212121212121212121212121212121212121212121212121212121212";
+const HANDOFF_TOKEN_ID: &str = "0x3434343434343434343434343434343434343434343434343434343434343434";
+const HANDOFF_REGISTRAR_RESOURCE: &str = "30000000-0000-0000-0000-000000000001";
+const HANDOFF_REGISTRY_RESOURCE: &str = "30000000-0000-0000-0000-000000000002";
+const HANDOFF_REGISTRAR_BINDING: &str = "30000000-0000-0000-0000-000000000011";
+const HANDOFF_REGISTRY_BINDING: &str = "30000000-0000-0000-0000-000000000012";
+const RETAINED_OWNER: &str = "0x99999999999999999999999999999999999999Aa";
+const SECOND_HOLDER: &str = "0x99999999999999999999999999999999999999Bb";
+const THIRD_HOLDER: &str = "0x99999999999999999999999999999999999999Cc";
+
+/// Seeds a live registrar name whose registry owner and token holder are both R, then the
+/// registrar transfer R -> S without reclaim, exactly as the adapter emits it: the token
+/// transfer stays on the registrar resource, the registrar binding closes, the registry-only
+/// resource is bound, and one `AuthorityEpochChanged` carries `registry_owner` R. No extra
+/// registry `AuthorityTransferred` follows the handoff, because a registrar token transfer
+/// writes no registry state
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175
+/// @ ens_v1@91c966f).
+async fn seed_registrar_handoff_without_reclaim(pool: &PgPool) -> Result<()> {
+    seed_blocks(pool, [8, 9, 10]).await?;
+    seed_surface(
+        pool,
+        HANDOFF_NAMEHASH,
+        "handoff-fixture.eth",
+        HANDOFF_REGISTRAR_RESOURCE,
+        HANDOFF_REGISTRAR_BINDING,
+    )
+    .await?;
+    seed_binding_provenance(pool, HANDOFF_REGISTRAR_BINDING, 0, 1).await?;
+    // Registration: the registry NewOwner names R and the registrar grants R the lease.
+    seed_authority_transferred(
+        pool,
+        "fixture:handoff-registered-owner",
+        HANDOFF_NAMEHASH,
+        HANDOFF_REGISTRAR_RESOURCE,
+        8,
+        0,
+        json!({
+            "source_event": "NewOwner",
+            "node": HANDOFF_NAMEHASH,
+            "owner": RETAINED_OWNER,
+            "owner_getter": RETAINED_OWNER,
+            "authority_kind": "registrar"
+        }),
+    )
+    .await?;
+    seed_normalized_event(
+        pool,
+        "fixture:handoff-registration",
+        Some(HANDOFF_LOGICAL),
+        Some(HANDOFF_REGISTRAR_RESOURCE),
+        "RegistrationGranted",
+        "ens_v1_registrar_l1",
+        8,
+        1,
+        json!({
+            "status": "registered",
+            "registrant": RETAINED_OWNER,
+            "token_id": HANDOFF_TOKEN_ID,
+            "expiry": 4_102_444_800_i64
+        }),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    // Block 9: the token moves R -> S without reclaim. The adapter emits everything below
+    // from that one log.
+    seed_normalized_event(
+        pool,
+        "fixture:handoff-token-transfer",
+        Some(HANDOFF_LOGICAL),
+        Some(HANDOFF_REGISTRAR_RESOURCE),
+        "TokenControlTransferred",
+        "ens_v1_registrar_l1",
+        9,
+        0,
+        json!({
+            "source_event": "Transfer",
+            "to": SECOND_HOLDER,
+            "token_id": HANDOFF_TOKEN_ID,
+            "namehash": HANDOFF_NAMEHASH
+        }),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    seed_normalized_event(
+        pool,
+        "fixture:handoff-unbound",
+        Some(HANDOFF_LOGICAL),
+        Some(HANDOFF_REGISTRAR_RESOURCE),
+        "SurfaceUnbound",
+        "ens_v1_registrar_l1",
+        9,
+        0,
+        json!({
+            "source_event": "Transfer",
+            "authority_kind": "registrar",
+            "authority_key": "registrar:fixture",
+            "active_to": 9
+        }),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    seed_next_binding(
+        pool,
+        HANDOFF_NAMEHASH,
+        HANDOFF_REGISTRY_RESOURCE,
+        HANDOFF_REGISTRY_BINDING,
+        9,
+        "2026-08-01T00:00:09Z",
+    )
+    .await?;
+    seed_binding_provenance(pool, HANDOFF_REGISTRY_BINDING, 0, 0).await?;
+    seed_normalized_event(
+        pool,
+        "fixture:handoff-bound",
+        Some(HANDOFF_LOGICAL),
+        Some(HANDOFF_REGISTRY_RESOURCE),
+        "SurfaceBound",
+        "ens_v1_registrar_l1",
+        9,
+        0,
+        json!({
+            "source_event": "Transfer",
+            "registry_owner": RETAINED_OWNER,
+            "owner_getter": RETAINED_OWNER,
+            "registry_contract": REGISTRY_ADDRESS,
+            "authority_kind": "registry_only",
+            "authority_key": "registry-only:fixture",
+            "active_from": 9,
+            "binding_kind": "declared_registry_path"
+        }),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    seed_authority_epoch(
+        pool,
+        "fixture:handoff-epoch",
+        HANDOFF_NAMEHASH,
+        HANDOFF_REGISTRY_RESOURCE,
+        9,
+        0,
+        json!({
+            "source_event": "Transfer",
+            "registry_owner": RETAINED_OWNER,
+            "authority_kind": "registry_only",
+            "authority_key": "registry-only:fixture"
+        }),
+    )
+    .await
+}
+
+/// Seeds the later registrar transfer S -> T, still without reclaim: the adapter emits only
+/// the token transfer on the registrar resource because the registry-only authority stays
+/// selected.
+async fn seed_later_registrar_transfer(pool: &PgPool) -> Result<()> {
+    seed_normalized_event(
+        pool,
+        "fixture:handoff-later-token-transfer",
+        Some(HANDOFF_LOGICAL),
+        Some(HANDOFF_REGISTRAR_RESOURCE),
+        "TokenControlTransferred",
+        "ens_v1_registrar_l1",
+        10,
+        0,
+        json!({
+            "source_event": "Transfer",
+            "to": THIRD_HOLDER,
+            "token_id": HANDOFF_TOKEN_ID,
+            "namehash": HANDOFF_NAMEHASH
+        }),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await
+}
+
+async fn handoff_control(pool: &PgPool) -> Result<serde_json::Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT declared_summary -> 'control' FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(HANDOFF_LOGICAL)
+    .fetch_one(pool)
+    .await?)
+}
+
+fn assert_handoff_control_keeps_the_registry_owner(control: &serde_json::Value, stage: &str) {
+    assert_eq!(
+        control["registry_owner"],
+        json!(RETAINED_OWNER.to_lowercase()),
+        "{stage}: the registry still names R after a transfer without reclaim, got {control}"
+    );
+    assert!(
+        control.get("owner").is_none(),
+        "{stage}: the exact-name control summary publishes the registry owner under registry_owner"
+    );
+}
+
+/// After the adapter's real registry-only handoff (issue #923), the exact-name owner must stay
+/// the retained registry owner R, and a later token transfer S -> T must not clear it. The
+/// registrant follows the token to S at the handoff; whether it follows the later transfer
+/// to T is left to the registration-event supplement (#911). Checked incrementally and as a
+/// rebuild from zero.
+#[tokio::test]
+async fn registrar_handoff_without_reclaim_keeps_the_registry_owner_across_a_later_transfer()
+-> Result<()> {
+    let (database, pool) = migrated_pool().await?;
+    seed_registrar_handoff_without_reclaim(&pool).await?;
+    run_project(&pool, 9, 8, None).await?;
+    let selected: Option<String> =
+        sqlx::query_scalar("SELECT resource_id::text FROM name_current WHERE logical_name_id = $1")
+            .bind(HANDOFF_LOGICAL)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(selected.as_deref(), Some(HANDOFF_REGISTRY_RESOURCE));
+    let after_handoff = handoff_control(&pool).await?;
+    assert_handoff_control_keeps_the_registry_owner(&after_handoff, "incremental handoff");
+    assert_eq!(
+        after_handoff["registrant"],
+        json!(SECOND_HOLDER.to_lowercase()),
+        "incremental handoff: the registrant follows the token"
+    );
+
+    seed_later_registrar_transfer(&pool).await?;
+    run_project(&pool, 10, 10, Some(9)).await?;
+    let incremental = handoff_control(&pool).await?;
+    assert_handoff_control_keeps_the_registry_owner(&incremental, "incremental later transfer");
+    // The registrant after a post-handoff token transfer is not pinned here: main still serves
+    // the handoff holder S because the later transfer sits after the selected binding's
+    // position, and moving it to T is the registration-event supplement's job (#911).
+    assert!(
+        incremental["registrant"].is_string(),
+        "incremental later transfer: a registrant is still served, got {incremental}"
+    );
+    let incremental_snapshot = serving_projection_snapshot(&pool).await?;
+    database.cleanup().await?;
+
+    let (database, pool) = migrated_pool().await?;
+    seed_registrar_handoff_without_reclaim(&pool).await?;
+    seed_later_registrar_transfer(&pool).await?;
+    run_project(&pool, 10, 8, None).await?;
+    let rebuilt = handoff_control(&pool).await?;
+    assert_handoff_control_keeps_the_registry_owner(&rebuilt, "rebuild from zero");
+    assert_eq!(rebuilt, incremental);
+    assert_eq!(
+        serving_projection_snapshot(&pool).await?,
+        incremental_snapshot,
+        "a rebuild from zero must serve what the incremental run served"
+    );
     database.cleanup().await?;
     Ok(())
 }
