@@ -2093,409 +2093,533 @@ async fn registry_only_binding_preserves_the_same_arm_divergent_owner() -> Resul
     Ok(())
 }
 
-const HANDOFF_NAMEHASH: &str = "0x1212121212121212121212121212121212121212121212121212121212121212";
-const HANDOFF_LOGICAL: &str =
-    "ens:0x1212121212121212121212121212121212121212121212121212121212121212";
-const HANDOFF_PARENT_HASH: &str =
-    "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae";
-const HANDOFF_LABELHASH: &str =
-    "0x3434343434343434343434343434343434343434343434343434343434343434";
-const HANDOFF_TOKEN_LINEAGE: &str = "30000000-0000-0000-0000-000000000099";
-const HANDOFF_REGISTRAR_RESOURCE: &str = "30000000-0000-0000-0000-000000000001";
-const HANDOFF_REGISTRY_RESOURCE: &str = "30000000-0000-0000-0000-000000000002";
-const HANDOFF_REGISTRAR_BINDING: &str = "30000000-0000-0000-0000-000000000011";
-const HANDOFF_REGISTRY_BINDING: &str = "30000000-0000-0000-0000-000000000012";
-const HANDOFF_REGISTRAR_MANIFEST: i64 = 912;
-/// The BaseRegistrar emits the ERC-721 `Transfer`; the controller emits `NameRegistered`.
-const HANDOFF_REGISTRAR_ADDRESS: &str = "0x5757575757575757575757575757575757575757";
-const HANDOFF_CONTROLLER_ADDRESS: &str = "0x2828282828282828282828282828282828282828";
-const RETAINED_OWNER: &str = "0x99999999999999999999999999999999999999Aa";
-const SECOND_HOLDER: &str = "0x99999999999999999999999999999999999999Bb";
-const THIRD_HOLDER: &str = "0x99999999999999999999999999999999999999Cc";
+/// The registry-only handoff scenario of issue #923, interpreted by the real adapter and persisted
+/// the way Interpret persists adapter output, so Project consumes exactly what production would.
+mod handoff_scenario {
+    use super::{CHAIN, block_hash};
+    use alloy_primitives::{Address, B256, U256, keccak256};
+    use alloy_sol_types::{SolEvent, sol};
+    use anyhow::Result;
+    use bigname_adapters::schema_v2::{
+        AdapterSession, AddressAdmissionInput, BatchInput, BatchOutput, ManifestInput,
+        RawBlockInput, RawLogInput, StateCacheCapacity, prepare_schema_v2_batch_incremental,
+    };
+    use serde_json::json;
+    use sqlx::PgPool;
+    use time::OffsetDateTime;
+    use uuid::Uuid;
 
-fn handoff_registrar_authority_key() -> String {
-    format!(
-        "registrar:{CHAIN}:{HANDOFF_REGISTRAR_MANIFEST}:{HANDOFF_LABELHASH}:{}:2",
-        block_hash(8)
-    )
-}
-
-fn handoff_registry_authority_key() -> String {
-    format!("registry-only:{CHAIN}:{HANDOFF_NAMEHASH}")
-}
-
-/// The `raw_fact_ref` the adapter attaches to every event it derives from one log: the log's
-/// position and the contract that emitted it.
-fn handoff_fact_ref(
-    emitting_address: &str,
-    block_number: i64,
-    log_index: i64,
-) -> serde_json::Value {
-    json!({
-        "kind": "raw_log",
-        "chain_id": CHAIN,
-        "block_hash": block_hash(block_number),
-        "block_number": block_number,
-        "transaction_hash": format!("0x{:064x}", 1_000 + log_index),
-        "transaction_index": 0,
-        "log_index": log_index,
-        "emitting_address": emitting_address
-    })
-}
-
-/// Binds a resource with the provenance the adapter records for a binding created by one log.
-#[allow(clippy::too_many_arguments)]
-async fn seed_handoff_binding(
-    pool: &PgPool,
-    resource: &str,
-    binding: &str,
-    block_number: i64,
-    log_index: i64,
-    active_from: &str,
-    active_to: Option<&str>,
-    emitting_address: &str,
-    source_event: &str,
-    source_manifest_id: i64,
-) -> Result<()> {
-    let mut provenance = handoff_fact_ref(emitting_address, block_number, log_index);
-    provenance["source"] = json!("raw_log");
-    provenance["source_event"] = json!(source_event);
-    provenance["source_manifest_id"] = json!(source_manifest_id);
-    provenance
-        .as_object_mut()
-        .expect("provenance is an object")
-        .remove("kind");
-    sqlx::query(
-        "INSERT INTO surface_bindings (
-             surface_binding_id, logical_name_id, resource_id, binding_kind,
-             authority_arm, active_from, active_to, chain_id, block_hash, block_number,
-             canonicality_state, provenance
-         ) VALUES (
-             $1::uuid, $2, $3::uuid, 'declared_registry_path', 'ens_v1',
-             $4::timestamptz, $5::timestamptz, $6, $7, $8, 'canonical', $9
-         )",
-    )
-    .bind(binding)
-    .bind(HANDOFF_LOGICAL)
-    .bind(resource)
-    .bind(active_from)
-    .bind(active_to)
-    .bind(CHAIN)
-    .bind(block_hash(block_number))
-    .bind(block_number)
-    .bind(provenance)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// Seeds one event of the handoff scenario with the provenance the adapter gives it: the
-/// source family of the manifest whose log produced it and that log's emitting contract.
-#[allow(clippy::too_many_arguments)]
-async fn seed_handoff_event(
-    pool: &PgPool,
-    identity: &str,
-    resource: &str,
-    event_kind: &str,
-    source_family: &str,
-    emitting_address: &str,
-    block_number: i64,
-    log_index: i64,
-    after_state: serde_json::Value,
-) -> Result<()> {
-    seed_normalized_event(
-        pool,
-        identity,
-        Some(HANDOFF_LOGICAL),
-        Some(resource),
-        event_kind,
-        source_family,
-        block_number,
-        log_index,
-        after_state,
-        handoff_fact_ref(emitting_address, block_number, log_index),
-    )
-    .await
-}
-
-/// Seeds a live ENSv1 registrar name whose registry owner and token holder are both R, then the
-/// registrar transfer R -> S without reclaim, with the provenance and payloads the adapter
-/// emits for that history (copied from the adapter test
-/// `registrar_transfers_without_reclaim_keep_the_retained_registry_owner_on_the_epoch`):
-///
-/// - block 8, log 0, registry contract: the registration's `NewOwner` lands on the registrar
-///   resource as `AuthorityTransferred` with owner R;
-/// - block 8, log 2, registrar controller: `RegistrationGranted`, `ExpiryChanged`,
-///   `SurfaceBound` and `AuthorityEpochChanged` on the registrar resource under the registrar
-///   source family, and the registrar binding;
-/// - block 9, log 0, BaseRegistrar: `TokenControlTransferred` to S on the registrar resource,
-///   `SurfaceUnbound` on it, then `SurfaceBound` and `AuthorityEpochChanged` on the registry-only
-///   resource carrying `registry_owner` R, and the registry-only binding.
-///
-/// No registry event follows the handoff, because a registrar token transfer writes no registry
-/// state (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175
-/// @ ens_v1@91c966f). The adapter's `PermissionChanged`, `SubregistryChanged` and
-/// `PreimageObserved` rows and the `registrar_surface_evidence` payload are left out: the
-/// exact-name control fold does not read them.
-async fn seed_registrar_handoff_without_reclaim(pool: &PgPool) -> Result<()> {
-    seed_blocks(pool, [8, 9, 10]).await?;
-    sqlx::query(
-        "INSERT INTO name_surfaces (
-             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
-             namehash, labelhashes, normalizer_version, visibility_state,
-             chain_id, block_hash, block_number, canonicality_state
-         ) VALUES (
-             $1, 'ens', 'handoff.eth', ARRAY['handoff', 'eth'], '\\x00', $2,
-             ARRAY[$3, $4], 'test', 'active', $5, $6, 8, 'canonical'
-         )",
-    )
-    .bind(HANDOFF_LOGICAL)
-    .bind(HANDOFF_NAMEHASH)
-    .bind(HANDOFF_LABELHASH)
-    .bind(format!("0x{:064x}", 2_u64))
-    .bind(CHAIN)
-    .bind(block_hash(8))
-    .execute(pool)
-    .await?;
-    for resource in [HANDOFF_REGISTRY_RESOURCE, HANDOFF_REGISTRAR_RESOURCE] {
-        sqlx::query(
-            "INSERT INTO resources (
-                 resource_id, chain_id, block_hash, block_number, canonicality_state
-             ) VALUES ($1::uuid, $2, $3, 8, 'canonical')",
-        )
-        .bind(resource)
-        .bind(CHAIN)
-        .bind(block_hash(8))
-        .execute(pool)
-        .await?;
+    sol! {
+        event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
+        event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
     }
-    let registrar_key = handoff_registrar_authority_key();
-    let registry_key = handoff_registry_authority_key();
-    let registration = json!({
-        "authority_key": registrar_key,
-        "authority_kind": "registrar",
-        "cost": "7",
-        "decoded_label": "handoff",
-        "expiry": 4_102_444_800_i64,
-        "labelhash": HANDOFF_LABELHASH,
-        "namehash": HANDOFF_NAMEHASH,
-        "raw_label_hex": "68616e646f6666",
-        "registrant": RETAINED_OWNER,
-        "source_event": "NameRegistered",
-        "surface_known": true,
-        "token_lineage_id": HANDOFF_TOKEN_LINEAGE
-    });
 
-    // Block 8: the registration transaction. The registry NewOwner names R.
-    seed_handoff_event(
-        pool,
-        "fixture:handoff-registered-owner",
-        HANDOFF_REGISTRAR_RESOURCE,
-        "AuthorityTransferred",
-        "ens_v1_registry_l1",
-        REGISTRY_ADDRESS,
-        8,
-        0,
-        json!({
-            "child_node": HANDOFF_NAMEHASH,
-            "emitter_role": "registry",
-            "labelhash": HANDOFF_LABELHASH,
-            "node": HANDOFF_PARENT_HASH,
-            "owner": RETAINED_OWNER,
-            "owner_getter": RETAINED_OWNER,
-            "source_event": "NewOwner"
-        }),
-    )
-    .await?;
-    let mut granted = registration.clone();
-    granted["authority_owner"] = json!(RETAINED_OWNER);
-    seed_handoff_event(
-        pool,
-        "fixture:handoff-registration",
-        HANDOFF_REGISTRAR_RESOURCE,
-        "RegistrationGranted",
-        "ens_v1_registrar_l1",
-        HANDOFF_CONTROLLER_ADDRESS,
-        8,
-        2,
-        granted,
-    )
-    .await?;
-    seed_handoff_event(
-        pool,
-        "fixture:handoff-expiry",
-        HANDOFF_REGISTRAR_RESOURCE,
-        "ExpiryChanged",
-        "ens_v1_registrar_l1",
-        HANDOFF_CONTROLLER_ADDRESS,
-        8,
-        2,
-        registration.clone(),
-    )
-    .await?;
-    seed_handoff_binding(
-        pool,
-        HANDOFF_REGISTRAR_RESOURCE,
-        HANDOFF_REGISTRAR_BINDING,
-        8,
-        2,
-        "2026-08-01T00:00:08.000002Z",
-        Some("2026-08-01T00:00:09Z"),
-        HANDOFF_CONTROLLER_ADDRESS,
-        "NameRegistered",
-        HANDOFF_REGISTRAR_MANIFEST,
-    )
-    .await?;
-    let mut bound = registration.clone();
-    bound["active_from"] = json!(8);
-    bound["binding_kind"] = json!("declared_registry_path");
-    bound["owner_getter"] = json!(RETAINED_OWNER);
-    bound["registry_contract"] = json!(REGISTRY_ADDRESS);
-    seed_handoff_event(
-        pool,
-        "fixture:handoff-registrar-bound",
-        HANDOFF_REGISTRAR_RESOURCE,
-        "SurfaceBound",
-        "ens_v1_registrar_l1",
-        HANDOFF_CONTROLLER_ADDRESS,
-        8,
-        2,
-        bound,
-    )
-    .await?;
-    seed_handoff_event(
-        pool,
-        "fixture:handoff-registrar-epoch",
-        HANDOFF_REGISTRAR_RESOURCE,
-        "AuthorityEpochChanged",
-        "ens_v1_registrar_l1",
-        HANDOFF_CONTROLLER_ADDRESS,
-        8,
-        2,
-        registration,
-    )
-    .await?;
+    mod registrar_lifecycle {
+        alloy_sol_types::sol! {
+            event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires);
+        }
+    }
 
-    // Block 9: the BaseRegistrar Transfer R -> S without reclaim. Every row below comes from
-    // that one registrar log.
-    seed_handoff_event(
-        pool,
-        "fixture:handoff-token-transfer",
-        HANDOFF_REGISTRAR_RESOURCE,
-        "TokenControlTransferred",
-        "ens_v1_registrar_l1",
-        HANDOFF_REGISTRAR_ADDRESS,
-        9,
-        0,
-        json!({
-            "namehash": HANDOFF_NAMEHASH,
-            "source_event": "Transfer",
-            "to": SECOND_HOLDER,
-            "token_id": HANDOFF_LABELHASH,
-            "token_lineage_id": HANDOFF_TOKEN_LINEAGE
-        }),
-    )
-    .await?;
-    seed_handoff_event(
-        pool,
-        "fixture:handoff-unbound",
-        HANDOFF_REGISTRAR_RESOURCE,
-        "SurfaceUnbound",
-        "ens_v1_registrar_l1",
-        HANDOFF_REGISTRAR_ADDRESS,
-        9,
-        0,
-        json!({
-            "active_to": 9,
-            "authority_key": registrar_key,
-            "authority_kind": "registrar",
-            "registry_owner": RETAINED_OWNER,
-            "source_event": "Transfer"
-        }),
-    )
-    .await?;
-    seed_handoff_binding(
-        pool,
-        HANDOFF_REGISTRY_RESOURCE,
-        HANDOFF_REGISTRY_BINDING,
-        9,
-        0,
-        "2026-08-01T00:00:09Z",
-        None,
-        HANDOFF_REGISTRAR_ADDRESS,
-        "Transfer",
-        HANDOFF_REGISTRAR_MANIFEST,
-    )
-    .await?;
-    seed_handoff_event(
-        pool,
-        "fixture:handoff-bound",
-        HANDOFF_REGISTRY_RESOURCE,
-        "SurfaceBound",
-        "ens_v1_registrar_l1",
-        HANDOFF_REGISTRAR_ADDRESS,
-        9,
-        0,
-        json!({
-            "active_from": 9,
-            "authority_key": registry_key,
-            "authority_kind": "registry_only",
-            "binding_kind": "declared_registry_path",
-            "owner_getter": RETAINED_OWNER,
-            "registry_contract": REGISTRY_ADDRESS,
-            "registry_owner": RETAINED_OWNER,
-            "source_event": "Transfer"
-        }),
-    )
-    .await?;
-    seed_handoff_event(
-        pool,
-        "fixture:handoff-epoch",
-        HANDOFF_REGISTRY_RESOURCE,
-        "AuthorityEpochChanged",
-        "ens_v1_registrar_l1",
-        HANDOFF_REGISTRAR_ADDRESS,
-        9,
-        0,
-        json!({
-            "authority_key": registry_key,
-            "authority_kind": "registry_only",
-            "registry_owner": RETAINED_OWNER,
-            "source_event": "Transfer"
-        }),
-    )
-    .await
-}
+    mod legacy_controller {
+        alloy_sol_types::sol! {
+            event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires);
+        }
+    }
 
-/// Seeds the later BaseRegistrar transfer S -> T, still without reclaim: the adapter emits only
-/// the token transfer on the registrar resource because the registry-only authority stays
-/// selected, so no binding, `SurfaceBound` or `AuthorityEpochChanged` accompanies it.
-async fn seed_later_registrar_transfer(pool: &PgPool) -> Result<()> {
-    seed_handoff_event(
-        pool,
-        "fixture:handoff-later-token-transfer",
-        HANDOFF_REGISTRAR_RESOURCE,
-        "TokenControlTransferred",
-        "ens_v1_registrar_l1",
-        HANDOFF_REGISTRAR_ADDRESS,
-        10,
-        0,
-        json!({
-            "namehash": HANDOFF_NAMEHASH,
-            "source_event": "Transfer",
-            "to": THIRD_HOLDER,
-            "token_id": HANDOFF_LABELHASH,
-            "token_lineage_id": HANDOFF_TOKEN_LINEAGE
-        }),
-    )
-    .await
+    pub const REGISTRY_MANIFEST: i64 = 911;
+    pub const REGISTRAR_MANIFEST: i64 = 912;
+    pub const REGISTRY_ADDRESS: &str = "0x0000000000000000000000000000000000000091";
+    /// The BaseRegistrar emits the ERC-721 `Transfer`; the legacy controller emits the
+    /// label-bearing `NameRegistered`.
+    pub const REGISTRAR_ADDRESS: &str = "0x0000000000000000000000000000000000000042";
+    pub const CONTROLLER_ADDRESS: &str = "0x0000000000000000000000000000000000000092";
+    pub const RETAINED_OWNER: &str = "0x00000000000000000000000000000000000000ab";
+    pub const SECOND_HOLDER: &str = "0x00000000000000000000000000000000000000cd";
+    pub const THIRD_HOLDER: &str = "0x00000000000000000000000000000000000000ef";
+    pub const LABEL: &str = "handoff";
+    pub const REGISTRATION_BLOCK: i64 = 8;
+    pub const HANDOFF_BLOCK: i64 = 9;
+    pub const LATER_BLOCK: i64 = 10;
+
+    fn namehash(labels: &[&str]) -> B256 {
+        labels.iter().rev().fold(B256::ZERO, |node, label| {
+            keccak256([node.as_slice(), keccak256(label.as_bytes()).as_slice()].concat())
+        })
+    }
+
+    pub fn name_namehash() -> B256 {
+        namehash(&[LABEL, "eth"])
+    }
+
+    pub fn logical_name_id() -> String {
+        format!("ens:{:#x}", name_namehash())
+    }
+
+    /// The adapter's stable registry-only resource identity for a node (its `stable_uuid`).
+    pub fn registry_only_resource() -> Uuid {
+        let hash = keccak256(format!(
+            "resource:registry-only:{CHAIN}:{:#x}",
+            name_namehash()
+        ));
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&hash[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x50;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Uuid::from_bytes(bytes)
+    }
+
+    fn block_timestamp(block_number: i64) -> OffsetDateTime {
+        // The same instants `seed_blocks` writes: 2026-08-01T00:00:<block>Z.
+        time::Date::from_calendar_date(2026, time::Month::August, 1)
+            .expect("fixture date")
+            .midnight()
+            .assume_utc()
+            + time::Duration::seconds(block_number)
+    }
+
+    fn raw_log(
+        encoded: alloy_primitives::LogData,
+        block_number: i64,
+        log_index: i64,
+        emitting_address: &str,
+    ) -> RawLogInput {
+        RawLogInput {
+            chain_id: CHAIN.to_owned(),
+            block_hash: block_hash(block_number),
+            block_number,
+            block_timestamp: block_timestamp(block_number),
+            canonicality_state: "canonical".to_owned(),
+            transaction_hash: format!("0x{:064x}", 900 + block_number),
+            transaction_index: 0,
+            log_index,
+            emitting_address: emitting_address.to_owned(),
+            topics: encoded
+                .topics()
+                .iter()
+                .map(|topic| format!("{topic:#x}"))
+                .collect(),
+            data: encoded.data.to_vec(),
+        }
+    }
+
+    fn manifest(manifest_id: i64, source_family: &str, events: serde_json::Value) -> ManifestInput {
+        ManifestInput {
+            manifest_id,
+            manifest_version: 1,
+            namespace: "ens".to_owned(),
+            source_family: source_family.to_owned(),
+            chain_id: CHAIN.to_owned(),
+            deployment_label: "fixture".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
+            payload_json: json!({"abi": {"events": events}}).to_string(),
+        }
+    }
+
+    fn admission(
+        manifest_id: i64,
+        instance: u128,
+        role: &str,
+        address: &str,
+    ) -> AddressAdmissionInput {
+        AddressAdmissionInput {
+            address: address.to_owned(),
+            contract_instance_id: Uuid::from_u128(instance),
+            source_manifest_id: Some(manifest_id),
+            role: Some(role.to_owned()),
+            discovery_edge_kind: None,
+            discovery_from_contract_instance_id: None,
+            discovery_observation_key: None,
+            active_from_block: Some(0),
+            active_to_block: None,
+        }
+    }
+
+    /// The registrar and registry declarations as the production ENS mainnet manifests admit
+    /// them: the registrar's numeric `NameRegistered` only releases, the legacy controller's
+    /// cost-bearing `NameRegistered` grants, and the ERC-721 `Transfer` comes from the registrar.
+    pub fn manifests() -> Vec<ManifestInput> {
+        const GRANTED: &[&str] = &[
+            "RegistrationGranted",
+            "ExpiryChanged",
+            "PermissionChanged",
+            "SurfaceUnbound",
+            "SurfaceBound",
+            "AuthorityEpochChanged",
+            "ResolverChanged",
+            "PreimageObserved",
+        ];
+        const TRANSFERRED: &[&str] = &[
+            "TokenControlTransferred",
+            "PermissionChanged",
+            "SurfaceUnbound",
+            "SurfaceBound",
+            "AuthorityEpochChanged",
+            "ResolverChanged",
+        ];
+        vec![
+            manifest(
+                REGISTRY_MANIFEST,
+                "ens_v1_registry_l1",
+                json!([
+                    {
+                        "name": "NewOwner",
+                        "fragment": "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+                        "emitter_roles": ["registry"],
+                        "normalized_events": ["SubregistryChanged", "AuthorityTransferred"],
+                    },
+                    {
+                        "name": "Transfer",
+                        "fragment": "event Transfer(bytes32 indexed node, address owner)",
+                        "emitter_roles": ["registry"],
+                        "normalized_events": ["AuthorityTransferred"],
+                    },
+                ]),
+            ),
+            manifest(
+                REGISTRAR_MANIFEST,
+                "ens_v1_registrar_l1",
+                json!([
+                    {
+                        "name": "NameRegistered",
+                        "fragment": "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)",
+                        "emitter_roles": ["registrar"],
+                        "normalized_events": ["RegistrationReleased"],
+                    },
+                    {
+                        "name": "NameRegistered",
+                        "fragment": "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires)",
+                        "emitter_roles": ["legacy_registrar_controller"],
+                        "normalized_events": GRANTED,
+                    },
+                    {
+                        "name": "Transfer",
+                        "fragment": "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+                        "emitter_roles": ["registrar"],
+                        "normalized_events": TRANSFERRED,
+                    },
+                ]),
+            ),
+        ]
+    }
+
+    fn batch(block_number: i64, raw_logs: Vec<RawLogInput>) -> BatchInput {
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: manifests(),
+            discovery_rules: Vec::new(),
+            admissions: vec![
+                admission(REGISTRY_MANIFEST, 911, "registry", REGISTRY_ADDRESS),
+                admission(REGISTRAR_MANIFEST, 912, "registrar", REGISTRAR_ADDRESS),
+                admission(
+                    REGISTRAR_MANIFEST,
+                    9121,
+                    "legacy_registrar_controller",
+                    CONTROLLER_ADDRESS,
+                ),
+            ],
+            prior_events: Vec::new(),
+            blocks: vec![RawBlockInput {
+                chain_id: CHAIN.to_owned(),
+                block_hash: block_hash(block_number),
+                block_number,
+                block_timestamp: block_timestamp(block_number),
+                canonicality_state: "canonical".to_owned(),
+            }],
+            raw_logs,
+        }
+    }
+
+    fn address(value: &str) -> Address {
+        value.parse().expect("fixture address")
+    }
+
+    /// The registration transaction in the order the ENSv1 contracts emit it: the registrar
+    /// mints the token, sets the registry owner and emits its numeric event, then the legacy
+    /// controller emits the label-bearing event.
+    pub fn registration() -> BatchInput {
+        let label = keccak256(LABEL.as_bytes());
+        batch(
+            REGISTRATION_BLOCK,
+            vec![
+                raw_log(
+                    Transfer {
+                        from: Address::ZERO,
+                        to: address(RETAINED_OWNER),
+                        tokenId: U256::from_be_bytes(*label),
+                    }
+                    .encode_log_data(),
+                    REGISTRATION_BLOCK,
+                    0,
+                    REGISTRAR_ADDRESS,
+                ),
+                raw_log(
+                    NewOwner {
+                        node: namehash(&["eth"]),
+                        label,
+                        owner: address(RETAINED_OWNER),
+                    }
+                    .encode_log_data(),
+                    REGISTRATION_BLOCK,
+                    1,
+                    REGISTRY_ADDRESS,
+                ),
+                raw_log(
+                    registrar_lifecycle::NameRegistered {
+                        id: U256::from_be_bytes(*label),
+                        owner: address(RETAINED_OWNER),
+                        expires: U256::from(4_102_444_800_u64),
+                    }
+                    .encode_log_data(),
+                    REGISTRATION_BLOCK,
+                    2,
+                    REGISTRAR_ADDRESS,
+                ),
+                raw_log(
+                    legacy_controller::NameRegistered {
+                        name: LABEL.to_owned(),
+                        label,
+                        owner: address(RETAINED_OWNER),
+                        cost: U256::from(7),
+                        expires: U256::from(4_102_444_800_u64),
+                    }
+                    .encode_log_data(),
+                    REGISTRATION_BLOCK,
+                    3,
+                    CONTROLLER_ADDRESS,
+                ),
+            ],
+        )
+    }
+
+    /// A registrar token transfer without `reclaim`: one ERC-721 `Transfer` from the registrar
+    /// and nothing from the registry.
+    pub fn token_transfer(block_number: i64, from: &str, to: &str) -> BatchInput {
+        batch(
+            block_number,
+            vec![raw_log(
+                Transfer {
+                    from: address(from),
+                    to: address(to),
+                    tokenId: U256::from_be_bytes(*keccak256(LABEL.as_bytes())),
+                }
+                .encode_log_data(),
+                block_number,
+                0,
+                REGISTRAR_ADDRESS,
+            )],
+        )
+    }
+
+    pub fn interpret(
+        input: BatchInput,
+        session: Option<AdapterSession>,
+    ) -> Result<(BatchOutput, AdapterSession)> {
+        let (output, session) =
+            prepare_schema_v2_batch_incremental(input, session, StateCacheCapacity::Unlimited)?
+                .finish(Vec::new())?;
+        assert!(
+            output.decode_skips.is_empty(),
+            "every fixture log must decode: {:?}",
+            output.decode_skips
+        );
+        Ok((output, session))
+    }
+
+    /// Persists adapter output the way Interpret does for the rows Project reads: the manifest
+    /// versions the events cite, token lineages, resources, name surfaces, surface bindings
+    /// with their closures, and normalized events with every column Interpret writes. Label
+    /// preimages, contract identity and discovery rows are not persisted; the exact-name
+    /// control fold does not read them.
+    pub async fn persist(pool: &PgPool, output: &BatchOutput) -> Result<()> {
+        for manifest in manifests() {
+            sqlx::query(
+                "INSERT INTO manifest_versions (
+                     manifest_id, manifest_version, namespace, source_family, chain_id,
+                     deployment_label, rollout_status, normalizer_version, file_path,
+                     manifest_payload
+                 ) OVERRIDING SYSTEM VALUE
+                 VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9::jsonb)
+                 ON CONFLICT (manifest_id) DO NOTHING",
+            )
+            .bind(manifest.manifest_id)
+            .bind(manifest.manifest_version)
+            .bind(&manifest.namespace)
+            .bind(&manifest.source_family)
+            .bind(&manifest.chain_id)
+            .bind(&manifest.deployment_label)
+            .bind(&manifest.normalizer_version)
+            .bind(format!("fixture/handoff/{}.toml", manifest.source_family))
+            .bind(&manifest.payload_json)
+            .execute(pool)
+            .await?;
+        }
+        for lineage in &output.token_lineages {
+            sqlx::query(
+                "INSERT INTO token_lineages (
+                     token_lineage_id, chain_id, block_hash, block_number, provenance,
+                     canonicality_state
+                 ) VALUES ($1, $2, $3, $4, $5, $6::canonicality_state)
+                 ON CONFLICT (token_lineage_id) DO NOTHING",
+            )
+            .bind(lineage.token_lineage_id)
+            .bind(&lineage.chain_id)
+            .bind(&lineage.block_hash)
+            .bind(lineage.block_number)
+            .bind(&lineage.provenance)
+            .bind(&lineage.canonicality_state)
+            .execute(pool)
+            .await?;
+        }
+        for resource in &output.resources {
+            sqlx::query(
+                "INSERT INTO resources (
+                     resource_id, token_lineage_id, chain_id, block_hash, block_number,
+                     provenance, canonicality_state
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7::canonicality_state)
+                 ON CONFLICT (resource_id) DO NOTHING",
+            )
+            .bind(resource.resource_id)
+            .bind(resource.token_lineage_id)
+            .bind(&resource.chain_id)
+            .bind(&resource.block_hash)
+            .bind(resource.block_number)
+            .bind(&resource.provenance)
+            .bind(&resource.canonicality_state)
+            .execute(pool)
+            .await?;
+        }
+        for surface in &output.name_surfaces {
+            sqlx::query(
+                "INSERT INTO name_surfaces (
+                     logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+                     namehash, labelhashes, normalizer_version, visibility_state,
+                     normalization_errors, deactivation_reason, deactivated_at, chain_id,
+                     block_hash, block_number, provenance, canonicality_state
+                 ) VALUES (
+                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                     $17::canonicality_state
+                 )
+                 ON CONFLICT (logical_name_id) DO NOTHING",
+            )
+            .bind(&surface.logical_name_id)
+            .bind(&surface.namespace)
+            .bind(&surface.raw_name)
+            .bind(&surface.raw_labels)
+            .bind(&surface.dns_encoded_name)
+            .bind(&surface.namehash)
+            .bind(&surface.labelhashes)
+            .bind(&surface.normalizer_version)
+            .bind(&surface.visibility_state)
+            .bind(&surface.normalization_errors)
+            .bind(&surface.deactivation_reason)
+            .bind(surface.deactivated_at)
+            .bind(&surface.chain_id)
+            .bind(&surface.block_hash)
+            .bind(surface.block_number)
+            .bind(&surface.provenance)
+            .bind(&surface.canonicality_state)
+            .execute(pool)
+            .await?;
+        }
+        for closure in &output.binding_closures {
+            sqlx::query(
+                "UPDATE surface_bindings
+                 SET active_to = $2
+                 WHERE logical_name_id = $1
+                   AND chain_id = $3
+                   AND authority_arm = $4
+                   AND ($5::uuid IS NULL OR surface_binding_id <> $5)
+                   AND (
+                       block_number < $6
+                       OR (
+                           block_number = $6
+                           AND (
+                               COALESCE((provenance ->> 'transaction_index')::bigint, -1),
+                               COALESCE((provenance ->> 'log_index')::bigint, -1)
+                           ) < ($7, $8)
+                       )
+                   )
+                   AND (active_to IS NULL OR active_to > $2)",
+            )
+            .bind(&closure.logical_name_id)
+            .bind(closure.active_to)
+            .bind(&closure.chain_id)
+            .bind(&closure.authority_arm)
+            .bind(closure.except_surface_binding_id)
+            .bind(closure.block_number)
+            .bind(closure.transaction_index)
+            .bind(closure.log_index)
+            .execute(pool)
+            .await?;
+        }
+        for binding in &output.surface_bindings {
+            sqlx::query(
+                "INSERT INTO surface_bindings (
+                     surface_binding_id, logical_name_id, resource_id, binding_kind,
+                     authority_arm, active_from, chain_id, block_hash, block_number,
+                     provenance, canonicality_state
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::canonicality_state)",
+            )
+            .bind(binding.surface_binding_id)
+            .bind(&binding.logical_name_id)
+            .bind(binding.resource_id)
+            .bind(&binding.binding_kind)
+            .bind(&binding.authority_arm)
+            .bind(binding.active_from)
+            .bind(&binding.chain_id)
+            .bind(&binding.block_hash)
+            .bind(binding.block_number)
+            .bind(&binding.provenance)
+            .bind(&binding.canonicality_state)
+            .execute(pool)
+            .await?;
+        }
+        for event in &output.normalized_events {
+            sqlx::query(
+                "INSERT INTO normalized_events (
+                     event_identity, namespace, logical_name_id, resource_id, event_kind,
+                     source_family, manifest_version, source_manifest_id, chain_id,
+                     block_number, block_hash, transaction_hash, transaction_index, log_index,
+                     raw_fact_ref, derivation_kind, canonicality_state, before_state,
+                     after_state, migration_correlation_ids, consumer_visibility
+                 ) VALUES (
+                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                     $17::canonicality_state, $18, $19, $20, $21
+                 )",
+            )
+            .bind(&event.event_identity)
+            .bind(&event.namespace)
+            .bind(&event.logical_name_id)
+            .bind(event.resource_id)
+            .bind(&event.event_kind)
+            .bind(&event.source_family)
+            .bind(event.manifest_version)
+            .bind(event.source_manifest_id)
+            .bind(&event.chain_id)
+            .bind(event.block_number)
+            .bind(&event.block_hash)
+            .bind(&event.transaction_hash)
+            .bind(event.transaction_index)
+            .bind(event.log_index)
+            .bind(&event.raw_fact_ref)
+            .bind(&event.derivation_kind)
+            .bind(&event.canonicality_state)
+            .bind(&event.before_state)
+            .bind(&event.after_state)
+            .bind(&event.migration_correlation_ids)
+            .bind(&event.consumer_visibility)
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
 }
 
 async fn handoff_control(pool: &PgPool) -> Result<serde_json::Value> {
     Ok(sqlx::query_scalar(
         "SELECT declared_summary -> 'control' FROM name_current WHERE logical_name_id = $1",
     )
-    .bind(HANDOFF_LOGICAL)
+    .bind(handoff_scenario::logical_name_id())
     .fetch_one(pool)
     .await?)
 }
@@ -2503,7 +2627,7 @@ async fn handoff_control(pool: &PgPool) -> Result<serde_json::Value> {
 fn assert_handoff_control_keeps_the_registry_owner(control: &serde_json::Value, stage: &str) {
     assert_eq!(
         control["registry_owner"],
-        json!(RETAINED_OWNER.to_lowercase()),
+        json!(handoff_scenario::RETAINED_OWNER),
         "{stage}: the registry still names R after a transfer without reclaim, got {control}"
     );
     assert!(
@@ -2512,33 +2636,97 @@ fn assert_handoff_control_keeps_the_registry_owner(control: &serde_json::Value, 
     );
 }
 
-/// After the adapter's real registry-only handoff (issue #923), the exact-name owner must stay
-/// the retained registry owner R, and a later token transfer S -> T must not clear it. The
-/// registrant follows the token to S at the handoff; whether it follows the later transfer
-/// to T is left to the registration-event supplement (#911). Checked incrementally and as a
-/// rebuild from zero.
+/// Issue #923: a live ENSv1 name whose registry owner and registrar token holder are both R,
+/// transferred R -> S and then S -> T without `reclaim`. A registrar token transfer writes no
+/// registry state; after registration only `reclaim` writes the registry owner
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175
+/// @ ens_v1@91c966f). The three batches go through the real adapter, are persisted as
+/// Interpret persists them, and Project must keep serving R as the registry owner: after the
+/// handoff and after the later transfer, incrementally and rebuilt from zero. The registrant
+/// follows the token to S at the handoff; whether it follows the later transfer to T is left to
+/// the registration-event supplement (#911).
 #[tokio::test]
 async fn registrar_handoff_without_reclaim_keeps_the_registry_owner_across_a_later_transfer()
 -> Result<()> {
+    use handoff_scenario::{
+        HANDOFF_BLOCK, LATER_BLOCK, REGISTRATION_BLOCK, RETAINED_OWNER, SECOND_HOLDER, THIRD_HOLDER,
+    };
+    let (registration, session) =
+        handoff_scenario::interpret(handoff_scenario::registration(), None)?;
+    let (handoff, session) = handoff_scenario::interpret(
+        handoff_scenario::token_transfer(HANDOFF_BLOCK, RETAINED_OWNER, SECOND_HOLDER),
+        Some(session),
+    )?;
+    let (later, _) = handoff_scenario::interpret(
+        handoff_scenario::token_transfer(LATER_BLOCK, SECOND_HOLDER, THIRD_HOLDER),
+        Some(session),
+    )?;
+
+    // Anti-vacuity: this is the adapter output the issue is about. The handoff selects the
+    // registry-only resource with an epoch carrying R, and the later transfer emits its token
+    // and permission rows but no epoch and no binding.
+    let registry_resource = handoff_scenario::registry_only_resource();
+    let handoff_epochs = handoff
+        .normalized_events
+        .iter()
+        .filter(|event| event.event_kind == "AuthorityEpochChanged")
+        .collect::<Vec<_>>();
+    assert_eq!(handoff_epochs.len(), 1);
+    assert_eq!(handoff_epochs[0].resource_id, Some(registry_resource));
+    assert_eq!(
+        handoff_epochs[0].after_state["registry_owner"],
+        RETAINED_OWNER
+    );
+    assert!(
+        handoff
+            .normalized_events
+            .iter()
+            .all(|event| event.event_kind != "AuthorityTransferred"),
+        "a registrar token transfer must not produce a registry ownership observation"
+    );
+    let later_kinds = later
+        .normalized_events
+        .iter()
+        .map(|event| event.event_kind.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        later_kinds.contains(&"TokenControlTransferred"),
+        "{later_kinds:?}"
+    );
+    assert!(
+        later_kinds.contains(&"PermissionChanged"),
+        "{later_kinds:?}"
+    );
+    assert!(
+        !later_kinds.contains(&"AuthorityEpochChanged"),
+        "{later_kinds:?}"
+    );
+    assert!(later.surface_bindings.is_empty() && later.binding_closures.is_empty());
+
     let (database, pool) = migrated_pool().await?;
-    seed_registrar_handoff_without_reclaim(&pool).await?;
-    run_project(&pool, 9, 8, None).await?;
+    seed_blocks(&pool, [REGISTRATION_BLOCK, HANDOFF_BLOCK, LATER_BLOCK]).await?;
+    handoff_scenario::persist(&pool, &registration).await?;
+    handoff_scenario::persist(&pool, &handoff).await?;
+    run_project(&pool, HANDOFF_BLOCK, REGISTRATION_BLOCK, None).await?;
     let selected: Option<String> =
         sqlx::query_scalar("SELECT resource_id::text FROM name_current WHERE logical_name_id = $1")
-            .bind(HANDOFF_LOGICAL)
+            .bind(handoff_scenario::logical_name_id())
             .fetch_one(&pool)
             .await?;
-    assert_eq!(selected.as_deref(), Some(HANDOFF_REGISTRY_RESOURCE));
+    assert_eq!(
+        selected.as_deref(),
+        Some(registry_resource.to_string().as_str())
+    );
     let after_handoff = handoff_control(&pool).await?;
     assert_handoff_control_keeps_the_registry_owner(&after_handoff, "incremental handoff");
     assert_eq!(
         after_handoff["registrant"],
-        json!(SECOND_HOLDER.to_lowercase()),
+        json!(SECOND_HOLDER),
         "incremental handoff: the registrant follows the token"
     );
 
-    seed_later_registrar_transfer(&pool).await?;
-    run_project(&pool, 10, 10, Some(9)).await?;
+    handoff_scenario::persist(&pool, &later).await?;
+    run_project(&pool, LATER_BLOCK, LATER_BLOCK, Some(HANDOFF_BLOCK)).await?;
     let incremental = handoff_control(&pool).await?;
     assert_handoff_control_keeps_the_registry_owner(&incremental, "incremental later transfer");
     // The registrant after a post-handoff token transfer is not pinned here: main still serves
@@ -2552,9 +2740,11 @@ async fn registrar_handoff_without_reclaim_keeps_the_registry_owner_across_a_lat
     database.cleanup().await?;
 
     let (database, pool) = migrated_pool().await?;
-    seed_registrar_handoff_without_reclaim(&pool).await?;
-    seed_later_registrar_transfer(&pool).await?;
-    run_project(&pool, 10, 8, None).await?;
+    seed_blocks(&pool, [REGISTRATION_BLOCK, HANDOFF_BLOCK, LATER_BLOCK]).await?;
+    for output in [&registration, &handoff, &later] {
+        handoff_scenario::persist(&pool, output).await?;
+    }
+    run_project(&pool, LATER_BLOCK, REGISTRATION_BLOCK, None).await?;
     let rebuilt = handoff_control(&pool).await?;
     assert_handoff_control_keeps_the_registry_owner(&rebuilt, "rebuild from zero");
     assert_eq!(rebuilt, incremental);
