@@ -1,6 +1,10 @@
 use alloy_primitives::{hex, keccak256};
 use anyhow::bail;
 
+use serde_json::{Value, json};
+
+use super::super::super::{EventDraft, SourcedEventBatch};
+use super::super::authority_transition::authority_kind;
 use super::{
     Interpreted, NameDraft, ShadowNameDraft, State, admitted_label, decode, decoded_label,
     registrar_namehash, stable_uuid, wrapper_renewal,
@@ -70,6 +74,50 @@ fn event(
     let resource_id = binding_target.map(|state| state.resource_id);
     let token_lineage_id = binding_target.and_then(|state| state.token_lineage_id);
     let bind = binding_target.is_some_and(|state| !state.surface_known);
+    // This event names a surface its authority did not have. A resolver set
+    // while the name was unknown was linked to the resource alone; it is
+    // replayed onto the surface now, as a registrar event does for a
+    // registry-only authority it promotes.
+    if bind
+        && let Some(target) = binding_target
+        && let Some(source_manifest_id) = target.source_manifest_id
+        && let Some(link) = state.name_v1_resolver_link(
+            &selected.source.namespace,
+            &namehash,
+            &format!("{}:{namehash}", selected.source.namespace),
+            target.resource_id,
+        )
+    {
+        output.sourced_events.push(SourcedEventBatch {
+            source_manifest_id,
+            events: vec![EventDraft {
+                event_kind: "ResolverChanged".to_owned(),
+                logical_name_id: Some(format!("{}:{namehash}", selected.source.namespace)),
+                resource_id: Some(target.resource_id),
+                identity_suffix: format!(
+                    "ResolverChanged:surface-materialization:{namehash}:{}:{}",
+                    target.resource_id, link.resolver_address
+                ),
+                explicit_before: Some(json!({"resolver":Value::Null})),
+                after_state: json!({
+                    "state_derived":true,
+                    "surface_materialization":true,
+                    "source_event":selected.event.name,
+                    "node":namehash,
+                    "authority_kind":authority_kind(target),
+                    "authority_key":target.authority_key,
+                    "binding_kind":"declared_registry_path",
+                    "pointer_reason":"surface_materialization_current_resolver",
+                    "resolver":link.resolver_address,
+                    "resolver_source_role":link.source_role,
+                }),
+                state_scope: format!(
+                    "surface-materialization:{namehash}:{}:resolver",
+                    target.resource_id
+                ),
+            }],
+        });
+    }
     output.names.push(NameDraft {
         labels: vec![label, "eth".to_owned()],
         namehash,
@@ -89,7 +137,7 @@ fn event(
         source_kind: format!("{}_name", selected.event.name),
         preimage_metadata: Some(super::super::registry::merge_observation(
             &observation,
-            serde_json::json!({
+            json!({
                 "raw_label_hex":hex::encode(&raw_label),
                 "decoded_label":decoded_label(&raw_label),
                 "labelhash":format!("{explicit_labelhash:#x}"),

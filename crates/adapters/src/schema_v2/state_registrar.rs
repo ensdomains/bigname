@@ -1,4 +1,8 @@
-use super::State;
+use uuid::Uuid;
+
+use super::{State, V1ResolverLink};
+
+const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
 pub(in crate::schema_v2) fn v1_key(namespace: &str, namehash: &str) -> String {
     let key = format!("{namespace}:{}", namehash.to_ascii_lowercase());
@@ -41,5 +45,34 @@ impl State {
                                     },
                                 ))))
             })
+    }
+
+    /// A resolver set while the node's authority had no surface is linked to the
+    /// resource alone. When a label-bearing event names the surface, the link
+    /// takes the name and the named authority's resource, and the link as it is
+    /// now stored is returned so the caller can replay its resolver onto the
+    /// surface. A link that already carries a name, a cleared (zero) resolver,
+    /// or no link returns nothing and changes nothing.
+    pub(in crate::schema_v2) fn name_v1_resolver_link(
+        &mut self,
+        namespace: &str,
+        namehash: &str,
+        logical_name_id: &str,
+        resource_id: Uuid,
+    ) -> Option<V1ResolverLink> {
+        let key = v1_key(namespace, namehash);
+        let link = self.v1_resolver_links.get(&key)?.clone();
+        if link.logical_name_id.is_some()
+            || link.resolver_address.eq_ignore_ascii_case(ZERO_ADDRESS)
+        {
+            return None;
+        }
+        let named = V1ResolverLink {
+            resource_id: Some(resource_id),
+            logical_name_id: Some(logical_name_id.to_owned()),
+            ..link
+        };
+        self.v1_resolver_links.insert(key, named.clone());
+        Some(named)
     }
 }

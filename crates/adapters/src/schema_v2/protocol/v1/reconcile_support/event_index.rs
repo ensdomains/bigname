@@ -52,6 +52,9 @@ pub(super) struct EventFields {
     pub(super) grant: bool,
     pub(super) revocation: bool,
     pub(super) current_registry_setup: bool,
+    /// A state-derived replay onto a surface the event named -- a resolver set
+    /// before the label was known -- not a transition of the resource itself.
+    pub(super) surface_materialization: bool,
 }
 
 impl EventFields {
@@ -78,6 +81,8 @@ impl EventFields {
             resource_id: event.resource_id,
             registry_only: state.get("authority_kind").and_then(Value::as_str)
                 == Some("registry_only"),
+            surface_materialization: state.get("surface_materialization")
+                == Some(&Value::Bool(true)),
             permission: event.event_kind == "PermissionChanged",
             owner: state
                 .get("owner")
