@@ -155,6 +155,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `contract_address` | lower-cased emitting contract of an event row, exposed only with `include=data`; `null` for state-derived rows | `emitting_address` |
 | `resolver` (query) | `/v1/events` filter naming one resolver contract as `<chain_id>:<address>` (numeric chain id, case-insensitive address); matches rows the contract emitted plus `resolver` pointer rows naming it | new in v2 |
 | `mirror` | on the resolver overview, present only for a declared [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver): `{kind: "ensv1_registry", registry: {chain_id, address}}`, the ENSv1 registry whose resolvers answer for names bound to this resolver | `declared_summary.classification.mirror`, `ensv1_mirror_resolver` |
+| `record_resource` | on `GET /v1/permissions` rows and resolver `/roles` rows for a grant on an ENSv2 record-ID resolver: the setter argument the granted resource stands for, decoded — `{kind: "address", hash, coin_type}`, `{kind: "text" \| "data", hash, key \| key_bytes}` (`key` for valid, NUL-free, non-blank UTF-8; `key_bytes` hex otherwise), `{kind: "abi", hash, content_type}`, `{kind: "interface", hash, interface_id}`, or `{kind: "argument", hash, selectors}` when one argument authorizes several setters; only readings whose setter the row's `powers` hold. `coin_type` and `content_type` are numbers; an argument beyond 64 bits is served as a decimal string under `coin_type_decimal` / `content_type_decimal` | permission-event `selector`, `scope_detail.resource_selector` |
 | `grant_event` | on resolver-overview `include=roles` items: `{block_number, timestamp, transaction_hash, log_index}` of the earliest permission event that granted the role; omitted when unresolvable | permission-row `provenance.normalized_event_ids` |
 
 An admitted controller-free ENSv1 numeric registration can retain its resource and token lifecycle
@@ -1322,8 +1323,9 @@ An ENSv2 registration that lapses by path expiry is served like one released by
 `released`, the registration identity, timestamps and the lapsed `expires_at`,
 without a current owner, resolver or records, and `GET /v1/names/{name}/history`
 keeps serving the name's history. An ENSv1 lease that lapses past grace with no
-revived custody, which is how a wrapped `.eth` name lapses, is served the same
-way as a [released v1 authority](glossary.md#released-v1-authority):
+revived custody, which is how a wrapped `.eth` name lapses and how a `.eth` name
+lapses after its registrar token was transferred without `reclaim`, is served the
+same way as a [released v1 authority](glossary.md#released-v1-authority):
 `registration_status` `released` with the registration identity and
 timestamps, no owner, registrant, `expires_at`, resolver or records, and its
 history intact. Only a name that never had a readable surface

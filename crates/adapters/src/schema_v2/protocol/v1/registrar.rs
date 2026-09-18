@@ -17,11 +17,11 @@ use crate::schema_v2::{
     model::RawLogInput,
     state::{State, V1NameState},
 };
-mod identity;
+pub(in crate::schema_v2) mod identity;
 mod registry_only_fallback;
 use identity::{new_registrar_identity, registrar_namehash};
 pub(super) mod base;
-mod decode;
+pub(in crate::schema_v2) mod decode;
 mod enrichment;
 mod transfer_permissions;
 mod wrapper_renewal;

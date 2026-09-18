@@ -39,6 +39,12 @@
                        END,
                        'authority_kind', authority_context.authority_kind,
                        'authority_key', authority_context.authority_key,
+                       -- The registration's identity is its BaseRegistrar lease, also while the
+                       -- name is wrapped and whether it was wrapped at or after registration.
+                       -- ENSv2 registrations keep the bound resource as their identity.
+                       'resource_id', CASE
+                           WHEN NOT COALESCE(selected_registration.is_v2_lifecycle, false)
+                               THEN lifecycle.registrar_resource_id END,
                        'registrant', registrant.registrant,
                        'expiry', CASE
                            WHEN selected_registration.is_v2_lifecycle
@@ -71,8 +77,10 @@
                                'registrant', NULL, 'expiry', NULL
                            )
                        -- A released ENSv1 lease whose custody was not revived is a tombstone:
-                       -- the registrar lease is gone and nothing current owns the node, so the
-                       -- lapsed registrant, authority and expiry are history only.
+                       -- the registrar lease is gone, and whether nothing current owns the node
+                       -- or the registry still holds the owner a transfer without `reclaim`
+                       -- left behind, the lapsed registrant, authority and expiry are history
+                       -- only.
                        WHEN COALESCE(selected_authority.released_v1_tombstone, false)
                            THEN jsonb_build_object('authority_kind', NULL, 'authority_key', NULL,
                                'registrant', NULL, 'expiry', NULL)
@@ -323,6 +331,18 @@
                    CASE WHEN arm.is_v2 THEN CASE WHEN arm.use_event THEN registration_current.lifecycle_key END END AS lifecycle_key, arm.is_v2 AS is_v2_lifecycle
             FROM (SELECT COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2' AS is_v2, NOT (registration_current.event_kind = 'RegistrationReleased' AND binding.resource_id IS NOT NULL AND registration_current.resource_id IS DISTINCT FROM binding.resource_id) AS use_event) arm
         ) selected_registration CROSS JOIN LATERAL (
+            SELECT COALESCE((
+                SELECT (current_wrapper.after_state ->> 'wrapped_registrar_resource_id')::uuid
+                FROM project_events current_wrapper
+                WHERE current_wrapper.resource_id = selected_registration.resource_id
+                  AND current_wrapper.event_kind = 'SurfaceBound'
+                  AND current_wrapper.source_family = 'ens_v1_wrapper_l1'
+                  AND current_wrapper.after_state ->> 'wrapped_registrar_resource_id' IS NOT NULL
+                ORDER BY current_wrapper.block_number DESC NULLS LAST,
+                         current_wrapper.normalized_event_id DESC
+                LIMIT 1
+            ), selected_registration.resource_id) AS registrar_resource_id
+        ) lifecycle CROSS JOIN LATERAL (
             SELECT CASE WHEN identity.mismatch THEN NULL ELSE binding.surface_binding_id END AS surface_binding_id,
                    CASE WHEN identity.mismatch THEN NULL ELSE binding.resource_id END AS resource_id, CASE WHEN identity.mismatch THEN NULL ELSE binding.binding_kind END AS binding_kind,
                    CASE WHEN identity.has_lifecycle THEN selected_registration.resource_id ELSE binding.resource_id END AS event_resource_id FROM (SELECT selected_registration.is_v2_lifecycle AND selected_registration.event_kind IS NOT NULL AS has_lifecycle,
@@ -365,6 +385,19 @@
                  OR (event.event_kind = 'SurfaceBound' AND event.after_state @>
                      '{"state_derived":true,"authority_kind":"registry_only"}')
               )
+              -- A successor lease granted by `registerOnly` under a registry-only binding names
+              -- the registration, not the authority: the registrar did not touch the registry,
+              -- so the binding's registry-only epoch stays the authority the name is under.
+              -- (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
+              AND NOT (
+                  event.event_kind = 'RegistrationGranted'
+                  AND EXISTS (
+                      SELECT 1 FROM project_registry_only_handoffs handoff
+                      WHERE handoff.surface_binding_id = binding.surface_binding_id
+                        AND handoff.lease_resource_id = event.resource_id
+                        AND handoff.lease_resource_id <> handoff.predecessor_resource_id
+                  )
+              )
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
@@ -376,7 +409,7 @@
                        ELSE event.after_state ->> 'registrant'
                    END) AS registrant,
                    event.normalized_event_id
-            FROM project_authority_events event
+            FROM project_registration_events event
             WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind IN (
                   'RegistrationGranted', 'TokenControlTransferred'
@@ -399,7 +432,8 @@
             FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind IN (
-                  'RegistrationGranted', 'RegistrationRenewed', 'ExpiryChanged'
+                  'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
+                  'ExpiryChanged'
               )
               AND NOT (
                   event.event_kind = 'ExpiryChanged'

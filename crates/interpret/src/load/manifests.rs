@@ -15,6 +15,10 @@ type ManifestRow = (
     bool,
 );
 
+/// Loads the chain's `active` manifests and, separately, its `active` plus `deprecated`
+/// manifests in one stable order. Rows in any other rollout state are not returned; the
+/// lookahead loader's coverage decision reads them on its own
+/// (`lookahead::retained_family_reason`) to find history retained from such a family.
 pub(super) async fn load(
     connection: &mut PgConnection,
     chain_id: &str,

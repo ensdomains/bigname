@@ -1827,6 +1827,7 @@ dependencies = [
  "sqlx",
  "time",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1882,7 +1883,9 @@ name = "bigname-project"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-sol-types",
  "anyhow",
+ "bigname-adapters",
  "bigname-domain",
  "bigname-lookup",
  "bigname-manifests",
@@ -1890,7 +1893,9 @@ dependencies = [
  "bigname-test-support",
  "serde_json",
  "sqlx",
+ "time",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -642,6 +642,28 @@ index, or has another definition. It never drops or rebuilds an index. If it
 fails, recover as above, then run `sqlx migrate run` again.
 
 The release containing
+`20260917150000_normalized_events_v1_lookahead_indexes.sql` adds the two
+partial expression indexes Interpret's per-batch ENSv1
+[lookahead loader](../glossary.md#lookahead-loader) reads. On an initialized
+production namespace, build them in step 3 by running
+[`ops/v1-lookahead-indexes/install.sql`](../../ops/v1-lookahead-indexes/install.sql)
+as [its runbook](../../ops/v1-lookahead-indexes/README.md) describes, then run
+`ANALYZE bigname_phase.normalized_events`, because expression indexes have no
+statistics until the table is analyzed and the loader's queries depend on them.
+This runbook carries no copy of the two statements; `install.sql` is the only
+source, and `schema-v2/apply-check.sh` proves it builds what the fresh baseline
+and the schema-migration build. The builds are concurrent and permit writes, so
+they can finish while the existing runner is still processing, before the
+stop/start window opens; step 3 then only runs `install.sql` again as the check.
+`install.sql` is its own readiness check and never drops or rebuilds an index;
+recover an interrupted build as its runbook describes. Keep the `install.sql`
+output with its start and end times in the release record. Then apply the
+schema-migrations in step 4; the schema-migration's `IF NOT EXISTS` builds are
+no-ops when the indexes already exist, and it ends with the same check, so
+`sqlx migrate run` stops without recording it if either index is missing,
+invalid, not ready, on another table, not an index, or has another definition.
+
+The release containing
 `20260904120000_project_redo_child_registration_history.sql` adds the bounded
 Interpret-to-Project handoff for child and registry identifiers from deleted
 ENSv1→ENSv2 [migration-registry](../glossary.md#migration-registry-wrapperregistry)
@@ -1052,6 +1074,10 @@ indexes are additive; rollback may leave them in place.
    `20260917131000_project_scoped_history_indexes.sql`, run
    `ops/project-scoped-history/install.sql` as described above and require it
    to exit zero;
+   for the release containing
+   `20260917150000_normalized_events_v1_lookahead_indexes.sql`, run
+   `ops/v1-lookahead-indexes/install.sql` as described above, require it to
+   exit zero, then run `ANALYZE bigname_phase.normalized_events`;
    otherwise skip this step;
    For the release containing
    `20260814130000_surface_binding_authority_arm.sql`, a populated phase schema

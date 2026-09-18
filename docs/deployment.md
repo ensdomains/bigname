@@ -113,6 +113,12 @@ before applying the matching schema-migrations. The script fails unless all eigh
 are valid, ready, and have the reviewed definition, and the later validity-check
 schema-migration refuses the same shapes.
 
+Interpret's per-batch ENSv1 [lookahead loader](glossary.md#lookahead-loader)
+reads `normalized_events` through two partial expression indexes. Follow their
+[online index runbook](../ops/v1-lookahead-indexes/README.md) before applying
+the matching schema-migration on a large initialized database, and before
+starting a release that contains the loader.
+
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
 runtime configuration is documented in
@@ -171,6 +177,61 @@ values reduce process memory and cause more indexed reads from
 `normalized_events`; zero is valid and forces every required pre-batch value
 through that read path. The setting does not change stored output or the
 [interpreter content hash](glossary.md#interpreter-content-hash).
+
+Interpret chooses how it restores prior adapter state for each chain and each
+batch; there is nothing to enable. When every active or deprecated manifest of
+the chain belongs to a source family the
+[lookahead loader](glossary.md#lookahead-loader) covers (the five `ens_v1_*`
+families, plus `basenames_l1_compat` and the `*_execution` families, which
+interpret no logs), and the chain retains no `normalized_events` history of an
+uncovered family whose manifest has moved to `draft` or `shadow`, Interpret
+uses the lookahead loader: it reads the names and
+resources the batch's logs mention plus the registrations falling due in the
+batch, restores only their history, and keeps no
+[interpreter session](glossary.md#interpreter-session) between batches.
+Otherwise it uses the full-state loader, which restores all retained history
+once and then carries the session. Ethereum Sepolia has active ENSv2 manifests
+and Base has Basenames registry manifests, so both always use the full-state
+loader. Both loaders must produce identical stored output and share one
+[interpreter content hash](glossary.md#interpreter-content-hash), so a change
+of loader needs no redo. The choice can change only when a release changes the
+chain's manifest set, including moving to `draft` or `shadow` a manifest whose
+family wrote history that is still retained, or when a redo removes the last
+retained history of such a family; a change to the full-state loader costs one
+cold restore of the chain's history, with the memory that implies.
+
+The runner logs the choice at info level when a chain's loader is first chosen
+and whenever it changes (`interpret chose its prior-state loader`,
+`interpret changed its prior-state loader`), with the source family, and the
+rollout status of its manifest, that required the full-state loader.
+`BIGNAME_INTERPRET_FORCE_FULL_STATE_LOADER=true`
+(`--interpret-force-full-state-loader`) is the one operator override: it makes
+every chain use the full-state loader. It defaults to false. The lookahead
+loader depends on the two `normalized_events_v1_*_probe_idx` indexes; build them
+on an initialized database as described in
+[`ops/v1-lookahead-indexes/README.md`](../ops/v1-lookahead-indexes/README.md)
+before starting a release that contains the loader. If interpretation reads a
+name the loader did not restore, the batch stops before publication; it never
+publishes output from partial state.
+
+`BIGNAME_INTERPRET_BLOCKS_PER_BATCH` (`--interpret-blocks-per-batch`) sets how
+many canonical blocks one Interpret [batch](glossary.md#batch-grid) reads,
+interprets and publishes in one transaction. It defaults to 500 and must be at
+least 1. It is the operator's control over Interpret memory per batch: the
+lookahead loader has no row or byte limit of its own, so a batch in which very
+many registrations fall due or very many names change loads all of their
+history, and a smaller batch holds fewer of them at once. Names that fall due at
+one block timestamp cannot be split across batches. The setting must not change
+stored output or the interpreter content hash, so it can be changed between runs
+without a redo.
+
+`BIGNAME_INTERPRET_LOOKAHEAD_STATEMENT_TIMEOUT_SECS`
+(`--interpret-lookahead-statement-timeout-secs`) sets a PostgreSQL
+`statement_timeout`, in seconds, on the lookahead loader's read transaction. It
+defaults to 0, which sets no timeout, so a legitimately large batch is never
+killed by default. With a value set, a read that exceeds it fails the batch with
+a database error and the runner retries the same batch; use it only to surface a
+bad query plan, and prefer a smaller batch when a batch is simply large.
 
 `BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR` configures the Prometheus listener for
 a directly launched runner and defaults to `127.0.0.1:9465`. The server Compose
