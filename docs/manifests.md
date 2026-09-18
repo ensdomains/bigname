@@ -1150,10 +1150,19 @@ initializer calls can write records.
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2_sepolia_20260916@366de741)
 Because the constructor emits it too, the implementation contract itself is
 admitted by its own construction log: the Sepolia `PermissionedResolverImpl`
-address is captured like any proxy and, since it never announces an
-implementation of its own, is served as an unsupported resolver with
-`resolver_implementation_unknown`.
+address
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2 @ ens_v2_sepolia_20260916@366de741)
+is captured like any proxy. Capture decides nothing about support. That
+address is declared only under `resolver_implementations` in
+`manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v1.toml`, not as a
+resolver contract, and Project's support rule serves an `ens_v2_resolver_l1`
+candidate that has no canonical `Upgraded` observation naming it as the proxy
+as unsupported with `resolver_implementation_unknown` (the `support_reason`
+case on a null `upgrade_event_id` in `crates/project/src/builders/resolver.rs`;
+vocabulary in
+[`projections.md` § Resolver and records](projections.md#resolver-and-records)).
+The implementation address is served that way until and unless a canonical
+`Upgraded` log names an implementation for it.
 Ingest fetches the announcing address's role-independent resolver events from
 the creation block through the end of that same window before advancing its
 cursor. Later windows load retained canonical creation logs. Verify uses the
@@ -1637,11 +1646,27 @@ performs no historical lookback for a newly admitted address: a resolver's logs
 from before its admission block stay uninterpreted.
 
 An ENSv2 resolver is therefore read only from a block in which it announces
-itself. `ResolverCreated()` is one such announcement. Resolvers deployed before
-that event existed never emit it, and the support rule needs the resolver's
-implementation observation in any case, so `ens_v2_resolver_l1` also admits a
-resolver from the block in which it, or its factory, announces a declared
-implementation:
+itself. `ResolverCreated()` is one such announcement, but only the current
+resolver generation has it. The admitted 2026-06-29 Sepolia
+`PermissionedResolver` declares no creation event: the events declared in the
+contract itself are the four resource-naming events
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L142-L172 @ ens_v2_sepolia_20260629@ccaeb58),
+its own interface declares only `AliasChanged`
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L19-L24 @ ens_v2_sepolia_20260629@ccaeb58),
+and neither its constructor nor its initializer emits anything
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L194-L202 @ ens_v2_sepolia_20260629@ccaeb58)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L234-L241 @ ens_v2_sepolia_20260629@ccaeb58).
+Among the pinned sources the event first appears in the post-audit `ens_v2`
+pin, declared on `IRecordResolver`
+(upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IRecordResolver.sol:L31 @ ens_v2@a971bd64),
+and the 2026-09-15 Sepolia deployment is the first admitted generation whose
+resolver emits it
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L108 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2_sepolia_20260916@366de741).
+Resolvers of the older generation never announce this way, and the support
+rule needs the resolver's implementation observation in any case, so
+`ens_v2_resolver_l1` also admits a resolver from the block in which it, or its
+factory, announces a declared implementation:
 
 - `Upgraded(address indexed implementation)` from any emitter whose indexed
   `implementation` is in the same-namespace, same-deployment
