@@ -42,6 +42,7 @@ sol! {
     event NamedAddrResource(uint256 indexed resource, bytes name, uint256 indexed coinType);
     event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap);
     event Upgraded(address indexed implementation);
+    event ResolverCreated();
 }
 
 pub(in crate::schema_v2) fn public_resolver_v2_signature(signature: &str) -> bool {
@@ -69,12 +70,35 @@ pub(super) fn is_public_node_event(selected: &Selected) -> bool {
     }
 }
 
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2_sepolia_20260916@366de741)
+pub(super) fn created(selected: &Selected, raw: &RawLogInput) -> anyhow::Result<Interpreted> {
+    decode_event_log::<ResolverCreated>(
+        &raw.topics,
+        &raw.data,
+        "ResolverCreated log is malformed",
+    )?;
+    ensure_declared(selected, &["ContractDiscovered"])?;
+    let mut output = Interpreted::new();
+    output.events.push(EventDraft {
+        event_kind: "ContractDiscovered".to_owned(),
+        logical_name_id: None,
+        resource_id: None,
+        identity_suffix: format!("ContractDiscovered:{}", raw.emitting_address),
+        explicit_before: None,
+        after_state: json!({"source_event":"ResolverCreated", "resolver":raw.emitting_address}),
+        state_scope: format!("{}:-:-:-:ResolverCreated", raw.emitting_address),
+    });
+    output.discovery.push(DiscoveryDraft::ResolverCreation);
+    Ok(output)
+}
+
 pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
 ) -> anyhow::Result<Interpreted> {
     match selected.event.name.as_str() {
+        "ResolverCreated" => created(selected, raw),
         "AddressChanged" => {
             let event = decode_event_log::<AddressChanged>(
                 &raw.topics,

@@ -290,10 +290,7 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
     }
     if event.event_kind == "ResolverChanged"
         && let (Some(namehash), Some(resolver), Some(resource_id)) = (
-            event.after_state["child_node"]
-                .as_str()
-                .or_else(|| event.after_state["node"].as_str())
-                .or_else(|| event.after_state["namehash"].as_str()),
+            super::seam::v1_event_node(&event.after_state),
             event.after_state.get("resolver").and_then(Value::as_str),
             event.resource_id,
         )

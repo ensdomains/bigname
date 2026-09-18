@@ -57,6 +57,16 @@ It changes nothing; recover as
 described above, then run the schema-migrations again. No runner restart or Interpret replay is
 required solely to preinstall this index.
 
+Run the schema-migrations with `quote_all_identifiers` at its PostgreSQL
+default, `off`. `20260917140000_resolver_creation_self_edge.sql` finds the
+older self-edge CHECK on `bigname_phase.discovery_edges` by searching the text
+`pg_get_constraintdef` prints, which is quoted when the setting is on, and the
+file cannot carry its own setting because it is already applied on Sepolia and
+checksummed in `_sqlx_migrations`. The
+[production runbook](../../docs/runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+has the full requirement; the later schema-migrations, including the validity
+check above, turn the setting off themselves and restore it.
+
 `benchmark.py /path/to/repo --runtime podman --container bigname-test-postgres`
 creates and removes its own test database. It extracts the actual reopen UPDATE,
 holds the observation fixed while growing unrelated history from 1,000 to

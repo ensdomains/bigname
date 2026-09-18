@@ -260,6 +260,9 @@ impl ChainConfig {
 
 #[derive(Clone, Debug)]
 pub struct CapacityConfig {
+    pub interpret_blocks_per_batch: std::num::NonZeroU32,
+    pub interpret_force_full_state_loader: bool,
+    pub interpret_lookahead_statement_timeout_secs: Option<std::num::NonZeroU32>,
     pub database_max_bytes: Option<u64>,
     pub minimum_free_disk_bytes: u64,
     pub writable_path: PathBuf,
@@ -270,6 +273,9 @@ pub struct CapacityConfig {
 impl Default for CapacityConfig {
     fn default() -> Self {
         Self {
+            interpret_blocks_per_batch: bigname_interpret::DEFAULT_INTERPRET_BLOCKS_PER_BATCH,
+            interpret_force_full_state_loader: false,
+            interpret_lookahead_statement_timeout_secs: None,
             database_max_bytes: None,
             minimum_free_disk_bytes: 0,
             writable_path: PathBuf::from("."),

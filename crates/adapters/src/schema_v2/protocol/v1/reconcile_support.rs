@@ -241,11 +241,15 @@ fn reconcile_registration(
         refresh_interpreter_state_key(event);
     }
 
+    // A replay of a pre-surface resolver onto the surface the naming event
+    // created sits at that event's position on the registration's resource, but
+    // it is the surface being named, not a successor epoch of the resource.
     let redundant_successor_positions = target_candidates
         .iter()
         .filter_map(|index| {
             let fields = &events.fields[*index];
             (fields.resource_id == Some(registration.resource_id)
+                && !fields.surface_materialization
                 && fields
                     .position
                     .is_some_and(|position| position > registration.position && eligible(fields)))

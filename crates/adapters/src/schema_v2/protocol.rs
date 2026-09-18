@@ -23,24 +23,10 @@ use super::{
     state::State,
 };
 
-pub(super) fn role_insensitivity_justification(
-    source_family: &str,
-    event: &str,
-) -> Option<&'static str> {
-    bigname_manifests::role_insensitivity_justification(source_family, event)
-}
+pub(super) use bigname_manifests::{
+    event_allows_empty_emitter_roles, role_insensitivity_justification,
+};
 
-pub(super) fn event_allows_empty_emitter_roles(
-    source_family: &str,
-    event: &str,
-    has_registry_announcement_rule: bool,
-) -> bool {
-    bigname_manifests::event_allows_empty_emitter_roles(
-        source_family,
-        event,
-        has_registry_announcement_rule,
-    )
-}
 #[derive(Clone, Debug)]
 pub(super) struct Interpreted {
     pub events: Vec<EventDraft>,
@@ -224,6 +210,7 @@ pub(super) struct BindingDraft {
 #[derive(Clone, Debug)]
 pub(super) enum DiscoveryDraft {
     RegistryAnnouncement,
+    ResolverCreation,
     Close {
         edge_kind: String,
         observation_key: String,
@@ -251,7 +238,11 @@ pub(super) fn interpret(
     if let Some(output) = standard_approvals::interpret(selected, raw, state)? {
         return Ok(output);
     }
-    let mut output = if v2_resolver::is_public_node_event(selected) {
+    let mut output = if selected.source.source_family == "ens_v2_resolver_l1"
+        && selected.event.name == "ResolverCreated"
+    {
+        v2_resolver::interpret(selected, raw, state)
+    } else if v2_resolver::is_public_node_event(selected) {
         if !selected.manifest_declared_emitter
             || !public_resolver_v2_signature(&selected.event.signature)
         {
@@ -449,7 +440,11 @@ pub(super) fn is_match_all(
         }),
         "ens_v2_resolver_l1" => matches!(
             event.name.as_str(),
-            "AliasChanged" | "NamedResource" | "NamedTextResource" | "NamedAddrResource"
+            "ResolverCreated"
+                | "AliasChanged"
+                | "NamedResource"
+                | "NamedTextResource"
+                | "NamedAddrResource"
         ),
         _ => false,
     }
@@ -552,7 +547,8 @@ fn supports_signature(source_family: &str, signature: &str) -> bool {
         ),
         "ens_v2_resolver_l1" => matches!(
             signature,
-            "Linked(uint256,bytes32,bytes)"
+            "ResolverCreated()"
+                | "Linked(uint256,bytes32,bytes)"
                 | "ResourceArgument(uint256,bytes)"
                 | "AddressUpdated(uint256,uint256,bytes)"
                 | "TextUpdated(uint256,string,string,string)"
