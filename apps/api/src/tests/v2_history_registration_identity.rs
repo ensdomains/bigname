@@ -2294,3 +2294,218 @@ async fn v2_history_ignores_an_unpublished_name_wrapped_link() -> Result<()> {
     }
     database.cleanup().await
 }
+
+// A name's older and later BaseRegistrar leases are separate registrations. A node-keyed
+// record write that Project attributed only to the later lease's records is not part of the
+// older lease's history, its count, or its cursor anchors, while a write attributed to the
+// NameWrapper resource whose `NameWrapped` row recorded the older lease is.
+#[tokio::test]
+async fn registration_history_excludes_record_writes_attributed_to_another_lease() -> Result<()> {
+    const NAME: &str = "two-leases.eth";
+    const SEED_LOGICAL_NAME_ID: &str = "ens:two-leases.eth";
+    const HOLDER: &str = "0x0000000000000000000000000000000000007160";
+    const RESOLVER: &str = "0x00000000000000000000000000000000000000c3";
+    let database = TestDatabase::new_migrated().await?;
+    // The name is currently bound to its later, unwrapped lease.
+    let later_lease_id = Uuid::from_u128(0x7160);
+    // Its older lease was held through the NameWrapper, whose binding has ended.
+    let older_lease_id = Uuid::from_u128(0x7161);
+    let wrapper_resource_id = Uuid::from_u128(0x7162);
+    let namehash = bigname_lookup::ens_namehash_hex(NAME)?;
+    let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
+
+    seed_identity_name(
+        &database,
+        SEED_LOGICAL_NAME_ID,
+        NAME,
+        NAME,
+        "node:two-leases.eth",
+        later_lease_id,
+        Uuid::from_u128(0x8160),
+        Uuid::from_u128(0x9160),
+        HOLDER,
+        bigname_storage::AddressNameRelation::Registrant,
+        80,
+    )
+    .await?;
+    upsert_test_resources(
+        &database.pool,
+        &[
+            address_name_resource(older_lease_id, None, "0xolder-lease-resource", 78),
+            address_name_resource(wrapper_resource_id, None, "0xwrapper-resource", 79),
+        ],
+    )
+    .await?;
+    seed_v2_history_blocks(&database, 120..=125).await?;
+    // The NameWrapper's ended binding makes it one of the name's resources.
+    let mut ended_wrapper_binding = surface_binding(
+        Uuid::from_u128(0x9161),
+        SEED_LOGICAL_NAME_ID,
+        wrapper_resource_id,
+        timestamp(1_700_000_121),
+    );
+    ended_wrapper_binding.active_to = Some(timestamp(1_700_000_123));
+    upsert_test_surface_bindings(&database.pool, &[ended_wrapper_binding]).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.surface_bindings
+         SET active_from = to_timestamp(1700000124) WHERE resource_id = $1",
+    )
+    .bind(later_lease_id)
+    .execute(&database.pool)
+    .await?;
+
+    let node_write = |event_identity: &str, block_number: i64| {
+        let mut event = v2_history_event(event_identity, None, None, "RecordChanged", block_number);
+        event.source_family = "ens_v2_resolver_l1".to_owned();
+        event.derivation_kind = "ens_v2_resolver".to_owned();
+        event.after_state = json!({
+            "source_event": "TextChanged",
+            "resolver": RESOLVER,
+            "node": namehash,
+            "record_key": "text:lease",
+            "record_family": "text",
+            "selector_key": "lease",
+            "value_retained": true,
+            "value": event_identity,
+        });
+        event
+    };
+    let mut older_grant = v2_history_event(
+        "two-leases-older-grant",
+        None,
+        Some(older_lease_id),
+        "RegistrationGranted",
+        120,
+    );
+    older_grant.after_state["namehash"] = json!(&namehash);
+    let mut wrapper_binding = v2_history_event(
+        "two-leases-wrap",
+        Some(&logical_name_id),
+        Some(wrapper_resource_id),
+        "SurfaceBound",
+        121,
+    );
+    wrapper_binding.source_family = "ens_v1_wrapper_l1".to_owned();
+    wrapper_binding.after_state = json!({
+        "source_event": "NameWrapped",
+        "node": namehash,
+        "wrapped_registrar_resource_id": older_lease_id,
+    });
+    let older_write_identity =
+        "ens_v2_resolver:2:ethereum-mainnet:0xhistory122:0xtx122:0:RecordChanged:0";
+    let later_write_identity =
+        "ens_v2_resolver:2:ethereum-mainnet:0xhistory125:0xtx125:0:RecordChanged:0";
+    let mut later_grant = v2_history_event(
+        "two-leases-later-grant",
+        Some(&logical_name_id),
+        Some(later_lease_id),
+        "RegistrationGranted",
+        124,
+    );
+    later_grant.after_state["namehash"] = json!(&namehash);
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            older_grant,
+            wrapper_binding,
+            node_write(older_write_identity, 122),
+            later_grant,
+            node_write(later_write_identity, 125),
+        ],
+    )
+    .await?;
+
+    // Project attributes the older write to the NameWrapper resource's records and the later
+    // write to the later lease's records.
+    let event_id = |identity: &str| {
+        let pool = database.pool.clone();
+        let identity = identity.to_owned();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT normalized_event_id FROM bigname_phase.normalized_events
+                 WHERE event_identity = $1",
+            )
+            .bind(identity)
+            .fetch_one(&pool)
+            .await
+        }
+    };
+    let older_write_id = event_id(older_write_identity).await?;
+    let later_write_id = event_id(later_write_identity).await?;
+    let mut wrapper_inventory =
+        compact_records_inventory_current_row(&logical_name_id, wrapper_resource_id);
+    wrapper_inventory.provenance =
+        json!({ "attributed_event_ids": [older_write_id.to_string()] });
+    database
+        .insert_record_inventory_current_row(wrapper_inventory)
+        .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.record_inventory_current
+         SET provenance = provenance
+             || jsonb_build_object('attributed_event_ids', jsonb_build_array($2::bigint))
+         WHERE resource_id = $1",
+    )
+    .bind(later_lease_id)
+    .bind(later_write_id)
+    .execute(&database.pool)
+    .await?;
+
+    let older_route = format!("/v1/events?registration_id={older_lease_id}&page_size=20");
+    let older = v2_history_payload_for_database(&database, &older_route).await?;
+    let older_hashes = history_transaction_hashes(&older);
+    assert!(
+        older_hashes.contains(&"0xtx122"),
+        "the older lease lost the write attributed to the NameWrapper resource that wrapped it: {older_hashes:?}"
+    );
+    assert!(
+        !older_hashes.contains(&"0xtx125"),
+        "the older lease listed a write attributed only to the later lease: {older_hashes:?}"
+    );
+    assert_eq!(
+        older["page"]["total_count"],
+        json!(older_hashes.len()),
+        "the older lease's count disagrees with its rows: {older}"
+    );
+
+    let later = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?registration_id={later_lease_id}&page_size=20"),
+    )
+    .await?;
+    let later_hashes = history_transaction_hashes(&later);
+    assert!(later_hashes.contains(&"0xtx125"), "{later_hashes:?}");
+    assert!(!later_hashes.contains(&"0xtx122"), "{later_hashes:?}");
+
+    // The later lease's write cannot anchor a page of the older lease's history.
+    let later_first = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?registration_id={later_lease_id}&page_size=1"),
+    )
+    .await?;
+    assert_eq!(later_first["data"][0]["transaction_hash"], json!("0xtx125"));
+    let mut foreign_anchor = crate::v2::decode(
+        later_first["page"]["next_cursor"]
+            .as_str()
+            .expect("the later lease has more than one row"),
+    )
+    .expect("the later lease's cursor must decode");
+    foreign_anchor.filters.insert(
+        "registration_id".to_owned(),
+        older_lease_id.to_string(),
+    );
+    let response = v2_history_response_for_database(
+        &database,
+        &format!(
+            "/v1/events?registration_id={older_lease_id}&page_size=1&cursor={}",
+            crate::v2::encode(&foreign_anchor)
+        ),
+    )
+    .await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "a write of the later lease anchored a page of the older lease"
+    );
+
+    database.cleanup().await
+}
