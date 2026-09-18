@@ -11,7 +11,7 @@ use sqlx::PgPool;
 use crate::{
     IngestError, Result,
     engine::{BLOCKS_PER_BATCH, Marker},
-    provider::{ChainProvider, ResolvedBlock, provider_error},
+    provider::{ChainProvider, HeadSnapshot, ResolvedBlock, provider_error},
     verification::VerificationProvider,
 };
 
@@ -47,10 +47,11 @@ impl LiveContinuation {
 
 /// Selects where live follow resumes for `chain_id` on the node `provider` reads.
 ///
-/// The rule is the live batch's own: a published head is required; a node standing on a
+/// The rule is the live batch's own, including its admission of the node: the node must
+/// report safe and finalized heads, a published head is required, a node standing on a
 /// published block behind the published head has nothing to load yet, so that block is the
-/// ancestor; otherwise the ancestor is the highest block at or below both heads that the node
-/// reports with the hash the chain published, walked back no further than the published
+/// ancestor, and otherwise the ancestor is the highest block at or below both heads that the
+/// node reports with the hash the chain published, walked back no further than the published
 /// finalized block.
 pub async fn plan_live_continuation(
     pool: &PgPool,
@@ -62,6 +63,7 @@ pub async fn plan_live_continuation(
         .heads()
         .await
         .map_err(|error| provider_error("failed to fetch live target heads", error))?;
+    require_checkpoint_heads(&snapshot)?;
     let node_head = Marker {
         number: snapshot.latest.number,
         hash: snapshot.latest.hash,
@@ -71,6 +73,17 @@ pub async fn plan_live_continuation(
         ancestor: ancestor.unwrap_or_else(|| node_head.clone()),
         node_head,
     })
+}
+
+/// A live batch publishes safe and finalized heads with every block it loads, so a node that
+/// reports neither cannot serve live follow at all.
+pub(super) fn require_checkpoint_heads(snapshot: &HeadSnapshot) -> Result<()> {
+    if snapshot.safe.is_none() || snapshot.finalized.is_none() {
+        return Err(IngestError::data_integrity(
+            "live provider must report safe and finalized checkpoint heads",
+        ));
+    }
+    Ok(())
 }
 
 /// The published head and the block live follow extends from, or `None` for the block when

@@ -2,7 +2,7 @@ use crate::{
     IngestError, Result,
     engine::{
         BLOCKS_PER_BATCH, BatchRequest, Engine, LiveBatchOutcome, LiveBatchRequest, Marker,
-        live_plan::published_ancestor,
+        live_plan::{published_ancestor, require_checkpoint_heads},
     },
     plan::{primary_source, publishable_heads, sort_sources, validate_request},
     provider::provider_error,
@@ -22,11 +22,7 @@ impl Engine {
             .heads()
             .await
             .map_err(|error| provider_error("failed to fetch live target heads", error))?;
-        if snapshot.safe.is_none() || snapshot.finalized.is_none() {
-            return Err(IngestError::data_integrity(
-                "live provider must report safe and finalized checkpoint heads",
-            ));
-        }
+        require_checkpoint_heads(&snapshot)?;
 
         let node_latest = Marker {
             number: snapshot.latest.number,
