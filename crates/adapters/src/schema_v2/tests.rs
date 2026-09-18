@@ -15008,6 +15008,8 @@ fn registrar_transfers_without_reclaim_keep_the_retained_registry_owner_on_the_e
         let namehash = super::common::namehash(&labels);
         let label = keccak256(b"handoff");
         let token_id = U256::from_be_bytes(*label);
+        // The registry declarations carry the full normalized-event lists of the checked-in
+        // production manifests (ens_v1_registry_l1 v3 and basenames_base_registry v2).
         let registry_manifest = manifest_with_events(
             911,
             namespace,
@@ -15017,13 +15019,28 @@ fn registrar_transfers_without_reclaim_keep_the_retained_registry_owner_on_the_e
                     "NewOwner",
                     "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
                     &["registry"],
-                    &["SubregistryChanged", "AuthorityTransferred"],
+                    &[
+                        "SubregistryChanged",
+                        "AuthorityTransferred",
+                        "PermissionChanged",
+                        "SurfaceUnbound",
+                        "SurfaceBound",
+                        "AuthorityEpochChanged",
+                        "ResolverChanged",
+                    ],
                 ),
                 (
                     "Transfer",
                     "event Transfer(bytes32 indexed node, address owner)",
                     &["registry"],
-                    &["AuthorityTransferred"],
+                    &[
+                        "AuthorityTransferred",
+                        "PermissionChanged",
+                        "SurfaceUnbound",
+                        "SurfaceBound",
+                        "AuthorityEpochChanged",
+                        "ResolverChanged",
+                    ],
                 ),
             ],
         );
@@ -15077,17 +15094,37 @@ fn registrar_transfers_without_reclaim_keep_the_retained_registry_owner_on_the_e
         let mut controller_admission = admission(912, "legacy_registrar_controller");
         controller_admission.address = CONTROLLER.to_owned();
         controller_admission.contract_instance_id = Uuid::from_u128(9121);
-        let mut raw_logs = vec![raw_at(
-            v1_registry::NewOwner {
-                node: parent,
-                label,
-                owner: OWNER.parse()?,
-            }
-            .encode_log_data(),
-            1,
-            0,
-            REGISTRY,
-        )];
+        // The registration transaction in contract order: the registrar mints the token
+        // (ERC-721 Transfer from zero), writes the registry owner (registry NewOwner) and emits
+        // its numeric NameRegistered, then the controller emits the label-bearing event
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L131-L153 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L288-L298 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L333-L341 @ ens_v1@91c966f)
+        // (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L415-L426 @ basenames@1809bbc).
+        let mut raw_logs = vec![
+            raw_at(
+                v1_registrar::Transfer {
+                    from: Address::ZERO,
+                    to: OWNER.parse()?,
+                    tokenId: token_id,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                CONTRACT,
+            ),
+            raw_at(
+                v1_registry::NewOwner {
+                    node: parent,
+                    label,
+                    owner: OWNER.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                1,
+                REGISTRY,
+            ),
+        ];
         if namespace == "ens" {
             raw_logs.push(raw_at(
                 with_topic0(
@@ -15100,7 +15137,7 @@ fn registrar_transfers_without_reclaim_keep_the_retained_registry_owner_on_the_e
                     keccak256(b"NameRegistered(uint256,address,uint256)"),
                 ),
                 1,
-                1,
+                2,
                 CONTRACT,
             ));
             raw_logs.push(raw_at(
@@ -15113,7 +15150,7 @@ fn registrar_transfers_without_reclaim_keep_the_retained_registry_owner_on_the_e
                 }
                 .encode_log_data(),
                 1,
-                2,
+                3,
                 CONTROLLER,
             ));
         } else {
@@ -15126,7 +15163,7 @@ fn registrar_transfers_without_reclaim_keep_the_retained_registry_owner_on_the_e
                 }
                 .encode_log_data(),
                 1,
-                1,
+                2,
                 CONTROLLER,
             ));
         }
