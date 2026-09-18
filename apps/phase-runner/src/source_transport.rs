@@ -185,10 +185,11 @@ enum ResumePoint {
     /// Ingest plans another normal batch from the descriptor's declared start block; the
     /// cursor's next block is the one it fetches first.
     DeclaredStart(i64),
-    /// Ingest completed and handed off, so only live follow reads this node. The historical
-    /// cursor stops moving at the handoff while live progress goes through `record_progress`,
-    /// so the position is selected from the published chain head with the live engine's own
-    /// common-ancestor rule instead.
+    /// Ingest completed and handed off, or holds a retained completion the runner revalidates
+    /// without a historical rescan (`completed_phase_recovery`), so only live follow reads
+    /// this node. The historical cursor stops moving at the handoff while live progress goes
+    /// through `record_progress`, so the position is selected from the published chain head
+    /// with the live engine's own common-ancestor rule instead.
     Live(LiveContinuation),
 }
 
@@ -308,13 +309,18 @@ async fn admit_retention_floor(
 }
 
 /// Whether Ingest plans another normal batch from its declared start when it resumes: the
-/// same completed-phase test the runner applies before it restarts Ingest.
+/// same tests the runner applies before it starts Ingest. A failed phase that retains a
+/// completed extent is revalidated, not rescanned, so it does not replan; every other
+/// failed or unfinished phase does.
 async fn ingest_replans_from_declared_start(
     tx: &mut Transaction<'_, Postgres>,
     chain: &str,
 ) -> Result<bool> {
     let rows = lock_chain_phase_state(tx, chain).await?;
     let ingest = row_for(&rows, PhaseName::Ingest)?;
+    if crate::completed_phase_recovery::locked_completion_recovery(ingest, PhaseName::Ingest) {
+        return Ok(false);
+    }
     Ok(ingest.status()? != PhaseStatus::Completed || ingest.ingest_completion_is_incomplete())
 }
 
