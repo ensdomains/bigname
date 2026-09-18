@@ -2,7 +2,75 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result};
 
-pub(super) async fn ownerless_registry(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+pub(super) async fn prepare(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+    bind_resource_events(transaction).await?;
+    ownerless_registry(transaction).await
+}
+
+/// Names the `.eth` BaseRegistrar lifecycle rows that were written before the label was known.
+/// Rows of every other source family keep the name Interpret gave them, or none.
+///
+/// A row is named in one of two ways, both an exact match on the registrar resource and the
+/// namehash: through a binding of that resource to the name, or through the registrar lease a
+/// `NameWrapped` row of the name recorded in `wrapped_registrar_resource_id`. The second way
+/// leaves out the registrar transfer that moves the token into the NameWrapper in the wrap's own
+/// transaction: it names the NameWrapper contract, not a holder. Rows named the second way are
+/// listed in `project_wrapper_linked_events`.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L265 @ ens_v1@91c966f)
+async fn bind_resource_events(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+    for statement in [
+        "UPDATE project_events event SET logical_name_id = binding.logical_name_id
+         FROM project_binding_candidates binding JOIN project_surfaces surface
+           ON surface.logical_name_id = binding.logical_name_id
+         WHERE event.logical_name_id IS NULL AND event.resource_id = binding.resource_id
+           AND event.source_family = 'ens_v1_registrar_l1'
+           AND event.event_kind IN (
+               'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
+               'ExpiryChanged', 'TokenControlTransferred'
+           )
+           AND lower(surface.namehash) = lower(event.after_state ->> 'namehash')",
+        "CREATE TEMP TABLE project_wrapper_linked_events (
+             normalized_event_id bigint PRIMARY KEY
+         ) ON COMMIT DROP",
+        BIND_WRAPPER_LINKED_EVENTS,
+    ] {
+        sqlx::query(statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to bind resource-keyed events", error)
+            })?;
+    }
+    Ok(())
+}
+
+const BIND_WRAPPER_LINKED_EVENTS: &str = "
+    WITH named AS (
+        UPDATE project_events event SET logical_name_id = wrapper.logical_name_id
+        FROM project_events wrapper
+        WHERE event.logical_name_id IS NULL
+          AND event.source_family = 'ens_v1_registrar_l1'
+          AND event.event_kind IN (
+              'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
+              'ExpiryChanged', 'TokenControlTransferred'
+          )
+          AND wrapper.source_family = 'ens_v1_wrapper_l1'
+          AND wrapper.event_kind = 'SurfaceBound'
+          AND wrapper.logical_name_id IS NOT NULL
+          AND wrapper.after_state ->> 'wrapped_registrar_resource_id' = event.resource_id::text
+          AND lower(wrapper.after_state ->> 'node') = lower(event.after_state ->> 'namehash')
+          AND (
+              event.event_kind <> 'TokenControlTransferred'
+              OR event.transaction_hash IS DISTINCT FROM wrapper.transaction_hash
+              OR lower(event.after_state ->> 'to') IS DISTINCT FROM
+                 lower(wrapper.raw_fact_ref ->> 'emitting_address')
+          )
+        RETURNING event.normalized_event_id
+    )
+    INSERT INTO project_wrapper_linked_events
+    SELECT DISTINCT normalized_event_id FROM named";
+
+async fn ownerless_registry(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query(
         "CREATE TEMP TABLE project_latest_registry_owner ON COMMIT DROP AS
          SELECT latest.logical_name_id, latest.resource_id, latest.owner_getter,
@@ -71,26 +139,34 @@ pub(super) async fn ownerless_registry(transaction: &mut Transaction<'_, Postgre
     Ok(())
 }
 
+/// What `build` runs before `AUTHORITY_EVENTS`; the plan test stages the same way.
+pub(super) const SELECTED_BINDINGS: [&str; 5] = [
+    // Temporary tables are never analyzed automatically, and the builders read every table
+    // staged here once per name. Without statistics the planner assumes a handful of rows
+    // and joins them by nested loop.
+    "ALTER TABLE project_name_authority ADD PRIMARY KEY (logical_name_id)",
+    "ANALYZE project_name_authority",
+    "CREATE TEMP TABLE project_bindings ON COMMIT DROP AS
+     SELECT candidate.*
+     FROM project_name_authority authority
+     JOIN project_binding_candidates candidate
+       ON candidate.surface_binding_id = authority.selected_binding_id",
+    "CREATE INDEX ON project_bindings (logical_name_id)",
+    "ANALYZE project_bindings",
+];
+pub(super) const AUTHORITY_EVENTS: &str = include_str!("authority_events.sql");
+
 pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
-    for statement in [
-        // Temporary tables are never analyzed automatically, and the builders read every table
-        // staged here once per name. Without statistics the planner assumes a handful of rows
-        // and joins them by nested loop.
-        "ALTER TABLE project_name_authority ADD PRIMARY KEY (logical_name_id)",
-        "ANALYZE project_name_authority",
-        "CREATE TEMP TABLE project_bindings ON COMMIT DROP AS
-         SELECT candidate.*
-         FROM project_name_authority authority
-         JOIN project_binding_candidates candidate
-           ON candidate.surface_binding_id = authority.selected_binding_id",
-        "CREATE INDEX ON project_bindings (logical_name_id)",
-        "ANALYZE project_bindings",
-        include_str!("authority_events.sql"),
+    for statement in SELECTED_BINDINGS.into_iter().chain([
+        AUTHORITY_EVENTS,
         // Each staged event joins at most one name, so the event id is the table's key.
         "ALTER TABLE project_authority_events ADD PRIMARY KEY (normalized_event_id)",
         "CREATE INDEX ON project_authority_events (logical_name_id, normalized_event_id)",
         "CREATE INDEX ON project_authority_events (resource_id, normalized_event_id)",
         "ANALYZE project_authority_events",
+        include_str!("registration_events.sql"),
+        "CREATE INDEX ON project_registration_events (logical_name_id, normalized_event_id)",
+        "ANALYZE project_registration_events",
         "CREATE TEMP TABLE project_name_serving ON COMMIT DROP AS
          SELECT authority.logical_name_id,
                 pointer.resource_id AS serving_resource_id,
@@ -152,30 +228,28 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                 NULL::text AS owner_getter_reason
          FROM project_name_authority authority
          JOIN LATERAL (
-             SELECT candidates.* FROM (
-                 SELECT event.* FROM project_events event
-                 WHERE event.logical_name_id = authority.logical_name_id
-                   AND event.event_kind = 'ResolverChanged'
-                   AND event.source_family = 'ens_v2_root_l1'
-                   AND event.resource_id IS NOT NULL
-                 UNION ALL
-                 SELECT event.* FROM (
-                     SELECT DISTINCT linked.resource_id FROM project_events linked
-                     WHERE linked.logical_name_id = authority.logical_name_id
-                       AND linked.source_family = 'ens_v2_root_l1'
-                       AND linked.event_kind = 'ResolverChanged'
-                       AND linked.resource_id IS NOT NULL
-                 ) linked
-                 JOIN project_events event ON event.resource_id = linked.resource_id
-                 WHERE event.logical_name_id IS NULL
-                   AND event.event_kind = 'ResolverChanged'
-                   AND event.source_family = 'ens_v2_root_l1'
-                   AND event.resource_id IS NOT NULL
-             ) candidates
-             ORDER BY candidates.block_number DESC NULLS LAST,
-                      candidates.transaction_index DESC NULLS LAST,
-                      candidates.log_index DESC NULLS LAST,
-                      candidates.event_identity DESC
+             SELECT event.*
+             FROM project_events event
+             WHERE event.event_kind = 'ResolverChanged'
+               AND event.source_family = 'ens_v2_root_l1'
+               AND event.resource_id IS NOT NULL
+               AND (
+                   event.logical_name_id = authority.logical_name_id
+                   OR (
+                       event.logical_name_id IS NULL
+                       AND EXISTS (
+                           SELECT 1 FROM project_events linked
+                           WHERE linked.logical_name_id = authority.logical_name_id
+                             AND linked.resource_id = event.resource_id
+                             AND linked.source_family = 'ens_v2_root_l1'
+                             AND linked.event_kind = 'ResolverChanged'
+                       )
+                   )
+               )
+             ORDER BY event.block_number DESC NULLS LAST,
+                      event.transaction_index DESC NULLS LAST,
+                      event.log_index DESC NULLS LAST,
+                      event.event_identity DESC
              LIMIT 1
          ) pointer ON TRUE
          WHERE authority.unsupported_reason = 'current_authority_not_projected'
@@ -202,7 +276,7 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
         "CREATE INDEX ON project_name_serving (serving_resource_id)",
         "CREATE INDEX ON project_name_serving (resolver_chain_id, resolver_address)",
         "ANALYZE project_name_serving",
-    ] {
+    ]) {
         sqlx::query(statement)
             .execute(&mut **transaction)
             .await
@@ -211,4 +285,45 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
             })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// A full rebuild runs this statement once over every event and every name. With anything but
+    /// a plain equality between the two, Postgres can neither hash- nor merge-join them and
+    /// instead re-reads every row that carries no name once per name. This checks the SQL text
+    /// only; `plan_tests` checks the plan Postgres chooses.
+    #[test]
+    fn authority_events_join_names_by_equality_only() {
+        let statement = include_str!("authority_events.sql");
+        let (join, _filter) = statement
+            .split_once("\nWHERE (")
+            .expect("the statement has a WHERE clause");
+        assert!(
+            join.trim_end().ends_with(
+                "FROM project_events event\nJOIN project_name_authority authority\n  \
+                 ON authority.logical_name_id = event.logical_name_id"
+            ),
+            "the events-to-names join must be a single equality on logical_name_id:\n{join}"
+        );
+        assert!(
+            !statement.contains("event.logical_name_id IS NULL"),
+            "rows without a name are named while staging, not searched by this statement"
+        );
+    }
+
+    /// The registrar lease a `NameWrapped` row recorded is attached while staging, with the same
+    /// restriction as the binding match: `.eth` BaseRegistrar lifecycle rows only.
+    #[test]
+    fn staging_names_only_base_registrar_lifecycle_rows() {
+        assert_eq!(
+            super::BIND_WRAPPER_LINKED_EVENTS
+                .matches("event.source_family = 'ens_v1_registrar_l1'")
+                .count(),
+            1
+        );
+        assert!(super::BIND_WRAPPER_LINKED_EVENTS.contains(
+            "wrapper.after_state ->> 'wrapped_registrar_resource_id' = event.resource_id::text"
+        ));
+    }
 }

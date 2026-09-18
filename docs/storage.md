@@ -214,6 +214,40 @@ from another ENS source alone does not choose registrar authority. A subsequent 
 bind a now-known name when the registrar remains current. Earlier resource-only rows are not rewritten.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f)
 
+When an admitted controller event names a registrar lease whose label was unknown, Interpret
+writes the binding and nothing else about the lease: the earlier grant, renewal, expiry and
+release rows keep their null `logical_name_id` and stay keyed by the registrar `resource_id`.
+A resolver set on the node before the label was known was linked to that resource alone, so the
+naming event also emits one named [state-derived normalized event](glossary.md#state-derived-normalized-event)
+of kind `ResolverChanged` for the current non-zero resolver. It is sourced to the registrar's
+manifest at the naming event's raw position, marked `state_derived=true` and
+`surface_materialization=true` with `pointer_reason=surface_materialization_current_resolver`,
+and copies the link's `resolver_source_role`. Restoration reads that key only for the
+`registry_old` role, so it does not rebuild the named resolver link from this row. Later
+resolver writes carry the name either way, whether the interpreter kept its state or restored it
+from stored events. The replay is sourced to the manifest recorded on the authority being named;
+a registry-only authority opened by a registrar transfer without `reclaim` records none, and its
+resolver is not replayed.
+Same-transaction reconciliation does not treat this replay as a successor authority epoch of the
+resource, so the binding made at that position survives.
+
+The `NameWrapped`-derived rows that inherit the wrap's shared observation object record
+`after_state.wrapped_registrar_resource_id`. Those rows are `TokenControlTransferred`,
+`ExpiryChanged` and `PermissionScopeChanged`, and the authority-transition rows the wrap emits
+from the same object: `AuthorityEpochChanged`, and `SurfaceBound`, `SurfaceUnbound` and the
+authority `ResolverChanged` whenever the wrap emits them. The value is the
+`resource_id` of the BaseRegistrar lease whose token the wrap moved into the NameWrapper, when a
+registrar lease with a token lineage is the node's current authority as the log is interpreted.
+On those rows the key is always present and is `null` otherwise: for a wrapped subname, which has
+no registrar lease, and for a registration where a controller event creates the lease only after
+`NameWrapped` in the same transaction. The wrap's holder `PermissionChanged` rows and the
+`PreimageObserved` row generated for its name are built separately and do not carry the key.
+Project follows a wrap to its registrar lease through this recorded
+identity rather than by matching names or timestamps.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L305 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
+
 A canonical, admitted, normalization-valid readable observation may also disclose a retained unnamed ENSv1 registrar lease to its exact namehash and labelhash only when that same live resource and token lineage are already the selected authority. Current admitted ENS registry ownership evidence must match the registrar's nonzero current owner; missing ownership evidence, a different authority, expiry, release, or migration retirement prevents attachment. A readable observation does not select authority. The binding begins at the observation. Earlier resource-only events remain unchanged.
 
 `registration_window` retains whether restoration reconciles preceding setup logs or the complete
@@ -229,6 +263,11 @@ independently of the registration marker.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L68 @ ens_v1@91c966f)
 
 Numeric BaseRegistrar expiry above the signed timestamp range is retained as `i64::MAX`.
+The `ens_v1_registrar_l1` controller events that repeat that expiry next to the label use the same
+rule, so an out-of-range value does not fail interpretation and lose the label; Basenames expiry
+decoding stays strict.
+(upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L116-L124 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L133-L139 @ ens_v1@91c966f)
 Settlement treats an expiry whose grace addition overflows that range as live; public timestamp
 rendering keeps the existing `null` representation for unrepresentable dates. Co-admitted
 ENSv1→ENSv2 migration evidence retains over-`u64` expiry as decimal text and does not use it for
@@ -1094,6 +1133,17 @@ Surface-materialization and per-log authority-transition resolver copies carry
 so compacted restoration survives a later global resolver selection.
 
 The additive named `RegistrationGranted` is a [state-derived normalized event](glossary.md#state-derived-normalized-event), marked `state_derived`, `surface_materialization`, and `registrar_surface_snapshot`. It reports the retained lease's original registration timestamp and current expiry, owner, resolver, and ownership permissions. Its raw position is the readable trigger; a bounded provenance object retains the original numeric grant and latest registrar-owner, registry-owner, and resolver evidence. Subsequent retained state carries these references without accumulating history. Restoration handles the marked snapshot separately from an on-chain registration. Project uses the verified original timestamp only for this marked case; compact product history omits rows with both markers `state_derived=true` and `registrar_surface_snapshot=true` before pagination, while diagnostics retains them. Missing, null, or false markers do not exclude any row; other state-derived events and the original resource-only grant keep their existing history behavior.
+
+The marked snapshot (the [registrar surface snapshot](glossary.md#registrar-surface-snapshot)) and Project's join by resource identity coexist, and each covers reveals the
+other does not. The snapshot gives an immediate adapter-side binding when a source that is
+neither a registrar controller nor the NameWrapper discloses the label; the ENSv1→ENSv2 migration
+on Sepolia depends on that binding existing before the migration boundary. It is deliberately not
+emitted where a registrar controller event or a wrap names the lease, which is nearly every mainnet
+name, because copying a grant, an expiry and permission rows per registration would duplicate
+facts the original rows already hold. There Project attaches the original resource-keyed rows to
+the name (see [projections](projections.md#exact-name-projection)). When both exist for one name,
+they describe one registration: the original grant and the snapshot share a `resource_id`, and
+`registered_at` is the original grant's block time either way.
 
 For this disclosure rule, launch-bounded transfers to the manifest-declared Graveyard and admitted cleanup observations carry `registrar_surface_retired` in their existing event payload. The bounded retained evidence records that retirement separately from the ENSv1 current-registry fallback marker. It prevents a later preimage from reopening that lease and does not replace migration correlation or relax exact cleanup evidence. A subsequent independently proven new numeric grant has a new lease identity.
 

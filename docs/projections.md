@@ -259,7 +259,10 @@ that epoch's binding and resources at the requested position. An activated
 ENSv1→ENSv2 authority proof may select a closed ENSv2 binding after release;
 that [released v2 authority](glossary.md#released-v2-authority) does not fall
 back to an active retained ENSv1 binding. A released ENSv1 lease with no
-revived custody and no open binding likewise selects its closed lease binding
+revived custody likewise selects its closed lease binding,
+or the closed NameWrapper binding that stands for a lease registered through
+the NameWrapper, or the open registry-only binding under which the lease lapsed
+after its token was transferred without `reclaim`,
 as a [released v1 authority](glossary.md#released-v1-authority) tombstone. The exact
 [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) no-proof
 exception selects a current ENSv2 arm when ENSv1 evidence is current or
@@ -351,6 +354,123 @@ has no current child or exact-name row and its historical wrapper resource is
 not the resource on its active binding: retracting the latest disqualifying
 `PermissionScopeChanged` or `ExpiryChanged` event must still rebuild the child
 from the surviving wrapper history.
+
+ENSv1 BaseRegistrar lifecycle rows (`RegistrationGranted`, `RegistrationRenewed`,
+`ExpiryChanged`, `RegistrationReleased`, and the registrar's `TokenControlTransferred`) can carry
+no `logical_name_id`, because the registrar's own events identify a lease by labelhash only
+(upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L10-L20 @ ens_v1@91c966f).
+Project gives such a row its name while staging a build, by exact identity and never by label or
+time. Only these `ens_v1_registrar_l1` rows are named this way. A row of any other source family
+that carries a resource but no name, for example an ENSv1 registry row written before the label
+was known, keeps no name: it stays out of the name's `created_at` and provenance lists, as
+before registrar rows were joined by resource identity.
+
+- **Through the lease's own binding.** A name-less row whose `resource_id` has a binding
+  candidate, open or closed, to a surface with the row's namehash is staged with that name. This
+  is what a controller event that names the lease later, or a
+  [registrar surface snapshot](glossary.md#registrar-surface-snapshot), makes possible.
+  A row on the same resource with a different namehash is not attached.
+- **Through a wrap.** A wrapped `.eth` name is bound to its NameWrapper resource, so the lease is
+  reached from the selected wrapper binding's `SurfaceBound` row by one of two rules:
+  1. *A named grant in the wrap's own transaction.* When a controller event creates the lease
+     (today's mainnet manifest), that event follows `NameWrapped` in the registration
+     transaction, so the wrap could not record the lease and
+     `wrapped_registrar_resource_id` is `null`. The grant carries the name, and sharing the
+     wrap's transaction identifies it.
+  2. *The recorded link.* When the BaseRegistrar's own event creates the lease, or the name is
+     wrapped in a later transaction, the lease exists before `NameWrapped` and the wrap records
+     its `resource_id` in `wrapped_registrar_resource_id`. The registrar rows are name-less, so
+     there is nothing else to match on; the link plus equality of the wrap's node and the row's
+     namehash identifies them. These rows are also named while staging, from any `NameWrapped`
+     binding row of the name that recorded the lease, so the statement that collects each
+     name's authority events joins events to names by a plain equality on the name and never
+     searches the rows that carry no name. The registrar `Transfer` into the NameWrapper in the
+     wrap's own transaction is not named this way.
+
+  Both rules stay because both shapes exist in stored events: rule 1 alone cannot see name-less
+  registrar rows, and rule 2 alone would drop the registrar lease, and with it `registered_at`
+  and the registrar expiry, from every name registered through the NameWrapper under a manifest
+  where the controller event grants the lease.
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L305 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
+
+The served registrant of a wrapped name follows the chain: the `NameWrapped` owner, then each
+later NameWrapper transfer. The registrar `Transfer` that moves the token into the NameWrapper
+during a later wrap is left out of the registrant fold: it is custody moving to the wrapper
+contract, not a change of holder, and the person who holds the name afterwards is the
+`NameWrapped` owner recorded next in the same transaction.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f)
+
+`declared_summary.registration.resource_id` names the registration of an ENSv1 name by its
+BaseRegistrar lease: the selected registration's own resource, or the lease the current wrapper
+binding recorded. It is the lease whether the name was wrapped at registration or later, and
+stays the same through unwrap and rewrap. It is `null` for ENSv2 registrations. No API route
+reads this key yet.
+
+Incremental scope brings in the same rows a rebuild names, in both directions. A scoped wrapper
+resource or name adds the exact registrar resource its canonical `SurfaceBound` row names, and a
+changed registrar row adds the name and wrapper resource only when a canonical wrapper binding
+names that registrar resource. A scoped name also adds every resource it was ever bound to that
+holds lease rows without a name, and a scoped resource that holds such rows adds every name it
+was bound to with the same namehash, whether or not that binding is still open: after a
+registrar token is transferred without `reclaim`, the registry-only binding is the open one and
+the lease's binding is closed, yet the lease rows still belong to the name. The closure runs
+for normal publication and for redo, so a wrapper-only transfer, resolver update, fuse change,
+retraction, registrar renewal or registry-only update stages the same registration rows, and
+serves the same `created_at`, `registered_at` and expiry, as a rebuild from block zero.
+
+A registry-only binding reads the events of the binding it replaced only up to the position where
+it opened; nothing later on that resource can decide control. The lease the name kept is the one
+exception. After a registrar token is transferred without `reclaim` the name still has its
+BaseRegistrar lease, and that lease goes on being renewed, and in the end lapses, under the
+registry-only binding. So `RegistrationRenewed`, `ExpiryChanged` and `RegistrationReleased` rows
+of the `ens_v1_registrar_l1` family on exactly that lease's resource still reach the
+registration after the handoff. A renewal updates its expiry and `latest_event_kind`;
+`registered_at`, the registrant, the selected binding and every `control` field other than the
+repeated expiry stay as they were. Rows of any other kind or source family, and lease rows on any
+other resource even when they carry the name (an earlier lease of the same name, or a resource
+the name was never bound to), stay outside the window. `renew` writes only the lease's expiry,
+and the registrar writes the registry owner only when registering and in `reclaim`, so a token
+transfer alone leaves the registry owner unchanged.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L148-L150 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+
+The release of the retained lease releases the name like any other lapse. On chain the registry
+keeps the owner and resolver it held after an ordinary lapse too; what makes a lapsed `.eth`
+name available again is the registrar, whose `ownerOf` reverts once the lease is past its expiry
+and whose `available` is true once it is past grace. ENSv2 draws the same line inside the
+registry: it checks expiry on every read and returns no resolver and no subregistry for an
+expired label. The handed-off name is therefore not the one exception. It becomes a
+[released v1 authority](glossary.md#released-v1-authority) tombstone: `status` `released` with
+the lease's `released_at`, and no current owner, manager, registrant, authority, expiry, control,
+resolver or records; the address listing drops it and a name-filtered permissions request
+selects nothing, as for any released name. The tombstone selects the registry-only binding,
+which stands for the released lease the way the closed NameWrapper binding stands for a wrapped
+one. It fires only for the lease that binding replaced (the exact predecessor whose lifecycle
+rows the window admits past its position), released by a registrar row that arrived after the
+binding opened, and only when that binding is the name's only open one. A release of an earlier
+lease carrying the name, whether it came before the name was registered again or is observed
+after the handoff, does not release the live registration. A release at the very position where
+a registry-only binding opened is the release that handed the name over itself; that revived
+registry-only custody is unchanged.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L249-L257 @ ens_v2@a971bd64)
+
+A lease registered through the NameWrapper that lapses past grace is released like any other:
+the registrar's `ownerOf` reverts and the name is available again. Its registrar resource never
+had a binding, so the [released v1 authority](glossary.md#released-v1-authority) tombstone
+selects the closed NameWrapper binding that stands for the lease, found by the same two rules as
+above: the recorded `wrapped_registrar_resource_id`, or a named grant in the wrap's transaction.
+The rule starts from a registrar `RegistrationReleased`, so it does not fire when only the
+NameWrapper's own expiry has passed and the registrar lease, renewed on the BaseRegistrar
+directly, is still live; that name is not released.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
 
 A pre-existing owner-retraction gap remains: if an owner-zeroing ENSv1 or Basenames registry
 `AuthorityTransferred` event hides a child that has no current child or exact-name row, later retracting that
@@ -697,7 +817,7 @@ or its registry root carries, because only a held admin role can grant or
 revoke that role and the registration cannot re-grant an admin role; it is
 `NULL` for every other resource. The registry root is read from the resource
 identity table rather than the build scope, the admin rows are the staged rows
-for in-scope resources plus the live rows for every other resource, and a
+for in-scope resources plus the live rows of their registry roots, and a
 changed root permission scopes every registration of that registry, so
 incremental, redo, and full builds converge on `locked_roles`.
 (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L418-L424 @ ens_v2@a971bd64)

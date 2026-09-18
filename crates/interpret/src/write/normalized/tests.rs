@@ -1,10 +1,23 @@
-use bigname_adapters::schema_v2::seam::{LOG_INDEX_KEY, TRANSACTION_INDEX_KEY};
+use alloy_primitives::{Address, U256, keccak256};
+use alloy_sol_types::{SolEvent, sol};
+use bigname_adapters::schema_v2::{
+    AddressAdmissionInput, BatchInput, ManifestInput, RawBlockInput, RawLogInput,
+    interpret_schema_v2_batch,
+    seam::{LOG_INDEX_KEY, TRANSACTION_INDEX_KEY},
+};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::json;
+use time::OffsetDateTime;
 
 use super::*;
 
 type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+sol! {
+    event RegistrarNameRegistered(uint256 indexed id, address indexed owner, uint256 expires);
+    event RegistryNewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
+    event RegistryTransfer(bytes32 indexed node, address owner);
+}
 
 async fn database(name: &str) -> TestResult<TestDatabase> {
     let database = TestDatabase::create(TestDatabaseConfig::new(name)).await?;
@@ -24,6 +37,177 @@ async fn database(name: &str) -> TestResult<TestDatabase> {
     .execute(database.pool())
     .await?;
     Ok(database)
+}
+
+#[tokio::test]
+async fn registrar_only_batch_persists_resource_keyed_events_without_a_surface() -> TestResult {
+    let database = database("interpret_registrar_only_without_surface").await?;
+    let registry = "0x0000000000000000000000000000000000000043";
+    let eth_node: alloy_primitives::B256 =
+        "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae".parse()?;
+    let label: alloy_primitives::B256 = U256::from(1).into();
+    let node = keccak256([eth_node.as_slice(), label.as_slice()].concat());
+    let registry_encoded = RegistryNewOwner {
+        node: eth_node,
+        label,
+        owner: "0x0000000000000000000000000000000000000042".parse()?,
+    }
+    .encode_log_data();
+    let transfer_encoded = RegistryTransfer {
+        node,
+        owner: "0x0000000000000000000000000000000000000042".parse()?,
+    }
+    .encode_log_data();
+    let encoded = RegistrarNameRegistered {
+        id: U256::from(1),
+        owner: "0x0000000000000000000000000000000000000042".parse::<Address>()?,
+        expires: U256::from(42),
+    }
+    .encode_log_data();
+    let mut topics = encoded
+        .topics()
+        .iter()
+        .map(|topic| format!("{topic:#x}"))
+        .collect::<Vec<_>>();
+    topics[0] = format!(
+        "{:#x}",
+        keccak256("NameRegistered(uint256,address,uint256)")
+    );
+    let manifest =
+        |manifest_id: i64, source_family: &str, events: serde_json::Value| ManifestInput {
+            manifest_id,
+            manifest_version: 1,
+            namespace: "ens".to_owned(),
+            source_family: source_family.to_owned(),
+            chain_id: "batch-test".to_owned(),
+            deployment_label: "test".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
+            payload_json: json!({"abi": {"events": events}}).to_string(),
+        };
+    let admission = |address: &str, id: u128, role: &str| AddressAdmissionInput {
+        address: address.to_owned(),
+        contract_instance_id: sqlx::types::Uuid::from_u128(id),
+        source_manifest_id: Some(id as i64),
+        role: Some(role.to_owned()),
+        discovery_edge_kind: None,
+        discovery_from_contract_instance_id: None,
+        discovery_observation_key: None,
+        active_from_block: Some(0),
+        active_to_block: None,
+    };
+    let raw_log = |log_index: i64, address: &str, topics: Vec<String>, data: Vec<u8>| RawLogInput {
+        chain_id: "batch-test".to_owned(),
+        block_hash: "0x01".to_owned(),
+        block_number: 1,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH,
+        canonicality_state: "canonical".to_owned(),
+        transaction_hash: "0xtx".to_owned(),
+        transaction_index: 0,
+        log_index,
+        emitting_address: address.to_owned(),
+        topics,
+        data,
+    };
+    let hex_topics = |log: &alloy_primitives::LogData| {
+        log.topics()
+            .iter()
+            .map(|topic| format!("{topic:#x}"))
+            .collect::<Vec<_>>()
+    };
+    let registrar = "0x0000000000000000000000000000000000000042";
+    let mut output = interpret_schema_v2_batch(BatchInput {
+        chain_id: "batch-test".to_owned(),
+        manifests: vec![
+            manifest(
+                1,
+                "ens_v1_registrar_l1",
+                json!([{
+                    "name": "NameRegistered",
+                    "fragment": concat!(
+                        "event NameRegistered(uint256 indexed id, address indexed owner, ",
+                        "uint256 expires)"
+                    ),
+                    "emitter_roles": ["registrar"],
+                    "normalized_events": [
+                        "RegistrationGranted",
+                        "ExpiryChanged",
+                        "PermissionChanged",
+                        "AuthorityEpochChanged"
+                    ]
+                }]),
+            ),
+            manifest(
+                2,
+                "ens_v1_registry_l1",
+                json!([
+                    {
+                        "name": "NewOwner",
+                        "fragment": concat!(
+                            "event NewOwner(bytes32 indexed node, bytes32 indexed label, ",
+                            "address owner)"
+                        ),
+                        "emitter_roles": ["registry"],
+                        "normalized_events": ["SubregistryChanged", "AuthorityTransferred"]
+                    },
+                    {
+                        "name": "Transfer",
+                        "fragment": "event Transfer(bytes32 indexed node, address owner)",
+                        "emitter_roles": ["registry"],
+                        "normalized_events": ["AuthorityTransferred", "PermissionChanged"]
+                    }
+                ]),
+            ),
+        ],
+        discovery_rules: vec![],
+        admissions: vec![
+            admission(registrar, 1, "registrar"),
+            admission(registry, 2, "registry"),
+        ],
+        prior_events: vec![],
+        blocks: vec![RawBlockInput {
+            chain_id: "batch-test".to_owned(),
+            block_hash: "0x01".to_owned(),
+            block_number: 1,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH,
+            canonicality_state: "canonical".to_owned(),
+        }],
+        raw_logs: vec![
+            raw_log(
+                0,
+                registry,
+                hex_topics(&registry_encoded),
+                registry_encoded.data.to_vec(),
+            ),
+            raw_log(1, registrar, topics, encoded.data.to_vec()),
+            raw_log(
+                2,
+                registry,
+                hex_topics(&transfer_encoded),
+                transfer_encoded.data.to_vec(),
+            ),
+        ],
+    })?;
+    assert!(output.name_surfaces.is_empty());
+    for resource in &output.resources {
+        sqlx::query(
+            "INSERT INTO resources (
+                 resource_id, chain_id, block_hash, block_number, canonicality_state
+             ) VALUES ($1, 'batch-test', '0x01', 1, 'canonical')
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(resource.resource_id)
+        .execute(database.pool())
+        .await?;
+    }
+    output
+        .normalized_events
+        .iter_mut()
+        .for_each(|event| event.source_manifest_id = None);
+    let mut transaction = database.pool().begin().await?;
+    events(&mut transaction, &output.normalized_events).await?;
+    transaction.commit().await?;
+    database.cleanup().await?;
+    Ok(())
 }
 
 fn event(identity: &str, after_state: serde_json::Value) -> NormalizedEvent {

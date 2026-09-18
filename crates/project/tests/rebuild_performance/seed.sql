@@ -7,7 +7,8 @@
 --   5    ENSv1 names registered through the NameWrapper (the registrar rows carry no name and are
 --        reached only through the lease the NameWrapped row recorded)
 --   6-8  ENSv2 registry names (label rows without a resource, token rows with one, state-derived
---        expiry releases without a name, role grants with and without an admin holder)
+--        expiry releases without a name, role grants to a holder and three delegates, with and
+--        without an admin holder)
 --   9    ENSv1 registry-only subnames, half of them with a zero owner and a retained resolver
 -- On top: `.eth` leases whose label is never learned, reverse claims with a primary name for every
 -- second name, and node-keyed resolver records (coin-60 `AddressChanged` with and without its
@@ -237,8 +238,10 @@ WHERE known AND shape = 'v2'
   AND (tag <> 'again' OR i % 4 = 0)
   AND (tag <> 'unregistered' OR i % 7 = 0);
 
--- ENSv2 role grants: a holder role on every registration, an admin role on every second one, and
--- one admin role on the registry root.
+-- ENSv2 role grants: a holder role and three delegate roles on every registration, an admin role
+-- on every second one, and one admin role on the registry root. The delegates give the staged
+-- permission table several rows per registration, as a chain with delegated renewals and
+-- resolver management has.
 INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id,
     event_kind, source_family, manifest_version, chain_id, block_number, block_hash,
     transaction_hash, transaction_index, log_index, derivation_kind, canonicality_state,
@@ -262,9 +265,13 @@ SELECT 'seed:v2:role:' || role || ':' || i, 'ens', NULL, token, 'PermissionChang
 FROM seed
 CROSS JOIN LATERAL (VALUES
     ('holder', 5, owner, '["unregister","set_resolver"]'::jsonb),
-    ('admin', 6, later_owner, '["admin_set_resolver","can_transfer_admin"]'::jsonb)
+    ('admin', 6, later_owner, '["admin_set_resolver","can_transfer_admin"]'::jsonb),
+    ('renewer', 7, '0x' || substr(md5('d1' || i), 1, 40), '["renew"]'::jsonb),
+    ('resolver_manager', 8, '0x' || substr(md5('d2' || i), 1, 40), '["set_resolver"]'::jsonb),
+    ('subregistry_manager', 9, '0x' || substr(md5('d3' || i), 1, 40),
+     '["set_subregistry"]'::jsonb)
 ) roles(role, log, subject, powers)
-WHERE known AND shape = 'v2' AND (role = 'holder' OR i % 2 = 0);
+WHERE known AND shape = 'v2' AND (role <> 'admin' OR i % 2 = 0);
 INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id,
     event_kind, source_family, manifest_version, chain_id, block_number, block_hash,
     transaction_hash, transaction_index, log_index, derivation_kind, canonicality_state,

@@ -1,12 +1,14 @@
 use crate::{Marker, ProjectError, Result};
 use sqlx::{Postgres, Transaction};
+#[cfg(test)]
+mod plan_tests;
 mod stage;
 pub(super) async fn build(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
-    stage::ownerless_registry(transaction).await?;
+    stage::prepare(transaction).await?;
     sqlx::query(include_str!("name_authority/build.sql"))
         .bind(chain_id)
         .bind(target.number)

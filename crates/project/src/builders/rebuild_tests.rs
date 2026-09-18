@@ -28,6 +28,8 @@ const BASELINE: &[&str] = &[
 ];
 /// Enough names that reading a staged table once per name costs visibly more than a keyed lookup.
 const PLAN_NAMES: i64 = 3_000;
+/// How many ENSv2 registrations an incremental batch rebuilds; the live tables hold every name.
+const BATCH_RESOURCES: i64 = 40;
 
 /// The builders in the order `build_all` runs them.
 #[derive(Clone, Copy, PartialEq, PartialOrd)]
@@ -44,6 +46,8 @@ struct Rebuild {
     database: TestDatabase,
     transaction: Transaction<'static, Postgres>,
     target: Marker,
+    /// What `$4` binds to: `through` stages a full rebuild, `narrow_to_incremental_batch` flips it.
+    full_rebuild: bool,
 }
 
 impl Rebuild {
@@ -116,7 +120,74 @@ impl Rebuild {
             database,
             transaction,
             target,
+            full_rebuild: true,
         })
+    }
+
+    /// Turns the full-rebuild staging into an incremental batch of `BATCH_RESOURCES` ENSv2
+    /// registrations that hold an admin role. Every staged permission row is published as the
+    /// live table first, so the registry root, which is outside the batch, has its admin row only
+    /// there. The batch's own rows stay staged, except that the first registration loses its
+    /// staged admin row while the live table keeps it: a rebuild that removed a permission. Then
+    /// the chain grows by `extra` registrations outside the batch, each holding a live admin
+    /// row, one of every hundred being the root of a registry no staged resource uses.
+    async fn narrow_to_incremental_batch(&mut self, extra: i64) -> Result<()> {
+        raw_sql(&format!(
+            "CREATE TEMP TABLE incremental_batch ON COMMIT DROP AS
+             SELECT resource_id, row_number() OVER (ORDER BY resource_id) = 1 AS admin_removed
+             FROM (
+                 SELECT DISTINCT resource_id FROM project_stage_permissions_current
+                 WHERE scope_kind = 'registry' AND effective_powers ? 'admin_set_resolver'
+                 ORDER BY resource_id LIMIT {BATCH_RESOURCES}
+             ) chosen;
+             INSERT INTO permissions_current SELECT * FROM project_stage_permissions_current;
+             INSERT INTO project_scope_resources SELECT resource_id FROM incremental_batch;
+             DELETE FROM project_resources resource
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM incremental_batch batch WHERE batch.resource_id = resource.resource_id
+             );
+             DELETE FROM project_stage_permissions_current staged
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM incremental_batch batch
+                 WHERE batch.resource_id = staged.resource_id
+                   AND NOT (batch.admin_removed AND staged.effective_powers ? 'admin_set_resolver')
+             );
+             INSERT INTO resources (
+                 resource_id, chain_id, block_hash, block_number, provenance, canonicality_state
+             )
+             SELECT ('00000000-0000-0000-00ee-' || lpad(to_hex(n), 12, '0'))::uuid, '{CHAIN}',
+                    '0x' || lpad('1', 64, '0'), 1,
+                    jsonb_build_object(
+                        'adapter', 'ens_v2_permissions', 'source_family', 'ens_v2_registry_l1',
+                        'registry_contract_instance_id', CASE WHEN n % 100 = 0
+                            THEN '00000000-0000-0000-0000-' || lpad(to_hex(n), 12, '0')
+                            ELSE '00000000-0000-0000-0000-000000000001' END,
+                        'upstream_resource', CASE WHEN n % 100 = 0
+                            THEN '0x' || lpad('0', 64, '0')
+                            ELSE '0x' || lpad(to_hex(n), 64, '0') END
+                    ),
+                    'canonical'
+             FROM generate_series(1, {extra}) extra(n);
+             INSERT INTO permissions_current (
+                 resource_id, subject, scope, scope_kind, effective_powers, provenance,
+                 manifest_version
+             )
+             SELECT ('00000000-0000-0000-00ee-' || lpad(to_hex(n), 12, '0'))::uuid,
+                    '0x' || lpad(to_hex(n), 40, '0'),
+                    CASE WHEN n % 100 = 0 THEN 'root' ELSE 'registry' END,
+                    CASE WHEN n % 100 = 0 THEN 'root' ELSE 'registry' END,
+                    '[\"admin_renew\", \"admin_unregister\"]'::jsonb,
+                    jsonb_build_object('chain_id', '{CHAIN}'), 1
+             FROM generate_series(1, {extra}) extra(n);
+             ANALYZE permissions_current;
+             ANALYZE project_resources;
+             ANALYZE project_stage_permissions_current;
+             ANALYZE project_scope_resources"
+        ))
+        .execute(&mut *self.transaction)
+        .await?;
+        self.full_rebuild = false;
+        Ok(())
     }
 
     /// Runs a statement whose parameters are the chain, the target number, the target hash and
@@ -129,7 +200,7 @@ impl Rebuild {
                 1 => query.bind(CHAIN),
                 2 => query.bind(self.target.number),
                 3 => query.bind(&self.target.hash),
-                _ => query.bind(true),
+                _ => query.bind(self.full_rebuild),
             };
         }
         query.execute(&mut *self.transaction).await?;
@@ -145,7 +216,7 @@ impl Rebuild {
                 1 => query.bind(CHAIN),
                 2 => query.bind(self.target.number),
                 3 => query.bind(&self.target.hash),
-                _ => query.bind(true),
+                _ => query.bind(self.full_rebuild),
             };
         }
         Ok(query.fetch_one(&mut *self.transaction).await?[0]["Plan"].take())
@@ -471,15 +542,22 @@ fn swapped(sql: &str, current: &str, previous: &str) -> String {
     sql.replacen(current, previous, 1)
 }
 
-/// `locked_roles` asked, per resource and role, whether an admin row exists for the resource or
-/// its root. The `IN (resource, root)` test kept that from being a join, so every resource read
-/// all staged permission rows. It is now two joins on the per-resource admin set.
-#[tokio::test]
-async fn resource_summary_matches_the_correlated_admin_lookup() -> Result<()> {
+/// The resource summary as it was: the admin sets aggregated once over every staged row and,
+/// on an incremental build, every live row on the chain, then searched per resource and role.
+fn previous_resource_summary() -> String {
     let current = super::permissions::resource_summary::query();
-    let previous = swapped(
+    swapped(
         &swapped(
-            &swapped(&current, "v2_admin_powers AS MATERIALIZED (", "v2_admin_powers AS ("),
+            &swapped(
+                &swapped(
+                    &current,
+                    "            FROM admin_resources needed
+            JOIN permissions_current live ON live.resource_id = needed.resource_id\n",
+                    "            FROM permissions_current live\n",
+                ),
+                "v2_admin_powers AS MATERIALIZED (",
+                "v2_admin_powers AS (",
+            ),
             "        LEFT JOIN v2_admin_powers own_admins ON own_admins.resource_id = resource.resource_id
         LEFT JOIN v2_admin_powers root_admins
           ON root_admins.resource_id = root_resource.resource_id\n",
@@ -488,7 +566,15 @@ async fn resource_summary_matches_the_correlated_admin_lookup() -> Result<()> {
         "            WHERE NOT COALESCE(role.admin = ANY(own_admins.admins), false)
               AND NOT COALESCE(role.admin = ANY(root_admins.admins), false)\n",
         include_str!("../../tests/rebuild_performance/previous_resource_summary_locks.sql"),
-    );
+    )
+}
+
+/// `locked_roles` asked, per resource and role, whether an admin row exists for the resource or
+/// its root. The `IN (resource, root)` test kept that from being a join, so every resource read
+/// all staged permission rows. It is now two joins on the per-resource admin set.
+#[tokio::test]
+async fn resource_summary_matches_the_correlated_admin_lookup() -> Result<()> {
+    let previous = previous_resource_summary();
     let mut rebuild = Rebuild::through("rebuild_equal_summary", 600, Builder::Permissions).await?;
     let stage = "project_stage_permissions_current_resource_summary";
     rebuild.rerun_with(stage, &previous).await?;
@@ -521,6 +607,113 @@ async fn resource_summary_reads_the_staged_permissions_a_fixed_number_of_times()
             "{relation} rows handled: {rows}; {plan}"
         );
     }
+    rebuild.finish().await
+}
+
+/// Whether an ENSv2 registration has a staged permission row is an `EXISTS` in the
+/// `resource_restrictions` block. Postgres either hashes the staged rows once or searches the
+/// staged table per registration, and it searches once it estimates the rows will not fit hash
+/// memory, which is a few tens of thousands of rows under the default `work_mem`. The stage is
+/// created like the live table but without its key, so the search read the whole stage for every
+/// registration, and a chain the size of Sepolia never finished. The stage is now indexed by
+/// resource and analyzed, so the search is a keyed probe. Hash memory is at its minimum here so
+/// the seeded rows exceed it.
+#[tokio::test]
+async fn resource_summary_looks_the_staged_permissions_up_by_key() -> Result<()> {
+    let mut rebuild =
+        Rebuild::through("rebuild_plan_summary_key", PLAN_NAMES, Builder::Permissions).await?;
+    raw_sql("SET LOCAL work_mem = '64kB'; SET LOCAL hash_mem_multiplier = 1")
+        .execute(&mut *rebuild.transaction)
+        .await?;
+    let staged: i64 = sqlx::query_scalar("SELECT count(*) FROM project_stage_permissions_current")
+        .fetch_one(&mut *rebuild.transaction)
+        .await?;
+    // A hashed row is 40 bytes, so the minimum 64kB holds about 1,600; the stage must be well
+    // past that even as the planner estimates it.
+    ensure!(
+        staged >= 2_500,
+        "the seed stages {staged} permission rows, too few to exceed hash memory"
+    );
+    let plan = rebuild
+        .explain(&super::permissions::resource_summary::query())
+        .await?;
+    let rows = rows_read(&plan, "project_stage_permissions_current");
+    eprintln!("project_stage_permissions_current rows handled: {rows} of {staged}");
+    ensure!(
+        rows <= 2.0 * staged as f64,
+        "project_stage_permissions_current rows handled: {rows} of {staged}; {plan}"
+    );
+    rebuild.finish().await
+}
+
+/// An incremental batch takes its own resources' permissions from the staged rows, whatever the
+/// live table still says about them, and its registry root's from the live rows, since an
+/// unchanged root lies outside the scope. The live rows used to be read for the whole chain.
+#[tokio::test]
+async fn resource_summary_matches_the_chain_wide_live_read_on_an_incremental_batch() -> Result<()> {
+    let mut rebuild =
+        Rebuild::through("rebuild_equal_incremental", 600, Builder::Permissions).await?;
+    rebuild.narrow_to_incremental_batch(300).await?;
+    let stage = "project_stage_permissions_current_resource_summary";
+    raw_sql(&format!("TRUNCATE {stage}"))
+        .execute(&mut *rebuild.transaction)
+        .await?;
+    rebuild
+        .execute(&super::permissions::resource_summary::query())
+        .await?;
+    rebuild
+        .rerun_with(stage, &previous_resource_summary())
+        .await?;
+    rebuild.assert_same_rows("current_rows", stage).await?;
+    // The root's live `admin_renew` unlocks `renew` for the whole batch; the registration whose
+    // staged admin row is gone locks `set_resolver` and `transfer` although the live table still
+    // holds that row.
+    let (rows, root_unlocked, own_unlocked, own_removed): (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT count(*),
+                count(*) FILTER (WHERE NOT locked ? 'renew'),
+                count(*) FILTER (WHERE locked = '[\"unregister\", \"set_subregistry\"]'),
+                count(*) FILTER (WHERE locked = '[\"unregister\", \"set_subregistry\", \"set_resolver\", \"transfer\"]')
+         FROM current_rows, LATERAL (SELECT resource_restrictions -> 'locked_roles' AS locked) roles",
+    )
+    .fetch_one(&mut *rebuild.transaction)
+    .await?;
+    ensure!(
+        (rows, root_unlocked, own_unlocked, own_removed)
+            == (BATCH_RESOURCES, BATCH_RESOURCES, BATCH_RESOURCES - 1, 1),
+        "{rows} rows, {root_unlocked} with renew unlocked by the root, {own_unlocked} with their \
+         own admin, {own_removed} with the admin removed"
+    );
+    rebuild.finish().await
+}
+
+/// The live rows the batch needs are those of its own resources and of their registry roots. The
+/// admin aggregate is materialized, so that restriction cannot reach it from the joins below and
+/// has to be its input; without it every live permission row on the chain is aggregated per batch.
+#[tokio::test]
+async fn resource_summary_reads_live_permissions_for_the_batch_only() -> Result<()> {
+    let mut rebuild =
+        Rebuild::through("rebuild_plan_incremental", PLAN_NAMES, Builder::Permissions).await?;
+    rebuild.narrow_to_incremental_batch(12_000).await?;
+    let bound = 20.0 * BATCH_RESOURCES as f64;
+    let live: i64 = sqlx::query_scalar("SELECT count(*) FROM permissions_current")
+        .fetch_one(&mut *rebuild.transaction)
+        .await?;
+    ensure!(
+        live as f64 >= 4.0 * bound,
+        "the live table holds {live} rows, too few to tell a keyed read from a chain-wide one"
+    );
+    raw_sql("TRUNCATE project_stage_permissions_current_resource_summary")
+        .execute(&mut *rebuild.transaction)
+        .await?;
+    let plan = rebuild
+        .explain(&super::permissions::resource_summary::query())
+        .await?;
+    let rows = rows_read(&plan, "permissions_current");
+    eprintln!("permissions_current rows handled: {rows} of {live}");
+    ensure!(
+        rows <= bound,
+        "permissions_current rows handled: {rows} of {live}; {plan}"
+    );
     rebuild.finish().await
 }
 
@@ -674,5 +867,199 @@ async fn direct_topology_joins_names_to_bindings_once() -> Result<()> {
             "{relation} rows handled: {rows}; {plan}"
         );
     }
+    rebuild.finish().await
+}
+
+/// Whether the plan reads `relation` through its index somewhere, in key order or as a bitmap of
+/// the matching rows.
+fn index_scanned(plan: &Value, relation: &str) -> bool {
+    any_node(plan, true, &|node| {
+        matches!(
+            node["Node Type"].as_str(),
+            Some("Index Scan" | "Index Only Scan" | "Bitmap Heap Scan")
+        ) && node["Relation Name"] == relation
+    })
+}
+
+/// The topology serializer reads the staged names whose topology is an object a page at a time
+/// in key order and writes each page back. The stage is created like the live table without its
+/// key, so every page read and every write read the whole stage: as many full scans as pages,
+/// each way. Once its last topology writer is done the stage is keyed and analyzed, and each
+/// write is bounded to the first and last key of its page, so both read about a page by index.
+#[tokio::test]
+async fn topology_serialization_reads_and_writes_each_page_by_key() -> Result<()> {
+    use super::name_topology::serialization::{page_statement, update_page};
+    let mut rebuild = Rebuild::through(
+        "rebuild_plan_serialization",
+        PLAN_NAMES,
+        Builder::AddressNames,
+    )
+    .await?;
+    let page: i64 = 250;
+    let stage = "project_stage_name_current";
+    let (staged, with_topology): (i64, i64) = sqlx::query_as(&format!(
+        "SELECT count(*),
+                count(*) FILTER (WHERE jsonb_typeof(declared_summary -> 'topology') = 'object')
+         FROM {stage}"
+    ))
+    .fetch_one(&mut *rebuild.transaction)
+    .await?;
+    ensure!(
+        with_topology >= 3 * page,
+        "{with_topology} names have a topology, too few for a middle page of {page}"
+    );
+    // The names without a topology are spread through the key order, so a page read by key
+    // passes about `staged / with_topology` rows per name it returns.
+    let bound = 2.0 * page as f64 * staged as f64 / with_topology as f64;
+    ensure!(
+        staged as f64 >= 3.0 * bound,
+        "{staged} staged names, too few to tell a page read from a whole-stage read"
+    );
+    let after: String = sqlx::query_scalar(&format!(
+        "SELECT logical_name_id FROM {stage}
+         WHERE jsonb_typeof(declared_summary -> 'topology') = 'object'
+         ORDER BY logical_name_id OFFSET $1 LIMIT 1"
+    ))
+    .bind(with_topology / 2)
+    .fetch_one(&mut *rebuild.transaction)
+    .await?;
+
+    let plan = sqlx::query_scalar::<_, Value>(&format!(
+        "EXPLAIN (ANALYZE, FORMAT JSON) {}",
+        page_statement(true)
+    ))
+    .bind(page)
+    .bind(&after)
+    .fetch_one(&mut *rebuild.transaction)
+    .await?[0]["Plan"]
+        .take();
+    let rows = rows_read(&plan, stage);
+    eprintln!("page read: {stage} rows handled: {rows} of {staged}");
+    ensure!(
+        index_scanned(&plan, stage) && rows <= bound,
+        "the page read handled {rows} of {staged} {stage} rows: {plan}"
+    );
+
+    let rows_of_page: Vec<(String, Value)> = sqlx::query_as(page_statement(true))
+        .bind(page)
+        .bind(&after)
+        .fetch_all(&mut *rebuild.transaction)
+        .await?;
+    ensure!(rows_of_page.len() == page as usize);
+    let plan = update_page("EXPLAIN (ANALYZE, FORMAT JSON) ", &rows_of_page)
+        .build_query_scalar::<Value>()
+        .fetch_one(&mut *rebuild.transaction)
+        .await?[0]["Plan"]
+        .take();
+    let rows = rows_read(&plan, stage);
+    eprintln!("page write: {stage} rows handled: {rows} of {staged}");
+    ensure!(
+        index_scanned(&plan, stage) && rows <= bound,
+        "the page write handled {rows} of {staged} {stage} rows: {plan}"
+    );
+    rebuild.finish().await
+}
+
+/// Paging the serializer by key, whatever the page size, writes every name the JSON that
+/// `ResolutionTopology` gives its projected topology, and touches nothing else: not the names
+/// without a topology, not the other columns, and nothing at all when no name has one.
+#[tokio::test]
+async fn topology_serialization_matches_the_direct_conversion_page_by_page() -> Result<()> {
+    use super::name_topology::serialization::{
+        SERIALIZATION_BATCH_SIZE, serialize_projected_topologies_in_pages,
+    };
+    use bigname_domain::resolution_topology::ResolutionTopology;
+    let mut rebuild =
+        Rebuild::through("rebuild_equal_serialization", 600, Builder::RecordInventory).await?;
+    let target = rebuild.target.clone();
+    super::name_topology::project(&mut rebuild.transaction, CHAIN, &target).await?;
+    let stage = "project_stage_name_current";
+    raw_sql(&format!("CREATE TEMP TABLE projected AS TABLE {stage}"))
+        .execute(&mut *rebuild.transaction)
+        .await?;
+    let (with_topology, without_topology): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE jsonb_typeof(declared_summary -> 'topology') = 'object'),
+                count(*) FILTER (WHERE jsonb_typeof(declared_summary -> 'topology')
+                                       IS DISTINCT FROM 'object')
+         FROM projected",
+    )
+    .fetch_one(&mut *rebuild.transaction)
+    .await?;
+    ensure!(
+        with_topology >= 6 && without_topology > 0,
+        "the seed stages {with_topology} names with a topology and {without_topology} without"
+    );
+    // Three pages, the last of them partial.
+    let page = with_topology / 3 + 1;
+    ensure!(2 * page < with_topology && with_topology < 3 * page);
+    serialize_projected_topologies_in_pages(&mut rebuild.transaction, page).await?;
+
+    let untouched_differences: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*)
+         FROM projected before
+         FULL JOIN {stage} after USING (logical_name_id)
+         WHERE before.logical_name_id IS NULL
+            OR after.logical_name_id IS NULL
+            OR to_jsonb(before) - 'declared_summary' IS DISTINCT FROM
+               to_jsonb(after) - 'declared_summary'
+            OR before.declared_summary - 'topology' IS DISTINCT FROM
+               after.declared_summary - 'topology'
+            OR (jsonb_typeof(before.declared_summary -> 'topology') IS DISTINCT FROM 'object'
+                AND before.declared_summary IS DISTINCT FROM after.declared_summary)"
+    ))
+    .fetch_one(&mut *rebuild.transaction)
+    .await?;
+    ensure!(
+        untouched_differences == 0,
+        "{untouched_differences} names changed outside their topology"
+    );
+    let topologies: Vec<(String, Value, Value)> = sqlx::query_as(&format!(
+        "SELECT logical_name_id, before.declared_summary -> 'topology',
+                after.declared_summary -> 'topology'
+         FROM projected before
+         JOIN {stage} after USING (logical_name_id)
+         WHERE jsonb_typeof(before.declared_summary -> 'topology') = 'object'"
+    ))
+    .fetch_all(&mut *rebuild.transaction)
+    .await?;
+    ensure!(topologies.len() == with_topology as usize);
+    let mut rewritten = 0;
+    for (logical_name_id, projected, serialized) in topologies {
+        let converted = serde_json::to_value(serde_json::from_value::<ResolutionTopology>(
+            projected.clone(),
+        )?)?;
+        ensure!(
+            converted == serialized,
+            "{logical_name_id}: serialized {serialized} but the conversion gives {converted}"
+        );
+        rewritten += usize::from(converted != projected);
+    }
+    eprintln!("{rewritten} of {with_topology} topologies changed in serialization");
+
+    // The production page size writes the same rows.
+    raw_sql(&format!(
+        "CREATE TEMP TABLE serialized_in_pages AS TABLE {stage};
+         TRUNCATE {stage};
+         INSERT INTO {stage} TABLE projected"
+    ))
+    .execute(&mut *rebuild.transaction)
+    .await?;
+    serialize_projected_topologies_in_pages(&mut rebuild.transaction, SERIALIZATION_BATCH_SIZE)
+        .await?;
+    rebuild
+        .assert_same_rows(stage, "serialized_in_pages")
+        .await?;
+
+    // Without a topology anywhere the serializer writes nothing.
+    raw_sql(&format!(
+        "UPDATE {stage} SET declared_summary = declared_summary - 'topology';
+         CREATE TEMP TABLE without_topologies AS TABLE {stage}"
+    ))
+    .execute(&mut *rebuild.transaction)
+    .await?;
+    serialize_projected_topologies_in_pages(&mut rebuild.transaction, page).await?;
+    rebuild
+        .assert_same_rows(stage, "without_topologies")
+        .await?;
     rebuild.finish().await
 }

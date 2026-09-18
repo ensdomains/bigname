@@ -389,6 +389,34 @@ pub(super) async fn build(
         .await
         .map_err(|error| ProjectError::database("failed to build permissions_current", error))?;
     wrapper_operators::build(transaction, chain_id, full_rebuild).await?;
+    key_by_resource(transaction, "project_stage_permissions_current").await?;
     resource_summary::build(transaction, chain_id, target, full_rebuild).await?;
+    key_by_resource(
+        transaction,
+        "project_stage_permissions_current_resource_summary",
+    )
+    .await?;
+    Ok(())
+}
+
+/// The resource summary asks, per ENSv2 registration, whether the registration has a staged
+/// permission row, and the summary itself is joined by resource by the builders after it. The
+/// stages are created like their live tables but without their keys, and temporary tables are
+/// never analyzed automatically, so once its last writer is done each gets a resource index and
+/// statistics. The index is not the live table's primary key: the rows are unique per resource,
+/// subject and scope by construction, but publication is what enforces that, for the rows it
+/// publishes, and the stage may hold rows an incremental build never publishes.
+async fn key_by_resource(transaction: &mut Transaction<'_, Postgres>, stage: &str) -> Result<()> {
+    for statement in [
+        format!("CREATE INDEX ON {stage} (resource_id)"),
+        format!("ANALYZE {stage}"),
+    ] {
+        sqlx::query(&statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database(format!("failed to key {stage} by resource"), error)
+            })?;
+    }
     Ok(())
 }

@@ -1140,6 +1140,15 @@ mutate or replace the earlier normalized fact and requires no provider read.
 
 Readable-name evidence may disclose an already selected ENSv1 registrar resource only under the current-owner and live-lineage checks in [storage semantics](storage.md). This creates an observation-time binding and a marked state-derived snapshot without changing earlier resource-only facts.
 
+Which event creates an ENSv1 `.eth` lease is a manifest declaration, not an adapter choice: the
+registrar adapter runs the BaseRegistrar path for an event only when that event declares
+`RegistrationGranted`. Where the BaseRegistrar's own numeric events create the lease, a reveal of
+the label is never a rewrite. A controller event that names the lease writes a binding and
+replays the current resolver onto the name, a wrap records the wrapped lease's `resource_id` on
+the rows listed in [storage semantics](storage.md), and Project attaches the immutable resource-keyed lifecycle rows to the name
+through those two identities. See [storage semantics](storage.md) and
+[projections](projections.md#exact-name-projection).
+
 Fresh, restored, resumed, and redo interpretation over the same retained input
 must emit identical state-derived output. Within one raw position, Interpret
 orders the selected source's ordinary events first, then state-derived sourced

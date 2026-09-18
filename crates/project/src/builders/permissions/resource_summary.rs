@@ -4,9 +4,9 @@ use crate::{Marker, ProjectError, Result};
 
 /// Per-resource permission summary, including the `resource_restrictions` block. ENSv2
 /// `locked_roles` reads the registry root from the identity table and the admin rows from the
-/// staged rows for in-scope resources plus the live rows for every other resource, so an
-/// incremental build sees a root that its own window never touched; a full rebuild has every
-/// row staged.
+/// staged rows for in-scope resources plus the live rows of their registry roots, so an
+/// incremental build sees a root that its own window never touched without reading the rest of
+/// the chain; a full rebuild has every row staged.
 pub(super) async fn build(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -238,12 +238,28 @@ pub(in crate::builders) fn query() -> String {
             LEFT JOIN wrapper_lifecycles lifecycle USING (resource_id)
             LEFT JOIN expiry_retirements retirement USING (resource_id)
         ),
+        -- The resources whose admin sets the joins below can ask for: every staged resource and
+        -- the registry root of each. An incremental build reads live rows for these only; the
+        -- unchanged root of a changed registration lies outside the scope and is among them,
+        -- while the rest of the chain's live rows are not.
+        admin_resources AS (
+            SELECT resource.resource_id
+            FROM project_resources resource
+            UNION
+            SELECT root.resource_id
+            FROM registry_roots root
+            WHERE root.registry IN (
+                SELECT resource.provenance ->> 'registry_contract_instance_id'
+                FROM project_resources resource
+            )
+        ),
         admin_rows AS (
             SELECT staged.resource_id, staged.scope_kind, staged.effective_powers
             FROM project_stage_permissions_current staged
             UNION ALL
             SELECT live.resource_id, live.scope_kind, live.effective_powers
-            FROM permissions_current live
+            FROM admin_resources needed
+            JOIN permissions_current live ON live.resource_id = needed.resource_id
             WHERE NOT $4
               AND live.provenance ->> 'chain_id' = $1
               AND NOT EXISTS (
@@ -252,7 +268,9 @@ pub(in crate::builders) fn query() -> String {
               )
         ),
         -- One row per resource that has an admin holder. It is joined twice below, for the
-        -- resource and for its registry root, so it is computed once.
+        -- resource and for its registry root, so it is computed once; being materialized, it
+        -- takes no restriction from those joins, which is why `admin_resources` restricts its
+        -- input instead.
         v2_admin_powers AS MATERIALIZED (
             SELECT row.resource_id, array_agg(DISTINCT power.value) AS admins
             FROM admin_rows row

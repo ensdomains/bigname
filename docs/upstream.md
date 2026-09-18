@@ -148,9 +148,9 @@ only then deploy the matching API as required by the
 > meaning without using a deleted row as evidence that an old version is current.
 > **Since**: `2026-09-14`
 
-> **Numeric ENSv1 expiry representation** — admitted BaseRegistrar numeric registration and renewal retain expiry above the signed timestamp range as `i64::MAX`. Grace overflow does not release that retained lease; raw logs keep the original word. This does not narrow the on-chain event or change the exact Graveyard cleanup predicate.
-> **Upstream**: BaseRegistrar emits and stores uint256 registration and renewal expiry. (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f)
-> **Our rule / why**: See [storage semantics](storage.md). The adapter keeps its signed timestamp representation without failing an otherwise valid numeric lifecycle observation. No controller string-decoder width change is included in this composition.
+> **Numeric ENSv1 expiry representation** — admitted BaseRegistrar numeric registration and renewal, and the admitted ENSv1 .eth controller events that repeat the same expiry, retain expiry above the signed timestamp range as `i64::MAX`. Grace overflow does not release that retained lease; raw logs keep the original word. This does not narrow the on-chain event or change the exact Graveyard cleanup predicate.
+> **Upstream**: BaseRegistrar emits and stores uint256 registration and renewal expiry. (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f) The .eth controller's `NameRegistered` and `NameRenewed` carry the same value as `uint256 expires`. (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L116-L124 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L133-L139 @ ens_v1@91c966f)
+> **Our rule / why**: See [storage semantics](storage.md). The adapter keeps its signed timestamp representation without failing an otherwise valid numeric lifecycle observation. The ENSv1 .eth controller-event decoder saturates the same `uint256` expiry word the same way, so a controller event that repeats an out-of-range expiry no longer fails interpretation of its log. Basenames controller events are unchanged: an out-of-range expiry there still fails.
 > **Since**: `2026-09-10`
 
 > **NameWrapper `safeTransferFrom` self-transfer clears the token approval without a log** —
