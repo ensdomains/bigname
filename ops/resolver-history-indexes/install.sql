@@ -112,11 +112,15 @@ BEGIN
         END IF;
     END LOOP;
 
-    FOR checked_index IN
+    -- A retired name is dropped only when it holds exactly the index #415
+    -- built; an index on another table or with another definition is refused.
+    FOR checked_index, expected_definition IN
         SELECT * FROM (VALUES
-            ('normalized_events_permission_after_resolver_history_idx'),
-            ('normalized_events_permission_before_resolver_history_idx')
-        ) AS retired(index_name)
+            ('normalized_events_permission_after_resolver_history_idx',
+             $def$CREATE INDEX normalized_events_permission_after_resolver_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state #>> '{scope,resolver_address}'::text[])), block_number, block_hash) INCLUDE (resource_id) WHERE ((event_kind = 'PermissionChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND ((after_state #>> '{scope,kind}'::text[]) = 'resolver'::text) AND (resource_id IS NOT NULL))$def$),
+            ('normalized_events_permission_before_resolver_history_idx',
+             $def$CREATE INDEX normalized_events_permission_before_resolver_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((before_state #>> '{scope,resolver_address}'::text[])), block_number, block_hash) INCLUDE (resource_id) WHERE ((event_kind = 'PermissionChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND ((before_state #>> '{scope,kind}'::text[]) = 'resolver'::text) AND (resource_id IS NOT NULL))$def$)
+        ) AS retired(index_name, definition)
     LOOP
         SELECT relkind INTO found_kind
         FROM pg_class
@@ -128,6 +132,24 @@ BEGIN
             RAISE EXCEPTION
                 'bigname_phase.% is not an index (relkind %), so it cannot be the retired index; remove or rename that relation, then rerun this script',
                 checked_index, found_kind;
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_index
+            WHERE indexrelid = to_regclass('bigname_phase.' || checked_index)
+              AND indrelid = to_regclass('bigname_phase.normalized_events')
+        ) THEN
+            RAISE EXCEPTION
+                'bigname_phase.% is an index on another table, so it cannot be the retired index; remove or rename that index, then rerun this script',
+                checked_index;
+        END IF;
+        SELECT pg_get_indexdef(indexrelid)
+        INTO found_definition
+        FROM pg_index
+        WHERE indexrelid = to_regclass('bigname_phase.' || checked_index);
+        IF found_definition <> expected_definition THEN
+            RAISE EXCEPTION
+                'bigname_phase.% is not the retired index; found "%", expected "%"; remove or rename that index, then rerun this script',
+                checked_index, found_definition, expected_definition;
         END IF;
         IF require_built THEN
             RAISE EXCEPTION

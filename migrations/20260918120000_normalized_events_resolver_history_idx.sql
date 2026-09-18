@@ -26,8 +26,9 @@
 -- 20260917160000_discovery_edges_index_validity_check.sql for why the printed
 -- text is never rewritten and why quote_all_identifiers is turned off while
 -- the definitions are read. Both changes are transaction-local and put back
--- before the block returns. A retired name that is held by something other
--- than an index stops the run the same way.
+-- before the block returns. A retired name that holds anything but the index
+-- #415 built -- a table, an index on another table, an index with another
+-- definition -- stops the run the same way instead of being dropped.
 --
 -- On a large initialized database, prebuild and drop concurrently with
 -- ops/resolver-history-indexes/install.sql as its README and docs/deployment.md
@@ -141,14 +142,16 @@ CREATE INDEX normalized_events_pointer_before_resolver_history_idx
         END IF;
     END LOOP;
 
-    PERFORM set_config('search_path', previous_search_path, true);
-    PERFORM set_config('quote_all_identifiers', previous_quote_all_identifiers, true);
-
-    FOR checked_index IN
+    -- The retired pair is dropped only when the name holds exactly the index
+    -- #415 built: an index on another table, or one with another definition,
+    -- is somebody's own access path and is refused, not dropped.
+    FOR checked_index, expected_definition IN
         SELECT * FROM (VALUES
-            ('normalized_events_permission_after_resolver_history_idx'),
-            ('normalized_events_permission_before_resolver_history_idx')
-        ) AS retired(index_name)
+            ('normalized_events_permission_after_resolver_history_idx',
+             'CREATE INDEX normalized_events_permission_after_resolver_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state #>> ''{scope,resolver_address}''::text[])), block_number, block_hash) INCLUDE (resource_id) WHERE ((event_kind = ''PermissionChanged''::text) AND (consumer_visibility = ''activated''::text) AND (canonicality_state = ANY (ARRAY[''canonical''::bigname_phase.canonicality_state, ''safe''::bigname_phase.canonicality_state, ''finalized''::bigname_phase.canonicality_state])) AND ((after_state #>> ''{scope,kind}''::text[]) = ''resolver''::text) AND (resource_id IS NOT NULL))'),
+            ('normalized_events_permission_before_resolver_history_idx',
+             'CREATE INDEX normalized_events_permission_before_resolver_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((before_state #>> ''{scope,resolver_address}''::text[])), block_number, block_hash) INCLUDE (resource_id) WHERE ((event_kind = ''PermissionChanged''::text) AND (consumer_visibility = ''activated''::text) AND (canonicality_state = ANY (ARRAY[''canonical''::bigname_phase.canonicality_state, ''safe''::bigname_phase.canonicality_state, ''finalized''::bigname_phase.canonicality_state])) AND ((before_state #>> ''{scope,kind}''::text[]) = ''resolver''::text) AND (resource_id IS NOT NULL))')
+        ) AS retired(index_name, definition)
     LOOP
         SELECT relkind INTO found_kind
         FROM pg_class
@@ -161,7 +164,28 @@ CREATE INDEX normalized_events_pointer_before_resolver_history_idx
                 'bigname_phase.% is not an index (relkind %), so it cannot be the retired index; remove or rename that relation, then run the schema-migrations again',
                 checked_index, found_kind;
         END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_index
+            WHERE indexrelid = to_regclass('bigname_phase.' || checked_index)
+              AND indrelid = to_regclass('bigname_phase.normalized_events')
+        ) THEN
+            RAISE EXCEPTION
+                'bigname_phase.% is an index on another table, so it cannot be the retired index; remove or rename that index, then run the schema-migrations again',
+                checked_index;
+        END IF;
+        SELECT pg_get_indexdef(indexrelid)
+        INTO found_definition
+        FROM pg_index
+        WHERE indexrelid = to_regclass('bigname_phase.' || checked_index);
+        IF found_definition <> expected_definition THEN
+            RAISE EXCEPTION
+                'bigname_phase.% is not the retired index; found "%", expected "%"; remove or rename that index, then run the schema-migrations again',
+                checked_index, found_definition, expected_definition;
+        END IF;
         EXECUTE format('DROP INDEX bigname_phase.%I', checked_index);
     END LOOP;
+
+    PERFORM set_config('search_path', previous_search_path, true);
+    PERFORM set_config('quote_all_identifiers', previous_quote_all_identifiers, true);
 END
 $migration$;

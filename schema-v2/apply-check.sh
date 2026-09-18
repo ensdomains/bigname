@@ -232,7 +232,8 @@ migration_uses_unicode_escape() {
 # every column with its storage, statistics target, privileges and the
 # schema, provider and locale of its collation, constraint, index, view,
 # routine with its full argument list, trigger with its firing state,
-# sequence with its full range, type, domain, comment, policy, rule, extended
+# sequence with its full range, type and domain with their privileges,
+# comment, policy, rule, extended
 # statistics object, the schema's own privileges, every collation the schema
 # holds and every cast to or from one of its types, with the schema name
 # normalized -- built
@@ -352,7 +353,7 @@ SELECT line FROM (
     FROM pg_sequences s WHERE s.schemaname = current_schema()
     UNION ALL
     SELECT 8, t.typname, '',
-           format('type %s %s %s base=%s %s default=%s check=%s attributes=%s', t.typname, t.typtype,
+           format('type %s %s %s base=%s %s default=%s check=%s attributes=%s acl=%s', t.typname, t.typtype,
                   COALESCE((SELECT string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder)
                             FROM pg_enum e WHERE e.enumtypid = t.oid), '-'),
                   CASE WHEN t.typtype = 'd' THEN format_type(t.typbasetype, t.typtypmod) ELSE '-' END,
@@ -361,7 +362,8 @@ SELECT line FROM (
                   COALESCE((SELECT string_agg(format('%s %s', con.conname, pg_get_constraintdef(con.oid)), ',' ORDER BY con.conname)
                             FROM pg_constraint con WHERE con.contypid = t.oid), '-'),
                   COALESCE((SELECT string_agg(format('%s %s', a.attname, format_type(a.atttypid, a.atttypmod)), ',' ORDER BY a.attnum)
-                            FROM pg_attribute a WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped), '-'))
+                            FROM pg_attribute a WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped), '-'),
+                  COALESCE(replace(array_to_string(t.typacl, ','), current_user, 'owner'), 'default'))
     FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
     WHERE n.nspname = current_schema() AND t.typtype IN ('e', 'd', 'c', 'r')
       AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.reltype = t.oid AND c.relkind <> 'c')
@@ -559,6 +561,8 @@ assert_frozen_catalog_sees_planted_changes() {
         # only a pg_cast row, and it changes operator resolution.
         'implicit cast:CREATE CAST (canonicality_state AS text) WITH INOUT AS IMPLICIT;'
         'assignment cast:CREATE CAST (text AS canonicality_state) WITH INOUT AS ASSIGNMENT;'
+        # A type privilege: no relation, column or routine row moves.
+        'type privilege:REVOKE USAGE ON TYPE canonicality_state FROM PUBLIC;'
     )
     planted_catalog="$(mktemp "${TMPDIR:-/tmp}/schema-v2-planted-catalog.XXXXXX")"
     for planted in "${planted_changes[@]}"; do
@@ -1347,7 +1351,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=198
+expected_refusal_assertions=210
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
@@ -1391,7 +1395,7 @@ trap cleanup EXIT
 # splitter blind inside single quotes, quoted identifiers and dollar quoting,
 # so a statement inside a comment or a routine body is not a statement.
 sql_statement_splitter='
-    BEGIN { quote = ""; depth = 0; stmt = "" }
+    BEGIN { quote = ""; depth = 0; stmt = ""; escaped = 0 }
     {
         line = $0 "\n"; n = length(line); i = 1
         while (i <= n) {
@@ -1407,13 +1411,21 @@ sql_statement_splitter='
                 if (c == "$" && match(substr(line, i), /^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/)) {
                     quote = substr(line, i, RLENGTH); stmt = stmt quote; i += RLENGTH; continue
                 }
-                if (c == "\047" || c == "\"") quote = c
+                if (c == "\047" || c == "\"") {
+                    quote = c
+                    # An escape-string literal (E prefix): a backslash escapes
+                    # the next character, so an escaped quote does not end it.
+                    escaped = (c == "\047" && i > 1 && substr(line, i - 1, 1) ~ /[Ee]/ \
+                               && (i == 2 || substr(line, i - 2, 1) !~ /[A-Za-z0-9_]/))
+                }
                 else if (c == ";") { emit(stmt ";"); stmt = ""; i++; continue }
             } else if (length(quote) > 1) {
                 if (substr(line, i, length(quote)) == quote) { stmt = stmt quote; i += length(quote); quote = ""; continue }
+            } else if (escaped && c == "\\") {
+                stmt = stmt substr(line, i, 2); i += 2; continue
             } else if (c == quote) {
                 if (quote == "\047" && substr(line, i + 1, 1) == "\047") { stmt = stmt "\047\047"; i += 2; continue }
-                quote = ""
+                quote = ""; escaped = 0
             }
             stmt = stmt c; i++
         }
@@ -1436,7 +1448,12 @@ sql_statements() {
 # every CREATE EXTENSION the splitter finds as a statement of its own, so a
 # declaration a comment or a routine body has swallowed is not one.
 baseline_extension_statements_of() {
-    sql_statements "$1"/*.sql | grep -iE '^CREATE EXTENSION ' || true
+    local statements
+    if ! statements="$(sql_statements "$1"/*.sql)"; then
+        printf '%s\n' "schema-v2/baseline cannot be split into statements: $(printf '%s\n' "$statements" | tail -n 1)" >&2
+        return 1
+    fi
+    printf '%s\n' "$statements" | grep -iE '^CREATE EXTENSION ' || true
 }
 # Exactly the two reviewed statements, both present: anything else that would
 # reach the owner's connection, or a prerequisite the runtime baseline no
@@ -1468,7 +1485,7 @@ check_baseline_extensions() {
 # installed by init-schema and must not pass; a third extension, another
 # schema, or a split statement must not reach the owner.
 assert_baseline_extension_rule_holds() {
-    local planted planted_dir reason
+    local planted planted_dir reason statements
     local -a refused=(
         'block comment:/* CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public; */'
         'nested block comment:/* outer /* inner */ CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public; */'
@@ -1478,6 +1495,9 @@ assert_baseline_extension_rule_holds() {
         'third extension:CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public; CREATE EXTENSION IF NOT EXISTS hstore WITH SCHEMA public;'
         'other schema:CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA bigname_phase;'
         'split line:CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public'
+        'escape string:SELECT E'"'"'it\\'"'"'s not a statement; CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public;'"'"';'
+        'unterminated string:SELECT '"'"'open; CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public;'
+        'unterminated block comment:/* open; CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public;'
     )
     planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-extension-rule.XXXXXX")"
     for planted in "${refused[@]}"; do
@@ -1486,22 +1506,23 @@ assert_baseline_extension_rule_holds() {
         printf '%s\n' "${planted#*:}" > "$planted_dir/01_planted.sql"
         # The other required statement stays intact so only the planted form decides.
         printf 'CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;\n' > "$planted_dir/02_other.sql"
-        if check_baseline_extensions "$(baseline_extension_statements_of "$planted_dir")" 2>/dev/null; then
+        if statements="$(baseline_extension_statements_of "$planted_dir" 2>/dev/null)" \
+            && check_baseline_extensions "$statements" 2>/dev/null; then
             printf '%s\n' "extension rule accepted a baseline it must refuse ($reason)" >&2
             exit 1
         fi
         refusal_assertions_passed=$((refusal_assertions_passed + 1))
     done
     rm -f "$planted_dir"/*.sql
-    printf '/* leading */ CREATE   EXTENSION IF NOT EXISTS\n  btree_gist WITH SCHEMA public; -- trailing\nCREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;\n' > "$planted_dir/01_ok.sql"
-    if ! check_baseline_extensions "$(baseline_extension_statements_of "$planted_dir")"; then
+    printf '/* leading */ CREATE   EXTENSION IF NOT EXISTS\n  btree_gist WITH SCHEMA public; -- trailing\nSELECT E'"'"'a\\'"'"'b'"'"', '"'"'c'"'"''"'"'d'"'"', $q$e'"'"'f$q$;\nCREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;\n' > "$planted_dir/01_ok.sql"
+    if ! statements="$(baseline_extension_statements_of "$planted_dir")" || ! check_baseline_extensions "$statements"; then
         printf '%s\n' "extension rule refused the two reviewed statements written across lines and beside comments" >&2
         exit 1
     fi
     rm -rf "$planted_dir"
 }
 assert_baseline_extension_rule_holds
-baseline_extension_statements="$(baseline_extension_statements_of "$ROOT/schema-v2/baseline")"
+baseline_extension_statements="$(baseline_extension_statements_of "$ROOT/schema-v2/baseline")" || exit 1
 check_baseline_extensions "$baseline_extension_statements" || exit 1
 # The login is provisioned by the owner without any database-level grant,
 # which the documented external-database user (CREATEDB and CREATEROLE, not
@@ -4002,6 +4023,29 @@ for resolver_history_retired_name in $resolver_history_retired_names; do
         "$scratch_schema.$resolver_history_retired_name is not an index (relkind r), so it cannot be the retired index; remove or rename that relation, then run the schema-migrations again" <<SQL
 CREATE TABLE $resolver_history_retired_name ();
 SQL
+    assert_migration_refusal "other-table-$resolver_history_retired_name" \
+        "$resolver_history_index_migration" \
+        "$scratch_schema.$resolver_history_retired_name is an index on another table, so it cannot be the retired index; remove or rename that index, then run the schema-migrations again" <<SQL
+CREATE INDEX $resolver_history_retired_name ON discovery_edges (chain_id);
+SQL
+    # The definition the file expects for a retired name is how the #415 index
+    # prints under search_path pg_catalog; read it from a copy built and
+    # dropped here.
+    resolver_history_retired_reviewed="$(
+        {
+            printf '\\pset tuples_only on\n\\pset format unaligned\n'
+            printf 'SET search_path TO "%s";\n' "$scratch_schema"
+            printf '%s\n' "$resolver_history_retired_sql"
+            printf 'SET search_path TO pg_catalog;\n'
+            printf "SELECT pg_get_indexdef('%s.%s'::regclass);\n" "$scratch_schema" "$resolver_history_retired_name"
+            printf 'DROP INDEX "%s".normalized_events_permission_after_resolver_history_idx, "%s".normalized_events_permission_before_resolver_history_idx;\n' "$scratch_schema" "$scratch_schema"
+        } | run_psql
+    )"
+    assert_migration_refusal "other-definition-$resolver_history_retired_name" \
+        "$resolver_history_index_migration" \
+        "$scratch_schema.$resolver_history_retired_name is not the retired index; found \"CREATE INDEX $resolver_history_retired_name ON $scratch_schema.normalized_events USING btree (chain_id, block_number)\", expected \"$resolver_history_retired_reviewed\"; remove or rename that index, then run the schema-migrations again" <<SQL
+CREATE INDEX $resolver_history_retired_name ON normalized_events (chain_id, block_number);
+SQL
 done
 # The definitions the file expects are the fresh baseline's, as printed with
 # search_path set to pg_catalog; the frozen catalog comparison at the end
@@ -4052,7 +4096,26 @@ for resolver_history_retired_name in $resolver_history_retired_names; do
     assert_index_install_refusal "resolver-history-table-named-$resolver_history_retired_name" \
         "$resolver_history_install" \
         "$scratch_schema.$resolver_history_retired_name is not an index (relkind r), so it cannot be the retired index; remove or rename that relation, then rerun this script"
-    printf 'SET search_path TO "%s";\nDROP TABLE %s;\n' "$scratch_schema" "$resolver_history_retired_name" | run_psql >/dev/null
+    printf 'SET search_path TO "%s";\nDROP TABLE %s;\nCREATE INDEX %s ON discovery_edges (chain_id);\n' "$scratch_schema" "$resolver_history_retired_name" "$resolver_history_retired_name" | run_psql >/dev/null
+    assert_index_install_refusal "resolver-history-other-table-$resolver_history_retired_name" \
+        "$resolver_history_install" \
+        "$scratch_schema.$resolver_history_retired_name is an index on another table, so it cannot be the retired index; remove or rename that index, then rerun this script"
+    printf 'SET search_path TO "%s";\nDROP INDEX %s;\nCREATE INDEX %s ON normalized_events (chain_id, block_number);\n' "$scratch_schema" "$resolver_history_retired_name" "$resolver_history_retired_name" | run_psql >/dev/null
+    assert_index_install_refusal "resolver-history-other-definition-$resolver_history_retired_name" \
+        "$resolver_history_install" \
+        "$scratch_schema.$resolver_history_retired_name is not the retired index; found \"CREATE INDEX $resolver_history_retired_name ON $scratch_schema.normalized_events USING btree (chain_id, block_number)\", expected \"$(
+            {
+                printf '\\pset tuples_only on\n\\pset format unaligned\n'
+                printf 'SET search_path TO "%s";\n' "$scratch_schema"
+                printf 'DROP INDEX %s;\n' "$resolver_history_retired_name"
+                printf '%s\n' "$resolver_history_retired_sql"
+                printf 'SET search_path TO pg_catalog;\n'
+                printf "SELECT pg_get_indexdef('%s.%s'::regclass);\n" "$scratch_schema" "$resolver_history_retired_name"
+                printf 'DROP INDEX "%s".normalized_events_permission_after_resolver_history_idx, "%s".normalized_events_permission_before_resolver_history_idx;\n' "$scratch_schema" "$scratch_schema"
+                printf 'SET search_path TO "%s";\nCREATE INDEX %s ON normalized_events (chain_id, block_number);\n' "$scratch_schema" "$resolver_history_retired_name"
+            } | run_psql
+        )\"; remove or rename that index, then rerun this script"
+    printf 'SET search_path TO "%s";\nDROP INDEX %s;\n' "$scratch_schema" "$resolver_history_retired_name" | run_psql >/dev/null
 done
 # The installer refuses before it builds anything. With the last index invalid
 # and the first one absent, it must stop on the invalid one, tell the operator

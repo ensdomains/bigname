@@ -1294,7 +1294,7 @@ sequence manifest_discovery_rules_manifest_discovery_rule_id_seq bigint start=1 
 sequence manifest_versions_manifest_id_seq bigint start=1 increment=1 min=1 max=9223372036854775807 cache=1 cycle=f owned_by=manifest_versions.manifest_id
 sequence normalized_events_normalized_event_id_seq bigint start=1 increment=1 min=1 max=9223372036854775807 cache=1 cycle=f owned_by=normalized_events.normalized_event_id
 sequence reverse_hydration_attempt_ordinal_seq bigint start=1 increment=1 min=1 max=9223372036854775807 cache=1 cycle=f owned_by=-
-type canonicality_state e observed,canonical,safe,finalized,orphaned base=- null default=- check=- attributes=-
+type canonicality_state e observed,canonical,safe,finalized,orphaned base=- null default=- check=- attributes=- acl=default
 comment account_permission_state_current - Latest account-wide permission states.
 comment account_permission_state_current approved The latest approval Boolean.
 comment account_permission_state_current authority_contract The authority contract address.

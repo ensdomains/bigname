@@ -51,8 +51,9 @@ instead of reporting success over an index the feed cannot use. Before it
 builds anything, it refuses a kept name that is already taken by an index that
 is not both `indisvalid` and `indisready`, an index on another table, an index
 whose definition is not the reviewed one, or a table, view, or other relation
-that is not an index, and a retired name held by anything that is not an
-index. Names that resolve to nothing pass this first check. After the builds
+that is not an index, and a retired name held by anything but the index #415 built
+(a table, an index on another table, an index with another definition).
+Names that resolve to nothing pass this first check. After the builds
 and drops it makes the same check and also requires both kept indexes to exist
 and both retired names to resolve to nothing. It prints the index rows before
 the last check, so the receipt shows the flags and definitions either way. The
@@ -89,8 +90,9 @@ not an index on `bigname_phase.normalized_events`, is not valid and ready, or
 does not have the reviewed definition; recover as described above, then run
 the schema-migrations again. It then drops each retired index that still
 exists with a plain `DROP INDEX`, which takes the table's exclusive lock for
-the instant of the drop, and fails on a retired name held by anything that is
-not an index. `schema-v2/apply-check.sh` proves each refusal for the script
+the instant of the drop, and fails on a retired name held by anything but
+that index: a table, an index on another table, or an index with another
+definition is refused, not dropped. `schema-v2/apply-check.sh` proves each refusal for the script
 and for the schema-migration, that the schema-migration builds both kept
 indexes and drops both retired ones from the slice-1 and the #415 predecessor
 shapes, and that the fresh baseline, the schema-migration, and the script
