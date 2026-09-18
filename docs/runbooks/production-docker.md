@@ -52,7 +52,17 @@ environment, since the host shell does not source `.env.server`). A Sepolia depl
 is its own Compose project with its own `.env.server`
 (`BIGNAME_PHASE_RUNNER_CHAINS=ethereum-sepolia`,
 `BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT=/app/manifests/sepolia`, a Sepolia
-`RETH_DATA_DIR`, and `RETH_NETWORK_NAME` set to the Sepolia node's network).
+`RETH_DATA_DIR`, `RETH_NETWORK_NAME` set to the Sepolia node's network, and
+the `SEPOLIA_INTAKE_RPC_URL` the HTTP-side descriptor names). That URL variable
+must be added to the `phase-runner` service environment in the Compose file
+explicitly, as [deployment.md](../deployment.md#phase-runner-configuration)
+requires for every provider variable a descriptor names: the runner and the
+one-off `source-transport` run both read the descriptor's `=URL_ENV` from the
+container environment, and `docker compose --env-file` only supplies
+interpolation values. `docker-compose.server.yml` forwards `RETH_DATA_DIR` but
+not the RPC variables. For a one-off run alone,
+`docker compose ... run --rm -e SEPOLIA_INTAKE_RPC_URL phase-runner ...`
+passes the value from the invoking shell's environment instead.
 [Direct Reth reader](../reth-db-reader.md#mount-contract) explains why each
 requirement below exists.
 
