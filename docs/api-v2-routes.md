@@ -1556,7 +1556,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   scopes share that order. The account key is
   `account:{chain_id}:{authority_kind}:{authority_contract}:{owner}`. The
   opaque cursor binds the exact normalized collection anchor: normalized
-  `address`, normalized `name` when supplied, resolved `registration_id`,
+  `address`, normalized `name` when supplied, the selected public
+  `registration_id` (the one named, else the registration the name serves,
+  which for a wrapped `.eth` name is the lease and never the NameWrapper
+  resource that holds its rows),
   namespace when explicit or implied by a name (and namespace absence for an
   address-only request, matching its all-namespace result set),
   `include=lineage`, the fixed sort, the last keyset tuple, and the captured
