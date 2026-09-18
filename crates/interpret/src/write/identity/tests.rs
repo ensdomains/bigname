@@ -688,6 +688,44 @@ async fn activated_boundary_rejects_zero_and_multiple_predecessors() -> TestResu
     Ok(())
 }
 
+/// A BaseRegistrar lifecycle event of `event_kind` on `resource` at block 1 log `log_index`,
+/// emitted by the admitted registrar instance, with `after_state` merged over the token id.
+async fn insert_lease_event(
+    pool: &sqlx::PgPool,
+    event_identity: &str,
+    resource: u128,
+    event_kind: &str,
+    log_index: i64,
+    after_state: serde_json::Value,
+) -> TestResult {
+    insert_registrar_contract(pool).await?;
+    let mut state = json!({"token_id":"0xexpected"});
+    state
+        .as_object_mut()
+        .unwrap()
+        .extend(after_state.as_object().unwrap().clone());
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, resource_id, event_kind, source_family,
+             manifest_version, chain_id, block_number, block_hash, transaction_hash,
+             transaction_index, log_index, raw_fact_ref, derivation_kind, canonicality_state,
+             after_state
+         ) VALUES ($1, 'ens', $2, $3, $4, 'ens_v1_registrar_l1', 1, 'ethereum', 1, '0x01',
+                   '0xlease', 0, $5,
+                   jsonb_build_object('emitting_address', '0x0000000000000000000000000000000000000101'),
+                   'ens_v1_unwrapped_authority', 'canonical', $6)",
+    )
+    .bind(event_identity)
+    .bind(NAME)
+    .bind(Uuid::from_u128(resource))
+    .bind(event_kind)
+    .bind(log_index)
+    .bind(state)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// A binding positioned at block 1 log `log_index`, active over `[from, to)` given in microseconds
 /// after block 1.
 async fn insert_binding_span(
@@ -774,20 +812,14 @@ async fn a_lease_released_before_the_cleanup_is_not_a_predecessor() -> TestResul
     let pool = database.pool();
     insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
     insert_registrar_evidence(pool, 1, "0xexpected").await?;
-    sqlx::query(
-        "INSERT INTO normalized_events (
-             event_identity, namespace, logical_name_id, resource_id, event_kind, source_family,
-             manifest_version, chain_id, block_number, block_hash, transaction_hash,
-             transaction_index, log_index, raw_fact_ref, derivation_kind, canonicality_state,
-             after_state
-         ) VALUES ('registrar-release-1', 'ens', $1, $2, 'RegistrationReleased',
-                   'ens_v1_registrar_l1', 1, 'ethereum', 1, '0x01', '0xrelease', 0, 1, '{}',
-                   'ens_v1_unwrapped_authority', 'canonical',
-                   '{\"source_event\":\"RegistrationReleased\"}')",
+    insert_lease_event(
+        pool,
+        "registrar-release-1",
+        1,
+        "RegistrationReleased",
+        1,
+        json!({}),
     )
-    .bind(NAME)
-    .bind(Uuid::from_u128(1))
-    .execute(pool)
     .await?;
     let mut output = ordinary_open(12, 2, "ens_v2", 2);
     activate(&mut output)?;
@@ -795,6 +827,107 @@ async fn a_lease_released_before_the_cleanup_is_not_a_predecessor() -> TestResul
     let error = apply(pool, &output).await.unwrap_err().to_string();
     assert!(error.contains("0 active ENSv1 predecessors"), "{error}");
     assert_eq!(active_to(pool, 11).await?, None);
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A lapsed lease can be granted again with `registerOnly`, which mints a new token and writes
+/// the expiry without touching the registry. Under a registry-only binding that successor lease
+/// never gets a binding of its own (`crates/project/src/builders/name_authority/stage.rs`), and
+/// the replaced lease was released before it. The successor is the token the controller receives,
+/// so it is the predecessor: found by its evidence alone, with no binding to point at it.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
+#[tokio::test]
+async fn a_register_only_successor_lease_without_a_binding_is_the_predecessor() -> TestResult {
+    let database = database().await?;
+    let pool = database.pool();
+    // The replaced lease: bound, handed off without reclaim, then released.
+    insert_binding_span(pool, 11, 1, 0, 0, Some(500_000)).await?;
+    insert_binding_span(pool, 14, 4, 1, 500_000, None).await?;
+    insert_registrar_evidence(pool, 1, "0xexpected").await?;
+    insert_lease_event(
+        pool,
+        "registrar-release-1",
+        1,
+        "RegistrationReleased",
+        1,
+        json!({}),
+    )
+    .await?;
+    // The successor lease, granted with `registerOnly` on a new resource and never bound.
+    insert_lease_event(
+        pool,
+        "registrar-grant-5",
+        5,
+        "RegistrationGranted",
+        2,
+        json!({"source_event":"NameRegistered","namehash":"0xname","labelhash":"0xexpected"}),
+    )
+    .await?;
+    let mut output = ordinary_open(12, 2, "ens_v2", 2);
+    activate(&mut output)?;
+
+    apply(pool, &output).await?;
+    assert_eq!(
+        active_to(pool, 11).await?,
+        Some(time::OffsetDateTime::from_unix_timestamp(1)? + time::Duration::milliseconds(500)),
+        "the replaced lease binding keeps its handoff close"
+    );
+    assert_eq!(
+        active_to(pool, 14).await?,
+        Some(
+            time::OffsetDateTime::from_unix_timestamp(2)?
+                + time::Duration::microseconds(REGISTRAR_CLEANUP_LOG_INDEX)
+        ),
+        "the registry-only binding closes at the recorded registrar cleanup"
+    );
+    assert_eq!(active_to(pool, 12).await?, None);
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// An ENSv1 binding opened at the cleanup instant itself cannot be closed there, so it would
+/// outlive the boundary. Ordinary interpretation of a complete migration transaction opens none
+/// (the adapters reconcile the transaction first), so this shape is only constructible directly;
+/// the writer must still refuse it rather than publish two current authorities.
+#[tokio::test]
+async fn a_binding_opened_at_the_cleanup_instant_stops_the_boundary() -> TestResult {
+    let database = database().await?;
+    let pool = database.pool();
+    insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+    insert_registrar_evidence(pool, 1, "0xexpected").await?;
+    let mut output = ordinary_open(12, 2, "ens_v2", 2);
+    activate(&mut output)?;
+    // Pre-write the successor and close the lease at the cleanup, as the boundary would, then
+    // open another ENSv1 binding of the name at exactly that instant and position.
+    apply(pool, &output).await?;
+    sqlx::query(&format!(
+        "INSERT INTO surface_bindings (
+             surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm,
+             active_from, chain_id, block_hash, block_number, provenance, canonicality_state
+         ) VALUES ($1, $2, $3, 'declared_registry_path', 'ens_v1',
+                   timestamptz '1970-01-01 00:00:02Z' + $4 * interval '1 microsecond',
+                   'ethereum', '0x02', 2,
+                   jsonb_build_object('{TRANSACTION_INDEX_KEY}', 0, '{LOG_INDEX_KEY}', $4),
+                   'canonical')",
+    ))
+    .bind(Uuid::from_u128(15))
+    .bind(NAME)
+    .bind(Uuid::from_u128(1))
+    .bind(REGISTRAR_CLEANUP_LOG_INDEX)
+    .execute(pool)
+    .await?;
+
+    let error = apply(pool, &output).await.unwrap_err().to_string();
+    assert!(
+        error.contains("leaves 1 ENSv1 bindings open at its predecessor cleanup"),
+        "{error}"
+    );
+    assert_eq!(
+        active_to(pool, 15).await?,
+        None,
+        "the writer does not clamp it shut"
+    );
     database.cleanup().await?;
     Ok(())
 }
