@@ -64,6 +64,14 @@ same for a lease whose token moved without `reclaim` before the migration, the
 Sepolia block 11723340 shape, asserting that the boundary resolves on the lease,
 that the registry-only binding closes at the registrar cleanup, and that no
 ENSv1 binding stays open.
+`mainnet_declared_registrar_resolves_the_lease_of_a_wrapper_minted_registration`
+does the same on the unlocked-wrapped path with the checked-in Mainnet
+registrar manifest re-chained to Sepolia, for a name registered straight into
+the NameWrapper: its controller grant carries no token id and its only
+token-bearing event is the cleanup transfer from the NameWrapper to the
+Graveyard, which the writer admits because the grant had been observed before
+the transaction; a Redo pass over the migration block must reproduce the same
+bindings.
 
 | ID | Recorded baseline disposition | Pinned exact catalog result | Checked-in rule anchor |
 | --- | --- | --- | --- |

@@ -699,13 +699,23 @@ adapter requires before it interprets the numeric events as lifecycle events
 (`crates/adapters/src/schema_v2/protocol/v1/registrar.rs`), and the
 controller-derived `RegistrationGranted`/`RegistrationRenewed` after-state
 carries no token id, so on Mainnet only `TokenControlTransferred` is lease
-evidence. A Mainnet lease
-that was never transferred before its migration has exactly one such event:
-the migration transaction's own holder-to-controller transfer, which precedes
-the cleanup. Predecessor resolution therefore relies on that transfer being
-activated with the name's `logical_name_id`, which the ordinary registrar
-adapter gives it whenever the surface is known.
-(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f) The writer closes whatever `ens_v1` binding of the
+evidence, and which transfer that is depends on the path. A retained lease
+never transferred before its direct unwrapped migration is handed to the
+controller first, so the migration transaction's own holder-to-controller
+transfer precedes the cleanup. On the unlocked-wrapped path `unwrapETH2LD`
+moves the token from the NameWrapper straight to the Graveyard, so for a name
+registered straight into the NameWrapper that cleanup transfer is the lease's
+first and only token-bearing event. The writer admits token evidence positioned
+at the cleanup when the lease was observed before the migration transaction,
+that is, when the resource carries an activated canonical registrar lifecycle
+event positioned before the cleanup, token id or not, which on Mainnet is the
+controller grant; the cleanup transfer never vouches for a lease first seen in
+the transaction itself. Predecessor resolution therefore relies on those
+transfers being activated with the name's `logical_name_id`, which the
+ordinary registrar adapter gives them whenever the surface is known.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L128-L150 @ ens_v2@a971bd6) The writer closes whatever `ens_v1` binding of the
 name is still open at the cleanup position, zero or one, and refuses an
 `ens_v1` binding opened at the cleanup instant itself. Authority-boundary
 events are not lease evidence: they carry the registrar observation but land
