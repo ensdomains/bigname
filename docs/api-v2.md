@@ -1217,7 +1217,11 @@ read them back so history lists the writes the name's records serve, while
 `name` scope does not because the observation has no surface link. The row's
 `registration_id` stays null. The attribution follows the current pointer
 exactly as the inventory does: switching the pointer away hides those rows and
-switching back restores them.
+switching back restores them. `GET /v1/events?registration_id=...` lists such
+a write only when Project attributed it to that registration's own records or
+to the records of a NameWrapper resource whose `NameWrapped` row recorded that
+lease; a write attributed only to another registration of the same name is not
+part of the read, its `total_count`, or its cursor anchors.
 
 The [#613](https://github.com/ensdomains/bigname/issues/613) interpreter change
 keeps the original [pre-surface](glossary.md#pre-surface) ENSv1 registry `ResolverChanged` row unchanged,
@@ -1333,7 +1337,12 @@ whether or not `address` is also given, and `GET /v1/permissions` pairing the
 name with it is the proven-empty selection described above. A wrapped subname
 has no lease, so its NameWrapper resource is its `registration_id` and selects
 its permissions as before. `GET /v1/permissions?registration_id=<lease>` returns
-the rows of the NameWrapper resource that currently controls the name.
+the rows of the NameWrapper resource that currently controls the name. The lease
+is matched to its name through the name's current `registration_id`, not through
+the `NameWrapped` link, so this holds for a name registered through the
+NameWrapper as well. On every page of a read bound to the lease, by `name` or by
+`registration_id`, `restrictions.registration_id` is the lease, including an
+empty page produced by an `address` with no grant.
 
 #### Known gap: a name registered through the NameWrapper where the controller event grants the lease
 
@@ -1345,7 +1354,8 @@ yet agree on one handle:
 
 - `GET /v1/names/{name}`, `POST /v1/lookup` and `GET /v1/permissions` serve the
   BaseRegistrar lease as `registration_id`, and permissions accept only the
-  lease.
+  lease: `GET /v1/permissions?registration_id=<lease>` selects the NameWrapper
+  resource's rows for this shape too.
 - History still uses the NameWrapper resource as that name's handle.
   `GET /v1/names/{name}/history` and `GET /v1/events` report the NameWrapper
   resource as the `registration_id` of the name's NameWrapper events, and

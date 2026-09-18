@@ -1495,7 +1495,11 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   Rows of a wrapped `.eth` name carry the BaseRegistrar lease as
   `registration_id`, the same handle name detail serves.
   `GET /v1/permissions?registration_id=<lease>` for a wrapped name returns the
-  permission rows of the NameWrapper resource that currently controls the name.
+  permission rows of the NameWrapper resource that currently controls the name,
+  matched through the name's current `registration_id`; a name registered
+  through the NameWrapper, whose wrap recorded no lease, is matched the same
+  way. `restrictions.registration_id` is the lease on every page of a read
+  bound to it, including an empty page filtered by `address`.
   The NameWrapper resource itself is not the name's registration, so pairing
   the name with it is the proven-empty selection.
   An unrecognized namespace returns `404 not_found`. A publication change
@@ -2106,7 +2110,11 @@ For a registrar lease first identified by a later readable observation, registra
   registration that was open at the event's position on the event's own chain
   branch, so an older registration does not acquire a later registration's name
   events. Record writes on the name's resolver that carry no resource are kept
-  through the same binding. A handle is a public registration only when a
+  through the same binding, or through Project's attribution of the write to
+  that registration's own records or to the records of a NameWrapper resource
+  whose `NameWrapped` row recorded the lease; attribution to another
+  registration of the same name does not admit the write, its count, or its
+  cursor anchor. A handle is a public registration only when a
   registration grant backs it: directly, through a NameWrapper binding that
   recorded the lease it wrapped, or, for a wrapped name with no registrar
   lease, through the NameWrapper binding itself. A reservation, a
