@@ -20,12 +20,13 @@ use crate::{
         CompletedPhaseFuture, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
         PhaseProgress, RunMode, VerificationLevel,
     },
-    verify_compare,
     verify_store::VerificationStore,
 };
 
 #[path = "verify_completed.rs"]
 mod completed;
+#[path = "verify_reference_retry.rs"]
+mod reference_retry;
 #[path = "verify_source.rs"]
 mod source_roles;
 pub(crate) use completed::provider_trusted_verify_required;
@@ -156,19 +157,14 @@ impl Phase for VerifyPhase {
                         .store
                         .load_batch(&context.chain_id, plan.from, plan.to)
                         .await?;
-                    let reference = self
-                        .reference
-                        .fetch(source, stored.filter.clone(), plan.from, plan.to)
-                        .await?;
-                    if let Some(mismatch) = verify_compare::compare(&stored, &reference) {
-                        return Err(RunnerError::verification_mismatch(format!(
-                            "chain {} source {} range {}..={}: {mismatch}",
-                            context.chain_id,
-                            source.source_key(),
-                            plan.from,
-                            plan.to
-                        )));
-                    }
+                    let reference = reference_retry::fetch_matching(
+                        self.reference.as_ref(),
+                        source,
+                        &stored,
+                        plan.from,
+                        plan.to,
+                    )
+                    .await?;
                     info!(
                         chain_id = context.chain_id,
                         source_key = source.source_key(),
