@@ -1,11 +1,21 @@
+use std::collections::BTreeMap;
+
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use super::{
     EventHistoryReadFilter,
-    filters::{push_attributed_record_filter_where, push_attributing_inventory_is_registration},
+    filters::{
+        push_attributed_record_filter_where, push_attributing_inventory_is_registration,
+        push_publication_bound,
+    },
     lineage::{same_fork_as, same_fork_predicate},
 };
+
+/// The per-chain published block a product read is bound to. Every row that establishes
+/// registration identity (a grant, a wrapper binding, a surface binding) must lie at or below
+/// it, so rows Interpret wrote above the bound publication cannot reclassify rows below it.
+type PublicationBounds<'a> = Option<&'a BTreeMap<String, i64>>;
 
 pub(super) fn push_product_event_kind_predicate(builder: &mut QueryBuilder<'_, Postgres>) {
     builder.push(
@@ -24,6 +34,7 @@ pub(super) async fn is_public_registration_id(
     pool: &PgPool,
     registration_id: Uuid,
     canonical_only: bool,
+    published: PublicationBounds<'_>,
 ) -> Result<bool, sqlx::Error> {
     let mut builder = QueryBuilder::new(
         "SELECT EXISTS (
@@ -36,6 +47,7 @@ pub(super) async fn is_public_registration_id(
     );
     builder.push_bind(registration_id);
     builder.push(" AND ne.consumer_visibility = 'activated'");
+    push_publication_bound(&mut builder, "ne", published);
     if canonical_only {
         builder.push(
             " AND ne.canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -46,7 +58,7 @@ pub(super) async fn is_public_registration_id(
         );
     }
     builder.push(" AND ");
-    push_public_registration_witness(&mut builder, canonical_only, &["ne"]);
+    push_public_registration_witness(&mut builder, canonical_only, &["ne"], published);
     builder.push(" AND (");
     push_product_registration_id(&mut builder, canonical_only);
     builder.push(" = ");
@@ -60,7 +72,8 @@ pub(super) async fn is_public_registration_id(
 /// to it while one of the registration's bindings is active, or when Project attributed the
 /// write to the registration's own records or to those of a NameWrapper resource that wrapped
 /// it. The candidate rows also hold the writes of the name's other registrations, so attribution
-/// to a candidate resource alone is not membership.
+/// to a candidate resource alone is not membership. Every binding, grant and wrapper-link
+/// witness lies at or below the read's published block of its chain.
 pub(super) fn push_registration_filter<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a EventHistoryReadFilter,
@@ -69,19 +82,25 @@ pub(super) fn push_registration_filter<'a>(
     let Some(registration_id) = filter.registration_id else {
         return;
     };
+    let published = filter.publication_block_bounds.as_ref();
     builder.push(" AND ");
     builder.push_bind(filter.registration_id_is_public);
     builder.push(" AND ((ne.resource_id IS NULL AND ");
     push_product_event_kind_predicate(builder);
     builder.push(" AND (");
-    push_registration_binding_at_event(builder, registration_id, canonical_only);
+    push_registration_binding_at_event(builder, registration_id, canonical_only, published);
     if let Some((_, resource_ids)) = filter.product_registration() {
         push_attributed_record_filter_where(builder, "ne", resource_ids, |builder| {
-            push_attributing_inventory_is_registration(builder, registration_id, canonical_only);
+            push_attributing_inventory_is_registration(
+                builder,
+                registration_id,
+                canonical_only,
+                published,
+            );
         });
     }
     builder.push(")) OR (");
-    push_public_registration_at_event(builder, registration_id, canonical_only);
+    push_public_registration_at_event(builder, registration_id, canonical_only, published);
     builder.push(" AND ");
     push_product_registration_id(builder, canonical_only);
     builder.push(" = ");
@@ -94,6 +113,7 @@ fn push_registration_binding_at_event(
     builder: &mut QueryBuilder<'_, Postgres>,
     registration_id: Uuid,
     canonical_only: bool,
+    published: PublicationBounds<'_>,
 ) {
     builder.push(
         "EXISTS (
@@ -114,6 +134,7 @@ fn push_registration_binding_at_event(
                        + GREATEST(COALESCE(ne.log_index, 0), 0)
                          * interval '1 microsecond')",
     );
+    push_publication_bound(builder, "history_binding", published);
     if canonical_only {
         builder.push(
             " AND history_binding.canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -134,6 +155,7 @@ fn push_registration_binding_at_event(
         registration_id,
         canonical_only,
         true,
+        published,
     );
     builder.push(")");
 }
@@ -143,6 +165,7 @@ fn push_public_registration_at_event(
     builder: &mut QueryBuilder<'_, Postgres>,
     registration_id: Uuid,
     canonical_only: bool,
+    published: PublicationBounds<'_>,
 ) {
     if canonical_only {
         builder.push("TRUE");
@@ -160,6 +183,7 @@ fn push_public_registration_at_event(
         registration_id,
         canonical_only,
         false,
+        published,
     );
     builder.push(")");
 }
@@ -170,6 +194,7 @@ fn push_registration_resource_witness(
     registration_id: Uuid,
     canonical_only: bool,
     require_lifecycle: bool,
+    published: PublicationBounds<'_>,
 ) {
     // Keep the resource-index lookup bounded before applying nested identity checks.
     builder.push(format!(
@@ -185,6 +210,7 @@ fn push_registration_resource_witness(
         builder
             .push(" AND resource_event.canonicality_state IN ('canonical', 'safe', 'finalized')");
     }
+    push_publication_bound(builder, "resource_event", published);
     builder.push(
         " OFFSET 0
             ) ne
@@ -208,9 +234,9 @@ fn push_registration_resource_witness(
     builder.push(same_fork_as("ne", anchors, canonical_only));
     builder.push(" AND ");
     if require_lifecycle {
-        push_registration_lifecycle_witness(builder, canonical_only, anchors);
+        push_registration_lifecycle_witness(builder, canonical_only, anchors, published);
     } else {
-        push_public_registration_witness(builder, canonical_only, anchors);
+        push_public_registration_witness(builder, canonical_only, anchors, published);
     }
     builder.push(" AND (");
     push_product_registration_id_with_anchors(builder, canonical_only, anchors);
@@ -225,9 +251,10 @@ fn push_public_registration_witness(
     builder: &mut QueryBuilder<'_, Postgres>,
     canonical_only: bool,
     anchors: &[&str],
+    published: PublicationBounds<'_>,
 ) {
     builder.push("(");
-    push_registration_lifecycle_witness(builder, canonical_only, anchors);
+    push_registration_lifecycle_witness(builder, canonical_only, anchors, published);
     builder.push(
         " OR (
             (ne.source_family IN ('ens_v1_registrar_l1', 'basenames_base_registrar')
@@ -249,6 +276,7 @@ fn push_registration_lifecycle_witness(
     builder: &mut QueryBuilder<'_, Postgres>,
     canonical_only: bool,
     anchors: &[&str],
+    published: PublicationBounds<'_>,
 ) {
     builder.push(
         "(ne.event_kind = 'RegistrationGranted'
@@ -267,6 +295,7 @@ fn push_registration_lifecycle_witness(
     if canonical_only {
         builder.push(" AND grant_event.canonicality_state IN ('canonical', 'safe', 'finalized')");
     }
+    push_publication_bound(builder, "grant_event", published);
     builder.push(
         " OFFSET 0
                   ) lifecycle_grant

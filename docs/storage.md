@@ -266,7 +266,11 @@ of its chain is not followed. A registration-scoped product read gathers its can
 three index-keyed arms (the lease's names, the resources of those names, and resolver record
 writes attributed to them) and then keeps a row only when its product registration identity is
 the requested lease, or when the row has no resource and falls inside a binding of that lease
-that was open at the row's position.
+that was open at the row's position. The rows that prove the requested resource is a registration
+(its grant, a wrapper `SurfaceBound` row that names it, the binding a resource-less row falls
+inside) also lie at or below the read's published block, so a grant Interpret has written above
+the publication a read is bound to does not turn that publication's older rows, count, or cursor
+anchors into registration history.
 
 History loaders called with `canonical_only=false` also return rows of activated losing
 branches. For those reads every binding, grant and wrapper-link witness must lie on the event's

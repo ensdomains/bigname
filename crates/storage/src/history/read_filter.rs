@@ -24,8 +24,14 @@ pub(in crate::history) struct EventHistoryReadFilter {
     pub(in crate::history) selectors: Vec<HistorySelector>,
     pub(in crate::history) registration_id: Option<Uuid>,
     /// Whether `registration_id` names a registration at all. A reservation, a registry-only
-    /// resource, or a NameWrapper resource standing in for a BaseRegistrar lease does not.
+    /// resource, or a NameWrapper resource standing in for a BaseRegistrar lease does not. Judged
+    /// from the rows at or below `publication_block_bounds`.
     pub(in crate::history) registration_id_is_public: bool,
+    /// The per-chain published block the read is bound to. The registration witnesses honour it
+    /// like the anchor loaders do, so rows above the bound publication cannot reclassify rows
+    /// below it.
+    pub(in crate::history) publication_block_bounds:
+        Option<std::collections::BTreeMap<String, i64>>,
     pub(in crate::history) namespace: Option<String>,
     pub(in crate::history) contract_address: Option<String>,
     pub(in crate::history) event_kinds: Vec<String>,
@@ -71,13 +77,14 @@ pub(in crate::history) async fn event_history_read_filter(
         .then_some(filter.resource_id)
         .flatten();
     let registration_id_is_public = match registration_id {
-        Some(registration_id) => {
-            registration_identity::is_public_registration_id(pool, registration_id, canonical_only)
-                .await
-                .with_context(|| {
-                    format!("failed to validate public registration_id {registration_id}")
-                })?
-        }
+        Some(registration_id) => registration_identity::is_public_registration_id(
+            pool,
+            registration_id,
+            canonical_only,
+            published,
+        )
+        .await
+        .with_context(|| format!("failed to validate public registration_id {registration_id}"))?,
         None => false,
     };
 
@@ -173,6 +180,7 @@ pub(in crate::history) async fn event_history_read_filter(
         selectors,
         registration_id,
         registration_id_is_public,
+        publication_block_bounds: filter.publication_block_bounds,
         namespace: filter.namespace,
         contract_address: filter
             .contract_address

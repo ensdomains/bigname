@@ -1,7 +1,38 @@
+use std::collections::BTreeMap;
+
 use sqlx::{Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use super::{HistoryBlockWindow, lineage::same_fork_predicate, selectors::HistorySelector};
+
+/// Keep `alias` at or below the published block of its chain. A row on a chain the bounds do
+/// not name lies above every publication, as does every row when the bounds are empty; without
+/// bounds the read is not bound to a publication and nothing is pushed.
+pub(super) fn push_publication_bound(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    alias: &str,
+    published: Option<&BTreeMap<String, i64>>,
+) {
+    let Some(bounds) = published else {
+        return;
+    };
+    if bounds.is_empty() {
+        builder.push(" AND FALSE");
+        return;
+    }
+    builder.push(" AND (");
+    for (index, (chain_id, block_number)) in bounds.iter().enumerate() {
+        if index > 0 {
+            builder.push(" OR ");
+        }
+        builder.push(format!("({alias}.chain_id = "));
+        builder.push_bind(chain_id.clone());
+        builder.push(format!(" AND {alias}.block_number <= "));
+        builder.push_bind(*block_number);
+        builder.push(")");
+    }
+    builder.push(")");
+}
 
 /// One inclusive block range per chain; a window without ranges matches nothing.
 pub(super) fn push_history_block_window<'a>(
@@ -115,11 +146,12 @@ pub(super) fn push_attributed_record_filter_where<'a>(
 /// The `inventory` predicate of a registration-scoped read: the record inventory that attributes
 /// a write proves membership only when it is the registration's own, or belongs to a NameWrapper
 /// resource whose `NameWrapped` row on the write's fork recorded this registration as the lease
-/// it wrapped.
+/// it wrapped. The `NameWrapped` row must lie at or below the read's published block.
 pub(super) fn push_attributing_inventory_is_registration(
     builder: &mut QueryBuilder<'_, Postgres>,
     registration_id: Uuid,
     canonical_only: bool,
+    published: Option<&BTreeMap<String, i64>>,
 ) {
     builder.push(" AND (inventory.resource_id = ");
     builder.push_bind(registration_id);
@@ -138,6 +170,7 @@ pub(super) fn push_attributing_inventory_is_registration(
         builder
             .push(" AND wrapper_binding.canonicality_state IN ('canonical', 'safe', 'finalized')");
     }
+    push_publication_bound(builder, "wrapper_binding", published);
     builder.push(
         " OFFSET 0
             ) wrapper_binding
