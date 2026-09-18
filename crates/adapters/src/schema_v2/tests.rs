@@ -6,6 +6,8 @@ use uuid::Uuid;
 
 use super::*;
 
+#[path = "tests/lookahead.rs"]
+mod lookahead;
 mod migration;
 
 #[path = "tests/record_id_resolver.rs"]
@@ -7130,7 +7132,7 @@ fn wrapper_fallback_registrar_identity_matches_live_full_replay_and_cold_restore
         .cloned()
         .collect::<Vec<_>>();
     let cold_prior = seam::fold_prior_events(Vec::new(), &fallback_history, &[block(1), block(2)])?;
-    let cold = interpret_test_batch(BatchInput {
+    let cold_input = BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: manifests(),
         discovery_rules: Vec::new(),
@@ -7138,7 +7140,9 @@ fn wrapper_fallback_registrar_identity_matches_live_full_replay_and_cold_restore
         prior_events: cold_prior,
         blocks: Vec::new(),
         raw_logs: vec![later_transfer.clone()],
-    })?;
+    };
+    lookahead::assert_scoped_matches(cold_input.clone())?;
+    let cold = interpret_test_batch(cold_input)?;
     let cold_later = cold
         .normalized_events
         .iter()
@@ -14416,7 +14420,7 @@ fn assert_reverse_node_resolver_events_are_state_keyed(
     };
     let mut registry_admission = admission(90, "registry");
     registry_admission.address = REGISTRY_ADDRESS.to_owned();
-    let output = interpret_test_batch(BatchInput {
+    let batch = BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![
             manifest_with_events(
@@ -14461,7 +14465,11 @@ fn assert_reverse_node_resolver_events_are_state_keyed(
             raw_at(name_log, 1, 2, RESOLVER_ADDRESS),
             raw_at(text_log, 1, 3, RESOLVER_ADDRESS),
         ],
-    })?;
+    };
+    if namespace == "ens" {
+        lookahead::assert_scoped_matches(batch.clone())?;
+    }
+    let output = interpret_test_batch(batch)?;
 
     assert!(
         output.name_surfaces.is_empty(),
@@ -17768,7 +17776,39 @@ fn interpret_test_batch(mut input: BatchInput) -> anyhow::Result<BatchOutput> {
         }
         input.blocks = blocks.into_values().collect();
     }
-    super::interpret_schema_v2_batch(input)
+    let output = super::interpret_schema_v2_batch(input.clone())?;
+    // Every ENSv1-only fixture input doubles as a loader-equivalence case: interpreting it
+    // from lookahead-scoped state must give exactly the output of full restored state.
+    if lookahead::is_ensv1_only(&input) {
+        lookahead::assert_scoped_matches(input).map_err(|error| {
+            error.context("ENSv1 fixture input differs between lookahead and full-state")
+        })?;
+    }
+    Ok(output)
+}
+
+#[test]
+fn every_ensv1_adapter_fixture_matches_scoped_lookahead() -> anyhow::Result<()> {
+    // `interpret_test_batch` is the entry point of the adapter fixture tests. This pins that
+    // it runs the lookahead comparison for ENSv1-only inputs, and only for those.
+    let ensv1 = BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![lookahead::registrar_manifest()],
+        discovery_rules: Vec::new(),
+        admissions: Vec::new(),
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: Vec::new(),
+    };
+    assert!(lookahead::is_ensv1_only(&ensv1));
+    let before = lookahead::scoped_comparisons();
+    interpret_test_batch(ensv1.clone())?;
+    assert_eq!(lookahead::scoped_comparisons(), before + 1);
+
+    let mut with_v2 = ensv1;
+    with_v2.manifests[0].source_family = "ens_v2_registry_l1".to_owned();
+    assert!(!lookahead::is_ensv1_only(&with_v2));
+    Ok(())
 }
 
 fn interpret_test_batch_incremental(

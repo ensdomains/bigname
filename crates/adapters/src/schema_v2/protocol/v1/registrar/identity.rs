@@ -6,7 +6,7 @@ use crate::schema_v2::{
     model::RawLogInput,
 };
 
-pub(super) fn registrar_namehash(selected: &Selected, labelhash: B256) -> String {
+pub(in crate::schema_v2) fn registrar_namehash(selected: &Selected, labelhash: B256) -> String {
     let suffix = if selected.source.source_family == "basenames_base_registrar" {
         vec!["base".to_owned(), "eth".to_owned()]
     } else {

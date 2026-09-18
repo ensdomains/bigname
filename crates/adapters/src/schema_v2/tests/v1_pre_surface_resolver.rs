@@ -542,10 +542,9 @@ fn assert_four_way_and_restore_parity(
             .collect(),
         compact_prior(&prefix_output.normalized_events),
     ] {
-        let (restored, _) = interpret_test_batch_incremental(
-            input(manifests.clone(), admissions.clone(), prior, suffix.clone()),
-            None,
-        )?;
+        let restored_input = input(manifests.clone(), admissions.clone(), prior, suffix.clone());
+        super::lookahead::assert_scoped_matches(restored_input.clone())?;
+        let (restored, _) = interpret_test_batch_incremental(restored_input, None)?;
         assert_eq!(live, restored, "cold restore drift");
     }
     Ok((single, live))

@@ -1,11 +1,12 @@
-use std::{collections::HashMap, sync::Mutex, time::Instant};
+use std::{collections::HashMap, num::NonZeroU32, sync::Mutex, time::Instant};
 
 use bigname_adapters::{SchemaV2AdapterSession, StateCacheCapacity};
 use sqlx::PgPool;
 
 use crate::{InterpretError, Result, load, recompute, write};
 
-const CANONICAL_BLOCKS_PER_BATCH: i64 = 500;
+/// Canonical blocks one Interpret batch reads, interprets and publishes in one transaction.
+pub const DEFAULT_INTERPRET_BLOCKS_PER_BATCH: NonZeroU32 = NonZeroU32::new(500).unwrap();
 pub const DEFAULT_INTERPRETER_STATE_CACHE_ENTRIES: usize = 65_536;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,6 +42,10 @@ pub struct BatchOutcome {
 pub struct Engine {
     pool: PgPool,
     state_cache_capacity: StateCacheCapacity,
+    blocks_per_batch: NonZeroU32,
+    lookahead_statement_timeout_secs: Option<NonZeroU32>,
+    force_full_state_loader: bool,
+    loader_choices: loader_choice::LoaderChoices,
     prior_sessions: Mutex<HashMap<String, PriorSession>>,
 }
 
@@ -67,8 +72,38 @@ impl Engine {
         Self {
             pool,
             state_cache_capacity: StateCacheCapacity::Entries(entries),
+            blocks_per_batch: DEFAULT_INTERPRET_BLOCKS_PER_BATCH,
+            lookahead_statement_timeout_secs: None,
+            force_full_state_loader: false,
+            loader_choices: loader_choice::LoaderChoices::default(),
             prior_sessions: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Batch length in canonical blocks. It bounds the memory and transaction size of one
+    /// batch and must not change stored output.
+    pub fn with_blocks_per_batch(mut self, blocks: NonZeroU32) -> Self {
+        self.blocks_per_batch = blocks;
+        self
+    }
+
+    /// Optional PostgreSQL `statement_timeout`, in seconds, for the lookahead loader's
+    /// reads. `None`, the default, sets no timeout.
+    pub fn with_lookahead_statement_timeout_secs(mut self, seconds: Option<NonZeroU32>) -> Self {
+        self.lookahead_statement_timeout_secs = seconds;
+        self
+    }
+
+    /// The loader most recently chosen for a chain, as reported in the log.
+    pub fn chosen_loader(&self, chain_id: &str) -> Result<Option<StateLoader>> {
+        self.loader_choices.current(chain_id)
+    }
+
+    /// Operator override: always restore prior state with the full-state loader, even on
+    /// a chain where the per-batch ENSv1 lookahead loader would be chosen automatically.
+    pub fn with_full_state_loader_forced(mut self, forced: bool) -> Self {
+        self.force_full_state_loader = forced;
+        self
     }
 
     pub async fn run_batch(&self, request: BatchRequest) -> Result<BatchOutcome> {
@@ -124,7 +159,7 @@ impl Engine {
             &request.chain_id,
             next_block,
             target.number,
-            CANONICAL_BLOCKS_PER_BATCH,
+            i64::from(self.blocks_per_batch.get()),
         )
         .await?;
         validate_contiguous_markers(&request.chain_id, next_block, &markers)?;
@@ -145,19 +180,50 @@ impl Engine {
             self.take_prior_session(&session_key, *batch_from, request.resume_current.is_some())?;
         profile_phase(profile, "take_prior_session", phase_started, None);
         let phase_started = Instant::now();
-        let loaded = load::batch_input(
-            &self.pool,
-            &request.chain_id,
-            *batch_from,
-            *batch_to,
-            request
-                .resume_current
-                .as_ref()
-                .map(|marker| (marker.number, marker.hash.as_str())),
-            cached_prior,
-            self.state_cache_capacity,
-        )
-        .await?;
+        let resume_marker = request
+            .resume_current
+            .as_ref()
+            .map(|marker| (marker.number, marker.hash.as_str()));
+        // The loader is chosen for each chain and each batch, inside the loader's own
+        // database snapshot, so the choice always matches the manifests the batch uses.
+        let lookahead = if self.force_full_state_loader {
+            load::lookahead::Attempt::FullStateRequired(StateLoader::FullState {
+                reason: FullStateReason::OperatorOverride,
+            })
+        } else {
+            load::lookahead::batch_input(
+                &self.pool,
+                &request.chain_id,
+                *batch_from,
+                *batch_to,
+                resume_marker,
+                self.state_cache_capacity,
+                self.lookahead_statement_timeout_secs,
+            )
+            .await?
+        };
+        let loaded = match lookahead {
+            load::lookahead::Attempt::Loaded(loaded) => {
+                drop(cached_prior);
+                self.loader_choices
+                    .record(&request.chain_id, StateLoader::Lookahead)?;
+                *loaded
+            }
+            load::lookahead::Attempt::FullStateRequired(choice) => {
+                self.loader_choices.record(&request.chain_id, choice)?;
+                load::batch_input(
+                    &self.pool,
+                    &request.chain_id,
+                    *batch_from,
+                    *batch_to,
+                    resume_marker,
+                    cached_prior,
+                    self.state_cache_capacity,
+                )
+                .await?
+            }
+        };
+        let used_lookahead = loaded.lookahead_nodes.is_some();
         let restored_event_count = loaded.restored_event_count;
         profile_phase(
             profile,
@@ -184,12 +250,21 @@ impl Engine {
         }
         write_lineage.extend(loaded_markers.iter().cloned());
         let phase_started = Instant::now();
-        let prepared = bigname_adapters::prepare_schema_v2_batch_incremental_with_provenance(
-            input,
-            provenance_manifests,
-            adapter_session,
-            self.state_cache_capacity,
-        )
+        let prepared = match loaded.lookahead_nodes {
+            Some(nodes) => bigname_adapters::schema_v2::prepare_schema_v2_batch_lookahead(
+                input,
+                provenance_manifests,
+                adapter_session.expect("lookahead supplies a restored session"),
+                &nodes,
+                self.state_cache_capacity,
+            ),
+            None => bigname_adapters::prepare_schema_v2_batch_incremental_with_provenance(
+                input,
+                provenance_manifests,
+                adapter_session,
+                self.state_cache_capacity,
+            ),
+        }
         .map_err(|error| {
             InterpretError::data_integrity(format!(
                 "hash-covered adapter interpretation failed: {error:#}"
@@ -240,13 +315,16 @@ impl Engine {
         .await?;
         profile_phase(profile, "write_batch", phase_started, None);
         let phase_started = Instant::now();
-        self.store_prior_session(
-            session_key,
-            batch_to.saturating_add(1),
-            next_prior_cache,
-            adapter_session,
-            complete,
-        )?;
+        // Lookahead restores each batch from the database, so it keeps no session.
+        if !used_lookahead {
+            self.store_prior_session(
+                session_key,
+                batch_to.saturating_add(1),
+                next_prior_cache,
+                adapter_session,
+                complete,
+            )?;
+        }
         profile_phase(
             profile,
             "store_prior_session",
@@ -358,6 +436,10 @@ fn validate_loaded_lineage(
     }
     Ok(())
 }
+
+#[path = "engine/loader_choice.rs"]
+mod loader_choice;
+pub use loader_choice::{FullStateReason, StateLoader};
 
 #[cfg(test)]
 #[path = "engine/tests.rs"]

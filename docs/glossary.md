@@ -163,7 +163,8 @@ repair path, or checkpoint-promotion consumer for these records.
 ## Batch grid
 
 the partition of one interpret walk into consecutive physical
-batches (today 500-block ranges). Grids never split a block: the block is the
+batches (500-block ranges unless the operator sets
+`BIGNAME_INTERPRET_BLOCKS_PER_BATCH`). Grids never split a block: the block is the
 atomic unit every grid loads. Where the boundaries fall is an execution
 detail, not an input to interpretation. After a walk completes, surviving identity rows,
 discovery edges, and normalized events must be identical across grids over identical input.
@@ -1547,6 +1548,22 @@ physical Interpret batches for one chain (`AdapterSession` in code). It holds
 protocol topology and current authority needed by the next batch, plus a
 bounded cache of persisted event values. It is disposable: a cold restore
 rebuilds it from readable `normalized_events` rows.
+
+## Lookahead loader
+
+the way Interpret restores prior adapter state for one batch on a chain
+whose `active` and `deprecated` manifests all belong to source families it
+covers (`ens_v1_registrar_l1`, `ens_v1_registry_l1`, `ens_v1_resolver_l1`,
+`ens_v1_wrapper_l1`, `ens_v1_reverse_l1`, `basenames_l1_compat`, and every
+`*_execution` family) and whose retained `normalized_events` hold no history of
+an uncovered family under a `draft` or `shadow` manifest: it loads only the
+history of the names and resources the batch can touch (those its logs
+mention, those earlier events link to them, and registrations falling due in
+the batch) instead of all retained history. The other way is the *full-state
+loader*, which restores everything once and then carries the
+[interpreter session](#interpreter-session) between batches. Interpret chooses
+between them automatically for each chain and batch; both must produce identical
+output. See [Interpret process memory](storage.md#interpret-process-memory).
 
 ## Interpreter state key
 
