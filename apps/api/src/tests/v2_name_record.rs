@@ -1632,19 +1632,22 @@ async fn v2_get_name_withholds_retained_inventory_for_released_tombstone() -> Re
 
 /// A `.eth` lease that lapsed under the registry-only binding a transfer without `reclaim`
 /// opened is released like any other lapse. Project serves it as a released tombstone on that
-/// binding, with `registry_only` still named as the authority kind of the registration, and the
-/// API serves what it serves for every released name: no owner, registrant, expiry, resolver or
-/// records.
+/// binding: the registration row keeps `released`, its `released_at`, `registered_at` and the
+/// lease's `resource_id`, and Project clears its authority kind, authority key, registrant and
+/// expiry to null as it does for every released-v1 tombstone. The API then serves what it
+/// serves for every released name: no owner, registrant, expiry, resolver or records.
 #[tokio::test]
 async fn v2_get_name_serves_a_lapsed_handed_off_lease_as_released() -> Result<()> {
     let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
         row.declared_summary["registration"] = json!({
             "status": "released",
-            "authority_kind": "registry_only",
+            "authority_kind": null,
+            "authority_key": null,
             "released_at": "2026-06-14T00:00:00Z",
             "registrant": null,
             "expiry": null,
             "registered_at": "2024-06-14T00:00:00Z",
+            "resource_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
             "latest_event_kind": "RegistrationReleased"
         });
         row.declared_summary["control"] = json!({"status": "unregistered"});
