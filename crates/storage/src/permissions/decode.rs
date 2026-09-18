@@ -28,6 +28,7 @@ pub(super) fn decode_permissions_current_row(row: PgRow) -> Result<PermissionsCu
         resource_id: row.try_get("resource_id")?,
         subject: row.try_get("subject")?,
         scope,
+        record_resource_selector: scope_detail.get("resource_selector").cloned(),
         effective_powers: row.try_get("effective_powers")?,
         grant_source: row.try_get("grant_source")?,
         revocation_source: row.try_get("revocation_source")?,
@@ -45,15 +46,21 @@ pub(super) fn decode_permissions_current_row(row: PgRow) -> Result<PermissionsCu
 pub(super) fn decode_effective_permission_row(row: PgRow) -> Result<EffectivePermissionRow> {
     let kind: String = row.try_get("scope_kind")?;
     let detail: Value = row.try_get("scope_detail")?;
-    let scope = if kind == "account" {
-        EffectivePermissionScope::Account {
-            chain_id: text(&detail, "chain_id")?,
-            authority_kind: text(&detail, "authority_kind")?,
-            authority_contract: text(&detail, "authority_contract")?.to_ascii_lowercase(),
-            owner: text(&detail, "owner")?.to_ascii_lowercase(),
-        }
+    let (scope, record_resource_selector) = if kind == "account" {
+        (
+            EffectivePermissionScope::Account {
+                chain_id: text(&detail, "chain_id")?,
+                authority_kind: text(&detail, "authority_kind")?,
+                authority_contract: text(&detail, "authority_contract")?.to_ascii_lowercase(),
+                owner: text(&detail, "owner")?.to_ascii_lowercase(),
+            },
+            None,
+        )
     } else {
-        EffectivePermissionScope::Direct(PermissionScope::parse(&kind, &detail)?)
+        (
+            EffectivePermissionScope::Direct(PermissionScope::parse(&kind, &detail)?),
+            detail.get("resource_selector").cloned(),
+        )
     };
     let stored_scope: String = row.try_get("scope_storage_key")?;
     let expected_scope = scope.storage_key();
@@ -74,6 +81,7 @@ pub(super) fn decode_effective_permission_row(row: PgRow) -> Result<EffectivePer
         resource_id: row.try_get("resource_id")?,
         subject: row.try_get("subject")?,
         scope,
+        record_resource_selector,
         grant_relation: relation,
         effective_powers: row.try_get("effective_powers")?,
         grant_source: row.try_get("grant_source")?,
