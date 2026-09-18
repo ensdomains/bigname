@@ -133,10 +133,11 @@ pub(crate) async fn get_permissions(
 
     if let Some(selection) = resolved.empty_selection {
         let support = if selection == EmptyPermissionsSelection::SupersededNameRegistrationPair {
-            // The explicitly requested registration classifies the empty page; the name's own
-            // control resource (its NameWrapper resource for a wrapped `.eth` name) does not.
-            let ids = filter_inputs
-                .requested_resource_id
+            // The explicitly requested registration classifies the empty page like its own
+            // standalone read, through the resource that controls it; the name's own control
+            // resource does not.
+            let ids = resolved
+                .pair_support_resource_id
                 .into_iter()
                 .collect::<Vec<_>>();
             let summaries =

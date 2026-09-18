@@ -34,6 +34,11 @@ pub(super) struct ResolvedPermissionsFilter {
     pub(super) subject: Option<String>,
     pub(super) resource_id: Option<Uuid>,
     pub(super) empty_selection: Option<EmptyPermissionsSelection>,
+    /// The resource whose support summary classifies a superseded name and registration pair:
+    /// the requested registration resolved like its own standalone read, so a wrapped `.eth`
+    /// lease reads the NameWrapper resource that controls it. An id that is not a registration
+    /// keeps its raw resource classification.
+    pub(super) pair_support_resource_id: Option<Uuid>,
     pub(super) authority_context: AuthorityContext,
     pub(super) cursor_filters: BTreeMap<String, String>,
 }
@@ -114,6 +119,15 @@ pub(super) async fn resolve_permissions_filter(
         (Some(requested), Some(resolved)) if requested != resolved
     );
 
+    let pair_support_resource_id = match inputs.requested_resource_id {
+        Some(requested) if superseded_pair => Some(
+            control_resource_for_registration(state, requested)
+                .await?
+                .unwrap_or(requested),
+        ),
+        _ => None,
+    };
+
     let namespace = inputs.namespace.clone();
     let mut resource_is_not_a_registration = false;
     let resource_id = match (name_resource_id, inputs.requested_resource_id) {
@@ -183,6 +197,7 @@ pub(super) async fn resolve_permissions_filter(
         subject: params.address.clone(),
         resource_id,
         empty_selection,
+        pair_support_resource_id,
         authority_context,
         cursor_filters,
     })
