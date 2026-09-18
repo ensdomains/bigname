@@ -658,17 +658,32 @@ shared production/test activation function after all batch correlation paths fin
 there is no second test-only transition implementation. Its transition carries the exact
 logical name, full chain position, expected `ens_v1` arm, predecessor selector,
 expected `ens_v2` arm, and concrete successor binding/resource. The writer
-selects current matching predecessors under `FOR UPDATE` and performs the
+resolves the predecessor under `FOR UPDATE` and performs the
 cross-arm close and successor retain/open in that same transaction. It never
 ranks multiple predecessors and never applies the transition to descendants.
 There is no runtime or manifest activation flag.
 
 The `.eth` second-level selector is path-specific. The registrar-token
 `unwrapped` and `unlocked_wrapped` paths record their exact BaseRegistrar
-transfer to the Graveyard, select the registrar resource immediately before
-that cleanup, and close it at the cleanup position. The `locked_wrapped` path
+transfer to the Graveyard and select the lease: the one resource of the name
+that carries an activated registrar lifecycle event (`RegistrationGranted`,
+`RegistrationRenewed`, `ExpiryChanged`, `TokenControlTransferred`) with the
+recorded token id, emitted by the recorded BaseRegistrar instance before that
+cleanup, that once had an `ens_v1` binding, and whose registration was not
+released before the cleanup. The token is the predecessor because the
+controller takes it from whoever holds it and reclaims the registry record
+for itself before parking both in the Graveyard; the registry-owner record
+never holds the token. A lease whose binding a
+[registry-only handoff](glossary.md#registry-only-handoff) closed earlier
+therefore still qualifies. The writer closes whatever `ens_v1` binding of the
+name is still open at the cleanup position, zero or one, and refuses an
+`ens_v1` binding opened at the cleanup instant itself. Authority-boundary
+events are not lease evidence: they carry the registrar observation but land
+on the resource that gained or lost the name. The `locked_wrapped` path
 selects the live NameWrapper resource immediately before the ENSv2 registration
-boundary and closes it there. The unlocked wrapped controller unwraps before
+boundary and closes it there.
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2@a971bd6)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f) The unlocked wrapped controller unwraps before
 injecting the ENSv2 registration, so ordinary ENSv1 interpretation has already
 closed its wrapper binding and reactivated its registrar position before that
 recorded transfer. If no prior registrar identity was materialized, that exact
@@ -680,6 +695,9 @@ proof requires the admitted BaseRegistrar holder-to-controller transfer,
 registry reclaim to that controller, registry transfer to Graveyard, any
 emitted resolver/TTL clears, the matching registrar transfer to Graveyard,
 and exactly one complete ENSv2 successor for the same name and transaction.
+The name may enter the transaction bound to its lease or, after a registrar
+transfer without `reclaim`, to the registry-only resource the lease goes on
+under; the registrar state is the lease either way.
 The successor proof ends at its initial mint/resource-link/role-grant sequence;
 subsequent same-transaction token transfers and role changes remain ordinary.
 (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRegistry.json:L2347 @ ens_v2@a971bd64)
@@ -687,7 +705,7 @@ Reconciliation retains raw facts and normalized ownership/cleanup observations,
 but removes intervening ENSv1 authority bindings and their derived permission
 changes. Registry metadata remains attached to the existing registrar resource
 without fields that would restore temporary registry-only authority. Thus the
-actual registrar predecessor stays eligible immediately before cleanup, and
+actual registrar lease stays the predecessor at cleanup, and
 no replacement ENSv1 binding survives the strict cross-arm transition. Missing,
 ambiguous, or mismatched proof leaves ordinary interpretation unchanged; zero
 or multiple eligible predecessors remain integrity errors in the writer.

@@ -55,8 +55,15 @@ its controller declared in the fixture [deployment profile](glossary.md#deployme
 current ENSv1 bindings and permissions for the current name, one ENSv2 binding,
 and the expected ENSv2 owner. These tests require execution evidence before a
 passing claim; none of them substitutes for the complete catalog replay matrix.
-The reduced `checked_in_sepolia_manifests_materialize_exactly_one_transition_predecessor`
-remains a transition-materialization test, not a complete transaction proof.
+`checked_in_sepolia_manifests_materialize_exactly_one_transition_predecessor`
+drives the complete unwrapped migration transaction through the checked-in
+Sepolia manifests and the production writer; it is a transition-materialization
+test, not a publication proof.
+`registry_only_handoff_migrates_the_lease_and_closes_every_v1_binding` does the
+same for a lease whose token moved without `reclaim` before the migration, the
+Sepolia block 11723340 shape, asserting that the boundary resolves on the lease,
+that the registry-only binding closes at the registrar cleanup, and that no
+ENSv1 binding stays open.
 
 | ID | Recorded baseline disposition | Pinned exact catalog result | Checked-in rule anchor |
 | --- | --- | --- | --- |

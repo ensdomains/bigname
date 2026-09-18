@@ -28,7 +28,8 @@ const CLEANUP_LOG_INDEX: i64 = 5;
 ///
 /// The transfer without `reclaim` leaves the registry owner untouched, so ordinary ENSv1
 /// interpretation closes the lease binding and opens a registry-only binding
-/// ([registry-only handoff](../../../../../docs/glossary.md)). The token is still the lease.
+/// ([registry-only handoff](../../../../../docs/glossary.md#registry-only-handoff)). The token is
+/// still the lease.
 /// At migration the unlocked controller receives the token, reclaims the registry record for
 /// itself, writes the Graveyard as owner with empty resolver and TTL, parks the token in the
 /// Graveyard, and registers the name in ENSv2.
