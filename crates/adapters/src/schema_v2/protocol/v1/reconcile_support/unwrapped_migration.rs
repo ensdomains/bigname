@@ -1,7 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde_json::Value;
-
 use super::super::refresh_interpreter_state_key;
 use crate::schema_v2::{
     migration::UnwrappedReconciliation,
