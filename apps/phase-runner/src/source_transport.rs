@@ -45,19 +45,48 @@ pub async fn transition_with_readers(
     open_reader: impl Fn(&SourceConfig) -> Result<VerificationProvider>,
 ) -> Result<Value> {
     validate_pair(old, new)?;
+    let mut tx = database.pool().begin().await?;
+    let receipt = match apply_transition(&mut tx, database, old, new, open_reader).await {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            // A refusal must release the phase-writer locks before it is reported. Dropping
+            // the transaction only queues its rollback for the connection's next use, so the
+            // locks would otherwise outlive the error inside the caller's own process and a
+            // following attempt could find them held.
+            return Err(match tx.rollback().await {
+                Ok(()) => error,
+                Err(rollback) => error.context(format!(
+                    "and releasing the phase-writer locks after the refusal failed: {rollback}"
+                )),
+            });
+        }
+    };
+    // Source changes cannot upgrade or clear any verification/redo state.
+    tx.commit().await?;
+    Ok(receipt)
+}
+
+/// Every check and the cursor update, inside the caller's transaction; the caller commits
+/// on success and rolls back on refusal.
+async fn apply_transition(
+    tx: &mut Transaction<'_, Postgres>,
+    database: &RunnerDatabase,
+    old: &SourceConfig,
+    new: &SourceConfig,
+    open_reader: impl Fn(&SourceConfig) -> Result<VerificationProvider>,
+) -> Result<Value> {
     let chain = &old.chain_id;
     let from_kind = normalized_source_kind(&old.source_kind);
     let to_kind = normalized_source_kind(&new.source_kind);
-    let mut tx = database.pool().begin().await?;
     sqlx::query("SET LOCAL lock_timeout = '2s'")
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     for phase in PhaseName::ALL {
         let locked: bool = sqlx::query_scalar(
             "SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0::bigint))",
         )
         .bind(crate::phase_lock::lock_name(chain, phase))
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
         ensure!(
             locked,
@@ -68,7 +97,7 @@ pub async fn transition_with_readers(
         "SELECT to_jsonb(c) FROM ingest_cursors c WHERE chain_id = $1 FOR UPDATE",
     )
     .bind(chain)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     ensure!(
         rows.len() == 1,
@@ -95,7 +124,7 @@ pub async fn transition_with_readers(
         "SELECT to_jsonb(p) FROM chain_phase_state p WHERE chain_id = $1 AND phase_name = 'ingest' FOR UPDATE",
     )
     .bind(chain)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
     let old_provider = open_reader(old)?;
     let new_provider = open_reader(new)?;
@@ -131,15 +160,7 @@ pub async fn transition_with_readers(
         !checked.is_empty(),
         "transport change requires a retained boundary"
     );
-    let resume = resume_point(
-        &mut tx,
-        database.pool(),
-        chain,
-        cursor,
-        &phase,
-        &new_provider,
-    )
-    .await?;
+    let resume = resume_point(tx, database.pool(), chain, cursor, &phase, &new_provider).await?;
     let compared = resume.compared_block();
     // The watch set Ingest itself reads the block with (`Engine::load_window`): manifest
     // declarations and persisted discovery edges, supplemented with emitters that announced
@@ -168,10 +189,8 @@ pub async fn transition_with_readers(
         "UPDATE ingest_cursors SET source_kind = $3 WHERE chain_id = $1 AND source_key = $2 AND source_kind = $4",
     )
     .bind(chain).bind(&old.source_key).bind(&to_kind).bind(&from_kind)
-    .execute(&mut *tx).await?.rows_affected();
+    .execute(&mut **tx).await?.rows_affected();
     ensure!(affected == 1, "source cursor changed during transition");
-    // Source changes cannot upgrade or clear any verification/redo state.
-    tx.commit().await?;
     Ok(
         json!({"chain":chain,"source_key":old.source_key,"from_kind":from_kind,
         "to_kind":to_kind,"previous_cursor":cursor,"ingest_phase":phase,
