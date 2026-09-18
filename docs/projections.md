@@ -670,7 +670,19 @@ registrar token and account approvals, resolver operators and delegates, and
 ENSv2 registry operators are not indexed. NameWrapper summaries are partial for
 a narrower reason described below: holders, operators, and per-token delegates
 are rows, while parent control of a non-emancipated wrapped subname and resolver
-operators/delegates are not.
+operators/delegates are not. For a grant on an ENSv2 record-ID resolver, whose
+resource is the keccak of a setter argument rather than a name
+(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64),
+`scope_detail` also keeps the selector the interpreter decoded from that
+argument (`resource_selector`) so reads can say which record the grant is
+about — recognized by the selector's hash being the resource itself
+(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L336-L337 @ ens_v2@a971bd64),
+which the node-keyed generation's named-resource selectors never satisfy:
+`NamedTextResource` hashes the key alone and `NamedAddrResource` carries no
+hash at all
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L144-L153 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L168-L172 @ ens_v2_sepolia_20260629@ccaeb58); the interpreter reads the argument under the union of the old and new
+role bitmaps, and reads keep only the readings the row's effective powers
+still hold. A grant whose argument was never observed keeps a plain scope.
 
 `account_permission_state_current` separately folds `AccountPermissionChanged`
 events from the [`standard_approval`
