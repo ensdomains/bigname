@@ -70,9 +70,10 @@ else
   # The e2e suite runs dozens of pipeline stacks in parallel, each with its
   # own pools; the stock 100-connection ceiling saturates and surfaces as
   # pool-acquire timeouts in unrelated tests. JIT is off because the Project
-  # phase's large statements otherwise spend seconds in LLVM compilation on
-  # tiny fixtures; that alone made a full bigname-project suite take over half
-  # an hour. (Recreate the container to pick either up: docker rm -f
+  # phase (the step that builds the served projections from normalized events,
+  # docs/projections.md) runs very large statements that otherwise spend
+  # seconds in LLVM compilation on tiny fixtures; that alone made a full
+  # bigname-project suite take over half an hour. (Recreate the container to pick either up: docker rm -f
   # bigname-test-postgres.)
   docker run \
     --detach \
