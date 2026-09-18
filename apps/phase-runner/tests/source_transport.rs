@@ -13,6 +13,7 @@ use phase_runner::{
     state::{PhaseStore, StartDisposition},
 };
 use serde_json::{Value, json};
+use sqlx::Row as _;
 use support::ScratchDatabase;
 use tokio::net::TcpListener;
 use uuid::Uuid;
@@ -74,21 +75,32 @@ async fn a_refused_change_releases_the_phase_writer_locks_before_it_returns() ->
     seed_ingest(db.pool(), "drpc", Redo::None).await?;
     let node = NodeDouble::through(6).with_watched_log(6);
     let forked = node.clone().with_hash(5, block_hash(1_005));
-    // A second session is open before the refusal, so its lock probe is the next statement
-    // the server sees after the error is reported; nothing else may run in between.
+    // A second session is open before the refusal. Its probe is one unprepared statement
+    // (simple query protocol, no bind parameters), so the lock attempt is the first thing
+    // this connection sends after the refusal; a prepared query would yield to the runtime
+    // on its Parse round trip first, and that yield is when a dropped transaction's queued
+    // rollback gets flushed.
     let mut probe = db.pool().begin().await?;
 
     switch(&db, "drpc", &node, "reth_db", &forked)
         .await
         .expect_err("the two interfaces disagree at the retained boundary");
 
-    for phase in PhaseName::ALL {
-        let free: bool = sqlx::query_scalar(
-            "SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0::bigint))",
-        )
-        .bind(format!("phase-runner:{SEPOLIA}:{phase}"))
+    let attempts = PhaseName::ALL
+        .iter()
+        .map(|phase| {
+            format!(
+                "pg_try_advisory_xact_lock(hashtextextended('phase-runner:{SEPOLIA}:{phase}', \
+                 0::bigint))"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let row = sqlx::raw_sql(&format!("SELECT {attempts}"))
         .fetch_one(&mut *probe)
         .await?;
+    for (index, phase) in PhaseName::ALL.iter().enumerate() {
+        let free: bool = row.try_get(index)?;
         assert!(
             free,
             "the refused change still holds the {phase} writer lock after reporting its error"
