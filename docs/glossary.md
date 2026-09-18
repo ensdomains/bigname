@@ -207,10 +207,14 @@ cursor, after confirming that every phase writer is stopped, that both
 interfaces report the hashes Ingest retained at its boundaries, that both
 report the same watched logs for the block the resumed work reads first, and
 that the direct reader's retention floor admits the range that work plans. The
-resumed work is a redo in progress, a normal Ingest batch from the declared
-start, or, once Ingest has handed off to live follow (including a completed
-extent awaiting completed-phase revalidation), live follow from the block after
-the highest published block the node still holds.
+resumed work is a redo in progress with blocks left, a normal Ingest batch from
+the declared start, or, once Ingest has handed off to live follow (including a
+completed extent awaiting completed-phase revalidation), live follow from the
+block after the highest published block the node still holds. A redo that
+already read its last block only clears its marker when rerun, so it is judged
+on the lifecycle it interrupted; the receipt then carries the still-set redo
+marker alongside the selected live continuation when that lifecycle had handed
+off.
 The operator
 attests that both interfaces belong to the same node; the command cannot prove
 it. Progress, raw facts, redo state and the

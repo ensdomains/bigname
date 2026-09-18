@@ -204,7 +204,15 @@ engine's own rule (`bigname_ingest::admit_source_floor`) applied to the proposed
 descriptor, and which work resumes is read from the persisted phase state the
 way the runner reads it:
 
-- a redo in progress is judged on what remains of its range;
+- a redo in progress with blocks left is judged on what remains of its range;
+- a redo that read its last block before the runner cleared its marker (its
+  `redo_current_block_number` equals `redo_to_block_number`) has nothing left
+  to read. Rerunning it only clears the marker and restores the lifecycle the
+  redo interrupted, so the command judges that restored lifecycle by the rules
+  below; the receipt then shows `ingest_phase.redo_in_progress: true` together
+  with a populated `live_continuation` when the interrupted pass had handed off
+  (the compared block is the ancestor when the next block does not exist yet).
+  A redo position outside its range is refused, as the engine refuses it;
 - an Ingest phase that has not completed replans from the declared start block
   (zero, so a direct reader that has pruned any history is refused);
 - a completed Ingest phase that handed off to live follow is judged where live
