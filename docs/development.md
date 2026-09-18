@@ -56,8 +56,11 @@ Run DB-backed Rust tests through the isolated database harness:
 
 Do not run DB-backed tests directly unless `BIGNAME_DATABASE_URL` or
 `DATABASE_URL` already points at a reachable local PostgreSQL server. The
-harness starts or reuses `postgres:16-alpine` on `127.0.0.1:55432`, exports both
-variables, and does not source `.env`.
+harness starts or reuses `postgres:16-alpine` on `127.0.0.1:55432` with JIT off,
+exports both variables, and does not source `.env`. A container created before
+JIT was turned off keeps JIT on; recreate it with `docker rm -f
+bigname-test-postgres` or the Project suites spend most of their time compiling
+statements.
 
 Pass a focused command after `--`:
 
