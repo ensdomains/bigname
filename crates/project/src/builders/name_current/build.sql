@@ -436,10 +436,14 @@
                         AND wrapper_binding.source_family = 'ens_v1_wrapper_l1'
                         AND wrapper_binding.event_kind = 'SurfaceBound'
                         -- The release names the BaseRegistrar token owner, which for a wrapped
-                        -- lease is the NameWrapper contract. The holder is the NameWrapper token
-                        -- owner, so the fold skips the release of a lease the name's wrap stands
-                        -- for: the wrap recorded the lease, or a controller event granted the
-                        -- lease in the wrap's transaction after NameWrapped recorded nothing.
+                        -- lease is the NameWrapper contract: wrapping moves the registrar token
+                        -- to the NameWrapper, and registering through it mints the token to the
+                        -- NameWrapper. The holder is the NameWrapper token owner, so the fold
+                        -- skips the release of a lease the name's wrap stands for: the wrap
+                        -- recorded the lease, or a controller event granted the lease in the
+                        -- wrap's transaction after NameWrapped recorded nothing.
+                        -- (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L265 @ ens_v1@91c966f)
+                        -- (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L297 @ ens_v1@91c966f)
                         AND (
                             wrapper_binding.after_state ->>
                                 'wrapped_registrar_resource_id' = event.resource_id::text
