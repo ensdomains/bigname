@@ -5319,15 +5319,131 @@ fn registry_only_handoff_cleanup_keeps_the_lease_without_v1_reopenings() -> anyh
         event.event_kind.as_str(),
         "SurfaceBound" | "SurfaceUnbound" | "AuthorityEpochChanged"
     )));
+    // Registry metadata observations land on the lease without the fields that would restore
+    // temporary registry-only authority. Permission revocations are not metadata: each one stays
+    // on the resource whose grant it closes, which is the registry-only resource for the
+    // registrant's handoff grants and the lease for the controller's transient reclaim grant.
+    let (revocations, metadata): (Vec<&NormalizedEvent>, Vec<&NormalizedEvent>) = migrated
+        .iter()
+        .copied()
+        .filter(|event| event.source_family == "ens_v1_registry_l1")
+        .partition(|event| event.event_kind == "PermissionChanged");
+    assert!(!metadata.is_empty());
+    assert!(metadata.iter().all(|event| {
+        event.resource_id == Some(lease)
+            && event.after_state.get("authority_kind").is_none()
+            && event.after_state.get("authority_key").is_none()
+    }));
     assert!(
-        migrated
+        revocations.iter().all(|event| {
+            !event.after_state["revocation_source"].is_null()
+                && (event.resource_id == Some(lease)
+                    || event.resource_id == Some(handoff_bindings[0].resource_id))
+        }),
+        "{revocations:#?}"
+    );
+    Ok(())
+}
+
+/// The handoff without `reclaim` leaves the registrant as registry owner, so the registrar
+/// transfer grants the registrant resource control and resolver control on the registry-only
+/// resource. The migration's reclaim moves the registry record to the controller and revokes
+/// those grants where they were made. Reconciliation removes the transient authority openings
+/// inside the migration transaction, but the revocations of grants made before it are durable
+/// permission history: dropping them would leave the registrant's registry-only grants as the
+/// latest permission rows on that resource.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@a971bd64)
+#[test]
+fn registry_only_handoff_cleanup_keeps_the_registrant_revocations_on_the_registry_resource()
+-> anyhow::Result<()> {
+    let registrant = format!("{:#x}", Address::from([0x51; 20]));
+    let holder = Address::from([0x52; 20]);
+    let input = unwrapped_input(Some(holder))?;
+    let block = input.raw_logs.last().unwrap().block_number;
+    let mut ordinary = input.clone();
+    ordinary
+        .manifests
+        .retain(|manifest| manifest.source_family != "ens_v2_migration_l1");
+    ordinary
+        .admissions
+        .retain(|admission| admission.source_manifest_id != Some(MIGRATION_MANIFEST_ID));
+    let output = interpret_test_batch(input)?;
+    let ordinary = interpret_test_batch(ordinary)?;
+    let registry_resource = output
+        .surface_bindings
+        .iter()
+        .find(|binding| binding.block_number == block - 1 && binding.authority_arm == "ens_v1")
+        .expect("the handoff binds the name to a registry-only resource")
+        .resource_id;
+    let registrant_permissions = |output: &BatchOutput, block_number: i64| {
+        output
+            .normalized_events
             .iter()
-            .filter(|event| event.source_family == "ens_v1_registry_l1")
-            .all(|event| {
-                event.resource_id == Some(lease)
-                    && event.after_state.get("authority_kind").is_none()
-                    && event.after_state.get("authority_key").is_none()
+            .filter(|event| {
+                event.block_number == Some(block_number)
+                    && event.event_kind == "PermissionChanged"
+                    && event.resource_id == Some(registry_resource)
+                    && event.after_state["subject"]
+                        .as_str()
+                        .is_some_and(|subject| subject.eq_ignore_ascii_case(&registrant))
             })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let powers = |events: &[NormalizedEvent], state: &str| {
+        let mut powers = events
+            .iter()
+            .flat_map(|event| {
+                let state = if state == "before" {
+                    event.before_state.clone()
+                } else {
+                    event.after_state.clone()
+                };
+                state["effective_powers"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .filter_map(|power| power.as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        powers.sort();
+        powers
+    };
+    let handoff_grants = registrant_permissions(&output, block - 1);
+    assert_eq!(
+        powers(&handoff_grants, "after"),
+        ["resolver_control", "resource_control"],
+        "the handoff grants the registrant on the registry-only resource: {handoff_grants:#?}"
+    );
+    assert_eq!(handoff_grants, registrant_permissions(&ordinary, block - 1));
+
+    let expected = registrant_permissions(&ordinary, block);
+    assert_eq!(
+        powers(&expected, "before"),
+        ["resolver_control", "resource_control"],
+        "ordinary interpretation revokes both handoff grants at the reclaim: {expected:#?}"
+    );
+    assert!(
+        expected
+            .iter()
+            .all(|event| event.after_state["effective_powers"] == json!([])
+                && !event.after_state["revocation_source"].is_null()),
+        "{expected:#?}"
+    );
+    let reconciled = registrant_permissions(&output, block);
+    assert_eq!(
+        reconciled, expected,
+        "reconciliation keeps the registrant's revocations on the registry-only resource"
+    );
+    assert!(
+        output.normalized_events.iter().all(|event| {
+            event.block_number != Some(block)
+                || event.event_kind != "PermissionChanged"
+                || event.resource_id != Some(registry_resource)
+                || event.after_state["effective_powers"] == json!([])
+        }),
+        "no grant on the registry-only resource survives the migration transaction"
     );
     Ok(())
 }
