@@ -5888,7 +5888,7 @@ fn producer_guard_rejects_a_discovery_module_constructor() {
 }
 
 #[test]
-fn root_resolver_updated_is_admitted_in_active_sepolia_manifest() -> anyhow::Result<()> {
+fn root_resolver_updated_records_topology_without_admitting_its_target() -> anyhow::Result<()> {
     const MANIFEST_ID: i64 = 374;
     const RESOLVER_MANIFEST_ID: i64 = 375;
     const RESOLVER: &str = "0x0000000000000000000000000000000000000043";
@@ -6035,9 +6035,11 @@ fn root_resolver_updated_is_admitted_in_active_sepolia_manifest() -> anyhow::Res
         2,
         0,
         RESOLVER,
-    ))?
-    .context("root-discovered resolver did not select a target adapter")?;
-    assert_eq!(selected.source.source_family, "ens_v2_resolver_l1");
+    ))?;
+    assert!(
+        selected.is_none(),
+        "a resolver pointer is not capture authority"
+    );
     Ok(())
 }
 
@@ -6277,7 +6279,7 @@ fn declared_resolver_out_ranks_same_namespace_resolver_discovery() -> anyhow::Re
             manifest_with_events(RESOLVER_ID, "ens", "ens_v2_resolver_l1", &[text_event]),
             manifest_with_events(77, "foreign", "ens_v2_registry_l1", &[]),
         ];
-        let edge = discovered(DISCOVERY_ID, Uuid::from_u128(700), "resolver:first");
+        let edge = discovered(RESOLVER_ID, Uuid::from_u128(700), "resolver:first");
         let mut foreign = discovered(77, Uuid::from_u128(705), "announcement:foreign");
         foreign.discovery_edge_kind = Some("registry_announcement".to_owned());
         for admissions in [
@@ -6306,7 +6308,7 @@ fn declared_resolver_out_ranks_same_namespace_resolver_discovery() -> anyhow::Re
                 source_manifest_id: Some(73),
                 ..declared.clone()
             },
-            discovered(DISCOVERY_ID, Uuid::from_u128(701), "resolver:foreign"),
+            discovered(RESOLVER_ID, Uuid::from_u128(701), "resolver:foreign"),
         ],
     )?
     .select(&raw)?
@@ -6320,8 +6322,8 @@ fn declared_resolver_out_ranks_same_namespace_resolver_discovery() -> anyhow::Re
         ],
         Vec::new(),
         vec![
-            discovered(DISCOVERY_ID, Uuid::from_u128(702), "resolver:first"),
-            discovered(DISCOVERY_ID, Uuid::from_u128(703), "resolver:second"),
+            discovered(RESOLVER_ID, Uuid::from_u128(702), "resolver:first"),
+            discovered(RESOLVER_ID, Uuid::from_u128(703), "resolver:second"),
         ],
     )?
     .select(&raw)?
@@ -6345,7 +6347,7 @@ fn declared_resolver_out_ranks_same_namespace_resolver_discovery() -> anyhow::Re
     let direct = run(vec![declared.clone()])?;
     let overlapping = run(vec![
         declared,
-        discovered(DISCOVERY_ID, Uuid::from_u128(704), "resolver:stable"),
+        discovered(RESOLVER_ID, Uuid::from_u128(704), "resolver:stable"),
     ])?;
     let stable = |output: &BatchOutput| {
         let event = output

@@ -365,42 +365,35 @@ fn proxy_deployed_naming_an_undeclared_implementation_admits_nothing() -> anyhow
 }
 
 #[test]
-fn registry_pointer_admits_the_resolver_logs_earlier_in_the_same_block() -> anyhow::Result<()> {
+fn registry_pointer_does_not_admit_earlier_resolver_logs() -> anyhow::Result<()> {
     let output = interpret(vec![
         upgraded(OTHER_IMPLEMENTATION, 1, 0),
         roles_changed(1, 1),
         pointer(1, 2),
     ])?;
-
-    assert_eq!(
-        event_kinds(&output),
-        [
-            (1, 0, "Upgraded".to_owned()),
-            (1, 1, "PermissionChanged".to_owned()),
-            (1, 2, "ResolverChanged".to_owned()),
-        ]
-    );
-    let edges = resolver_edges(&output);
-    assert_eq!(edges.len(), 1);
-    assert_eq!(edges[0].discovery_source, "ResolverUpdated");
+    assert_eq!(event_kinds(&output), [(1, 2, "ResolverChanged".to_owned())]);
+    assert_eq!(resolver_edges(&output).len(), 1, "binding topology remains");
     assert!(
-        output
+        !output
             .discovery_edges
             .iter()
             .any(|edge| edge.edge_kind == "proxy_implementation")
     );
-    assert!(output.decode_skips.is_empty());
     Ok(())
 }
 
 #[test]
 fn a_log_before_a_later_block_admission_is_recorded_as_a_skip() -> anyhow::Result<()> {
-    let output = interpret(vec![text_changed(1, 0), pointer(2, 0), text_changed(2, 1)])?;
+    let output = interpret(vec![
+        text_changed(1, 0),
+        upgraded(IMPLEMENTATION, 2, 0),
+        text_changed(2, 1),
+    ])?;
 
     assert_eq!(
         event_kinds(&output),
         [
-            (2, 0, "ResolverChanged".to_owned()),
+            (2, 0, "Upgraded".to_owned()),
             (2, 1, "RecordChanged".to_owned()),
         ]
     );
@@ -416,5 +409,122 @@ fn a_log_before_a_later_block_admission_is_recorded_as_a_skip() -> anyhow::Resul
         "{}",
         skip.decode_context
     );
+    Ok(())
+}
+
+sol! {
+    event ResolverCreated();
+    event Linked(uint256 indexed recordId, bytes32 indexed node, bytes name);
+    event TextUpdated(uint256 indexed recordId, string indexed keyHash, string key, string value);
+}
+
+fn creation_manifest() -> ManifestInput {
+    manifest_with_events(
+        RESOLVER_MANIFEST,
+        "ens",
+        "ens_v2_resolver_l1",
+        &[
+            (
+                "ResolverCreated",
+                "event ResolverCreated()",
+                &[],
+                &["ContractDiscovered"],
+            ),
+            (
+                "Linked",
+                "event Linked(uint256 indexed recordId, bytes32 indexed node, bytes name)",
+                &[],
+                &["ResolverRecordLinked", "PreimageObserved"],
+            ),
+            (
+                "TextUpdated",
+                "event TextUpdated(uint256 indexed recordId, string indexed keyHash, string key, string value)",
+                &[],
+                &["RecordChanged"],
+            ),
+        ],
+    )
+}
+
+fn creation_input(raw_logs: Vec<RawLogInput>) -> BatchInput {
+    BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![root_manifest(), creation_manifest()],
+        discovery_rules: vec![root_rule()],
+        admissions: vec![admission(ROOT_MANIFEST, "root_registry")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs,
+    }
+}
+
+fn record_text(block: i64, log_index: i64) -> RawLogInput {
+    raw_at(
+        TextUpdated {
+            recordId: U256::from(1),
+            keyHash: keccak256(b"url"),
+            key: "url".to_owned(),
+            value: "https://example.test".to_owned(),
+        }
+        .encode_log_data(),
+        block,
+        log_index,
+        RESOLVER,
+    )
+}
+
+#[test]
+fn resolver_creation_admits_initializer_records_without_a_registry_pointer() -> anyhow::Result<()> {
+    // Creation precedes multicall in the actual initializer.
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2_sepolia_20260916@366de741)
+    let output = interpret_test_batch(creation_input(vec![
+        record_text(0, 0),
+        raw_at(ResolverCreated {}.encode_log_data(), 1, 1, RESOLVER),
+        record_text(1, 2),
+        record_text(2, 0),
+    ]))?;
+    assert_eq!(
+        event_kinds(&output),
+        vec![
+            (1, 1, "ContractDiscovered".to_owned()),
+            (1, 2, "RecordChanged".to_owned()),
+            (2, 0, "RecordChanged".to_owned()),
+        ]
+    );
+    let edges = resolver_edges(&output);
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].discovery_source, "ResolverCreated");
+    assert_eq!(
+        edges[0].from_contract_instance_id,
+        edges[0].to_contract_instance_id
+    );
+    assert_eq!(edges[0].source_manifest_id, RESOLVER_MANIFEST);
+    Ok(())
+}
+
+#[test]
+fn resolver_pointer_records_binding_but_does_not_admit_records() -> anyhow::Result<()> {
+    let output = interpret_test_batch(creation_input(vec![
+        pointer(1, 0),
+        record_text(1, 1),
+        record_text(2, 0),
+    ]))?;
+    assert_eq!(
+        event_kinds(&output),
+        vec![(1, 0, "ResolverChanged".to_owned())]
+    );
+    let mut input = creation_input(vec![record_text(2, 0)]);
+    input.admissions.push(AddressAdmissionInput {
+        address: RESOLVER.to_owned(),
+        contract_instance_id: Uuid::from_u128(77),
+        source_manifest_id: Some(ROOT_MANIFEST),
+        role: None,
+        discovery_edge_kind: Some("resolver".to_owned()),
+        discovery_from_contract_instance_id: Some(Uuid::from_u128(1)),
+        discovery_observation_key: Some("old-pointer".to_owned()),
+        active_from_block: Some(1),
+        active_to_block: None,
+    });
+    assert!(interpret_test_batch(input)?.normalized_events.is_empty());
     Ok(())
 }

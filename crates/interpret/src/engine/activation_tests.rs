@@ -750,3 +750,104 @@ fn block_hash(number: i64) -> String {
 fn transaction_hash(number: i64) -> String {
     format!("0x{:064x}", number + 10_000)
 }
+
+#[tokio::test]
+async fn resolver_creation_replay_preserves_records_without_requesting_another_ingest() -> TestResult
+{
+    sol! {
+        event ResolverCreated();
+        event TextUpdated(uint256 indexed recordId, string indexed keyHash, string key, string value);
+    }
+    let database = database("resolver_creation_replay").await?;
+    let pool = database.pool();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/sepolia");
+    sync_schema_v2_repository(pool, &load_repository(root)?).await?;
+    seed_lineage(pool).await?;
+    const CREATED: &str = "0x0000000000000000000000000000000000000c01";
+    const POINTER_ONLY: &str = "0x0000000000000000000000000000000000000c02";
+    insert_transaction(pool, SETUP_BLOCK, CREATED).await?;
+    insert_log(
+        pool,
+        SETUP_BLOCK,
+        0,
+        CREATED,
+        ResolverCreated {}.encode_log_data(),
+    )
+    .await?;
+    insert_log(
+        pool,
+        SETUP_BLOCK,
+        1,
+        CREATED,
+        TextUpdated {
+            recordId: U256::from(1),
+            keyHash: keccak256(b"url"),
+            key: "url".to_owned(),
+            value: "first".to_owned(),
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_log(
+        pool,
+        SETUP_BLOCK,
+        2,
+        ETH_REGISTRY,
+        ResolverUpdated {
+            tokenId: U256::from(1),
+            resolver: POINTER_ONLY.parse()?,
+            sender: OWNER.parse()?,
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_transaction(pool, MIGRATION_BLOCK, CREATED).await?;
+    insert_log(
+        pool,
+        MIGRATION_BLOCK,
+        0,
+        CREATED,
+        TextUpdated {
+            recordId: U256::from(1),
+            keyHash: keccak256(b"url"),
+            key: "url".to_owned(),
+            value: "second".to_owned(),
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    sqlx::query("INSERT INTO ingest_cursors (chain_id,source_key,source_kind,seed_basis,start_block_number,next_block_number,target_block_number,last_processed_block_number,last_processed_block_hash) VALUES ($1,'creation-test','rpc','ethereum_head',$2,$3+1,$3,$3,$4)").bind(CHAIN).bind(SETUP_BLOCK).bind(MIGRATION_BLOCK).bind(block_hash(MIGRATION_BLOCK)).execute(pool).await?;
+    sqlx::query("INSERT INTO chain_phase_state (chain_id,phase_name,phase_status,current_block_number,current_block_hash,target_block_number,target_block_hash,started_at,finished_at) VALUES ($1,'ingest','completed',$2,$3,$2,$3,now(),now())").bind(CHAIN).bind(MIGRATION_BLOCK).bind(block_hash(MIGRATION_BLOCK)).execute(pool).await?;
+    stamp_interpreter_hash(pool, bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
+    let mut original = None;
+    for mode in [RunMode::Normal, RunMode::Redo] {
+        let result = Engine::new(pool.clone())
+            .run_batch(BatchRequest {
+                chain_id: CHAIN.to_owned(),
+                from_block: SETUP_BLOCK,
+                to_block: MIGRATION_BLOCK,
+                resume_current: None,
+                mode,
+            })
+            .await?;
+        assert!(result.complete);
+        let records: Vec<(String, serde_json::Value, serde_json::Value)> = sqlx::query_as("SELECT event_identity,before_state,after_state FROM normalized_events WHERE chain_id=$1 AND event_kind='RecordChanged' ORDER BY block_number,log_index").bind(CHAIN).fetch_all(pool).await?;
+        assert_eq!(records.len(), 2);
+        if let Some(expected) = &original {
+            assert_eq!(&records, expected);
+        } else {
+            original = Some(records);
+        }
+        let pending: bool = sqlx::query_scalar("SELECT redo_in_progress FROM chain_phase_state WHERE chain_id=$1 AND phase_name='ingest'").bind(CHAIN).fetch_one(pool).await?;
+        assert!(
+            !pending,
+            "creation capture and pointer changes must not request a second fetch"
+        );
+        let addresses: Vec<String> = sqlx::query_scalar("SELECT DISTINCT address FROM discovery_watch_admissions WHERE chain_id=$1 ORDER BY address").bind(CHAIN).fetch_all(pool).await?;
+        assert_eq!(addresses, [CREATED]);
+    }
+    database.cleanup().await?;
+    Ok(())
+}

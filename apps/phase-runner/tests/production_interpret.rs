@@ -84,6 +84,7 @@ sol! {
     event NameChanged(bytes32 indexed node, string name);
     event ReverseClaimed(address indexed addr, bytes32 indexed node);
     event RegistryCreated();
+    event ResolverCreated();
     event NameWrapped(
         bytes32 indexed node,
         bytes name,
@@ -3956,8 +3957,8 @@ async fn root_resolver_discovery_projects_single_label_records_in_normal_and_red
                 "Upgraded".into(),
             ),
         ],
-        "the registry pointer admits the proxy; its later Upgraded to a declared implementation \
-         is recorded as a second, later resolver edge"
+        "the registry pointer is topology only; the proxy's later Upgraded to a declared \
+         implementation is the resolver edge that admits it"
     );
 
     let record_topic = format!("{:#x}", TextChanged::SIGNATURE_HASH);
@@ -3965,10 +3966,13 @@ async fn root_resolver_discovery_projects_single_label_records_in_normal_and_red
 
     assert!(!watch.includes(DISCOVERED_RESOLVER, &record_topic, 0));
     assert!(
-        watch.includes(DISCOVERED_RESOLVER, &record_topic, 1),
-        "a root-discovered resolver must use ens_v2_resolver_l1 event topics"
+        !watch.includes(DISCOVERED_RESOLVER, &record_topic, 1),
+        "a root registry pointer must not open a resolver watch window"
     );
-    assert!(watch.includes(DISCOVERED_RESOLVER, &record_topic, 2));
+    assert!(
+        watch.includes(DISCOVERED_RESOLVER, &record_topic, 2),
+        "an announced resolver must use ens_v2_resolver_l1 event topics from its announcement"
+    );
 
     let record: (String, String, Uuid, String, String, String) = sqlx::query_as(
         "SELECT source_family, logical_name_id, resource_id,
@@ -4192,24 +4196,42 @@ async fn assert_root_resolver_projection(
 async fn discovery_admission_applies_to_later_logs_in_the_same_batch() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_discovery").await?;
     let chain = "interpret-discovery";
-    seed_discovery_fixture(scratch.pool(), chain).await?;
+    seed_created_resolver_discovery_fixture(scratch.pool(), chain).await?;
 
     run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
 
-    let edge: (String, String) = sqlx::query_as(
+    let edges: Vec<(String, String, String, String)> = sqlx::query_as(
         "
-        SELECT edge.edge_kind, address.address
+        SELECT edge.edge_kind, address.address, edge.discovery_source, edge.admission_basis
         FROM discovery_edges edge
         JOIN contract_instance_addresses address
           ON address.contract_instance_id = edge.to_contract_instance_id
         WHERE edge.chain_id = $1
           AND edge.deactivated_at IS NULL
+        ORDER BY edge.discovery_source
         ",
     )
     .bind(chain)
-    .fetch_one(scratch.pool())
+    .fetch_all(scratch.pool())
     .await?;
-    assert_eq!(edge, ("resolver".into(), DISCOVERED_RESOLVER.into()));
+    assert_eq!(
+        edges,
+        [
+            (
+                "resolver".into(),
+                DISCOVERED_RESOLVER.into(),
+                "ResolverCreated".into(),
+                "resolver_created".into(),
+            ),
+            (
+                "resolver".into(),
+                DISCOVERED_RESOLVER.into(),
+                "ResolverUpdated".into(),
+                "reachable_from_root".into(),
+            ),
+        ],
+        "the creation self-edge admits the resolver; the registry pointer is topology only"
+    );
     let resolver_event: (String, i64) = sqlx::query_as(
         "
         SELECT source_family, count(*)
@@ -4223,6 +4245,37 @@ async fn discovery_admission_applies_to_later_logs_in_the_same_batch() -> Result
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(resolver_event, ("ens_v2_resolver_l1".into(), 1));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn registry_pointer_alone_does_not_admit_the_resolver() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_pointer_only").await?;
+    let chain = "interpret-pointer-only";
+    seed_discovery_fixture(scratch.pool(), chain).await?;
+
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+
+    let counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM discovery_edges
+              WHERE chain_id = $1 AND edge_kind = 'resolver' AND deactivated_at IS NULL),
+             (SELECT count(*) FROM normalized_events
+              WHERE chain_id = $1 AND event_kind = 'ResolverChanged'),
+             (SELECT count(*) FROM normalized_events
+              WHERE chain_id = $1 AND event_kind = 'RecordChanged')",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        counts,
+        (1, 1, 0),
+        "the pointer keeps its topology edge and binding, and reads no resolver record"
+    );
+    let record_topic = format!("{:#x}", TextChanged::SIGNATURE_HASH);
+    let watch = load_watch_filter(scratch.pool(), chain, 0, 1).await?;
+    assert!(!watch.includes(DISCOVERED_RESOLVER, &record_topic, 1));
     scratch.cleanup().await
 }
 
@@ -4488,11 +4541,12 @@ async fn declared_v1_resolver_precedes_v2_discovery_and_preserves_topology() -> 
 async fn discovery_admitted_malformed_log_is_recorded_once_across_replay() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_decode_skip").await?;
     let chain = "interpret-decode-skip";
-    seed_discovery_fixture(scratch.pool(), chain).await?;
+    seed_created_resolver_discovery_fixture(scratch.pool(), chain).await?;
+    // Log 0 is the resolver's creation, log 1 the registry pointer, log 2 the record.
     sqlx::query(
         "UPDATE raw_logs
          SET topics = array_append(topics, $2)
-         WHERE chain_id = $1 AND log_index = 1",
+         WHERE chain_id = $1 AND log_index = 2",
     )
     .bind(chain)
     .bind(format!("{:#x}", B256::repeat_byte(0xff)))
@@ -7308,7 +7362,23 @@ async fn run_project(
     Ok(())
 }
 
+/// A registry `ResolverUpdated` pointer followed by the resolver's record log. The pointer binds
+/// the name and admits nothing, so the record stays uninterpreted.
 async fn seed_discovery_fixture(pool: &PgPool, chain_id: &str) -> Result<()> {
+    seed_discovery_fixture_with(pool, chain_id, false).await
+}
+
+/// The same fixture, with the resolver announcing itself (`ResolverCreated()`) first. That
+/// creation admits the resolver, so the later record log in the block is interpreted.
+async fn seed_created_resolver_discovery_fixture(pool: &PgPool, chain_id: &str) -> Result<()> {
+    seed_discovery_fixture_with(pool, chain_id, true).await
+}
+
+async fn seed_discovery_fixture_with(
+    pool: &PgPool,
+    chain_id: &str,
+    resolver_created: bool,
+) -> Result<()> {
     for block in 0..=1 {
         sqlx::query(
             "
@@ -7361,6 +7431,20 @@ async fn seed_discovery_fixture(pool: &PgPool, chain_id: &str) -> Result<()> {
             "normalized_events": ["ResolverChanged"]
         }], "calls": [] }
     });
+    let mut resolver_events = vec![json!({
+        "name": "TextChanged",
+        "fragment": "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+        "emitter_roles": [],
+        "normalized_events": ["RecordChanged"]
+    })];
+    if resolver_created {
+        resolver_events.push(json!({
+            "name": "ResolverCreated",
+            "fragment": "event ResolverCreated()",
+            "emitter_roles": [],
+            "normalized_events": ["ContractDiscovered"]
+        }));
+    }
     let resolver_payload = json!({
         "manifest_version": 1,
         "namespace": "ens",
@@ -7373,12 +7457,7 @@ async fn seed_discovery_fixture(pool: &PgPool, chain_id: &str) -> Result<()> {
         "roots": [],
         "contracts": [],
         "discovery_rules": [],
-        "abi": { "events": [{
-            "name": "TextChanged",
-            "fragment": "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
-            "emitter_roles": [],
-            "normalized_events": ["RecordChanged"]
-        }], "calls": [] }
+        "abi": { "events": resolver_events, "calls": [] }
     });
     let registry_manifest_id = insert_manifest(
         pool,
@@ -7456,6 +7535,20 @@ async fn seed_discovery_fixture(pool: &PgPool, chain_id: &str) -> Result<()> {
     .execute(pool)
     .await?;
     let resolver_address = DISCOVERED_RESOLVER.parse::<Address>()?;
+    let pointer_index = i64::from(resolver_created);
+    if resolver_created {
+        let creation = ResolverCreated {}.encode_log_data();
+        insert_log(
+            pool,
+            chain_id,
+            &transaction_hash,
+            0,
+            DISCOVERED_RESOLVER,
+            creation.topics(),
+            creation.data.as_ref(),
+        )
+        .await?;
+    }
     let discovery = ResolverUpdated {
         tokenId: U256::from(7),
         resolver: resolver_address,
@@ -7466,7 +7559,7 @@ async fn seed_discovery_fixture(pool: &PgPool, chain_id: &str) -> Result<()> {
         pool,
         chain_id,
         &transaction_hash,
-        0,
+        pointer_index,
         CONTRACT,
         discovery.topics(),
         discovery.data.as_ref(),
@@ -7483,7 +7576,7 @@ async fn seed_discovery_fixture(pool: &PgPool, chain_id: &str) -> Result<()> {
         pool,
         chain_id,
         &transaction_hash,
-        1,
+        pointer_index + 1,
         DISCOVERED_RESOLVER,
         record.topics(),
         record.data.as_ref(),

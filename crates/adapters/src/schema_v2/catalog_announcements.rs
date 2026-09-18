@@ -79,3 +79,14 @@ impl Catalog {
             })
     }
 }
+
+pub(super) fn is_registry_pointer(
+    source: &super::ManifestSource,
+    admission: &super::AddressAdmissionInput,
+) -> bool {
+    admission.discovery_edge_kind.as_deref() == Some("resolver")
+        && matches!(
+            source.source_family.as_str(),
+            "ens_v2_registry_l1" | "ens_v2_root_l1"
+        )
+}

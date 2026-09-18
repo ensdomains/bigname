@@ -19,6 +19,12 @@ const V2_RESOLVER_JUSTIFICATION: &str =
 pub const ROLE_INSENSITIVE_EVENTS: &[RoleInsensitiveEvent] = &[
     RoleInsensitiveEvent {
         source_family: "ens_v2_resolver_l1",
+        event: "ResolverCreated",
+        justification: V2_RESOLVER_JUSTIFICATION,
+        adapter_file: V2_RESOLVER_ADAPTER,
+    },
+    RoleInsensitiveEvent {
+        source_family: "ens_v2_resolver_l1",
         event: "Linked",
         justification: "the record-ID resolver adapter does not read Selected.emitter_role",
         adapter_file: "crates/adapters/src/schema_v2/protocol/v2_record_resolver.rs",

@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 
 use super::{CompiledWatchEntry, WatchEmitter, insert_watch};
 use crate::{
-    SourceManifest, all_emitter_topic0s, implementation_announcement_topic0,
-    is_address_scoped_approval, normalize_address,
+    SourceManifest, all_emitter_topic0s, implementation_announcement_topic0, is_role_scoped_event,
+    normalize_address,
 };
 
 pub(super) fn compile_watch_scope(manifest: &SourceManifest) -> Result<Vec<CompiledWatchEntry>> {
@@ -18,7 +18,11 @@ pub(super) fn compile_watch_scope(manifest: &SourceManifest) -> Result<Vec<Compi
         let Some(topic0) = parsed.topic0().map(|topic| topic.to_ascii_lowercase()) else {
             continue;
         };
-        if is_address_scoped_approval(&manifest.source_family, &parsed.canonical_signature()) {
+        if is_role_scoped_event(
+            &manifest.source_family,
+            &parsed.canonical_signature(),
+            &event.emitter_roles,
+        ) {
             for role in &event.emitter_roles {
                 role_topics
                     .entry(role.clone())
