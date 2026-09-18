@@ -1,7 +1,7 @@
 use sqlx::{Postgres, QueryBuilder};
 use uuid::Uuid;
 
-use super::{HistoryBlockWindow, selectors::HistorySelector};
+use super::{HistoryBlockWindow, lineage::same_fork_predicate, selectors::HistorySelector};
 
 /// One inclusive block range per chain; a window without ranges matches nothing.
 pub(super) fn push_history_block_window<'a>(
@@ -110,6 +110,55 @@ pub(super) fn push_attributed_record_filter_where<'a>(
     );
     push_inventory_predicate(builder);
     builder.push(")");
+}
+
+/// The `inventory` predicate of a registration-scoped read: the record inventory that attributes
+/// a write proves membership only when it is the registration's own, or belongs to a NameWrapper
+/// resource whose `NameWrapped` row on the write's fork recorded this registration as the lease
+/// it wrapped.
+pub(super) fn push_attributing_inventory_is_registration(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    registration_id: Uuid,
+    canonical_only: bool,
+) {
+    builder.push(" AND (inventory.resource_id = ");
+    builder.push_bind(registration_id);
+    // The derived table keeps the lookup keyed by the inventory's resource; without it the
+    // planner rewrites the EXISTS into a per-row hash of every NameWrapped row on the chain.
+    builder.push(
+        " OR EXISTS (
+            SELECT 1
+            FROM (
+                SELECT * FROM bigname_phase.normalized_events wrapper_binding
+                WHERE wrapper_binding.resource_id = inventory.resource_id
+                  AND wrapper_binding.resource_id IS NOT NULL
+                  AND wrapper_binding.consumer_visibility = 'activated'",
+    );
+    if canonical_only {
+        builder
+            .push(" AND wrapper_binding.canonicality_state IN ('canonical', 'safe', 'finalized')");
+    }
+    builder.push(
+        " OFFSET 0
+            ) wrapper_binding
+            LEFT JOIN bigname_phase.chain_lineage wrapper_lineage
+              ON wrapper_lineage.chain_id = wrapper_binding.chain_id
+             AND wrapper_lineage.block_hash = wrapper_binding.block_hash
+            WHERE wrapper_binding.chain_id = ne.chain_id
+              AND wrapper_binding.event_kind = 'SurfaceBound'
+              AND wrapper_binding.source_family = 'ens_v1_wrapper_l1'
+              AND (wrapper_binding.after_state ->> 'wrapped_registrar_resource_id')::uuid = ",
+    );
+    builder.push_bind(registration_id);
+    if canonical_only {
+        builder.push(
+            " AND (wrapper_binding.block_hash IS NULL
+                   OR wrapper_lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))",
+        );
+    }
+    builder.push(" AND ");
+    builder.push(same_fork_predicate("wrapper_binding", "ne", canonical_only));
+    builder.push("))");
 }
 
 pub(super) fn push_string_filter<'a>(
