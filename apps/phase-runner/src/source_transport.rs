@@ -53,11 +53,13 @@ pub async fn transition_with_readers(
             // the transaction only queues its rollback for the connection's next use, so the
             // locks would otherwise outlive the error inside the caller's own process and a
             // following attempt could find them held.
+            // The refusal stays the message; a rollback failure is appended, not put in front.
             return Err(match tx.rollback().await {
                 Ok(()) => error,
-                Err(rollback) => error.context(format!(
-                    "and releasing the phase-writer locks after the refusal failed: {rollback}"
-                )),
+                Err(rollback) => anyhow::anyhow!(
+                    "{error:#}; releasing the phase-writer locks after the refusal also failed: \
+                     {rollback}"
+                ),
             });
         }
     };
