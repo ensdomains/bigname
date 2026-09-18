@@ -171,6 +171,7 @@ migration_is_closed_form_drop() {
                     bad = bad " [not a closed-form drop: " substr(s, 1, 40) "]"
                     continue
                 }
+                routine = (u ~ /^DROP (FUNCTION|PROCEDURE) /)
                 rest = substr(u, RSTART + RLENGTH)
                 if (rest ~ / CASCADE$/) {
                     bad = bad " [CASCADE may drop a dependent bigname_phase object: " substr(s, 1, 40) "]"
@@ -184,13 +185,33 @@ migration_is_closed_form_drop() {
                     c = substr(rest, k, 1)
                     if (c == "(") depth++
                     else if (c == ")") depth--
+                    if (depth < 0) break
                     if (c == "," && depth == 0) { targets[++t] = target; target = "" } else target = target c
                 }
                 targets[++t] = target
-                if (depth != 0) bad = bad " [unbalanced parentheses: " substr(s, 1, 40) "]"
+                if (depth != 0) { bad = bad " [unbalanced parentheses: " substr(s, 1, 40) "]"; continue }
+                # Each target is `schema.name`, and for a routine optionally a
+                # signature `(type, type(10,2), ...)` of plain type names; any
+                # other token before, inside, or after the signature is refused
+                # rather than dropped, since sqlx would still run the file.
                 for (j = 1; j <= t; j++) {
                     target = targets[j]; gsub(/^ +| +$/, "", target)
-                    sub(/ *\(.*$/, "", target)
+                    signature = ""
+                    if (routine && match(target, /\(/)) {
+                        signature = substr(target, RSTART + 1)
+                        target = substr(target, 1, RSTART - 1); sub(/ +$/, "", target)
+                        # The signature runs to the closing parenthesis of the one
+                        # it opened: a typmod may nest, a second list may not.
+                        depth = 1; ok = (signature ~ /\)$/)
+                        signature = substr(signature, 1, length(signature) - 1)
+                        for (k = 1; k <= length(signature) && ok; k++) {
+                            c = substr(signature, k, 1)
+                            if (c == "(") depth++
+                            else if (c == ")") depth--
+                            if (depth < 1) ok = 0
+                        }
+                        if (!ok || signature !~ /^[A-Z0-9_ .,\[\]()]*$/) bad = bad " [signature: " signature "]"
+                    }
                     if (target !~ /^[A-Z_][A-Z0-9_]*\.[A-Z_][A-Z0-9_]*$/) {
                         bad = bad " " (target == "" ? "[empty target]" : target)
                     }
@@ -208,11 +229,13 @@ migration_uses_unicode_escape() {
 # through the documented head. schema-v2/frozen-schema.txt is that artifact's
 # catalog -- the baseline's extension declarations, then every relation with
 # its storage options, row-security flags, replica identity and partitioning,
-# every column with its storage, statistics target and privileges, constraint,
-# index, view, routine with its full argument list, trigger with its firing
-# state, sequence with its full range, type, domain, comment, policy, rule,
-# extended statistics object and the schema's own privileges, with the schema
-# name normalized -- built
+# every column with its storage, statistics target, privileges and the
+# schema, provider and locale of its collation, constraint, index, view,
+# routine with its full argument list, trigger with its firing state,
+# sequence with its full range, type, domain, comment, policy, rule, extended
+# statistics object, the schema's own privileges, every collation the schema
+# holds and every cast to or from one of its types, with the schema name
+# normalized -- built
 # here into its own schema and compared line for line, so a change to a
 # baseline file or a schema-migration that moves the schema without moving the
 # frozen catalog fails, whatever its name. Regenerate deliberately with
@@ -242,7 +265,19 @@ SELECT line FROM (
                   COALESCE(pg_get_expr(d.adbin, d.adrelid), '-'),
                   COALESCE(NULLIF(a.attidentity, ''), '-'),
                   COALESCE(NULLIF(a.attgenerated, ''), '-'),
-                  COALESCE((SELECT quote_ident(col.collname) FROM pg_collation col
+                  -- The referenced collation by schema and definition, so a
+                  -- schema-local collation shadowing a pg_catalog name, or a
+                  -- provider or locale change behind the same name, differs.
+                  -- The database default collation is the one definition that
+                  -- is the deployment's (storage.md), so it is named alone.
+                  COALESCE((SELECT CASE WHEN col.oid = 'default'::regcollation THEN 'pg_catalog.default'
+                                        ELSE format('%I.%I provider=%s collate=%s ctype=%s locale=%s deterministic=%s',
+                                          cn.nspname, col.collname, col.collprovider,
+                                          COALESCE(NULLIF(col.collcollate, ''), '-'),
+                                          COALESCE(NULLIF(col.collctype, ''), '-'),
+                                          COALESCE(to_jsonb(col) ->> 'colllocale', to_jsonb(col) ->> 'colliculocale', '-'),
+                                          col.collisdeterministic) END
+                            FROM pg_collation col JOIN pg_namespace cn ON cn.oid = col.collnamespace
                             WHERE col.oid = a.attcollation AND a.attcollation <> 0), '-'),
                   a.attstorage, COALESCE(NULLIF(a.attcompression, ''), '-'),
                   CASE WHEN a.attstattarget IS NULL OR a.attstattarget < 0 THEN 'default'
@@ -376,6 +411,32 @@ SELECT line FROM (
                                               ';' ORDER BY da.defaclobjtype)
                             FROM pg_default_acl da WHERE da.defaclnamespace = n.oid), '-'))
     FROM pg_namespace n WHERE n.nspname = current_schema()
+    UNION ALL
+    SELECT 14, col.collname, '',
+           format('collation %s provider=%s collate=%s ctype=%s locale=%s deterministic=%s',
+                  col.collname, col.collprovider,
+                  COALESCE(NULLIF(col.collcollate, ''), '-'),
+                  COALESCE(NULLIF(col.collctype, ''), '-'),
+                  COALESCE(to_jsonb(col) ->> 'colllocale', to_jsonb(col) ->> 'colliculocale', '-'),
+                  col.collisdeterministic)
+    FROM pg_collation col JOIN pg_namespace n ON n.oid = col.collnamespace
+    WHERE n.nspname = current_schema()
+    UNION ALL
+    -- A cast is catalogued by its types, not a schema: every cast whose source
+    -- or target type lives here is listed, since an implicit or assignment
+    -- cast changes how production SQL resolves operators and functions.
+    SELECT 15, format_type(ca.castsource, NULL), format_type(ca.casttarget, NULL),
+           format('cast %s -> %s context=%s method=%s function=%s',
+                  format_type(ca.castsource, NULL), format_type(ca.casttarget, NULL),
+                  ca.castcontext, ca.castmethod,
+                  COALESCE((SELECT format('%s(%s)', p.proname, pg_get_function_identity_arguments(p.oid))
+                            FROM pg_proc p WHERE p.oid = ca.castfunc), '-'))
+    FROM pg_cast ca
+    JOIN pg_type st ON st.oid = ca.castsource
+    JOIN pg_type tt ON tt.oid = ca.casttarget
+    JOIN pg_namespace sn ON sn.oid = st.typnamespace
+    JOIN pg_namespace tn ON tn.oid = tt.typnamespace
+    WHERE current_schema() IN (sn.nspname, tn.nspname)
 ) catalog
 ORDER BY section, a, b, line;
 CATALOG_SQL
@@ -456,6 +517,66 @@ assert_frozen_schema_fingerprint() {
         exit 1
     fi
     rm -f -- "$observed"
+}
+# The catalog proves on every run that it sees what it claims to: each change
+# below is planted in the frozen schema inside a transaction that is rolled
+# back, and the catalog taken inside that transaction must differ from the
+# one taken without it. A planted change the catalog cannot see would pass
+# the freeze unnoticed, which is how the earlier catalog gaps were found.
+frozen_schema_catalog_within() {
+    local schema="$1" planted_sql="$2"
+    {
+        printf '\\pset format unaligned\n\\pset tuples_only on\n'
+        printf 'SET search_path TO "%s";\n' "$schema"
+        printf 'BEGIN;\n%s\n' "$planted_sql"
+        cat <<'SQL'
+CREATE FUNCTION pg_temp.frozen_catalog_default(expression text, is_array boolean) RETURNS text
+LANGUAGE plpgsql STABLE AS $$
+DECLARE evaluated text;
+BEGIN
+    IF expression IS NULL THEN RETURN NULL; END IF;
+    IF is_array THEN
+        EXECUTE format('SELECT ARRAY[(%s)::text]::text', expression) INTO evaluated;
+    ELSE
+        EXECUTE format('SELECT ARRAY[(%s)]::text', expression) INTO evaluated;
+    END IF;
+    RETURN evaluated;
+END $$;
+SQL
+        printf '%s\n' "$frozen_schema_catalog_sql"
+        printf 'ROLLBACK;\n'
+    } | run_psql | sed "s/$schema/bigname_phase/g"
+}
+assert_frozen_catalog_sees_planted_changes() {
+    local planted reason planted_catalog
+    local -a planted_changes=(
+        # A schema-local collation named like the catalog one, and a text
+        # column moved onto it: same name, another definition and namespace.
+        'schema-local collation:CREATE COLLATION "C" FROM pg_catalog."C"; ALTER TABLE service_heartbeats ALTER COLUMN phase_name TYPE text COLLATE "C";'
+        # A collation the schema holds that no column uses yet.
+        'unused collation:CREATE COLLATION phase_c FROM pg_catalog."C";'
+        # An implicit INOUT cast on a phase type: no function, no relation,
+        # only a pg_cast row, and it changes operator resolution.
+        'implicit cast:CREATE CAST (canonicality_state AS text) WITH INOUT AS IMPLICIT;'
+        'assignment cast:CREATE CAST (text AS canonicality_state) WITH INOUT AS ASSIGNMENT;'
+    )
+    planted_catalog="$(mktemp "${TMPDIR:-/tmp}/schema-v2-planted-catalog.XXXXXX")"
+    for planted in "${planted_changes[@]}"; do
+        reason="${planted%%:*}"
+        frozen_schema_catalog_within "$frozen_schema" "${planted#*:}" > "$planted_catalog"
+        if [ ! -s "$planted_catalog" ]; then
+            printf '%s\n' "the planted catalog ($reason) came back empty" >&2
+            rm -f -- "$planted_catalog"
+            exit 1
+        fi
+        if diff -q "$frozen_schema_catalog" "$planted_catalog" >/dev/null; then
+            printf '%s\n' "the frozen catalog does not see a planted change ($reason)" >&2
+            rm -f -- "$planted_catalog"
+            exit 1
+        fi
+        refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    done
+    rm -f -- "$planted_catalog"
 }
 # The fresh artifact above has no rows, so a schema-migration whose DDL runs
 # only when a table holds data leaves it unchanged there. The scratch schema
@@ -626,6 +747,12 @@ assert_uninventoried_migrations_are_schema_qualified() {
         'DROP VIEW public.a /* -- */; UPDATE chain_phase_state SET a = 1;'
         'CREATE FUNCTION public.touch() RETURNS int LANGUAGE sql AS '"'"'SELECT 1'"'"';'
         'DROP VIEW public.a; DROP VIEW b;'
+        'DROP FUNCTION public.fn(integer) GARBAGE;'
+        'DROP FUNCTION IF EXISTS public.fn(integer) RESTRICT GARBAGE;'
+        'DROP FUNCTION public.fn(integer) public.g(integer);'
+        'DROP FUNCTION public.fn(integer),;'
+        'DROP FUNCTION public.fn(integer) (text);'
+        'DROP INDEX public.old_idx(integer);'
     )
     for reason in "${refused[@]}"; do
         if printf '%s\n' "$reason" | migration_is_closed_form_drop /dev/stdin >/dev/null; then
@@ -1220,7 +1347,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=196
+expected_refusal_assertions=198
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
@@ -1252,33 +1379,130 @@ trap cleanup EXIT
 # which the login could not (it never holds CREATE on the database). Only the
 # two reviewed statements are forwarded, matched whole: btree_gist for the
 # baseline's exclusion constraints and pgcrypto for public.digest, each
-# `CREATE EXTENSION IF NOT EXISTS <name> WITH SCHEMA public;` on a line of its
-# own. Anything else on a CREATE EXTENSION line -- a third extension, another
+# `CREATE EXTENSION IF NOT EXISTS <name> WITH SCHEMA public;` as a statement of its
+# own. Anything else in a CREATE EXTENSION statement -- a third extension, another
 # schema, a second statement after the semicolon -- fails here rather than
 # running on the owner's connection; a new extension is a schema change and
 # joins this list under an ADR 0007 carve-out or amendment. A real
 # init-schema on an empty database has only the baseline to install them, so
 # both must still be declared there.
-baseline_extension_statements="$(grep -hiE '^[[:space:]]*CREATE EXTENSION' "$ROOT"/schema-v2/baseline/*.sql | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)"
-for required_extension in btree_gist pgcrypto; do
-    if ! printf '%s\n' "$baseline_extension_statements" | grep -qxF "CREATE EXTENSION IF NOT EXISTS $required_extension WITH SCHEMA public;"; then
-        printf '%s\n' "schema-v2/baseline no longer declares CREATE EXTENSION IF NOT EXISTS $required_extension WITH SCHEMA public; on a line of its own; init-schema on an empty database needs it" >&2
+# The statements of an SQL file, one per line with whitespace collapsed and
+# the trailing semicolon kept: line and (nested) block comments removed, the
+# splitter blind inside single quotes, quoted identifiers and dollar quoting,
+# so a statement inside a comment or a routine body is not a statement.
+sql_statement_splitter='
+    BEGIN { quote = ""; depth = 0; stmt = "" }
+    {
+        line = $0 "\n"; n = length(line); i = 1
+        while (i <= n) {
+            c = substr(line, i, 1); two = substr(line, i, 2)
+            if (depth > 0) {
+                if (two == "/*") { depth++; i += 2; continue }
+                if (two == "*/") { depth--; i += 2; continue }
+                i++; continue
+            }
+            if (quote == "") {
+                if (two == "--") break
+                if (two == "/*") { depth = 1; i += 2; continue }
+                if (c == "$" && match(substr(line, i), /^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/)) {
+                    quote = substr(line, i, RLENGTH); stmt = stmt quote; i += RLENGTH; continue
+                }
+                if (c == "\047" || c == "\"") quote = c
+                else if (c == ";") { emit(stmt ";"); stmt = ""; i++; continue }
+            } else if (length(quote) > 1) {
+                if (substr(line, i, length(quote)) == quote) { stmt = stmt quote; i += length(quote); quote = ""; continue }
+            } else if (c == quote) {
+                if (quote == "\047" && substr(line, i + 1, 1) == "\047") { stmt = stmt "\047\047"; i += 2; continue }
+                quote = ""
+            }
+            stmt = stmt c; i++
+        }
+    }
+    function emit(text) {
+        gsub(/[[:space:]]+/, " ", text); sub(/^ /, "", text); sub(/ ;$/, ";", text)
+        if (text != ";") print text
+    }
+    END {
+        if (depth > 0) { print "[unterminated block comment]"; exit 1 }
+        if (quote != "") { print "[unterminated quote]"; exit 1 }
+        sub(/[[:space:]]+$/, "", stmt)
+        if (stmt != "") emit(stmt)
+    }
+'
+sql_statements() {
+    awk "$sql_statement_splitter" "$@"
+}
+# The statements a baseline directory would execute to install extensions:
+# every CREATE EXTENSION the splitter finds as a statement of its own, so a
+# declaration a comment or a routine body has swallowed is not one.
+baseline_extension_statements_of() {
+    sql_statements "$1"/*.sql | grep -iE '^CREATE EXTENSION ' || true
+}
+# Exactly the two reviewed statements, both present: anything else that would
+# reach the owner's connection, or a prerequisite the runtime baseline no
+# longer installs, fails here with the reason.
+check_baseline_extensions() {
+    local statements="$1" required_extension extension_statement
+    for required_extension in btree_gist pgcrypto; do
+        if ! printf '%s\n' "$statements" | grep -qxF "CREATE EXTENSION IF NOT EXISTS $required_extension WITH SCHEMA public;"; then
+            printf '%s\n' "schema-v2/baseline no longer declares CREATE EXTENSION IF NOT EXISTS $required_extension WITH SCHEMA public; as a statement of its own; init-schema on an empty database needs it" >&2
+            return 1
+        fi
+    done
+    while IFS= read -r extension_statement; do
+        [ -n "$extension_statement" ] || continue
+        case "$extension_statement" in
+            "CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public;" \
+            | "CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;") ;;
+            *)
+                printf '%s\n' \
+                    "schema-v2/baseline carries a CREATE EXTENSION statement this check does not know: $extension_statement" \
+                    "only the two reviewed btree_gist and pgcrypto statements run on the owner's connection; a new extension is a schema change under ADR 0007 and joins the reviewed list here" >&2
+                return 1
+                ;;
+        esac
+    done <<< "$statements"
+}
+# The rule proves itself on every run against planted copies of the baseline:
+# a declaration inside a block comment, a line comment, or a DO body is not
+# installed by init-schema and must not pass; a third extension, another
+# schema, or a split statement must not reach the owner.
+assert_baseline_extension_rule_holds() {
+    local planted planted_dir reason
+    local -a refused=(
+        'block comment:/* CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public; */'
+        'nested block comment:/* outer /* inner */ CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public; */'
+        'line comment:-- CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public;'
+        'do body:DO $$ BEGIN EXECUTE '"'"'CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public'"'"'; END $$;'
+        'string:SELECT '"'"'CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public;'"'"';'
+        'third extension:CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public; CREATE EXTENSION IF NOT EXISTS hstore WITH SCHEMA public;'
+        'other schema:CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA bigname_phase;'
+        'split line:CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public'
+    )
+    planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-extension-rule.XXXXXX")"
+    for planted in "${refused[@]}"; do
+        reason="${planted%%:*}"
+        rm -f "$planted_dir"/*.sql
+        printf '%s\n' "${planted#*:}" > "$planted_dir/01_planted.sql"
+        # The other required statement stays intact so only the planted form decides.
+        printf 'CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;\n' > "$planted_dir/02_other.sql"
+        if check_baseline_extensions "$(baseline_extension_statements_of "$planted_dir")" 2>/dev/null; then
+            printf '%s\n' "extension rule accepted a baseline it must refuse ($reason)" >&2
+            exit 1
+        fi
+        refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    done
+    rm -f "$planted_dir"/*.sql
+    printf '/* leading */ CREATE   EXTENSION IF NOT EXISTS\n  btree_gist WITH SCHEMA public; -- trailing\nCREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;\n' > "$planted_dir/01_ok.sql"
+    if ! check_baseline_extensions "$(baseline_extension_statements_of "$planted_dir")"; then
+        printf '%s\n' "extension rule refused the two reviewed statements written across lines and beside comments" >&2
         exit 1
     fi
-done
-while IFS= read -r extension_statement; do
-    [ -n "$extension_statement" ] || continue
-    case "$extension_statement" in
-        "CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public;" \
-        | "CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;") ;;
-        *)
-            printf '%s\n' \
-                "schema-v2/baseline carries a CREATE EXTENSION line this check does not know: $extension_statement" \
-                "only the two reviewed btree_gist and pgcrypto statements run on the owner's connection; a new extension is a schema change under ADR 0007 and joins the reviewed list here" >&2
-            exit 1
-            ;;
-    esac
-done <<< "$baseline_extension_statements"
+    rm -rf "$planted_dir"
+}
+assert_baseline_extension_rule_holds
+baseline_extension_statements="$(baseline_extension_statements_of "$ROOT/schema-v2/baseline")"
+check_baseline_extensions "$baseline_extension_statements" || exit 1
 # The login is provisioned by the owner without any database-level grant,
 # which the documented external-database user (CREATEDB and CREATEROLE, not
 # necessarily the database's owner) may not be able to make: the owner takes
@@ -1542,20 +1766,6 @@ BEGIN
                 'ResolverChanged',
                 NULL,
                 false
-            ),
-            (
-                'normalized_events_permission_after_resolver_history_idx',
-                '%chain_id%lower%after_state%scope%resolver_address%block_number%block_hash%INCLUDE%resource_id%',
-                'PermissionChanged',
-                '%after_state%scope%kind%resolver%',
-                true
-            ),
-            (
-                'normalized_events_permission_before_resolver_history_idx',
-                '%chain_id%lower%before_state%scope%resolver_address%block_number%block_hash%INCLUDE%resource_id%',
-                'PermissionChanged',
-                '%before_state%scope%kind%resolver%',
-                true
             )
     ) AS required(
         index_name, definition_pattern, event_kind, scope_pattern, resource_required
@@ -3712,11 +3922,52 @@ SQL
 # Dropping consumer_visibility above took the four resolver-history indexes
 # whose predicates name it with it, which is the shape of a database that took
 # slice 1 in place: #415 added them to the baseline with no schema-migration.
-# The file that carries them now must build all four to the fresh-baseline
-# definition from that shape, change nothing when rerun, and refuse an index
-# under the right name that is invalid, is another definition, or is a table.
+# The file that carries them now must build the two kept indexes to the
+# fresh-baseline definition from that shape, change nothing when rerun, and
+# refuse a kept index under the right name that is invalid, is another
+# definition, or is a table. A database initialized from the #415 baseline
+# holds all four; from that shape the file must drop the two retired
+# `permission_*` indexes, which have no reader, and refuse a retired name
+# held by a table.
 resolver_history_index_migration="$ROOT/migrations/20260918120000_normalized_events_resolver_history_idx.sql"
-resolver_history_index_names="normalized_events_pointer_after_resolver_history_idx normalized_events_pointer_before_resolver_history_idx normalized_events_permission_after_resolver_history_idx normalized_events_permission_before_resolver_history_idx"
+resolver_history_index_names="normalized_events_pointer_after_resolver_history_idx normalized_events_pointer_before_resolver_history_idx"
+resolver_history_retired_names="normalized_events_permission_after_resolver_history_idx normalized_events_permission_before_resolver_history_idx"
+resolver_history_retired_sql='
+CREATE INDEX normalized_events_permission_after_resolver_history_idx
+    ON normalized_events (chain_id, lower(after_state #>> '"'"'{scope,resolver_address}'"'"'), block_number, block_hash)
+    INCLUDE (resource_id)
+    WHERE event_kind = '"'"'PermissionChanged'"'"' AND consumer_visibility = '"'"'activated'"'"'
+      AND canonicality_state IN ('"'"'canonical'"'"', '"'"'safe'"'"', '"'"'finalized'"'"')
+      AND after_state #>> '"'"'{scope,kind}'"'"' = '"'"'resolver'"'"' AND resource_id IS NOT NULL;
+CREATE INDEX normalized_events_permission_before_resolver_history_idx
+    ON normalized_events (chain_id, lower(before_state #>> '"'"'{scope,resolver_address}'"'"'), block_number, block_hash)
+    INCLUDE (resource_id)
+    WHERE event_kind = '"'"'PermissionChanged'"'"' AND consumer_visibility = '"'"'activated'"'"'
+      AND canonicality_state IN ('"'"'canonical'"'"', '"'"'safe'"'"', '"'"'finalized'"'"')
+      AND before_state #>> '"'"'{scope,kind}'"'"' = '"'"'resolver'"'"' AND resource_id IS NOT NULL;
+'
+assert_resolver_history_index_state() {
+    local reason="$1"
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        cat <<SQL
+DO \$\$
+DECLARE built integer; retired integer;
+BEGIN
+    SELECT count(*) INTO built FROM pg_index
+    WHERE indrelid = 'normalized_events'::regclass
+      AND indexrelid::regclass::text LIKE 'normalized_events_pointer_%_resolver_history_idx'
+      AND indisvalid AND indisready;
+    SELECT count(*) INTO retired FROM pg_class
+    WHERE relnamespace = current_schema()::regnamespace
+      AND relname LIKE 'normalized_events_permission_%_resolver_history_idx';
+    IF built <> 2 OR retired <> 0 THEN
+        RAISE EXCEPTION '$reason: % of 2 kept resolver-history indexes built, % retired ones present', built, retired;
+    END IF;
+END \$\$;
+SQL
+    } | run_psql
+}
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<'SQL'
@@ -3733,22 +3984,25 @@ END $$;
 SQL
     emit_phase_migration "$resolver_history_index_migration" preceding-shape
     emit_phase_migration "$resolver_history_index_migration" baseline-first
-    cat <<'SQL'
-DO $$
-DECLARE built integer;
-BEGIN
-    SELECT count(*) INTO built FROM pg_index
-    WHERE indrelid = 'normalized_events'::regclass
-      AND indexrelid::regclass::text LIKE 'normalized_events_%_resolver_history_idx'
-      AND indisvalid AND indisready;
-    IF built <> 4 THEN
-        RAISE EXCEPTION 'resolver-history index schema-migration built % of 4 indexes', built;
-    END IF;
-END $$;
-SQL
 } | run_psql
+assert_resolver_history_index_state "from the slice-1 shape"
 assert_migration_context_count "$resolver_history_index_migration" preceding-shape 1
 assert_migration_context_count "$resolver_history_index_migration" baseline-first 1
+# The #415 shape: the two kept indexes present, the two retired ones too.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' "$resolver_history_retired_sql"
+    emit_phase_migration "$resolver_history_index_migration" preceding-shape
+} | run_psql
+assert_resolver_history_index_state "from the #415 shape"
+assert_migration_context_count "$resolver_history_index_migration" preceding-shape 2
+for resolver_history_retired_name in $resolver_history_retired_names; do
+    assert_migration_refusal "table-named-$resolver_history_retired_name" \
+        "$resolver_history_index_migration" \
+        "$scratch_schema.$resolver_history_retired_name is not an index (relkind r), so it cannot be the retired index; remove or rename that relation, then run the schema-migrations again" <<SQL
+CREATE TABLE $resolver_history_retired_name ();
+SQL
+done
 # The definitions the file expects are the fresh baseline's, as printed with
 # search_path set to pg_catalog; the frozen catalog comparison at the end
 # proves the built indexes match the baseline. The schema-migration's own
@@ -3770,11 +4024,13 @@ assert_migration_context_count "$resolver_history_index_migration" baseline-firs
 } | run_psql
 assert_migration_context_count "$resolver_history_index_migration" empty-schema 1
 assert_migration_context_count "$resolver_history_index_migration" baseline-first 3
-# The live prebuild in ops/resolver-history-indexes/install.sql builds all four
-# in one file. For each in turn it must build the baseline definition, refuse
-# an invalid index, a valid index with other keys, a valid index whose JSON key
-# literals start with the schema name, and a table under the name, and recover
-# as its README says.
+# The live prebuild in ops/resolver-history-indexes/install.sql builds both
+# kept indexes and drops both retired ones in one file. For each kept index in
+# turn it must build the baseline definition, refuse an invalid index, a valid
+# index with other keys, a valid index whose JSON key literals start with the
+# schema name, and a table under the name, and recover as its README says. It
+# must drop the retired pair from the #415 shape and refuse a retired name a
+# table holds.
 resolver_history_install="$ROOT/ops/resolver-history-indexes/install.sql"
 resolver_history_readme=ops/resolver-history-indexes/README.md
 for resolver_history_index_name in $resolver_history_index_names; do
@@ -3784,6 +4040,19 @@ for resolver_history_index_name in $resolver_history_index_names; do
         "$resolver_history_readme" \
         normalized_events \
         "block_number, chain_id"
+done
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' "$resolver_history_retired_sql"
+    render_phase_migration "$resolver_history_install"
+} | run_psql >/dev/null
+assert_resolver_history_index_state "installer from the #415 shape"
+for resolver_history_retired_name in $resolver_history_retired_names; do
+    printf 'SET search_path TO "%s";\nCREATE TABLE %s ();\n' "$scratch_schema" "$resolver_history_retired_name" | run_psql >/dev/null
+    assert_index_install_refusal "resolver-history-table-named-$resolver_history_retired_name" \
+        "$resolver_history_install" \
+        "$scratch_schema.$resolver_history_retired_name is not an index (relkind r), so it cannot be the retired index; remove or rename that relation, then rerun this script"
+    printf 'SET search_path TO "%s";\nDROP TABLE %s;\n' "$scratch_schema" "$resolver_history_retired_name" | run_psql >/dev/null
 done
 # The installer refuses before it builds anything. With the last index invalid
 # and the first one absent, it must stop on the invalid one, tell the operator
@@ -9517,6 +9786,7 @@ assert_uninventoried_migrations_are_schema_qualified
 assert_documented_head_is_newest_migration
 assert_no_migration_below_prior_head
 assert_frozen_schema_fingerprint
+assert_frozen_catalog_sees_planted_changes
 assert_exercised_schema_matches_frozen
 assert_reviewed_phase_migrations_applied
 if [ "$refusal_assertions_passed" -ne "$expected_refusal_assertions" ]; then

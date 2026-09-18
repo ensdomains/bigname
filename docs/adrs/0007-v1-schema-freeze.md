@@ -281,10 +281,12 @@ freeze observable rather than aspirational.
 
 - No schema change to the frozen artifact during the V1 milestone, except the
   pre-authorized carve-outs below.
-- Each carve-out made under this freeze is additive and requires no
-  re-derivation. The one non-additive change in the history recorded below —
-  carve-out 1's constraint replacement — predates the freeze and is recorded,
-  not authorized; a like change now is an amendment, not a carve-out.
+- Each carve-out made under this freeze requires no re-derivation, and each
+  is additive except the one drop carve-out 6 authorizes: two indexes nothing
+  reads, an access path and no contract. The one non-additive change in the
+  history recorded below — carve-out 1's constraint replacement — predates
+  the freeze and is recorded, not authorized; a like change now is an
+  amendment, not a carve-out.
 - Any change beyond the carve-outs requires an amendment to this ADR before it
   merges.
 
@@ -490,25 +492,46 @@ values the system already documents as unstable across a boundary.
    with no schema-migration. Their predicates name `consumer_visibility`,
    which slice 1's `20260811120000` adds, so a database that took slice 1 in
    place and was never replaced from the baseline has the column and not the
-   indexes; Project's resolver scoping (`crates/project/src/scope`) reads
-   them. The conformance test found this the first time it compared the
+   indexes. The conformance test found this the first time it compared the
    frozen catalog with the exercised scratch schema — the one its
    predecessor-shape proofs rewind and re-upgrade — rather than with the
    fresh one, where a baseline object needs no schema-migration to be
-   present. **Decided: in, with this ADR.**
+   present. Review then asked who reads them. The `pointer_*` pair has a
+   reader: the resolver-anchored event feed
+   (`GET /v1/events?resolver=<chain>:<address>`,
+   `crates/storage/src/history/paging.rs`) selects activated canonical
+   `ResolverChanged` events by chain and the lower-cased resolver the
+   pointer moved to or from, and `EXPLAIN` over a 400,000-row
+   `normalized_events` answers it with a `BitmapOr` over both indexes, and
+   without them with a scan of every canonical `ResolverChanged` on the
+   chain. The `permission_*` pair has none: Project's resolver scoping
+   (`crates/project/src/scope`, `crates/project/src/stage.rs`), which #415
+   built them for, derives the resolver address through a `CASE` inside a
+   lateral `VALUES` list, which no expression index serves (`EXPLAIN` of that
+   shape reads the primary key and filters), and no other read filters
+   `PermissionChanged` by scope resolver. **Decided: the `pointer_*` pair in,
+   the `permission_*` pair out, with this ADR.**
    `migrations/20260918120000_normalized_events_resolver_history_idx.sql`
-   builds each of the four when it is missing and, when one is present,
+   builds each kept index when it is missing and, when one is present,
    refuses an invalid index, another definition, or a table under the name
-   rather than adopting it; on a large database the operator prebuilds them
-   concurrently with `ops/resolver-history-indexes/install.sql` first, as
+   rather than adopting it; it drops each retired index that exists and
+   refuses a retired name held by anything that is not an index; the two
+   retired definitions leave the baseline in the same change. On a large
+   database the operator prebuilds and drops concurrently with
+   `ops/resolver-history-indexes/install.sql` first, as
    [`deployment.md`](../deployment.md) and the production runbook list,
-   since the file's own build is an ordinary write-blocking `CREATE INDEX`.
-   Additive; no re-derivation. Whether other objects #415 and its neighbours added to the
-   baseline without a schema-migration are missing on some initialized
-   database is a question for the deployment that would hold it, since the
-   exercised comparison sees only what the proofs rewind; the fresh baseline
-   is the artifact, and a database that differs from it is replaced or
-   carried to it by a schema-migration under this process.
+   since the file's own build is an ordinary write-blocking `CREATE INDEX`
+   and its drop takes the table's exclusive lock. Access paths only; no
+   re-derivation. The drop is the one non-additive step under this freeze:
+   an index nothing reads carries storage and write maintenance and no
+   contract, and carve-out 5's rule applies to bringing one back — an
+   `EXPLAIN` of the read it serves, first. Whether other objects #415 and
+   its neighbours added to the baseline without a schema-migration are
+   missing on some initialized database is a question for the deployment
+   that would hold it, since the exercised comparison sees only what the
+   proofs rewind; the fresh baseline is the artifact, and a database that
+   differs from it is replaced or carried to it by a schema-migration under
+   this process.
 
 ### Derivation-side changes that are not schema changes
 

@@ -1,5 +1,6 @@
 -- Run with psql -X -v ON_ERROR_STOP=1, outside any transaction.
--- These indexes can be preinstalled while the existing runner is processing batches.
+-- The two kept indexes can be preinstalled, and the two retired ones dropped,
+-- while the existing runner is processing batches.
 -- A long Interpret batch can hold the writer transaction a concurrent build waits for.
 -- Bound each build, rather than aborting that expected wait after a few seconds.
 SET lock_timeout = '0';
@@ -12,9 +13,9 @@ SET statement_timeout = '6h';
 -- names. This check runs twice. Before the builds it refuses any name that is
 -- already taken by something other than the reviewed, valid and ready index,
 -- so the operator repairs it before the other builds run; names that resolve
--- to nothing pass. After the builds it also requires all four indexes to
--- exist, so the script fails instead of reporting success. README.md describes
--- the recovery.
+-- to nothing pass. After the builds it also requires both kept indexes to
+-- exist and both retired names to resolve to nothing, so the script fails
+-- instead of reporting success. README.md describes the recovery.
 -- The definition check matches the one in the schema-migration
 -- 20260918120000_normalized_events_resolver_history_idx.sql. PostgreSQL always
 -- prints the table's schema name, and a type's schema name only when the
@@ -48,11 +49,7 @@ BEGIN
             ('normalized_events_pointer_after_resolver_history_idx',
              $def$CREATE INDEX normalized_events_pointer_after_resolver_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'resolver'::text)), block_number, block_hash) INCLUDE (normalized_event_id) WHERE ((event_kind = 'ResolverChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_pointer_before_resolver_history_idx',
-             $def$CREATE INDEX normalized_events_pointer_before_resolver_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((before_state ->> 'resolver'::text)), block_number, block_hash) INCLUDE (normalized_event_id) WHERE ((event_kind = 'ResolverChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
-            ('normalized_events_permission_after_resolver_history_idx',
-             $def$CREATE INDEX normalized_events_permission_after_resolver_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state #>> '{scope,resolver_address}'::text[])), block_number, block_hash) INCLUDE (resource_id) WHERE ((event_kind = 'PermissionChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND ((after_state #>> '{scope,kind}'::text[]) = 'resolver'::text) AND (resource_id IS NOT NULL))$def$),
-            ('normalized_events_permission_before_resolver_history_idx',
-             $def$CREATE INDEX normalized_events_permission_before_resolver_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((before_state #>> '{scope,resolver_address}'::text[])), block_number, block_hash) INCLUDE (resource_id) WHERE ((event_kind = 'PermissionChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND ((before_state #>> '{scope,kind}'::text[]) = 'resolver'::text) AND (resource_id IS NOT NULL))$def$)
+             $def$CREATE INDEX normalized_events_pointer_before_resolver_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((before_state ->> 'resolver'::text)), block_number, block_hash) INCLUDE (normalized_event_id) WHERE ((event_kind = 'ResolverChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$)
         ) AS reviewed(index_name, definition)
     LOOP
         SELECT CASE relkind
@@ -114,6 +111,30 @@ BEGIN
                 checked_index, found_definition, expected_definition;
         END IF;
     END LOOP;
+
+    FOR checked_index IN
+        SELECT * FROM (VALUES
+            ('normalized_events_permission_after_resolver_history_idx'),
+            ('normalized_events_permission_before_resolver_history_idx')
+        ) AS retired(index_name)
+    LOOP
+        SELECT relkind INTO found_kind
+        FROM pg_class
+        WHERE oid = to_regclass('bigname_phase.' || checked_index);
+        IF found_kind IS NULL THEN
+            CONTINUE;
+        END IF;
+        IF found_kind <> 'i' THEN
+            RAISE EXCEPTION
+                'bigname_phase.% is not an index (relkind %), so it cannot be the retired index; remove or rename that relation, then rerun this script',
+                checked_index, found_kind;
+        END IF;
+        IF require_built THEN
+            RAISE EXCEPTION
+                '% still exists after DROP INDEX CONCURRENTLY; follow the recovery steps in ops/resolver-history-indexes/README.md before retrying',
+                checked_index;
+        END IF;
+    END LOOP;
 END
 $check$;
 
@@ -142,31 +163,10 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_pointer_before_resolve
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_permission_after_resolver_history_idx
-    ON bigname_phase.normalized_events (
-        chain_id,
-        lower(after_state #>> '{scope,resolver_address}'),
-        block_number,
-        block_hash
-    ) INCLUDE (resource_id)
-    WHERE event_kind = 'PermissionChanged'
-      AND consumer_visibility = 'activated'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND after_state #>> '{scope,kind}' = 'resolver'
-      AND resource_id IS NOT NULL;
-
-CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_permission_before_resolver_history_idx
-    ON bigname_phase.normalized_events (
-        chain_id,
-        lower(before_state #>> '{scope,resolver_address}'),
-        block_number,
-        block_hash
-    ) INCLUDE (resource_id)
-    WHERE event_kind = 'PermissionChanged'
-      AND consumer_visibility = 'activated'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND before_state #>> '{scope,kind}' = 'resolver'
-      AND resource_id IS NOT NULL;
+-- The two retired indexes have no reader (see the schema-migration header);
+-- a concurrent drop waits for the batch transaction the same way a build does.
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_permission_after_resolver_history_idx;
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_permission_before_resolver_history_idx;
 
 -- Printed first so the receipt shows the flags even when the check below fails.
 SELECT indexrelid::regclass AS index_name, indisvalid, indisready,
@@ -180,6 +180,7 @@ WHERE indexrelid IN (
     to_regclass('bigname_phase.normalized_events_permission_before_resolver_history_idx')
 ) ORDER BY index_name;
 
--- All four must now exist, belong to bigname_phase.normalized_events, be valid
--- and ready, and have the reviewed definition.
+-- Both kept indexes must now exist, belong to bigname_phase.normalized_events,
+-- be valid and ready, and have the reviewed definition; both retired names
+-- must resolve to nothing.
 DO $$ BEGIN PERFORM pg_temp.check_resolver_history_indexes(true); END $$;
