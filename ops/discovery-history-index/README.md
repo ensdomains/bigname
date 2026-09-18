@@ -23,7 +23,7 @@ minutes. Retain its output in the deployment receipt.
 The script ends with a check that fails, with a non-zero `psql` exit, unless
 the named index belongs to `bigname_phase.discovery_edges`, is both
 `indisvalid` and `indisready`, and has the reviewed definition. It compares
-the `pg_get_indexdef` text, read with `search_path` set to `pg_catalog` so
+the `pg_get_indexdef` text, read with `search_path` set to `pg_catalog` and `quote_all_identifiers` off, so
 every schema name is printed and nothing in the text has to be rewritten, with
 how the fresh baseline index prints, and on a mismatch prints the definition it
 found beside the expected one. It also fails, naming the kind of relation, when a table,
