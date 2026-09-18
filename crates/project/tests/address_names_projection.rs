@@ -2129,8 +2129,13 @@ mod handoff_scenario {
     pub const REGISTRY_MANIFEST: i64 = 911;
     pub const REGISTRAR_MANIFEST: i64 = 912;
     pub const REGISTRY_ADDRESS: &str = "0x0000000000000000000000000000000000000091";
-    /// The BaseRegistrar emits the ERC-721 `Transfer`; the legacy controller emits the
-    /// label-bearing `NameRegistered`.
+    /// The BaseRegistrar is the ERC-721 token and emits `Transfer` and its numeric
+    /// `NameRegistered`
+    /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L8 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L15-L19 @ ens_v1@91c966f);
+    /// the legacy controller emits the label-bearing, cost-carrying `NameRegistered`
+    /// (upstream: .refs/ens_v1/deployments/archive/ETHRegistrarController_mainnet_9380471.sol/ETHRegistrarController_mainnet_9380471.json:L33-L68 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L333-L341 @ ens_v1@91c966f).
     pub const REGISTRAR_ADDRESS: &str = "0x0000000000000000000000000000000000000042";
     pub const CONTROLLER_ADDRESS: &str = "0x0000000000000000000000000000000000000092";
     pub const RETAINED_OWNER: &str = "0x00000000000000000000000000000000000000ab";
@@ -2235,8 +2240,10 @@ mod handoff_scenario {
     }
 
     /// The registrar and registry declarations as the production ENS mainnet manifests admit
-    /// them: the registrar's numeric `NameRegistered` only releases, the legacy controller's
-    /// cost-bearing `NameRegistered` grants, and the ERC-721 `Transfer` comes from the registrar.
+    /// them (`manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml` and
+    /// `manifests/mainnet/ethereum/ens/ens_v1_registry_l1/v3.toml`): the registrar's numeric
+    /// `NameRegistered` only releases, the legacy controller's cost-bearing `NameRegistered`
+    /// grants, and the ERC-721 `Transfer` comes from the registrar.
     pub fn manifests() -> Vec<ManifestInput> {
         const GRANTED: &[&str] = &[
             "RegistrationGranted",
@@ -2333,9 +2340,16 @@ mod handoff_scenario {
         value.parse().expect("fixture address")
     }
 
-    /// The registration transaction in the order the ENSv1 contracts emit it: the registrar
-    /// mints the token, sets the registry owner and emits its numeric event, then the legacy
-    /// controller emits the label-bearing event.
+    /// The registration transaction in the order the ENSv1 contracts emit it. The controller
+    /// calls `base.register`
+    /// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L288-L298 @ ens_v1@91c966f);
+    /// inside `_register` the registrar mints the token (the ERC-721 `Transfer` from zero),
+    /// sets the registry owner, which makes the registry emit `NewOwner`, and then emits its
+    /// numeric `NameRegistered`
+    /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L131-L153 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f);
+    /// the controller emits its label-bearing `NameRegistered` after the call returns
+    /// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L333-L341 @ ens_v1@91c966f).
     pub fn registration() -> BatchInput {
         let label = keccak256(LABEL.as_bytes());
         batch(
@@ -2392,7 +2406,14 @@ mod handoff_scenario {
     }
 
     /// A registrar token transfer without `reclaim`: one ERC-721 `Transfer` from the registrar
-    /// and nothing from the registry.
+    /// and nothing from the registry. The registrar inherits the ERC-721 transfer unchanged
+    /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L8 @ ens_v1@91c966f)
+    /// and writes the registry owner only from `_register` and `reclaim`
+    /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L148-L150 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f),
+    /// and the registry emits `NewOwner` and `Transfer` only from its own owner writes
+    /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f).
     pub fn token_transfer(block_number: i64, from: &str, to: &str) -> BatchInput {
         batch(
             block_number,
