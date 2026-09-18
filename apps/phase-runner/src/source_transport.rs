@@ -2,7 +2,7 @@
 use anyhow::{Context as _, Result, ensure};
 use bigname_ingest::{
     LiveContinuation, Marker, SourceDescriptor, VerificationProvider, WatchFilter,
-    admit_source_floor, enforce_source_floor, load_persisted_watch_filter, plan_live_continuation,
+    admit_source_floor, enforce_source_floor, load_watch_filter, plan_live_continuation,
 };
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -141,7 +141,12 @@ pub async fn transition_with_readers(
     )
     .await?;
     let compared = resume.compared_block();
-    let filter = load_persisted_watch_filter(database.pool(), chain, compared, compared).await?;
+    // The watch set Ingest itself reads the block with (`Engine::load_window`): manifest
+    // declarations and persisted discovery edges, supplemented with emitters that announced
+    // themselves in earlier canonical blocks and have no persisted edge yet. Comparing with
+    // the persisted set alone would drop those emitters' logs on both sides and admit a
+    // reader the next batch disagrees with.
+    let filter = load_watch_filter(database.pool(), chain, compared, compared).await?;
     let left = old_provider
         .fetch(filter.clone(), compared, compared)
         .await?;
