@@ -79,6 +79,17 @@ pub(super) fn push_attributed_record_filter<'a>(
     row_alias: &str,
     resource_ids: &'a [Uuid],
 ) {
+    push_attributed_record_filter_where(builder, row_alias, resource_ids, |_| {});
+}
+
+/// [`push_attributed_record_filter`] with a further predicate on the attributing `inventory`
+/// row, for readers that admit attribution through some of the candidate resources only.
+pub(super) fn push_attributed_record_filter_where<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    row_alias: &str,
+    resource_ids: &'a [Uuid],
+    push_inventory_predicate: impl FnOnce(&mut QueryBuilder<'a, Postgres>),
+) {
     builder.push(" OR ");
     builder.push(row_alias);
     builder.push(
@@ -95,9 +106,10 @@ pub(super) fn push_attributed_record_filter<'a>(
     builder.push_bind(resource_ids);
     builder.push(
         r#"::uuid[])
-              AND attributed.event_id ~ '^[0-9]+$'
-        )"#,
+              AND attributed.event_id ~ '^[0-9]+$'"#,
     );
+    push_inventory_predicate(builder);
+    builder.push(")");
 }
 
 pub(super) fn push_string_filter<'a>(

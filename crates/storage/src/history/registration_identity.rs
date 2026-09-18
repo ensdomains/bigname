@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use super::{
     EventHistoryReadFilter,
-    filters::push_attributed_record_filter,
+    filters::push_attributed_record_filter_where,
     lineage::{same_fork_as, same_fork_predicate},
 };
 
@@ -58,7 +58,9 @@ pub(super) async fn is_public_registration_id(
 /// Keep only the rows of one registration. A row on a resource belongs to it when its
 /// registration identity is that registration; a row with no resource (a record write) belongs
 /// to it while one of the registration's bindings is active, or when Project attributed the
-/// write to one of the registration's resources.
+/// write to the registration's own records or to those of a NameWrapper resource that wrapped
+/// it. The candidate rows also hold the writes of the name's other registrations, so attribution
+/// to a candidate resource alone is not membership.
 pub(super) fn push_registration_filter<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a EventHistoryReadFilter,
@@ -74,7 +76,9 @@ pub(super) fn push_registration_filter<'a>(
     builder.push(" AND (");
     push_registration_binding_at_event(builder, registration_id, canonical_only);
     if let Some((_, resource_ids)) = filter.product_registration() {
-        push_attributed_record_filter(builder, "ne", resource_ids);
+        push_attributed_record_filter_where(builder, "ne", resource_ids, |builder| {
+            push_attributing_inventory_is_registration(builder, registration_id, canonical_only);
+        });
     }
     builder.push(")) OR (");
     push_public_registration_at_event(builder, registration_id, canonical_only);
@@ -82,6 +86,54 @@ pub(super) fn push_registration_filter<'a>(
     push_product_registration_id(builder, canonical_only);
     builder.push(" = ");
     builder.push_bind(registration_id);
+    builder.push("))");
+}
+
+// The record inventory that attributes a write proves membership only when it is the
+// registration's own, or belongs to a NameWrapper resource whose `NameWrapped` row on the
+// write's fork recorded this registration as the lease it wrapped.
+fn push_attributing_inventory_is_registration(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    registration_id: Uuid,
+    canonical_only: bool,
+) {
+    builder.push(" AND (inventory.resource_id = ");
+    builder.push_bind(registration_id);
+    // The derived table keeps the lookup keyed by the inventory's resource; without it the
+    // planner rewrites the EXISTS into a per-row hash of every NameWrapped row on the chain.
+    builder.push(
+        " OR EXISTS (
+            SELECT 1
+            FROM (
+                SELECT * FROM bigname_phase.normalized_events wrapper_binding
+                WHERE wrapper_binding.resource_id = inventory.resource_id
+                  AND wrapper_binding.resource_id IS NOT NULL
+                  AND wrapper_binding.consumer_visibility = 'activated'",
+    );
+    if canonical_only {
+        builder
+            .push(" AND wrapper_binding.canonicality_state IN ('canonical', 'safe', 'finalized')");
+    }
+    builder.push(
+        " OFFSET 0
+            ) wrapper_binding
+            LEFT JOIN bigname_phase.chain_lineage wrapper_lineage
+              ON wrapper_lineage.chain_id = wrapper_binding.chain_id
+             AND wrapper_lineage.block_hash = wrapper_binding.block_hash
+            WHERE wrapper_binding.chain_id = ne.chain_id
+              AND wrapper_binding.event_kind = 'SurfaceBound'
+              AND wrapper_binding.source_family = 'ens_v1_wrapper_l1'
+              AND (wrapper_binding.after_state ->> 'wrapped_registrar_resource_id')::uuid = ",
+    );
+    builder.push_bind(registration_id);
+    if canonical_only {
+        builder.push(
+            " AND (wrapper_binding.block_hash IS NULL
+                   OR wrapper_lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))",
+        );
+    }
+    builder.push(" AND ");
+    builder.push(same_fork_predicate("wrapper_binding", "ne", canonical_only));
     builder.push("))");
 }
 
