@@ -430,6 +430,10 @@ fn range_too_large(error: &anyhow::Error) -> bool {
     ]
     .iter()
     .any(|needle| error.contains(needle))
+        // Some backends include the requested size between "block range" and "exceeds".
+        || (error.contains("block range ")
+            && error.contains(" exceeds the maximum of ")
+            && error.contains(" blocks per logs request"))
 }
 
 fn unsupported_checkpoint_tag(error: &anyhow::Error) -> bool {
@@ -456,11 +460,17 @@ mod range_limit_tests {
         for message in [
             "provider returned JSON-RPC error for eth_getLogs: -32602: query block range exceeds server limit, narrow your filter: 1000",
             "provider returned JSON-RPC error for eth_getLogs: -32005: query returned more than 10000 results",
+            "provider returned JSON-RPC error for eth_getLogs: -32602: Block range 131072 exceeds the maximum of 10000 blocks per logs request. Use a narrower fromBlock/toBlock range or increase Receipt.MaxBlockDepth.",
+            "provider returned JSON-RPC error for eth_getLogs: -32602: Block range 8192 exceeds the maximum of 1000 blocks per logs request.",
         ] {
             assert!(range_too_large(&anyhow::anyhow!(message)), "{message}");
         }
-        assert!(!range_too_large(&anyhow::anyhow!(
-            "provider returned JSON-RPC error for eth_getLogs: -32602: invalid argument 0: hex string"
-        )));
+        for message in [
+            "provider returned JSON-RPC error for eth_getLogs: -32602: invalid argument 0: hex string",
+            "provider returned JSON-RPC error for eth_getLogs: -32602: Block range 10..1 is invalid",
+            "provider returned JSON-RPC error for eth_getLogs: -32602: address count exceeds the maximum of 1000",
+        ] {
+            assert!(!range_too_large(&anyhow::anyhow!(message)), "{message}");
+        }
     }
 }
