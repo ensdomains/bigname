@@ -14,15 +14,16 @@ impl Engine {
             if normalized_kind(&source.kind) == ProviderKind::Coinbase {
                 continue;
             }
+            // A source with nothing left to plan is not asked for its floor.
+            let Some((from, to)) =
+                planned_range(source, request.redo_range, request.resume_current.as_ref())
+            else {
+                continue;
+            };
             let Some(floor) = self.source_floor(&request.chain_id, source).await? else {
                 continue;
             };
-            admit_source_floor(
-                source,
-                request.redo_range,
-                request.resume_current.as_ref(),
-                floor,
-            )?;
+            enforce_source_floor(&source.key, from, to, floor)?;
         }
         Ok(())
     }
