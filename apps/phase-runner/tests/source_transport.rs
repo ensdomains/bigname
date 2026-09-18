@@ -622,6 +622,62 @@ async fn candidate_reader_without_checkpoint_heads_is_refused_before_live_follow
     db.cleanup().await
 }
 
+#[tokio::test]
+async fn exhausted_redo_of_an_unfinished_pass_replans_from_the_declared_start() -> Result<()> {
+    let db = ScratchDatabase::create("source_transport_redo_exhausted_declared").await?;
+    seed_watch_set(db.pool()).await?;
+    // The pass the redo interrupted never handed off to live follow, so once the marker
+    // clears the runner restarts normal Ingest from the declared start.
+    seed_ingest(db.pool(), "drpc", Redo::ResumedAt(5)).await?;
+    let node = NodeDouble::through(6).with_watched_log(6);
+    let before = snapshot(db.pool()).await?;
+
+    let error = switch_to_direct_reader_with_floor(&db, &node, 3)
+        .await
+        .expect_err("the restored pass replans from block 0");
+    assert!(format!("{error:#}").contains("0..=head"), "{error:#}");
+    assert_eq!(before, snapshot(db.pool()).await?);
+
+    let receipt = switch_to_direct_reader_with_floor(&db, &node, 0).await?;
+
+    assert_eq!(receipt["next_block"], 6);
+    assert_eq!(receipt["compared_block"], 6);
+    assert_eq!(receipt["live_continuation"], Value::Null);
+    assert_eq!(
+        snapshot(db.pool()).await?,
+        with_stored_kind(before, "reth_db")
+    );
+    db.cleanup().await
+}
+
+#[tokio::test]
+async fn exhausted_redo_with_the_node_ahead_compares_the_block_live_follow_loads_next() -> Result<()>
+{
+    let db = ScratchDatabase::create("source_transport_redo_exhausted_ahead").await?;
+    seed_watch_set(db.pool()).await?;
+    seed_ingest(db.pool(), "drpc", Redo::ResumedAt(5)).await?;
+    hand_off_to_live(db.pool()).await?;
+    seed_published_head(db.pool(), 5).await?;
+    // The node moved on to block 6 while the redo was finishing.
+    let node = NodeDouble::through(6).with_watched_log(6);
+    let before = snapshot(db.pool()).await?;
+
+    let receipt = switch_to_direct_reader_with_floor(&db, &node, 3).await?;
+
+    assert_eq!(receipt["next_block"], 6);
+    assert_eq!(receipt["compared_block"], 6);
+    assert_eq!(receipt["compared_block_log_count"], 1);
+    assert_eq!(
+        receipt["live_continuation"]["ancestor"],
+        json!({"number": 5, "hash": block_hash(5)})
+    );
+    assert_eq!(
+        snapshot(db.pool()).await?,
+        with_stored_kind(before, "reth_db")
+    );
+    db.cleanup().await
+}
+
 /// Runs the production switch with each descriptor read through an HTTP node double. The
 /// direct database reader needs a real Reth datadir, so `direct` stands in for it; the locks,
 /// cursor checks, comparisons and update are the ones `transition` runs.
