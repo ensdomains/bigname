@@ -692,9 +692,14 @@ as the only evidence for a lease never observed before the transaction.
 Which of the four kinds carries the token id depends on the deployment profile:
 the Sepolia profile indexes the BaseRegistrar's numeric `NameRegistered` and
 `NameRenewed` as lifecycle events with the token id, while the Mainnet profile
-declares them for `RegistrationReleased` only and the controller-derived
-`RegistrationGranted`/`RegistrationRenewed` after-state carries no token id, so
-on Mainnet only `TokenControlTransferred` is lease evidence. A Mainnet lease
+declares `NameRegistered` for `RegistrationReleased` and `NameRenewed` for
+`RegistrationRenewed` and `ExpiryChanged` (`manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml`);
+neither declaration names `RegistrationGranted`, which is what the registrar
+adapter requires before it interprets the numeric events as lifecycle events
+(`crates/adapters/src/schema_v2/protocol/v1/registrar.rs`), and the
+controller-derived `RegistrationGranted`/`RegistrationRenewed` after-state
+carries no token id, so on Mainnet only `TokenControlTransferred` is lease
+evidence. A Mainnet lease
 that was never transferred before its migration has exactly one such event:
 the migration transaction's own holder-to-controller transfer, which precedes
 the cleanup. Predecessor resolution therefore relies on that transfer being
