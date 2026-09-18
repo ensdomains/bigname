@@ -667,16 +667,20 @@ async fn registrar_boundary_refuses_inexact_cleanup_evidence() -> TestResult {
 async fn activated_boundary_rejects_zero_and_multiple_predecessors() -> TestResult {
     let database = database().await?;
     let pool = database.pool();
-    insert_registrar_evidence(pool, 1, "0xexpected").await?;
+    // A binding without any token evidence before the cleanup is no lease; the cleanup transfer
+    // alone vouches only for a fallback binding positioned at the cleanup itself.
+    insert_registrar_contract(pool).await?;
+    insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
     let mut output = ordinary_open(12, 2, "ens_v2", 2);
     activate(&mut output)?;
     let zero = apply(pool, &output).await.unwrap_err().to_string();
     assert!(zero.contains("0 active ENSv1 predecessors"), "{zero}");
+    assert_eq!(active_to(pool, 11).await?, None);
 
     sqlx::query("ALTER TABLE surface_bindings DROP CONSTRAINT surface_bindings_no_overlap")
         .execute(pool)
         .await?;
-    insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+    insert_registrar_evidence(pool, 1, "0xexpected").await?;
     insert_binding(pool, 13, NAME, 3, "ens_v1").await?;
     insert_registrar_evidence(pool, 3, "0xexpected").await?;
     let multiple = apply(pool, &output).await.unwrap_err().to_string();

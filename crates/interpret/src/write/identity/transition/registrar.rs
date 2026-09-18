@@ -38,17 +38,22 @@ const LEASE_EVIDENCE_EVENT_KINDS: &[&str] = &[
 
 /// Resolves the lease and closes the ENSv1 side of the name at `predecessor_time`.
 ///
-/// The lease is the one resource of the name that carries an activated canonical event with
-/// `after_state.token_id` equal to the selector's labelhash, emitted by the selector's
-/// BaseRegistrar instance, positioned before the cleanup (or at it: a registrar identity
-/// materialized at `NameUnwrapped` has the cleanup transfer as its first evidence); that once had
-/// an `ens_v1` binding positioned no later than the same rule allows; and whose registration was
-/// not released before the cleanup. Zero or several such resources are integrity errors, exactly
-/// as before: the entry point accepts the token only from the BaseRegistrar, whose `ownerOf`
-/// rejects an expired token, so a supported migration with no live lease means the ENSv1
-/// interpretation is corrupt.
+/// The lease is the one resource of the name that carries an activated canonical registrar
+/// lifecycle event with `after_state.token_id` equal to the selector's labelhash, emitted by the
+/// selector's BaseRegistrar instance and positioned before the cleanup (at it only for the
+/// `NameUnwrapped` fallback whose binding sits at the cleanup log), and whose registration was
+/// not released before the cleanup. The lease need not have had a binding: one granted with
+/// `registerOnly` under a registry-only binding never gets one, and the token is the predecessor
+/// whether or not a binding ever pointed at it. Resources share a token id only as
+/// successive leases of the same label, and a successor grant requires the earlier lease to be
+/// past its grace period, which the adapters settle as a `RegistrationReleased` no later than the
+/// grant's block, so the release guard leaves exactly one live lease. Zero or several are
+/// integrity errors, exactly as before: the entry point accepts the token only from the
+/// BaseRegistrar, whose `ownerOf` rejects an expired token, so a supported migration with no
+/// live lease means the ENSv1 interpretation is corrupt.
 /// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L100-L102 @ ens_v2@a971bd6)
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
 pub(super) async fn close_lease_predecessor(
     transaction: &mut Transaction<'_, Postgres>,
     transition: &MigrationAuthorityTransition,
@@ -56,47 +61,46 @@ pub(super) async fn close_lease_predecessor(
     predecessor_at: (i64, i64, i64),
     predecessor_time: time::OffsetDateTime,
 ) -> Result<()> {
-    // A fallback registrar binding is effective from NameUnwrapped, but its confirming evidence
-    // is the cleanup transfer, so a lease whose binding is positioned at the cleanup may use the
-    // cleanup itself as evidence. Every other lease needs evidence strictly before it: the cleanup
-    // transfer alone does not vouch for a binding opened earlier.
-    let allow_cleanup_evidence = selector.cleanup.is_some();
+    // Evidence must be positioned strictly before the cleanup, with one exception: a registrar
+    // identity materialized at `NameUnwrapped` has the cleanup transfer as its first and only
+    // evidence, and its binding is positioned at that same cleanup log. The binding gate on that
+    // arm is what keeps the cleanup transfer, which every migration emits on the lease resource,
+    // from standing in as the only evidence for a lease never observed before the transaction.
     let leases: Vec<Uuid> = sqlx::query_scalar(&format!(
         "SELECT DISTINCT evidence.resource_id
          FROM normalized_events evidence
          WHERE evidence.chain_id = $1
            AND evidence.logical_name_id = $2
            AND evidence.resource_id IS NOT NULL
-           AND evidence.event_kind = ANY($10)
+           AND evidence.event_kind = ANY($8)
            AND evidence.consumer_visibility = 'activated'
            AND evidence.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND evidence.after_state ->> 'token_id' = $7
+           AND evidence.after_state ->> 'token_id' = $6
            AND (
                (
                    evidence.block_number,
                    COALESCE(evidence.transaction_index, -1),
                    COALESCE(evidence.log_index, -1)
-               ) < ($4, $5, $6)
+               ) < ($3, $4, $5)
                OR (
-                   $9
-                   AND (
+                   (
                        evidence.block_number,
                        COALESCE(evidence.transaction_index, -1),
                        COALESCE(evidence.log_index, -1)
-                   ) = ($4, $5, $6)
+                   ) = ($3, $4, $5)
                    AND EXISTS (
                        SELECT 1
                        FROM surface_bindings fallback
                        WHERE fallback.chain_id = evidence.chain_id
                          AND fallback.logical_name_id = evidence.logical_name_id
                          AND fallback.resource_id = evidence.resource_id
-                         AND fallback.authority_arm = $3
+                         AND fallback.authority_arm = $9
                          AND fallback.canonicality_state IN ('canonical', 'safe', 'finalized')
                          AND (
                              fallback.block_number,
                              COALESCE((fallback.provenance ->> '{transaction_index}')::bigint, -1),
                              COALESCE((fallback.provenance ->> '{log_index}')::bigint, -1)
-                         ) = ($4, $5, $6)
+                         ) = ($3, $4, $5)
                    )
                )
            )
@@ -112,7 +116,7 @@ pub(super) async fn close_lease_predecessor(
                SELECT 1
                FROM contract_instance_addresses address
                WHERE address.chain_id = evidence.chain_id
-                 AND address.contract_instance_id = $8
+                 AND address.contract_instance_id = $7
                  AND lower(address.address) = lower(evidence.raw_fact_ref ->> 'emitting_address')
                  AND (
                      address.active_from_block_number IS NULL
@@ -121,27 +125,6 @@ pub(super) async fn close_lease_predecessor(
                  AND (
                      address.active_to_block_number IS NULL
                      OR address.active_to_block_number >= evidence.block_number
-                 )
-           )
-           AND EXISTS (
-               SELECT 1
-               FROM surface_bindings lease
-               WHERE lease.chain_id = evidence.chain_id
-                 AND lease.logical_name_id = evidence.logical_name_id
-                 AND lease.resource_id = evidence.resource_id
-                 AND lease.authority_arm = $3
-                 AND lease.canonicality_state IN ('canonical', 'safe', 'finalized')
-                 AND (
-                     (
-                         lease.block_number,
-                         COALESCE((lease.provenance ->> '{transaction_index}')::bigint, -1),
-                         COALESCE((lease.provenance ->> '{log_index}')::bigint, -1)
-                     ) < ($4, $5, $6)
-                     OR ($9 AND (
-                         lease.block_number,
-                         COALESCE((lease.provenance ->> '{transaction_index}')::bigint, -1),
-                         COALESCE((lease.provenance ->> '{log_index}')::bigint, -1)
-                     ) = ($4, $5, $6))
                  )
            )
            AND NOT EXISTS (
@@ -156,7 +139,7 @@ pub(super) async fn close_lease_predecessor(
                      released.block_number,
                      COALESCE(released.transaction_index, -1),
                      COALESCE(released.log_index, -1)
-                 ) < ($4, $5, $6)
+                 ) < ($3, $4, $5)
                  AND EXISTS (
                      SELECT 1
                      FROM chain_lineage released_lineage
@@ -172,19 +155,18 @@ pub(super) async fn close_lease_predecessor(
     ))
     .bind(&transition.chain_id)
     .bind(&transition.logical_name_id)
-    .bind(&transition.expected_predecessor_arm)
     .bind(predecessor_at.0)
     .bind(predecessor_at.1)
     .bind(predecessor_at.2)
     .bind(&selector.identity)
     .bind(selector.contract_instance_id)
-    .bind(allow_cleanup_evidence)
     .bind(
         LEASE_EVIDENCE_EVENT_KINDS
             .iter()
             .map(|kind| (*kind).to_owned())
             .collect::<Vec<_>>(),
     )
+    .bind(&transition.expected_predecessor_arm)
     .fetch_all(&mut **transaction)
     .await
     .map_err(|error| {
@@ -209,17 +191,10 @@ pub(super) async fn close_lease_predecessor(
            AND authority_arm = $3
            AND canonicality_state IN ('canonical', 'safe', 'finalized')
            AND (
-               (
-                   block_number,
-                   COALESCE((provenance ->> '{transaction_index}')::bigint, -1),
-                   COALESCE((provenance ->> '{log_index}')::bigint, -1)
-               ) < ($4, $5, $6)
-               OR ($8 AND (
-                   block_number,
-                   COALESCE((provenance ->> '{transaction_index}')::bigint, -1),
-                   COALESCE((provenance ->> '{log_index}')::bigint, -1)
-               ) = ($4, $5, $6))
-           )
+               block_number,
+               COALESCE((provenance ->> '{transaction_index}')::bigint, -1),
+               COALESCE((provenance ->> '{log_index}')::bigint, -1)
+           ) <= ($4, $5, $6)
            AND active_from < $7
            AND (active_to IS NULL OR active_to > $7)",
         transaction_index = seam::TRANSACTION_INDEX_KEY,
@@ -232,7 +207,6 @@ pub(super) async fn close_lease_predecessor(
     .bind(predecessor_at.1)
     .bind(predecessor_at.2)
     .bind(predecessor_time)
-    .bind(allow_cleanup_evidence)
     .execute(&mut **transaction)
     .await
     .map_err(|error| {
