@@ -54,10 +54,15 @@ pub(crate) async fn batch_input(
             "chain {chain_id} has no active manifests for interpretation"
         )));
     }
-    // Decided inside this snapshot, so the choice matches the manifests the batch would use.
-    // Deprecated manifests count too: the full-state loader restores their retained events,
-    // and lookahead reads none from a family it does not cover.
-    if let Some(reason) = full_state_reason(&manifests, &provenance) {
+    // Decided inside this snapshot, so the choice matches the manifests the batch would use
+    // and the history the full-state loader would restore. Deprecated manifests count too:
+    // the full-state loader restores their retained events, and lookahead reads none from a
+    // family it does not cover.
+    let reason = match full_state_reason(&manifests, &provenance) {
+        Some(reason) => Some(reason),
+        None => retained_family_reason(&mut tx, chain_id, from_block).await?,
+    };
+    if let Some(reason) = reason {
         return Ok(Attempt::FullStateRequired(StateLoader::FullState {
             reason,
         }));
@@ -153,16 +158,8 @@ pub(crate) async fn batch_input(
 }
 
 /// The first manifest, in the loader's stable order, whose source family lookahead does not
-/// cover. `provenance` holds the active and the deprecated manifests.
-///
-/// Coverage is decided from the manifest rows `manifests::load` returns, which are those in
-/// the `active` or `deprecated` rollout states. The full-state loader restores every retained
-/// `normalized_events` row with no source-family filter, while lookahead reads only
-/// `ens_v1_*` families. The two loaders therefore produce the same output only while the
-/// chain retains no history from a family whose manifest has left both states (for example
-/// one moved back to `draft`): such rows are invisible here, so lookahead would still be
-/// chosen and would not read them. No admitted Mainnet family has done this, and nothing
-/// here detects it.
+/// cover. `provenance` holds the active and the deprecated manifests, the rows
+/// `manifests::load` returns; `retained_family_reason` covers the other rollout states.
 fn full_state_reason(
     active: &[ManifestInput],
     provenance: &[ManifestInput],
@@ -177,6 +174,58 @@ fn full_state_reason(
             })
     };
     unsupported(active, "active").or_else(|| unsupported(provenance, "deprecated"))
+}
+
+/// The first uncovered source family, in name order, whose manifest on the chain is in a
+/// rollout state other than `active` or `deprecated` (`draft` or `shadow`) and that retains a
+/// readable event before the batch. The full-state loader restores every retained event with
+/// no source-family filter, while lookahead reads only `ens_v1_*` families, so history of
+/// such a family (written while its manifest was active, before the manifest moved back)
+/// would be restored by one loader and not the other.
+///
+/// Only families with a manifest row on the chain are probed: every event is written under
+/// one of the chain's manifests, and `manifest_versions` rows are never deleted, only moved
+/// between rollout states. A chain whose manifests are all `active` or `deprecated`, or
+/// whose other manifests are all covered, runs no event query here.
+async fn retained_family_reason(
+    connection: &mut sqlx::PgConnection,
+    chain_id: &str,
+    from_block: i64,
+) -> Result<Option<FullStateReason>> {
+    let candidates: Vec<(String, String)> =
+        lookahead_query::other_manifest_families(connection, chain_id)
+            .await?
+            .into_iter()
+            .filter(|(family, _)| !v1_lookahead_supports_family(family))
+            .collect();
+    let mut families: Vec<String> = candidates
+        .iter()
+        .map(|(family, _)| family.clone())
+        .collect();
+    families.dedup();
+    let Some(source_family) =
+        lookahead_query::first_retained_family(connection, chain_id, from_block, &families).await?
+    else {
+        return Ok(None);
+    };
+    // The first row for the family in (family, status) order: `draft` before `shadow`.
+    let rollout_status = candidates
+        .iter()
+        .find(|(family, _)| *family == source_family)
+        .map(|(_, status)| status.as_str());
+    let rollout_status = match rollout_status {
+        Some("draft") => "draft",
+        Some("shadow") => "shadow",
+        other => {
+            return Err(InterpretError::data_integrity(format!(
+                "retained source family {source_family} has manifest rollout status {other:?}"
+            )));
+        }
+    };
+    Ok(Some(FullStateReason::UnsupportedSourceFamily {
+        source_family,
+        rollout_status,
+    }))
 }
 
 fn validate_dependencies(dependencies: &V1BatchDependencies) -> Result<()> {

@@ -16,7 +16,9 @@ pub enum StateLoader {
 pub enum FullStateReason {
     /// The operator forced the full-state loader for the whole process.
     OperatorOverride,
-    /// A manifest the batch reads belongs to a source family lookahead does not cover.
+    /// A manifest the batch reads belongs to a source family lookahead does not cover, or
+    /// the chain retains history of such a family under a manifest in another rollout state
+    /// (`rollout_status` is that manifest's state).
     UnsupportedSourceFamily {
         source_family: String,
         rollout_status: &'static str,

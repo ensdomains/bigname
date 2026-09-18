@@ -18,6 +18,7 @@ use crate::{InterpretError, Result};
 const ENS_GRACE_PERIOD_SECS: i64 = 90 * 24 * 60 * 60;
 const EVENTS: &str = include_str!("lookahead/events.sql");
 const DUE_NAMES: &str = include_str!("lookahead/due_names.sql");
+const RETAINED_FAMILIES: &str = include_str!("lookahead/retained_families.sql");
 
 type EventRow = (Value, Option<OffsetDateTime>);
 
@@ -72,6 +73,47 @@ pub(super) async fn due_names(
         })?;
     names.sort();
     Ok(names)
+}
+
+/// The source families of the chain's manifests in a rollout state other than `active` or
+/// `deprecated`, each with that state, ordered by family then state. `manifest_versions`
+/// holds a few rows per chain, so this reads no index.
+pub(super) async fn other_manifest_families(
+    connection: &mut PgConnection,
+    chain: &str,
+) -> Result<Vec<(String, String)>> {
+    sqlx::query_as(
+        "SELECT DISTINCT source_family, rollout_status
+         FROM manifest_versions
+         WHERE chain_id = $1 AND rollout_status NOT IN ('active', 'deprecated')
+         ORDER BY source_family, rollout_status",
+    )
+    .bind(chain)
+    .fetch_all(connection)
+    .await
+    .map_err(|error| {
+        InterpretError::database("failed to load manifests outside interpretation", error)
+    })
+}
+
+/// The first of `families`, in name order, with a readable event on the chain before
+/// `before`; see `lookahead/retained_families.sql` for its cost.
+pub(super) async fn first_retained_family(
+    connection: &mut PgConnection,
+    chain: &str,
+    before: i64,
+    families: &[String],
+) -> Result<Option<String>> {
+    if families.is_empty() {
+        return Ok(None);
+    }
+    sqlx::query_scalar(RETAINED_FAMILIES)
+        .bind(chain)
+        .bind(before)
+        .bind(families)
+        .fetch_optional(connection)
+        .await
+        .map_err(|error| InterpretError::database("failed to probe retained families", error))
 }
 
 fn decode_event(
