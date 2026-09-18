@@ -176,8 +176,7 @@ async fn registry_only_handoff_migrates_the_lease_and_closes_every_v1_binding() 
                           AND resource_id = $6),
                     count(*) FILTER (
                         WHERE source_family LIKE 'ens_v1_%'
-                          AND event_kind IN ('SurfaceBound', 'SurfaceUnbound',
-                                             'AuthorityEpochChanged'))
+                          AND event_kind IN ($7, $8, 'AuthorityEpochChanged'))
              FROM normalized_events
              WHERE chain_id = $1 AND logical_name_id = $2 AND block_number = $3",
         )
@@ -187,6 +186,8 @@ async fn registry_only_handoff_migrates_the_lease_and_closes_every_v1_binding() 
         .bind(bigname_adapters::schema_v2::seam::TOKEN_CONTROL_TRANSFERRED_EVENT_KIND)
         .bind(format!("{labelhash:#x}"))
         .bind(lease_resource)
+        .bind(bigname_adapters::schema_v2::seam::SURFACE_BOUND_EVENT_KIND)
+        .bind(bigname_adapters::schema_v2::seam::SURFACE_UNBOUND_EVENT_KIND)
         .fetch_one(pool)
         .await?;
         assert_eq!(
