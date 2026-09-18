@@ -314,6 +314,25 @@ the ledger is reconciled by hand. A migration that drops legacy
 `public`-schema tables is destructive and additionally requires an explicit
 maintenance window.
 
+Run the migration session with `quote_all_identifiers` at its PostgreSQL
+default, `off`. Confirm with `SHOW quote_all_identifiers` as the migration
+role, and do not set it on for that role or database (`ALTER ROLE ... SET`,
+`ALTER DATABASE ... SET`) or in `PGOPTIONS`. The reason is
+`20260917140000_resolver_creation_self_edge.sql`: it finds the older
+self-edge CHECK on `bigname_phase.discovery_edges` by searching the text
+`pg_get_constraintdef` prints, and with the setting on PostgreSQL prints every
+identifier in double quotes, so the search misses the rule. The file would then
+leave the older rule in place beside the new one, which keeps rejecting the
+resolver self-edge, or fail on the duplicate name when the new rule already
+exists. That file cannot be changed to carry its own setting: it is already
+applied on Sepolia and recorded in `_sqlx_migrations` with its checksum, so an
+edited copy makes `sqlx migrate run` refuse the deploy as a modified applied
+migration, and a fresh database would apply the edited text while the live one
+keeps the original's result. The later
+`20260917141000_discovery_self_edge_check_name.sql` and the index validity
+checks turn the setting off themselves, transaction-locally, and put the
+caller's value back; `schema-v2/apply-check.sh` proves that for each of them.
+
 Adding, editing, or deleting a covered interpreter input rotates the compiled
 [interpreter content hash](../glossary.md#interpreter-content-hash);
 `docs/storage.md` names what is covered. Covered files are hashed whole, so

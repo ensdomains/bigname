@@ -1166,7 +1166,13 @@ older rule on an existing database; it is already applied on a live database,
 so its content is fixed. Schema-migration
 `20260917141000_discovery_self_edge_check_name.sql` then settles the name: it
 renames a rule that has the right text under a generated name, and replaces the
-rule only when its text differs.
+rule only when its text differs. Both files find the existing rule by searching
+the text `pg_get_constraintdef` prints; `20260917141000` turns
+`quote_all_identifiers` off while it reads that text and restores the caller's
+value, while the fixed `20260917140000` needs the migration session to run with
+the setting at its default, `off`, as the
+[production runbook](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+states.
 
 ### Interpret process memory
 
