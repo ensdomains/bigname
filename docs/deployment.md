@@ -106,6 +106,16 @@ because replay must also find orphaned and closed observations. Follow its
 [online index runbook](../ops/discovery-reopen-index/README.md) before applying
 the matching schema-migration on a large initialized database.
 
+The resolver-anchored event feed (`GET /v1/events?resolver=`) uses two partial
+`normalized_events` indexes that #415 added to the baseline without a
+schema-migration, beside two `permission_*` resolver-history indexes nothing
+reads; a database that took slice 1 in place lacks all four. Follow their
+[online index runbook](../ops/resolver-history-indexes/README.md) before
+applying `20260918120000_normalized_events_resolver_history_idx.sql` on a
+large initialized database: applied first, that schema-migration builds each
+missing kept index with an ordinary write-blocking `CREATE INDEX` and drops
+each retired one under the table's exclusive lock.
+
 Project's history lookups for changed names and primary names use eight indexes
 on `normalized_events`. Prebuild them concurrently on a large initialized
 database following [their index runbook](../ops/project-scoped-history/README.md)

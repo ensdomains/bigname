@@ -2186,6 +2186,17 @@ resolver
 This path does not turn the ancestor into the name's declared exact resolver
 and has no live/indexed comparison.
 
+## V1 milestone
+
+bigname's first stable read release, "V1" — not ENSv1, and not the
+prospective V2 specification — together with the work that proves it replaces
+the retained legacy read surface: the parity coverage
+[`consumer-capabilities.md`](consumer-capabilities.md) requires, regression
+tests over the served routes, and monitoring. [ADR
+0007](adrs/0007-v1-schema-freeze.md) freezes the schema for the milestone's
+duration; it ends when those gates pass and the release is signed off, which
+is recorded by amending that ADR's status line.
+
 ## Verified lookup
 
 request-scoped resolution or primary-name verification

@@ -598,32 +598,6 @@ CREATE INDEX IF NOT EXISTS normalized_events_pointer_before_resolver_history_idx
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
-CREATE INDEX IF NOT EXISTS normalized_events_permission_after_resolver_history_idx
-    ON normalized_events (
-        chain_id,
-        lower(after_state #>> '{scope,resolver_address}'),
-        block_number,
-        block_hash
-    ) INCLUDE (resource_id)
-    WHERE event_kind = 'PermissionChanged'
-      AND consumer_visibility = 'activated'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND after_state #>> '{scope,kind}' = 'resolver'
-      AND resource_id IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS normalized_events_permission_before_resolver_history_idx
-    ON normalized_events (
-        chain_id,
-        lower(before_state #>> '{scope,resolver_address}'),
-        block_number,
-        block_hash
-    ) INCLUDE (resource_id)
-    WHERE event_kind = 'PermissionChanged'
-      AND consumer_visibility = 'activated'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND before_state #>> '{scope,kind}' = 'resolver'
-      AND resource_id IS NOT NULL;
-
 CREATE INDEX IF NOT EXISTS normalized_events_subregistry_registration_history_idx
     ON normalized_events (
         chain_id,
