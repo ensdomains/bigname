@@ -239,24 +239,24 @@ async fn resume_point(
     let rows = lock_chain_phase_state(tx, chain).await?;
     let mut ingest = row_for(&rows, PhaseName::Ingest)?.clone();
     if ingest.redo_in_progress {
-        let to = phase["redo_to_block_number"]
-            .as_i64()
-            .ok_or_else(|| anyhow::anyhow!("ingest redo is in progress without a redo range"))?;
-        let exhausted = phase["redo_current_block_number"]
-            .as_i64()
-            .is_some_and(|current| current >= to);
-        if !exhausted {
-            return phase["redo_current_block_number"]
-                .as_i64()
-                .map(|n| n + 1)
-                .or(phase["redo_from_block_number"].as_i64())
-                .map(ResumePoint::Redo)
-                .ok_or_else(|| anyhow::anyhow!("missing next ingest block"));
+        let (Some(from), Some(to)) = (
+            phase["redo_from_block_number"].as_i64(),
+            phase["redo_to_block_number"].as_i64(),
+        ) else {
+            anyhow::bail!("ingest redo is in progress for chain {chain} without a redo range");
+        };
+        if let RedoPosition::Next(next) =
+            redo_position(from, to, phase["redo_current_block_number"].as_i64())?
+        {
+            return Ok(ResumePoint::Redo(next));
         }
         // The redo read its last block and the process stopped before finish_redo cleared
         // the marker. Rerunning it reads nothing and clears the marker, restoring the
         // lifecycle the redo interrupted (redo_state::finish); the work that follows is the
-        // work that restored state plans, so it is judged on that state.
+        // work that restored state plans, so it is judged on that state. For a redo that
+        // interrupted a running or paused Ingest, finish persists `failed` ("phase was
+        // interrupted before redo; resume the normal phase") while this restored copy keeps
+        // running or paused; both replan from the declared start.
         crate::redo_completion::restore_previous_lifecycle(&mut ingest)?;
     }
     if ingest_replans_from_declared_start(&ingest)? {
@@ -269,6 +269,29 @@ async fn resume_point(
         .await
         .map(ResumePoint::Live)
         .context("failed to select where live follow resumes on the proposed reader")
+}
+
+/// Where a persisted redo of `from..=to` stands.
+#[derive(Debug)]
+enum RedoPosition {
+    /// Blocks remain; this one is read next.
+    Next(i64),
+    /// The position is the range's last block: nothing remains, only the marker.
+    Exhausted,
+}
+
+/// Reads the redo position the way the engine admits it (`bigname_ingest` refuses a resume
+/// marker outside the redo range before it plans anything) and tells an exhausted range
+/// from one with blocks left.
+fn redo_position(from: i64, to: i64, current: Option<i64>) -> Result<RedoPosition> {
+    match current {
+        None => Ok(RedoPosition::Next(from)),
+        Some(current) if current == to => Ok(RedoPosition::Exhausted),
+        Some(current) if current < from || current > to => anyhow::bail!(
+            "ingest redo resume marker {current} is outside the redo range {from}..={to}"
+        ),
+        Some(current) => Ok(RedoPosition::Next(current + 1)),
+    }
 }
 
 /// Applies, to the proposed descriptor, the source-floor admission that Ingest or live
@@ -367,6 +390,28 @@ fn validate_pair(old: &SourceConfig, new: &SourceConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redo_position_outside_the_range_is_refused() {
+        assert!(matches!(
+            redo_position(2, 5, None),
+            Ok(RedoPosition::Next(2))
+        ));
+        assert!(matches!(
+            redo_position(2, 5, Some(3)),
+            Ok(RedoPosition::Next(4))
+        ));
+        assert!(matches!(
+            redo_position(2, 5, Some(5)),
+            Ok(RedoPosition::Exhausted)
+        ));
+        let error = redo_position(2, 5, Some(6)).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "ingest redo resume marker 6 is outside the redo range 2..=5"
+        );
+        assert!(redo_position(2, 5, Some(1)).is_err());
+    }
     fn source(kind: &str) -> SourceConfig {
         SourceConfig::new_with_role(
             "ethereum-sepolia",
