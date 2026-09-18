@@ -1530,11 +1530,15 @@ rebuilds it from readable `normalized_events` rows.
 ## Lookahead loader
 
 the way Interpret restores prior adapter state for one batch on a chain
-whose manifests all belong to ENSv1 source families: it loads only the history
-of the names and resources the batch can touch (those its logs mention, those
-earlier events link to them, and registrations falling due in the batch)
-instead of all retained history. The other way is the *full-state loader*,
-which restores everything once and then carries the
+whose `active` and `deprecated` manifests all belong to source families it
+covers (`ens_v1_registrar_l1`, `ens_v1_registry_l1`, `ens_v1_resolver_l1`,
+`ens_v1_wrapper_l1`, `ens_v1_reverse_l1`, `basenames_l1_compat`, and every
+`*_execution` family) and whose retained `normalized_events` hold no history of
+an uncovered family under a `draft` or `shadow` manifest: it loads only the
+history of the names and resources the batch can touch (those its logs
+mention, those earlier events link to them, and registrations falling due in
+the batch) instead of all retained history. The other way is the *full-state
+loader*, which restores everything once and then carries the
 [interpreter session](#interpreter-session) between batches. Interpret chooses
 between them automatically for each chain and batch; both must produce identical
 output. See [Interpret process memory](storage.md#interpret-process-memory).

@@ -3,7 +3,8 @@
 Interpret's [lookahead loader](../../docs/glossary.md#lookahead-loader) restores
 prior adapter state for one batch by reading only the history of the names and
 resources that batch can touch. It is chosen automatically for a chain whose
-manifests all belong to ENSv1 source families (see
+`active` and `deprecated` manifests all belong to source families it covers and
+whose retained history holds no other family (see
 [`docs/deployment.md`](../../docs/deployment.md)). Two partial expression indexes
 on `normalized_events` serve its reads:
 

@@ -183,7 +183,9 @@ batch; there is nothing to enable. When every active or deprecated manifest of
 the chain belongs to a source family the
 [lookahead loader](glossary.md#lookahead-loader) covers (the five `ens_v1_*`
 families, plus `basenames_l1_compat` and the `*_execution` families, which
-interpret no logs), Interpret uses the lookahead loader: it reads the names and
+interpret no logs), and the chain retains no `normalized_events` history of an
+uncovered family whose manifest has moved to `draft` or `shadow`, Interpret
+uses the lookahead loader: it reads the names and
 resources the batch's logs mention plus the registrations falling due in the
 batch, restores only their history, and keeps no
 [interpreter session](glossary.md#interpreter-session) between batches.
@@ -193,13 +195,16 @@ and Base has Basenames registry manifests, so both always use the full-state
 loader. Both loaders must produce identical stored output and share one
 [interpreter content hash](glossary.md#interpreter-content-hash), so a change
 of loader needs no redo. The choice can change only when a release changes the
-chain's manifest set; a change to the full-state loader costs one cold restore
-of the chain's history, with the memory that implies.
+chain's manifest set, including moving to `draft` or `shadow` a manifest whose
+family wrote history that is still retained, or when a redo removes the last
+retained history of such a family; a change to the full-state loader costs one
+cold restore of the chain's history, with the memory that implies.
 
 The runner logs the choice at info level when a chain's loader is first chosen
 and whenever it changes (`interpret chose its prior-state loader`,
-`interpret changed its prior-state loader`), with the source family that
-required the full-state loader. `BIGNAME_INTERPRET_FORCE_FULL_STATE_LOADER=true`
+`interpret changed its prior-state loader`), with the source family, and the
+rollout status of its manifest, that required the full-state loader.
+`BIGNAME_INTERPRET_FORCE_FULL_STATE_LOADER=true`
 (`--interpret-force-full-state-loader`) is the one operator override: it makes
 every chain use the full-state loader. It defaults to false. The lookahead
 loader depends on the two `normalized_events_v1_*_probe_idx` indexes; build them

@@ -1228,7 +1228,7 @@ and lists every ENSv1 name (by namehash) and resource the logs can touch.
 Interpret adds the names whose registrar expiry plus the 90-day grace period
 falls inside the batch's time span, because time-derived releases touch names no
 log mentions. A registration is released at the first block whose timestamp is
-strictly greater than its expiry plus the grace period, so the span runs from
+strictly greater than its expiry plus the grace period (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f), so the span runs from
 the timestamp of the block before the batch, inclusive, to the timestamp of the
 batch's last block, exclusive. One case lies below that span: a registrar event
 in the block just before the batch that recorded an expiry already lapsed at its
@@ -1246,12 +1246,21 @@ session is discarded after the batch. Two partial expression indexes on
 (events of one name) and `normalized_events_v1_due_probe_idx` (registrar expiry
 ranges). The loader is an access path, not a semantic: it must produce the same
 normalized events, identity rows and discovery edges as the full-state loader,
-and it is covered by the same interpreter content hash. That same-output rule
-assumes the chain retains no `normalized_events` history from a source family
-whose manifest has left the `active` and `deprecated` rollout states: the loader
-choice reads only manifests in those states, the full-state loader restores
-every retained row regardless of family, and lookahead reads only ENSv1
-families, so such history would be restored by one loader and not the other.
+and it is covered by the same interpreter content hash. The loader choice
+therefore looks past the manifests the batch interprets: the full-state loader
+restores every retained row regardless of family and lookahead reads only ENSv1
+families, so `normalized_events` history of a family lookahead does not cover,
+written while that family's manifest was `active` and still retained after the
+manifest moved to `draft` or `shadow`, would be restored by one loader and not
+the other. Before choosing lookahead, Interpret lists the chain's manifests in
+those two states and, for each uncovered family among them, asks whether a
+readable event of that family is retained before the batch; one such event
+chooses the full-state loader. The probe is bounded by the chain's manifests
+because every event is written under one of them and manifest rows are only
+ever moved between rollout states, never deleted. No index leads with
+`source_family`, so each probed family costs one scan of the chain's retained
+events, stopping at the first match; a chain with no uncovered manifest in those
+states runs no probe.
 It fails the batch, rather than publishing, if interpretation reads a name that
 was not loaded.
 
