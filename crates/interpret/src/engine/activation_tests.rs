@@ -70,6 +70,9 @@ sol! {
 #[path = "tests/unlocked_wrapped.rs"]
 mod unlocked_wrapped;
 
+#[path = "tests/registry_only_handoff.rs"]
+mod registry_only_handoff;
+
 #[path = "activation_tests/equivalence.rs"]
 mod equivalence;
 

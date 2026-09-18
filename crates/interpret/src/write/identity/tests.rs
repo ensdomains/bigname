@@ -688,6 +688,117 @@ async fn activated_boundary_rejects_zero_and_multiple_predecessors() -> TestResu
     Ok(())
 }
 
+/// A binding positioned at block 1 log `log_index`, active over `[from, to)` given in microseconds
+/// after block 1.
+async fn insert_binding_span(
+    pool: &sqlx::PgPool,
+    id: u128,
+    resource: u128,
+    log_index: i64,
+    from_micros: i64,
+    to_micros: Option<i64>,
+) -> TestResult {
+    sqlx::query(
+        "INSERT INTO surface_bindings (
+             surface_binding_id, logical_name_id, resource_id, binding_kind,
+             authority_arm, active_from, active_to, chain_id, block_hash, block_number,
+             provenance, canonicality_state
+         ) VALUES ($1, $2, $3, 'declared_registry_path', 'ens_v1',
+                   timestamptz '1970-01-01 00:00:01Z' + $4 * interval '1 microsecond',
+                   timestamptz '1970-01-01 00:00:01Z' + $5 * interval '1 microsecond',
+                   'ethereum', '0x01', 1, $6, 'canonical')",
+    )
+    .bind(Uuid::from_u128(id))
+    .bind(NAME)
+    .bind(Uuid::from_u128(resource))
+    .bind(from_micros)
+    .bind(to_micros)
+    .bind(json!({(TRANSACTION_INDEX_KEY):0,(LOG_INDEX_KEY):log_index}))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// The lease of a registered `.eth` name ends only with the token. A BaseRegistrar transfer
+/// without `reclaim` leaves the registry owner in place, so ordinary ENSv1 interpretation closes
+/// the lease binding and binds the name to a registry-only resource while the lease goes on
+/// under it (crates/project/src/builders/name_authority/stage.rs). The unlocked controller later
+/// receives that token and reclaims the registry record for itself before parking both in the
+/// Graveyard, so the token, not the registry-owner record, is what the boundary migrates.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2@a971bd6)
+///
+/// The writer therefore finds the lease by its own token evidence, accepts that its binding was
+/// closed by the handoff, and closes whatever ENSv1 binding is still open at the cleanup: here
+/// the registry-only one.
+#[tokio::test]
+async fn a_registrar_boundary_resolves_the_lease_behind_a_registry_only_handoff() -> TestResult {
+    let database = database().await?;
+    let pool = database.pool();
+    // The lease binding, closed by the handoff half a second after it opened.
+    insert_binding_span(pool, 11, 1, 0, 0, Some(500_000)).await?;
+    // The registry-only binding the handoff opened, still current at the cleanup.
+    insert_binding_span(pool, 14, 4, 1, 500_000, None).await?;
+    insert_registrar_evidence(pool, 1, "0xexpected").await?;
+    let mut output = ordinary_open(12, 2, "ens_v2", 2);
+    activate(&mut output)?;
+
+    apply(pool, &output).await?;
+    let handoff = time::OffsetDateTime::from_unix_timestamp(1)? + time::Duration::milliseconds(500);
+    assert_eq!(
+        active_to(pool, 11).await?,
+        Some(handoff),
+        "the lease binding keeps the close the handoff gave it"
+    );
+    assert_eq!(
+        active_to(pool, 14).await?,
+        Some(
+            time::OffsetDateTime::from_unix_timestamp(2)?
+                + time::Duration::microseconds(REGISTRAR_CLEANUP_LOG_INDEX)
+        ),
+        "the registry-only binding closes at the recorded registrar cleanup"
+    );
+    assert_eq!(active_to(pool, 12).await?, None, "the successor stays open");
+
+    apply(pool, &output).await?;
+    assert_eq!(active_to(pool, 11).await?, Some(handoff));
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A token released before the cleanup is no lease any more, whatever bindings say: the boundary
+/// has no predecessor and the batch stops.
+#[tokio::test]
+async fn a_lease_released_before_the_cleanup_is_not_a_predecessor() -> TestResult {
+    let database = database().await?;
+    let pool = database.pool();
+    insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+    insert_registrar_evidence(pool, 1, "0xexpected").await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, resource_id, event_kind, source_family,
+             manifest_version, chain_id, block_number, block_hash, transaction_hash,
+             transaction_index, log_index, raw_fact_ref, derivation_kind, canonicality_state,
+             after_state
+         ) VALUES ('registrar-release-1', 'ens', $1, $2, 'RegistrationReleased',
+                   'ens_v1_registrar_l1', 1, 'ethereum', 1, '0x01', '0xrelease', 0, 1, '{}',
+                   'ens_v1_unwrapped_authority', 'canonical',
+                   '{\"source_event\":\"RegistrationReleased\"}')",
+    )
+    .bind(NAME)
+    .bind(Uuid::from_u128(1))
+    .execute(pool)
+    .await?;
+    let mut output = ordinary_open(12, 2, "ens_v2", 2);
+    activate(&mut output)?;
+
+    let error = apply(pool, &output).await.unwrap_err().to_string();
+    assert!(error.contains("0 active ENSv1 predecessors"), "{error}");
+    assert_eq!(active_to(pool, 11).await?, None);
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn activated_boundary_rejects_a_wrong_singleton_selector() -> TestResult {
     let database = database().await?;
