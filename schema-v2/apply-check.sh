@@ -39,11 +39,11 @@ fi
 
 # Every batch after set-up runs on a connection authenticated as a per-run
 # login role that owns the scratch schema and holds no privilege on
-# bigname_phase, so whatever a migration reaches for outside the rewritten
+# bigname_phase, so whatever a schema-migration reaches for outside the rewritten
 # text -- an identifier assembled inside EXECUTE, a search-path-relative name
 # in a DO body -- fails on the production schema instead of changing it
 # unobserved. A separate login, not SET ROLE on the owner's session: RESET
-# ROLE would hand a migration the owner back. Only role set-up and teardown
+# ROLE would hand a schema-migration the owner back. Only role set-up and teardown
 # use the owner's connection.
 run_psql_as_owner() {
     case "$psql_mode" in
@@ -115,7 +115,7 @@ phase_migration_uses_production_schema() {
         END { exit !found }
     ' "$1"
 }
-# A migration outside the inventory is never applied here, so a phase migration
+# A schema-migration outside the inventory is never applied here, so a phase schema-migration
 # written against the connection's search path would change bigname_phase
 # unlisted and untested. Since the legacy public schema was dropped, every such
 # file must consist of statements the check can read, each naming the object it
@@ -214,7 +214,7 @@ migration_uses_unicode_escape() {
 # extended statistics object and the schema's own privileges, with the schema
 # name normalized -- built
 # here into its own schema and compared line for line, so a change to a
-# baseline file or a migration that moves the schema without moving the
+# baseline file or a schema-migration that moves the schema without moving the
 # frozen catalog fails, whatever its name. Regenerate deliberately with
 # SCHEMA_V2_APPLY_CHECK_WRITE_FINGERPRINT=1 in the change that moves the schema.
 frozen_schema_catalog_sql="$(cat <<'CATALOG_SQL'
@@ -705,18 +705,58 @@ emit_phase_migration() {
         >> "$migration_application_log"
     render_phase_migration "$migration_file"
 }
-# Run a probe with one pg_index flag of a scratch index cleared. The catalog
-# write is the harness's own and needs the owner, whose connection cannot
-# share the probe's transaction, so the flag is cleared before the probe and
-# set again after it, whatever the probe's outcome.
-with_index_flag_cleared() {
-    local index_name="$1" flag="$2" status
+# Leave an invalid, not-ready index under a scratch index's name the way an
+# interrupted concurrent build does, with supported DDL only: a direct UPDATE
+# of pg_index needs a superuser, which the documented external-database path
+# does not have. A second session holds a writer's lock on the table inside an
+# open transaction; the concurrent build creates its catalog entry, then waits
+# for that transaction and is stopped by its own statement_timeout, which
+# leaves the entry with indisvalid and indisready both false. The holder is
+# then terminated (its own role may), so nothing outlives the helper.
+build_invalid_index() {
+    local index_name="$1" table_name="$2" flags attempt holder_pid
+    printf 'SET search_path TO "%s";\nDROP INDEX %s;\n' "$scratch_schema" "$index_name" \
+        | run_psql >/dev/null
+    printf 'BEGIN;\nLOCK TABLE "%s".%s IN ROW EXCLUSIVE MODE;\nSELECT pg_sleep(120) AS apply_check_lock_holder;\nROLLBACK;\n' \
+        "$scratch_schema" "$table_name" | run_psql >/dev/null 2>&1 &
+    holder_pid=$!
+    for attempt in $(seq 1 60); do
+        if [ "$(
+            printf '\\pset tuples_only on\n\\pset format unaligned\nSELECT count(*) FROM pg_stat_activity WHERE usename = current_user AND pid <> pg_backend_pid() AND state = %s AND query LIKE %s;\n' \
+                "'active'" "'%apply_check_lock_holder%'" | run_psql
+        )" = 1 ]; then
+            break
+        fi
+        sleep 0.5
+    done
+    printf 'SET search_path TO "%s";\nSET statement_timeout = %s;\nCREATE INDEX CONCURRENTLY %s ON %s (chain_id);\n' \
+        "$scratch_schema" "'3s'" "$index_name" "$table_name" | run_psql >/dev/null 2>&1 || true
+    printf 'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = current_user AND pid <> pg_backend_pid() AND query LIKE %s;\n' \
+        "'%apply_check_lock_holder%'" | run_psql >/dev/null
+    wait "$holder_pid" 2>/dev/null || true
+    flags="$(
+        printf '\\pset tuples_only on\n\\pset format unaligned\nSELECT indisvalid OR indisready FROM pg_index WHERE indexrelid = to_regclass(%s);\n' \
+            "'$scratch_schema.$index_name'" | run_psql
+    )"
+    if [ "$flags" != f ]; then
+        printf '%s\n' \
+            "could not leave an invalid index under $index_name on $scratch_schema.$table_name (flags: '$flags')" >&2
+        exit 1
+    fi
+}
+# Run a probe with a scratch index replaced by an invalid one of the same
+# name, then put the reviewed index back, whatever the probe's outcome.
+with_index_invalidated() {
+    local index_name="$1" table_name="$2" status definition
     shift 2
-    printf 'UPDATE pg_index SET %s = false WHERE indexrelid = %s::regclass;\n' \
-        "$flag" "'$scratch_schema.$index_name'" | run_psql_as_owner >/dev/null
+    definition="$(
+        printf '\\pset tuples_only on\n\\pset format unaligned\nSET search_path TO "%s";\nSELECT pg_get_indexdef(%s::regclass);\n' \
+            "$scratch_schema" "'$scratch_schema.$index_name'" | run_psql
+    )"
+    build_invalid_index "$index_name" "$table_name"
     "$@" && status=0 || status=$?
-    printf 'UPDATE pg_index SET %s = true WHERE indexrelid = %s::regclass;\n' \
-        "$flag" "'$scratch_schema.$index_name'" | run_psql_as_owner >/dev/null
+    printf 'SET search_path TO "%s";\nDROP INDEX %s;\n%s;\n' \
+        "$scratch_schema" "$index_name" "$definition" | run_psql >/dev/null
     return "$status"
 }
 assert_migration_context_count() {
@@ -996,41 +1036,42 @@ END \$\$;"
         emit_quote_all_identifiers_probe "$install_file" outside-transaction
         printf '%s\n' "$matches_baseline_sql"
     } | run_psql >/dev/null
-    # An interrupted concurrent build leaves an invalid index under this
-    # name. Mark this scratch index invalid to stand in for one; the catalog
-    # write is the harness's own and needs the owner, not the migration role.
-    {
-        printf 'SET search_path TO "%s";\n' "$scratch_schema"
-        printf '%s\n' \
-            "UPDATE pg_index SET indisvalid = false" \
-            "WHERE indexrelid = '$index_name'::regclass;"
-    } | run_psql_as_owner >/dev/null
-    assert_index_install_refusal "$label-invalid-prebuild" "$install_file" \
-        "$index_name is missing from $scratch_schema.$table_name or is not valid and ready; follow the recovery steps in $readme_path before retrying"
-    # A wrong manual prebuild leaves a valid index with other keys under this
-    # name. The installer names the fresh-baseline definition as the expected
-    # one, printed as it reads it: with search_path set to pg_catalog, so the
-    # table and the enum type both carry the schema name.
+    # The installer names the fresh-baseline definition as the expected one,
+    # printed as it reads it: with search_path set to pg_catalog, so the table
+    # and the enum type both carry the schema name. Read it before the index is
+    # replaced below.
     reviewed_definition="$(
         {
-            printf 'SET search_path TO "%s";\n' "$scratch_schema"
             printf '%s\n' \
                 '\pset tuples_only on' \
                 '\pset format unaligned' \
                 "SET search_path TO pg_catalog;" \
-                "SELECT pg_get_indexdef('$scratch_schema.$index_name'::regclass);" \
-                "SET search_path TO $scratch_schema;" \
-                "DROP INDEX $index_name;" \
-                "CREATE INDEX $index_name" \
-                "    ON $table_name ($wrong_key_columns);"
+                "SELECT pg_get_indexdef('$scratch_schema.$index_name'::regclass);"
         } | run_psql
     )"
+    # An interrupted concurrent build leaves an invalid index under this name.
+    build_invalid_index "$index_name" "$table_name"
+    assert_index_install_refusal "$label-invalid-prebuild" "$install_file" \
+        "$index_name is missing from $scratch_schema.$table_name or is not valid and ready; follow the recovery steps in $readme_path before retrying"
+    # A wrong manual prebuild leaves a valid index with other keys under this
+    # name.
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' \
+            "DROP INDEX $index_name;" \
+            "CREATE INDEX $index_name" \
+            "    ON $table_name ($wrong_key_columns);"
+    } | run_psql >/dev/null
     assert_index_install_refusal "$label-wrong-keys-prebuild" "$install_file" \
         "$index_name exists but does not have the reviewed definition; found \"CREATE INDEX $index_name ON $scratch_schema.$table_name USING btree ($wrong_key_columns)\", expected \"$reviewed_definition\"; follow the recovery steps in $readme_path before retrying"
     # A valid, ready index on the right table whose JSON key literals start with
     # the schema name and a dot indexes other values, so it must be refused too.
     # Removing the schema name from the printed definition would hide that.
     schema_in_literal_definition="${reviewed_definition//->> \'/->> \'$scratch_schema.}"
+    if [ "$schema_in_literal_definition" = "$reviewed_definition" ]; then
+        # A path literal: the first path element gets the schema name instead.
+        schema_in_literal_definition="${reviewed_definition//#>> \'\{/#>> \'\{$scratch_schema.}"
+    fi
     if [ "$schema_in_literal_definition" = "$reviewed_definition" ]; then
         printf '%s\n' "$label: reviewed definition has no JSON key literal to alter" >&2
         exit 1
@@ -1179,7 +1220,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=177
+expected_refusal_assertions=196
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
@@ -1208,32 +1249,52 @@ trap cleanup EXIT
 
 # The owner keeps the race probe (another session's wait event is not visible
 # to an ordinary login) and installs the extensions the baseline declares,
-# which need the database CREATE the login loses below. The statements are
-# read from the baseline, not repeated here, and the two the baseline relies on
-# (btree_gist for its exclusion constraints, pgcrypto for public.digest) must
-# still be declared there: a real init-schema on an empty database has only
-# the baseline to install them.
-baseline_extension_statements="$(grep -hiE '^[[:space:]]*CREATE EXTENSION ' "$ROOT"/schema-v2/baseline/*.sql | sed -E 's/^[[:space:]]+//' || true)"
+# which the login could not (it never holds CREATE on the database). Only the
+# two reviewed statements are forwarded, matched whole: btree_gist for the
+# baseline's exclusion constraints and pgcrypto for public.digest, each
+# `CREATE EXTENSION IF NOT EXISTS <name> WITH SCHEMA public;` on a line of its
+# own. Anything else on a CREATE EXTENSION line -- a third extension, another
+# schema, a second statement after the semicolon -- fails here rather than
+# running on the owner's connection; a new extension is a schema change and
+# joins this list under an ADR 0007 carve-out or amendment. A real
+# init-schema on an empty database has only the baseline to install them, so
+# both must still be declared there.
+baseline_extension_statements="$(grep -hiE '^[[:space:]]*CREATE EXTENSION' "$ROOT"/schema-v2/baseline/*.sql | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)"
 for required_extension in btree_gist pgcrypto; do
-    if ! printf '%s\n' "$baseline_extension_statements" | grep -qiE "^CREATE EXTENSION (IF NOT EXISTS )?${required_extension}( |;)"; then
-        printf '%s\n' "schema-v2/baseline no longer declares CREATE EXTENSION IF NOT EXISTS $required_extension; init-schema on an empty database needs it" >&2
+    if ! printf '%s\n' "$baseline_extension_statements" | grep -qxF "CREATE EXTENSION IF NOT EXISTS $required_extension WITH SCHEMA public;"; then
+        printf '%s\n' "schema-v2/baseline no longer declares CREATE EXTENSION IF NOT EXISTS $required_extension WITH SCHEMA public; on a line of its own; init-schema on an empty database needs it" >&2
         exit 1
     fi
 done
+while IFS= read -r extension_statement; do
+    [ -n "$extension_statement" ] || continue
+    case "$extension_statement" in
+        "CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public;" \
+        | "CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;") ;;
+        *)
+            printf '%s\n' \
+                "schema-v2/baseline carries a CREATE EXTENSION line this check does not know: $extension_statement" \
+                "only the two reviewed btree_gist and pgcrypto statements run on the owner's connection; a new extension is a schema change under ADR 0007 and joins the reviewed list here" >&2
+            exit 1
+            ;;
+    esac
+done <<< "$baseline_extension_statements"
+# The login is provisioned by the owner without any database-level grant,
+# which the documented external-database user (CREATEDB and CREATEROLE, not
+# necessarily the database's owner) may not be able to make: the owner takes
+# membership of the role it just created and creates both scratch schemas
+# owned by the login. The login connects on PUBLIC's default CONNECT and never
+# holds CREATE on the database, so an assembled CREATE SCHEMA bigname_phase
+# fails where the production schema does not yet exist.
+frozen_schema="${scratch_schema}_frozen"
 {
     printf "CREATE ROLE \"%s\" LOGIN PASSWORD '%s';\n" \
         "$apply_check_role" "$apply_check_role_password"
+    printf 'GRANT "%s" TO CURRENT_USER;\n' "$apply_check_role"
     printf '%s\n' "$baseline_extension_statements"
-    printf "SELECT format('GRANT CONNECT, CREATE ON DATABASE %%I TO %%I', current_database(), '%s') \\gexec\n" "$apply_check_role"
+    printf 'CREATE SCHEMA "%s" AUTHORIZATION "%s";\n' "$scratch_schema" "$apply_check_role"
+    printf 'CREATE SCHEMA "%s" AUTHORIZATION "%s";\n' "$frozen_schema" "$apply_check_role"
 } | run_psql_as_owner
-
-frozen_schema="${scratch_schema}_frozen"
-printf 'CREATE SCHEMA "%s"; CREATE SCHEMA "%s";\n' "$scratch_schema" "$frozen_schema" | run_psql
-# Both schemas exist; from here the login may create nothing else in the
-# database, so an assembled CREATE SCHEMA bigname_phase fails where the
-# production schema does not yet exist.
-printf "SELECT format('REVOKE CREATE ON DATABASE %%I FROM %%I', current_database(), '%s') \\gexec\n" "$apply_check_role" \
-    | run_psql_as_owner
 # Prove the role boundary on every run: an identifier the rewrite cannot see,
 # assembled inside EXECUTE, must fail on the production schema whether or not
 # that schema exists in this database, while the same statement against the
@@ -1649,7 +1710,7 @@ END $$;
 SQL
 } | run_psql
 # The address-record table shipped before its column comments. The additive
-# comment migration must restore all current comments without rewriting that migration.
+# comment schema-migration must restore all current comments without rewriting that schema-migration.
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<'SQL'
@@ -1838,7 +1899,7 @@ for discovery_index_name in \
     discovery_edges_observation_history_idx \
     discovery_edges_reopen_idx
 do
-    with_index_flag_cleared "$discovery_index_name" indisvalid \
+    with_index_invalidated "$discovery_index_name" discovery_edges \
         assert_migration_refusal "invalid-$discovery_index_name" \
         "$discovery_index_validity_migration" \
         "$discovery_index_name exists but is not a valid and ready index on $scratch_schema.discovery_edges; follow the recovery steps in ops/discovery-history-index/README.md or ops/discovery-reopen-index/README.md, then run the schema-migrations again" <<SQL
@@ -2230,8 +2291,7 @@ assert_index_install_hint() {
 project_history_first_index="${project_history_index_names[0]}"
 project_history_last_index="${project_history_index_names[7]}"
 printf 'SET search_path TO "%s";\nDROP INDEX %s;\n' "$scratch_schema" "$project_history_first_index" | run_psql >/dev/null
-printf 'UPDATE pg_index SET indisvalid = false WHERE indexrelid = %s::regclass;\n' \
-    "'$scratch_schema.$project_history_last_index'" | run_psql_as_owner >/dev/null
+build_invalid_index "$project_history_last_index" normalized_events
 assert_index_install_refusal project-history-refuses-before-building \
     "$project_history_install" \
     "$project_history_last_index is missing from $scratch_schema.normalized_events or is not valid and ready; follow the recovery steps in $project_history_readme before retrying"
@@ -2300,13 +2360,8 @@ assert_migration_context_count "$project_history_validity_migration" baseline-fi
 project_history_recovery="follow the recovery steps in $project_history_readme, then run the schema-migrations again"
 project_history_rebuild="build the index with ops/project-scoped-history/install.sql as $project_history_readme describes, then run the schema-migrations again"
 for project_history_index_name in "${project_history_index_names[@]}"; do
-    with_index_flag_cleared "$project_history_index_name" indisvalid \
+    with_index_invalidated "$project_history_index_name" normalized_events \
         assert_migration_refusal "invalid-$project_history_index_name" \
-        "$project_history_validity_migration" \
-        "$project_history_index_name exists but is not a valid and ready index on $scratch_schema.normalized_events; $project_history_recovery" <<SQL
-SQL
-    with_index_flag_cleared "$project_history_index_name" indisready \
-        assert_migration_refusal "not-ready-$project_history_index_name" \
         "$project_history_validity_migration" \
         "$project_history_index_name exists but is not a valid and ready index on $scratch_schema.normalized_events; $project_history_recovery" <<SQL
 SQL
@@ -2482,8 +2537,7 @@ done
 v1_lookahead_first_index="${v1_lookahead_index_names[0]}"
 v1_lookahead_last_index="${v1_lookahead_index_names[1]}"
 printf 'SET search_path TO "%s";\nDROP INDEX %s;\n' "$scratch_schema" "$v1_lookahead_first_index" | run_psql >/dev/null
-printf 'UPDATE pg_index SET indisvalid = false WHERE indexrelid = %s::regclass;\n' \
-    "'$scratch_schema.$v1_lookahead_last_index'" | run_psql_as_owner >/dev/null
+build_invalid_index "$v1_lookahead_last_index" normalized_events
 assert_index_install_refusal v1-lookahead-refuses-before-building \
     "$v1_lookahead_install" \
     "$v1_lookahead_last_index is missing from $scratch_schema.normalized_events or is not valid and ready; follow the recovery steps in $v1_lookahead_readme before retrying"
@@ -2524,13 +2578,8 @@ assert_index_install_hint v1-lookahead-index-on-another-table-hint \
 # the fresh-baseline index prints, read under search_path pg_catalog.
 v1_lookahead_recovery="follow the recovery steps in $v1_lookahead_readme, then run the schema-migrations again"
 for v1_lookahead_index_name in "${v1_lookahead_index_names[@]}"; do
-    with_index_flag_cleared "$v1_lookahead_index_name" indisvalid \
+    with_index_invalidated "$v1_lookahead_index_name" normalized_events \
         assert_migration_refusal "invalid-$v1_lookahead_index_name" \
-        "$v1_lookahead_migration" \
-        "$v1_lookahead_index_name exists but is not a valid and ready index on $scratch_schema.normalized_events; $v1_lookahead_recovery" <<SQL
-SQL
-    with_index_flag_cleared "$v1_lookahead_index_name" indisready \
-        assert_migration_refusal "not-ready-$v1_lookahead_index_name" \
         "$v1_lookahead_migration" \
         "$v1_lookahead_index_name exists but is not a valid and ready index on $scratch_schema.normalized_events; $v1_lookahead_recovery" <<SQL
 SQL
@@ -3702,32 +3751,112 @@ assert_migration_context_count "$resolver_history_index_migration" preceding-sha
 assert_migration_context_count "$resolver_history_index_migration" baseline-first 1
 # The definitions the file expects are the fresh baseline's, as printed with
 # search_path set to pg_catalog; the frozen catalog comparison at the end
-# proves the built indexes match the baseline. Refusals, on the first index:
-resolver_history_probe_index="normalized_events_pointer_after_resolver_history_idx"
-resolver_history_probe_reviewed="$(
-    {
-        printf '\\pset tuples_only on\n\\pset format unaligned\n'
-        printf 'SET search_path TO pg_catalog;\n'
-        printf "SELECT pg_get_indexdef('%s.%s'::regclass);\n" "$scratch_schema" "$resolver_history_probe_index"
-    } | run_psql
-)"
-with_index_flag_cleared "$resolver_history_probe_index" indisvalid \
-    assert_migration_refusal "invalid-$resolver_history_probe_index" \
-    "$resolver_history_index_migration" \
-    "$resolver_history_probe_index exists but is not a valid and ready index on $scratch_schema.normalized_events; DROP INDEX CONCURRENTLY it, then run the schema-migrations again" <<SQL
+# proves the built indexes match the baseline. The schema-migration's own
+# check must accept all four under either session search_path and with
+# quote_all_identifiers on, and leave both settings as it found them.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    emit_phase_migration "$resolver_history_index_migration" baseline-first
+    assert_search_path_sql "$scratch_schema"
+    printf 'SET search_path TO public;\n'
+    emit_phase_migration "$resolver_history_index_migration" baseline-first
+    assert_search_path_sql public
+    printf 'BEGIN;\nSET LOCAL search_path TO "%s", public;\n' "$scratch_schema"
+    render_phase_migration "$resolver_history_index_migration"
+    assert_search_path_sql "$scratch_schema, public"
+    printf 'COMMIT;\n'
+    assert_search_path_sql public
+    emit_quote_all_identifiers_probe "$resolver_history_index_migration" in-transaction
+} | run_psql
+assert_migration_context_count "$resolver_history_index_migration" empty-schema 1
+assert_migration_context_count "$resolver_history_index_migration" baseline-first 3
+# The live prebuild in ops/resolver-history-indexes/install.sql builds all four
+# in one file. For each in turn it must build the baseline definition, refuse
+# an invalid index, a valid index with other keys, a valid index whose JSON key
+# literals start with the schema name, and a table under the name, and recover
+# as its README says.
+resolver_history_install="$ROOT/ops/resolver-history-indexes/install.sql"
+resolver_history_readme=ops/resolver-history-indexes/README.md
+for resolver_history_index_name in $resolver_history_index_names; do
+    assert_concurrent_index_installer "resolver-history-$resolver_history_index_name" \
+        "$resolver_history_index_name" \
+        "$resolver_history_install" \
+        "$resolver_history_readme" \
+        normalized_events \
+        "block_number, chain_id"
+done
+# The installer refuses before it builds anything. With the last index invalid
+# and the first one absent, it must stop on the invalid one, tell the operator
+# how to drop it, and leave the first one unbuilt.
+resolver_history_first_index="${resolver_history_index_names%% *}"
+resolver_history_last_index="${resolver_history_index_names##* }"
+printf 'SET search_path TO "%s";\nDROP INDEX %s;\n' "$scratch_schema" "$resolver_history_first_index" | run_psql >/dev/null
+build_invalid_index "$resolver_history_last_index" normalized_events
+assert_index_install_refusal resolver-history-refuses-before-building \
+    "$resolver_history_install" \
+    "$resolver_history_last_index is missing from $scratch_schema.normalized_events or is not valid and ready; follow the recovery steps in $resolver_history_readme before retrying"
+assert_index_install_hint resolver-history-invalid-index-hint \
+    "$resolver_history_install" \
+    "An interrupted concurrent build leaves an invalid index. Confirm in pg_stat_progress_create_index that no build is still running, run DROP INDEX CONCURRENTLY $scratch_schema.$resolver_history_last_index, then rerun this script."
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<SQL
+DO \$\$
+BEGIN
+    IF to_regclass('$resolver_history_first_index') IS NOT NULL THEN
+        RAISE EXCEPTION 'resolver-history installer built an index before refusing an invalid one';
+    END IF;
+END \$\$;
+DROP INDEX CONCURRENTLY $resolver_history_last_index;
 SQL
-assert_migration_refusal "wrong-definition-$resolver_history_probe_index" \
-    "$resolver_history_index_migration" \
-    "$resolver_history_probe_index exists but does not have the reviewed definition; found \"CREATE INDEX $resolver_history_probe_index ON $scratch_schema.normalized_events USING btree (chain_id, block_number)\", expected \"$resolver_history_probe_reviewed\"; DROP INDEX CONCURRENTLY it, then run the schema-migrations again" <<SQL
-DROP INDEX $resolver_history_probe_index;
-CREATE INDEX $resolver_history_probe_index ON normalized_events (chain_id, block_number);
+    render_phase_migration "$resolver_history_install"
+    # An index on another table under the name is not the index either.
+    printf '%s\n' \
+        "DROP INDEX $resolver_history_first_index;" \
+        "CREATE INDEX $resolver_history_first_index ON discovery_edges (chain_id);"
+} | run_psql >/dev/null
+assert_index_install_refusal resolver-history-index-on-another-table \
+    "$resolver_history_install" \
+    "$resolver_history_first_index is missing from $scratch_schema.normalized_events or is not valid and ready; follow the recovery steps in $resolver_history_readme before retrying"
+assert_index_install_hint resolver-history-index-on-another-table-hint \
+    "$resolver_history_install" \
+    "An index on $scratch_schema.discovery_edges holds this name. Rename or remove it, then rerun this script."
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' "DROP INDEX $resolver_history_first_index;"
+    render_phase_migration "$resolver_history_install"
+} | run_psql >/dev/null
+# Put each index in turn into every shape the schema-migration must refuse
+# rather than adopt: invalid, another definition, a table under the name. The
+# expected definition it names must be how the fresh-baseline index prints,
+# read under search_path pg_catalog.
+resolver_history_recovery="follow the recovery steps in $resolver_history_readme, then run the schema-migrations again"
+for resolver_history_index_name in $resolver_history_index_names; do
+    resolver_history_reviewed="$(
+        {
+            printf '\\pset tuples_only on\n\\pset format unaligned\n'
+            printf 'SET search_path TO pg_catalog;\n'
+            printf "SELECT pg_get_indexdef('%s.%s'::regclass);\n" "$scratch_schema" "$resolver_history_index_name"
+        } | run_psql
+    )"
+    with_index_invalidated "$resolver_history_index_name" normalized_events \
+        assert_migration_refusal "invalid-$resolver_history_index_name" \
+        "$resolver_history_index_migration" \
+        "$resolver_history_index_name exists but is not a valid and ready index on $scratch_schema.normalized_events; $resolver_history_recovery" <<SQL
 SQL
-assert_migration_refusal "table-named-$resolver_history_probe_index" \
-    "$resolver_history_index_migration" \
-    "$scratch_schema.$resolver_history_probe_index is a table, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again" <<SQL
-DROP INDEX $resolver_history_probe_index;
-CREATE TABLE $resolver_history_probe_index ();
+    assert_migration_refusal "wrong-definition-$resolver_history_index_name" \
+        "$resolver_history_index_migration" \
+        "$resolver_history_index_name exists but does not have the reviewed definition; found \"CREATE INDEX $resolver_history_index_name ON $scratch_schema.normalized_events USING btree (chain_id, block_number)\", expected \"$resolver_history_reviewed\"; $resolver_history_recovery" <<SQL
+DROP INDEX $resolver_history_index_name;
+CREATE INDEX $resolver_history_index_name ON normalized_events (chain_id, block_number);
 SQL
+    assert_migration_refusal "table-named-$resolver_history_index_name" \
+        "$resolver_history_index_migration" \
+        "$scratch_schema.$resolver_history_index_name is a table, not an index, so the index was never built; remove or rename that relation, then follow $resolver_history_readme and run the schema-migrations again" <<SQL
+DROP INDEX $resolver_history_index_name;
+CREATE TABLE $resolver_history_index_name ();
+SQL
+done
 
 # The preceding vocabulary reconstruction ends with the exact 20260902 constraint.
 record_id_add="$ROOT/migrations/20260909120000_resolver_record_id_events.sql"
@@ -8715,7 +8844,7 @@ SQL
 
 # The independent predecessor body and ACL are copied from public #855 f95200b3.
 # The exact-zero result body hash is pinned from baseline 9f417401; the newer
-# unsupported-inventory migration is proved separately against the current baseline.
+# unsupported-inventory schema-migration is proved separately against the current baseline.
 zero_default_migration="$ROOT/migrations/20260906120000_exact_zero_addr60_default_derivation.sql"
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"

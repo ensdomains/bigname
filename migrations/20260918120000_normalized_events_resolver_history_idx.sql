@@ -17,11 +17,11 @@
 -- the definitions are read. Both changes are transaction-local and put back
 -- before the block returns.
 --
--- On a large initialized database, prebuild each index first with
---   CREATE INDEX CONCURRENTLY IF NOT EXISTS <name> ON bigname_phase.normalized_events (...)
--- using the definition below verbatim, then run the schema-migrations; this
--- file then verifies and builds nothing. To recover from a failed prebuild,
--- DROP INDEX CONCURRENTLY the named index and rerun.
+-- On a large initialized database, prebuild concurrently with
+-- ops/resolver-history-indexes/install.sql as its README and docs/deployment.md
+-- describe, then run the schema-migrations; this file then verifies and builds
+-- nothing. Built here, each index is an ordinary CREATE INDEX that blocks
+-- writes to normalized_events for the build.
 --
 -- Fresh databases may not yet contain the phase baseline; that case passes,
 -- and the baseline installed afterwards carries all four.
@@ -134,7 +134,7 @@ CREATE INDEX normalized_events_pointer_before_resolver_history_idx
         END IF;
         IF found_kind <> 'index' THEN
             RAISE EXCEPTION
-                'bigname_phase.% is a %, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again',
+                'bigname_phase.% is a %, not an index, so the index was never built; remove or rename that relation, then follow ops/resolver-history-indexes/README.md and run the schema-migrations again',
                 checked_index, found_kind;
         END IF;
         IF EXISTS (
@@ -148,7 +148,7 @@ CREATE INDEX normalized_events_pointer_before_resolver_history_idx
               )
         ) THEN
             RAISE EXCEPTION
-                '% exists but is not a valid and ready index on bigname_phase.normalized_events; DROP INDEX CONCURRENTLY it, then run the schema-migrations again',
+                '% exists but is not a valid and ready index on bigname_phase.normalized_events; follow the recovery steps in ops/resolver-history-indexes/README.md, then run the schema-migrations again',
                 checked_index;
         END IF;
         SELECT pg_get_indexdef(indexrelid)
@@ -157,7 +157,7 @@ CREATE INDEX normalized_events_pointer_before_resolver_history_idx
         WHERE indexrelid = to_regclass('bigname_phase.' || checked_index);
         IF found_definition <> expected_definition THEN
             RAISE EXCEPTION
-                '% exists but does not have the reviewed definition; found "%", expected "%"; DROP INDEX CONCURRENTLY it, then run the schema-migrations again',
+                '% exists but does not have the reviewed definition; found "%", expected "%"; follow the recovery steps in ops/resolver-history-indexes/README.md, then run the schema-migrations again',
                 checked_index, found_definition, expected_definition;
         END IF;
     END LOOP;

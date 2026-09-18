@@ -577,6 +577,31 @@ no-ops when the indexes already exist, and it ends with the same check, so
 invalid, not ready, on another table, not an index, or has another definition.
 
 The release containing
+`20260918120000_normalized_events_resolver_history_idx.sql` carries the four
+partial `normalized_events` indexes Project's resolver-history reads use, which
+#415 added to the baseline without a schema-migration; a namespace that took
+slice 1 in place lacks them, a namespace replaced from the baseline since
+2026-08-14 already has them. On an initialized production namespace, run
+[`ops/resolver-history-indexes/install.sql`](../../ops/resolver-history-indexes/install.sql)
+in step 3 as [its runbook](../../ops/resolver-history-indexes/README.md)
+describes. This runbook carries no copy of the four statements; `install.sql`
+is the only source, and `schema-v2/apply-check.sh` proves it builds what the
+fresh baseline and the schema-migration build. The builds are concurrent and
+permit writes, so they can finish while the existing runner is still
+processing, before the stop/start window opens; step 3 then only runs
+`install.sql` again as the check, which is a no-op with a receipt on a
+namespace that already has all four. `install.sql` is its own readiness check
+and never drops or rebuilds an index; recover an interrupted build as its
+runbook describes. Keep the `install.sql` output with its start and end times
+in the release record. Then apply the schema-migrations in step 4. Unlike the
+other index schema-migrations, this one builds each index that is still
+missing itself, as an ordinary `CREATE INDEX` that blocks writes to
+`normalized_events` for the build, so on a populated namespace step 3 must
+come first; where a name is already taken it applies the same check, so
+`sqlx migrate run` stops without recording it if that name is invalid, not
+ready, on another table, not an index, or has another definition.
+
+The release containing
 `20260904120000_project_redo_child_registration_history.sql` adds the bounded
 Interpret-to-Project handoff for child and registry identifiers from deleted
 ENSv1→ENSv2 [migration-registry](../glossary.md#migration-registry-wrapperregistry)

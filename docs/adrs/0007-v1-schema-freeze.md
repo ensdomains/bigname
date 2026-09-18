@@ -219,7 +219,11 @@ so it cannot see a name a schema-migration assembles at run time (`'bigname_' ||
 'phase.…'` inside `EXECUTE`, or a search-path-relative name in a `DO` body).
 The check therefore applies every batch on a connection of its own, a
 per-run login that owns the scratch schema and holds no privilege on
-`bigname_phase` and no `CREATE` on the database: whatever the rewrite misses
+`bigname_phase` and no `CREATE` on the database — provisioned by the
+configured user with `CREATEROLE` alone, since the schemas are created for
+the login rather than granted to it, and the only statements that run on the
+configured user's own connection are the baseline's two reviewed
+`CREATE EXTENSION` lines, matched whole: whatever the rewrite misses
 fails on the production schema instead of changing it unobserved. The check
 proves itself on every run against a planted set of the forms it refuses and
 the one it accepts, including an assembled production name that must be
@@ -496,8 +500,10 @@ values the system already documents as unstable across a boundary.
    builds each of the four when it is missing and, when one is present,
    refuses an invalid index, another definition, or a table under the name
    rather than adopting it; on a large database the operator prebuilds them
-   concurrently with the definitions the file prints. Additive; no
-   re-derivation. Whether other objects #415 and its neighbours added to the
+   concurrently with `ops/resolver-history-indexes/install.sql` first, as
+   [`deployment.md`](../deployment.md) and the production runbook list,
+   since the file's own build is an ordinary write-blocking `CREATE INDEX`.
+   Additive; no re-derivation. Whether other objects #415 and its neighbours added to the
    baseline without a schema-migration are missing on some initialized
    database is a question for the deployment that would hold it, since the
    exercised comparison sees only what the proofs rewind; the fresh baseline
