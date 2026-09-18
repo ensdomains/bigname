@@ -746,9 +746,18 @@ registry state, not an owner-change argument from the registrar `Transfer` log.
 Missing, zero, inconsistent or unmasked owner evidence contributes no value;
 a selected wrapper or registrar authority does not qualify. Project consumes
 this value through its existing owner fold without changing resource selection.
+A later registrar token transfer that leaves the registry-only authority selected
+emits no new epoch, so the retained `registry_owner` stays the served owner; that
+transfer does not update the served registrant. The Basenames registrar behaves
+the same way: its token transfer is the inherited ERC-721 ownership write, and it
+writes the registry owner only from `reclaim` and registration.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L20 @ ens_v1@91c966f)
 (upstream: .refs/basenames/src/L2/Registry.sol:L49-L52 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L24 @ basenames@1809bbc)
+(upstream: .refs/basenames/lib/solady/src/tokens/ERC721.sol:L744-L745 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327-L329 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L421-L423 @ basenames@1809bbc)
 
 This transfer-only observation does not apply to release. A release that restores
 a retained direct-registry authority carries that authority's owner. A genuinely
