@@ -1939,23 +1939,33 @@ qualify leaves no tombstone: the name resolves to explicit
 ## Released v1 authority
 
 the authority tombstone left when the latest ENSv1 registrar lifecycle fact for a
-name is a release and no custody was revived behind it: no binding of any arm
-is open and the registry owner is not a proven zero. The lease that lapsed
-while wrapped is the ordinary case: the NameWrapper's registry custody expired
-with the lease, so nothing current owns the node. The tombstone selects the
-released lease binding, serves the registration as `released` with its
-identity and timestamps, and serves no current registrant, authority, expiry,
-owner, control, resolver or records. It is positive proof that the
-registration is absent, so the row is supported rather than
+name is a release and no custody was revived behind it: either no binding of any
+arm is open and the registry owner is not a proven zero, or the name's only open
+binding is the registry-only binding a registrar token transfer without
+`reclaim` opened and the released lease is exactly the one that binding replaced.
+The lease that lapsed while wrapped is the ordinary case: the NameWrapper's
+registry custody expired with the lease, so nothing current owns the node. The
+tombstone selects the released lease binding, serves the registration as
+`released` with its identity and timestamps, and serves no current registrant,
+authority, expiry, owner, control, resolver or records. It is positive proof
+that the registration is absent, so the row is supported rather than
 `current_authority_not_projected`. A lease registered through the NameWrapper
 never has a binding of its own, so its released lease binding is the closed
 NameWrapper binding that stands for it: the one whose `NameWrapped` rows recorded
 the lease in `wrapped_registrar_resource_id`, or, where a controller event granted
 the lease after `NameWrapped`, the one whose wrap shares the named grant's
-transaction. Only a registrar release selects a tombstone; a NameWrapper expiry
-that passes while the registrar lease is still live releases nothing. A release whose registry owner was revived
-is not a tombstone; it selects the revived registry-only binding. A registry
-owner proven zero stays the supported ownerless-registry profile.
+transaction. A lease that lapsed under a registry-only binding has a closed
+binding of its own, but the tombstone selects the open registry-only binding,
+which stands for the lease the same way: the registry still holds the owner that
+lease left behind, and the lapsed lease releases the name all the same, as the
+registrar's `ownerOf` and `available` do on chain. Only a registrar release
+selects a tombstone; a NameWrapper expiry that passes while the registrar lease
+is still live releases nothing, and a release of an earlier lease of the name
+does not release a later live one. A release whose registry owner was revived at
+the release itself is not a tombstone; it selects the revived registry-only
+binding. A registry owner proven zero stays the supported ownerless-registry
+profile.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L143-L154 @ ens_v1@91c966f)

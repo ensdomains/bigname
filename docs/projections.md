@@ -259,9 +259,10 @@ that epoch's binding and resources at the requested position. An activated
 ENSv1→ENSv2 authority proof may select a closed ENSv2 binding after release;
 that [released v2 authority](glossary.md#released-v2-authority) does not fall
 back to an active retained ENSv1 binding. A released ENSv1 lease with no
-revived custody and no open binding likewise selects its closed lease binding,
+revived custody likewise selects its closed lease binding,
 or the closed NameWrapper binding that stands for a lease registered through
-the NameWrapper,
+the NameWrapper, or the open registry-only binding under which the lease lapsed
+after its token was transferred without `reclaim`,
 as a [released v1 authority](glossary.md#released-v1-authority) tombstone. The exact
 [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) no-proof
 exception selects a current ENSv2 arm when ENSv1 evidence is current or
@@ -425,21 +426,39 @@ it opened; nothing later on that resource can decide control. The lease the name
 exception. After a registrar token is transferred without `reclaim` the name still has its
 BaseRegistrar lease, and that lease goes on being renewed, and in the end lapses, under the
 registry-only binding. So `RegistrationRenewed`, `ExpiryChanged` and `RegistrationReleased` rows
-of the `ens_v1_registrar_l1` family on exactly that lease's resource still update the
-registration after the handoff: its expiry and `latest_event_kind`, and its `status` and
-`released_at` once the lease is released. `registered_at`, the registrant, the selected binding
-and every `control` field other than the repeated expiry stay as they were. Rows of any other
-kind or source family, and lease rows on any other resource even when they carry the name (an
-earlier lease of the same name, or a resource the name was never bound to), stay outside the
-window. `renew` writes only the lease's expiry, and the registrar writes the registry owner only
-when registering and in `reclaim`, so a token transfer alone leaves the registry owner unchanged.
+of the `ens_v1_registrar_l1` family on exactly that lease's resource still reach the
+registration after the handoff. A renewal updates its expiry and `latest_event_kind`;
+`registered_at`, the registrant, the selected binding and every `control` field other than the
+repeated expiry stay as they were. Rows of any other kind or source family, and lease rows on any
+other resource even when they carry the name (an earlier lease of the same name, or a resource
+the name was never bound to), stay outside the window. `renew` writes only the lease's expiry,
+and the registrar writes the registry owner only when registering and in `reclaim`, so a token
+transfer alone leaves the registry owner unchanged.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L148-L150 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
-A released lease under an open registry-only binding is not a
-[released v1 authority](glossary.md#released-v1-authority) tombstone: the registry keeps its owner
-record, so control is still served, as it is when the release itself hands the name to the
-registry-only binding.
+
+The release of the retained lease releases the name like any other lapse. On chain the registry
+keeps the owner and resolver it held after an ordinary lapse too; what makes a lapsed `.eth`
+name available again is the registrar, whose `ownerOf` reverts once the lease is past its expiry
+and whose `available` is true once it is past grace. ENSv2 draws the same line inside the
+registry: it checks expiry on every read and returns no resolver and no subregistry for an
+expired label. The handed-off name is therefore not the one exception. It becomes a
+[released v1 authority](glossary.md#released-v1-authority) tombstone: `status` `released` with
+the lease's `released_at`, and no current owner, manager, registrant, authority, expiry, control,
+resolver or records; the address listing drops it and a name-filtered permissions request
+selects nothing, as for any released name. The tombstone selects the registry-only binding,
+which stands for the released lease the way the closed NameWrapper binding stands for a wrapped
+one. It fires only for the lease that binding replaced (the exact predecessor whose lifecycle
+rows the window admits past its position), released by a registrar row that arrived after the
+binding opened, and only when that binding is the name's only open one. A release of an earlier
+lease carrying the name, whether it came before the name was registered again or is observed
+after the handoff, does not release the live registration. A release at the very position where
+a registry-only binding opened is the release that handed the name over itself; that revived
+registry-only custody is unchanged.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L249-L257 @ ens_v2@a971bd64)
 
 A lease registered through the NameWrapper that lapses past grace is released like any other:
 the registrar's `ownerOf` reverts and the name is available again. Its registrar resource never
