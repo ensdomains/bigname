@@ -3,6 +3,7 @@ use sqlx::{Postgres, Transaction, types::Uuid};
 
 use crate::{InterpretError, Result};
 
+mod registrar;
 mod selector;
 use selector::{PredecessorCleanup, PredecessorSelector, REGISTRAR_ANCHOR_KIND, validate};
 
@@ -68,50 +69,21 @@ fn exact_boundary(
         && event.after_state["successor_binding"]["authority_epoch"] == transition.successor_arm
 }
 
+/// Applies each activated boundary: locks its ENSv2 successor, resolves the instant its ENSv1
+/// predecessor ended, then closes the ENSv1 side according to the selector's anchor.
+///
+/// A `wrapper_backed_control` or child anchor names one NameWrapper binding that must still be
+/// open at that instant, and closes exactly it. A `registrar_backed_registration` anchor names a
+/// BaseRegistrar lease: the token, not any binding. The token is found by its own evidence and
+/// every ENSv1 binding of the name still open at the cleanup is closed there
+/// ([`registrar::close_lease_predecessor`]).
 pub(super) async fn write(
     transaction: &mut Transaction<'_, Postgres>,
     transitions: &[MigrationAuthorityTransition],
 ) -> Result<()> {
     for transition in transitions {
         let selector = validate(transition)?;
-        let boundary_time: Option<time::OffsetDateTime> = sqlx::query_scalar(&format!(
-            "SELECT lineage.block_timestamp + $8 * interval '1 microsecond'
-             FROM surface_bindings binding
-             JOIN chain_lineage lineage
-               ON lineage.chain_id = binding.chain_id
-              AND lineage.block_hash = binding.block_hash
-              AND lineage.block_number = binding.block_number
-             WHERE binding.surface_binding_id = $1
-               AND binding.logical_name_id = $2
-               AND binding.resource_id = $3
-               AND binding.authority_arm = $4
-               AND binding.chain_id = $5
-               AND binding.block_number = $6
-               AND COALESCE((binding.provenance ->> '{}')::bigint, -1) = $7
-               AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
-               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-             FOR UPDATE OF binding",
-            seam::TRANSACTION_INDEX_KEY,
-        ))
-        .bind(transition.successor_surface_binding_id)
-        .bind(&transition.logical_name_id)
-        .bind(transition.successor_resource_id)
-        .bind(&transition.successor_arm)
-        .bind(&transition.chain_id)
-        .bind(transition.block_number)
-        .bind(transition.transaction_index)
-        .bind(transition.log_index)
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(|error| {
-            InterpretError::database("failed to lock migration successor binding", error)
-        })?;
-        let boundary_time = boundary_time.ok_or_else(|| {
-            InterpretError::data_integrity(format!(
-                "activated migration boundary {} has no exact ENSv2 successor binding",
-                transition.boundary_event_identity
-            ))
-        })?;
+        let boundary_time = lock_successor(transaction, transition).await?;
         // A child or unlocked second-level predecessor resolves and closes at its recorded ENSv1
         // cleanup. A locked-wrapped second-level predecessor resolves and closes at the boundary.
         let (predecessor_at, predecessor_time) = match &selector.cleanup {
@@ -132,141 +104,163 @@ pub(super) async fn write(
                 boundary_time,
             ),
         };
-        // A fallback registrar binding is effective from NameUnwrapped, but its confirming
-        // evidence is the cleanup transfer. Only registrar evidence may equal the cleanup.
-        let allow_cleanup_evidence =
-            selector.cleanup.is_some() && selector.anchor_kind == REGISTRAR_ANCHOR_KIND;
-        let predecessors: Vec<Uuid> = sqlx::query_scalar(&format!(
-            "SELECT surface_binding_id
-             FROM surface_bindings
-             WHERE chain_id = $1
-               AND logical_name_id = $2
-               AND authority_arm = $3
-               AND canonicality_state IN ('canonical', 'safe', 'finalized')
-               AND (
-                   (
-                       block_number,
-                       COALESCE((provenance ->> '{}')::bigint, -1),
-                       COALESCE((provenance ->> '{}')::bigint, -1)
-                   ) < ($4, $5, $6)
-                   OR ($12 AND (
-                       block_number,
-                       COALESCE((provenance ->> '{}')::bigint, -1),
-                       COALESCE((provenance ->> '{}')::bigint, -1)
-                   ) = ($4, $5, $6))
-               )
-               AND active_from < $7
-               AND (active_to IS NULL OR active_to >= $7)
-               AND EXISTS (
-                   SELECT 1
-                   FROM normalized_events evidence
-                   WHERE evidence.chain_id = surface_bindings.chain_id
-                     AND evidence.logical_name_id = surface_bindings.logical_name_id
-                     AND evidence.resource_id = surface_bindings.resource_id
-                     AND evidence.consumer_visibility = 'activated'
-                     AND evidence.canonicality_state IN ('canonical', 'safe', 'finalized')
-                     AND (
-                         (
-                             evidence.block_number,
-                             COALESCE(evidence.transaction_index, -1),
-                             COALESCE(evidence.log_index, -1)
-                         ) < ($4, $5, $6)
-                         OR ($12
-                             AND (
-                                 surface_bindings.block_number,
-                                 COALESCE((surface_bindings.provenance ->> '{}')::bigint, -1),
-                                 COALESCE((surface_bindings.provenance ->> '{}')::bigint, -1)
-                             ) = ($4, $5, $6)
-                             AND (evidence.block_number,
-                                  COALESCE(evidence.transaction_index, -1),
-                                  COALESCE(evidence.log_index, -1)) = ($4, $5, $6))
-                     )
-                     AND EXISTS (
-                         SELECT 1
-                         FROM chain_lineage evidence_lineage
-                         WHERE evidence_lineage.chain_id = evidence.chain_id
-                           AND evidence_lineage.block_hash = evidence.block_hash
-                           AND evidence_lineage.block_number = evidence.block_number
-                           AND evidence_lineage.canonicality_state IN (
-                               'canonical', 'safe', 'finalized'
-                           )
-                     )
-                     AND (
-                         (
-                             $8 = 'registrar_backed_registration'
-                             AND evidence.after_state ->> 'token_id' = $9
-                             AND EXISTS (
-                                 SELECT 1
-                                 FROM contract_instance_addresses address
-                                 WHERE address.chain_id = evidence.chain_id
-                                   AND address.contract_instance_id = $10
-                                   AND lower(address.address) = lower(
-                                       evidence.raw_fact_ref ->> 'emitting_address'
-                                   )
-                                   AND (
-                                       address.active_from_block_number IS NULL
-                                       OR address.active_from_block_number <= evidence.block_number
-                                   )
-                                   AND (
-                                       address.active_to_block_number IS NULL
-                                       OR address.active_to_block_number >= evidence.block_number
-                                   )
-                             )
-                         )
-                         OR (
-                             $8 = 'wrapper_backed_control'
-                             AND evidence.after_state ->> 'authority_kind' = 'wrapper'
-                             AND evidence.after_state ->> 'node' = $9
-                             AND lower(evidence.raw_fact_ref ->> 'emitting_address') = lower($11)
-                         )
-                     )
-               )
-             ORDER BY surface_binding_id
-             FOR UPDATE",
-            seam::TRANSACTION_INDEX_KEY,
-            seam::LOG_INDEX_KEY,
-            seam::TRANSACTION_INDEX_KEY,
-            seam::LOG_INDEX_KEY,
-            seam::TRANSACTION_INDEX_KEY,
-            seam::LOG_INDEX_KEY,
-        ))
-        .bind(&transition.chain_id)
-        .bind(&transition.logical_name_id)
-        .bind(&transition.expected_predecessor_arm)
-        .bind(predecessor_at.0)
-        .bind(predecessor_at.1)
-        .bind(predecessor_at.2)
-        .bind(predecessor_time)
-        .bind(&selector.anchor_kind)
-        .bind(&selector.identity)
-        .bind(selector.contract_instance_id)
-        .bind(&selector.contract_address)
-        .bind(allow_cleanup_evidence)
-        .fetch_all(&mut **transaction)
-        .await
-        .map_err(|error| {
-            InterpretError::database("failed to lock migration predecessor binding", error)
-        })?;
-        if predecessors.len() != 1 {
-            return Err(InterpretError::data_integrity(format!(
-                "activated migration boundary {} has {} active ENSv1 predecessors matching its resource selector; expected exactly one",
-                transition.boundary_event_identity,
-                predecessors.len()
-            )));
+        if selector.anchor_kind == REGISTRAR_ANCHOR_KIND {
+            registrar::close_lease_predecessor(
+                transaction,
+                transition,
+                &selector,
+                predecessor_at,
+                predecessor_time,
+            )
+            .await?;
+        } else {
+            close_wrapper_predecessor(
+                transaction,
+                transition,
+                &selector,
+                predecessor_at,
+                predecessor_time,
+            )
+            .await?;
         }
-        sqlx::query(
-            "UPDATE surface_bindings
-             SET active_to = $2, observed_at = now()
-             WHERE surface_binding_id = $1",
-        )
-        .bind(predecessors[0])
-        .bind(predecessor_time)
-        .execute(&mut **transaction)
-        .await
-        .map_err(|error| {
-            InterpretError::database("failed to apply migration authority transition", error)
-        })?;
     }
+    Ok(())
+}
+
+/// Locks the exact ENSv2 successor binding the boundary names and returns the boundary instant.
+async fn lock_successor(
+    transaction: &mut Transaction<'_, Postgres>,
+    transition: &MigrationAuthorityTransition,
+) -> Result<time::OffsetDateTime> {
+    let boundary_time: Option<time::OffsetDateTime> = sqlx::query_scalar(&format!(
+        "SELECT lineage.block_timestamp + $8 * interval '1 microsecond'
+         FROM surface_bindings binding
+         JOIN chain_lineage lineage
+           ON lineage.chain_id = binding.chain_id
+          AND lineage.block_hash = binding.block_hash
+          AND lineage.block_number = binding.block_number
+         WHERE binding.surface_binding_id = $1
+           AND binding.logical_name_id = $2
+           AND binding.resource_id = $3
+           AND binding.authority_arm = $4
+           AND binding.chain_id = $5
+           AND binding.block_number = $6
+           AND COALESCE((binding.provenance ->> '{}')::bigint, -1) = $7
+           AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+         FOR UPDATE OF binding",
+        seam::TRANSACTION_INDEX_KEY,
+    ))
+    .bind(transition.successor_surface_binding_id)
+    .bind(&transition.logical_name_id)
+    .bind(transition.successor_resource_id)
+    .bind(&transition.successor_arm)
+    .bind(&transition.chain_id)
+    .bind(transition.block_number)
+    .bind(transition.transaction_index)
+    .bind(transition.log_index)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| {
+        InterpretError::database("failed to lock migration successor binding", error)
+    })?;
+    boundary_time.ok_or_else(|| {
+        InterpretError::data_integrity(format!(
+            "activated migration boundary {} has no exact ENSv2 successor binding",
+            transition.boundary_event_identity
+        ))
+    })
+}
+
+/// Closes the one NameWrapper binding a wrapper or child anchor names: the binding of the name
+/// whose own resource carries the wrapper's evidence for the namehash, positioned before the
+/// predecessor instant and still open at it.
+async fn close_wrapper_predecessor(
+    transaction: &mut Transaction<'_, Postgres>,
+    transition: &MigrationAuthorityTransition,
+    selector: &PredecessorSelector,
+    predecessor_at: (i64, i64, i64),
+    predecessor_time: time::OffsetDateTime,
+) -> Result<()> {
+    let predecessors: Vec<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT surface_binding_id
+         FROM surface_bindings
+         WHERE chain_id = $1
+           AND logical_name_id = $2
+           AND authority_arm = $3
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND (
+               block_number,
+               COALESCE((provenance ->> '{}')::bigint, -1),
+               COALESCE((provenance ->> '{}')::bigint, -1)
+           ) < ($4, $5, $6)
+           AND active_from < $7
+           AND (active_to IS NULL OR active_to >= $7)
+           AND EXISTS (
+               SELECT 1
+               FROM normalized_events evidence
+               WHERE evidence.chain_id = surface_bindings.chain_id
+                 AND evidence.logical_name_id = surface_bindings.logical_name_id
+                 AND evidence.resource_id = surface_bindings.resource_id
+                 AND evidence.consumer_visibility = 'activated'
+                 AND evidence.canonicality_state IN ('canonical', 'safe', 'finalized')
+                 AND (
+                     evidence.block_number,
+                     COALESCE(evidence.transaction_index, -1),
+                     COALESCE(evidence.log_index, -1)
+                 ) < ($4, $5, $6)
+                 AND EXISTS (
+                     SELECT 1
+                     FROM chain_lineage evidence_lineage
+                     WHERE evidence_lineage.chain_id = evidence.chain_id
+                       AND evidence_lineage.block_hash = evidence.block_hash
+                       AND evidence_lineage.block_number = evidence.block_number
+                       AND evidence_lineage.canonicality_state IN (
+                           'canonical', 'safe', 'finalized'
+                       )
+                 )
+                 AND evidence.after_state ->> 'authority_kind' = 'wrapper'
+                 AND evidence.after_state ->> 'node' = $8
+                 AND lower(evidence.raw_fact_ref ->> 'emitting_address') = lower($9)
+           )
+         ORDER BY surface_binding_id
+         FOR UPDATE",
+        seam::TRANSACTION_INDEX_KEY,
+        seam::LOG_INDEX_KEY,
+    ))
+    .bind(&transition.chain_id)
+    .bind(&transition.logical_name_id)
+    .bind(&transition.expected_predecessor_arm)
+    .bind(predecessor_at.0)
+    .bind(predecessor_at.1)
+    .bind(predecessor_at.2)
+    .bind(predecessor_time)
+    .bind(&selector.identity)
+    .bind(&selector.contract_address)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|error| {
+        InterpretError::database("failed to lock migration predecessor binding", error)
+    })?;
+    if predecessors.len() != 1 {
+        return Err(InterpretError::data_integrity(format!(
+            "activated migration boundary {} has {} active ENSv1 predecessors matching its resource selector; expected exactly one",
+            transition.boundary_event_identity,
+            predecessors.len()
+        )));
+    }
+    sqlx::query(
+        "UPDATE surface_bindings
+         SET active_to = $2, observed_at = now()
+         WHERE surface_binding_id = $1",
+    )
+    .bind(predecessors[0])
+    .bind(predecessor_time)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        InterpretError::database("failed to apply migration authority transition", error)
+    })?;
     Ok(())
 }
 
