@@ -73,6 +73,14 @@ authoritative_for = [
   "ENSv2-specific rules in docs/adrs/0002-surface-resource-identity.md § ENSv2 linked surfaces",
 ]
 
+[refs.ens_v2_sepolia_20260916]
+repo = "https://github.com/ensdomains/contracts-v2"
+commit = "366de741187e38686c904242753c532b7de70d47"
+purpose = "Official 2026-09-15 Sepolia deployment artifacts, receipts, compiler inputs and matching ENSv2 source."
+authoritative_for = [
+  "Official Sepolia addresses, deployment starts, proxy wiring, event ABI and contract implementation evidence",
+]
+
 [refs.ens_v2_sepolia_20260903]
 repo = "https://github.com/ensdomains/contracts-v2"
 commit = "5da83f6a4823864af39e0873686f1a53c8e393cc"

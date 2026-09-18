@@ -95,9 +95,9 @@ async fn main() -> Result<()> {
                 let ingest_engine = Arc::new(bigname_ingest::Engine::new(database.pool().clone()));
                 let phases = PhaseSet::with_ingest_interpret_project_and_live(
                     Arc::new(IngestPhase::with_engine(Arc::clone(&ingest_engine))),
-                    Arc::new(InterpretPhase::with_state_cache_capacity(
+                    Arc::new(InterpretPhase::from_capacity(
                         database.pool().clone(),
-                        runtime.capacity.interpreter_state_cache_entries,
+                        &runtime.capacity,
                     )),
                     Arc::new(ProjectPhase::with_hydration(
                         database.pool().clone(),
@@ -203,9 +203,9 @@ async fn main() -> Result<()> {
                 .await?;
                 let ingest_engine = Arc::new(bigname_ingest::Engine::new(database.pool().clone()));
                 let ingest = Arc::new(IngestPhase::with_engine(ingest_engine));
-                let interpret = Arc::new(InterpretPhase::with_state_cache_capacity(
+                let interpret = Arc::new(InterpretPhase::from_capacity(
                     database.pool().clone(),
-                    capacity.interpreter_state_cache_entries,
+                    &capacity,
                 ));
                 let project = Arc::new(ProjectPhase::with_hydration(
                     database.pool().clone(),

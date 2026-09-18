@@ -25,7 +25,7 @@ pub struct WatchFilter {
     address_ranges: Vec<AddressRange>,
     all_emitter_ranges: Vec<AllEmitterRange>,
     implementation_ranges: Vec<ImplementationRange>,
-    registry_announcements: Option<RegistryAnnouncementWatch>,
+    creation_watches: Vec<CreationWatch>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -64,7 +64,7 @@ struct ImplementationRange {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct RegistryAnnouncementWatch {
+struct CreationWatch {
     announcement_topic0: String,
     scoped_topic0s: Vec<String>,
 }
@@ -87,7 +87,7 @@ impl WatchFilter {
             }],
             all_emitter_ranges: Vec::new(),
             implementation_ranges: Vec::new(),
-            registry_announcements: None,
+            creation_watches: Vec::new(),
         }
     }
 
@@ -179,32 +179,47 @@ impl WatchFilter {
         queries
     }
 
-    pub(crate) fn registry_announcement_topic0(&self) -> Option<&str> {
-        self.registry_announcements
-            .as_ref()
-            .map(|watch| watch.announcement_topic0.as_str())
+    pub(crate) fn creation_topic0s(&self) -> Vec<String> {
+        self.creation_watches
+            .iter()
+            .map(|watch| watch.announcement_topic0.clone())
+            .collect()
     }
 
-    pub(crate) fn admit_registry_announcements(
+    pub(crate) fn admit_creation_announcements(
         &mut self,
+        topic0: &str,
         announcements: impl IntoIterator<Item = (String, i64)>,
         from_block: i64,
         to_block: i64,
     ) -> Vec<WatchQuery> {
-        let Some(watch) = &self.registry_announcements else {
+        let Some(watch) = self
+            .creation_watches
+            .iter()
+            .find(|watch| watch.announcement_topic0.eq_ignore_ascii_case(topic0))
+        else {
             return Vec::new();
         };
         let topics = watch.scoped_topic0s.clone();
         if topics.is_empty() {
             return Vec::new();
         }
-        let mut addresses_by_start = BTreeMap::<i64, BTreeSet<String>>::new();
+        // One address may announce itself in several blocks of one window. Every
+        // suffix from a later announcement lies inside the suffix from the earliest
+        // one, so each address is read once, from its earliest announcement.
+        let mut earliest_start_by_address = BTreeMap::<String, i64>::new();
         for (address, announced_at) in announcements {
             let start = announced_at.max(from_block);
             if start > to_block {
                 continue;
             }
-            let address = address.to_ascii_lowercase();
+            earliest_start_by_address
+                .entry(address.to_ascii_lowercase())
+                .and_modify(|earliest| *earliest = (*earliest).min(start))
+                .or_insert(start);
+        }
+        let mut addresses_by_start = BTreeMap::<i64, BTreeSet<String>>::new();
+        for (address, start) in earliest_start_by_address {
             addresses_by_start
                 .entry(start)
                 .or_default()
@@ -236,10 +251,15 @@ pub async fn load_watch_filter(
     to_block: i64,
 ) -> Result<WatchFilter> {
     let mut filter = load_persisted_watch_filter(pool, chain_id, from_block, to_block).await?;
-    if let Some(announcement_topic0) = filter.registry_announcement_topic0().map(str::to_owned) {
+    for announcement_topic0 in filter.creation_topic0s() {
         let announcements =
             announcements::canonical(pool, chain_id, to_block, &announcement_topic0).await?;
-        filter.admit_registry_announcements(announcements, from_block, to_block);
+        filter.admit_creation_announcements(
+            &announcement_topic0,
+            announcements,
+            from_block,
+            to_block,
+        );
     }
     Ok(filter)
 }
@@ -283,7 +303,7 @@ pub async fn load_persisted_watch_filter(
     let mut all_emitter_ranges = Vec::new();
     let mut implementation_ranges = Vec::new();
     let announcement_topic0 = registry_announcement_topic0();
-    let mut announced_registry_topics = BTreeSet::new();
+    let mut creation_topics = BTreeMap::<String, BTreeSet<String>>::new();
     for (manifest_id, payload) in payloads {
         let manifest = serde_json::from_str::<SourceManifest>(&payload).map_err(|error| {
             IngestError::with_source(
@@ -309,9 +329,10 @@ pub async fn load_persisted_watch_filter(
                 continue;
             };
             topic0s.insert(topic0.clone());
-            if bigname_manifests::is_address_scoped_approval(
+            if bigname_manifests::is_role_scoped_event(
                 &manifest.source_family,
                 &parsed.canonical_signature(),
+                &event.emitter_roles,
             ) {
                 for role in &event.emitter_roles {
                     role_topics
@@ -364,24 +385,29 @@ pub async fn load_persisted_watch_filter(
             }
         }
         role_topics_by_manifest.insert(manifest_id, role_topics);
-        if manifest.source_family == ENS_V2_REGISTRY_SOURCE_FAMILY
-            && manifest_topics.contains(&announcement_topic0)
-        {
-            announced_registry_topics.extend(
+        let creation_topic = match manifest.source_family.as_str() {
+            ENS_V2_REGISTRY_SOURCE_FAMILY => Some(announcement_topic0.clone()),
+            ENS_V2_RESOLVER_SOURCE_FAMILY => Some(bigname_manifests::resolver_creation_topic0()),
+            _ => None,
+        };
+        if let Some(topic) = creation_topic.filter(|topic| manifest_topics.contains(topic)) {
+            creation_topics.entry(topic.clone()).or_default().extend(
                 manifest_topics
                     .iter()
-                    .filter(|topic| *topic != &announcement_topic0)
+                    .filter(|candidate| *candidate != &topic)
                     .cloned(),
             );
         }
         topics_by_manifest.insert(manifest_id, manifest_topics);
     }
 
-    let registry_announcements =
-        (!announced_registry_topics.is_empty()).then(|| RegistryAnnouncementWatch {
-            announcement_topic0: announcement_topic0.clone(),
-            scoped_topic0s: announced_registry_topics.into_iter().collect(),
-        });
+    let creation_watches = creation_topics
+        .into_iter()
+        .map(|(announcement_topic0, topics)| CreationWatch {
+            announcement_topic0,
+            scoped_topic0s: topics.into_iter().collect(),
+        })
+        .collect();
 
     ranges::validate(pool, chain_id).await?;
 
@@ -553,7 +579,7 @@ pub async fn load_persisted_watch_filter(
         address_ranges,
         all_emitter_ranges,
         implementation_ranges,
-        registry_announcements,
+        creation_watches,
     };
     Ok(filter)
 }

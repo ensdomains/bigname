@@ -65,6 +65,7 @@ pub(crate) type HistoryQuery = StrictQueryParams<HistoryQueryParams>;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct HistoryEvent {
+    pub(crate) id: String,
     #[serde(rename = "type")]
     pub(crate) event_type: HistoryEventType,
     pub(crate) name: String,
@@ -392,6 +393,7 @@ pub(crate) fn build_history_event(
     let event_type = history_event_type(&row.event_kind)?;
 
     Some(HistoryEvent {
+        id: history_event_id(row),
         event_type,
         name: history_event_name(row, anchor_name),
         namespace: row.namespace.clone(),
@@ -405,6 +407,15 @@ pub(crate) fn build_history_event(
         detail: include.data.then(|| build_event_detail(row, event_type)),
         kind: raw_event_kind(row, include),
     })
+}
+
+/// The opaque identity of one event row, shared by every history route: a digest of
+/// the storage identity that redo re-derives byte-for-byte for the same block, so a
+/// consumer can merge and de-duplicate feeds without reading the identity itself.
+/// It is not stable across a re-derivation boundary.
+pub(crate) fn history_event_id(row: &StorageHistoryEvent) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(row.event_identity.as_bytes()))
 }
 
 pub(crate) fn history_event_type(event_kind: &str) -> Option<HistoryEventType> {

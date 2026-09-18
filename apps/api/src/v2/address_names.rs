@@ -7,7 +7,7 @@ use axum::{
 };
 use bigname_storage::{
     AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe,
-    AddressNamesCurrentOrder, AddressNamesCurrentSort, NameCurrentRow, PermissionsCurrentRow,
+    AddressNamesCurrentOrder, AddressNamesCurrentSort, EffectivePermissionRow, NameCurrentRow,
     PrimaryNameClaimStatus,
 };
 use serde::{Deserialize, Serialize};
@@ -20,11 +20,11 @@ use super::permission_support::{
 };
 use super::support::{ensure_public_namespace, parse_evm_address};
 use super::{
-    AddressNamesDedupe, AddressNamesSort, Authority, Envelope, Page, QueryParamAllowlist,
-    RegistrationStatus, Relation, RelationSet, SortOrder, StrictQueryParams, V2Error, V2Result,
-    api_error_to_v2, decode, encode,
+    AddressNamesDedupe, AddressNamesSort, Authority, Envelope, GrantRelation, Page,
+    QueryParamAllowlist, RegistrationStatus, Relation, RelationSet, SortOrder, StrictQueryParams,
+    V2Error, V2Result, api_error_to_v2, decode, effective_permission_scope_value, encode,
     name_record::{load_migrated_at, name_registration_fields, registration_id},
-    permission_powers_value, permission_scope_value,
+    permission_powers_value,
     restrictions::ResourceRestrictions,
     validate_latest_collection_selectors,
 };
@@ -41,8 +41,11 @@ pub(crate) use self::cursor::{
 
 mod cursor;
 mod resolves_to;
+mod role_summary;
 
 pub(crate) use self::resolves_to::{AddressNameResolution, address_name_resolution};
+#[cfg(test)]
+pub(crate) use self::role_summary::grant_read_test_hooks;
 
 pub(crate) struct AddressNamesQueryParams;
 
@@ -73,6 +76,10 @@ pub(crate) struct AddressName {
     pub(crate) display_name: String,
     pub(crate) namespace: String,
     pub(crate) namehash: String,
+    /// Absent only on a `relation=resolves_to` row whose name has no permission authority
+    /// resource.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) permission_resource_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) owner: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -114,6 +121,8 @@ pub(crate) struct AddressNameRoleSummary {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct AddressNameGrant {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) grant_relation: Option<GrantRelation>,
     pub(crate) grant_scope: Value,
     pub(crate) powers: Value,
 }
@@ -251,14 +260,24 @@ pub(crate) async fn get_address_names(
             .into_iter()
             .collect::<Vec<_>>()
     });
+    let permission_namespace = namespace_filter.as_deref();
     let permissions_by_resource = if let Some(resource_ids) = role_resource_ids.as_deref() {
-        bigname_storage::load_permissions_current_by_resource_ids(&state.pool, resource_ids)
-            .await
-            .map_err(|_| {
-                V2Error::internal_error(format!(
-                    "failed to load address-name role summaries for {normalized_address}"
-                ))
-            })?
+        role_summary::load_rows(
+            &state,
+            &snapshot,
+            resource_ids,
+            permission_namespace,
+            storage_page.entries.iter().map(|entry| entry.resource_id),
+        )
+        .await?
+        .into_iter()
+        .fold(BTreeMap::new(), |mut grouped, row| {
+            grouped
+                .entry(row.resource_id)
+                .or_insert_with(Vec::new)
+                .push(row);
+            grouped
+        })
     } else {
         std::collections::BTreeMap::new()
     };
@@ -455,6 +474,7 @@ pub(crate) fn build_address_name(
         display_name: entry.canonical_display_name.clone(),
         namespace: entry.namespace.clone(),
         namehash: entry.namehash.clone(),
+        permission_resource_id: Some(entry.resource_id.to_string()),
         owner: registration.owner,
         registrant: registration.registrant,
         registration_status: registration.registration_status,
@@ -529,9 +549,9 @@ pub(crate) fn order_to_storage(order: SortOrder) -> AddressNamesCurrentOrder {
 }
 
 pub(crate) fn build_address_name_role_summary(
-    rows: &[PermissionsCurrentRow],
+    rows: &[EffectivePermissionRow],
 ) -> V2Result<Vec<AddressNameRoleSummary>> {
-    let mut subjects = BTreeMap::<String, Vec<&PermissionsCurrentRow>>::new();
+    let mut subjects = BTreeMap::<String, Vec<&EffectivePermissionRow>>::new();
 
     for row in rows {
         subjects.entry(row.subject.clone()).or_default().push(row);
@@ -547,7 +567,8 @@ pub(crate) fn build_address_name_role_summary(
                     .into_iter()
                     .map(|row| {
                         Ok(AddressNameGrant {
-                            grant_scope: permission_scope_value(&row.scope)?,
+                            grant_relation: super::permission_grant_relation(row.grant_relation),
+                            grant_scope: effective_permission_scope_value(&row.scope)?,
                             powers: permission_powers_value(&row.effective_powers)?,
                         })
                     })

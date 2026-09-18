@@ -193,6 +193,7 @@ sol! {
     }
 
     interface V2RecordResolver {
+        event ResolverCreated();
         event Linked(uint256 indexed recordId, bytes32 indexed node, bytes name);
         event AddressUpdated(uint256 indexed recordId, uint256 coinType, bytes addressBytes);
         event NameUpdated(uint256 indexed recordId, string primaryName);
@@ -289,43 +290,30 @@ pub fn declared_events() -> Vec<DeclaredEvent> {
             V1Resolver::VersionChanged,
         ]
     );
-    let v1_hackathon = v1_sepolia
-        .iter()
-        .cloned()
-        .map(|mut event| {
-            event.world = "ens_v1_sepolia_hackathon";
-            event
-        })
+    let v1_sepolia = v1_sepolia
+        .into_iter()
         .chain(declared!(
-            "ens_v1_sepolia_hackathon",
+            "ens_v1_sepolia",
             [V1Reverse::ReverseClaimed, V1Resolver::NameChanged]
-        ));
-    let v2_hackathon = v2
-        .iter()
+        ))
+        .collect::<Vec<_>>();
+    let v2 = v2
+        .into_iter()
         .filter(|event| {
             event.signature != V2Resolver::AliasChanged::SIGNATURE
                 && event.signature != V2Resolver::NameChanged::SIGNATURE
         })
-        .cloned()
-        .map(|mut event| {
-            event.world = "ens_v2_sepolia_hackathon";
-            event
-        })
         .chain(declared!(
-            "ens_v2_sepolia_hackathon",
+            "ens_v2_sepolia",
             [
+                V2RecordResolver::ResolverCreated,
                 V2RecordResolver::Linked,
                 V2RecordResolver::AddressUpdated,
                 V2RecordResolver::NameUpdated,
                 V2RecordResolver::ResourceArgument,
             ]
         ));
-    v1.into_iter()
-        .chain(v1_sepolia.clone())
-        .chain(v2.clone())
-        .chain(v1_hackathon)
-        .chain(v2_hackathon)
-        .collect()
+    v1.into_iter().chain(v1_sepolia).chain(v2).collect()
 }
 
 pub fn encoded_topics(encoded: &LogData) -> Vec<String> {

@@ -1,6 +1,6 @@
-mod authority_transition;
+pub(in crate::schema_v2) mod authority_transition;
 mod reconcile_support;
-mod registrar;
+pub(in crate::schema_v2) mod registrar;
 mod registrar_surface;
 pub(in crate::schema_v2) use registrar_surface::materialize as materialize_registrar_surface;
 mod registry;
@@ -10,7 +10,7 @@ mod reverse;
 mod support;
 pub(in crate::schema_v2) mod unmasked_word;
 mod upgrade;
-mod wrapper;
+pub(in crate::schema_v2) mod wrapper;
 pub(in crate::schema_v2) use wrapper::{WrapperPermissionContext, append_delegate_permission};
 
 use std::collections::HashMap;

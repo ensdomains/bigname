@@ -191,6 +191,71 @@ assert_reviewed_phase_migrations_applied() {
     total_successful_migration_applications="$(wc -l < "$migration_application_log")"
     intentional_phase_migration_skip_count="$skip_count"
 }
+# Emit SQL that fails unless the session search_path is exactly this text.
+assert_search_path_sql() {
+    printf '%s\n' \
+        "DO \$\$ BEGIN" \
+        "    IF current_setting('search_path') <> '$1' THEN" \
+        "        RAISE EXCEPTION 'search_path is %, expected $1', current_setting('search_path');" \
+        "    END IF;" \
+        "END \$\$;"
+}
+# Emit SQL that fails unless quote_all_identifiers is exactly this text.
+assert_quote_all_identifiers_sql() {
+    printf '%s\n' \
+        "DO \$\$ BEGIN" \
+        "    IF current_setting('quote_all_identifiers') <> '$1' THEN" \
+        "        RAISE EXCEPTION 'quote_all_identifiers is %, expected $1', current_setting('quote_all_identifiers');" \
+        "    END IF;" \
+        "END \$\$;"
+}
+# Emit SQL that runs one check of printed catalog text, a schema-migration or
+# a whole ops/ installer, for a caller that has quote_all_identifiers on.
+# PostgreSQL then prints every identifier in pg_get_indexdef and
+# pg_get_constraintdef quoted, so a check that compares or searches the
+# printed text must turn the setting off while it reads the definitions, or it
+# refuses healthy indexes and misses healthy constraints. It must also leave
+# the caller's setting as it found it: in the session, inside one transaction
+# where the setting is only transaction-local, and after that transaction
+# commits. Nothing here is recorded as a schema-migration application.
+emit_quote_all_identifiers_probe() {
+    local checked_file="$1"
+    local transaction_mode="$2"
+    printf 'SET quote_all_identifiers = on;\n'
+    render_phase_migration "$checked_file"
+    assert_quote_all_identifiers_sql on
+    if [ "$transaction_mode" = in-transaction ]; then
+        # As sqlx applies a schema-migration. The installers cannot run here:
+        # CREATE INDEX CONCURRENTLY refuses a transaction block.
+        printf 'BEGIN;\n'
+        render_phase_migration "$checked_file"
+        assert_quote_all_identifiers_sql on
+        printf 'COMMIT;\n'
+        assert_quote_all_identifiers_sql on
+        printf 'RESET quote_all_identifiers;\nBEGIN;\nSET LOCAL quote_all_identifiers = on;\n'
+        render_phase_migration "$checked_file"
+        assert_quote_all_identifiers_sql on
+        printf 'COMMIT;\n'
+        assert_quote_all_identifiers_sql off
+    fi
+    printf 'RESET quote_all_identifiers;\n'
+}
+# Print the first PostgreSQL error message in psql's stderr, whole. A RAISE
+# that quotes a printed index definition spanning several lines, as the ENSv1
+# lookahead due-probe index does, prints those lines after the ERROR: line and
+# before the HINT:, DETAIL: or CONTEXT: line that follows the message.
+psql_error_message() {
+    awk '
+        !started && /^ERROR:[[:space:]]*/ {
+            started = 1
+            sub(/^ERROR:[[:space:]]*/, "")
+            print
+            next
+        }
+        started && /^(ERROR|DETAIL|HINT|CONTEXT|QUERY|STATEMENT|WHERE|LOCATION|LINE [0-9]+|psql):/ { exit }
+        started { print }
+    '
+}
 assert_migration_refusal() {
     local label="$1"
     local migration_file="$2"
@@ -210,11 +275,7 @@ assert_migration_refusal() {
         printf '%s\n' "$label: migration unexpectedly succeeded" >&2
         exit 1
     fi
-    observed_error="$(
-        printf '%s\n' "$refusal_stderr" \
-            | sed -n 's/^ERROR:[[:space:]]*//p' \
-            | sed -n '1p'
-    )"
+    observed_error="$(printf '%s\n' "$refusal_stderr" | psql_error_message)"
     if [ "$observed_error" != "$exact_message" ]; then
         printf '%s\n' \
             "$label: expected PostgreSQL error: $exact_message" \
@@ -225,6 +286,162 @@ assert_migration_refusal() {
     fi
     refusal_assertions_passed=$((refusal_assertions_passed + 1))
     refusal_probe_seconds=$((refusal_probe_seconds + SECONDS - refusal_started))
+}
+# Run a concurrent index installer from ops/ against the scratch schema and
+# require it to stop with exactly this error. CREATE INDEX CONCURRENTLY cannot
+# run inside a transaction, so the caller commits its setup and undoes it.
+assert_index_install_refusal() {
+    local label="$1"
+    local install_file="$2"
+    local exact_message="$3"
+    local refusal_stderr
+    local observed_error
+    local refusal_started=$SECONDS
+    if refusal_stderr="$(
+        render_phase_migration "$install_file" | run_psql 2>&1 >/dev/null
+    )"; then
+        printf '%s\n' "$label: index installer unexpectedly succeeded" >&2
+        exit 1
+    fi
+    observed_error="$(printf '%s\n' "$refusal_stderr" | psql_error_message)"
+    if [ "$observed_error" != "$exact_message" ]; then
+        printf '%s\n' \
+            "$label: expected PostgreSQL error: $exact_message" \
+            "$label: observed PostgreSQL error: $observed_error" \
+            "$label: complete stderr:" \
+            "$refusal_stderr" >&2
+        exit 1
+    fi
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    refusal_probe_seconds=$((refusal_probe_seconds + SECONDS - refusal_started))
+}
+# Prove one concurrent index installer from ops/ against the scratch schema:
+# from the shape without the index it builds the fresh-baseline definition and
+# passes its own validity and definition checks, a rerun is a no-op, an invalid
+# index, a valid index with other keys, or a table under the same name makes it
+# fail, and the documented drop-and-rerun recovery works. So does a valid index
+# that differs from the reviewed one only by the schema name and a dot inside
+# each JSON key literal, which a check that strips the schema name from the
+# printed definition would accept.
+# The optional fifth argument names the indexed table (default discovery_edges)
+# and the sixth the columns of the wrong-keys stand-in index.
+assert_concurrent_index_installer() {
+    local label="$1"
+    local index_name="$2"
+    local install_file="$3"
+    local readme_path="$4"
+    local table_name="${5:-discovery_edges}"
+    local wrong_key_columns="${6:-active_from_block_number, chain_id}"
+    local reviewed_definition
+    local schema_in_literal_definition
+    local matches_baseline_sql="DO \$\$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index, expected_installed_index expected
+        WHERE indexrelid = '$index_name'::regclass
+          AND indisvalid AND indisready
+          AND pg_get_indexdef(indexrelid) = expected.definition
+    ) THEN
+        RAISE EXCEPTION '$index_name prebuild differs from the baseline';
+    END IF;
+END \$\$;"
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' \
+            "CREATE TABLE expected_installed_index AS" \
+            "SELECT pg_get_indexdef(indexrelid) AS definition" \
+            "FROM pg_index WHERE indexrelid = '$index_name'::regclass;" \
+            "DROP INDEX $index_name;"
+        render_phase_migration "$install_file"
+        render_phase_migration "$install_file"
+        # The installer reads definitions under its own search_path and must
+        # leave the session's as it found it.
+        assert_search_path_sql "$scratch_schema"
+        printf '%s\n' "$matches_baseline_sql"
+        # A caller with quote_all_identifiers on must get the same answer for
+        # the healthy index, and keep its setting.
+        emit_quote_all_identifiers_probe "$install_file" outside-transaction
+        printf '%s\n' "$matches_baseline_sql"
+        # An interrupted concurrent build leaves an invalid index under this
+        # name. Mark this scratch index invalid to stand in for one.
+        printf '%s\n' \
+            "UPDATE pg_index SET indisvalid = false" \
+            "WHERE indexrelid = '$index_name'::regclass;"
+    } | run_psql >/dev/null
+    assert_index_install_refusal "$label-invalid-prebuild" "$install_file" \
+        "$index_name is missing from $scratch_schema.$table_name or is not valid and ready; follow the recovery steps in $readme_path before retrying"
+    # A wrong manual prebuild leaves a valid index with other keys under this
+    # name. The installer names the fresh-baseline definition as the expected
+    # one, printed as it reads it: with search_path set to pg_catalog, so the
+    # table and the enum type both carry the schema name.
+    reviewed_definition="$(
+        {
+            printf 'SET search_path TO "%s";\n' "$scratch_schema"
+            printf '%s\n' \
+                '\pset tuples_only on' \
+                '\pset format unaligned' \
+                "SET search_path TO pg_catalog;" \
+                "SELECT pg_get_indexdef('$scratch_schema.$index_name'::regclass);" \
+                "SET search_path TO $scratch_schema;" \
+                "DROP INDEX $index_name;" \
+                "CREATE INDEX $index_name" \
+                "    ON $table_name ($wrong_key_columns);"
+        } | run_psql
+    )"
+    assert_index_install_refusal "$label-wrong-keys-prebuild" "$install_file" \
+        "$index_name exists but does not have the reviewed definition; found \"CREATE INDEX $index_name ON $scratch_schema.$table_name USING btree ($wrong_key_columns)\", expected \"$reviewed_definition\"; follow the recovery steps in $readme_path before retrying"
+    # A valid, ready index on the right table whose JSON key literals start with
+    # the schema name and a dot indexes other values, so it must be refused too.
+    # Removing the schema name from the printed definition would hide that.
+    schema_in_literal_definition="${reviewed_definition//->> \'/->> \'$scratch_schema.}"
+    if [ "$schema_in_literal_definition" = "$reviewed_definition" ]; then
+        printf '%s\n' "$label: reviewed definition has no JSON key literal to alter" >&2
+        exit 1
+    fi
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' "DROP INDEX $index_name;" "$schema_in_literal_definition;"
+    } | run_psql >/dev/null
+    assert_index_install_refusal "$label-schema-name-in-literal-prebuild" "$install_file" \
+        "$index_name exists but does not have the reviewed definition; found \"$schema_in_literal_definition\", expected \"$reviewed_definition\"; follow the recovery steps in $readme_path before retrying"
+    # IF NOT EXISTS also skips a table under this name.
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' "DROP INDEX $index_name;" "CREATE TABLE $index_name ();"
+    } | run_psql >/dev/null
+    assert_index_install_refusal "$label-table-under-name" "$install_file" \
+        "$scratch_schema.$index_name is a table, not an index, so the index was never built; remove or rename that relation, then follow $readme_path before retrying"
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' "DROP TABLE $index_name;"
+        render_phase_migration "$install_file"
+        printf '%s\n' "$matches_baseline_sql" "DROP TABLE expected_installed_index;"
+    } | run_psql >/dev/null
+}
+# The discovery index validity check must accept the reviewed definitions
+# however they were built. sqlx runs schema-migrations without the phase schema
+# on search_path, which makes PostgreSQL print the enum type in the predicate
+# with its schema name unless the check controls search_path itself, so prove
+# both session settings. The check must also leave the session search_path as
+# it found it.
+assert_discovery_index_definitions_accepted() {
+    local context="$1"
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        emit_phase_migration "$discovery_index_validity_migration" "$context"
+        assert_search_path_sql "$scratch_schema"
+        printf 'SET search_path TO public;\n'
+        emit_phase_migration "$discovery_index_validity_migration" "$context"
+        assert_search_path_sql public
+        # Inside one transaction, as sqlx applies a schema-migration, a later
+        # statement must see the search_path the transaction already had.
+        printf 'BEGIN;\nSET LOCAL search_path TO "%s", public;\n' "$scratch_schema"
+        render_phase_migration "$discovery_index_validity_migration"
+        assert_search_path_sql "$scratch_schema, public"
+        printf 'COMMIT;\n'
+        assert_search_path_sql public
+        emit_quote_all_identifiers_probe "$discovery_index_validity_migration" in-transaction
+    } | run_psql
 }
 assert_unconfigured_settlement_constraint() {
     local provenance="$1"
@@ -302,9 +519,9 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=7
+expected_refusal_assertions=173
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=31
+expected_predecessor_shape_proof_count=39
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -393,7 +610,15 @@ for migration_file in \
     "$ROOT/migrations/20260914120000_lookup_publication_revalidation.sql" \
     "$ROOT/migrations/20260914120100_address_records_current_comments.sql" \
     "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" \
-    "$ROOT/migrations/20260916120000_surface_bindings_name_history_idx.sql"
+    "$ROOT/migrations/20260916120000_surface_bindings_name_history_idx.sql" \
+    "$ROOT/migrations/20260917120000_discovery_edges_observation_history_idx.sql" \
+    "$ROOT/migrations/20260917130000_discovery_edges_reopen_idx.sql" \
+    "$ROOT/migrations/20260917131000_project_scoped_history_indexes.sql" \
+    "$ROOT/migrations/20260917140000_resolver_creation_self_edge.sql" \
+    "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql" \
+    "$ROOT/migrations/20260917150000_normalized_events_v1_lookahead_indexes.sql" \
+    "$ROOT/migrations/20260917160000_discovery_edges_index_validity_check.sql" \
+    "$ROOT/migrations/20260917161000_project_scoped_history_index_validity_check.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -754,6 +979,893 @@ SQL
 assert_migration_context_count "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" empty-schema 1
 assert_migration_context_count "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" preceding-shape 1
 assert_migration_context_count "$ROOT/migrations/20260915120000_address_records_optional_authority.sql" baseline-first 2
+# Both discovery indexes are still the ones the fresh baseline built.
+discovery_index_validity_migration="$ROOT/migrations/20260917160000_discovery_edges_index_validity_check.sql"
+assert_discovery_index_definitions_accepted baseline-first
+# Recreate the additive discovery observation-history index from its preceding
+# schema shape. Compare the resulting catalog definition to the fresh baseline,
+# then prove a rerun leaves it unchanged.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_discovery_history_index AS
+SELECT pg_get_indexdef(indexrelid) AS definition
+FROM pg_index
+WHERE indexrelid = 'discovery_edges_observation_history_idx'::regclass;
+DROP INDEX discovery_edges_observation_history_idx;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917120000_discovery_edges_observation_history_idx.sql" preceding-shape
+    emit_phase_migration "$ROOT/migrations/20260917120000_discovery_edges_observation_history_idx.sql" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index, expected_discovery_history_index expected
+        WHERE indexrelid = 'discovery_edges_observation_history_idx'::regclass
+          AND indisvalid AND indisready AND indpred IS NOT NULL
+          AND pg_get_indexdef(indexrelid) = expected.definition
+    ) THEN
+        RAISE EXCEPTION 'discovery observation-history index upgrade differs from the baseline';
+    END IF;
+END $$;
+DROP TABLE expected_discovery_history_index;
+SQL
+} | run_psql
+# The observation-history index is now the one its schema-migration built.
+assert_discovery_index_definitions_accepted preceding-shape
+# The live prebuild in ops/discovery-history-index/install.sql must build the
+# baseline definition, refuse an invalid index, and recover as its README says.
+assert_concurrent_index_installer discovery-history \
+    discovery_edges_observation_history_idx \
+    "$ROOT/ops/discovery-history-index/install.sql" \
+    ops/discovery-history-index/README.md
+# Recreate the additive discovery reopen index from its preceding schema shape.
+# Compare the resulting catalog definition to the fresh baseline, then prove a
+# rerun leaves it unchanged.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_discovery_reopen_index AS
+SELECT pg_get_indexdef(indexrelid) AS definition
+FROM pg_index
+WHERE indexrelid = 'discovery_edges_reopen_idx'::regclass;
+DROP INDEX discovery_edges_reopen_idx;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917130000_discovery_edges_reopen_idx.sql" preceding-shape
+    emit_phase_migration "$ROOT/migrations/20260917130000_discovery_edges_reopen_idx.sql" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index, expected_discovery_reopen_index expected
+        WHERE indexrelid = 'discovery_edges_reopen_idx'::regclass
+          AND indisvalid AND indisready AND indpred IS NULL
+          AND pg_get_indexdef(indexrelid) = expected.definition
+    ) THEN
+        RAISE EXCEPTION 'discovery reopen index upgrade differs from the baseline';
+    END IF;
+END $$;
+DROP TABLE expected_discovery_reopen_index;
+SQL
+} | run_psql
+# The reopen index is now the one its schema-migration built.
+assert_discovery_index_definitions_accepted preceding-shape
+# The live prebuild in ops/discovery-reopen-index/install.sql must build the
+# baseline definition, refuse an invalid index, and recover as its README says.
+assert_concurrent_index_installer discovery-reopen \
+    discovery_edges_reopen_idx \
+    "$ROOT/ops/discovery-reopen-index/install.sql" \
+    ops/discovery-reopen-index/README.md
+# The two index schema-migrations above adopt an existing index by name alone.
+# Both indexes are now the ones the ops/ installers built. The validity check
+# passes on that shape too and changes nothing when rerun.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    emit_phase_migration "$discovery_index_validity_migration" preceding-shape
+    emit_phase_migration "$discovery_index_validity_migration" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF (
+        SELECT count(*) FROM pg_index
+        WHERE indexrelid IN (
+                  'discovery_edges_observation_history_idx'::regclass,
+                  'discovery_edges_reopen_idx'::regclass
+              )
+          AND indisvalid AND indisready
+    ) <> 2 THEN
+        RAISE EXCEPTION 'discovery index validity check changed an index';
+    END IF;
+END $$;
+SQL
+} | run_psql
+assert_migration_context_count "$discovery_index_validity_migration" preceding-shape 5
+assert_migration_context_count "$discovery_index_validity_migration" baseline-first 3
+# An interrupted concurrent build leaves an invalid index under the right name.
+# Mark each scratch index invalid in turn, inside a transaction that rolls
+# back, and require the schema-migration to fail rather than record success.
+for discovery_index_name in \
+    discovery_edges_observation_history_idx \
+    discovery_edges_reopen_idx
+do
+    assert_migration_refusal "invalid-$discovery_index_name" \
+        "$discovery_index_validity_migration" \
+        "$discovery_index_name exists but is not a valid and ready index on $scratch_schema.discovery_edges; follow the recovery steps in ops/discovery-history-index/README.md or ops/discovery-reopen-index/README.md, then run the schema-migrations again" <<SQL
+UPDATE pg_index SET indisvalid = false
+WHERE indexrelid = '$discovery_index_name'::regclass;
+SQL
+    # The earlier files build the index whenever the table exists, so a missing
+    # index here was dropped or never installed, and nothing would rebuild it.
+    assert_migration_refusal "missing-$discovery_index_name" \
+        "$discovery_index_validity_migration" \
+        "$discovery_index_name does not exist although $scratch_schema.discovery_edges does; build it with the matching install.sql as ops/discovery-history-index/README.md or ops/discovery-reopen-index/README.md describes, then run the schema-migrations again" <<SQL
+DROP INDEX $discovery_index_name;
+SQL
+    # CREATE INDEX IF NOT EXISTS also skips a table or view under the name.
+    assert_migration_refusal "table-named-$discovery_index_name" \
+        "$discovery_index_validity_migration" \
+        "$scratch_schema.$discovery_index_name is a table, not an index, so the index was never built; remove or rename that relation, build the index with the matching install.sql as ops/discovery-history-index/README.md or ops/discovery-reopen-index/README.md describes, then run the schema-migrations again" <<SQL
+DROP INDEX $discovery_index_name;
+CREATE TABLE $discovery_index_name ();
+SQL
+    assert_migration_refusal "view-named-$discovery_index_name" \
+        "$discovery_index_validity_migration" \
+        "$scratch_schema.$discovery_index_name is a view, not an index, so the index was never built; remove or rename that relation, build the index with the matching install.sql as ops/discovery-history-index/README.md or ops/discovery-reopen-index/README.md describes, then run the schema-migrations again" <<SQL
+DROP INDEX $discovery_index_name;
+CREATE VIEW $discovery_index_name AS SELECT 1 AS occupied;
+SQL
+done
+# A wrong manual prebuild leaves a valid index under the right name that the
+# intended queries cannot use. Give each index the other one's column order,
+# then the right columns with the wrong predicate, and require the
+# schema-migration to fail and name both definitions.
+discovery_history_index_columns="chain_id, from_contract_instance_id, edge_kind, (provenance ->> 'observation_key'), active_from_block_number"
+discovery_reopen_index_columns="chain_id, from_contract_instance_id, edge_kind, active_from_block_number, (provenance ->> 'observation_key')"
+discovery_history_index_printed_columns="chain_id, from_contract_instance_id, edge_kind, ((provenance ->> 'observation_key'::text)), active_from_block_number"
+discovery_reopen_index_printed_columns="chain_id, from_contract_instance_id, edge_kind, active_from_block_number, ((provenance ->> 'observation_key'::text))"
+discovery_index_printed_predicate="WHERE (canonicality_state <> 'orphaned'::$scratch_schema.canonicality_state)"
+discovery_history_index_reviewed="CREATE INDEX discovery_edges_observation_history_idx ON $scratch_schema.discovery_edges USING btree ($discovery_history_index_printed_columns) $discovery_index_printed_predicate"
+discovery_reopen_index_reviewed="CREATE INDEX discovery_edges_reopen_idx ON $scratch_schema.discovery_edges USING btree ($discovery_reopen_index_printed_columns)"
+discovery_index_recovery="follow the recovery steps in ops/discovery-history-index/README.md or ops/discovery-reopen-index/README.md, then run the schema-migrations again"
+assert_migration_refusal wrong-column-order-discovery_edges_observation_history_idx \
+    "$discovery_index_validity_migration" \
+    "discovery_edges_observation_history_idx exists but does not have the reviewed definition; found \"CREATE INDEX discovery_edges_observation_history_idx ON $scratch_schema.discovery_edges USING btree ($discovery_reopen_index_printed_columns) $discovery_index_printed_predicate\", expected \"$discovery_history_index_reviewed\"; $discovery_index_recovery" <<SQL
+DROP INDEX discovery_edges_observation_history_idx;
+CREATE INDEX discovery_edges_observation_history_idx
+    ON discovery_edges ($discovery_reopen_index_columns)
+    WHERE canonicality_state <> 'orphaned';
+SQL
+assert_migration_refusal wrong-predicate-discovery_edges_observation_history_idx \
+    "$discovery_index_validity_migration" \
+    "discovery_edges_observation_history_idx exists but does not have the reviewed definition; found \"CREATE INDEX discovery_edges_observation_history_idx ON $scratch_schema.discovery_edges USING btree ($discovery_history_index_printed_columns) WHERE (deactivated_at IS NULL)\", expected \"$discovery_history_index_reviewed\"; $discovery_index_recovery" <<SQL
+DROP INDEX discovery_edges_observation_history_idx;
+CREATE INDEX discovery_edges_observation_history_idx
+    ON discovery_edges ($discovery_history_index_columns)
+    WHERE deactivated_at IS NULL;
+SQL
+assert_migration_refusal wrong-column-order-discovery_edges_reopen_idx \
+    "$discovery_index_validity_migration" \
+    "discovery_edges_reopen_idx exists but does not have the reviewed definition; found \"CREATE INDEX discovery_edges_reopen_idx ON $scratch_schema.discovery_edges USING btree ($discovery_history_index_printed_columns)\", expected \"$discovery_reopen_index_reviewed\"; $discovery_index_recovery" <<SQL
+DROP INDEX discovery_edges_reopen_idx;
+CREATE INDEX discovery_edges_reopen_idx
+    ON discovery_edges ($discovery_history_index_columns);
+SQL
+assert_migration_refusal wrong-predicate-discovery_edges_reopen_idx \
+    "$discovery_index_validity_migration" \
+    "discovery_edges_reopen_idx exists but does not have the reviewed definition; found \"CREATE INDEX discovery_edges_reopen_idx ON $scratch_schema.discovery_edges USING btree ($discovery_reopen_index_printed_columns) $discovery_index_printed_predicate\", expected \"$discovery_reopen_index_reviewed\"; $discovery_index_recovery" <<SQL
+DROP INDEX discovery_edges_reopen_idx;
+CREATE INDEX discovery_edges_reopen_idx
+    ON discovery_edges ($discovery_reopen_index_columns)
+    WHERE canonicality_state <> 'orphaned';
+SQL
+# A valid, ready index on the right table that differs only by the schema name
+# and a dot inside the JSON key literal indexes provenance ->>
+# '<schema>.observation_key', which is NULL for every real row. A check that
+# strips the schema name from the printed definition would accept it.
+for discovery_index_name in \
+    discovery_edges_observation_history_idx \
+    discovery_edges_reopen_idx
+do
+    case "$discovery_index_name" in
+        discovery_edges_observation_history_idx)
+            discovery_index_reviewed="$discovery_history_index_reviewed" ;;
+        *)
+            discovery_index_reviewed="$discovery_reopen_index_reviewed" ;;
+    esac
+    discovery_index_found="${discovery_index_reviewed//\'observation_key\'/\'$scratch_schema.observation_key\'}"
+    assert_migration_refusal "schema-name-in-literal-$discovery_index_name" \
+        "$discovery_index_validity_migration" \
+        "$discovery_index_name exists but does not have the reviewed definition; found \"$discovery_index_found\", expected \"$discovery_index_reviewed\"; $discovery_index_recovery" <<SQL
+DROP INDEX $discovery_index_name;
+$discovery_index_found;
+SQL
+done
+# Recreate all eight additive project-scoped history indexes from their
+# preceding schema shape. Compare every resulting catalog definition to the
+# fresh baseline, then prove a rerun leaves them unchanged.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_project_scoped_history_indexes AS
+SELECT index_class.relname AS index_name,
+       pg_get_indexdef(pg_index.indexrelid) AS definition
+FROM pg_index
+JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
+WHERE pg_index.indrelid = 'normalized_events'::regclass
+  AND index_class.relname IN (
+      'normalized_events_project_name_node_idx',
+      'normalized_events_project_name_child_idx',
+      'normalized_events_project_name_after_target_idx',
+      'normalized_events_project_name_before_target_idx',
+      'normalized_events_project_primary_after_idx',
+      'normalized_events_project_primary_before_idx',
+      'normalized_events_project_primary_after_source_idx',
+      'normalized_events_project_primary_before_source_idx'
+  );
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM expected_project_scoped_history_indexes) <> 8 THEN
+        RAISE EXCEPTION 'fresh baseline does not define all eight project-scoped history indexes';
+    END IF;
+END $$;
+DROP INDEX
+    normalized_events_project_name_node_idx,
+    normalized_events_project_name_child_idx,
+    normalized_events_project_name_after_target_idx,
+    normalized_events_project_name_before_target_idx,
+    normalized_events_project_primary_after_idx,
+    normalized_events_project_primary_before_idx,
+    normalized_events_project_primary_after_source_idx,
+    normalized_events_project_primary_before_source_idx;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917131000_project_scoped_history_indexes.sql" preceding-shape
+    emit_phase_migration "$ROOT/migrations/20260917131000_project_scoped_history_indexes.sql" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF (
+        SELECT count(*)
+        FROM expected_project_scoped_history_indexes expected
+        JOIN pg_class index_class ON index_class.relname = expected.index_name
+        JOIN pg_index ON pg_index.indexrelid = index_class.oid
+        WHERE pg_index.indrelid = 'normalized_events'::regclass
+          AND pg_index.indisvalid AND pg_index.indisready
+          AND pg_index.indpred IS NOT NULL
+          AND pg_get_indexdef(pg_index.indexrelid) = expected.definition
+    ) <> 8 THEN
+        RAISE EXCEPTION 'project-scoped history index upgrade differs from the baseline';
+    END IF;
+END $$;
+DROP TABLE expected_project_scoped_history_indexes;
+SQL
+} | run_psql
+# Upgrade the discovery self-edge rule from its preceding shape: an unnamed
+# CHECK that allowed only registry announcements to point at themselves.
+# 20260917140000 is already applied on a live database, so it stays as it was
+# and always replaces the rule. 20260917141000 starts from that exact result:
+# it must leave the fresh baseline's name, definition and validity, keep exactly
+# one self-edge CHECK, and replace nothing on the first or the second apply.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE FUNCTION pg_temp.self_edge_checks()
+RETURNS TABLE (constraint_oid oid, conname name, definition text, convalidated boolean)
+LANGUAGE sql STABLE AS $$
+    SELECT oid, conname, pg_get_constraintdef(oid), convalidated
+    FROM pg_constraint
+    WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
+      AND pg_get_constraintdef(oid) LIKE
+          '%from_contract_instance_id <> to_contract_instance_id%'
+$$;
+CREATE FUNCTION pg_temp.assert_self_edge_check_matches_baseline(step text)
+RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+    IF (SELECT count(*) FROM pg_temp.self_edge_checks()) <> 1 THEN
+        RAISE EXCEPTION '%: discovery_edges does not carry exactly one self-edge CHECK', step;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_temp.self_edge_checks() observed
+        JOIN expected_discovery_self_edge_check expected
+          ON expected.conname = observed.conname
+         AND expected.definition = observed.definition
+         AND expected.convalidated = observed.convalidated
+        WHERE observed.convalidated
+    ) THEN
+        RAISE EXCEPTION '%: discovery self-edge CHECK differs from the baseline', step;
+    END IF;
+END $$;
+CREATE FUNCTION pg_temp.assert_self_edge_check_kept(step text)
+RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_temp.self_edge_checks() observed
+        JOIN kept_discovery_self_edge_check kept USING (constraint_oid)
+    ) THEN
+        RAISE EXCEPTION '%: the discovery self-edge CHECK was replaced', step;
+    END IF;
+END $$;
+CREATE TEMP TABLE expected_discovery_self_edge_check AS
+SELECT conname, definition, convalidated
+FROM pg_temp.self_edge_checks()
+WHERE conname = 'discovery_edges_self_edge_check';
+CREATE TEMP TABLE expected_discovery_sibling_checks AS
+SELECT conname, pg_get_constraintdef(oid) AS definition
+FROM pg_constraint
+WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
+  AND conname ~ '^discovery_edges_check[0-9]*$';
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM expected_discovery_self_edge_check) <> 1 THEN
+        RAISE EXCEPTION 'fresh baseline does not name discovery_edges_self_edge_check';
+    END IF;
+    IF (SELECT count(*) FROM expected_discovery_sibling_checks) <> 4 THEN
+        RAISE EXCEPTION 'fresh baseline does not pin discovery_edges_check1 to discovery_edges_check4';
+    END IF;
+END $$;
+ALTER TABLE discovery_edges
+    DROP CONSTRAINT discovery_edges_self_edge_check,
+    ADD CHECK (
+        edge_kind = 'registry_announcement'
+        OR from_contract_instance_id <> to_contract_instance_id
+    );
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_temp.self_edge_checks()
+        WHERE conname = 'discovery_edges_check'
+    ) THEN
+        RAISE EXCEPTION 'preceding self-edge CHECK did not take its original generated name';
+    END IF;
+END $$;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917140000_resolver_creation_self_edge.sql" preceding-shape
+    cat <<'SQL'
+SELECT pg_temp.assert_self_edge_check_matches_baseline('after 20260917140000');
+CREATE TEMP TABLE kept_discovery_self_edge_check AS
+SELECT constraint_oid FROM pg_temp.self_edge_checks();
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql" preceding-shape
+    cat <<'SQL'
+SELECT pg_temp.assert_self_edge_check_matches_baseline('first 20260917141000 apply');
+SELECT pg_temp.assert_self_edge_check_kept('first 20260917141000 apply');
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql" baseline-first
+    cat <<'SQL'
+SELECT pg_temp.assert_self_edge_check_matches_baseline('second 20260917141000 apply');
+SELECT pg_temp.assert_self_edge_check_kept('second 20260917141000 apply');
+DO $$
+BEGIN
+    IF EXISTS (
+        (SELECT conname, pg_get_constraintdef(oid)
+         FROM pg_constraint
+         WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
+           AND conname ~ '^discovery_edges_check[0-9]*$'
+         EXCEPT SELECT conname, definition FROM expected_discovery_sibling_checks)
+        UNION ALL
+        (SELECT conname, definition FROM expected_discovery_sibling_checks
+         EXCEPT
+         SELECT conname, pg_get_constraintdef(oid)
+         FROM pg_constraint
+         WHERE conrelid = 'discovery_edges'::regclass AND contype = 'c'
+           AND conname ~ '^discovery_edges_check[0-9]*$')
+    ) THEN
+        RAISE EXCEPTION 'upgraded discovery_edges sibling CHECK names differ from the baseline';
+    END IF;
+END $$;
+SQL
+    # A caller with quote_all_identifiers on must take the same no-op path.
+    # PostgreSQL then prints every identifier in pg_get_constraintdef quoted,
+    # so the file finds the self-edge rule only if it turns the setting off
+    # while it reads the definitions; otherwise it adds a second rule under
+    # the taken name and fails. The rule must keep its name, text, validity
+    # and OID, and the caller must keep its setting.
+    emit_quote_all_identifiers_probe "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql" in-transaction
+    cat <<'SQL'
+SELECT pg_temp.assert_self_edge_check_matches_baseline('quoted-identifier no-op apply');
+SELECT pg_temp.assert_self_edge_check_kept('quoted-identifier no-op apply');
+
+-- A baseline installed after 20260917140000 ran as a no-op could hold the
+-- wanted rule under its generated name. That is a rename, not a replacement.
+ALTER TABLE discovery_edges
+    RENAME CONSTRAINT discovery_edges_self_edge_check TO discovery_edges_check;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql" specialized
+    cat <<'SQL'
+SELECT pg_temp.assert_self_edge_check_matches_baseline('generated-name apply');
+SELECT pg_temp.assert_self_edge_check_kept('generated-name apply');
+
+-- The rename path must find the generated-name rule under quoting too.
+ALTER TABLE discovery_edges
+    RENAME CONSTRAINT discovery_edges_self_edge_check TO discovery_edges_check;
+SET quote_all_identifiers = on;
+SQL
+    render_phase_migration "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql"
+    assert_quote_all_identifiers_sql on
+    cat <<'SQL'
+RESET quote_all_identifiers;
+SELECT pg_temp.assert_self_edge_check_matches_baseline('quoted-identifier generated-name apply');
+SELECT pg_temp.assert_self_edge_check_kept('quoted-identifier generated-name apply');
+
+-- A rule with different text, next to a stray second one, is replaced.
+ALTER TABLE discovery_edges
+    DROP CONSTRAINT discovery_edges_self_edge_check,
+    ADD CHECK (
+        edge_kind = 'registry_announcement'
+        OR from_contract_instance_id <> to_contract_instance_id
+    ),
+    ADD CONSTRAINT discovery_edges_stray_self_edge_check CHECK (
+        edge_kind <> 'proxy_implementation'
+        OR from_contract_instance_id <> to_contract_instance_id
+    );
+SQL
+    emit_phase_migration "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql" specialized
+    cat <<'SQL'
+SELECT pg_temp.assert_self_edge_check_matches_baseline('different-text apply');
+DROP TABLE expected_discovery_self_edge_check;
+DROP TABLE expected_discovery_sibling_checks;
+DROP TABLE kept_discovery_self_edge_check;
+SQL
+} | run_psql
+# 20260917131000 adopts an existing relation by name alone, so the later
+# 20260917161000_project_scoped_history_index_validity_check.sql must accept
+# the eight indexes that file just rebuilt. sqlx runs schema-migrations without
+# the phase schema on search_path, which makes PostgreSQL print the enum type
+# in each predicate with its schema name unless the check controls search_path
+# itself, so prove both session settings. The check must also leave the
+# search_path as it found it, in the session and inside one transaction.
+project_history_validity_migration="$ROOT/migrations/20260917161000_project_scoped_history_index_validity_check.sql"
+project_history_install="$ROOT/ops/project-scoped-history/install.sql"
+project_history_readme=ops/project-scoped-history/README.md
+project_history_index_names=(
+    normalized_events_project_name_node_idx
+    normalized_events_project_name_child_idx
+    normalized_events_project_name_after_target_idx
+    normalized_events_project_name_before_target_idx
+    normalized_events_project_primary_after_idx
+    normalized_events_project_primary_before_idx
+    normalized_events_project_primary_after_source_idx
+    normalized_events_project_primary_before_source_idx
+)
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    emit_phase_migration "$project_history_validity_migration" baseline-first
+    assert_search_path_sql "$scratch_schema"
+    printf 'SET search_path TO public;\n'
+    emit_phase_migration "$project_history_validity_migration" baseline-first
+    assert_search_path_sql public
+    printf 'BEGIN;\nSET LOCAL search_path TO "%s", public;\n' "$scratch_schema"
+    render_phase_migration "$project_history_validity_migration"
+    assert_search_path_sql "$scratch_schema, public"
+    printf 'COMMIT;\n'
+    assert_search_path_sql public
+    emit_quote_all_identifiers_probe "$project_history_validity_migration" in-transaction
+} | run_psql
+# The live prebuild in ops/project-scoped-history/install.sql builds all eight
+# indexes in one file. For each in turn it must build the baseline definition,
+# refuse an invalid index, a valid index with other keys, a valid index whose
+# JSON key literals start with the schema name, and a table under the name,
+# and recover as its README says.
+for project_history_index_name in "${project_history_index_names[@]}"; do
+    assert_concurrent_index_installer "project-history-$project_history_index_name" \
+        "$project_history_index_name" \
+        "$project_history_install" \
+        "$project_history_readme" \
+        normalized_events \
+        "block_number, chain_id"
+done
+# Require the installer's first HINT line to be exactly this text. The installer
+# names the DROP INDEX CONCURRENTLY recovery there, beside the refusal itself.
+assert_index_install_hint() {
+    local label="$1"
+    local install_file="$2"
+    local exact_hint="$3"
+    local observed_hint
+    observed_hint="$(
+        { render_phase_migration "$install_file" | run_psql 2>&1 >/dev/null || true; } \
+            | sed -n 's/^HINT:[[:space:]]*//p' \
+            | sed -n '1p'
+    )"
+    if [ "$observed_hint" != "$exact_hint" ]; then
+        printf '%s\n' \
+            "$label: expected PostgreSQL hint: $exact_hint" \
+            "$label: observed PostgreSQL hint: $observed_hint" >&2
+        exit 1
+    fi
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
+}
+# The installer refuses before it builds anything. With the last index invalid
+# and the first one absent, it must stop on the invalid one, tell the operator
+# how to drop it, and leave the first one unbuilt.
+project_history_first_index="${project_history_index_names[0]}"
+project_history_last_index="${project_history_index_names[7]}"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "DROP INDEX $project_history_first_index;" \
+        "UPDATE pg_index SET indisvalid = false" \
+        "WHERE indexrelid = '$project_history_last_index'::regclass;"
+} | run_psql >/dev/null
+assert_index_install_refusal project-history-refuses-before-building \
+    "$project_history_install" \
+    "$project_history_last_index is missing from $scratch_schema.normalized_events or is not valid and ready; follow the recovery steps in $project_history_readme before retrying"
+assert_index_install_hint project-history-invalid-index-hint \
+    "$project_history_install" \
+    "An interrupted concurrent build leaves an invalid index. Confirm in pg_stat_progress_create_index that no build is still running, run DROP INDEX CONCURRENTLY $scratch_schema.$project_history_last_index, then rerun this script."
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<SQL
+DO \$\$
+BEGIN
+    IF to_regclass('$project_history_first_index') IS NOT NULL THEN
+        RAISE EXCEPTION 'project-scoped history installer built an index before refusing an invalid one';
+    END IF;
+END \$\$;
+DROP INDEX CONCURRENTLY $project_history_last_index;
+SQL
+    render_phase_migration "$project_history_install"
+    # An index on another table under the name is not the index either.
+    printf '%s\n' \
+        "DROP INDEX $project_history_first_index;" \
+        "CREATE INDEX $project_history_first_index ON discovery_edges (chain_id);"
+} | run_psql >/dev/null
+assert_index_install_refusal project-history-index-on-another-table \
+    "$project_history_install" \
+    "$project_history_first_index is missing from $scratch_schema.normalized_events or is not valid and ready; follow the recovery steps in $project_history_readme before retrying"
+assert_index_install_hint project-history-index-on-another-table-hint \
+    "$project_history_install" \
+    "An index on $scratch_schema.discovery_edges holds this name. Rename or remove it, then rerun this script."
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' "DROP INDEX $project_history_first_index;"
+    render_phase_migration "$project_history_install"
+} | run_psql >/dev/null
+# All eight indexes are now the ones the installer built. The validity check
+# passes on that shape under both search_path settings and changes nothing.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    emit_phase_migration "$project_history_validity_migration" preceding-shape
+    printf 'SET search_path TO public;\n'
+    emit_phase_migration "$project_history_validity_migration" baseline-first
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF (
+        SELECT count(*)
+        FROM pg_index
+        JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
+        WHERE pg_index.indrelid = 'normalized_events'::regclass
+          AND index_class.relname LIKE 'normalized\_events\_project\_%\_idx'
+          AND pg_index.indisvalid AND pg_index.indisready
+    ) <> 8 THEN
+        RAISE EXCEPTION 'project-scoped history index validity check changed an index';
+    END IF;
+END $$;
+SQL
+} | run_psql
+assert_migration_context_count "$project_history_validity_migration" empty-schema 1
+assert_migration_context_count "$project_history_validity_migration" preceding-shape 1
+assert_migration_context_count "$project_history_validity_migration" baseline-first 3
+# Put each index in turn into every shape CREATE INDEX IF NOT EXISTS skips,
+# inside a transaction that rolls back, and require the schema-migration to
+# fail rather than record success. The expected definition it names must be how
+# the fresh-baseline index prints.
+project_history_recovery="follow the recovery steps in $project_history_readme, then run the schema-migrations again"
+project_history_rebuild="build the index with ops/project-scoped-history/install.sql as $project_history_readme describes, then run the schema-migrations again"
+for project_history_index_name in "${project_history_index_names[@]}"; do
+    assert_migration_refusal "invalid-$project_history_index_name" \
+        "$project_history_validity_migration" \
+        "$project_history_index_name exists but is not a valid and ready index on $scratch_schema.normalized_events; $project_history_recovery" <<SQL
+UPDATE pg_index SET indisvalid = false
+WHERE indexrelid = '$project_history_index_name'::regclass;
+SQL
+    assert_migration_refusal "not-ready-$project_history_index_name" \
+        "$project_history_validity_migration" \
+        "$project_history_index_name exists but is not a valid and ready index on $scratch_schema.normalized_events; $project_history_recovery" <<SQL
+UPDATE pg_index SET indisready = false
+WHERE indexrelid = '$project_history_index_name'::regclass;
+SQL
+    # The earlier file builds the index whenever the table exists, so a missing
+    # index here was dropped or never installed, and nothing would rebuild it.
+    assert_migration_refusal "missing-$project_history_index_name" \
+        "$project_history_validity_migration" \
+        "$project_history_index_name does not exist although $scratch_schema.normalized_events does; build it with ops/project-scoped-history/install.sql as $project_history_readme describes, then run the schema-migrations again" <<SQL
+DROP INDEX $project_history_index_name;
+SQL
+    assert_migration_refusal "table-named-$project_history_index_name" \
+        "$project_history_validity_migration" \
+        "$scratch_schema.$project_history_index_name is a table, not an index, so the index was never built; remove or rename that relation, $project_history_rebuild" <<SQL
+DROP INDEX $project_history_index_name;
+CREATE TABLE $project_history_index_name ();
+SQL
+    assert_migration_refusal "view-named-$project_history_index_name" \
+        "$project_history_validity_migration" \
+        "$scratch_schema.$project_history_index_name is a view, not an index, so the index was never built; remove or rename that relation, $project_history_rebuild" <<SQL
+DROP INDEX $project_history_index_name;
+CREATE VIEW $project_history_index_name AS SELECT 1 AS occupied;
+SQL
+    assert_migration_refusal "other-table-$project_history_index_name" \
+        "$project_history_validity_migration" \
+        "$project_history_index_name exists but is not a valid and ready index on $scratch_schema.normalized_events; $project_history_recovery" <<SQL
+DROP INDEX $project_history_index_name;
+CREATE INDEX $project_history_index_name ON discovery_edges (chain_id);
+SQL
+    project_history_reviewed_definition="$(
+        {
+            printf 'SET search_path TO "%s";\n' "$scratch_schema"
+            printf '%s\n' \
+                '\pset tuples_only on' \
+                '\pset format unaligned' \
+                "SET search_path TO pg_catalog;" \
+                "SELECT pg_get_indexdef('$scratch_schema.$project_history_index_name'::regclass);"
+        } | run_psql
+    )"
+    assert_migration_refusal "wrong-keys-$project_history_index_name" \
+        "$project_history_validity_migration" \
+        "$project_history_index_name exists but does not have the reviewed definition; found \"CREATE INDEX $project_history_index_name ON $scratch_schema.normalized_events USING btree (block_number, chain_id)\", expected \"$project_history_reviewed_definition\"; $project_history_recovery" <<SQL
+DROP INDEX $project_history_index_name;
+CREATE INDEX $project_history_index_name ON normalized_events (block_number, chain_id);
+SQL
+    # The right keys are not enough: the included column and the predicate are
+    # part of the reviewed definition too.
+    project_history_found_definition="${project_history_reviewed_definition/ INCLUDE (normalized_event_id)/}"
+    assert_migration_refusal "no-included-column-$project_history_index_name" \
+        "$project_history_validity_migration" \
+        "$project_history_index_name exists but does not have the reviewed definition; found \"$project_history_found_definition\", expected \"$project_history_reviewed_definition\"; $project_history_recovery" <<SQL
+DROP INDEX $project_history_index_name;
+$project_history_found_definition;
+SQL
+    project_history_found_definition="${project_history_reviewed_definition/\'safe\'::$scratch_schema.canonicality_state, /}"
+    assert_migration_refusal "wrong-predicate-$project_history_index_name" \
+        "$project_history_validity_migration" \
+        "$project_history_index_name exists but does not have the reviewed definition; found \"$project_history_found_definition\", expected \"$project_history_reviewed_definition\"; $project_history_recovery" <<SQL
+DROP INDEX $project_history_index_name;
+$project_history_found_definition;
+SQL
+    # Nor is a printed definition that matches once the schema name is removed:
+    # with the schema name and a dot at the start of each JSON key literal, in
+    # the keys and in the predicate, the index is valid, ready, and on the right
+    # table, but it indexes after_state ->> '<schema>.node' and the like, which
+    # is NULL for every real row.
+    project_history_found_definition="${project_history_reviewed_definition//->> \'/->> \'$scratch_schema.}"
+    if [ "$project_history_found_definition" = "$project_history_reviewed_definition" ]; then
+        printf '%s\n' "$project_history_index_name: reviewed definition has no JSON key literal to alter" >&2
+        exit 1
+    fi
+    assert_migration_refusal "schema-name-in-literal-$project_history_index_name" \
+        "$project_history_validity_migration" \
+        "$project_history_index_name exists but does not have the reviewed definition; found \"$project_history_found_definition\", expected \"$project_history_reviewed_definition\"; $project_history_recovery" <<SQL
+DROP INDEX $project_history_index_name;
+$project_history_found_definition;
+SQL
+done
+# Recreate both ENSv1 lookahead loader indexes from their preceding schema
+# shape. Compare each resulting catalog definition to the fresh baseline, then
+# prove a rerun leaves them unchanged.
+v1_lookahead_migration="$ROOT/migrations/20260917150000_normalized_events_v1_lookahead_indexes.sql"
+v1_lookahead_install="$ROOT/ops/v1-lookahead-indexes/install.sql"
+v1_lookahead_readme=ops/v1-lookahead-indexes/README.md
+v1_lookahead_index_names=(
+    normalized_events_v1_due_probe_idx
+    normalized_events_v1_direct_node_probe_idx
+)
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_v1_lookahead_indexes AS
+SELECT index_class.relname AS index_name,
+       pg_get_indexdef(pg_index.indexrelid) AS definition
+FROM pg_index
+JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
+WHERE pg_index.indrelid = 'normalized_events'::regclass
+  AND index_class.relname IN (
+      'normalized_events_v1_due_probe_idx',
+      'normalized_events_v1_direct_node_probe_idx'
+  );
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM expected_v1_lookahead_indexes) <> 2 THEN
+        RAISE EXCEPTION 'fresh baseline does not define both ENSv1 lookahead indexes';
+    END IF;
+END $$;
+DROP INDEX
+    normalized_events_v1_due_probe_idx,
+    normalized_events_v1_direct_node_probe_idx;
+SQL
+    emit_phase_migration "$v1_lookahead_migration" preceding-shape
+    emit_phase_migration "$v1_lookahead_migration" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF (
+        SELECT count(*)
+        FROM expected_v1_lookahead_indexes expected
+        JOIN pg_class index_class ON index_class.relname = expected.index_name
+        JOIN pg_index ON pg_index.indexrelid = index_class.oid
+        WHERE pg_index.indrelid = 'normalized_events'::regclass
+          AND pg_index.indisvalid AND pg_index.indisready
+          AND pg_index.indpred IS NOT NULL
+          AND pg_get_indexdef(pg_index.indexrelid) = expected.definition
+    ) <> 2 THEN
+        RAISE EXCEPTION 'ENSv1 lookahead index upgrade differs from the baseline';
+    END IF;
+END $$;
+DROP TABLE expected_v1_lookahead_indexes;
+SQL
+} | run_psql
+# The schema-migration adopts an existing relation by name alone, so its check
+# must accept the two indexes it just rebuilt. sqlx runs schema-migrations
+# without the phase schema on search_path, which makes PostgreSQL print the
+# enum type in each predicate with its schema name unless the check controls
+# search_path itself, so prove both session settings. The check must also
+# leave the search_path as it found it, in the session and inside one
+# transaction, and give a caller with quote_all_identifiers on the same answer
+# while keeping that setting.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    emit_phase_migration "$v1_lookahead_migration" baseline-first
+    assert_search_path_sql "$scratch_schema"
+    printf 'SET search_path TO public;\n'
+    emit_phase_migration "$v1_lookahead_migration" baseline-first
+    assert_search_path_sql public
+    printf 'BEGIN;\nSET LOCAL search_path TO "%s", public;\n' "$scratch_schema"
+    render_phase_migration "$v1_lookahead_migration"
+    assert_search_path_sql "$scratch_schema, public"
+    printf 'COMMIT;\n'
+    assert_search_path_sql public
+    emit_quote_all_identifiers_probe "$v1_lookahead_migration" in-transaction
+} | run_psql
+assert_migration_context_count "$v1_lookahead_migration" empty-schema 1
+assert_migration_context_count "$v1_lookahead_migration" preceding-shape 1
+assert_migration_context_count "$v1_lookahead_migration" baseline-first 3
+# The live prebuild in ops/v1-lookahead-indexes/install.sql builds both indexes
+# in one file. For each in turn it must build the baseline definition, refuse
+# an invalid index, a valid index with other keys, a valid index whose JSON
+# key literals start with the schema name, and a table under the name, and
+# recover as its README says.
+for v1_lookahead_index_name in "${v1_lookahead_index_names[@]}"; do
+    assert_concurrent_index_installer "v1-lookahead-$v1_lookahead_index_name" \
+        "$v1_lookahead_index_name" \
+        "$v1_lookahead_install" \
+        "$v1_lookahead_readme" \
+        normalized_events \
+        "block_number, chain_id"
+done
+# The installer refuses before it builds anything. With the second index
+# invalid and the first one absent, it must stop on the invalid one, tell the
+# operator how to drop it, and leave the first one unbuilt.
+v1_lookahead_first_index="${v1_lookahead_index_names[0]}"
+v1_lookahead_last_index="${v1_lookahead_index_names[1]}"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "DROP INDEX $v1_lookahead_first_index;" \
+        "UPDATE pg_index SET indisvalid = false" \
+        "WHERE indexrelid = '$v1_lookahead_last_index'::regclass;"
+} | run_psql >/dev/null
+assert_index_install_refusal v1-lookahead-refuses-before-building \
+    "$v1_lookahead_install" \
+    "$v1_lookahead_last_index is missing from $scratch_schema.normalized_events or is not valid and ready; follow the recovery steps in $v1_lookahead_readme before retrying"
+assert_index_install_hint v1-lookahead-invalid-index-hint \
+    "$v1_lookahead_install" \
+    "An interrupted concurrent build leaves an invalid index. Confirm in pg_stat_progress_create_index that no build is still running, run DROP INDEX CONCURRENTLY $scratch_schema.$v1_lookahead_last_index, then rerun this script."
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<SQL
+DO \$\$
+BEGIN
+    IF to_regclass('$v1_lookahead_first_index') IS NOT NULL THEN
+        RAISE EXCEPTION 'ENSv1 lookahead installer built an index before refusing an invalid one';
+    END IF;
+END \$\$;
+DROP INDEX CONCURRENTLY $v1_lookahead_last_index;
+SQL
+    render_phase_migration "$v1_lookahead_install"
+    # An index on another table under the name is not the index either.
+    printf '%s\n' \
+        "DROP INDEX $v1_lookahead_first_index;" \
+        "CREATE INDEX $v1_lookahead_first_index ON discovery_edges (chain_id);"
+} | run_psql >/dev/null
+assert_index_install_refusal v1-lookahead-index-on-another-table \
+    "$v1_lookahead_install" \
+    "$v1_lookahead_first_index is missing from $scratch_schema.normalized_events or is not valid and ready; follow the recovery steps in $v1_lookahead_readme before retrying"
+assert_index_install_hint v1-lookahead-index-on-another-table-hint \
+    "$v1_lookahead_install" \
+    "An index on $scratch_schema.discovery_edges holds this name. Rename or remove it, then rerun this script."
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' "DROP INDEX $v1_lookahead_first_index;"
+    render_phase_migration "$v1_lookahead_install"
+} | run_psql >/dev/null
+# Put each index in turn into every shape CREATE INDEX IF NOT EXISTS skips,
+# inside a transaction that rolls back, and require the schema-migration to
+# fail rather than record success. The expected definition it names must be how
+# the fresh-baseline index prints, read under search_path pg_catalog.
+v1_lookahead_recovery="follow the recovery steps in $v1_lookahead_readme, then run the schema-migrations again"
+for v1_lookahead_index_name in "${v1_lookahead_index_names[@]}"; do
+    assert_migration_refusal "invalid-$v1_lookahead_index_name" \
+        "$v1_lookahead_migration" \
+        "$v1_lookahead_index_name exists but is not a valid and ready index on $scratch_schema.normalized_events; $v1_lookahead_recovery" <<SQL
+UPDATE pg_index SET indisvalid = false
+WHERE indexrelid = '$v1_lookahead_index_name'::regclass;
+SQL
+    assert_migration_refusal "not-ready-$v1_lookahead_index_name" \
+        "$v1_lookahead_migration" \
+        "$v1_lookahead_index_name exists but is not a valid and ready index on $scratch_schema.normalized_events; $v1_lookahead_recovery" <<SQL
+UPDATE pg_index SET indisready = false
+WHERE indexrelid = '$v1_lookahead_index_name'::regclass;
+SQL
+    # CREATE INDEX IF NOT EXISTS also skips a table or view under the name.
+    assert_migration_refusal "table-named-$v1_lookahead_index_name" \
+        "$v1_lookahead_migration" \
+        "$scratch_schema.$v1_lookahead_index_name is a table, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again" <<SQL
+DROP INDEX $v1_lookahead_index_name;
+CREATE TABLE $v1_lookahead_index_name ();
+SQL
+    assert_migration_refusal "view-named-$v1_lookahead_index_name" \
+        "$v1_lookahead_migration" \
+        "$scratch_schema.$v1_lookahead_index_name is a view, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again" <<SQL
+DROP INDEX $v1_lookahead_index_name;
+CREATE VIEW $v1_lookahead_index_name AS SELECT 1 AS occupied;
+SQL
+    assert_migration_refusal "other-table-$v1_lookahead_index_name" \
+        "$v1_lookahead_migration" \
+        "$v1_lookahead_index_name exists but is not a valid and ready index on $scratch_schema.normalized_events; $v1_lookahead_recovery" <<SQL
+DROP INDEX $v1_lookahead_index_name;
+CREATE INDEX $v1_lookahead_index_name ON discovery_edges (chain_id);
+SQL
+    # A wrong manual prebuild leaves a valid index with other keys under the
+    # name. The expected text is how the fresh-baseline index prints with
+    # search_path set to pg_catalog: the table and the enum type both carry the
+    # schema name, and the due-probe CASE expression keeps its several lines.
+    v1_lookahead_reviewed_definition="$(
+        {
+            printf 'SET search_path TO "%s";\n' "$scratch_schema"
+            printf '%s\n' \
+                '\pset tuples_only on' \
+                '\pset format unaligned' \
+                "SET search_path TO pg_catalog;" \
+                "SELECT pg_get_indexdef('$scratch_schema.$v1_lookahead_index_name'::regclass);"
+        } | run_psql
+    )"
+    assert_migration_refusal "wrong-keys-$v1_lookahead_index_name" \
+        "$v1_lookahead_migration" \
+        "$v1_lookahead_index_name exists but does not have the reviewed definition; found \"CREATE INDEX $v1_lookahead_index_name ON $scratch_schema.normalized_events USING btree (block_number, chain_id)\", expected \"$v1_lookahead_reviewed_definition\"; $v1_lookahead_recovery" <<SQL
+DROP INDEX $v1_lookahead_index_name;
+CREATE INDEX $v1_lookahead_index_name ON normalized_events (block_number, chain_id);
+SQL
+    # The right keys are not enough: the predicate is part of the reviewed
+    # definition too.
+    v1_lookahead_found_definition="${v1_lookahead_reviewed_definition/\'safe\'::$scratch_schema.canonicality_state, /}"
+    if [ "$v1_lookahead_found_definition" = "$v1_lookahead_reviewed_definition" ]; then
+        printf '%s\n' "$v1_lookahead_index_name: reviewed definition has no safe canonicality state to remove" >&2
+        exit 1
+    fi
+    assert_migration_refusal "wrong-predicate-$v1_lookahead_index_name" \
+        "$v1_lookahead_migration" \
+        "$v1_lookahead_index_name exists but does not have the reviewed definition; found \"$v1_lookahead_found_definition\", expected \"$v1_lookahead_reviewed_definition\"; $v1_lookahead_recovery" <<SQL
+DROP INDEX $v1_lookahead_index_name;
+$v1_lookahead_found_definition;
+SQL
+    # Nor is a printed definition that matches once the schema name is removed:
+    # with the schema name and a dot at the start of each JSON key literal, the
+    # index is valid, ready, and on the right table, but it indexes
+    # after_state ->> '<schema>.expiry' and the like, which is NULL for every
+    # real row.
+    v1_lookahead_found_definition="${v1_lookahead_reviewed_definition//->> \'/->> \'$scratch_schema.}"
+    if [ "$v1_lookahead_found_definition" = "$v1_lookahead_reviewed_definition" ]; then
+        printf '%s\n' "$v1_lookahead_index_name: reviewed definition has no JSON key literal to alter" >&2
+        exit 1
+    fi
+    assert_migration_refusal "schema-name-in-literal-$v1_lookahead_index_name" \
+        "$v1_lookahead_migration" \
+        "$v1_lookahead_index_name exists but does not have the reviewed definition; found \"$v1_lookahead_found_definition\", expected \"$v1_lookahead_reviewed_definition\"; $v1_lookahead_recovery" <<SQL
+DROP INDEX $v1_lookahead_index_name;
+$v1_lookahead_found_definition;
+SQL
+done
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor
 # shape, then validate the additive tuple invariant independently. Both files
 # must remain idempotent after the upgrade completes.

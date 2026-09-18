@@ -1942,7 +1942,7 @@ async fn completed_sepolia_ingest_rejects_unreviewed_source_shape_before_interpr
         error.to_string(),
         "chain ethereum-sepolia intake descriptors [ethereum-sepolia:rpc-intake] violate the \
          required shape: exactly one dRPC intake-capable source with ethereum_head seed basis \
-         and start block 0 or the admitted hackathon deployment start"
+         and start block 0"
     );
     assert_eq!(
         observed_calls,
@@ -2438,7 +2438,7 @@ async fn sepolia_rejects_unreviewed_intake_source_shapes_before_verification() -
         error.to_string(),
         "chain ethereum-sepolia verification-only descriptors [ethereum-sepolia:drpc-verify] \
          violate the required shape: exactly one dRPC verification-only source with \
-         ethereum_head seed basis and start block 0 or the admitted hackathon deployment start"
+         ethereum_head seed basis and start block 0"
     );
     drop(phase);
     scratch.cleanup().await

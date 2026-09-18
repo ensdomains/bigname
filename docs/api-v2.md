@@ -99,6 +99,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `contract_address` | event filter for the contract that emitted an event's source log | `emitting_address` |
 | `chain_id` | numeric EVM chain id (`1`, `8453`); string-keyed in maps | string chain ids (`"ethereum-mainnet"`), position slot keys |
 | `network` | display slug (`ethereum`, `base`) | `network` (unchanged, display-only) |
+| `id` (event row) | opaque 64-character identity of one event row, identical for the same event on `/v1/events`, name history, and address history and across pages; a merge key for consumers combining feeds, not a durable reference (it may change at a re-derivation boundary) | `event_identity`, `normalized_event_id` |
 | `registration_id` | the one opaque stable handle for a registration lifecycle; for a `.eth` second-level name it is always the BaseRegistrar lease, wrapped or not (see [registration identity of wrapped names](#registration-identity-of-wrapped-names)) | `resource_id`, `resource_hex`, `resource`, `token_lineage_id`, `surface_binding_id` |
 | `input` | caller-supplied lookup input echoed in a result | `input` (unchanged; now specified as result echo, not a parallel DTO family) |
 | `normalization` | name-normalization result for an input | `corrected_input_normalization`, `unnormalizable_input` status detail |
@@ -112,13 +113,15 @@ step-3-gate vocabulary needed by the route schemas:
 | `sort` | route-documented sort field | `sort` (unchanged; allowed fields are now route-documented) |
 | `order` | sort direction, `asc` or `desc`; history collections default to `desc` (newest first) and treat `asc` as the exact reverse | `order` (unchanged) |
 | `scope` (history) | `name`, `registration`, `both` | `surface`, `resource`, `both` |
-| `grant_scope` | the protocol scope of a permission row: `root`, `registry`, `registration`, `resolver`, or `record_manager` | permission-row `scope` (renamed so history `scope` and permission scope are two names for two concepts) |
+| `grant_scope` | the protocol scope of a permission row: `root`, `registry`, `registration`, `resolver`, `record_manager`, or [`account`](glossary.md#account-permission-scope) | permission-row `scope` (renamed so history `scope` and permission scope are two names for two concepts) |
+| `grant_relation` | optional explicit [grant relation](glossary.md#grant-relation); `operator` identifies a registry-wide approval, while direct permission rows omit the field | new in v2 |
 | `verification` | typed checked-answer summary for claimed-vs-verified answers | `verified_state`, `verified_primary_name` section wrappers |
 | `status` | one result vocabulary: `ok`, `not_found`, `invalid_name`, `mismatch`, `unsupported`, `stale`, `failed` | `ResultStatus`, `IdentityStatus`, `NameRecordStatus`, `unnormalizable_input` (folds into `invalid_name`); `mismatch` kept for verification results |
 | `unsupported_reason` | reason code or short reason string required with `status=unsupported` | `coverage.unsupported_reason`, route-specific unsupported details |
 | `failure_reason` | reason code or short reason string for `failed`, `stale`, `not_found`, or `mismatch` details | route-specific failure detail fields |
 | `completeness` | `full`, `partial`, `unsupported` | `coverage.status` on product routes (full taxonomy moves to diagnostics) |
-| `powers` | effective permission powers, drawn from the [permission powers vocabulary](#permission-powers-vocabulary); storage `resource_control` is exposed as `registration_control`; ENSv2 registry `was_reserved` is a non-authorizing history marker retained here so marker-only transitions remain visible (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@a971bd64) | `effective_powers` |
+| `powers` | effective permission powers, drawn from the [permission powers vocabulary](#permission-powers-vocabulary); storage `resource_control` is exposed as `registration_control`; `registry_control` is passed through from an effective registry-operator account row; ENSv2 registry `was_reserved` is a non-authorizing history marker retained here so marker-only transitions remain visible (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@a971bd64) | `effective_powers` |
+| `unlisted_permission_surfaces` | on permission reads, the sorted codes of permission surfaces whose holders the rows do not list: `ens_v2_registry_operators`, `registrar_approvals`, `resolver_approvals`, `wrapper_parent_control`; omitted when nothing is unlisted or support is unknown | new in v2 |
 | `unsupported_fields` | fields or expansions that could not be served or proved for a response item | `unsupported_filters`, coverage-derived unsupported field lists |
 | `keys` | comma-separated resolver record-key allowlist | `records` query parameter, selector token lists in record diagnostics |
 | `page` | pagination object on top-level collections, per-input lookup results, and the resolver overview `bound_names` nested collection | pagination sections with divergent field subsets |
@@ -130,6 +133,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `meta` | response metadata object for snapshot, completeness, unsupported, and source details | `provenance`, `coverage`, `chain_positions`, `consistency`, `last_updated` top-level peers |
 | `subname_count` | count of direct subnames when requested | `subname_count` (unchanged; now the only count name for child rows) |
 | `record_count` | count of known record keys when requested | `record_count` (unchanged) |
+| `permission_resource_id` | selected address-name permission authority UUID; pass to the permissions route’s `registration_id` filter | new in v2 |
 | `role_summary` | grouped permission powers for dashboard-style name rows | `role_summary` (unchanged; rewritten to dictionary field names inside) |
 | `authority_context` | required permission-row marker from the [per-name ownership rule](consumer-capabilities.md#ensv1ensv2-mixed-history-ownership); [`current_for_name`](glossary.md#current-for-name-authority-context) means a `name` filter selected the current registration, while [`resource_audit`](glossary.md#resource-audit-context) makes no current-name claim | new in v2 |
 | `capabilities` | product-facing summary of supported namespace capabilities; `verified_records` and `verified_primary_name` carry a `chains` object keyed by numeric chain id with per-chain `{completeness, unsupported_reason?}` | capability flag summaries when exposed to product routes |
@@ -175,14 +179,52 @@ A changed publication, including replacement at the same block, requires a
 pagination restart with `409 stale`. The base address-name collection remains
 available without the expansion.
 
+An approved ENSv1 or Basenames registry `ApprovalForAll` row is effective for a
+resource when its chain, emitter-derived registry contract address, and owner
+match the resource's current
+[registry-owner binding](glossary.md#registry-owner-binding). The read uses the
+binding projected under the [registry-owner binding
+rule](projections.md#permissions); it does not derive applicability again from
+events. The matched row is returned with `grant_relation=operator`,
+`grant_scope={"kind":"account","detail":{"chain_id":...,"authority_kind":"registry","authority_contract":...,"owner":...}}`,
+and `powers=["registry_control"]`. Direct rows keep their existing wire shape
+and omit `grant_relation`. `include=lineage` emits only the bare `lineage.grant={"kind":"event"}` marker; the binding evidence remains internal.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L21 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L112-L118 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/Registry.sol:L46-L52 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/Registry.sol:L148-L158 @ basenames@1809bbc)
+
+The effective relation joins `account_permission_state_current.authority_contract`
+to `permissions_current_resource_summary.registry_contract`. The account row
+also retains `authority_contract_instance_id` as admitted-instance evidence.
+These agree because one admitted address on one chain maps to one contract
+instance across manifest epochs, while a different watched address creates a
+different registry generation. A prior generation's approval therefore stops
+applying as soon as the current binding names another registry contract.
+Revoked (`approved=false`) rows remain replayable projection state but are
+served as absence.
+
 Permission-backed v2 reads also classify the served resources from the typed
-projection-owned per-resource permission summary. For a resource-bound
-`GET /v1/permissions` read, a non-wrapper summary whose standard operator,
-token-approval, or resolver-delegation paths are not fully served produces
-`meta.completeness=partial` with
-`approval_and_delegation_permissions_not_supported`. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) An ENSv1 NameWrapper
-registration instead produces `meta.completeness=partial` with
-`parent_and_resolver_delegation_permissions_not_supported`: its token holder,
+projection-owned per-resource permission summary, and report the permission
+surfaces whose holders the rows do not list. When any surface is unlisted the
+response carries `meta.completeness=partial`,
+`meta.unsupported_reason=permissions_partially_listed`, and
+`meta.unlisted_permission_surfaces`, a sorted list of short stable codes:
+
+| Code | Surface not listed |
+| --- | --- |
+| `ens_v2_registry_operators` | operators that the name's owner approved on the ENSv2 registry with `setApprovalForAll` |
+| `registrar_approvals` | BaseRegistrar ERC-721 per-token and operator approvals |
+| `resolver_approvals` | resolver operator approvals and per-name delegates |
+| `wrapper_parent_control` | the parent name's control over a wrapped subname that is not emancipated |
+
+The list shrinks as later parts of issue #605 add these surfaces; consumers
+should read the list rather than infer gaps from the reason. A registrar- or
+registry-held (unwrapped) registration reports
+`["registrar_approvals","resolver_approvals"]`: registry `ApprovalForAll`
+operators are rows, while registrar ERC-721 approvals and resolver approvals
+and delegates are not. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) An ENSv1 NameWrapper
+registration reports `["resolver_approvals","wrapper_parent_control"]`: its token holder,
 the owner-wide operators that holder approved, and its per-token approved
 delegate are projected rows, while the parent name's control over a
 non-emancipated wrapped subname and resolver operator/delegate approvals are
@@ -193,9 +235,22 @@ service), not a per-registration permission, and is never a row.
 (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L162 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L186 @ ens_v1@91c966f)
-A missing or unrecognized summary
-produces `meta.completeness=partial` with `permission_support_unknown`, which
-takes precedence over both known limitations.
+An ENSv2 registry registration reports
+`["ens_v2_registry_operators","resolver_approvals"]`. Its direct role holders
+are rows. The ENSv2 registry also gives the owner's roles to every operator the
+owner approved with `setApprovalForAll`, and those operators are not rows.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
+An ENSv2 registration has no BaseRegistrar token, so it never reports
+`registrar_approvals`. It reports `resolver_approvals` because the ENSv2
+`PublicResolverV2` authorizes the owner's operators and per-name delegates, and
+those are not rows either.
+(upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L51-L59 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L174-L184 @ ens_v2@a971bd64)
+A set of registrations reports the sorted union of its members' lists. A
+summary that independently proves full coverage contributes nothing, and a
+resource-bound read of it omits all three fields. Missing or indeterminate
+support instead uses `meta.unsupported_reason=permission_support_unknown`
+without a list and takes precedence.
 
 A supplied `name` that is missing or unrecognized, whose current name is marked
 unsupported, or that resolves to a current name not bound to a registration
@@ -203,32 +258,35 @@ resource returns an empty result relative to that request with `meta.completenes
 `meta.unsupported_reason=permission_support_unknown`. This establishes only
 that the API could not select a supported current registration; it does not
 establish that the name has no permission rows. A supplied current name paired
-with an explicitly different `registration_id` is instead a supported,
-proven-empty selection. Its empty page has neither `meta.completeness` nor
-`meta.unsupported_reason`.
+with an explicitly different `registration_id` is a supported empty
+intersection. That zero-row result uses the explicitly requested registration's
+support classification under the resource-bound rule—including the
+wrapper list or `permission_support_unknown` when applicable—and
+does not claim complete permission coverage. A `registration_id` outside an
+explicit `namespace` instead returns an empty page without resource
+restrictions or permission support metadata.
 
-An address-only permissions read is always at least `partial` with
-`approval_and_delegation_permissions_not_supported`, including when it returns
-zero rows, because returned registrations cannot establish the request's full
-permission set.
+An address-only permissions read always reports all four codes,
+including when it returns zero rows or its current page contains no wrapper
+or ENSv2 resource, because returned registrations cannot establish the
+request's full permission set.
 For `include=role_summary`, any non-full resource summary makes the overall
 address-name response `partial`, lists `role_summary` in
-`meta.unsupported_fields`, and uses the same product reason mapping. Projected
+`meta.unsupported_fields`, and reports the same reason and surface list. Projected
 permission rows remain visible, but an empty or populated expansion is not
-authoritative when that metadata is present. A page containing both a wrapper
-summary and a non-wrapper approval/delegation limitation uses the latter partial
-reason; missing or unrecognized summary metadata still takes precedence. A
-synthetic or future resource summary that independently proves full coverage
-adds no completeness metadata on a resource-bound request.
+authoritative when that metadata is present. A page containing both wrapper
+and non-wrapper summaries reports the union of their lists; missing or
+unrecognized summary metadata still takes precedence.
 
 These classifications are request-relative. `/v1/permissions` continues to
 serve known permission rows that apply to each resource, but those rows and the
 derived role summaries are not authoritative enumerations while the coverage
 described above remains partial. Zero returned rows therefore
 do not prove that no account can mutate the selected name or registration.
-NameWrapper holders, operators, and per-token delegates are projected rows;
-parent control of non-emancipated wrapped subnames and ENSv2 registry operator
-approval remain separately narrowed until indexed.
+NameWrapper holders, operators, and per-token delegates are projected rows.
+Registrar ERC-721 approvals, resolver approvals and delegates, and parent
+control of non-emancipated wrapped subnames remain unsupported. ENSv2 registry
+operator approval also remains outside this slice.
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
 
 `wrapper_fuses` has one stable shape on name detail, resolver `bound_names`,
@@ -345,7 +403,7 @@ adds to them and does not replace them.
 ### Permission powers vocabulary
 
 `powers` (on `GET /v1/permissions` rows, `include=role_summary` grants, and
-lineage objects) is a list of snake_case names drawn from three producers. The
+lineage objects) is a list of snake_case names drawn from four producers. The
 table is the complete vocabulary the code can serve; a test
 (`documented_powers_vocabulary_matches_code` in
 `apps/api/src/v2/permission_values.rs`) fails when this table and the producing
@@ -357,6 +415,12 @@ them.
   `crates/project/src/builders/permissions.rs`). Registrar- and registry-held
   ENSv1 and Basenames names receive only these two powers. Storage spells the
   first `resource_control`; the API renames it `registration_control`.
+- **ENSv1 and Basenames effective registry operators** (adapter
+  `crates/adapters/src/schema_v2/protocol/standard_approvals.rs`, storage
+  effective-permission readers). A registry `ApprovalForAll` operator row
+  carries `registry_control` alone, applied at read time to the registrations
+  the approving account currently owns in that registry.
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
 - **ENSv1 NameWrapper fuse vocabulary** (projection mask in
   `crates/project/src/builders/permissions.rs`). The projection recognises
   these names and removes each one from a wrapped name's effective powers when
@@ -401,6 +465,7 @@ them.
 | --- | --- | --- |
 | `registration_control` | ENSv1/Basenames control | Storage `resource_control`. Held by the account that controls the registration's authority object: the registrar token owner (`RegistrationGranted`, registrar `Transfer`), the registry owner of a registry-only resource (`NewOwner`/`Transfer`), or the NameWrapper token holder (`TokenControlTransferred`). Masked away while the wrapper is `locked`. |
 | `resolver_control` | ENSv1/Basenames control | Held by the same account, scoped to the registration's current nonzero resolver (`grant_scope.kind = resolver`); revoked and re-granted on `ResolverChanged` and `RegistrationGranted`. Masked by `CANNOT_SET_RESOLVER` (8). |
+| `registry_control` | ENSv1/Basenames registry operator | Held by an operator the registry owner approved through registry `ApprovalForAll`, on rows with `grant_relation = operator` and `grant_scope.kind = account`; applies only while the approving account owns the registration in that registry and the approval stands. |
 | `set_resolver` | ENSv2 registry; wrapper mask | Registry `ROLE_SET_RESOLVER` (bit 24). On a wrapped ENSv1 name the mask removes it under `CANNOT_SET_RESOLVER` (8). |
 | `set_ttl` | wrapper mask | Removed under `CANNOT_SET_TTL` (16). |
 | `create_subnames` | wrapper mask | Removed under `CANNOT_CREATE_SUBDOMAIN` (32). |

@@ -565,6 +565,13 @@ pub async fn run_rpc_ingest_redo(
     let source = format!("{chain}:e2e-rpc:rpc:new_signature_range:0=BIGNAME_E2E_RPC_SOURCE");
     let mut command = pipeline_command(repo_root, &binary);
     command.env("BIGNAME_E2E_RPC_SOURCE", rpc_url);
+    // Window re-fetch warnings are operator diagnostics that scenarios assert on.
+    // The module directive is the most specific, so it holds under any RUST_LOG.
+    let log_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "error".to_owned());
+    command.env(
+        "RUST_LOG",
+        format!("{log_filter},bigname_ingest::engine::window=warn"),
+    );
     command
         .args(["redo", "--database-url", database_url, "--manifests-root"])
         .arg(manifests_root)

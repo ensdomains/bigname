@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use sqlx::PgPool;
 use tokio::sync::Mutex;
@@ -9,7 +6,7 @@ use tokio::sync::Mutex;
 use crate::{
     IngestError, Result,
     coinbase_sql::CoinbaseSqlSource,
-    fetching::{estimated_write_bytes, fetch_selected_facts},
+    fetching::estimated_write_bytes,
     manifest::load_watch_filter,
     plan::{
         BASE_COINBASE_SEAM_BLOCK, effective_redo_start, primary_source, publishable_heads,
@@ -23,10 +20,11 @@ pub(crate) mod prefetch;
 pub(crate) mod query;
 mod redo;
 mod source_floor;
+mod window;
 
 use prefetch::{Prefetcher, RangeLogCache};
-use query::QueryContext;
 use redo::LoadedWindow;
+use window::WindowReader;
 
 const BLOCKS_PER_BATCH: i64 = 256;
 const COINBASE_BLOCKS_PER_BATCH: i64 = 1_024;
@@ -441,17 +439,8 @@ impl Engine {
         prefetch_ceiling: Option<i64>,
     ) -> Result<LoadedWindow> {
         let provider = self.resolver(chain_id, source, all_sources).await?;
-        let numbers = (from..=to).collect::<Vec<_>>();
-        let resolved = provider.resolve(&numbers).await.map_err(|error| {
-            provider_error(
-                &format!("failed to resolve ingest blocks {from}..={to}"),
-                error,
-            )
-        })?;
-        let mut filter = load_watch_filter(&self.pool, chain_id, from, to).await?;
+        let filter = load_watch_filter(&self.pool, chain_id, from, to).await?;
         let coinbase = normalized_kind(&source.kind) == ProviderKind::Coinbase;
-        let mut queries = filter.queries();
-        let mut selected_by_identity = BTreeMap::new();
         let coinbase_source = if coinbase {
             Some(self.coinbase_source(chain_id, source).await?)
         } else {
@@ -460,33 +449,19 @@ impl Engine {
         let prefetcher = prefetch_ceiling.filter(|_| !coinbase).map(|ceiling| {
             Prefetcher::new(&self.range_logs, provider_key(chain_id, source), ceiling)
         });
-        let mut context = QueryContext {
+        let window::FetchedWindow {
+            resolved,
+            facts,
+            selected,
+            queries,
+        } = WindowReader {
             provider: &provider,
-            resolved: &resolved,
             coinbase: coinbase_source.as_deref(),
             prefetch: prefetcher.as_ref(),
-        };
-        query::fetch_into(&context, &queries, &mut selected_by_identity).await?;
-        if let Some(announcement_topic0) = filter.registry_announcement_topic0() {
-            let announcements = selected_by_identity
-                .values()
-                .filter(|log| {
-                    log.topics
-                        .first()
-                        .is_some_and(|topic| topic.eq_ignore_ascii_case(announcement_topic0))
-                })
-                .map(|log| (log.address.clone(), log.block_number))
-                .collect::<BTreeSet<_>>();
-            let supplemental = filter.admit_registry_announcements(announcements, from, to);
-            // Discovery queries admit addresses mid-window, so a range read ahead of the
-            // announcement would be incomplete: they always read the window itself.
-            context.prefetch = None;
-            query::fetch_into(&context, &supplemental, &mut selected_by_identity).await?;
-            queries.extend(supplemental);
+            filter: &filter,
         }
-        let mut selected = selected_by_identity.into_values().collect::<Vec<_>>();
-        selected.retain(|log| filter.includes_log(&log.address, &log.topics, log.block_number));
-        let facts = fetch_selected_facts(&provider, &resolved, selected.clone(), &filter).await?;
+        .fetch(from, to)
+        .await?;
         let estimated_write_bytes = estimated_write_bytes(&facts);
         self.enforce_window_floor(chain_id, source, from, to)
             .await?;

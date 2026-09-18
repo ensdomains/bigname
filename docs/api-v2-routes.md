@@ -164,7 +164,7 @@ Field ownership:
   source answer entries, and `raw_claim_name` preserves an invalid reverse
   claim exactly as observed for that tuple.
 - Role-summary containers are route-local: `grants` groups
-  `{grant_scope, powers}` entries under one `address` inside
+  `{grant_relation?, grant_scope, powers}` entries under one `address` inside
   `role_summary`.
 - Namespace metadata containers are route-local: `networks` is the
   product-facing list of public chain mappings for one namespace.
@@ -833,8 +833,8 @@ collection route carry neither header.
   [authority arm](glossary.md#authority-epoch) is outside the
   `verified_authority_arms` the selected `ens_execution` manifest declares
   (`manifests.md` § `verified_authority_arms`; absent means `["ens_v1"]`, so
-  an `ens_v2`-selected name is refused on the Mainnet and Sepolia profiles and
-  admitted on `sepolia-hackathon`). Neither refusal dispatches a provider call.
+  an `ens_v2`-selected name is refused on Mainnet and
+  admitted on the official `sepolia` profile). Neither refusal dispatches a provider call.
   Bound ENS names of either arm with a non-null exact resolver carry a
   projected direct topology (`execution.md` § Resolver-record lookup), so an
   admitted arm executes the direct route and compares against the indexed
@@ -845,10 +845,8 @@ collection route carry neither header.
   exact resolver, a projected name identity and DNS wire name, no alias,
   linked-subregistry, projected wildcard, or cross-chain transport path, and an
   admitted Universal Resolver manifest entrypoint on that chain
-  (`ens_execution`, checked in for both profiles; the separately evidenced
-  `sepolia-hackathon` profile declares its own hackathon Universal Resolver
-  under the same family, see `manifests.md` § Sepolia hackathon deployment
-  evidence). Verified ENS reads follow
+  (`ens_execution`, checked in for both profiles; see the
+  [official Sepolia deployment](sepolia-deployment.md)). Verified ENS reads follow
   the same rules on both chains; only the chain, and therefore the
   `BIGNAME_API_CHAIN_RPC_URLS` entry they need (`ethereum-mainnet=` or
   `ethereum-sepolia=`), differs. This makes the indexed null-resolver miss
@@ -1055,14 +1053,14 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 | ABI records | Outside the grammar | No public key. ENS defines ABI records by node and accepted content-type mask. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IABIResolver.sol:L4-L16 @ ens_v1@91c966f) |
 | Public keys | Outside the grammar | No public key. ENS defines a secp256k1 public-key record. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IPubkeyResolver.sol:L4-L12 @ ens_v1@91c966f) |
 | Interface declarations | Outside the grammar | No public key. ENS defines an interface-ID-to-implementer lookup. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IInterfaceResolver.sol:L4-L22 @ ens_v1@91c966f) |
-| Reverse-claim name records | Served outside the grammar | No record key. For indexed claim intake, only a `RecordChanged` row whose `primary_claim_source` was produced when the reverse-registrar adapter interpreted `NameForAddrChanged` is attributed to a reverse claim. Among indexed `RecordChanged` rows, only those attributed rows contribute claim values to the primary-name projection; a `ReverseChanged` event for the same address, coin type, and namespace must also exist, and the indexed claim attaches to that event's key. ENSv1's standalone reverse registrar emits `NameForAddrChanged` when it stores an address's name. (upstream: .refs/ens_v1/contracts/reverseRegistrar/StandaloneReverseRegistrar.sol:L28-L30 @ ens_v1@91c966f) Mainnet ENS reverse resolution instead uses the separate [event-silent](glossary.md#event-silent) reverse-resolver [hydration](glossary.md#hydration) or request-scoped [verified lookup](glossary.md#verified-lookup) path, not indexed `NameForAddrChanged` claim intake; its reverse registrar emits `ReverseClaimed` and calls the selected resolver to set the name. (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L76-L84 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123-L131 @ ens_v1@91c966f) The `sepolia-hackathon` [deployment profile](glossary.md#deployment-profile)'s declared ReverseRegistrar has the same shape: its `ReverseClaimed` keys the indexed tuple and records the reverse node's resolver, its PublicResolver `NameChanged` stays unattributed, and no hydration is admitted for that resolver, so the indexed answer is `not_found` and the claim value comes from the verified path. |
-| General resolver name records | History only; outside the grammar | No public key or current value surface. Every resolver-family `NameChanged` is retained as an unattributed normalized `RecordChanged` in the `name` family, regardless of resolver or node type; a write for an `<addr>.addr.reverse` node therefore remains unattributed. When the row is associated with a materialized name, `GET /v1/names/{name}/history` exposes the change as `type=record` without its stored name value. The record routes reject the `name` family, and the primary-name projection ignores these rows because they have no `primary_claim_source`. ENSv1 defines `NameChanged` generically by node and name. (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L4-L11 @ ens_v1@91c966f) |
+| Reverse-claim name records | Served outside the grammar | No record key. The primary-name projection takes an indexed claim value from one of two event paths, chosen by the event that keys the address, coin type, and namespace tuple. (1) When the reverse-registrar adapter interprets `NameForAddrChanged`, it emits the tuple's `ReverseChanged` and a `RecordChanged` row carrying `primary_claim_source`; the claim attaches to that tuple. ENSv1's standalone reverse registrar emits `NameForAddrChanged` when it stores an address's name. (upstream: .refs/ens_v1/contracts/reverseRegistrar/StandaloneReverseRegistrar.sol:L28-L30 @ ens_v1@91c966f) (2) The ENSv1 `addr.reverse` ReverseRegistrar declared by the Mainnet and canonical `sepolia` [deployment profiles](glossary.md#deployment-profile) emits no name: it emits `ReverseClaimed` with the reverse node, sets that node's registry resolver, and calls the resolver's `setName`, which emits `NameChanged`. (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L76-L84 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123-L131 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L19 @ ens_v1@91c966f) For such a tuple the projection joins the `ReverseClaimed` reverse node to the latest retained `NameChanged` or record-version reset on the node's current registry resolver, as described in [projections.md](projections.md#primary-names). A Sepolia or Mainnet `setName` through an admitted event-emitting PublicResolver therefore yields an indexed `claim_status = success` with the claimed name; a blank name or a version reset yields `not_found`. The joined `RecordChanged` row itself still carries no `primary_claim_source`. When the reverse node's resolver is [event-silent](glossary.md#event-silent) (it stores the name without emitting `NameChanged`), there is nothing to join, so the indexed answer is `not_found` unless reverse-resolver [hydration](glossary.md#hydration) is admitted for that resolver; the canonical `sepolia` profile admits none. Either way the indexed value is a declared claim only: forward verification stays on the request-scoped [verified lookup](glossary.md#verified-lookup) path. |
+| General resolver name records | History only; outside the grammar | No public key or current value surface. Every resolver-family `NameChanged` is retained as an unattributed normalized `RecordChanged` in the `name` family, regardless of resolver or node type; a write for an `<addr>.addr.reverse` node therefore remains unattributed. When the row is associated with a materialized name, `GET /v1/names/{name}/history` exposes the change as `type=record` without its stored name value. The record routes reject the `name` family. The primary-name projection reads these rows only through the reverse-node join in the row above: a `NameChanged` for a node that no retained `ReverseClaimed` tuple names, or on a resolver that is not that node's current registry resolver, contributes nothing. ENSv1 defines `NameChanged` generically by node and name. (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L4-L11 @ ens_v1@91c966f) |
 | Resolver record versions | Outside the grammar | No public key. ENS keeps a per-node record version on the resolver and bumps it on `clearRecords`, emitting `VersionChanged`; the indexed record inventory retains that event as the boundary that invalidates older record values, but the version number itself is not served. (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L20-L22 @ ens_v1@91c966f) |
 | DNS record sets | Outside the grammar | No public key. ENS defines DNS record-set update/delete events and a wire-format getter. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSRecordResolver.sol:L4-L24 @ ens_v1@91c966f) |
 | DNS zone hashes | Outside the grammar | No public key. ENS defines a DNS zone-hash update event and getter. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSZoneResolver.sol:L4-L15 @ ens_v1@91c966f) |
 | Legacy content and multihash | Outside the grammar | No public key. ENS retains these getters and setters as deprecated resolver functions. (upstream: .refs/ens_v1/contracts/resolvers/Resolver.sol:L86-L93 @ ens_v1@91c966f) |
 | ENSv1 arbitrary data records | Outside the grammar | No public key. ENS defines string-keyed arbitrary byte data. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDataResolver.sol:L5-L21 @ ens_v1@91c966f) The pinned ENSv1 `PublicResolver` source composes `DataResolver`. (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20-L30 @ ens_v1@91c966f) bigname's ENSv1 resolver-family manifest admits and normalizes `DataChanged`, but its Mainnet PublicResolver admission rows include `DataResolver` in none of their declared resolver compositions; see [ENS mainnet admission](manifests.md#ens-mainnet). This is an admitted-generation composition limit and a grammar limit, not an event-admission limit. |
-| ENSv2 generic data resources | Outside the grammar | No public key. The admitted archived Sepolia resolver ABI exposes `DataChanged` and `NamedDataResource`; their normalized-event exclusion is documented in the [ENSv2 admission divergence](upstream.md#ensv2-data-event-admission-narrowing). (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L360-L375 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L505-L519 @ ens_v2@a971bd64) |
+| ENSv2 generic data resources | Outside the grammar | No public key. The historical June Sepolia resolver ABI exposed `DataChanged` and `NamedDataResource`; their normalized-event exclusion is documented in the [ENSv2 admission divergence](upstream.md#ensv2-data-event-admission-narrowing). (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L360-L375 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L505-L519 @ ens_v2@a971bd64) |
 
 ### `GET /v1/names/{name}/subnames`
 
@@ -1247,6 +1245,18 @@ They can be combined in any order. Other values return `400 invalid_input`.
 Without either payload flag, rows keep their lean shape and carry none of the
 fields below; requesting an exact total does not expand event rows.
 
+Every event row on the three collections carries `id`, an opaque
+64-character identifier that is unique per row and identical for the same
+event wherever it appears — on `/v1/events`, in name history, in address
+history, and across pages — so a consumer merging feeds can de-duplicate on
+it. Nothing else in the row is an identity: rows derived from interpreter
+state rather than from one log have no `transaction_hash` or `log_index`,
+and several rows can share one log. `id` is stable across pages, snapshots,
+and a redo that re-derives the same blocks on the same chain fork; a reorg
+that replaces a block yields new rows with new ids, and a
+[re-derivation boundary](glossary.md#re-derivation-boundary) may change
+every id, so it is a merge key, not a durable reference to store.
+
 `include=data` adds two fields to every returned row:
 
 - `contract_address`: the lower-cased address of the contract that emitted the
@@ -1325,8 +1335,9 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   `include=data` and `include=raw` add the [history event
   payloads](#history-event-payloads-includedata-includeraw).
 - Response shape: `data` is an array of dedicated lean event rows:
-  `{type, name, namespace, registration_id, block_number, timestamp,
-  transaction_hash, log_index}`. `registration_id` carries actual registration
+  `{id, type, name, namespace, registration_id, block_number, timestamp,
+  transaction_hash, log_index}`, `id` being the opaque row identity of the
+  [shared payload contract](#history-event-payloads-includedata-includeraw). `registration_id` carries actual registration
   lifecycle identity and is `null` when the event is not associated with a
   registration; reservation facts never carry one. The shared event-identity
   contract, including the committed companion change that adds `resource_id`
@@ -1417,9 +1428,29 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 - Method/path: `GET /v1/permissions`
 - Tier: product read.
 - Purpose: flat permission rows by name, registration, or address, including
-  registrations that are no longer a name's current one.
+  registrations that are no longer a name's current one. An `address` anchor
+  answers “what resources does account X operate?” for both direct and
+  effective account-wide grants.
 - Request parameters: at least one of `name`, `registration_id`, or `address`;
-  filters are combinable. Query `namespace`, `include=lineage`, `cursor`,
+  filters are combinable intersections. A `name` resolves its current
+  `registration_id`; an explicit `registration_id` must match it when both are
+  supplied, and `address` then restricts the permission subject. An explicit or
+  name-implied `namespace` filters registrations before pagination; an
+  address-only request without `namespace` continues to span all namespaces.
+  For the limited solo beta, address-only operator discovery retains a known
+  scalability limitation: a small page can still scan or sort an owner's
+  resource keys, and sparse namespace eligibility or cursor filtering can
+  require many eligibility lookups. The accepted optimization reduces payload
+  work in measured finite cases; it does not establish a production latency
+  SLO, a cold-cache guarantee, or a bound for arbitrary owner sizes. Issue #861
+  remains open for scalability. Name or explicit registration filters select
+  one resource and avoid this broad discovery branch. This limitation does not
+  change which rows are eligible or the cursor ordering.
+  An explicit namespace must be public; an unknown value returns `404 not_found`
+  before cursor decoding.
+  Direct rows and effective registry-operator rows share the namespace
+  membership rule described below.
+  Query `include=lineage`, `cursor`,
   `page_size`, and optional `finality=latest`. `at` and historical `finality`
   values are rejected by the shared latest-state collection rule. An explicit
   namespace filters rows and their summary evidence before pagination. Resource audit
@@ -1428,7 +1459,7 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   registration outside the namespace returns an empty page without its resource
   restrictions or permission support metadata.
 - Response shape: `data` is an array of permission rows
-  `{address, grant_scope, powers, registration_id, name?, authority_context,
+  `{address, grant_relation?, grant_scope, powers, registration_id, name?, authority_context,
   wrapper_state?, wrapper_fuses?}`. The two wrapper fields use the same atomic,
   [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word)
   contract as name detail and appear only for a returned current ENSv1 wrapper
@@ -1471,8 +1502,64 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   `grant_scope` is `{kind, detail}`. Detail is `{}` for `root`, `registry`,
   and `registration`;
   `{resolver: {chain_id, address}}` for `resolver` with numeric `chain_id`;
-  and `{chain_id, manager}` for `record_manager`.
-- Pagination behavior: standard collection pagination.
+  `{chain_id, manager}` for `record_manager`; and
+  `{chain_id, authority_kind, authority_contract, owner}` for the
+  [`account` permission scope](glossary.md#account-permission-scope). Effective
+  account rows carry `grant_relation=operator` and
+  `powers=["registry_control"]`; direct rows omit `grant_relation` and are
+  otherwise byte-for-byte compatible. For example, a direct row remains:
+
+  ```json
+  {
+    "address": "0xdirect",
+    "grant_scope": {"kind": "registration", "detail": {}},
+    "powers": ["registration_control"],
+    "registration_id": "018f...",
+    "name": "example.eth",
+    "authority_context": "current_for_name"
+  }
+  ```
+
+  An effective registry operator is:
+
+  ```json
+  {
+    "address": "0xoperator",
+    "grant_relation": "operator",
+    "grant_scope": {
+      "kind": "account",
+      "detail": {
+        "chain_id": 1,
+        "authority_kind": "registry",
+        "authority_contract": "0xregistry",
+        "owner": "0xregistry-owner"
+      }
+    },
+    "powers": ["registry_control"],
+    "registration_id": "018f...",
+    "name": "example.eth",
+    "authority_context": "current_for_name"
+  }
+  ```
+
+- Pagination behavior: standard collection pagination with fixed sort
+  `address_registration_scope_asc` and keyset
+  `(subject, resource_id, scope)`. Direct and account
+  scopes share that order. The account key is
+  `account:{chain_id}:{authority_kind}:{authority_contract}:{owner}`. The
+  opaque cursor binds the exact normalized collection anchor: normalized
+  `address`, normalized `name` when supplied, resolved `registration_id`,
+  namespace when explicit or implied by a name (and namespace absence for an
+  address-only request, matching its all-namespace result set),
+  `include=lineage`, the fixed sort, the last keyset tuple, and the captured
+  publication. Malformed cursor
+  encoding, a different bound filter anchor or sort, and a missing or malformed
+  keyset tuple are rejected. A well-formed edited keyset tuple is accepted as a
+  caller-supplied resume position; the cursor is opaque but is not
+  cryptographically signed. A name-anchored cursor is rejected for a different
+  name or a registration-only request, even when both names resolve to the same
+  registration. Crossing from direct to operator rows neither duplicates nor
+  omits a row.
 - Snapshot behavior: a `name` filter resolves its current registration anchor
   and permission rows under the same revalidated publication, disclosed in
   `meta.as_of`. Completeness metadata remains available. Continuations bind the
@@ -1483,15 +1570,20 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   current state. Unsupported filter combinations return `422 unsupported`;
   pairing `name` with a `registration_id` that is not that name's selected
   current registration is not one of them. It is a supported query that selects
-  nothing, so it returns `200` with empty `data`.
+  nothing, so it returns `200` with empty `data`; its reason is the explicitly
+  requested registration's support classification under the resource-bound
+  rule.
   A supplied `name` that is missing or unrecognized, whose current name is
   marked unsupported, or that resolves to a current name not bound to a
   registration resource cannot select a supported current registration. Its
   request-relative empty result returns `meta.completeness=partial` with
   `unsupported_reason=permission_support_unknown`; it does not prove that the
-  name has no permission rows. By contrast, a resolved current name paired with
-  an explicitly different `registration_id` is a supported, proven-empty
-  selection, so its empty page has no `completeness` or `unsupported_reason`.
+  name has no permission rows. A resolved current name paired with an explicitly
+  different `registration_id` is a supported empty intersection. Its empty page
+  uses that explicit registration's resource-bound support classification,
+  including the wrapper list or `permission_support_unknown` when
+  applicable. A `registration_id` outside an explicit `namespace` instead
+  returns an empty page without permission support metadata.
   Rows of a wrapped `.eth` name carry the BaseRegistrar lease as
   `registration_id`, the same handle name detail serves.
   `GET /v1/permissions?registration_id=<lease>` for a wrapped name returns the
@@ -1501,38 +1593,52 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   way. `restrictions.registration_id` is the lease on every page of a read
   bound to it, including an empty page filtered by `address`.
   The NameWrapper resource itself is not the name's registration, so pairing
-  the name with it is the proven-empty selection.
+  the name with it is the supported empty intersection described above, and
+  reading it alone returns an empty page without permission support metadata.
   An unrecognized namespace returns `404 not_found`. A publication change
   during the read returns `409 stale`, as described above.
   When `name` or `registration_id` binds the read to a registration, the
-  projection-owned per-registration permission summary classifies the result. Independently
-  proven full support adds no completeness metadata. A non-wrapper resource
-  whose standard operator, token-approval, or resolver-delegation paths are not
-  fully served returns `meta.completeness=partial` with
-  `unsupported_reason=approval_and_delegation_permissions_not_supported`.
+  projection-owned per-registration permission summary classifies the result.
+  When a permission surface is not listed, the response carries
+  `meta.completeness=partial`,
+  `unsupported_reason=permissions_partially_listed`, and
+  `meta.unlisted_permission_surfaces`, the sorted codes defined in
+  [api-v2.md](api-v2.md): `ens_v2_registry_operators`, `registrar_approvals`,
+  `resolver_approvals`, and `wrapper_parent_control`. The list shrinks as later
+  parts of issue #605 add these surfaces. An unwrapped registrar- or registry-held registration reports
+  `["registrar_approvals","resolver_approvals"]`.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) An
-  ENSv1 NameWrapper resource returns `meta.completeness=partial` with
-  `unsupported_reason=parent_and_resolver_delegation_permissions_not_supported`:
+  ENSv1 NameWrapper resource reports
+  `["resolver_approvals","wrapper_parent_control"]`:
   its holder, operators, and delegate are rows, while the parent name's control
   over a non-emancipated wrapped subname and resolver operator/delegate
   approvals are not enumerated; the NameWrapper `Ownable` owner is a
   deployment-wide administrator, not a per-registration permission.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565-L589 @ ens_v1@91c966f)
-  Missing or
+  An ENSv2 registry registration reports
+  `["ens_v2_registry_operators","resolver_approvals"]`: its direct role holders
+  are rows, while operators the owner approved on the ENSv2 registry and
+  `PublicResolverV2` operators and delegates are not. It has no BaseRegistrar
+  token, so it never reports `registrar_approvals`.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L51-L59 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L174-L184 @ ens_v2@a971bd64)
+  Independently proven full support omits all three fields. Missing or
   unrecognized summary metadata returns `meta.completeness=partial` with
-  `unsupported_reason=permission_support_unknown` and takes precedence. A mixed
-  wrapper/non-wrapper request uses the approval/delegation partial reason. An
-  address-only read is always at least `partial` with the approval/delegation
-  reason, including for zero rows, unless missing or unrecognized summary
-  metadata wins. Returned rows do not define the request denominator: zero rows
+  `unsupported_reason=permission_support_unknown`, no list, and takes
+  precedence. A request that mixes wrapper, non-wrapper, or ENSv2 registrations
+  reports the sorted union. An address-only read always reports all four codes,
+  including for zero rows or a page with no wrapper or ENSv2 row, unless
+  indeterminate support wins. Returned rows do not define the request denominator: zero rows
   do not prove that no account can mutate the selected name or registration.
   Projected rows are not suppressed by these classifications and remain useful,
   but neither the page nor a role summary is an authoritative permission
-  enumeration while the partial marker is present. Parent control of
-  non-emancipated wrapped subnames and ENSv2 registry operator approval remain
-  separately narrowed until indexed.
+  enumeration while the partial marker is present. Registrar ERC-721 approvals,
+  resolver approvals/delegates, and parent control of non-emancipated wrapped
+  subnames remain absent. ENSv2 registry operators also remain absent, and an
+  ENSv2 registration names that gap as `ens_v2_registry_operators`.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) A `name` filter
   resolves only the selected current registration: a migrated name returns its
   ENSv2 permission rows, while an explicit `registration_id` can still select a
@@ -1546,6 +1652,23 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   `registration_id` read remains available with `resource_audit`; that marker
   does not claim the evidence is live for the reserved name. Every
   permission row carries the required `authority_context` field.
+  An address-filtered request discovers effective registry operators and returns
+  one row per currently matching resource. Name and `registration_id` filters
+  expose the same rows for the selected current authority resource. This includes
+  an ENSv1 or Basenames registrar-token transfer without reclaim when the original
+  registry owner remains nonzero and has approved the operator: the name selects
+  the registry-only resource, and its name, resource and address reads agree.
+  The registrar token's separate resource does not replace that selection.
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L20 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/Registry.sol:L49-L52 @ basenames@1809bbc)
+  Applicability reads the current
+  [registry-owner binding](glossary.md#registry-owner-binding) described in
+  [`projections.md`](projections.md#permissions), rather than
+  deriving it from events. A registry-contract generation move, owner change,
+  zero owner, revocation, or orphaned account or binding lineage makes the row
+  absent. `include=lineage` exposes only the bare `lineage.grant={"kind":"event"}`
+  marker and does not expose registry-binding provenance.
   `current_for_name` means a `name` filter selected the row's current
   registration for that requested name. A row admitted without a `name` filter,
   including an explicit-`registration_id` or address-filtered resource read, is
@@ -1634,6 +1757,11 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 - Response shape: `data` is an array of record-shaped rows with `name`,
   `display_name`, `namespace`, `namehash`, `owner`, `registrant`,
   `registration_status`, `registered_at`, `created_at`, and `expires_at`.
+  Address-name rows also return `permission_resource_id`, the selected
+  permission authority resource UUID used by its inline summary. It remains
+  available without `include=role_summary` and does not redefine name detail's
+  `registration_id`. A `relation=resolves_to` row whose name has only a retained
+  serving resource, and therefore no permission authority, omits it.
   Address-name rows add `is_primary` and `relations`, where `relations` is the
   subset of `owner`, `manager`, and `registrant` that matched, or
   `["resolves_to"]` on a `relation=resolves_to` read. A `resolves_to` row also
@@ -1657,7 +1785,7 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   Resolver records are not included; use `GET /v1/names/{name}/records` for
   resolver data.
   `include=role_summary` adds
-  `role_summary: [{address, grants: [{grant_scope, powers}]}]` grouped by the
+  `role_summary: [{address, grants: [{grant_relation?, grant_scope, powers}]}]` grouped by the
   permission subject address, `restrictions` (the same
   [resource restrictions](glossary.md#resource-restrictions) object
   `GET /v1/permissions` returns for the row's registration, omitted when none
@@ -1665,7 +1793,25 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   for the row. `record_count` counts the known record selectors for the name's
   current registration, including unsupported-family selectors and excluding
   explicit gaps. `grant_scope` uses the same shape documented for
-  `GET /v1/permissions`. `include=counts` adds `subname_count`, the row's
+  `GET /v1/permissions`. Direct grants omit `grant_relation`; effective
+  registry-operator grants carry `grant_relation=operator`, the account scope,
+  and `powers=["registry_control"]`. Operator grants expand roles for resources
+  already on the page but never add or remove address-name membership rows.
+  The include supports at most 1,000 grant rows across all returned summaries,
+  counting each grant again when multiple names share a resource. This is a
+  total nested expansion budget, not a per-name or per-subject limit. Overflows
+  return a whole-request `422 unsupported` with no partial data or truncation.
+  Omit the include, then paginate
+  `GET /v1/permissions?registration_id=<permission_resource_id>` for each selected
+  resource. Preserve `namespace` only if it was explicitly present on the names
+  request; do not add `name` or `address` filters. This reads the same supported
+  permission relation, including supported rows on an unsupported name anchor.
+  Existing unsupported permission families remain unsupported. Reducing the name
+  page can help, but one resource can exceed the limit by itself. Each request
+  binds its own publication: a publication change between the names request and
+  a later permissions request can alter grants. The 1,000-row cap bounds returned grant
+  rows, not bytes or total database work. The name page maximum remains 200.
+  `include=counts` adds `subname_count`, the row's
   direct readable subname count (one bounded per-parent aggregate over the
   page's names), and the same `record_count`; the two expansions combine as
   `include=counts,role_summary`. No `event_count` is offered, for the reason
@@ -1683,20 +1829,19 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   Malformed addresses return `400 invalid_input`. Unsupported public namespaces
   return `404 not_found`. `include=role_summary`
   uses the same publication fence as the base collection, and current-state
-  publication changes produce `409 stale`. The expansion batch-loads
+  publication changes produce `409 stale`. The grant-budget `422 unsupported`
+  is returned only after that fence passes, so a publication change during an
+  overflowing read is also `409 stale`. The expansion batch-loads
   projection-owned permission summaries for every
-  registration on the served page. If all are independently proven full, no
-  completeness metadata is added. A non-wrapper approval/delegation limitation
+  registration on the served page. A page with any unlisted permission surface
   returns `meta.completeness=partial`,
-  `meta.unsupported_fields=["role_summary"]`, and
-  `unsupported_reason=approval_and_delegation_permissions_not_supported`. An
-  ENSv1 NameWrapper summary uses the same `partial` response classification and
-  unsupported field with
-  `unsupported_reason=parent_and_resolver_delegation_permissions_not_supported`.
+  `meta.unsupported_fields=["role_summary"]`,
+  `unsupported_reason=permissions_partially_listed`, and the sorted union of
+  its registrations' `meta.unlisted_permission_surfaces`, using the same codes
+  as `GET /v1/permissions`.
   Projected
   grants remain in `role_summary`, but the expansion is non-authoritative;
-  therefore an empty summary is not a proven empty permission set. A mixed
-  wrapper/non-wrapper page uses the approval/delegation reason. Missing or
+  therefore an empty summary is not a proven empty permission set. Missing or
   unrecognized summary metadata takes precedence and uses
   `permission_support_unknown`.
   Current address relations and
@@ -1802,16 +1947,9 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   Sepolia profile's `ens_execution` Universal Resolver and `ens_v1_registry_l1`
   registry declarations, with the same reverse leg, the same pre-forward
   authority gate, the same hash pinning to the readable Sepolia head, and the
-  same provider limits. On Sepolia the gate does real work: the profile admits
-  ENSv2 registries while its `ens_execution` manifest admits only the `ens_v1`
-  arm, so a claimed name whose selected authority is an `ens_v2` arm is refused
-  before the forward call exactly as described above. Under the
-  `sepolia-hackathon` profile, whose `ens_execution` manifest declares
-  `verified_authority_arms = ["ens_v1", "ens_v2"]` because its proxy is a
-  UniversalResolverV2 walking the hackathon root registry
-  `(upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L21-L45 @ ens_v2@a971bd64)`,
-  an `ens_v2`-selected claim is admitted and the forward call executes through
-  that proxy; `ens_v1`-selected names stay admitted there too. The
+  same provider limits. The official Sepolia manifest admits both `ens_v1` and `ens_v2`
+  through its Universal Resolver proxy; the [deployment inventory](sepolia-deployment.md)
+  records the root binding and rollout verification. The
   Sepolia evidence below explains the projected authority and the ENSv1-path
   behavior that route relies on. An
   unwrapped ENSv1→ENSv2 migration clears the migrated node's ENSv1 resolver
@@ -1837,7 +1975,7 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L454-L458 @ ens_v2@a971bd64)`
   `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L546-L553 @ ens_v2@a971bd64)`
   `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L606-L613 @ ens_v2@a971bd64)`.
-  The `eth`-node redirect is scripted intent plus a deployed Sepolia resolver in
+  The following paragraph records historical ENSv1 routing evidence, rather than the current V2 proxy route. The `eth`-node redirect was scripted intent plus a deployed Sepolia resolver in
   the pinned checkout
   `(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ENSV2Resolver.json:L2 @ ens_v2@a971bd64)`;
   the [`ens_v2` pin](../.refs/MANIFEST.toml) is scoped to the admitted
@@ -1905,12 +2043,8 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   anomaly and returns `exact_name_authority_not_verifiable`. A claim the
   projection supports whose selected authority arm is not listed in the
   selected `ens_execution` manifest's `verified_authority_arms` returns that
-  same reason: on the Mainnet and Sepolia profiles that manifest admits only
-  `ens_v1`, so an `ens_v2`-selected claim has no forward-resolution path there
-  and the route declines rather than resolving the name through a Universal
-  Resolver its own authority selection has already ruled out. A profile whose
-  manifest lists `ens_v2` (the `sepolia-hackathon` profile) admits that claim
-  instead. The refusal case needs a deployment profile that can support an
+  same reason. Mainnet lists only `ens_v1`; the official Sepolia manifest
+  lists both arms and therefore admits an `ens_v2`-selected claim. The refusal case needs a deployment profile that can support an
   ENSv2 selection at all; where the deployment profile shadows the ENSv2 arm,
   the name is already unsupported and takes the first case instead. None of the
   three cases dispatches a forward resolver call. A live reverse claim has

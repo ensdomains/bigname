@@ -23,6 +23,49 @@ pub(super) fn materialize(
 ) -> anyhow::Result<()> {
     for discovery in discoveries {
         match discovery {
+            DiscoveryDraft::ResolverCreation => {
+                let address = normalize_address(&raw.emitting_address)?;
+                let instance = selected.contract_instance_id;
+                let observation_key = format!("resolver-created:{address}");
+                push_contract(
+                    output,
+                    selected.source.manifest_id,
+                    raw,
+                    instance,
+                    &address,
+                    "ResolverCreated",
+                );
+                output.discovery_edges.push(DiscoveryEdge {
+                    chain_id: raw.chain_id.clone(),
+                    edge_kind: "resolver".to_owned(),
+                    from_contract_instance_id: instance,
+                    to_contract_instance_id: instance,
+                    discovery_source: "ResolverCreated".to_owned(),
+                    admission_basis: "resolver_created".to_owned(),
+                    source_manifest_id: selected.source.manifest_id,
+                    observation_key: observation_key.clone(),
+                    active_from_block_number: raw.block_number,
+                    active_from_block_hash: raw.block_hash.clone(),
+                    canonicality_state: raw.canonicality_state.clone(),
+                    provenance: discovery_provenance(
+                        raw,
+                        "ResolverCreated",
+                        selected.source.manifest_id,
+                        &observation_key,
+                    ),
+                });
+                catalog.admit(AddressAdmissionInput {
+                    address,
+                    contract_instance_id: instance,
+                    source_manifest_id: Some(selected.source.manifest_id),
+                    role: None,
+                    discovery_edge_kind: Some("resolver".to_owned()),
+                    discovery_from_contract_instance_id: Some(instance),
+                    discovery_observation_key: Some(observation_key),
+                    active_from_block: Some(raw.block_number),
+                    active_to_block: None,
+                });
+            }
             DiscoveryDraft::RegistryAnnouncement => {
                 let rule = catalog
                     .rule(
@@ -194,7 +237,12 @@ pub(super) fn materialize(
                         &observation_key,
                     ),
                 });
-                if edge_kind == "resolver" {
+                if edge_kind == "resolver"
+                    && !matches!(
+                        selected.source.source_family.as_str(),
+                        "ens_v2_registry_l1" | "ens_v2_root_l1"
+                    )
+                {
                     catalog.admit(AddressAdmissionInput {
                         address,
                         contract_instance_id: target,

@@ -1,5 +1,8 @@
+#[path = "catalog_admissions.rs"]
+mod admissions;
 #[path = "catalog_announcements.rs"]
 mod announcements;
+use admissions::Admissions;
 pub(super) use announcements::ANNOUNCEMENT_ADMISSION_BASIS;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -30,7 +33,7 @@ pub(super) struct Catalog {
     by_id: BTreeMap<i64, usize>,
     provenance_by_id: BTreeMap<i64, ManifestProvenance>,
     rules: Vec<DiscoveryRuleInput>,
-    admissions: Vec<AddressAdmissionInput>,
+    admissions: Admissions,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -88,7 +91,7 @@ impl Catalog {
             by_id,
             provenance_by_id,
             rules,
-            admissions,
+            admissions: Admissions::new(admissions),
         })
     }
 
@@ -125,47 +128,45 @@ impl Catalog {
         let Some(topic0) = raw.topics.first() else {
             return Ok(None);
         };
-        let manifest_declared_emitter = self
+        let admissions = self
             .admissions
+            .for_address(&raw.emitting_address)
+            .filter(|admission| applies(admission, raw))
+            .collect::<Vec<_>>();
+        let manifest_declared_emitter = admissions
             .iter()
-            .any(|admission| admission.discovery_edge_kind.is_none() && applies(admission, raw));
-        let declared_namespaces = self
-            .admissions
+            .copied()
+            .any(|admission| admission.discovery_edge_kind.is_none());
+        let declared_namespaces = admissions
             .iter()
-            .filter(|admission| admission.discovery_edge_kind.is_none() && applies(admission, raw))
+            .copied()
+            .filter(|admission| admission.discovery_edge_kind.is_none())
             .filter_map(|admission| admission.source_manifest_id)
             .filter_map(|manifest_id| self.source(manifest_id))
             .map(|source| source.namespace.as_str())
             .collect::<BTreeSet<_>>();
-        let announcement_namespaces = self
-            .admissions
+        let announcement_namespaces = admissions
             .iter()
+            .copied()
             .filter(|admission| {
-                admission.discovery_edge_kind.as_deref()
-                    != Some(MIGRATION_REGISTRY_ASSOCIATION_KIND)
-                    && applies(admission, raw)
-                    && admission.discovery_edge_kind.as_deref() == Some("registry_announcement")
+                admission.discovery_edge_kind.as_deref() == Some("registry_announcement")
             })
             .filter_map(|admission| admission.source_manifest_id)
             .filter_map(|manifest_id| self.source(manifest_id))
             .map(|source| source.namespace.as_str())
             .collect::<BTreeSet<_>>();
-        let resolver_namespaces = self
-            .admissions
+        let resolver_namespaces = admissions
             .iter()
-            .filter(|admission| {
-                applies(admission, raw)
-                    && admission.discovery_edge_kind.as_deref() == Some("resolver")
-            })
+            .copied()
+            .filter(|admission| admission.discovery_edge_kind.as_deref() == Some("resolver"))
             .filter_map(|admission| admission.source_manifest_id)
             .filter_map(|manifest_id| self.source(manifest_id))
             .map(|source| source.namespace.as_str())
             .collect::<BTreeSet<_>>();
         let mut candidates = Vec::new();
         let mut public_refusals = Vec::new();
-        for admission in self.admissions.iter().filter(|admission| {
+        for admission in admissions.iter().copied().filter(|admission| {
             admission.discovery_edge_kind.as_deref() != Some(MIGRATION_REGISTRY_ASSOCIATION_KIND)
-                && applies(admission, raw)
         }) {
             let Some(manifest_id) = admission.source_manifest_id else {
                 continue;
@@ -173,6 +174,9 @@ impl Catalog {
             let source = self
                 .source(manifest_id)
                 .with_context(|| format!("admission references inactive manifest {manifest_id}"))?;
+            if announcements::is_registry_pointer(source, admission) {
+                continue;
+            }
             let rank = match admission.discovery_edge_kind.as_deref() {
                 Some("registry_announcement") => 1,
                 None if announcement_namespaces.contains(source.namespace.as_str()) => 0,
@@ -238,10 +242,9 @@ impl Catalog {
                     && (self.is_match_all(source, event)
                         || announcements::announces_declared_implementation(source, event, raw))
             }) {
-                let contract_instance_id = self
-                    .admissions
+                let contract_instance_id = admissions
                     .iter()
-                    .filter(|admission| applies(admission, raw))
+                    .copied()
                     .map(|admission| admission.contract_instance_id)
                     .next()
                     .unwrap_or_else(|| contract_id(&raw.chain_id, &raw.emitting_address));
@@ -305,11 +308,7 @@ impl Catalog {
     }
 
     pub(super) fn retire(&mut self, edge_kind: &str, from: Uuid, observation_key: &str) {
-        self.admissions.retain(|existing| {
-            existing.discovery_edge_kind.as_deref() != Some(edge_kind)
-                || existing.discovery_from_contract_instance_id != Some(from)
-                || existing.discovery_observation_key.as_deref() != Some(observation_key)
-        });
+        self.admissions.retire(edge_kind, from, observation_key);
     }
 
     pub(super) fn contract_instance_for_address(
@@ -319,7 +318,7 @@ impl Catalog {
     ) -> anyhow::Result<Option<Uuid>> {
         let mut instances = self
             .admissions
-            .iter()
+            .for_address(address)
             .filter(|admission| {
                 admission.address.eq_ignore_ascii_case(address)
                     && admission
@@ -369,7 +368,7 @@ impl Catalog {
         contract_instance_id: Uuid,
     ) -> Option<&ManifestSource> {
         self.admissions
-            .iter()
+            .for_instance(contract_instance_id)
             .filter(|admission| admission.contract_instance_id == contract_instance_id)
             .filter_map(|admission| admission.source_manifest_id)
             .find_map(|manifest_id| self.source(manifest_id))
@@ -380,7 +379,7 @@ impl Catalog {
         source_family: &str,
         role: &str,
     ) -> Option<&str> {
-        self.admissions.iter().find_map(|admission| {
+        self.admissions.for_role(role).find_map(|admission| {
             (admission.role.as_deref() == Some(role)
                 && admission
                     .source_manifest_id
@@ -395,7 +394,7 @@ impl Catalog {
         source_family: &str,
         role: &str,
     ) -> Option<i64> {
-        self.admissions.iter().find_map(|admission| {
+        self.admissions.for_role(role).find_map(|admission| {
             (admission.role.as_deref() == Some(role)
                 && admission
                     .source_manifest_id
@@ -412,7 +411,7 @@ impl Catalog {
         block_number: i64,
     ) -> Vec<MigrationRegistryCorrelation> {
         self.admissions
-            .iter()
+            .for_address(address)
             .filter(|admission| {
                 admission.discovery_edge_kind.as_deref()
                     == Some(MIGRATION_REGISTRY_ASSOCIATION_KIND)

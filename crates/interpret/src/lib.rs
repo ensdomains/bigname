@@ -7,7 +7,8 @@ mod recompute;
 mod write;
 
 pub use engine::{
-    BatchOutcome, BatchRequest, DEFAULT_INTERPRETER_STATE_CACHE_ENTRIES, Engine, Marker, RunMode,
+    BatchOutcome, BatchRequest, DEFAULT_INTERPRET_BLOCKS_PER_BATCH,
+    DEFAULT_INTERPRETER_STATE_CACHE_ENTRIES, Engine, FullStateReason, Marker, RunMode, StateLoader,
 };
 pub use error::{ErrorKind, InterpretError, Result};
 pub use recompute::{RecomputeSummary, finalize_recompute_flags};

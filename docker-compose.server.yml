@@ -5,14 +5,34 @@ x-bigname-env: &bigname-env
   # Empty means "unset"; both binaries treat empty and the negative spellings as off.
   BIGNAME_LOG_JSON: ${BIGNAME_LOG_JSON:-}
 
+# Docker's json-file driver never rotates on its own; unrotated logs are a
+# slow path to filling the volume PostgreSQL writes to.
+x-bigname-logging: &bigname-logging
+  driver: json-file
+  options:
+    max-size: ${BIGNAME_LOG_MAX_SIZE:-100m}
+    max-file: "${BIGNAME_LOG_MAX_FILE:-5}"
+
 x-bigname-service: &bigname-service
   image: ${BIGNAME_IMAGE:-ghcr.io/ensdomains/bigname:latest}
   restart: unless-stopped
+  logging: *bigname-logging
 
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging: *bigname-logging
+    # Every service carries an explicit ceiling so a data-dependent spike kills
+    # that container (and restart brings it back) instead of letting the host
+    # OOM killer pick among the runner, the API, PostgreSQL and the co-resident
+    # archive node. Sizes are deployment-specific: docs/runbooks/production-docker.md
+    # § Capacity preflight. This one must cover shared_buffers plus every
+    # backend's work_mem allocations; an OOM kill of one backend restarts them all.
+    deploy:
+      resources:
+        limits:
+          memory: ${POSTGRES_MEMORY_LIMIT:?set POSTGRES_MEMORY_LIMIT}
     shm_size: ${POSTGRES_SHM_SIZE:-8gb}
     command:
       - postgres
@@ -70,6 +90,10 @@ services:
     stop_grace_period: ${BIGNAME_API_STOP_GRACE_MS:-45000}ms
     <<: *bigname-service
     command: api
+    deploy:
+      resources:
+        limits:
+          memory: ${BIGNAME_API_MEMORY_LIMIT:?set BIGNAME_API_MEMORY_LIMIT}
     ports:
       - "${BIGNAME_API_HOST:-127.0.0.1}:${BIGNAME_API_PORT:-3000}:3000"
       - "${BIGNAME_API_METRICS_HOST:-127.0.0.1}:${BIGNAME_API_METRICS_PORT:-9464}:9464"
@@ -127,6 +151,10 @@ services:
     # below 10s: start-up recovery is bounded by the same ten-second budget,
     # which this period must outlast.
     stop_grace_period: ${BIGNAME_PHASE_RUNNER_STOP_GRACE_PERIOD:-120s}
+    deploy:
+      resources:
+        limits:
+          memory: ${BIGNAME_PHASE_RUNNER_MEMORY_LIMIT:?set BIGNAME_PHASE_RUNNER_MEMORY_LIMIT}
     ports:
       - "${BIGNAME_PHASE_RUNNER_METRICS_HOST:-127.0.0.1}:${BIGNAME_PHASE_RUNNER_METRICS_PORT:-9465}:9465"
     extra_hosts:
@@ -143,6 +171,9 @@ services:
       BIGNAME_DATABASE_URL: ${BIGNAME_DATABASE_URL:?set BIGNAME_DATABASE_URL to the writer login, password percent-encoded}
       BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT: ${BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT:-/app/manifests/mainnet}
       BIGNAME_PHASE_RUNNER_INTERPRETER_STATE_CACHE_ENTRIES: ${BIGNAME_PHASE_RUNNER_INTERPRETER_STATE_CACHE_ENTRIES:-65536}
+      BIGNAME_INTERPRET_BLOCKS_PER_BATCH: ${BIGNAME_INTERPRET_BLOCKS_PER_BATCH:-500}
+      BIGNAME_INTERPRET_LOOKAHEAD_STATEMENT_TIMEOUT_SECS: ${BIGNAME_INTERPRET_LOOKAHEAD_STATEMENT_TIMEOUT_SECS:-0}
+      BIGNAME_INTERPRET_FORCE_FULL_STATE_LOADER: ${BIGNAME_INTERPRET_FORCE_FULL_STATE_LOADER:-false}
       BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL: ${BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL:?set BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL to the SELECT-only verifier login}
       BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR: 0.0.0.0:9465
       BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS: ${BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS:-900}

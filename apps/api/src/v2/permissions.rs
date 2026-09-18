@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use axum::{Json, extract::State};
-use bigname_storage::{PermissionsCurrentAccountResourceCursor, PermissionsCurrentRow};
+use bigname_storage::{
+    EffectivePermissionRow, PermissionGrantRelation, PermissionsCurrentAccountResourceCursor,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::types::Uuid;
@@ -12,12 +14,13 @@ use super::collection_snapshot::CollectionSnapshot;
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::name_record::{registration_id, wrapper_metadata};
 use super::permission_support::{
-    PermissionSupport, apply_permissions_collection_support_meta, permission_support_for_resources,
+    PermissionRequestScope, PermissionSupport, apply_permissions_collection_support_meta,
+    permission_support_for_resources,
 };
 use super::{
-    AddressNameGrant, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, QueryParams,
-    StrictQueryParams, V2Error, V2Result, decode, encode, permission_powers_value,
-    permission_scope_value,
+    AddressNameGrant, CursorPayload, Envelope, GrantRelation, Meta, Page, QueryParamAllowlist,
+    QueryParams, StrictQueryParams, V2Error, V2Result, decode, effective_permission_scope_value,
+    encode, permission_powers_value,
     restrictions::ResourceRestrictions,
     validate_latest_collection_selectors,
     vocab::{AuthorityContext, WrapperFuses, WrapperState},
@@ -35,6 +38,7 @@ use filter::{EmptyPermissionsSelection, permissions_filter_inputs, resolve_permi
 
 const PERMISSIONS_SORT: &str = "address_registration_scope_asc";
 const NAMESPACE_FILTER_KEY: &str = "namespace";
+const NAME_FILTER_KEY: &str = "name";
 const ADDRESS_FILTER_KEY: &str = "address";
 const REGISTRATION_ID_FILTER_KEY: &str = "registration_id";
 const INCLUDE_FILTER_KEY: &str = "include";
@@ -127,17 +131,29 @@ pub(crate) async fn get_permissions(
         .transpose()?;
 
     if let Some(selection) = resolved.empty_selection {
+        let support = if selection == EmptyPermissionsSelection::SupersededNameRegistrationPair {
+            let ids = resolved.resource_id.into_iter().collect::<Vec<_>>();
+            let summaries =
+                bigname_storage::load_permissions_current_resource_summaries(&state.pool, &ids)
+                    .await
+                    .map_err(|_| V2Error::internal_error("failed to load permission support"))?;
+            permission_support_for_resources(&ids, &summaries)
+        } else {
+            PermissionSupport::UNKNOWN
+        };
         return Ok(empty_permissions_response(
             &params,
             selection,
+            support,
             snapshot.finish(&state).await?,
         ));
     }
 
-    let storage_page = bigname_storage::load_permissions_current_account_resource_page(
+    let storage_page = bigname_storage::load_effective_permissions_account_resource_page(
         &state.pool,
         resolved.subject.as_deref(),
         resolved.resource_id,
+        // A name filter already selected its registration inside the name's namespace.
         params
             .namespace
             .as_deref()
@@ -196,7 +212,11 @@ pub(crate) async fn get_permissions(
     apply_permissions_collection_support_meta(
         &mut meta,
         permission_support,
-        resolved.resource_id.is_some(),
+        if resolved.resource_id.is_some() {
+            PermissionRequestScope::ResourceBound
+        } else {
+            PermissionRequestScope::AccountWide
+        },
     );
     let restrictions = resolved
         .resource_id
@@ -232,14 +252,25 @@ pub(crate) async fn get_permissions(
 fn empty_permissions_response(
     params: &QueryParams,
     selection: EmptyPermissionsSelection,
+    support: PermissionSupport,
     mut meta: Meta,
 ) -> Json<PermissionsResponse> {
     match selection {
         EmptyPermissionsSelection::MissingOrUnsupportedNameAnchor => {
-            apply_permissions_collection_support_meta(&mut meta, PermissionSupport::Unknown, false);
+            apply_permissions_collection_support_meta(
+                &mut meta,
+                PermissionSupport::UNKNOWN,
+                PermissionRequestScope::AccountWide,
+            );
         }
-        EmptyPermissionsSelection::SupersededNameRegistrationPair
-        | EmptyPermissionsSelection::NamespaceRegistrationMismatch
+        EmptyPermissionsSelection::SupersededNameRegistrationPair => {
+            apply_permissions_collection_support_meta(
+                &mut meta,
+                support,
+                PermissionRequestScope::ResourceBound,
+            );
+        }
+        EmptyPermissionsSelection::NamespaceRegistrationMismatch
         | EmptyPermissionsSelection::ResourceIsNotARegistration => {}
     }
 
@@ -260,7 +291,7 @@ fn empty_permissions_response(
 }
 
 pub(crate) fn build_permission_row(
-    row: &PermissionsCurrentRow,
+    row: &EffectivePermissionRow,
     name: Option<&str>,
     declared_summary: Option<&Value>,
     include_lineage: bool,
@@ -274,7 +305,10 @@ pub(crate) fn build_permission_row(
     Ok(PermissionRow {
         address: row.subject.clone(),
         grant: AddressNameGrant {
-            grant_scope: permission_scope_value(&row.scope)?,
+            grant_relation: row.grant_relation.map(|relation| match relation {
+                PermissionGrantRelation::Operator => GrantRelation::Operator,
+            }),
+            grant_scope: effective_permission_scope_value(&row.scope)?,
             powers: permission_powers_value(&row.effective_powers)?,
         },
         registration_id: declared_summary
@@ -347,7 +381,7 @@ fn permissions_include_lineage(include: &[String]) -> V2Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use bigname_storage::{PermissionScope, PermissionsCurrentAccountResourceCursor};
+    use bigname_storage::{EffectivePermissionScope, PermissionsCurrentAccountResourceCursor};
     use serde_json::json;
     use sqlx::types::time::OffsetDateTime;
 
@@ -375,14 +409,15 @@ mod tests {
     fn sample_permissions_row(
         inheritance_path: Value,
         transfer_behavior: Value,
-    ) -> PermissionsCurrentRow {
-        PermissionsCurrentRow {
+    ) -> EffectivePermissionRow {
+        EffectivePermissionRow {
             resource_id: Uuid::parse_str(REGISTRATION_ID).expect("uuid literal must parse"),
             subject: ADDRESS.to_owned(),
-            scope: PermissionScope::Resolver {
+            scope: EffectivePermissionScope::Direct(bigname_storage::PermissionScope::Resolver {
                 chain_id: "ethereum-mainnet".to_owned(),
                 resolver_address: "0x0000000000000000000000000000000000000ABC".to_owned(),
-            },
+            }),
+            grant_relation: None,
             effective_powers: json!(["set_resolver"]),
             grant_source: json!({
                 "kind": "raw_log",
@@ -513,6 +548,23 @@ mod tests {
                 transfer_behavior: None,
             })
         );
+    }
+
+    #[test]
+    fn registry_operator_grants_emit_operator_relation() {
+        let mut row = sample_permissions_row(json!([]), json!({"mode": "owner_scoped"}));
+        row.grant_relation = Some(PermissionGrantRelation::Operator);
+        row.scope = EffectivePermissionScope::Account {
+            chain_id: "ethereum-mainnet".to_owned(),
+            authority_kind: "registry".to_owned(),
+            authority_contract: "0x0000000000000000000000000000000000000c33".to_owned(),
+            owner: "0x0000000000000000000000000000000000000a11".to_owned(),
+        };
+        let mapped = build_permission_row(&row, None, None, false, AuthorityContext::ResourceAudit)
+            .expect("registry operator grant must map");
+        let value = serde_json::to_value(mapped).expect("permission row must serialize");
+
+        assert_eq!(value["grant_relation"], json!("operator"));
     }
 
     #[test]
