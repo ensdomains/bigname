@@ -658,8 +658,12 @@ shared production/test activation function after all batch correlation paths fin
 there is no second test-only transition implementation. Its transition carries the exact
 logical name, full chain position, expected `ens_v1` arm, predecessor selector,
 expected `ens_v2` arm, and concrete successor binding/resource. The writer
-resolves the predecessor under `FOR UPDATE` and performs the
-cross-arm close and successor retain/open in that same transaction. It never
+locks the exact ENSv2 successor binding `FOR UPDATE`, resolves the predecessor
+(the wrapper and child paths lock the one NameWrapper binding they close
+`FOR UPDATE`; the registrar path reads the lease's evidence rows unlocked and
+takes row locks only through the `UPDATE` that closes the open ENSv1
+binding), and performs the cross-arm close and successor retain/open in that
+same transaction. It never
 ranks multiple predecessors and never applies the transition to descendants.
 There is no runtime or manifest activation flag.
 
@@ -669,13 +673,34 @@ transfer to the Graveyard and select the lease: the one resource of the name
 that carries an activated registrar lifecycle event (`RegistrationGranted`,
 `RegistrationRenewed`, `ExpiryChanged`, `TokenControlTransferred`) with the
 recorded token id, emitted by the recorded BaseRegistrar instance before that
-cleanup, that once had an `ens_v1` binding, and whose registration was not
-released before the cleanup. The token is the predecessor because the
-controller takes it from whoever holds it and reclaims the registry record
-for itself before parking both in the Graveyard; the registry-owner record
-never holds the token. A lease whose binding a
+cleanup, and whose registration was not released before the cleanup. Whether
+the lease ever had an `ens_v1` binding is not consulted. The token is the
+predecessor because the controller takes it from whoever holds it and reclaims
+the registry record for itself before parking both in the Graveyard; the
+registry-owner record never holds the token. A lease whose binding a
 [registry-only handoff](glossary.md#registry-only-handoff) closed earlier
-therefore still qualifies. The writer closes whatever `ens_v1` binding of the
+therefore still qualifies, and so does a lease granted with `registerOnly`
+under such a binding, which never gets a binding of its own. Resources share a
+token id only as successive leases of the same label, and a successor grant
+requires the earlier lease to be past its grace period, which the adapters
+settle as a `RegistrationReleased` no later than the grant's block, so the
+release guard leaves exactly one live lease. Evidence positioned at the cleanup
+itself counts only for a lease whose binding sits at that same log, the
+registrar identity materialized at `NameUnwrapped`; otherwise the cleanup
+transfer, which every migration emits on the lease resource, could stand in
+as the only evidence for a lease never observed before the transaction.
+Which of the four kinds carries the token id depends on the deployment profile:
+the Sepolia profile indexes the BaseRegistrar's numeric `NameRegistered` and
+`NameRenewed` as lifecycle events with the token id, while the Mainnet profile
+declares them for `RegistrationReleased` only and the controller-derived
+`RegistrationGranted`/`RegistrationRenewed` after-state carries no token id, so
+on Mainnet only `TokenControlTransferred` is lease evidence. A Mainnet lease
+that was never transferred before its migration has exactly one such event:
+the migration transaction's own holder-to-controller transfer, which precedes
+the cleanup. Predecessor resolution therefore relies on that transfer being
+activated with the name's `logical_name_id`, which the ordinary registrar
+adapter gives it whenever the surface is known.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f) The writer closes whatever `ens_v1` binding of the
 name is still open at the cleanup position, zero or one, and refuses an
 `ens_v1` binding opened at the cleanup instant itself. Authority-boundary
 events are not lease evidence: they carry the registrar observation but land

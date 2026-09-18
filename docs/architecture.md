@@ -352,10 +352,11 @@ owner with an empty resolver and TTL, parks the token in the Graveyard and
 only then registers the name in ENSv2, and the registry-owner record never
 holds the token. The writer finds the lease as the one resource of the name
 with an activated registrar lifecycle event carrying the recorded token id,
-emitted by the recorded BaseRegistrar instance before the cleanup, that once
-had an ENSv1 binding and whose registration was not released before the
-cleanup; a lease binding already closed by a
-[registry-only handoff](glossary.md#registry-only-handoff) still qualifies.
+emitted by the recorded BaseRegistrar instance before the cleanup, and whose
+registration was not released before the cleanup; no binding is consulted, so
+a lease binding already closed by a
+[registry-only handoff](glossary.md#registry-only-handoff) still qualifies and
+so does a `registerOnly` successor lease that never had a binding.
 It then closes whatever ENSv1 binding of the name is still open at the
 cleanup, zero or one, and refuses a binding opened at the cleanup instant,
 which could not be closed there and would outlive the boundary.

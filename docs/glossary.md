@@ -657,10 +657,14 @@ Child, registrar-token `unwrapped`, and `unlocked_wrapped` second-level
 predecessors close at their recorded ENSv1 cleanup; `locked_wrapped`
 second-level predecessors close at the boundary. For the two registrar-token
 paths the predecessor is the BaseRegistrar token itself, found by its own
-lifecycle evidence rather than through the binding that is open: a lease whose
-binding a [registry-only handoff](#registry-only-handoff) already closed still
-qualifies, and the writer closes whatever ENSv1 binding of the name is still
-open at the cleanup, zero or one.
+lifecycle evidence rather than through any binding: a lease whose binding a
+[registry-only handoff](#registry-only-handoff) already closed still qualifies,
+as does a `registerOnly` successor lease that never had one, and the writer
+closes whatever ENSv1 binding of the name is still open at the cleanup, zero or
+one. On Mainnet that evidence is a `TokenControlTransferred` with the token id,
+for a never-transferred lease the migration transaction's own
+holder-to-controller transfer; the Sepolia profile also indexes the numeric
+BaseRegistrar lifecycle events.
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2@a971bd6)
 It is the only writer
 allowed to cross those `authority_arm` values. The transition and its activated
