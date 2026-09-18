@@ -1,26 +1,22 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use axum::{Json, extract::State};
-use bigname_storage::{
-    EffectivePermissionRow, PermissionGrantRelation, PermissionsCurrentAccountResourceCursor,
-};
+use bigname_storage::{EffectivePermissionRow, PermissionGrantRelation};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::types::Uuid;
 
 use crate::AppState;
 
 use super::collection_snapshot::CollectionSnapshot;
-use super::cursor::{cursor_value, invalid_cursor_error};
 use super::name_record::{registration_id, wrapper_metadata};
 use super::permission_support::{
     PermissionRequestScope, PermissionSupport, apply_permissions_collection_support_meta,
     permission_support_for_resources,
 };
 use super::{
-    AddressNameGrant, CursorPayload, Envelope, GrantRelation, Meta, Page, QueryParamAllowlist,
-    QueryParams, StrictQueryParams, V2Error, V2Result, decode, effective_permission_scope_value,
-    encode, permission_powers_value, record_resource_value,
+    AddressNameGrant, Envelope, GrantRelation, Meta, Page, QueryParamAllowlist, QueryParams,
+    StrictQueryParams, V2Error, V2Result, decode, effective_permission_scope_value, encode,
+    permission_powers_value, record_resource_value,
     restrictions::ResourceRestrictions,
     validate_latest_collection_selectors,
     vocab::{AuthorityContext, WrapperFuses, WrapperState},
@@ -35,17 +31,16 @@ use current_name::load_current_name_row;
 
 mod filter;
 pub(crate) use filter::current_registration_row;
-use filter::{EmptyPermissionsSelection, permissions_filter_inputs, resolve_permissions_filter};
 
-const PERMISSIONS_SORT: &str = "address_registration_scope_asc";
+mod paging;
+use filter::{EmptyPermissionsSelection, permissions_filter_inputs, resolve_permissions_filter};
+use paging::{permissions_cursor_payload, permissions_storage_cursor};
+
 const NAMESPACE_FILTER_KEY: &str = "namespace";
 const NAME_FILTER_KEY: &str = "name";
 const ADDRESS_FILTER_KEY: &str = "address";
 const REGISTRATION_ID_FILTER_KEY: &str = "registration_id";
 const INCLUDE_FILTER_KEY: &str = "include";
-const SUBJECT_CURSOR_KEY: &str = "subject";
-const RESOURCE_ID_CURSOR_KEY: &str = "resource_id";
-const SCOPE_CURSOR_KEY: &str = "scope";
 
 pub(crate) struct PermissionsQueryParams;
 
@@ -342,50 +337,6 @@ pub(crate) fn build_permission_row(
     })
 }
 
-fn permissions_cursor_payload(
-    cursor: &PermissionsCurrentAccountResourceCursor,
-    filters: &BTreeMap<String, String>,
-) -> CursorPayload {
-    CursorPayload::new(
-        PERMISSIONS_SORT,
-        filters.clone(),
-        BTreeMap::from([
-            (SUBJECT_CURSOR_KEY.to_owned(), cursor.subject.clone()),
-            (
-                RESOURCE_ID_CURSOR_KEY.to_owned(),
-                cursor.resource_id.to_string(),
-            ),
-            (SCOPE_CURSOR_KEY.to_owned(), cursor.scope.clone()),
-        ]),
-        None,
-    )
-}
-
-fn permissions_storage_cursor(
-    payload: &CursorPayload,
-    expected_filters: &BTreeMap<String, String>,
-) -> V2Result<PermissionsCurrentAccountResourceCursor> {
-    if payload.sort != PERMISSIONS_SORT {
-        return Err(invalid_cursor_error());
-    }
-    if &payload.filters != expected_filters {
-        return Err(invalid_cursor_error());
-    }
-    if payload.last_item.len() != 3 {
-        return Err(invalid_cursor_error());
-    }
-
-    let resource_id = cursor_value(payload, RESOURCE_ID_CURSOR_KEY, invalid_cursor_error)?
-        .parse::<Uuid>()
-        .map_err(|_| invalid_cursor_error())?;
-
-    Ok(PermissionsCurrentAccountResourceCursor {
-        subject: cursor_value(payload, SUBJECT_CURSOR_KEY, invalid_cursor_error)?,
-        resource_id,
-        scope: cursor_value(payload, SCOPE_CURSOR_KEY, invalid_cursor_error)?,
-    })
-}
-
 fn permissions_include_lineage(include: &[String]) -> V2Result<bool> {
     let mut include_lineage = false;
     for value in include {
@@ -399,8 +350,11 @@ fn permissions_include_lineage(include: &[String]) -> V2Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use bigname_storage::{EffectivePermissionScope, PermissionsCurrentAccountResourceCursor};
     use serde_json::json;
+    use sqlx::types::Uuid;
     use sqlx::types::time::OffsetDateTime;
 
     use super::*;
