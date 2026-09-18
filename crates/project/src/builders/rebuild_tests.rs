@@ -869,3 +869,197 @@ async fn direct_topology_joins_names_to_bindings_once() -> Result<()> {
     }
     rebuild.finish().await
 }
+
+/// Whether the plan reads `relation` through its index somewhere, in key order or as a bitmap of
+/// the matching rows.
+fn index_scanned(plan: &Value, relation: &str) -> bool {
+    any_node(plan, true, &|node| {
+        matches!(
+            node["Node Type"].as_str(),
+            Some("Index Scan" | "Index Only Scan" | "Bitmap Heap Scan")
+        ) && node["Relation Name"] == relation
+    })
+}
+
+/// The topology serializer reads the staged names whose topology is an object a page at a time
+/// in key order and writes each page back. The stage is created like the live table without its
+/// key, so every page read and every write read the whole stage: as many full scans as pages,
+/// each way. Once its last topology writer is done the stage is keyed and analyzed, and each
+/// write is bounded to the first and last key of its page, so both read about a page by index.
+#[tokio::test]
+async fn topology_serialization_reads_and_writes_each_page_by_key() -> Result<()> {
+    use super::name_topology::serialization::{page_statement, update_page};
+    let mut rebuild = Rebuild::through(
+        "rebuild_plan_serialization",
+        PLAN_NAMES,
+        Builder::AddressNames,
+    )
+    .await?;
+    let page: i64 = 250;
+    let stage = "project_stage_name_current";
+    let (staged, with_topology): (i64, i64) = sqlx::query_as(&format!(
+        "SELECT count(*),
+                count(*) FILTER (WHERE jsonb_typeof(declared_summary -> 'topology') = 'object')
+         FROM {stage}"
+    ))
+    .fetch_one(&mut *rebuild.transaction)
+    .await?;
+    ensure!(
+        with_topology >= 3 * page,
+        "{with_topology} names have a topology, too few for a middle page of {page}"
+    );
+    // The names without a topology are spread through the key order, so a page read by key
+    // passes about `staged / with_topology` rows per name it returns.
+    let bound = 2.0 * page as f64 * staged as f64 / with_topology as f64;
+    ensure!(
+        staged as f64 >= 3.0 * bound,
+        "{staged} staged names, too few to tell a page read from a whole-stage read"
+    );
+    let after: String = sqlx::query_scalar(&format!(
+        "SELECT logical_name_id FROM {stage}
+         WHERE jsonb_typeof(declared_summary -> 'topology') = 'object'
+         ORDER BY logical_name_id OFFSET $1 LIMIT 1"
+    ))
+    .bind(with_topology / 2)
+    .fetch_one(&mut *rebuild.transaction)
+    .await?;
+
+    let plan = sqlx::query_scalar::<_, Value>(&format!(
+        "EXPLAIN (ANALYZE, FORMAT JSON) {}",
+        page_statement(true)
+    ))
+    .bind(page)
+    .bind(&after)
+    .fetch_one(&mut *rebuild.transaction)
+    .await?[0]["Plan"]
+        .take();
+    let rows = rows_read(&plan, stage);
+    eprintln!("page read: {stage} rows handled: {rows} of {staged}");
+    ensure!(
+        index_scanned(&plan, stage) && rows <= bound,
+        "the page read handled {rows} of {staged} {stage} rows: {plan}"
+    );
+
+    let rows_of_page: Vec<(String, Value)> = sqlx::query_as(page_statement(true))
+        .bind(page)
+        .bind(&after)
+        .fetch_all(&mut *rebuild.transaction)
+        .await?;
+    ensure!(rows_of_page.len() == page as usize);
+    let plan = update_page("EXPLAIN (ANALYZE, FORMAT JSON) ", &rows_of_page)
+        .build_query_scalar::<Value>()
+        .fetch_one(&mut *rebuild.transaction)
+        .await?[0]["Plan"]
+        .take();
+    let rows = rows_read(&plan, stage);
+    eprintln!("page write: {stage} rows handled: {rows} of {staged}");
+    ensure!(
+        index_scanned(&plan, stage) && rows <= bound,
+        "the page write handled {rows} of {staged} {stage} rows: {plan}"
+    );
+    rebuild.finish().await
+}
+
+/// Paging the serializer by key, whatever the page size, writes every name the JSON that
+/// `ResolutionTopology` gives its projected topology, and touches nothing else: not the names
+/// without a topology, not the other columns, and nothing at all when no name has one.
+#[tokio::test]
+async fn topology_serialization_matches_the_direct_conversion_page_by_page() -> Result<()> {
+    use super::name_topology::serialization::{
+        SERIALIZATION_BATCH_SIZE, serialize_projected_topologies_in_pages,
+    };
+    use bigname_domain::resolution_topology::ResolutionTopology;
+    let mut rebuild =
+        Rebuild::through("rebuild_equal_serialization", 600, Builder::RecordInventory).await?;
+    let target = rebuild.target.clone();
+    super::name_topology::project(&mut rebuild.transaction, CHAIN, &target).await?;
+    let stage = "project_stage_name_current";
+    raw_sql(&format!("CREATE TEMP TABLE projected AS TABLE {stage}"))
+        .execute(&mut *rebuild.transaction)
+        .await?;
+    let (with_topology, without_topology): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE jsonb_typeof(declared_summary -> 'topology') = 'object'),
+                count(*) FILTER (WHERE jsonb_typeof(declared_summary -> 'topology')
+                                       IS DISTINCT FROM 'object')
+         FROM projected",
+    )
+    .fetch_one(&mut *rebuild.transaction)
+    .await?;
+    ensure!(
+        with_topology >= 6 && without_topology > 0,
+        "the seed stages {with_topology} names with a topology and {without_topology} without"
+    );
+    // Three pages, the last of them partial.
+    let page = with_topology / 3 + 1;
+    ensure!(2 * page < with_topology && with_topology < 3 * page);
+    serialize_projected_topologies_in_pages(&mut rebuild.transaction, page).await?;
+
+    let untouched_differences: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*)
+         FROM projected before
+         FULL JOIN {stage} after USING (logical_name_id)
+         WHERE before.logical_name_id IS NULL
+            OR after.logical_name_id IS NULL
+            OR to_jsonb(before) - 'declared_summary' IS DISTINCT FROM
+               to_jsonb(after) - 'declared_summary'
+            OR before.declared_summary - 'topology' IS DISTINCT FROM
+               after.declared_summary - 'topology'
+            OR (jsonb_typeof(before.declared_summary -> 'topology') IS DISTINCT FROM 'object'
+                AND before.declared_summary IS DISTINCT FROM after.declared_summary)"
+    ))
+    .fetch_one(&mut *rebuild.transaction)
+    .await?;
+    ensure!(
+        untouched_differences == 0,
+        "{untouched_differences} names changed outside their topology"
+    );
+    let topologies: Vec<(String, Value, Value)> = sqlx::query_as(&format!(
+        "SELECT logical_name_id, before.declared_summary -> 'topology',
+                after.declared_summary -> 'topology'
+         FROM projected before
+         JOIN {stage} after USING (logical_name_id)
+         WHERE jsonb_typeof(before.declared_summary -> 'topology') = 'object'"
+    ))
+    .fetch_all(&mut *rebuild.transaction)
+    .await?;
+    ensure!(topologies.len() == with_topology as usize);
+    let mut rewritten = 0;
+    for (logical_name_id, projected, serialized) in topologies {
+        let converted = serde_json::to_value(serde_json::from_value::<ResolutionTopology>(
+            projected.clone(),
+        )?)?;
+        ensure!(
+            converted == serialized,
+            "{logical_name_id}: serialized {serialized} but the conversion gives {converted}"
+        );
+        rewritten += usize::from(converted != projected);
+    }
+    eprintln!("{rewritten} of {with_topology} topologies changed in serialization");
+
+    // The production page size writes the same rows.
+    raw_sql(&format!(
+        "CREATE TEMP TABLE serialized_in_pages AS TABLE {stage};
+         TRUNCATE {stage};
+         INSERT INTO {stage} TABLE projected"
+    ))
+    .execute(&mut *rebuild.transaction)
+    .await?;
+    serialize_projected_topologies_in_pages(&mut rebuild.transaction, SERIALIZATION_BATCH_SIZE)
+        .await?;
+    rebuild
+        .assert_same_rows(stage, "serialized_in_pages")
+        .await?;
+
+    // Without a topology anywhere the serializer writes nothing.
+    raw_sql(&format!(
+        "UPDATE {stage} SET declared_summary = declared_summary - 'topology';
+         CREATE TEMP TABLE without_topologies AS TABLE {stage}"
+    ))
+    .execute(&mut *rebuild.transaction)
+    .await?;
+    serialize_projected_topologies_in_pages(&mut rebuild.transaction, page).await?;
+    rebuild
+        .assert_same_rows(stage, "without_topologies")
+        .await?;
+    rebuild.finish().await
+}

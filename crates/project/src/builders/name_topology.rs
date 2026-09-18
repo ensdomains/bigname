@@ -3,9 +3,21 @@ use sqlx::{Postgres, Transaction};
 use crate::{Marker, ProjectError, Result};
 
 pub(in crate::builders) mod direct;
-mod serialization;
+pub(in crate::builders) mod serialization;
 
 pub(super) async fn build(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target: &Marker,
+) -> Result<()> {
+    project(transaction, chain_id, target).await?;
+    serialization::serialize_projected_topologies(transaction).await?;
+    Ok(())
+}
+
+/// Writes each name's topology into its staged row as the JSON the statements build; the
+/// serializer then rewrites it through `ResolutionTopology`.
+pub(in crate::builders) async fn project(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target: &Marker,
@@ -15,7 +27,6 @@ pub(super) async fn build(
     project_ownerless_ens_topology(transaction).await?;
     direct::build(transaction).await?;
     project_basenames_transport(transaction, chain_id, target).await?;
-    serialization::serialize_projected_topologies(transaction).await?;
     Ok(())
 }
 
