@@ -20,7 +20,10 @@ pub(crate) struct LapsedRegistration {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) held_through: Option<LapsedHeldThrough>,
     /// Block time of the block at which the release was recorded: the first block whose
-    /// timestamp is strictly past the lease's expiry plus the 90-day grace period.
+    /// timestamp is strictly past the lease's expiry plus the BaseRegistrar's 90-day grace
+    /// period, the point at which the registrar treats the name as available again.
+    /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) released_at: Option<String>,
 }
