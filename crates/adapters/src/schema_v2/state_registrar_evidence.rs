@@ -1,4 +1,6 @@
 //! Bounded evidence for disclosing an already selected numeric registrar lease.
+use std::sync::Arc;
+
 use anyhow::Context;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -11,6 +13,32 @@ use crate::schema_v2::{
 };
 
 const KEY: &str = "registrar_surface_evidence";
+
+// Evidence is retained for every observed name. Keeping parsed JSON here grows
+// with history even though the separate before-state cache has an entry limit.
+// Only the in-memory representation changes; snapshots still contain full JSON.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct StoredEvidence {
+    bytes: Arc<[u8]>,
+    decoded_len: usize,
+}
+
+impl StoredEvidence {
+    fn new(value: &Value) -> Self {
+        let json = serde_json::to_vec(value).expect("JSON evidence serializes");
+        let bytes = zstd::bulk::compress(&json, 1).expect("evidence compression succeeds");
+        Self {
+            bytes: bytes.into(),
+            decoded_len: json.len(),
+        }
+    }
+
+    fn value(&self) -> Value {
+        let json = zstd::bulk::decompress(&self.bytes, self.decoded_len)
+            .expect("in-process evidence was compressed by StoredEvidence");
+        serde_json::from_slice(&json).expect("in-process evidence contains valid JSON")
+    }
+}
 
 impl State {
     pub(in crate::schema_v2) fn retain_registrar_evidence(
@@ -60,7 +88,7 @@ impl State {
         let mut evidence = self
             .v1_registrar_evidence
             .get(&key)
-            .cloned()
+            .map(StoredEvidence::value)
             .unwrap_or(json!({}));
         let entry = json!({
             "raw_fact_ref":raw_fact_ref(raw), "timestamp":raw.block_timestamp.unix_timestamp(),
@@ -87,7 +115,8 @@ impl State {
                 state.remove(KEY);
             }
         }
-        self.v1_registrar_evidence.insert(key, evidence.clone());
+        self.v1_registrar_evidence
+            .insert(key, StoredEvidence::new(&evidence));
         after[KEY] = evidence;
     }
 
@@ -106,7 +135,7 @@ impl State {
         let mut evidence = self
             .v1_registrar_evidence
             .get(&key)
-            .cloned()
+            .map(StoredEvidence::value)
             .unwrap_or(json!({}));
         for field in [
             "grant",
@@ -130,7 +159,8 @@ impl State {
                 evidence[field] = entry.clone();
             }
         }
-        self.v1_registrar_evidence.insert(key, evidence);
+        self.v1_registrar_evidence
+            .insert(key, StoredEvidence::new(&evidence));
     }
 
     fn registrar_disclosure_candidate(
@@ -141,11 +171,11 @@ impl State {
         timestamp: i64,
     ) -> Option<(V1NameState, Option<V1ResolverLink>, Value)> {
         let key = v1_key(namespace, node);
-        let registrar = self.v1_registrars.get(&key)?.clone();
+        let registrar = self.v1_registrars.get(&key)?.as_ref().clone();
         let selected = self.v1_names.get(&key)?;
         let (registry_owner, registry_contract) = self.v1_registry_binding(namespace, node)?;
         let owner = registrar.owner.as_deref()?;
-        let evidence = self.v1_registrar_evidence.get(&key)?.clone();
+        let evidence = self.v1_registrar_evidence.get(&key)?.value();
         let grant = &evidence["grant"];
         let registry = &evidence["registry_owner"];
         let owner_evidence = &evidence["registrar_owner"];

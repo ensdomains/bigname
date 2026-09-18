@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::{State, V1NameState, V1Release, v1_key};
 
 impl State {
@@ -43,7 +45,7 @@ impl State {
         {
             self.active_resources.remove(&released.logical_name_id);
         }
-        released
+        released.map(Arc::unwrap_or_clone)
     }
 
     pub(in crate::schema_v2) fn restore_v1_registration_release(
@@ -122,7 +124,7 @@ impl State {
                 self.release_v1_name(namespace, namehash);
                 releases.push(V1Release {
                     namehash: namehash.to_owned(),
-                    registrar,
+                    registrar: Arc::unwrap_or_clone(registrar),
                     release_was_active: false,
                     previous_authority: None,
                     next_authority: None,
@@ -130,7 +132,7 @@ impl State {
                 });
                 continue;
             }
-            let previous_authority = self.v1_names.get(&key).cloned();
+            let previous_authority = self.v1_names.get(&key).map(|value| value.as_ref().clone());
             let release_is_active = previous_authority.as_ref().is_some_and(|active| {
                 active.resource_id == registrar.resource_id
                     || active.authority_source_family == "ens_v1_wrapper_l1"
@@ -159,7 +161,7 @@ impl State {
             releases.push(V1Release {
                 namehash: namehash.to_owned(),
                 resolver: self.v1_resolvers.get(&key).cloned(),
-                registrar,
+                registrar: Arc::unwrap_or_clone(registrar),
                 release_was_active: release_is_active,
                 previous_authority,
                 next_authority,
