@@ -12,7 +12,7 @@ use crate::{
     database::RunnerDatabase,
     phase::PhaseName,
     state::PhaseStatus,
-    transitions::{lock_chain_phase_state, row_for},
+    transitions::{PhaseStateRow, lock_chain_phase_state, row_for},
 };
 
 /// The operator attests these endpoints expose the same node. This operation checks
@@ -180,7 +180,8 @@ pub async fn transition_with_readers(
 /// The work Ingest resumes with after the change, read from the persisted runner state the
 /// way the runner reads it. Every check after the retained boundaries is judged on it.
 enum ResumePoint {
-    /// A redo in progress reads this block next and is judged on what remains of its range.
+    /// A redo in progress with blocks left to read reads this one next and is judged on what
+    /// remains of its range.
     Redo(i64),
     /// Ingest plans another normal batch from the descriptor's declared start block; the
     /// cursor's next block is the one it fetches first.
@@ -235,15 +236,30 @@ async fn resume_point(
     phase: &Value,
     new_provider: &VerificationProvider,
 ) -> Result<ResumePoint> {
-    if phase["redo_in_progress"] == true {
-        return phase["redo_current_block_number"]
+    let rows = lock_chain_phase_state(tx, chain).await?;
+    let mut ingest = row_for(&rows, PhaseName::Ingest)?.clone();
+    if ingest.redo_in_progress {
+        let to = phase["redo_to_block_number"]
             .as_i64()
-            .map(|n| n + 1)
-            .or(phase["redo_from_block_number"].as_i64())
-            .map(ResumePoint::Redo)
-            .ok_or_else(|| anyhow::anyhow!("missing next ingest block"));
+            .ok_or_else(|| anyhow::anyhow!("ingest redo is in progress without a redo range"))?;
+        let exhausted = phase["redo_current_block_number"]
+            .as_i64()
+            .is_some_and(|current| current >= to);
+        if !exhausted {
+            return phase["redo_current_block_number"]
+                .as_i64()
+                .map(|n| n + 1)
+                .or(phase["redo_from_block_number"].as_i64())
+                .map(ResumePoint::Redo)
+                .ok_or_else(|| anyhow::anyhow!("missing next ingest block"));
+        }
+        // The redo read its last block and the process stopped before finish_redo cleared
+        // the marker. Rerunning it reads nothing and clears the marker, restoring the
+        // lifecycle the redo interrupted (redo_state::finish); the work that follows is the
+        // work that restored state plans, so it is judged on that state.
+        crate::redo_completion::restore_previous_lifecycle(&mut ingest)?;
     }
-    if ingest_replans_from_declared_start(tx, chain).await? {
+    if ingest_replans_from_declared_start(&ingest)? {
         return cursor["next_block_number"]
             .as_i64()
             .map(ResumePoint::DeclaredStart)
@@ -312,12 +328,7 @@ async fn admit_retention_floor(
 /// same tests the runner applies before it starts Ingest. A failed phase that retains a
 /// completed extent is revalidated, not rescanned, so it does not replan; every other
 /// failed or unfinished phase does.
-async fn ingest_replans_from_declared_start(
-    tx: &mut Transaction<'_, Postgres>,
-    chain: &str,
-) -> Result<bool> {
-    let rows = lock_chain_phase_state(tx, chain).await?;
-    let ingest = row_for(&rows, PhaseName::Ingest)?;
+fn ingest_replans_from_declared_start(ingest: &PhaseStateRow) -> Result<bool> {
     if crate::completed_phase_recovery::locked_completion_recovery(ingest, PhaseName::Ingest) {
         return Ok(false);
     }
