@@ -196,20 +196,40 @@ Both descriptors must keep the same key, `ethereum_head` seed, start zero,
 and explicit `intake` role. This exception does not admit another source or
 claim new historical coverage. Stop every phase writer first. The command takes
 all five phase advisory locks, locks the cursor and Ingest state, compares
-both endpoints' retained canonical boundary hashes, compares
-the next block's watched logs, and applies the
-[source-floor admission](#download-range-planning) that Ingest applies when it
-resumes, before changing only the persisted source kind. The admission is the
+both endpoints' retained canonical boundary hashes, compares the watched logs
+of the block the resumed work reads first, and applies the
+[source-floor admission](#download-range-planning) that the resumed work
+applies, before changing only the persisted source kind. The admission is the
 engine's own rule (`bigname_ingest::admit_source_floor`) applied to the proposed
-descriptor: a redo in progress is judged on what remains of its range, an
-Ingest phase that has not completed replans from the declared start block (zero,
-so a direct reader that has pruned any history is refused), and a completed
-Ingest phase that handed off to live follow is judged on the suffix from the
-next block. A refusal names the floor and the range Ingest would plan, and
+descriptor, and which work resumes is read from the persisted phase state the
+way the runner reads it:
+
+- a redo in progress is judged on what remains of its range;
+- an Ingest phase that has not completed replans from the declared start block
+  (zero, so a direct reader that has pruned any history is refused);
+- a completed Ingest phase that handed off to live follow is judged where live
+  follow resumes, not on the retained Ingest cursor, which stops at the handoff
+  while live progress is recorded separately. The command selects that block
+  from the published chain head with the live engine's own rule
+  (`bigname_ingest::plan_live_continuation`): the block after the highest
+  published block the node still reports with the published hash, no lower than
+  the published finalized block. When live follow has already published the
+  node's head there is no next block to compare yet, so the command compares
+  the published head itself, the boundary live follow extends, and still applies
+  the floor to the block after it;
+- a failed Ingest phase that retains a completed extent awaiting
+  completed-phase revalidation (the failed status, the completed-validation
+  error, matching current and target markers and a matching live handoff) is
+  judged like a handed-off phase, because the runner revalidates it without a
+  historical rescan. Every other failed or unfinished Ingest phase replans from
+  the declared start.
+
+A refusal names the floor and the range the resumed work would plan, and
 changes nothing; without it the command would report success and the next
-Ingest batch would fail the same check.
-It emits a receipt containing the previous cursor, unchanged phase state and
-checked boundaries; retain that receipt with the deployment record. Raw facts,
+batch would fail the same check.
+It emits a receipt containing the previous cursor, unchanged phase state,
+checked boundaries, the block it compared and, after a handoff, the selected
+live continuation; retain that receipt with the deployment record. Raw facts,
 positions, redo ranges, manifest authority and verification state are preserved.
 A mismatch or held writer lock aborts before the update. The inverse change is
 supported for rollback after the same checks. An ordinary startup still rejects

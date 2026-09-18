@@ -205,8 +205,12 @@ command that switches a Sepolia intake source between the two without
 re-ingesting. It rewrites only the stored source kind of the chain's one intake
 cursor, after confirming that every phase writer is stopped, that both
 interfaces report the hashes Ingest retained at its boundaries, that both
-report the same watched logs for the next block Ingest will read, and that the
-direct reader's retention floor admits the range Ingest plans when it resumes.
+report the same watched logs for the block the resumed work reads first, and
+that the direct reader's retention floor admits the range that work plans. The
+resumed work is a redo in progress, a normal Ingest batch from the declared
+start, or, once Ingest has handed off to live follow (including a completed
+extent awaiting completed-phase revalidation), live follow from the block after
+the highest published block the node still holds.
 The operator
 attests that both interfaces belong to the same node; the command cannot prove
 it. Progress, raw facts, redo state and the
