@@ -1246,8 +1246,14 @@ session is discarded after the batch. Two partial expression indexes on
 (events of one name) and `normalized_events_v1_due_probe_idx` (registrar expiry
 ranges). The loader is an access path, not a semantic: it must produce the same
 normalized events, identity rows and discovery edges as the full-state loader,
-and it is covered by the same interpreter content hash. It fails the batch,
-rather than publishing, if interpretation reads a name that was not loaded.
+and it is covered by the same interpreter content hash. That same-output rule
+assumes the chain retains no `normalized_events` history from a source family
+whose manifest has left the `active` and `deprecated` rollout states: the loader
+choice reads only manifests in those states, the full-state loader restores
+every retained row regardless of family, and lookahead reads only ENSv1
+families, so such history would be restored by one loader and not the other.
+It fails the batch, rather than publishing, if interpretation reads a name that
+was not loaded.
 
 For ENSv2, a retained registry/root `PreimageObserved` event for a canonical
 [name surface](glossary.md#surface-name-surface), or a retained resolver

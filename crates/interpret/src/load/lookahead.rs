@@ -154,6 +154,15 @@ pub(crate) async fn batch_input(
 
 /// The first manifest, in the loader's stable order, whose source family lookahead does not
 /// cover. `provenance` holds the active and the deprecated manifests.
+///
+/// Coverage is decided from the manifest rows `manifests::load` returns, which are those in
+/// the `active` or `deprecated` rollout states. The full-state loader restores every retained
+/// `normalized_events` row with no source-family filter, while lookahead reads only
+/// `ens_v1_*` families. The two loaders therefore produce the same output only while the
+/// chain retains no history from a family whose manifest has left both states (for example
+/// one moved back to `draft`): such rows are invisible here, so lookahead would still be
+/// chosen and would not read them. No admitted Mainnet family has done this, and nothing
+/// here detects it.
 fn full_state_reason(
     active: &[ManifestInput],
     provenance: &[ManifestInput],
