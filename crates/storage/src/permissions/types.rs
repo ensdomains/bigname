@@ -360,6 +360,7 @@ pub struct EffectivePermissionRow {
     pub scope: EffectivePermissionScope,
     /// As on [`PermissionsCurrentRow`]: the decoded setter argument of a grant on an
     /// ENSv2 record-ID resolver, absent on every other scope and on operator rows.
+    /// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64)
     pub record_resource_selector: Option<Value>,
     pub grant_relation: Option<PermissionGrantRelation>,
     pub effective_powers: Value,

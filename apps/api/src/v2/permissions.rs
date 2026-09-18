@@ -70,8 +70,9 @@ pub(crate) struct PermissionRow {
     #[serde(flatten)]
     pub(crate) grant: AddressNameGrant,
     pub(crate) registration_id: String,
-    /// Present for a grant on an ENSv2 record-ID resolver: which record the granted
-    /// resource is about.
+    /// Present for a grant on an ENSv2 record-ID resolver, whose resource is the keccak
+    /// of a setter argument: which record the granted resource is about.
+    /// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) record_resource: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
