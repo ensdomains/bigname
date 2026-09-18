@@ -40,9 +40,11 @@ const LEASE_EVIDENCE_EVENT_KINDS: &[&str] = &[
 ///
 /// The lease is the one resource of the name that carries an activated canonical registrar
 /// lifecycle event with `after_state.token_id` equal to the selector's labelhash, emitted by the
-/// selector's BaseRegistrar instance and positioned before the cleanup (at it only for the
-/// `NameUnwrapped` fallback whose binding sits at the cleanup log), and whose registration was
-/// not released before the cleanup. The lease need not have had a binding: one granted with
+/// selector's BaseRegistrar instance and positioned before the cleanup, or at it when the lease
+/// was already observed: a `NameUnwrapped` fallback identity whose binding sits at the cleanup
+/// log, or a lease with a registrar lifecycle event of its own before the cleanup, which on
+/// Mainnet is the controller grant that carries no token id. The registration must not have
+/// been released before the cleanup. The lease need not have had a binding: one granted with
 /// `registerOnly` under a registry-only binding never gets one, and the token is the predecessor
 /// whether or not a binding ever pointed at it. Resources share a token id only as
 /// successive leases of the same label, and a successor grant requires the earlier lease to be
@@ -61,11 +63,19 @@ pub(super) async fn close_lease_predecessor(
     predecessor_at: (i64, i64, i64),
     predecessor_time: time::OffsetDateTime,
 ) -> Result<()> {
-    // Evidence must be positioned strictly before the cleanup, with one exception: a registrar
-    // identity materialized at `NameUnwrapped` has the cleanup transfer as its first and only
-    // evidence, and its binding is positioned at that same cleanup log. The binding gate on that
-    // arm is what keeps the cleanup transfer, which every migration emits on the lease resource,
-    // from standing in as the only evidence for a lease never observed before the transaction.
+    // Evidence must be positioned strictly before the cleanup, with two exceptions for token
+    // evidence positioned exactly at it. A registrar identity materialized at `NameUnwrapped` has
+    // the cleanup transfer as its first and only evidence, and its binding is positioned at that
+    // same cleanup log. A lease the registrar family observed before the migration transaction,
+    // that is, one with an activated canonical lifecycle event of its own before the cleanup,
+    // token id or not, may likewise have the cleanup transfer as its only token-bearing event:
+    // on Mainnet the controller grant carries no token id and the mint transfer is not indexed,
+    // so a name registered straight into the NameWrapper moves at the BaseRegistrar level for the
+    // first time when `unwrapETH2LD` sends the token from the NameWrapper to the Graveyard. Both
+    // gates keep the cleanup transfer, which every migration emits on the lease resource, from
+    // standing in as the only evidence for a lease never observed before the transaction.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L128-L150 @ ens_v2@a971bd6)
     let leases: Vec<Uuid> = sqlx::query_scalar(&format!(
         "SELECT DISTINCT evidence.resource_id
          FROM normalized_events evidence
@@ -88,19 +98,45 @@ pub(super) async fn close_lease_predecessor(
                        COALESCE(evidence.transaction_index, -1),
                        COALESCE(evidence.log_index, -1)
                    ) = ($3, $4, $5)
-                   AND EXISTS (
-                       SELECT 1
-                       FROM surface_bindings fallback
-                       WHERE fallback.chain_id = evidence.chain_id
-                         AND fallback.logical_name_id = evidence.logical_name_id
-                         AND fallback.resource_id = evidence.resource_id
-                         AND fallback.authority_arm = $9
-                         AND fallback.canonicality_state IN ('canonical', 'safe', 'finalized')
-                         AND (
-                             fallback.block_number,
-                             COALESCE((fallback.provenance ->> '{transaction_index}')::bigint, -1),
-                             COALESCE((fallback.provenance ->> '{log_index}')::bigint, -1)
-                         ) = ($3, $4, $5)
+                   AND (
+                       EXISTS (
+                           SELECT 1
+                           FROM surface_bindings fallback
+                           WHERE fallback.chain_id = evidence.chain_id
+                             AND fallback.logical_name_id = evidence.logical_name_id
+                             AND fallback.resource_id = evidence.resource_id
+                             AND fallback.authority_arm = $9
+                             AND fallback.canonicality_state IN ('canonical', 'safe', 'finalized')
+                             AND (
+                                 fallback.block_number,
+                                 COALESCE((fallback.provenance ->> '{transaction_index}')::bigint, -1),
+                                 COALESCE((fallback.provenance ->> '{log_index}')::bigint, -1)
+                             ) = ($3, $4, $5)
+                       )
+                       OR EXISTS (
+                           SELECT 1
+                           FROM normalized_events observed
+                           WHERE observed.chain_id = evidence.chain_id
+                             AND observed.logical_name_id = evidence.logical_name_id
+                             AND observed.resource_id = evidence.resource_id
+                             AND observed.source_family = 'ens_v1_registrar_l1'
+                             AND observed.event_kind = ANY($8)
+                             AND observed.consumer_visibility = 'activated'
+                             AND observed.canonicality_state IN ('canonical', 'safe', 'finalized')
+                             AND (
+                                 observed.block_number,
+                                 COALESCE(observed.transaction_index, -1),
+                                 COALESCE(observed.log_index, -1)
+                             ) < ($3, $4, $5)
+                             AND EXISTS (
+                                 SELECT 1
+                                 FROM chain_lineage observed_lineage
+                                 WHERE observed_lineage.chain_id = observed.chain_id
+                                   AND observed_lineage.block_hash = observed.block_hash
+                                   AND observed_lineage.block_number = observed.block_number
+                                   AND observed_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                             )
+                       )
                    )
                )
            )

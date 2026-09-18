@@ -80,7 +80,8 @@ const NAME_UNWRAPPED_LOG_INDEX: i64 = 4;
 ///
 /// The mint transfer is ignored by the adapter, so the lease's only `TokenControlTransferred` is
 /// the cleanup itself. The boundary must still resolve exactly one ENSv1 predecessor, close every
-/// ENSv1 binding of the name at the cleanup, and leave the ENSv2 binding as the only current one.
+/// ENSv1 binding of the name at the cleanup, and leave the ENSv2 binding as the only current one;
+/// a Redo pass over the migration block must reproduce the same bindings.
 #[tokio::test]
 async fn mainnet_declared_registrar_resolves_the_lease_of_a_wrapper_minted_registration()
 -> TestResult {
@@ -238,6 +239,43 @@ async fn mainnet_declared_registrar_resolves_the_lease_of_a_wrapper_minted_regis
         "the last ENSv1 binding closes at the registrar cleanup: {after:#?}"
     );
 
+    // Redo re-derives the migration block against the state the first pass wrote, with the
+    // cleanup transfer already in `normalized_events`, and must reach the same boundary.
+    stamp_interpreter_hash(pool, bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            from_block: MIGRATION_BLOCK,
+            to_block: MIGRATION_BLOCK,
+            resume_current: Some(Marker {
+                number: PREDECESSOR_BLOCK,
+                hash: block_hash(PREDECESSOR_BLOCK),
+            }),
+            mode: RunMode::Redo,
+        })
+        .await?;
+    let redone = bindings(pool, &logical_name_id).await?;
+    assert_eq!(
+        redone
+            .iter()
+            .filter(|row| row.arm == "ens_v1")
+            .collect::<Vec<_>>(),
+        after
+            .iter()
+            .filter(|row| row.arm == "ens_v1")
+            .collect::<Vec<_>>(),
+        "Redo keeps every ENSv1 binding as the first pass left it"
+    );
+    assert_eq!(
+        redone
+            .iter()
+            .filter(|row| row.active_to.is_none())
+            .map(|row| row.arm.as_str())
+            .collect::<Vec<_>>(),
+        ["ens_v2"],
+        "Redo leaves the ENSv2 binding as the only current one: {redone:#?}"
+    );
+
     drop(manifests);
     database.cleanup().await?;
     Ok(())
@@ -304,7 +342,7 @@ fn copy_directory(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 struct BindingRow {
     binding: Uuid,
@@ -316,17 +354,19 @@ struct BindingRow {
     active_to: Option<time::OffsetDateTime>,
 }
 
+type RawBindingRow = (
+    Uuid,
+    Uuid,
+    String,
+    i64,
+    Option<i64>,
+    time::OffsetDateTime,
+    Option<time::OffsetDateTime>,
+);
+
 /// Every canonical binding of the name, oldest first.
 async fn bindings(pool: &PgPool, logical_name_id: &str) -> TestResult<Vec<BindingRow>> {
-    let rows: Vec<(
-        Uuid,
-        Uuid,
-        String,
-        i64,
-        Option<i64>,
-        time::OffsetDateTime,
-        Option<time::OffsetDateTime>,
-    )> = sqlx::query_as(&format!(
+    let rows: Vec<RawBindingRow> = sqlx::query_as(&format!(
         "SELECT surface_binding_id, resource_id, authority_arm, block_number,
                 (provenance ->> '{LOG_INDEX_KEY}')::bigint, active_from, active_to
          FROM surface_bindings

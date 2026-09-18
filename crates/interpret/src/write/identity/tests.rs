@@ -667,10 +667,22 @@ async fn registrar_boundary_refuses_inexact_cleanup_evidence() -> TestResult {
 async fn activated_boundary_rejects_zero_and_multiple_predecessors() -> TestResult {
     let database = database().await?;
     let pool = database.pool();
-    // A binding without any token evidence before the cleanup is no lease; the cleanup transfer
-    // alone vouches only for a fallback binding positioned at the cleanup itself.
+    // A binding alone is no lease: resource 1 has no registrar lifecycle event before the cleanup,
+    // so the cleanup transfer, which every migration emits on the lease resource, vouches only
+    // for a fallback binding positioned at the cleanup itself. An earlier grant of some other
+    // resource of the name does not vouch for this one either.
     insert_registrar_contract(pool).await?;
     insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+    insert_lease_event(
+        pool,
+        "registrar-grant-6",
+        6,
+        "RegistrationGranted",
+        0,
+        None,
+        json!({"source_event":"NameRegistered","namehash":"0xname","labelhash":"0xexpected"}),
+    )
+    .await?;
     let mut output = ordinary_open(12, 2, "ens_v2", 2);
     activate(&mut output)?;
     let zero = apply(pool, &output).await.unwrap_err().to_string();
@@ -693,17 +705,22 @@ async fn activated_boundary_rejects_zero_and_multiple_predecessors() -> TestResu
 }
 
 /// A BaseRegistrar lifecycle event of `event_kind` on `resource` at block 1 log `log_index`,
-/// emitted by the admitted registrar instance, with `after_state` merged over the token id.
+/// emitted by the admitted registrar instance, with `after_state` merged over `token_id` when
+/// one is given (a controller-derived grant on the Mainnet profile carries none).
 async fn insert_lease_event(
     pool: &sqlx::PgPool,
     event_identity: &str,
     resource: u128,
     event_kind: &str,
     log_index: i64,
+    token_id: Option<&str>,
     after_state: serde_json::Value,
 ) -> TestResult {
     insert_registrar_contract(pool).await?;
-    let mut state = json!({"token_id":"0xexpected"});
+    let mut state = json!({});
+    if let Some(token_id) = token_id {
+        state["token_id"] = json!(token_id);
+    }
     state
         .as_object_mut()
         .unwrap()
@@ -822,6 +839,7 @@ async fn a_lease_released_before_the_cleanup_is_not_a_predecessor() -> TestResul
         1,
         "RegistrationReleased",
         1,
+        Some("0xexpected"),
         json!({}),
     )
     .await?;
@@ -855,6 +873,7 @@ async fn a_register_only_successor_lease_without_a_binding_is_the_predecessor() 
         1,
         "RegistrationReleased",
         1,
+        Some("0xexpected"),
         json!({}),
     )
     .await?;
@@ -865,6 +884,7 @@ async fn a_register_only_successor_lease_without_a_binding_is_the_predecessor() 
         5,
         "RegistrationGranted",
         2,
+        Some("0xexpected"),
         json!({"source_event":"NameRegistered","namehash":"0xname","labelhash":"0xexpected"}),
     )
     .await?;
@@ -885,6 +905,50 @@ async fn a_register_only_successor_lease_without_a_binding_is_the_predecessor() 
         ),
         "the registry-only binding closes at the recorded registrar cleanup"
     );
+    assert_eq!(active_to(pool, 12).await?, None);
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// On the Mainnet deployment profile the controller's `RegistrationGranted` lands on the lease
+/// but carries no token id, and the mint transfer from the zero address is not indexed, so a name
+/// registered straight into the NameWrapper has no token-bearing event until `unwrapETH2LD` sends
+/// the token from the NameWrapper to the Graveyard in the migration transaction itself. That
+/// cleanup transfer is admissible evidence because the lease was observed before the transaction:
+/// the earlier grant, token id or not, is what separates it from a lease the cleanup alone would
+/// have to vouch for (`activated_boundary_rejects_zero_and_multiple_predecessors`).
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L128-L150 @ ens_v2@a971bd6)
+#[tokio::test]
+async fn a_lease_granted_without_a_token_id_is_found_by_its_cleanup_transfer() -> TestResult {
+    let database = database().await?;
+    let pool = database.pool();
+    insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+    insert_lease_event(
+        pool,
+        "registrar-grant-1",
+        1,
+        "RegistrationGranted",
+        0,
+        None,
+        json!({"source_event":"NameRegistered","namehash":"0xname","labelhash":"0xexpected"}),
+    )
+    .await?;
+    let mut output = ordinary_open(12, 2, "ens_v2", 2);
+    activate(&mut output)?;
+
+    apply(pool, &output).await?;
+    assert_eq!(
+        active_to(pool, 11).await?,
+        Some(
+            time::OffsetDateTime::from_unix_timestamp(2)?
+                + time::Duration::microseconds(REGISTRAR_CLEANUP_LOG_INDEX)
+        ),
+        "the lease binding closes at the recorded registrar cleanup"
+    );
+    assert_eq!(active_to(pool, 12).await?, None, "the successor stays open");
+
+    apply(pool, &output).await?;
     assert_eq!(active_to(pool, 12).await?, None);
     database.cleanup().await?;
     Ok(())
