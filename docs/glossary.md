@@ -1942,7 +1942,9 @@ the authority tombstone left when the latest ENSv1 registrar lifecycle fact for 
 name is a release and no custody was revived behind it: either no binding of any
 arm is open and the registry owner is not a proven zero, or the name's only open
 binding is the registry-only binding a registrar token transfer without
-`reclaim` opened and the released lease is exactly the one that binding replaced.
+`reclaim` opened and the released lease is the one that binding stands for: the
+lease it replaced or, once that was released, the successor lease `registerOnly`
+granted under it without touching the registry.
 The lease that lapsed while wrapped is the ordinary case: the NameWrapper's
 registry custody expired with the lease, so nothing current owns the node. The
 tombstone selects the released lease binding, serves the registration as
@@ -1955,8 +1957,9 @@ NameWrapper binding that stands for it: the one whose `NameWrapped` rows recorde
 the lease in `wrapped_registrar_resource_id`, or, where a controller event granted
 the lease after `NameWrapped`, the one whose wrap shares the named grant's
 transaction. A lease that lapsed under a registry-only binding has a closed
-binding of its own, but the tombstone selects the open registry-only binding,
-which stands for the lease the same way: the registry still holds the owner that
+binding of its own, or none when `registerOnly` granted it under that binding,
+and the tombstone selects the open registry-only binding either way, which
+stands for the lease the same way: the registry still holds the owner that
 lease left behind, and the lapsed lease releases the name all the same, as the
 registrar's `ownerOf` and `available` do on chain. Only a registrar release
 selects a tombstone; a NameWrapper expiry that passes while the registrar lease

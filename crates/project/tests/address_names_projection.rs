@@ -4205,6 +4205,7 @@ type EnrichedRegistryOnlyRow = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
     serde_json::Value,
     Option<String>,
     Option<String>,
@@ -4239,6 +4240,184 @@ async fn seed_earlier_lease_release(
     .await
 }
 
+/// Seeds the successor lease's batch at `block` when `stage` reaches it: the grant at block 12,
+/// the renewal at block 13, the release at block 14. With `transferred` the block-13 batch
+/// starts with the successor token's transfer to a later holder, again without `reclaim`, ahead
+/// of the renewal when the stage reaches that. Every row carries the name, as the adapter names
+/// them when the surface is known. Returns whether the block was seeded.
+async fn seed_successor_lease_batch(
+    pool: &PgPool,
+    block: i64,
+    stage: SuccessorStage,
+    reclaimed: bool,
+    transferred: bool,
+) -> Result<bool> {
+    let reached = match block {
+        12 => true,
+        13 => stage >= SuccessorStage::Renewed || transferred,
+        14 => stage >= SuccessorStage::Released,
+        _ => false,
+    };
+    if !reached {
+        return Ok(false);
+    }
+    seed_blocks(pool, [block]).await?;
+    let authority_key = format!(
+        "registrar:{CHAIN}:ens_v1_registrar_l1:0x{:064x}:{}:2",
+        1_u64,
+        block_hash(12)
+    );
+    match block {
+        12 if reclaimed => {
+            // `register` writes the registry owner in the grant's transaction, so the successor
+            // lease's resource takes over the name: a binding of its own, the registry owner it
+            // wrote, and its registrar epoch.
+            // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L148-L150 @ ens_v1@91c966f)
+            seed_next_binding(
+                pool,
+                OWNERLESS_NAMEHASH,
+                SUCCESSOR_LEASE_RESOURCE,
+                SUCCESSOR_LEASE_BINDING,
+                12,
+                "2026-08-01T00:00:12Z",
+            )
+            .await?;
+            seed_binding_provenance(pool, SUCCESSOR_LEASE_BINDING, 0, 2).await?;
+            seed_authority_transferred(
+                pool,
+                "fixture:enriched-successor-registry-owner",
+                OWNERLESS_NAMEHASH,
+                SUCCESSOR_LEASE_RESOURCE,
+                12,
+                4,
+                json!({
+                    "node": OWNERLESS_NAMEHASH,
+                    "owner": SUCCESSOR_OWNER,
+                    "owner_getter": SUCCESSOR_OWNER,
+                    "authority_kind": "registrar",
+                }),
+            )
+            .await?;
+            seed_authority_epoch_changed(
+                pool,
+                "fixture:enriched-successor-epoch",
+                OWNERLESS_NAMEHASH,
+                SUCCESSOR_LEASE_RESOURCE,
+                12,
+                "registrar",
+            )
+            .await?;
+        }
+        12 => {
+            // `registerOnly` mints the token and writes the expiry without touching the
+            // registry: a new registrar resource, no binding, no registry row.
+            // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
+            sqlx::query(
+                "INSERT INTO resources (
+                     resource_id, chain_id, block_hash, block_number, canonicality_state
+                 ) VALUES ($1::uuid, $2, $3, 12, 'canonical')",
+            )
+            .bind(SUCCESSOR_LEASE_RESOURCE)
+            .bind(CHAIN)
+            .bind(block_hash(12))
+            .execute(pool)
+            .await?;
+        }
+        _ => {}
+    }
+    let rows: Vec<(&str, i64, serde_json::Value)> = match block {
+        12 => [("RegistrationGranted", 2), ("ExpiryChanged", 3)]
+            .into_iter()
+            .map(|(kind, log)| {
+                (
+                    kind,
+                    log,
+                    json!({
+                        "source_event": "NameRegistered",
+                        "namehash": OWNERLESS_NAMEHASH,
+                        "labelhash": format!("0x{:064x}", 1_u64),
+                        "token_id": format!("0x{:064x}", 1_u64),
+                        "registrant": SUCCESSOR_OWNER,
+                        "authority_owner": SUCCESSOR_OWNER,
+                        "expiry": SUCCESSOR_EXPIRY,
+                        "surface_known": true,
+                        "authority_kind": "registrar",
+                        "authority_key": authority_key,
+                        "registration_window": "whole_transaction",
+                    }),
+                )
+            })
+            .collect(),
+        13 => {
+            let holder = if transferred {
+                LATER_HOLDER
+            } else {
+                SUCCESSOR_OWNER
+            };
+            let transfer = transferred.then(|| {
+                (
+                    "TokenControlTransferred",
+                    0,
+                    json!({
+                        "source_event": "Transfer",
+                        "authority_kind": "registrar",
+                        "from": SUCCESSOR_OWNER,
+                        "to": LATER_HOLDER,
+                        "namehash": OWNERLESS_NAMEHASH,
+                    }),
+                )
+            });
+            let renewal = (stage >= SuccessorStage::Renewed)
+                .then_some([("RegistrationRenewed", 1), ("ExpiryChanged", 2)])
+                .into_iter()
+                .flatten()
+                .map(|(kind, log)| {
+                    (
+                        kind,
+                        log,
+                        json!({
+                            "source_event": "NameRenewed",
+                            "namehash": OWNERLESS_NAMEHASH,
+                            "labelhash": format!("0x{:064x}", 1_u64),
+                            "registrant": holder,
+                            "expiry": SUCCESSOR_RENEWED_EXPIRY,
+                            "surface_known": true,
+                            "authority_kind": "registrar",
+                            "authority_key": authority_key.clone(),
+                        }),
+                    )
+                });
+            transfer.into_iter().chain(renewal).collect()
+        }
+        _ => vec![(
+            "RegistrationReleased",
+            1,
+            json!({
+                "source_event": "RegistrationReleased",
+                "released_at": SUCCESSOR_RELEASED_AT,
+                "expiry": SUCCESSOR_RENEWED_EXPIRY,
+                "namehash": OWNERLESS_NAMEHASH,
+            }),
+        )],
+    };
+    for (kind, log, after_state) in rows {
+        seed_normalized_event(
+            pool,
+            &format!("fixture:enriched-successor-{block}-{kind}"),
+            Some(OWNERLESS_LOGICAL),
+            Some(SUCCESSOR_LEASE_RESOURCE),
+            kind,
+            "ens_v1_registrar_l1",
+            block,
+            log,
+            after_state,
+            json!({}),
+        )
+        .await?;
+    }
+    Ok(true)
+}
+
 #[derive(Debug, PartialEq)]
 struct EnrichedRegistryOnlyProjection {
     expiry: Option<i64>,
@@ -4246,6 +4425,8 @@ struct EnrichedRegistryOnlyProjection {
     serving: Vec<(String, serde_json::Value)>,
     registration_resource_id: Option<String>,
     registrant: Option<String>,
+    /// The identity of the event `provenance.registrant_event_id` names.
+    registrant_event_identity: Option<String>,
     address_registrant: Option<String>,
     /// The selected binding and its resource, as `name_current` serves them.
     selected_binding: (Option<String>, Option<String>),
@@ -4286,11 +4467,58 @@ enum LaterBatch {
     /// the on-chain order, ahead of the retained lease's grant, and the block-11 batch renews
     /// the retained lease; otherwise its release is observed at block 11, after the handoff.
     ReleaseOfAnEarlierLease { before_reregistration: bool },
+    /// The retained lease lapses at block 11, and at block 12 a controller grants the name
+    /// again to a new owner. With `reclaimed` false the grant is `registerOnly`: the registrar
+    /// writes the expiry and mints the token but does not touch the registry, so the
+    /// registry-only binding stays the name's only open one and the successor lease has no
+    /// binding of its own. With `reclaimed` true the grant is `register`: the registry write
+    /// opens a binding on the successor lease's resource. Later stages renew the successor lease
+    /// at block 13 and release it at block 14, each in a batch of its own.
+    /// With `transferred` the successor token changes hands again at block 13, without
+    /// `reclaim`, ahead of the renewal in that batch when the stage reaches it.
+    /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
+    SuccessorLease {
+        stage: SuccessorStage,
+        reclaimed: bool,
+        transferred: bool,
+    },
+    /// The retained lease's token is transferred again at block 11, without `reclaim`, to a
+    /// holder who is neither the registry owner nor the holder the handoff left it with. At
+    /// `Renewed` the same batch renews the lease after the transfer; at `Released` a block-12
+    /// batch releases it.
+    TransferOfRetainedLease { stage: TransferStage },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+enum SuccessorStage {
+    Granted,
+    Renewed,
+    Released,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+enum TransferStage {
+    Transferred,
+    Renewed,
+    Released,
 }
 
 const EARLIER_LEASE_RESOURCE: &str = "60000000-0000-0000-0000-000000000001";
 const EARLIER_LEASE_BINDING: &str = "60000000-0000-0000-0000-000000000011";
 const UNBOUND_LEASE_RESOURCE: &str = "60000000-0000-0000-0000-000000000002";
+const SUCCESSOR_LEASE_RESOURCE: &str = "60000000-0000-0000-0000-000000000003";
+const SUCCESSOR_LEASE_BINDING: &str = "60000000-0000-0000-0000-000000000013";
+/// The successor lease's registrar owner: neither the registry owner the handoff left behind nor
+/// the retained lease's last holder.
+const SUCCESSOR_OWNER: &str = "0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a";
+/// The holder a lease's token is transferred to under the registry-only binding, again without
+/// `reclaim`: neither the registry owner nor any earlier holder.
+const LATER_HOLDER: &str = "0x7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c";
+const SUCCESSOR_EXPIRY: i64 = 1_700_020_000;
+const SUCCESSOR_RENEWED_EXPIRY: i64 = 1_700_030_000;
+const SUCCESSOR_RELEASED_AT: i64 = SUCCESSOR_RENEWED_EXPIRY + 7_776_001;
+/// When the retained lease, renewed once after its second transfer, lapses past grace.
+const TRANSFERRED_RELEASED_AT: i64 = 1_700_002_100 + 7_776_001;
 
 async fn project_enriched_registry_only_batches(
     controller_registered: bool,
@@ -4523,7 +4751,7 @@ async fn project_enriched_registry_only_batches(
                 )
                 .await?;
             }
-            LaterBatch::ReleaseOfRetainedLease => {
+            LaterBatch::ReleaseOfRetainedLease | LaterBatch::SuccessorLease { .. } => {
                 seed_normalized_event(
                     &pool,
                     "fixture:enriched-later-release",
@@ -4547,6 +4775,51 @@ async fn project_enriched_registry_only_batches(
                 before_reregistration: false,
             } => {
                 seed_earlier_lease_release(&pool, 11, 3).await?;
+            }
+            LaterBatch::TransferOfRetainedLease { stage } => {
+                // The adapter names the transfer: the surface is known by now.
+                seed_normalized_event(
+                    &pool,
+                    "fixture:enriched-retained-transfer",
+                    Some(OWNERLESS_LOGICAL),
+                    Some(OWNERLESS_RESOURCE),
+                    "TokenControlTransferred",
+                    "ens_v1_registrar_l1",
+                    11,
+                    1,
+                    json!({
+                        "source_event": "Transfer",
+                        "authority_kind": "registrar",
+                        "from": BOB,
+                        "to": LATER_HOLDER,
+                        "namehash": OWNERLESS_NAMEHASH,
+                    }),
+                    json!({}),
+                )
+                .await?;
+                if stage >= TransferStage::Renewed {
+                    for (kind, log) in [("RegistrationRenewed", 2), ("ExpiryChanged", 3)] {
+                        seed_normalized_event(
+                            &pool,
+                            &format!("fixture:enriched-later-{kind}"),
+                            None,
+                            Some(OWNERLESS_RESOURCE),
+                            kind,
+                            "ens_v1_registrar_l1",
+                            11,
+                            log,
+                            json!({
+                                "source_event": "NameRenewed",
+                                "authority_kind": "registrar",
+                                "registrant": LATER_HOLDER,
+                                "expiry": EXPIRY + 1_000,
+                                "namehash": OWNERLESS_NAMEHASH,
+                            }),
+                            json!({}),
+                        )
+                        .await?;
+                    }
+                }
             }
             LaterBatch::RenewalWithoutName
             | LaterBatch::RenewalAndOtherLeases
@@ -4614,19 +4887,66 @@ async fn project_enriched_registry_only_batches(
                 }
             }
         }
-        run_project(
-            &pool,
-            11,
-            if incremental { 11 } else { 8 },
-            incremental.then_some(10),
-        )
-        .await?;
+        let mut target_block = 11;
+        if incremental {
+            run_project(&pool, 11, 11, Some(10)).await?;
+        }
+        if let LaterBatch::TransferOfRetainedLease {
+            stage: TransferStage::Released,
+        } = later_batch
+        {
+            seed_blocks(&pool, [12]).await?;
+            seed_normalized_event(
+                &pool,
+                "fixture:enriched-transferred-release",
+                None,
+                Some(OWNERLESS_RESOURCE),
+                "RegistrationReleased",
+                "ens_v1_registrar_l1",
+                12,
+                1,
+                json!({
+                    "source_event": "RegistrationReleased",
+                    "released_at": TRANSFERRED_RELEASED_AT,
+                    "expiry": EXPIRY + 1_000,
+                    "namehash": OWNERLESS_NAMEHASH,
+                }),
+                json!({}),
+            )
+            .await?;
+            target_block = 12;
+            if incremental {
+                run_project(&pool, 12, 12, Some(11)).await?;
+            }
+        }
+        if let LaterBatch::SuccessorLease {
+            stage,
+            reclaimed,
+            transferred,
+        } = later_batch
+        {
+            for block in [12, 13, 14] {
+                let seeded =
+                    seed_successor_lease_batch(&pool, block, stage, reclaimed, transferred).await?;
+                if !seeded {
+                    break;
+                }
+                target_block = block;
+                if incremental {
+                    run_project(&pool, block, block, Some(block - 1)).await?;
+                }
+            }
+        }
+        if !incremental {
+            run_project(&pool, target_block, 8, None).await?;
+        }
     }
     let (
         expiry,
         registered_at,
         registration_resource_id,
         registrant,
+        registrant_event_identity,
         selected_binding_id,
         selected_resource_id,
         control,
@@ -4640,6 +4960,9 @@ async fn project_enriched_registry_only_batches(
              declared_summary #>> '{registration,registered_at}',
              declared_summary #>> '{registration,resource_id}',
              declared_summary #>> '{registration,registrant}',
+             (SELECT event.event_identity FROM normalized_events event
+              WHERE event.normalized_event_id =
+                    (name_current.provenance ->> 'registrant_event_id')::bigint),
              surface_binding_id::text, resource_id::text,
              (declared_summary -> 'control') - 'expiry',
              declared_summary #>> '{registration,status}',
@@ -4674,13 +4997,21 @@ async fn project_enriched_registry_only_batches(
     let mut serving = serving_projection_snapshot(&pool).await?;
     if matches!(
         later_batch,
-        Some(LaterBatch::ReleaseOfAnEarlierLease { .. })
+        Some(
+            LaterBatch::ReleaseOfAnEarlierLease { .. }
+                | LaterBatch::SuccessorLease { .. }
+                | LaterBatch::TransferOfRetainedLease {
+                    stage: TransferStage::Released
+                }
+        )
     ) {
-        // A lease resource that no later batch touches keeps, in its permission summary row,
-        // the target block of the batch that last projected it, as in
+        // A resource that no later batch touches keeps, in its permission summary row, the
+        // target block of the batch that last projected it, as in
         // `project_released_then_reregistered`: the earlier lease's resource when it was
         // released before the re-registration, the retained lease's when the block-11 batch
-        // touches only the earlier lease's.
+        // touches only the earlier lease's or when the later batches touch only the successor
+        // lease's, and the registry resource's when the block-12 batch touches only the
+        // transferred lease's.
         serving.retain(|(table, _)| table != "permissions_current_resource_summary");
     }
     database.cleanup().await?;
@@ -4690,6 +5021,7 @@ async fn project_enriched_registry_only_batches(
         serving,
         registration_resource_id,
         registrant,
+        registrant_event_identity,
         address_registrant,
         selected_binding: (selected_binding_id, selected_resource_id),
         control,
@@ -4924,6 +5256,426 @@ async fn release_of_an_earlier_lease_does_not_tombstone_a_handed_off_name() -> R
                 );
             }
         }
+    }
+    Ok(())
+}
+
+/// After the retained lease lapsed under the registry-only binding, a controller grants the name
+/// again with `registerOnly`: the registrar mints a new token and writes the expiry but leaves
+/// the registry alone, so the registry-only binding stays the name's only open one and the
+/// successor lease never gets a binding. The name is then that successor lease under the same
+/// registry control: its registration identity, `registered_at`, expiry and registrant, active,
+/// with nothing inherited from the lapsed lease's release, and the registry owner the handoff
+/// left behind still served. When the successor lease lapses in turn, its release tombstones the
+/// registry-only binding exactly as the retained lease's release did.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+#[tokio::test]
+async fn successor_lease_by_register_only_is_served_under_the_registry_only_binding() -> Result<()>
+{
+    let handed_off = project_enriched_registry_only_batches(false, false, None).await?;
+    let lapsed = project_enriched_registry_only_batches(
+        false,
+        false,
+        Some(LaterBatch::ReleaseOfRetainedLease),
+    )
+    .await?;
+    assert_eq!(lapsed.released_tombstone.as_deref(), Some("ens_v1"));
+    for stage in [SuccessorStage::Granted, SuccessorStage::Renewed] {
+        let later = Some(LaterBatch::SuccessorLease {
+            stage,
+            reclaimed: false,
+            transferred: false,
+        });
+        let incremental = project_enriched_registry_only_batches(false, true, later).await?;
+        let from_zero = project_enriched_registry_only_batches(false, false, later).await?;
+        assert_eq!(incremental, from_zero, "{stage:?}");
+        for (mode, projection) in [("incremental", &incremental), ("from zero", &from_zero)] {
+            let shape = format!("{mode}, {stage:?}");
+            assert_eq!(
+                projection.registration_resource_id.as_deref(),
+                Some(SUCCESSOR_LEASE_RESOURCE),
+                "{shape}: the registration is not the successor lease"
+            );
+            assert_eq!(
+                projection.registration_status.as_deref(),
+                Some("active"),
+                "{shape}: the successor lease is live"
+            );
+            assert_eq!(
+                projection.released_at, None,
+                "{shape}: the lapsed lease's released_at was inherited"
+            );
+            assert_eq!(
+                projection.released_tombstone, None,
+                "{shape}: the lapsed lease's tombstone outlived the successor grant"
+            );
+            assert_eq!(
+                projection.registered_at.as_deref(),
+                Some("2026-08-01T00:00:12+00:00"),
+                "{shape}: registered_at is not the successor grant's"
+            );
+            assert_eq!(
+                projection.expiry,
+                Some(match stage {
+                    SuccessorStage::Granted => SUCCESSOR_EXPIRY,
+                    _ => SUCCESSOR_RENEWED_EXPIRY,
+                }),
+                "{shape}: the expiry is not the successor lease's"
+            );
+            assert_eq!(
+                projection.registrant.as_deref(),
+                Some(SUCCESSOR_OWNER),
+                "{shape}: the registrant is not the successor lease's owner"
+            );
+            assert_eq!(
+                projection.selected_binding, handed_off.selected_binding,
+                "{shape}: the registry-only binding is no longer the selected one"
+            );
+            assert_eq!(
+                projection.authority_kind, handed_off.authority_kind,
+                "{shape}: the successor grant changed the authority kind"
+            );
+            // `control.registrant` repeats the registration's registrant; every other control
+            // field, the registry owner above all, is the handoff's.
+            let mut expected_control = handed_off.control.clone();
+            expected_control["registrant"] = json!(SUCCESSOR_OWNER);
+            assert_eq!(
+                projection.control, expected_control,
+                "{shape}: the successor grant changed control beyond its registrant"
+            );
+            assert_eq!(projection.resolver, handed_off.resolver, "{shape}");
+            assert_eq!(
+                projection.address_relations, handed_off.address_relations,
+                "{shape}"
+            );
+            assert_eq!(projection.address_registrant, None, "{shape}");
+        }
+    }
+    let later = Some(LaterBatch::SuccessorLease {
+        stage: SuccessorStage::Released,
+        reclaimed: false,
+        transferred: false,
+    });
+    let incremental = project_enriched_registry_only_batches(false, true, later).await?;
+    let from_zero = project_enriched_registry_only_batches(false, false, later).await?;
+    assert_eq!(incremental, from_zero, "released");
+    for (mode, projection) in [("incremental", &incremental), ("from zero", &from_zero)] {
+        assert_released_under_the_registry_only_binding(
+            mode,
+            projection,
+            &handed_off,
+            SUCCESSOR_LEASE_RESOURCE,
+            "2026-08-01T00:00:12+00:00",
+            SUCCESSOR_RELEASED_AT,
+        );
+    }
+    Ok(())
+}
+
+/// The released tombstone a lease leaves on the registry-only binding it lapsed under: the
+/// lease's identity, `registered_at` and `released_at` are kept, and nothing else is served.
+fn assert_released_under_the_registry_only_binding(
+    mode: &str,
+    projection: &EnrichedRegistryOnlyProjection,
+    handed_off: &EnrichedRegistryOnlyProjection,
+    lease_resource: &str,
+    registered_at: &str,
+    released_at: i64,
+) {
+    assert_eq!(
+        projection.registration_status.as_deref(),
+        Some("released"),
+        "{mode}: the lease's release did not reach the name"
+    );
+    assert_eq!(
+        projection.released_at.as_deref(),
+        Some(released_at.to_string().as_str()),
+        "{mode}: the release's released_at was not served"
+    );
+    assert_eq!(
+        projection.released_tombstone.as_deref(),
+        Some("ens_v1"),
+        "{mode}: the lease's release did not leave a released tombstone"
+    );
+    assert_eq!(
+        projection.selected_binding, handed_off.selected_binding,
+        "{mode}: the tombstone must stand on the registry-only binding"
+    );
+    assert_eq!(
+        projection.registration_resource_id.as_deref(),
+        Some(lease_resource),
+        "{mode}: the released registration must keep the lease's identity"
+    );
+    assert_eq!(
+        projection.registered_at.as_deref(),
+        Some(registered_at),
+        "{mode}"
+    );
+    assert_eq!(
+        projection.expiry, None,
+        "{mode}: a released name has no expiry"
+    );
+    assert_eq!(
+        projection.registrant, None,
+        "{mode}: a released name has no registrant"
+    );
+    assert_eq!(
+        projection.authority_kind, None,
+        "{mode}: a released name has no authority"
+    );
+    assert_eq!(
+        projection.control,
+        json!({"status": "unregistered"}),
+        "{mode}: a released name has no current control"
+    );
+    assert_eq!(
+        projection.resolver, None,
+        "{mode}: a released name has no resolver"
+    );
+    assert_eq!(
+        projection.address_relations,
+        Vec::<(String, String)>::new(),
+        "{mode}: a released name is listed under no address"
+    );
+    assert_eq!(projection.address_registrant, None, "{mode}");
+}
+
+/// The lease a registry-only binding stands for is live under it, so its token can be
+/// transferred again without `reclaim`. That changes the token holder, and the token holder is
+/// the registrant, while the registry owner the handoff left behind still controls the name.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+fn assert_transferred_under_the_registry_only_binding(
+    mode: &str,
+    projection: &EnrichedRegistryOnlyProjection,
+    handed_off: &EnrichedRegistryOnlyProjection,
+    transfer_identity: &str,
+) {
+    assert_eq!(
+        projection.registrant.as_deref(),
+        Some(LATER_HOLDER),
+        "{mode}: the registrant is not the holder the token was transferred to"
+    );
+    assert_eq!(
+        projection.registrant_event_identity.as_deref(),
+        Some(transfer_identity),
+        "{mode}: the registrant provenance is not the transfer"
+    );
+    assert_eq!(
+        projection.registration_status.as_deref(),
+        Some("active"),
+        "{mode}"
+    );
+    assert_eq!(projection.released_at, None, "{mode}");
+    assert_eq!(projection.released_tombstone, None, "{mode}");
+    assert_eq!(
+        projection.selected_binding, handed_off.selected_binding,
+        "{mode}: the registry-only binding is no longer the selected one"
+    );
+    assert_eq!(
+        projection.authority_kind, handed_off.authority_kind,
+        "{mode}: the transfer changed the authority kind"
+    );
+    // `control.registrant` repeats the registration's registrant; every other control field,
+    // the registry owner above all, is the handoff's.
+    let mut expected_control = handed_off.control.clone();
+    expected_control["registrant"] = json!(LATER_HOLDER);
+    assert_eq!(
+        projection.control, expected_control,
+        "{mode}: the transfer changed control beyond its registrant"
+    );
+    assert_eq!(projection.resolver, handed_off.resolver, "{mode}");
+    assert_eq!(
+        projection.address_relations, handed_off.address_relations,
+        "{mode}"
+    );
+    assert_eq!(projection.address_registrant, None, "{mode}");
+}
+
+/// The retained lease changes hands again under the registry-only binding, without `reclaim`.
+/// The name's registrant is then the new holder, with the transfer as its provenance; the
+/// registry owner, control, the selected binding, the resolver, the lease's identity and its
+/// dates stay as the handoff left them. A renewal in the same batch extends the lease as
+/// before, and the lease's later release tombstones the binding as before.
+#[tokio::test]
+async fn transfer_of_the_retained_lease_reaches_the_registrant_of_a_handed_off_name() -> Result<()>
+{
+    let handed_off = project_enriched_registry_only_batches(false, false, None).await?;
+    assert_eq!(
+        handed_off.registrant_event_identity.as_deref(),
+        Some("fixture:enriched-unreclaimed-transfer"),
+        "the handoff's own transfer names the registrant before the lease moves again"
+    );
+    for stage in [TransferStage::Transferred, TransferStage::Renewed] {
+        let later = Some(LaterBatch::TransferOfRetainedLease { stage });
+        let incremental = project_enriched_registry_only_batches(false, true, later).await?;
+        let from_zero = project_enriched_registry_only_batches(false, false, later).await?;
+        assert_eq!(incremental, from_zero, "{stage:?}");
+        for (mode, projection) in [("incremental", &incremental), ("from zero", &from_zero)] {
+            let shape = format!("{mode}, {stage:?}");
+            assert_transferred_under_the_registry_only_binding(
+                &shape,
+                projection,
+                &handed_off,
+                "fixture:enriched-retained-transfer",
+            );
+            assert_eq!(
+                projection.registration_resource_id.as_deref(),
+                Some(OWNERLESS_RESOURCE),
+                "{shape}: the registration is no longer the retained lease"
+            );
+            assert_eq!(
+                projection.registered_at, handed_off.registered_at,
+                "{shape}: the original registration date was not kept"
+            );
+            assert_eq!(
+                projection.expiry,
+                Some(match stage {
+                    TransferStage::Transferred => 1_700_001_100,
+                    _ => 1_700_002_100,
+                }),
+                "{shape}: the expiry is not the retained lease's"
+            );
+        }
+    }
+    let later = Some(LaterBatch::TransferOfRetainedLease {
+        stage: TransferStage::Released,
+    });
+    let incremental = project_enriched_registry_only_batches(false, true, later).await?;
+    let from_zero = project_enriched_registry_only_batches(false, false, later).await?;
+    assert_eq!(incremental, from_zero, "released");
+    for (mode, projection) in [("incremental", &incremental), ("from zero", &from_zero)] {
+        assert_released_under_the_registry_only_binding(
+            mode,
+            projection,
+            &handed_off,
+            OWNERLESS_RESOURCE,
+            "2026-08-01T00:00:08+00:00",
+            TRANSFERRED_RELEASED_AT,
+        );
+    }
+    Ok(())
+}
+
+/// The same for the successor lease: once `registerOnly` granted it under the registry-only
+/// binding, its token can be transferred without `reclaim` too. The registrant follows the
+/// token, with the transfer as its provenance, while the registry owner, control, the selected
+/// binding, the resolver and the successor lease's identity and dates are unchanged; a renewal
+/// in the same batch and the later release behave as they do without the transfer.
+#[tokio::test]
+async fn transfer_of_the_successor_lease_reaches_the_registrant_under_the_registry_only_binding()
+-> Result<()> {
+    let handed_off = project_enriched_registry_only_batches(false, false, None).await?;
+    for stage in [SuccessorStage::Granted, SuccessorStage::Renewed] {
+        let later = Some(LaterBatch::SuccessorLease {
+            stage,
+            reclaimed: false,
+            transferred: true,
+        });
+        let incremental = project_enriched_registry_only_batches(false, true, later).await?;
+        let from_zero = project_enriched_registry_only_batches(false, false, later).await?;
+        assert_eq!(incremental, from_zero, "{stage:?}");
+        for (mode, projection) in [("incremental", &incremental), ("from zero", &from_zero)] {
+            let shape = format!("{mode}, {stage:?}");
+            assert_transferred_under_the_registry_only_binding(
+                &shape,
+                projection,
+                &handed_off,
+                "fixture:enriched-successor-13-TokenControlTransferred",
+            );
+            assert_eq!(
+                projection.registration_resource_id.as_deref(),
+                Some(SUCCESSOR_LEASE_RESOURCE),
+                "{shape}: the registration is not the successor lease"
+            );
+            assert_eq!(
+                projection.registered_at.as_deref(),
+                Some("2026-08-01T00:00:12+00:00"),
+                "{shape}: registered_at is not the successor grant's"
+            );
+            assert_eq!(
+                projection.expiry,
+                Some(match stage {
+                    SuccessorStage::Granted => SUCCESSOR_EXPIRY,
+                    _ => SUCCESSOR_RENEWED_EXPIRY,
+                }),
+                "{shape}: the expiry is not the successor lease's"
+            );
+        }
+    }
+    let later = Some(LaterBatch::SuccessorLease {
+        stage: SuccessorStage::Released,
+        reclaimed: false,
+        transferred: true,
+    });
+    let incremental = project_enriched_registry_only_batches(false, true, later).await?;
+    let from_zero = project_enriched_registry_only_batches(false, false, later).await?;
+    assert_eq!(incremental, from_zero, "released");
+    for (mode, projection) in [("incremental", &incremental), ("from zero", &from_zero)] {
+        assert_released_under_the_registry_only_binding(
+            mode,
+            projection,
+            &handed_off,
+            SUCCESSOR_LEASE_RESOURCE,
+            "2026-08-01T00:00:12+00:00",
+            SUCCESSOR_RELEASED_AT,
+        );
+    }
+    Ok(())
+}
+
+/// The control case: the successor grant is `register`, which writes the registry owner in the
+/// same transaction, so the successor lease's resource takes over the name with a binding of its
+/// own. That binding is selected and the registration is the successor lease's, as for any
+/// re-registration; the registry-only binding plays no part.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L148-L150 @ ens_v1@91c966f)
+#[tokio::test]
+async fn successor_lease_that_writes_the_registry_opens_its_own_binding() -> Result<()> {
+    let later = Some(LaterBatch::SuccessorLease {
+        stage: SuccessorStage::Granted,
+        reclaimed: true,
+        transferred: false,
+    });
+    let incremental = project_enriched_registry_only_batches(false, true, later).await?;
+    let from_zero = project_enriched_registry_only_batches(false, false, later).await?;
+    assert_eq!(incremental, from_zero);
+    for (mode, projection) in [("incremental", &incremental), ("from zero", &from_zero)] {
+        assert_eq!(
+            projection.selected_binding,
+            (
+                Some(SUCCESSOR_LEASE_BINDING.to_owned()),
+                Some(SUCCESSOR_LEASE_RESOURCE.to_owned())
+            ),
+            "{mode}: the successor lease's own binding must be selected"
+        );
+        assert_eq!(
+            projection.registration_resource_id.as_deref(),
+            Some(SUCCESSOR_LEASE_RESOURCE),
+            "{mode}"
+        );
+        assert_eq!(
+            projection.registration_status.as_deref(),
+            Some("active"),
+            "{mode}"
+        );
+        assert_eq!(projection.expiry, Some(SUCCESSOR_EXPIRY), "{mode}");
+        assert_eq!(
+            projection.registered_at.as_deref(),
+            Some("2026-08-01T00:00:12+00:00"),
+            "{mode}"
+        );
+        assert_eq!(projection.released_at, None, "{mode}");
+        assert_eq!(projection.released_tombstone, None, "{mode}");
+        assert_eq!(
+            projection.registrant.as_deref(),
+            Some(SUCCESSOR_OWNER),
+            "{mode}"
+        );
+        assert_eq!(
+            projection.authority_kind.as_deref(),
+            Some("registrar"),
+            "{mode}"
+        );
     }
     Ok(())
 }

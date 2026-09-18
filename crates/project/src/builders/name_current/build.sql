@@ -374,6 +374,19 @@
                  OR (event.event_kind = 'SurfaceBound' AND event.after_state @>
                      '{"state_derived":true,"authority_kind":"registry_only"}')
               )
+              -- A successor lease granted by `registerOnly` under a registry-only binding names
+              -- the registration, not the authority: the registrar did not touch the registry,
+              -- so the binding's registry-only epoch stays the authority the name is under.
+              -- (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
+              AND NOT (
+                  event.event_kind = 'RegistrationGranted'
+                  AND EXISTS (
+                      SELECT 1 FROM project_registry_only_handoffs handoff
+                      WHERE handoff.surface_binding_id = binding.surface_binding_id
+                        AND handoff.lease_resource_id = event.resource_id
+                        AND handoff.lease_resource_id <> handoff.predecessor_resource_id
+                  )
+              )
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
