@@ -16,6 +16,20 @@ pub const ARM_WIDE_BINDING_CLOSE_KEY: &str = "arm_wide_binding_close";
 pub const CLOSED_AUTHORITY_ARM_KEY: &str = "closed_authority_arm";
 pub const TOKEN_LINEAGE_ID_KEY: &str = "token_lineage_id";
 pub const INTERPRETER_STATE_KEY: &str = "interpreter_state_key";
+/// `after_state` fields that can name the one ENSv1 name an event belongs to, in the order
+/// they are read. A registry `NewOwner` carries its parent in `node` and the name it creates
+/// in `child_node`, so `child_node` comes first. Every reader of "the event's name" uses this
+/// order: state restore, same-batch resolver links, and the Interpret lookahead index and
+/// query (`normalized_events_v1_direct_node_probe_idx`, `lookahead/events.sql`), which file
+/// each event under this name. No adapter emits differing `namehash` and `node` values; the
+/// shared order keeps the readers in agreement if one ever does.
+pub const V1_EVENT_NODE_FIELDS: [&str; 3] = ["child_node", "namehash", "node"];
+
+pub fn v1_event_node(after_state: &serde_json::Value) -> Option<&str> {
+    V1_EVENT_NODE_FIELDS
+        .iter()
+        .find_map(|field| after_state.get(field).and_then(serde_json::Value::as_str))
+}
 pub const SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY: &str = "subregistry_invalidated_token_ids";
 pub const STATE_SCOPE_KEY: &str = "state_scope";
 pub const OBSERVATION_KEY: &str = "observation_key";
@@ -27,6 +41,9 @@ pub const MIGRATION_REGISTRY_ASSOCIATION_KIND: &str = "migration_registry_creati
 pub const REGISTRY_ANNOUNCEMENT_EDGE_KIND: &str = "registry_announcement";
 
 pub const ADMISSION_DISCOVERY_EDGE_KINDS: &[&str] = &["resolver", REGISTRY_ANNOUNCEMENT_EDGE_KIND];
+
+/// Registry resolver pointers retain topology but never authorize emitter capture.
+pub const ADDRESS_ADMISSION_EDGE_SQL: &str = "NOT (edge.edge_kind = 'resolver' AND manifest.source_family IN ('ens_v2_registry_l1', 'ens_v2_root_l1'))";
 
 /// The only normalized event kinds a child migration boundary's recorded ENSv1 cleanup can be: the
 /// wrapper token parked in the graveyard

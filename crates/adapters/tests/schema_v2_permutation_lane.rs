@@ -49,8 +49,9 @@ use permutation::{
         V1LegacyController, V1Registry, V1Resolver, V1UnwrappedController, V1WrappedController,
         V1Wrapper, V2Registry, V2Resolver, declared_events,
     },
-    invariants::{IdentityReferences, assert_upsert_guards_agree, converge, split},
+    invariants::{Converged, IdentityReferences, assert_upsert_guards_agree, converge, split},
     names::{dns_encode, labelhash, namehash},
+    pool_v2,
     scenario::{self, BurstPhase},
     world::{
         BlockSpec, ENS_V1_MAINNET, ENS_V1_SEPOLIA, ENS_V2_SEPOLIA, GeneratedLog, Wiring, World,
@@ -90,6 +91,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
     let mut event_kinds: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     let mut derived = Vec::new();
     let mut burst_reach: BTreeMap<&str, BurstReach> = BTreeMap::new();
+    let mut resolver_creation_reach: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
     let mut forced_cache_misses = 0_usize;
     for world in WORLDS {
         let wiring = Wiring::build(world, &checked_in)?;
@@ -100,6 +102,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
         let mut world_artifacts = BatchBoundaryArtifacts::default();
         let mut world_detaches = 0_usize;
         let mut world_burst = BurstReach::default();
+        let mut world_creation = (0_usize, 0_usize);
         for case in 0..cases {
             let seed = base.wrapping_add(case.wrapping_mul(CASE_STRIDE));
             let scenario = scenario::generate(world, &wiring, seed);
@@ -112,6 +115,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
                     .map(|topic| topic.to_ascii_lowercase()),
             );
             world_burst.cases += usize::from(scenario.dimensions.pre_registration_burst);
+            world_creation.0 += usize::from(scenario.dimensions.resolver_creation);
             // Absolute chain positions of the logs the burst added, with the phase the generator
             // claims for each, so the run can count how many of them the interpretation actually
             // derives an event from, per phase.
@@ -170,6 +174,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
                         .extend(outcome.event_kinds);
                     world_artifacts.absorb(outcome.artifacts);
                     world_detaches += outcome.subregistry_detaches;
+                    world_creation.1 += usize::from(outcome.created_resolver_cross_batch);
                     for (total, derived) in world_burst
                         .derivations
                         .iter_mut()
@@ -193,6 +198,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
         subregistry_detaches.insert(world.label, world_detaches);
         derived.push((world.label, events, logs));
         burst_reach.insert(world.label, world_burst);
+        resolver_creation_reach.insert(world.label, world_creation);
     }
     for (world, kinds) in &event_kinds {
         eprintln!(
@@ -239,6 +245,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
     }
     assert_pinned_artifacts(&artifacts, &subregistry_detaches)?;
     assert_burst_reach(&burst_reach)?;
+    assert_resolver_creation_reach(&resolver_creation_reach)?;
     assert_volume_floors(&derived)
 }
 
@@ -3381,6 +3388,7 @@ struct Outcome {
     event_kinds: BTreeSet<String>,
     subregistry_detaches: usize,
     burst_derivations: [usize; BurstPhase::COUNT],
+    created_resolver_cross_batch: bool,
     artifacts: BatchBoundaryArtifacts,
     tiny_cache_misses: usize,
 }
@@ -3397,7 +3405,15 @@ fn check(
     if batches.len() < 2 {
         bail!("{context}: a split replay of fewer than two batches proves nothing");
     }
+    let created_resolver_logs = input
+        .raw_logs
+        .iter()
+        .filter(|log| log.emitting_address == pool_v2::CREATED_RESOLVER)
+        .map(|log| (log.block_number, log.transaction_index, log.log_index))
+        .collect::<BTreeSet<_>>();
     let converged = converge(context, input, batches)?;
+    let created_resolver_cross_batch =
+        assert_created_resolver_derives(context, &created_resolver_logs, &converged)?;
     let mut references = IdentityReferences::new(world.chain_id, declared, manifests);
     let mut events = 0;
     let mut event_kinds = BTreeSet::new();
@@ -3446,9 +3462,55 @@ fn check(
         event_kinds,
         subregistry_detaches,
         burst_derivations,
+        created_resolver_cross_batch,
         artifacts: converged.artifacts,
         tiny_cache_misses: converged.tiny_cache_misses,
     })
+}
+
+/// Nothing but its own `ResolverCreated()` admits the created resolver, so a log of its that derives
+/// no event is a log the creation failed to admit — and both passes dropping it alike would read
+/// as convergence. Returns whether the split replay derived its events in more than one batch,
+/// which is the case that needs the creation edge carried forward as an admission.
+fn assert_created_resolver_derives(
+    context: &str,
+    logs: &BTreeSet<(i64, i64, i64)>,
+    converged: &Converged,
+) -> Result<bool> {
+    let position = |event: &bigname_adapters::schema_v2::NormalizedEvent| {
+        Some((
+            event.block_number?,
+            event.transaction_index?,
+            event.log_index?,
+        ))
+    };
+    let derived = converged
+        .whole
+        .output
+        .normalized_events
+        .iter()
+        .filter_map(position)
+        .collect::<BTreeSet<_>>();
+    let dark = logs.difference(&derived).collect::<Vec<_>>();
+    if !dark.is_empty() {
+        bail!(
+            "{context}: the created resolver's logs at {dark:?} (block, transaction, log) derive \
+             no normalized event, so its ResolverCreated did not admit them"
+        );
+    }
+    let batches = converged
+        .batches
+        .iter()
+        .filter(|batch| {
+            batch
+                .output
+                .normalized_events
+                .iter()
+                .filter_map(position)
+                .any(|at| logs.contains(&at))
+        })
+        .count();
+    Ok(batches > 1)
 }
 
 /// The phase a burst marker claims is the generator's word; this checks that word against the
@@ -3700,6 +3762,7 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
         ENS_V2_SEPOLIA.label,
         &[
             "AuthorityTransferred",
+            "ContractDiscovered",
             "ExpiryChanged",
             "ParentChanged",
             "PermissionChanged",
@@ -3812,6 +3875,18 @@ const EXPECTED_BURST_REACH: &[(&str, usize, [usize; BurstPhase::COUNT], usize)] 
     (ENS_V1_MAINNET.label, 8, [14, 14, 14], 5),
     (ENS_V1_SEPOLIA.label, 0, [0, 0, 0], 0),
     (ENS_V2_SEPOLIA.label, 0, [0, 0, 0], 0),
+];
+
+/// The resolver-creation axis's reach at the default corpus, per world: how many cases it fired
+/// in, and a floor on how many of those derive the created resolver's events in more than one
+/// batch of the case's own split. Every log of that resolver must derive wherever the axis fires
+/// (`assert_created_resolver_derives`), so the case count is what keeps the axis from going dark,
+/// and the floor keeps the corpus reaching the placement that needs the creation edge carried
+/// into a later batch as an admission. The ENSv1 zero rows pin the axis as ENSv2-only.
+const EXPECTED_RESOLVER_CREATION_REACH: &[(&str, usize, usize)] = &[
+    (ENS_V1_MAINNET.label, 0, 0),
+    (ENS_V1_SEPOLIA.label, 0, 0),
+    (ENS_V2_SEPOLIA.label, 18, 8),
 ];
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -4007,6 +4082,29 @@ fn assert_burst_reach(reach: &BTreeMap<&str, BurstReach>) -> Result<()> {
     Ok(())
 }
 
+fn assert_resolver_creation_reach(reach: &BTreeMap<&str, (usize, usize)>) -> Result<()> {
+    assert_tables_name_every_world(
+        "EXPECTED_RESOLVER_CREATION_REACH",
+        &EXPECTED_RESOLVER_CREATION_REACH
+            .iter()
+            .map(|(world, ..)| *world)
+            .collect::<Vec<_>>(),
+    )?;
+    for (world, cases, cross_batch) in EXPECTED_RESOLVER_CREATION_REACH {
+        let (observed_cases, observed_cross_batch) = reach.get(world).copied().unwrap_or_default();
+        if observed_cases != *cases || observed_cross_batch < *cross_batch {
+            bail!(
+                "{world}: a resolver was created in {observed_cases} cases, {observed_cross_batch} \
+                 of them deriving its events in more than one batch, not the pinned {cases} cases \
+                 with at least {cross_batch} cross-batch. {DRAWN_CORPUS_CAVEAT} Otherwise the \
+                 axis's draw moved, or the layout or the batch split stopped placing the created \
+                 resolver's later write past a boundary"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn assert_volume_floors(derived: &[(&str, usize, usize)]) -> Result<()> {
     assert_tables_name_every_world(
         "MINIMUM_VOLUMES",
@@ -4162,6 +4260,7 @@ fn burst_phase_annotations_fail_when_the_stream_disagrees() {
             name_count: 1,
             dense_transactions: false,
             pre_registration_burst: true,
+            resolver_creation: false,
         },
         action_names: Vec::new(),
         blocks: vec![

@@ -2,7 +2,202 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result};
 
-pub(super) async fn ownerless_registry(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+pub(super) async fn prepare(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+    bind_resource_events(transaction).await?;
+    registry_only_handoffs(transaction).await?;
+    ownerless_registry(transaction).await
+}
+
+/// One row per registry-only binding: the binding it replaced and the BaseRegistrar lease the
+/// name has under it. Both the authority-event window and the released-tombstone rule read this
+/// table, so they agree on which lease a registry-only binding stands for.
+///
+/// A registry-only binding opens when a registrar token is transferred without `reclaim`: the
+/// registry keeps the owner the registrar wrote, so the name is bound to a registry-only
+/// resource while its lease goes on under it. The replaced binding is the latest same-arm binding
+/// strictly before the registry-only one, and to begin with the name's lease is that binding's
+/// resource. The association moves to a successor lease when a controller grants the same name
+/// again with `registerOnly`, which mints a new token and writes the expiry without touching the
+/// registry: the registry-only binding stays open and the successor lease never gets a binding
+/// of its own. Exactly one grant qualifies: an `ens_v1_registrar_l1` `RegistrationGranted` of
+/// registrar authority kind that carries the name and the surface's namehash on another
+/// resource, positioned after the binding opened and after a `RegistrationReleased` of the
+/// replaced lease; the latest such grant is the lease. A grant before the binding opened (an
+/// earlier lease of the name) or before the replaced lease was released never qualifies, and a
+/// grant by `register` writes the registry in its own transaction, so it opens a binding of its
+/// own and is not read here.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+async fn registry_only_handoffs(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+    for statement in [
+        REGISTRY_ONLY_HANDOFFS,
+        "CREATE INDEX ON project_registry_only_handoffs (surface_binding_id)",
+        "CREATE INDEX ON project_registry_only_handoffs (logical_name_id)",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to stage registry-only handoffs", error)
+            })?;
+    }
+    Ok(())
+}
+
+const REGISTRY_ONLY_HANDOFFS: &str = "
+    CREATE TEMP TABLE project_registry_only_handoffs ON COMMIT DROP AS
+    SELECT binding.logical_name_id, binding.surface_binding_id, binding.authority_arm,
+           binding.resource_id, binding.block_number,
+           COALESCE((binding.provenance ->> 'transaction_index')::bigint, -1)
+               AS transaction_index,
+           COALESCE((binding.provenance ->> 'log_index')::bigint, -1) AS log_index,
+           predecessor.resource_id AS predecessor_resource_id,
+           predecessor.block_number AS predecessor_block_number,
+           COALESCE((predecessor.provenance ->> 'transaction_index')::bigint, -1)
+               AS predecessor_transaction_index,
+           COALESCE((predecessor.provenance ->> 'log_index')::bigint, -1)
+               AS predecessor_log_index,
+           COALESCE(successor.resource_id, predecessor.resource_id) AS lease_resource_id
+    FROM project_binding_candidates binding
+    JOIN project_surfaces surface
+      ON surface.logical_name_id = binding.logical_name_id
+    JOIN LATERAL (
+        SELECT predecessor.resource_id, predecessor.block_number, predecessor.provenance
+        FROM project_binding_candidates predecessor
+        WHERE predecessor.logical_name_id = binding.logical_name_id
+          AND predecessor.authority_arm = binding.authority_arm
+          AND (
+              predecessor.block_number,
+              COALESCE((predecessor.provenance ->> 'transaction_index')::bigint, -1),
+              COALESCE((predecessor.provenance ->> 'log_index')::bigint, -1)
+          ) < (
+              binding.block_number,
+              COALESCE((binding.provenance ->> 'transaction_index')::bigint, -1),
+              COALESCE((binding.provenance ->> 'log_index')::bigint, -1)
+          )
+        ORDER BY predecessor.block_number DESC,
+                 COALESCE((predecessor.provenance ->> 'transaction_index')::bigint, -1) DESC,
+                 COALESCE((predecessor.provenance ->> 'log_index')::bigint, -1) DESC,
+                 predecessor.surface_binding_id DESC
+        LIMIT 1
+    ) predecessor ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT successor_grant.resource_id
+        FROM project_events successor_grant
+        WHERE binding.authority_arm = 'ens_v1'
+          AND successor_grant.logical_name_id = binding.logical_name_id
+          AND successor_grant.resource_id IS NOT NULL
+          AND successor_grant.resource_id <> predecessor.resource_id
+          AND successor_grant.source_family = 'ens_v1_registrar_l1'
+          AND successor_grant.event_kind = 'RegistrationGranted'
+          AND COALESCE(NULLIF(successor_grant.after_state ->> 'authority_kind', ''), 'registrar')
+              = 'registrar'
+          AND lower(successor_grant.after_state ->> 'namehash') = lower(surface.namehash)
+          AND (
+              successor_grant.block_number,
+              COALESCE(successor_grant.transaction_index, -1),
+              COALESCE(successor_grant.log_index, -1)
+          ) > (
+              binding.block_number,
+              COALESCE((binding.provenance ->> 'transaction_index')::bigint, -1),
+              COALESCE((binding.provenance ->> 'log_index')::bigint, -1)
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM project_events release
+              WHERE release.logical_name_id = binding.logical_name_id
+                AND release.resource_id = predecessor.resource_id
+                AND release.source_family = 'ens_v1_registrar_l1'
+                AND release.event_kind = 'RegistrationReleased'
+                AND (
+                    release.block_number,
+                    COALESCE(release.transaction_index, -1),
+                    COALESCE(release.log_index, -1)
+                ) < (
+                    successor_grant.block_number,
+                    COALESCE(successor_grant.transaction_index, -1),
+                    COALESCE(successor_grant.log_index, -1)
+                )
+          )
+        ORDER BY successor_grant.block_number DESC,
+                 COALESCE(successor_grant.transaction_index, -1) DESC,
+                 COALESCE(successor_grant.log_index, -1) DESC,
+                 successor_grant.normalized_event_id DESC
+        LIMIT 1
+    ) successor ON TRUE
+    WHERE EXISTS (
+        SELECT 1
+        FROM project_events epoch
+        WHERE epoch.logical_name_id = binding.logical_name_id
+          AND epoch.resource_id = binding.resource_id
+          AND epoch.event_kind = 'AuthorityEpochChanged'
+          AND epoch.after_state ->> 'authority_kind' = 'registry_only'
+    )";
+
+/// Names the `.eth` BaseRegistrar lifecycle rows that were written before the label was known.
+/// Rows of every other source family keep the name Interpret gave them, or none.
+///
+/// A row is named in one of two ways, both an exact match on the registrar resource and the
+/// namehash: through a binding of that resource to the name, or through the registrar lease a
+/// `NameWrapped` row of the name recorded in `wrapped_registrar_resource_id`. The second way
+/// leaves out the registrar transfer that moves the token into the NameWrapper in the wrap's own
+/// transaction: it names the NameWrapper contract, not a holder. Rows named the second way are
+/// listed in `project_wrapper_linked_events`.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L265 @ ens_v1@91c966f)
+async fn bind_resource_events(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+    for statement in [
+        "UPDATE project_events event SET logical_name_id = binding.logical_name_id
+         FROM project_binding_candidates binding JOIN project_surfaces surface
+           ON surface.logical_name_id = binding.logical_name_id
+         WHERE event.logical_name_id IS NULL AND event.resource_id = binding.resource_id
+           AND event.source_family = 'ens_v1_registrar_l1'
+           AND event.event_kind IN (
+               'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
+               'ExpiryChanged', 'TokenControlTransferred'
+           )
+           AND lower(surface.namehash) = lower(event.after_state ->> 'namehash')",
+        "CREATE TEMP TABLE project_wrapper_linked_events (
+             normalized_event_id bigint PRIMARY KEY
+         ) ON COMMIT DROP",
+        BIND_WRAPPER_LINKED_EVENTS,
+    ] {
+        sqlx::query(statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to bind resource-keyed events", error)
+            })?;
+    }
+    Ok(())
+}
+
+const BIND_WRAPPER_LINKED_EVENTS: &str = "
+    WITH named AS (
+        UPDATE project_events event SET logical_name_id = wrapper.logical_name_id
+        FROM project_events wrapper
+        WHERE event.logical_name_id IS NULL
+          AND event.source_family = 'ens_v1_registrar_l1'
+          AND event.event_kind IN (
+              'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
+              'ExpiryChanged', 'TokenControlTransferred'
+          )
+          AND wrapper.source_family = 'ens_v1_wrapper_l1'
+          AND wrapper.event_kind = 'SurfaceBound'
+          AND wrapper.logical_name_id IS NOT NULL
+          AND wrapper.after_state ->> 'wrapped_registrar_resource_id' = event.resource_id::text
+          AND lower(wrapper.after_state ->> 'node') = lower(event.after_state ->> 'namehash')
+          AND (
+              event.event_kind <> 'TokenControlTransferred'
+              OR event.transaction_hash IS DISTINCT FROM wrapper.transaction_hash
+              OR lower(event.after_state ->> 'to') IS DISTINCT FROM
+                 lower(wrapper.raw_fact_ref ->> 'emitting_address')
+          )
+        RETURNING event.normalized_event_id
+    )
+    INSERT INTO project_wrapper_linked_events
+    SELECT DISTINCT normalized_event_id FROM named";
+
+async fn ownerless_registry(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query(
         "CREATE TEMP TABLE project_latest_registry_owner ON COMMIT DROP AS
          SELECT latest.logical_name_id, latest.resource_id, latest.owner_getter,
@@ -71,236 +266,25 @@ pub(super) async fn ownerless_registry(transaction: &mut Transaction<'_, Postgre
     Ok(())
 }
 
+/// What `build` runs before `AUTHORITY_EVENTS`; the plan test stages the same way.
+pub(super) const SELECTED_BINDINGS: [&str; 3] = [
+    "ALTER TABLE project_name_authority ADD PRIMARY KEY (logical_name_id)",
+    "CREATE TEMP TABLE project_bindings ON COMMIT DROP AS
+     SELECT candidate.*
+     FROM project_name_authority authority
+     JOIN project_binding_candidates candidate
+       ON candidate.surface_binding_id = authority.selected_binding_id",
+    "CREATE INDEX ON project_bindings (logical_name_id)",
+];
+pub(super) const AUTHORITY_EVENTS: &str = include_str!("authority_events.sql");
+
 pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
-    for statement in [
-        "ALTER TABLE project_name_authority ADD PRIMARY KEY (logical_name_id)",
-        "CREATE TEMP TABLE project_bindings ON COMMIT DROP AS
-         SELECT candidate.*
-         FROM project_name_authority authority
-         JOIN project_binding_candidates candidate
-           ON candidate.surface_binding_id = authority.selected_binding_id",
-        "CREATE INDEX ON project_bindings (logical_name_id)",
-        "CREATE TEMP TABLE project_authority_events ON COMMIT DROP AS
-         SELECT DISTINCT ON (event.normalized_event_id) event.*
-         FROM project_events event
-         JOIN project_name_authority authority
-           ON authority.logical_name_id = event.logical_name_id
-         WHERE (
-               (
-                   authority.unsupported_reason IS NULL
-                   AND (
-                       event.resource_id = authority.selected_resource_id
-                       OR (
-                           event.resource_id IS NULL
-                           AND CASE
-                               WHEN event.source_family LIKE 'ens_v1_%' THEN 'ens_v1'
-                               WHEN event.source_family LIKE 'ens_v2_%' THEN 'ens_v2'
-                               WHEN event.source_family LIKE 'basenames_%' THEN 'basenames'
-                           END = authority.selected_authority_arm
-                       )
-                       OR (
-                           authority.selected_authority_arm = 'ens_v1'
-                           AND event.event_kind IN (
-                               'RegistrationGranted', 'RegistrationRenewed',
-                               'ExpiryChanged'
-                           )
-                           AND event.source_family = 'ens_v1_registrar_l1'
-                           AND COALESCE(
-                               NULLIF(event.after_state ->> 'authority_kind', ''),
-                               'registrar'
-                           ) = 'registrar'
-                           AND (
-                               EXISTS (
-                                   SELECT 1
-                                   FROM project_bindings selected_binding
-                                   JOIN LATERAL (
-                                       SELECT predecessor.*
-                                       FROM project_binding_candidates predecessor
-                                       WHERE predecessor.logical_name_id =
-                                             selected_binding.logical_name_id
-                                         AND predecessor.authority_arm = 'ens_v1'
-                                         AND (
-                                             predecessor.block_number,
-                                             COALESCE(
-                                                 (predecessor.provenance ->> 'transaction_index')::bigint,
-                                                 -1
-                                             ),
-                                             COALESCE(
-                                                 (predecessor.provenance ->> 'log_index')::bigint, -1
-                                             )
-                                         ) < (
-                                             selected_binding.block_number,
-                                             COALESCE(
-                                                 (selected_binding.provenance ->> 'transaction_index')::bigint,
-                                                 -1
-                                             ),
-                                             COALESCE(
-                                                 (selected_binding.provenance ->> 'log_index')::bigint,
-                                                 -1
-                                             )
-                                         )
-                                       ORDER BY predecessor.block_number DESC,
-                                                COALESCE(
-                                                    (predecessor.provenance ->> 'transaction_index')::bigint,
-                                                    -1
-                                                ) DESC,
-                                                COALESCE(
-                                                    (predecessor.provenance ->> 'log_index')::bigint,
-                                                    -1
-                                                ) DESC,
-                                                predecessor.surface_binding_id DESC
-                                       LIMIT 1
-                                   ) predecessor ON TRUE
-                                   WHERE selected_binding.logical_name_id =
-                                         authority.logical_name_id
-                                     AND predecessor.resource_id = event.resource_id
-                               )
-                               OR EXISTS (
-                                   SELECT 1
-                                   FROM project_events selected_wrapper
-                                   JOIN project_events registration
-                                     ON registration.logical_name_id =
-                                        selected_wrapper.logical_name_id
-                                    AND registration.transaction_hash =
-                                        selected_wrapper.transaction_hash
-                                    AND registration.resource_id = event.resource_id
-                                    AND registration.source_family =
-                                        'ens_v1_registrar_l1'
-                                    AND registration.event_kind = 'RegistrationGranted'
-                                   WHERE selected_wrapper.logical_name_id =
-                                         authority.logical_name_id
-                                     AND selected_wrapper.resource_id =
-                                         authority.selected_resource_id
-                                     AND selected_wrapper.source_family =
-                                         'ens_v1_wrapper_l1'
-                                     AND selected_wrapper.event_kind = 'SurfaceBound'
-                               )
-                           )
-                           AND EXISTS (
-                               SELECT 1 FROM project_events wrapper
-                               WHERE wrapper.logical_name_id = authority.logical_name_id
-                                 AND wrapper.resource_id = authority.selected_resource_id
-                                 AND wrapper.source_family = 'ens_v1_wrapper_l1'
-                                 AND wrapper.event_kind = 'PermissionScopeChanged'
-                           )
-                       )
-                       OR (
-                           authority.selected_authority_arm IN ('ens_v1', 'basenames')
-                           AND event.event_kind IN (
-                               'RegistrationGranted', 'RegistrationRenewed',
-                               'RegistrationReleased', 'RegistrationReserved',
-                               'ExpiryChanged', 'TokenControlTransferred'
-                           )
-                           AND EXISTS (
-                               SELECT 1 FROM project_events fallback
-                               WHERE fallback.logical_name_id = authority.logical_name_id
-                                 AND fallback.resource_id = authority.selected_resource_id
-                                 AND fallback.event_kind = 'AuthorityEpochChanged'
-                                 AND fallback.after_state ->> 'authority_kind' = 'registry_only'
-                           )
-                           AND EXISTS (
-                               SELECT 1
-                               FROM project_bindings selected_binding
-                               JOIN LATERAL (
-                                   SELECT predecessor.*
-                                   FROM project_binding_candidates predecessor
-                                   WHERE predecessor.logical_name_id =
-                                         selected_binding.logical_name_id
-                                     AND predecessor.authority_arm =
-                                         authority.selected_authority_arm
-                                     AND (
-                                         predecessor.block_number,
-                                         COALESCE(
-                                             (predecessor.provenance ->> 'transaction_index')::bigint,
-                                             -1
-                                         ),
-                                         COALESCE(
-                                             (predecessor.provenance ->> 'log_index')::bigint, -1
-                                         )
-                                     ) < (
-                                         selected_binding.block_number,
-                                         COALESCE(
-                                             (selected_binding.provenance ->> 'transaction_index')::bigint,
-                                             -1
-                                         ),
-                                         COALESCE(
-                                             (selected_binding.provenance ->> 'log_index')::bigint,
-                                             -1
-                                         )
-                                     )
-                                   ORDER BY predecessor.block_number DESC,
-                                            COALESCE(
-                                                (predecessor.provenance ->> 'transaction_index')::bigint,
-                                                -1
-                                            ) DESC,
-                                            COALESCE(
-                                                (predecessor.provenance ->> 'log_index')::bigint,
-                                                -1
-                                            ) DESC,
-                                            predecessor.surface_binding_id DESC
-                                   LIMIT 1
-                               ) predecessor ON TRUE
-                               WHERE selected_binding.logical_name_id =
-                                     authority.logical_name_id
-                                 AND predecessor.resource_id = event.resource_id
-                                 AND (
-                                     event.block_number,
-                                     COALESCE(event.transaction_index, -1),
-                                     COALESCE(event.log_index, -1)
-                                 ) >= (
-                                     predecessor.block_number,
-                                     COALESCE(
-                                         (predecessor.provenance ->> 'transaction_index')::bigint,
-                                         -1
-                                     ),
-                                     COALESCE(
-                                         (predecessor.provenance ->> 'log_index')::bigint, -1
-                                     )
-                                 )
-                                 AND (
-                                     event.block_number,
-                                     COALESCE(event.transaction_index, -1),
-                                     COALESCE(event.log_index, -1)
-                                 ) <= (
-                                     selected_binding.block_number,
-                                     COALESCE(
-                                         (selected_binding.provenance ->> 'transaction_index')::bigint,
-                                         -1
-                                     ),
-                                     COALESCE(
-                                         (selected_binding.provenance ->> 'log_index')::bigint, -1
-                                     )
-                                 )
-                           )
-                       )
-                   )
-               )
-               OR (
-                   authority.unsupported_reason = 'current_authority_not_projected'
-                   AND event.event_kind = 'ResolverChanged'
-                   AND event.resource_id IS NULL
-               )
-           )
-           AND (
-               authority.authority_proof_event_id IS NULL
-               OR (
-                   event.block_number,
-                   COALESCE(event.transaction_index, -1),
-                   COALESCE(event.log_index, -1)
-               ) >= (
-                   (authority.authority_epoch_start_position ->> 'block_number')::bigint,
-                   COALESCE(
-                       (authority.authority_epoch_start_position ->> 'transaction_index')::bigint,
-                       -1
-                   ),
-                   COALESCE(
-                       (authority.authority_epoch_start_position ->> 'log_index')::bigint, -1
-                   )
-               )
-           )
-         ORDER BY event.normalized_event_id",
+    for statement in SELECTED_BINDINGS.into_iter().chain([
+        AUTHORITY_EVENTS,
         "CREATE INDEX ON project_authority_events (logical_name_id, normalized_event_id)",
         "CREATE INDEX ON project_authority_events (resource_id, normalized_event_id)",
+        include_str!("registration_events.sql"),
+        "CREATE INDEX ON project_registration_events (logical_name_id, normalized_event_id)",
         "CREATE TEMP TABLE project_name_serving ON COMMIT DROP AS
          SELECT authority.logical_name_id,
                 pointer.resource_id AS serving_resource_id,
@@ -409,7 +393,7 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
         "CREATE UNIQUE INDEX ON project_name_serving (logical_name_id)",
         "CREATE INDEX ON project_name_serving (serving_resource_id)",
         "CREATE INDEX ON project_name_serving (resolver_chain_id, resolver_address)",
-    ] {
+    ]) {
         sqlx::query(statement)
             .execute(&mut **transaction)
             .await
@@ -418,4 +402,45 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
             })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// A full rebuild runs this statement once over every event and every name. With anything but
+    /// a plain equality between the two, Postgres can neither hash- nor merge-join them and
+    /// instead re-reads every row that carries no name once per name. This checks the SQL text
+    /// only; `plan_tests` checks the plan Postgres chooses.
+    #[test]
+    fn authority_events_join_names_by_equality_only() {
+        let statement = include_str!("authority_events.sql");
+        let (join, _filter) = statement
+            .split_once("\nWHERE (")
+            .expect("the statement has a WHERE clause");
+        assert!(
+            join.trim_end().ends_with(
+                "FROM project_events event\nJOIN project_name_authority authority\n  \
+                 ON authority.logical_name_id = event.logical_name_id"
+            ),
+            "the events-to-names join must be a single equality on logical_name_id:\n{join}"
+        );
+        assert!(
+            !statement.contains("event.logical_name_id IS NULL"),
+            "rows without a name are named while staging, not searched by this statement"
+        );
+    }
+
+    /// The registrar lease a `NameWrapped` row recorded is attached while staging, with the same
+    /// restriction as the binding match: `.eth` BaseRegistrar lifecycle rows only.
+    #[test]
+    fn staging_names_only_base_registrar_lifecycle_rows() {
+        assert_eq!(
+            super::BIND_WRAPPER_LINKED_EVENTS
+                .matches("event.source_family = 'ens_v1_registrar_l1'")
+                .count(),
+            1
+        );
+        assert!(super::BIND_WRAPPER_LINKED_EVENTS.contains(
+            "wrapper.after_state ->> 'wrapped_registrar_resource_id' = event.resource_id::text"
+        ));
+    }
 }

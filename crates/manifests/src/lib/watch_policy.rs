@@ -11,6 +11,7 @@ pub const APPROVAL_SIGNATURE: &str = "Approval(address,address,uint256)";
 pub const APPROVED_SIGNATURE: &str = "Approved(address,bytes32,address,bool)";
 const ERC1967_UPGRADED_SIGNATURE: &str = "Upgraded(address)";
 const ENS_V2_UNIQUE_RESOLVER_EVENT_SIGNATURES: &[&str] = &[
+    "ResolverCreated()",
     "AliasChanged(bytes,bytes,bytes,bytes)",
     "NamedResource(uint256,bytes)",
     "NamedTextResource(uint256,bytes,bytes32,string)",
@@ -102,6 +103,10 @@ pub fn generic_resolver_topic0s() -> Vec<String> {
     topic0s(GENERIC_RESOLVER_EVENT_SIGNATURES)
 }
 
+pub fn resolver_creation_topic0() -> String {
+    topic0("ResolverCreated()")
+}
+
 pub fn registry_announcement_topic0() -> String {
     topic0(REGISTRY_CREATED_SIGNATURE)
 }
@@ -119,6 +124,12 @@ fn topic0s(signatures: &[&str]) -> Vec<String> {
 
 fn topic0(signature: &str) -> String {
     format!("{}", alloy_primitives::keccak256(signature.as_bytes()))
+}
+
+/// Exact role declarations are not topics of a discovered record-ID resolver.
+pub fn is_role_scoped_event(source_family: &str, signature: &str, roles: &[String]) -> bool {
+    is_address_scoped_approval(source_family, signature)
+        || (source_family == ENS_V2_RESOLVER_SOURCE_FAMILY && !roles.is_empty())
 }
 
 #[cfg(test)]
@@ -141,10 +152,11 @@ mod tests {
     }
 
     #[test]
-    fn v2_selects_only_its_four_unique_topics() {
+    fn v2_selects_creation_and_its_unique_topics() {
         let generic_text = topic0("TextChanged(bytes32,string,string,string)");
         let mut manifest = ens_v2_unique_resolver_topic0s();
-        assert_eq!(manifest.len(), 4);
+        assert_eq!(manifest.len(), 5);
+        assert!(manifest.contains(&resolver_creation_topic0()));
         manifest.push(generic_text.clone());
         assert_eq!(
             all_emitter_topic0s(ENS_V2_RESOLVER_SOURCE_FAMILY, &manifest),

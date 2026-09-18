@@ -193,6 +193,7 @@ sol! {
     }
 
     interface V2RecordResolver {
+        event ResolverCreated();
         event Linked(uint256 indexed recordId, bytes32 indexed node, bytes name);
         event AddressUpdated(uint256 indexed recordId, uint256 coinType, bytes addressBytes);
         event NameUpdated(uint256 indexed recordId, string primaryName);
@@ -305,6 +306,7 @@ pub fn declared_events() -> Vec<DeclaredEvent> {
         .chain(declared!(
             "ens_v2_sepolia",
             [
+                V2RecordResolver::ResolverCreated,
                 V2RecordResolver::Linked,
                 V2RecordResolver::AddressUpdated,
                 V2RecordResolver::NameUpdated,

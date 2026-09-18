@@ -629,6 +629,56 @@ async fn v2_get_resolver_omits_names_without_projected_authority() -> Result<()>
     Ok(())
 }
 
+/// A `.eth` lease that lapsed under a registry-only binding is released like any other lapse, so
+/// the resolver its registry owner set no longer lists the name among its bound names.
+#[tokio::test]
+async fn v2_get_resolver_omits_a_lapsed_handed_off_name_from_bound_names() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture(&database).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+             jsonb_set(
+                 declared_summary,
+                 '{registration}',
+                 (declared_summary -> 'registration') || jsonb_build_object(
+                     'status', 'released',
+                     'authority_kind', 'registry_only',
+                     'released_at', '2026-06-14T00:00:00Z',
+                     'registrant', NULL,
+                     'expiry', NULL
+                 )
+             ),
+             '{control}',
+             '{\"status\": \"unregistered\"}'::jsonb
+         )
+         WHERE raw_name = 'alpha.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+    upsert_test_resolver_current_rows(
+        &database,
+        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
+    )
+    .await?;
+
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+    )
+    .await?;
+    let names = payload["data"]["bound_names"]["data"]
+        .as_array()
+        .expect("bound names must be an array")
+        .iter()
+        .map(|row| row["name"].as_str().expect("bound name must be text"))
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["beta.eth"], "{payload}");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_get_resolver_lists_a_root_registry_pointer_without_projected_authority() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

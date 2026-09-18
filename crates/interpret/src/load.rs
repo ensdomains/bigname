@@ -1,5 +1,7 @@
 use bigname_adapters::SchemaV2AdapterSession;
-use bigname_adapters::schema_v2::seam::{ADMISSION_DISCOVERY_EDGE_KINDS, OBSERVATION_KEY};
+use bigname_adapters::schema_v2::seam::{
+    ADDRESS_ADMISSION_EDGE_SQL, ADMISSION_DISCOVERY_EDGE_KINDS, OBSERVATION_KEY,
+};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, DiscoveryRuleInput, ManifestInput, RawBlockInput,
     RawLogInput, StateCacheCapacity,
@@ -9,6 +11,8 @@ use sqlx::{PgConnection, PgPool, types::Uuid};
 use crate::{InterpretError, Result};
 
 mod cache;
+pub(crate) mod lookahead;
+mod lookahead_query;
 mod manifests;
 mod migration;
 mod prior;
@@ -28,6 +32,8 @@ pub(crate) struct LoadedBatch {
     pub prior_cache: PriorCache,
     pub adapter_session: Option<SchemaV2AdapterSession>,
     pub restored_event_count: usize,
+    pub lookahead_nodes:
+        Option<std::collections::BTreeSet<bigname_adapters::schema_v2::V1NodeRequest>>,
 }
 
 type RawLogRow = (
@@ -136,6 +142,7 @@ pub(crate) async fn batch_input(
         prior_cache,
         adapter_session: Some(adapter_session),
         restored_event_count,
+        lookahead_nodes: None,
     })
 }
 
@@ -394,6 +401,7 @@ async fn load_admissions(
             WHERE edge.chain_id = $1
               AND manifest.rollout_status = 'active'
               AND edge.edge_kind = ANY($3::text[])
+              AND {ADDRESS_ADMISSION_EDGE_SQL}
               AND edge.canonicality_state IN ('canonical', 'safe', 'finalized')
               AND COALESCE(edge.active_from_block_number, 0) < $2
               AND (

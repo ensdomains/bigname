@@ -189,6 +189,12 @@ pub struct Dimensions {
     /// ordering otherwise keeps unreachable. The `Reregistration` perturbation's later registration
     /// is deliberately not wrapped. See `pool_v1::burst_around_registration` for the legality.
     pub pre_registration_burst: bool,
+    /// ENSv2 only: a resolver that is not a declared role address announces itself with
+    /// `ResolverCreated()`, writes its initializer records in that same transaction, and writes
+    /// again later. Nothing else admits that address, so every one of its record events derives
+    /// only through the creation's self discovery edge — including, under a split, in a later
+    /// batch than the creation. See `pool_v2::created_resolver`.
+    pub resolver_creation: bool,
 }
 
 impl Dimensions {
@@ -237,6 +243,7 @@ impl Dimensions {
                                 name_count: 1,
                                 dense_transactions: false,
                                 pre_registration_burst: true,
+                                resolver_creation: true,
                             });
                         }
                     }
@@ -289,6 +296,8 @@ impl Dimensions {
             // `generate` decides this from a side stream; drawing it here would shift every later
             // draw and redraw the pinned corpus.
             pre_registration_burst: false,
+            // Same side-stream rule as the burst axis.
+            resolver_creation: false,
         }
     }
 
@@ -331,12 +340,18 @@ const BASE_BLOCK: i64 = 15_000_000;
 /// any ENSv1 decision, and an ENSv2 failure context always prints false rather than implying a
 /// burst its pool cannot build.
 const PRE_REGISTRATION_BURST_SALT: u64 = 0x5bd1_e995_4a89_1d4b;
+/// Salt for the resolver-creation axis's side stream, for the same reason as the burst's: a case
+/// the axis does not fire in stays byte-identical to the corpus before the axis existed. Only the
+/// ENSv2 pool reads the axis, so only that world draws it.
+const RESOLVER_CREATION_SALT: u64 = 0x94d0_49bb_1331_11eb;
 
 pub fn generate(world: &'static World, wiring: &Wiring, seed: u64) -> Scenario {
     let mut rng = Rng::new(seed);
     let mut dimensions = Dimensions::draw(&mut rng);
     dimensions.pre_registration_burst = world.label == "ens_v1_mainnet"
         && Rng::new(seed ^ PRE_REGISTRATION_BURST_SALT).chance(1, 4);
+    dimensions.resolver_creation =
+        world.label == "ens_v2_sepolia" && Rng::new(seed ^ RESOLVER_CREATION_SALT).chance(1, 3);
     let blocks = draw_blocks(&mut rng);
     let settle_timestamp = blocks.last().expect("scenario has blocks").timestamp;
     let mut actions = pool(world, wiring, &dimensions, settle_timestamp);

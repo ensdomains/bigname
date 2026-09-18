@@ -375,6 +375,14 @@ fn record_discovery_rules(snapshot: &mut Snapshot, manifest: &SourceManifest) ->
             "resolver" | "registry_announcement"
         )
     }) {
+        if rule.edge_kind == "resolver"
+            && matches!(
+                manifest.source_family.as_str(),
+                "ens_v2_registry_l1" | "ens_v2_root_l1"
+            )
+        {
+            continue;
+        }
         let mut emitters = BTreeMap::<String, u64>::new();
         for (_, address, start) in declarations
             .iter()

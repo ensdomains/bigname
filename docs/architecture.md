@@ -624,6 +624,13 @@ Schema, capability ownership detail, and the discovery edge model are in [`manif
 
 ## Discovery graph
 
+ENSv2 resolver bindings and capture are separate. `ResolverUpdated` changes a
+name's target, while `ResolverCreated()` admits the emitting resolver from its
+creation block. Same-window ingestion includes initializer writes and earlier
+construction logs in that block; later binding changes cannot trigger capture
+backfill. See [resolver creation capture](glossary.md#resolver-creation-capture).
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2_sepolia_20260916@366de741)
+
 Discovery expands the canonical graph through time-versioned indexability and relationship edges. The schema-v2 baseline constrains `edge_kind` to exactly five values: `resolver`, `subregistry`, `proxy_implementation`, `registry_announcement`, and `migration`. Four of the five have producers; nothing writes `migration`, which is [reserved surface](glossary.md#reserved-surface). (The legacy `public` schema built from `migrations/` never constrained the column, so historical rows there are not bounded by this list.) Each edge stores `edge_id`, `from_contract_instance_id`, `to_contract_instance_id`, `discovered_by`, `edge_kind`, `active_from`, `active_to`, provenance, and canonicality.
 
 ENSv2 mappings:
@@ -670,7 +677,12 @@ Registry-name suffix labels are retained verbatim. Raw label text keys the live 
 Project applies the same declaration precedence when it classifies an active
 resolver-discovery admission for serving. An applicable exact resolver
 declaration in the same namespace has classification rank 0, ahead of the
-original discovery admission at rank 1. This changes only the address's
+original discovery admission at rank 1. For this purpose an ENSv2 registry or
+root `ResolverUpdated` pointer edge still counts, as does a
+[creation self-edge](glossary.md#resolver-creation-capture): the pointer does
+not admit the resolver for event capture, but it proves that a name in its
+namespace uses the address, which is what the declaration is matched against.
+This changes only the address's
 Project family classification: it does not remove or rewrite the discovery
 edge, the ENSv2-origin `ResolverChanged` event, its `logical_name_id`, or their
 provenance. When one manifest has repeated applicable declarations for the
@@ -1140,6 +1152,15 @@ mutate or replace the earlier normalized fact and requires no provider read.
 
 Readable-name evidence may disclose an already selected ENSv1 registrar resource only under the current-owner and live-lineage checks in [storage semantics](storage.md). This creates an observation-time binding and a marked state-derived snapshot without changing earlier resource-only facts.
 
+Which event creates an ENSv1 `.eth` lease is a manifest declaration, not an adapter choice: the
+registrar adapter runs the BaseRegistrar path for an event only when that event declares
+`RegistrationGranted`. Where the BaseRegistrar's own numeric events create the lease, a reveal of
+the label is never a rewrite. A controller event that names the lease writes a binding and
+replays the current resolver onto the name, a wrap records the wrapped lease's `resource_id` on
+the rows listed in [storage semantics](storage.md), and Project attaches the immutable resource-keyed lifecycle rows to the name
+through those two identities. See [storage semantics](storage.md) and
+[projections](projections.md#exact-name-projection).
+
 Fresh, restored, resumed, and redo interpretation over the same retained input
 must emit identical state-derived output. Within one raw position, Interpret
 orders the selected source's ordinary events first, then state-derived sourced
@@ -1201,8 +1222,8 @@ Physical batching is an execution detail, not an input to interpretation for a c
 Identity rows, discovery edges, and normalized events must be a pure function
 of the canonical raw facts and the declared manifests, discovery rules, and
 admissions: after completion, a fresh full walk, an incremental follow, and a resumed session
-over identical input must write identical rows no matter where the 500-block
-batch boundaries fall. A finitely retired manifest-declared address range is
+over identical input must write identical rows no matter where the
+[batch](glossary.md#batch-grid) boundaries fall or how many blocks a batch holds. A finitely retired manifest-declared address range is
 the narrow history-bearing exception: manifest synchronization supplies its
 retirement boundary, Interpret redo preserves it, and a fresh database that
 starts after the declaration was removed need not contain that historical

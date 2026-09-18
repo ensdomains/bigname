@@ -7,6 +7,7 @@ mod catalog;
 mod common;
 mod discovery;
 mod identity;
+mod lookahead;
 mod manifest;
 mod migration;
 #[cfg(feature = "test-activation")]
@@ -22,6 +23,11 @@ mod state_key;
 mod state_residency;
 mod state_restore;
 
+pub use lookahead::{
+    V1BatchDependencies, V1NodeRequest, collect_v1_batch_dependencies,
+    prepare_schema_v2_batch_lookahead, restore_schema_v2_lookahead_session,
+    v1_lookahead_supports_family,
+};
 pub use model::*;
 pub use session::{
     AdapterSession, AdapterSessionRestore, InterpreterStateRequest, InterpreterStateValue,

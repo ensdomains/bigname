@@ -1325,8 +1325,9 @@ An ENSv2 registration that lapses by path expiry is served like one released by
 `released`, the registration identity, timestamps and the lapsed `expires_at`,
 without a current owner, resolver or records, and `GET /v1/names/{name}/history`
 keeps serving the name's history. An ENSv1 lease that lapses past grace with no
-revived custody, which is how a wrapped `.eth` name lapses, is served the same
-way as a [released v1 authority](glossary.md#released-v1-authority):
+revived custody, which is how a wrapped `.eth` name lapses and how a `.eth` name
+lapses after its registrar token was transferred without `reclaim`, is served the
+same way as a [released v1 authority](glossary.md#released-v1-authority):
 `registration_status` `released` with the registration identity and
 timestamps, no owner, registrant, `expires_at`, resolver or records, and its
 history intact. Only a name that never had a readable surface
