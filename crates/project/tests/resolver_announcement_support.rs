@@ -1,12 +1,13 @@
 //! ENSv2 resolver support classification from the latest implementation observation: a
 //! factory-announced implementation (`Upgraded` history with `source_event = ProxyDeployed`)
 //! supports the proxy, and a discovered proxy with no observation is explicitly
-//! `resolver_implementation_unknown`.
+//! `resolver_implementation_unknown`. Declaration precedence pairs a manifest declaration with
+//! a same-namespace `resolver` edge; a creation self-edge is one.
 
 use anyhow::Result;
 use bigname_project::{BatchRequest, Engine, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
 
 const CHAIN: &str = "ethereum-sepolia";
@@ -76,33 +77,8 @@ async fn announced_implementation_supports_the_proxy_and_silence_is_unknown() ->
 async fn creation_self_edge_alone_is_served_as_implementation_unknown() -> Result<()> {
     let (db, pool) = database("resolver_creation_only_support").await?;
     seed(&pool).await?;
-    let resolver_manifest: i64 = sqlx::query_scalar(
-        "SELECT manifest_id FROM manifest_versions WHERE source_family = 'ens_v2_resolver_l1'",
-    )
-    .fetch_one(&pool)
-    .await?;
-    sqlx::query("INSERT INTO contract_instances (contract_instance_id,chain_id,contract_kind) VALUES ($1::uuid,$2,'contract')")
-        .bind(CREATED_INSTANCE).bind(CHAIN).execute(&pool).await?;
-    sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id,chain_id,address,active_from_block_number,active_from_block_hash,source_manifest_id) VALUES ($1::uuid,$2,$3,$4,$5,$6)")
-        .bind(CREATED_INSTANCE).bind(CHAIN).bind(CREATED_RESOLVER).bind(BLOCK).bind(hash(BLOCK)).bind(resolver_manifest).execute(&pool).await?;
-    sqlx::query("INSERT INTO discovery_edges (chain_id,edge_kind,from_contract_instance_id,to_contract_instance_id,discovery_source,admission_basis,source_manifest_id,active_from_block_number,active_from_block_hash,canonicality_state) VALUES ($1,'resolver',$2::uuid,$2::uuid,'ResolverCreated','reachable_from_root',$3,$4,$5,'canonical')")
-        .bind(CHAIN).bind(CREATED_INSTANCE).bind(resolver_manifest).bind(BLOCK).bind(hash(BLOCK)).execute(&pool).await?;
-    // What Interpret writes for the creation log. There is no `Upgraded` for this address.
-    let after = json!({"source_event":"ResolverCreated","resolver":CREATED_RESOLVER});
-    let raw_fact_ref = json!({"kind":"raw_log","chain_id":CHAIN,"block_hash":hash(BLOCK),"block_number":BLOCK,"transaction_hash":hash(3000),"transaction_index":2,"log_index":0,"emitting_address":CREATED_RESOLVER,"state_scope":format!("{CREATED_RESOLVER}:-:-:-:ResolverCreated"),"interpreter_state_key":format!("ens:ens_v2_resolver_l1:-:-:ResolverCreated:{CREATED_RESOLVER}:-:-:-:ResolverCreated")});
-    sqlx::query("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state,raw_fact_ref,before_state,source_manifest_id) VALUES ('created','ens','ContractDiscovered','ens_v2_resolver_l1',1,$1,$2,$3,$4,2,0,'ens_v2_resolver','canonical',$5,$6,'{}',$7)")
-        .bind(CHAIN).bind(BLOCK).bind(hash(BLOCK)).bind(hash(3000)).bind(after).bind(raw_fact_ref).bind(resolver_manifest).execute(&pool).await?;
-
-    Engine::new(pool.clone())
-        .run_batch(BatchRequest {
-            chain_id: CHAIN.to_owned(),
-            target_block: BLOCK,
-            affected_from_block: BLOCK,
-            affected_to_block: BLOCK,
-            resume_current: None,
-            mode: RunMode::Normal,
-        })
-        .await?;
+    seed_created_resolver(&pool).await?;
+    run(&pool).await?;
 
     let row: Option<(String, Option<String>)> = sqlx::query_as(
         "SELECT support_status, unsupported_reason
@@ -123,13 +99,99 @@ async fn creation_self_edge_alone_is_served_as_implementation_unknown() -> Resul
     Ok(())
 }
 
+/// The resolver's own `ResolverCreated()` self-edge carries the resolver manifest's namespace,
+/// so a same-namespace declaration is applied through it and provenance records that namespace.
+#[tokio::test]
+async fn creation_self_edge_admits_a_declared_resolver() -> Result<()> {
+    let (db, pool) = database("resolver_creation_declaration").await?;
+    seed_with_contracts(&pool, json!([declaration(CREATED_RESOLVER)])).await?;
+    seed_created_resolver(&pool).await?;
+    run(&pool).await?;
+    assert_eq!(
+        classification(&pool, CREATED_RESOLVER).await?,
+        Some((
+            "supported".to_owned(),
+            Some("public_resolver_v2".to_owned()),
+            Some("ens".to_owned()),
+        ))
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+fn declaration(address: &str) -> Value {
+    json!({"role":"public_resolver_v2","address":address,"proxy_kind":"none","start_block":BLOCK})
+}
+
+async fn run(pool: &PgPool) -> Result<()> {
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: BLOCK,
+            affected_from_block: BLOCK,
+            affected_to_block: BLOCK,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+    Ok(())
+}
+
+/// `(support_status, classification role, admission namespace)` for one resolver row.
+async fn classification(
+    pool: &PgPool,
+    address: &str,
+) -> Result<Option<(String, Option<String>, Option<String>)>> {
+    Ok(sqlx::query_as(
+        "SELECT support_status, declared_summary #>> '{classification,role}',
+                provenance ->> 'classification_admission_namespace'
+         FROM resolver_current WHERE chain_id = $1 AND lower(resolver_address) = $2",
+    )
+    .bind(CHAIN)
+    .bind(address)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// What Interpret writes for a `ResolverCreated()` log: the instance, its address, the
+/// `resolver` self-edge with `admission_basis = resolver_created`, and `ContractDiscovered`.
+/// There is no `Upgraded` for this address.
+async fn seed_created_resolver(pool: &PgPool) -> Result<()> {
+    let resolver_manifest: i64 = sqlx::query_scalar(
+        "SELECT manifest_id FROM manifest_versions WHERE source_family = 'ens_v2_resolver_l1'",
+    )
+    .fetch_one(pool)
+    .await?;
+    sqlx::query("INSERT INTO contract_instances (contract_instance_id,chain_id,contract_kind) VALUES ($1::uuid,$2,'contract')")
+        .bind(CREATED_INSTANCE).bind(CHAIN).execute(pool).await?;
+    sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id,chain_id,address,active_from_block_number,active_from_block_hash,source_manifest_id) VALUES ($1::uuid,$2,$3,$4,$5,$6)")
+        .bind(CREATED_INSTANCE).bind(CHAIN).bind(CREATED_RESOLVER).bind(BLOCK).bind(hash(BLOCK)).bind(resolver_manifest).execute(pool).await?;
+    sqlx::query("INSERT INTO discovery_edges (chain_id,edge_kind,from_contract_instance_id,to_contract_instance_id,discovery_source,admission_basis,source_manifest_id,active_from_block_number,active_from_block_hash,canonicality_state) VALUES ($1,'resolver',$2::uuid,$2::uuid,'ResolverCreated','resolver_created',$3,$4,$5,'canonical')")
+        .bind(CHAIN).bind(CREATED_INSTANCE).bind(resolver_manifest).bind(BLOCK).bind(hash(BLOCK)).execute(pool).await?;
+    let after = json!({"source_event":"ResolverCreated","resolver":CREATED_RESOLVER});
+    let raw_fact_ref = json!({"kind":"raw_log","chain_id":CHAIN,"block_hash":hash(BLOCK),"block_number":BLOCK,"transaction_hash":hash(3000),"transaction_index":2,"log_index":0,"emitting_address":CREATED_RESOLVER,"state_scope":format!("{CREATED_RESOLVER}:-:-:-:ResolverCreated"),"interpreter_state_key":format!("ens:ens_v2_resolver_l1:-:-:ResolverCreated:{CREATED_RESOLVER}:-:-:-:ResolverCreated")});
+    sqlx::query("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state,raw_fact_ref,before_state,source_manifest_id) VALUES ('created','ens','ContractDiscovered','ens_v2_resolver_l1',1,$1,$2,$3,$4,2,0,'ens_v2_resolver','canonical',$5,$6,'{}',$7)")
+        .bind(CHAIN).bind(BLOCK).bind(hash(BLOCK)).bind(hash(3000)).bind(after).bind(raw_fact_ref).bind(resolver_manifest).execute(pool).await?;
+    Ok(())
+}
+
 async fn seed(pool: &PgPool) -> Result<()> {
+    seed_with_contracts(pool, json!([])).await
+}
+
+/// `contracts` is the resolver manifest's declaration list.
+async fn seed_with_contracts(pool: &PgPool, contracts: Value) -> Result<()> {
     sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,$3,to_timestamp($3::double precision),'canonical')")
         .bind(CHAIN).bind(hash(BLOCK)).bind(BLOCK).execute(pool).await?;
-    let payload = json!({"deployment_epoch":"announcement_fixture","resolver_implementations":[{"role":"permissioned_resolver","address":IMPLEMENTATION}],"contracts":[],"capability_flags":{}});
+    let payload = json!({"deployment_epoch":"announcement_fixture","resolver_implementations":[{"role":"permissioned_resolver","address":IMPLEMENTATION}],"contracts":contracts,"capability_flags":{}});
     let resolver_manifest: i64 = sqlx::query_scalar("INSERT INTO manifest_versions (manifest_version,namespace,source_family,chain_id,deployment_label,rollout_status,normalizer_version,file_path,manifest_payload) VALUES (1,'ens','ens_v2_resolver_l1',$1,'announcement_fixture','active','fixture','fixture/resolver.toml',$2) RETURNING manifest_id").bind(CHAIN).bind(&payload).fetch_one(pool).await?;
     sqlx::query("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,source_manifest_id,chain_id,derivation_kind,canonicality_state,after_state) VALUES ('manifest','ens','SourceManifestUpdated','ens_v2_resolver_l1',1,$1,$2,'manifest_sync','canonical',$3)").bind(resolver_manifest).bind(CHAIN).bind(json!({"rollout_status":"active","normalizer_version":"fixture","manifest_payload":payload})).execute(pool).await?;
-    let registry_manifest: i64 = sqlx::query_scalar("INSERT INTO manifest_versions (manifest_version,namespace,source_family,chain_id,deployment_label,rollout_status,normalizer_version,file_path,manifest_payload) VALUES (1,'ens','ens_v2_registry_l1',$1,'announcement_fixture','active','fixture','fixture/registry.toml','{}') RETURNING manifest_id").bind(CHAIN).fetch_one(pool).await?;
+    let registry_payload =
+        json!({"deployment_epoch":"announcement_fixture","contracts":[],"capability_flags":{}});
+    let registry_manifest: i64 = sqlx::query_scalar("INSERT INTO manifest_versions (manifest_version,namespace,source_family,chain_id,deployment_label,rollout_status,normalizer_version,file_path,manifest_payload) VALUES (1,'ens','ens_v2_registry_l1',$1,'announcement_fixture','active','fixture','fixture/registry.toml',$2) RETURNING manifest_id").bind(CHAIN).bind(&registry_payload).fetch_one(pool).await?;
+    // Stage the registry manifest too, so its pointer edges carry the `ens` namespace that
+    // declaration precedence compares against.
+    sqlx::query("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,source_manifest_id,chain_id,derivation_kind,canonicality_state,after_state) VALUES ('registry-manifest','ens','SourceManifestUpdated','ens_v2_registry_l1',1,$1,$2,'manifest_sync','canonical',$3)").bind(registry_manifest).bind(CHAIN).bind(json!({"rollout_status":"active","normalizer_version":"fixture","manifest_payload":registry_payload})).execute(pool).await?;
     for instance in [REGISTRY_INSTANCE, ANNOUNCED_INSTANCE, SILENT_INSTANCE] {
         sqlx::query("INSERT INTO contract_instances (contract_instance_id,chain_id,contract_kind) VALUES ($1::uuid,$2,'contract')").bind(instance).bind(CHAIN).execute(pool).await?;
     }
