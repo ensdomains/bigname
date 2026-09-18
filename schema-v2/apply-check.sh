@@ -209,14 +209,15 @@ assert_quote_all_identifiers_sql() {
         "    END IF;" \
         "END \$\$;"
 }
-# Emit SQL that runs one index validity check, a schema-migration or a whole
-# ops/ installer, for a caller that has quote_all_identifiers on. PostgreSQL
-# then prints every identifier in pg_get_indexdef quoted, so a check that
-# compares the printed text must turn the setting off while it reads the
-# definitions, or it refuses healthy indexes. It must also leave the caller's
-# setting as it found it: in the session, inside one transaction where the
-# setting is only transaction-local, and after that transaction commits.
-# Nothing here is recorded as a schema-migration application.
+# Emit SQL that runs one check of printed catalog text, a schema-migration or
+# a whole ops/ installer, for a caller that has quote_all_identifiers on.
+# PostgreSQL then prints every identifier in pg_get_indexdef and
+# pg_get_constraintdef quoted, so a check that compares or searches the
+# printed text must turn the setting off while it reads the definitions, or it
+# refuses healthy indexes and misses healthy constraints. It must also leave
+# the caller's setting as it found it: in the session, inside one transaction
+# where the setting is only transaction-local, and after that transaction
+# commits. Nothing here is recorded as a schema-migration application.
 emit_quote_all_identifiers_probe() {
     local checked_file="$1"
     local transaction_mode="$2"
@@ -1344,6 +1345,17 @@ BEGIN
         RAISE EXCEPTION 'upgraded discovery_edges sibling CHECK names differ from the baseline';
     END IF;
 END $$;
+SQL
+    # A caller with quote_all_identifiers on must take the same no-op path.
+    # PostgreSQL then prints every identifier in pg_get_constraintdef quoted,
+    # so the file finds the self-edge rule only if it turns the setting off
+    # while it reads the definitions; otherwise it adds a second rule under
+    # the taken name and fails. The rule must keep its name, text, validity
+    # and OID, and the caller must keep its setting.
+    emit_quote_all_identifiers_probe "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql" in-transaction
+    cat <<'SQL'
+SELECT pg_temp.assert_self_edge_check_matches_baseline('quoted-identifier no-op apply');
+SELECT pg_temp.assert_self_edge_check_kept('quoted-identifier no-op apply');
 
 -- A baseline installed after 20260917140000 ran as a no-op could hold the
 -- wanted rule under its generated name. That is a rename, not a replacement.
@@ -1354,6 +1366,18 @@ SQL
     cat <<'SQL'
 SELECT pg_temp.assert_self_edge_check_matches_baseline('generated-name apply');
 SELECT pg_temp.assert_self_edge_check_kept('generated-name apply');
+
+-- The rename path must find the generated-name rule under quoting too.
+ALTER TABLE discovery_edges
+    RENAME CONSTRAINT discovery_edges_self_edge_check TO discovery_edges_check;
+SET quote_all_identifiers = on;
+SQL
+    render_phase_migration "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql"
+    assert_quote_all_identifiers_sql on
+    cat <<'SQL'
+RESET quote_all_identifiers;
+SELECT pg_temp.assert_self_edge_check_matches_baseline('quoted-identifier generated-name apply');
+SELECT pg_temp.assert_self_edge_check_kept('quoted-identifier generated-name apply');
 
 -- A rule with different text, next to a stray second one, is replaced.
 ALTER TABLE discovery_edges
