@@ -594,8 +594,8 @@ Missing, zero, inconsistent or unmasked owner evidence contributes no value;
 a selected wrapper or registrar authority does not qualify. Project consumes
 this value through its existing owner fold without changing resource selection.
 A later registrar token transfer that leaves the registry-only authority selected
-emits no new epoch, so the retained `registry_owner` stays the served owner while
-the registrant follows the token.
+emits no new epoch, so the retained `registry_owner` stays the served owner; that
+transfer does not update the served registrant.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L20 @ ens_v1@91c966f)
 (upstream: .refs/basenames/src/L2/Registry.sol:L49-L52 @ basenames@1809bbc)
