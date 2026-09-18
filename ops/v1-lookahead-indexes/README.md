@@ -16,7 +16,9 @@ on `normalized_events` serve its reads:
   `crates/interpret/src/load/lookahead/events.sql`.
 - `normalized_events_v1_due_probe_idx` selects registrar grants, renewals and
   token transfers by chain and parsed expiry, so Interpret can find registrations
-  whose expiry plus the 90-day grace period falls inside a batch. The expression
+  whose expiry plus the 90-day grace period falls inside a batch
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f). The expression
   parses any stored expiry without raising and must stay identical to
   `crates/interpret/src/load/lookahead/due_names.sql`. The same query also reads
   the block just before the batch through `normalized_events_chain_block_number_idx`,
