@@ -166,8 +166,10 @@ pub(crate) async fn get_permissions(
     )
     .await
     .map_err(|_| V2Error::internal_error("failed to load permission support"))?;
+    // The selected resource is included so an empty page still serves its restrictions under
+    // the name's registration_id.
     let current_names =
-        bigname_storage::load_current_names_by_resource_ids(&state.pool, &resource_ids)
+        bigname_storage::load_current_names_by_resource_ids(&state.pool, &support_resource_ids)
             .await
             .map_err(|_| V2Error::internal_error("failed to load permission names"))?;
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
