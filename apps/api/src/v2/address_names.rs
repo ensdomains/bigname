@@ -6,9 +6,7 @@ use axum::{
     extract::{Path, State},
 };
 use bigname_storage::{
-    AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe,
-    AddressNamesCurrentOrder, AddressNamesCurrentSort, EffectivePermissionRow, NameCurrentRow,
-    PrimaryNameClaimStatus,
+    AddressNameCurrentEntry, EffectivePermissionRow, NameCurrentRow, PrimaryNameClaimStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -20,9 +18,9 @@ use super::permission_support::{
 };
 use super::support::{ensure_public_namespace, parse_evm_address};
 use super::{
-    AddressNamesDedupe, AddressNamesSort, Authority, Envelope, GrantRelation, Page,
-    QueryParamAllowlist, RegistrationStatus, Relation, RelationSet, SortOrder, StrictQueryParams,
-    V2Error, V2Result, api_error_to_v2, decode, effective_permission_scope_value, encode,
+    Authority, Envelope, GrantRelation, Page, QueryParamAllowlist, RegistrationStatus, Relation,
+    RelationSet, SortOrder, StrictQueryParams, V2Error, V2Result, api_error_to_v2, decode,
+    effective_permission_scope_value, encode,
     name_record::{load_migrated_at, name_registration_fields, registration_id},
     permission_powers_value,
     restrictions::ResourceRestrictions,
@@ -42,6 +40,12 @@ pub(crate) use self::cursor::{
 mod cursor;
 mod resolves_to;
 mod role_summary;
+mod storage_mapping;
+
+pub(crate) use self::storage_mapping::{
+    dedupe_to_storage, order_to_storage, relation_from_storage, relation_set_to_storage,
+    sort_to_storage,
+};
 
 pub(crate) use self::resolves_to::{AddressNameResolution, address_name_resolution};
 #[cfg(test)]
@@ -495,56 +499,6 @@ pub(crate) fn build_address_name(
         record_count,
         role_summary,
         restrictions: None,
-    }
-}
-
-/// The `address_names_current` relation an authority relation reads. `resolves_to` reads
-/// `address_records_current` instead and has no storage relation here.
-pub(crate) fn relation_to_storage(relation: Relation) -> Option<AddressNameRelation> {
-    match relation {
-        Relation::Owner => Some(AddressNameRelation::TokenHolder),
-        Relation::Manager => Some(AddressNameRelation::EffectiveController),
-        Relation::Registrant => Some(AddressNameRelation::Registrant),
-        Relation::ResolvesTo => None,
-    }
-}
-
-pub(crate) fn relation_set_to_storage(relation_set: &RelationSet) -> Vec<AddressNameRelation> {
-    relation_set
-        .as_slice()
-        .iter()
-        .copied()
-        .filter_map(relation_to_storage)
-        .collect()
-}
-
-pub(crate) fn relation_from_storage(relation: AddressNameRelation) -> Relation {
-    match relation {
-        AddressNameRelation::TokenHolder => Relation::Owner,
-        AddressNameRelation::EffectiveController => Relation::Manager,
-        AddressNameRelation::Registrant => Relation::Registrant,
-    }
-}
-
-pub(crate) fn dedupe_to_storage(dedupe: AddressNamesDedupe) -> AddressNamesCurrentDedupe {
-    match dedupe {
-        AddressNamesDedupe::Name => AddressNamesCurrentDedupe::Surface,
-        AddressNamesDedupe::Registration => AddressNamesCurrentDedupe::Resource,
-    }
-}
-
-pub(crate) fn sort_to_storage(sort: AddressNamesSort) -> AddressNamesCurrentSort {
-    match sort {
-        AddressNamesSort::Name => AddressNamesCurrentSort::Name,
-        AddressNamesSort::ExpiresAt => AddressNamesCurrentSort::ExpiresAt,
-        AddressNamesSort::RegisteredAt => AddressNamesCurrentSort::RegisteredAt,
-    }
-}
-
-pub(crate) fn order_to_storage(order: SortOrder) -> AddressNamesCurrentOrder {
-    match order {
-        SortOrder::Asc => AddressNamesCurrentOrder::Asc,
-        SortOrder::Desc => AddressNamesCurrentOrder::Desc,
     }
 }
 
