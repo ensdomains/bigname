@@ -41,22 +41,37 @@ that batch. The script permits that transaction wait and bounds each build to
 six hours, because both indexes cover most of a mainnet `normalized_events`
 table. Retain its output in the deployment receipt.
 
-The script ends with a check that fails, with a non-zero `psql` exit, unless
-each name is an index on `bigname_phase.normalized_events`, is `indisvalid` and
-`indisready`, and has the reviewed definition. The definition is compared as
-`pg_get_indexdef` prints it, with the schema name removed and runs of whitespace
-collapsed, so key order, expressions, and the predicate are all covered. It
-prints the index rows first, so the receipt shows the flags either way.
-`IF NOT EXISTS` matches on the name alone: it fixes neither an invalid index
-from an interrupted concurrent build, nor a valid index with other keys, nor a
-table or view under the name. Rerunning the script skips creation and then
-fails at the check. To recover from an invalid or wrong index, first confirm in
-`pg_stat_progress_create_index` that no build is still running, drop only it with
-`DROP INDEX CONCURRENTLY bigname_phase.<index name>`, then rerun the script. If
-the name belongs to a table, view, or other relation, remove or rename that
-relation first. Never drop a valid index with the reviewed definition merely
-because an installation was retried, and never drop one while a runner that uses
-the lookahead loader is processing batches.
+The script checks both names twice and fails, with a non-zero `psql` exit,
+instead of reporting success over an index the loader cannot use. Before it
+builds anything, it refuses a name that is already taken by an index that is not
+both `indisvalid` and `indisready`, an index on another table, an index whose
+definition is not the reviewed one, or a table, view, or other relation that is
+not an index. Names that resolve to nothing pass this first check. After the
+builds it makes the same check and also requires both indexes to exist. It
+prints the index rows before the last check, so the receipt shows the flags and
+definitions either way. The definition is compared exactly as `pg_get_indexdef`
+prints it, read with `search_path` set to `pg_catalog` and
+`quote_all_identifiers` off, so every schema name is printed and nothing in the
+text has to be rewritten, with how the fresh baseline index prints, so key
+order, expressions, JSON keys, and the predicate are all covered. PostgreSQL 16
+prints the expiry `CASE` expression over several indented lines, and the
+expected text keeps them. The check function carries its own settings, so the
+session's are unchanged. On a mismatch the error prints the definition it found
+beside the expected one.
+
+An interrupted concurrent build, for example one cancelled or stopped by the
+six-hour limit, leaves an invalid index under the intended name. `IF NOT EXISTS`
+matches on the name alone, so it does not repair that index; rerunning the
+script stops at the first check and names it. Nothing drops or rebuilds an
+index automatically. To recover, first confirm in
+`pg_stat_progress_create_index` that no build is still running. Then drop only
+the named index with `DROP INDEX CONCURRENTLY bigname_phase.<index name>`, as the
+error's hint spells out, and rerun the script. Recover a valid index that fails
+the definition check the same way. If the name belongs to a table, view, or
+another table's index, remove or rename that relation first. Never drop a valid
+index with the reviewed definition merely because an installation was retried,
+and never drop one while a runner that uses the lookahead loader is processing
+batches.
 
 After both builds finish, run `ANALYZE bigname_phase.normalized_events` (or
 confirm autovacuum has analyzed the table since). Expression indexes have no
@@ -64,14 +79,20 @@ statistics until the table is analyzed, and the loader's queries depend on them:
 in a test database without statistics, reading the history of 100,000 names did
 not finish in several minutes, and took under four seconds after `ANALYZE`.
 
-The matching versioned schema-migration installs the same definitions on
-initialized databases; after a live prebuild, its `IF NOT EXISTS` is a no-op.
-It ends with the same check, so the SQLx run fails rather than recording
-success if either name is not an index, is not valid and ready, or does not have
-the reviewed definition; recover as described above, then run the
-schema-migrations again.
-Apply that schema-migration through the usual SQLx release process when adopting
-this source revision. The fresh baseline also includes both indexes.
+The matching versioned schema-migration
+`20260917150000_normalized_events_v1_lookahead_indexes.sql` installs the same
+definitions on initialized databases and is a no-op before the phase schema
+exists; after a live prebuild, its `IF NOT EXISTS` is a no-op that adopts the
+indexes by name alone. It therefore ends with the script's final check, read
+under the same settings and put back before the block returns, so the SQLx run
+fails rather than recording success if either name is not an index on
+`bigname_phase.normalized_events`, is not valid and ready, or does not have the
+reviewed definition; recover as described above, then run the schema-migrations
+again. `schema-v2/apply-check.sh` proves each refusal for the script and for
+the schema-migration, and that the fresh baseline, the schema-migration, and
+the script build the same definitions. Apply that schema-migration through the
+usual SQLx release process when adopting this source revision. The fresh
+baseline also includes both indexes.
 
 An index with either name built from an earlier experimental script is kept only
 if `pg_get_indexdef` matches the definition here; otherwise drop and rebuild it

@@ -7,18 +7,36 @@
 -- view, or other relation that is not an index under the right name. The
 -- statements below then succeed without building anything. The check at the end
 -- stops the run instead of recording success over an index the lookahead loader
--- cannot use. It is the check 20260917160000_discovery_edges_index_validity_check.sql
--- makes for the discovery indexes.
+-- cannot use. It is the check 20260917161000_project_scoped_history_index_validity_check.sql
+-- makes for the project-scoped history indexes.
 --
 -- The definition is compared as PostgreSQL prints it with pg_get_indexdef, so
 -- key order, expressions, ordering, operator classes, uniqueness, and the
--- predicate are all covered. PostgreSQL adds the schema name to the table
--- always and to the enum type only when the session search_path does not
--- include it, so the schema name is removed before comparing. It prints the
--- expiry CASE expression over several indented lines, so runs of whitespace are
--- collapsed to one space before comparing. The expected text is how the fresh
--- baseline index prints; schema-v2/apply-check.sh proves it for the baseline,
--- this schema-migration, and install.sql.
+-- predicate are all covered. PostgreSQL adds the schema name to the table always
+-- and to the enum type only when the session search_path does not include it.
+-- The printed text is never rewritten to even that out, because a text
+-- replacement cannot tell a schema name from the same characters inside a
+-- string literal: an index on after_state ->> 'bigname_phase.expiry' would then
+-- compare equal to the reviewed one on after_state ->> 'expiry'. Instead
+-- search_path is set to pg_catalog while the definitions are read, so
+-- PostgreSQL always prints both schema names, and the expected text keeps them.
+-- Whitespace is compared as printed too: PostgreSQL 16 prints the expiry CASE
+-- expression over several indented lines, and the expected text below keeps
+-- those lines and their indentation. The expected text is how the fresh
+-- baseline index prints under that search_path; schema-v2/apply-check.sh
+-- proves it for the baseline, this schema-migration, and install.sql.
+--
+-- quote_all_identifiers is turned off while the definitions are read, for the
+-- same reason: when a caller has it on, PostgreSQL prints every identifier in
+-- double quotes, starting with the index name, and a healthy index would be
+-- refused. The quotes are not stripped from the printed text, because a text
+-- replacement would also change a double quote inside a string literal.
+--
+-- Both changes are transaction-local, and the block puts the previous values
+-- back before it returns, so later statements in the same transaction see the
+-- settings they would have seen without this file. When the block raises, the
+-- transaction, or the savepoint around it, rolls the changes back. The CREATE
+-- INDEX statements run before the settings change.
 --
 -- To recover, follow ops/v1-lookahead-indexes/README.md: confirm no build is
 -- running, drop only the named index with DROP INDEX CONCURRENTLY, rerun
@@ -29,6 +47,8 @@ DECLARE
     expected_definition text;
     found_definition text;
     found_kind text;
+    previous_search_path text;
+    previous_quote_all_identifiers text;
 BEGIN
     IF to_regclass('bigname_phase.normalized_events') IS NULL THEN
         RETURN;
@@ -58,12 +78,27 @@ BEGIN
         WHERE canonicality_state IN ('canonical','safe','finalized')
           AND source_family LIKE 'ens\_v1\_%';
 
+    -- Every name below is schema-qualified or lives in pg_catalog.
+    previous_search_path := current_setting('search_path');
+    PERFORM set_config('search_path', 'pg_catalog', true);
+    -- The expected text below has no quoted identifiers.
+    previous_quote_all_identifiers := current_setting('quote_all_identifiers');
+    PERFORM set_config('quote_all_identifiers', 'off', true);
+
     FOR checked_index, expected_definition IN
         SELECT * FROM (VALUES
             ('normalized_events_v1_due_probe_idx',
-             $def$CREATE INDEX normalized_events_v1_due_probe_idx ON normalized_events USING btree (chain_id, ( CASE WHEN ((jsonb_typeof((after_state -> 'expiry'::text)) = ANY (ARRAY['number'::text, 'string'::text])) AND ((after_state ->> 'expiry'::text) ~ '^[+-]?[0-9]+$'::text) AND (length(ltrim((after_state ->> 'expiry'::text), '+-0'::text)) <= 19)) THEN (( CASE WHEN ("left"((after_state ->> 'expiry'::text), 1) = '-'::text) THEN '-'::text ELSE ''::text END || COALESCE(NULLIF(ltrim((after_state ->> 'expiry'::text), '+-0'::text), ''::text), '0'::text)))::numeric ELSE NULL::numeric END), block_number) WHERE ((canonicality_state = ANY (ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state])) AND (source_family = 'ens_v1_registrar_l1'::text) AND (event_kind = ANY (ARRAY['RegistrationGranted'::text, 'RegistrationRenewed'::text, 'TokenControlTransferred'::text])))$def$),
+             $def$CREATE INDEX normalized_events_v1_due_probe_idx ON bigname_phase.normalized_events USING btree (chain_id, (
+CASE
+    WHEN ((jsonb_typeof((after_state -> 'expiry'::text)) = ANY (ARRAY['number'::text, 'string'::text])) AND ((after_state ->> 'expiry'::text) ~ '^[+-]?[0-9]+$'::text) AND (length(ltrim((after_state ->> 'expiry'::text), '+-0'::text)) <= 19)) THEN ((
+    CASE
+        WHEN ("left"((after_state ->> 'expiry'::text), 1) = '-'::text) THEN '-'::text
+        ELSE ''::text
+    END || COALESCE(NULLIF(ltrim((after_state ->> 'expiry'::text), '+-0'::text), ''::text), '0'::text)))::numeric
+    ELSE NULL::numeric
+END), block_number) WHERE ((canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (source_family = 'ens_v1_registrar_l1'::text) AND (event_kind = ANY (ARRAY['RegistrationGranted'::text, 'RegistrationRenewed'::text, 'TokenControlTransferred'::text])))$def$),
             ('normalized_events_v1_direct_node_probe_idx',
-             $def$CREATE INDEX normalized_events_v1_direct_node_probe_idx ON normalized_events USING btree (chain_id, COALESCE(((namespace || ':'::text) || lower(COALESCE((after_state ->> 'child_node'::text), (after_state ->> 'namehash'::text), (after_state ->> 'node'::text), (after_state #>> '{grant_source,node}'::text[]), (after_state #>> '{revocation_source,node}'::text[])))), logical_name_id), block_number) WHERE ((canonicality_state = ANY (ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state])) AND (source_family ~~ 'ens\_v1\_%'::text))$def$)
+             $def$CREATE INDEX normalized_events_v1_direct_node_probe_idx ON bigname_phase.normalized_events USING btree (chain_id, COALESCE(((namespace || ':'::text) || lower(COALESCE((after_state ->> 'child_node'::text), (after_state ->> 'namehash'::text), (after_state ->> 'node'::text), (after_state #>> '{grant_source,node}'::text[]), (after_state #>> '{revocation_source,node}'::text[])))), logical_name_id), block_number) WHERE ((canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (source_family ~~ 'ens\_v1\_%'::text))$def$)
         ) AS reviewed(index_name, definition)
     LOOP
         SELECT CASE relkind
@@ -81,6 +116,11 @@ BEGIN
         INTO found_kind
         FROM pg_class
         WHERE oid = to_regclass('bigname_phase.' || checked_index);
+        IF found_kind IS NULL THEN
+            RAISE EXCEPTION
+                '% does not exist although bigname_phase.normalized_events does; build it with ops/v1-lookahead-indexes/install.sql as ops/v1-lookahead-indexes/README.md describes, then run the schema-migrations again',
+                checked_index;
+        END IF;
         IF found_kind <> 'index' THEN
             RAISE EXCEPTION
                 'bigname_phase.% is a %, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again',
@@ -100,9 +140,7 @@ BEGIN
                 checked_index;
         END IF;
 
-        SELECT regexp_replace(
-                   replace(pg_get_indexdef(indexrelid), 'bigname_phase.', ''),
-                   '\s+', ' ', 'g')
+        SELECT pg_get_indexdef(indexrelid)
         INTO found_definition
         FROM pg_index
         WHERE indexrelid = to_regclass('bigname_phase.' || checked_index);
@@ -112,5 +150,8 @@ BEGIN
                 checked_index, found_definition, expected_definition;
         END IF;
     END LOOP;
+
+    PERFORM set_config('search_path', previous_search_path, true);
+    PERFORM set_config('quote_all_identifiers', previous_quote_all_identifiers, true);
 END
 $migration$;
