@@ -16,10 +16,14 @@ use crate::{
 };
 
 mod live;
+mod live_plan;
 pub(crate) mod prefetch;
 pub(crate) mod query;
 mod redo;
 mod source_floor;
+
+pub use live_plan::{LiveContinuation, plan_live_continuation};
+pub use source_floor::admit_source_floor;
 mod window;
 
 use prefetch::{Prefetcher, RangeLogCache};

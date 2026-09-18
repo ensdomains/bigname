@@ -8,6 +8,7 @@ use crate::{
     provider::{ChainProvider, Log},
 };
 use alloy_primitives::{Address, B256};
+use reth_ethereum::chainspec::{MAINNET, SEPOLIA};
 use std::{
     collections::BTreeSet,
     sync::{Arc, OnceLock},
@@ -16,6 +17,167 @@ use std::{
 #[path = "payloads_fixture.rs"]
 mod fixture;
 use fixture::Fixture;
+
+/// Names the datadir a re-run of this binary opens read-only, as a second process.
+const CHILD_DATADIR: &str = "BIGNAME_RETH_SEPOLIA_TEST_DATADIR";
+
+/// Runs `test` again in a child process with `CHILD_DATADIR` set to the fixture's datadir.
+///
+/// MDBX requires separate processes for independently opened environments on the same
+/// database without a test-only legacy mode
+/// (upstream: .refs/reth/crates/storage/db/src/lib.rs:L234 @ reth@189c0df3). The caller
+/// keeps the fixture's primary factory alive while the child opens read-only.
+fn rerun_in_child(test: &str, fixture: &Fixture, env: &[(&str, String)]) {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &format!("provider::reth_db::enabled::payloads_tests::{test}"),
+            "--nocapture",
+        ])
+        .env(CHILD_DATADIR, &fixture.reader.datadir)
+        .envs(env.iter().map(|(name, value)| (name, value)))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
+async fn sepolia_read_only_provider_reads_while_writer_is_open() {
+    if let Ok(datadir) = std::env::var(CHILD_DATADIR) {
+        let reader = RethDbProvider::new("ethereum-sepolia", &datadir).unwrap();
+        let resolved = reader.resolve(&[0, 1]).await.unwrap();
+        let headers = reader.headers(&resolved).await.unwrap();
+        let bundles = reader.bundles(&resolved).await.unwrap();
+        assert_eq!(
+            headers,
+            bundles
+                .iter()
+                .map(|bundle| bundle.block.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            bundles
+                .iter()
+                .map(|bundle| bundle.receipts.len())
+                .sum::<usize>(),
+            6
+        );
+        let logs = reader
+            .logs(
+                &resolved,
+                &[address_hex(Address::repeat_byte(7))],
+                &[hash_hex(B256::repeat_byte(1))],
+                &[],
+            )
+            .await
+            .unwrap();
+        for (name, actual) in [
+            (
+                "BIGNAME_RETH_TEST_BLOCKS",
+                serde_json::to_value(resolved).unwrap(),
+            ),
+            (
+                "BIGNAME_RETH_TEST_LOGS",
+                serde_json::to_value(logs).unwrap(),
+            ),
+        ] {
+            let expected: serde_json::Value =
+                serde_json::from_str(&std::env::var(name).unwrap()).unwrap();
+            assert_eq!(actual, expected);
+        }
+        return;
+    }
+    // Block 0 is Sepolia's real genesis header, so the child's chain check has a genuine
+    // anchor; the child opens the datadir as ethereum-sepolia through the production path.
+    let fixture = Fixture::anchored("ethereum-sepolia", SEPOLIA.clone(), 2, 3, 2);
+    rerun_in_child(
+        "sepolia_read_only_provider_reads_while_writer_is_open",
+        &fixture,
+        &[
+            (
+                "BIGNAME_RETH_TEST_BLOCKS",
+                serde_json::to_string(&fixture.blocks).unwrap(),
+            ),
+            (
+                "BIGNAME_RETH_TEST_LOGS",
+                serde_json::to_string(&selected(&fixture)).unwrap(),
+            ),
+        ],
+    );
+}
+
+#[tokio::test]
+async fn datadir_holding_another_chain_is_refused_when_opened() {
+    const DIAGNOSTIC_DATADIR: &str = "BIGNAME_RETH_TEST_DIAGNOSTIC_DATADIR";
+    const ARTIFICIAL_DATADIR: &str = "BIGNAME_RETH_TEST_ARTIFICIAL_DATADIR";
+    const EMPTY_DATADIR: &str = "BIGNAME_RETH_TEST_EMPTY_DATADIR";
+    // Each datadir is opened once: MDBX refuses a second environment on the same
+    // database inside one process, so every case below has its own fixture.
+    if let Ok(datadir) = std::env::var(CHILD_DATADIR) {
+        let expected = hash_hex(SEPOLIA.genesis_hash());
+        let stored = hash_hex(MAINNET.genesis_hash());
+        // A Mainnet datadir opened as Sepolia: the error names both genesis hashes.
+        let reader = RethDbProvider::new("ethereum-sepolia", &datadir).unwrap();
+        let error = format!("{:#}", reader.resolve(&[0]).await.unwrap_err());
+        assert!(
+            error.contains(&expected)
+                && error.contains(&stored)
+                && error.contains("ethereum-sepolia"),
+            "{error}"
+        );
+        // The diagnostic sample opens through the same path and is refused the same way.
+        let diagnostic = std::env::var(DIAGNOSTIC_DATADIR).unwrap();
+        let error = crate::read_reth_sample("ethereum-sepolia", &diagnostic, &[0], &[])
+            .await
+            .unwrap_err();
+        let error = format!("{error:#}");
+        assert!(
+            error.contains(&expected) && error.contains(&stored),
+            "{error}"
+        );
+        // Artificial headers are neither chain's genesis, so Mainnet is checked as well.
+        let artificial = std::env::var(ARTIFICIAL_DATADIR).unwrap();
+        let reader = RethDbProvider::new("ethereum-mainnet", &artificial).unwrap();
+        let error = format!("{:#}", reader.resolve(&[0]).await.unwrap_err());
+        assert!(
+            error.contains(&stored) && error.contains("ethereum-mainnet"),
+            "{error}"
+        );
+        // A datadir without a stored block 0 cannot establish which chain it holds.
+        let empty = std::env::var(EMPTY_DATADIR).unwrap();
+        let reader = RethDbProvider::new("ethereum-sepolia", &empty).unwrap();
+        let error = format!("{:#}", reader.heads().await.unwrap_err());
+        assert!(error.contains("no canonical block 0"), "{error}");
+        return;
+    }
+    let mainnet = Fixture::anchored("ethereum-mainnet", MAINNET.clone(), 2, 1, 0);
+    let diagnostic = Fixture::anchored("ethereum-mainnet", MAINNET.clone(), 1, 1, 0);
+    let artificial = Fixture::new(1, 1, 0, false);
+    let empty = Fixture::new(0, 1, 0, false);
+    rerun_in_child(
+        "datadir_holding_another_chain_is_refused_when_opened",
+        &mainnet,
+        &[
+            (
+                DIAGNOSTIC_DATADIR,
+                diagnostic.reader.datadir.to_str().unwrap().to_owned(),
+            ),
+            (
+                ARTIFICIAL_DATADIR,
+                artificial.reader.datadir.to_str().unwrap().to_owned(),
+            ),
+            (
+                EMPTY_DATADIR,
+                empty.reader.datadir.to_str().unwrap().to_owned(),
+            ),
+        ],
+    );
+}
 
 fn selected(f: &Fixture) -> Vec<Log> {
     f.reader

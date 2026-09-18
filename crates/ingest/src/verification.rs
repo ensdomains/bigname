@@ -44,6 +44,7 @@ pub struct VerificationProvider {
     kind: VerificationProviderKind,
     provider: ChainProvider,
     fetch_lock: std::sync::Arc<Mutex<()>>,
+    declared_floor: Option<i64>,
 }
 
 impl VerificationProvider {
@@ -70,6 +71,7 @@ impl VerificationProvider {
             kind,
             provider,
             fetch_lock: std::sync::Arc::new(Mutex::new(())),
+            declared_floor: None,
         })
     }
 
@@ -79,11 +81,40 @@ impl VerificationProvider {
             kind: VerificationProviderKind::IndependentRpc,
             provider,
             fetch_lock: std::sync::Arc::new(Mutex::new(())),
+            declared_floor: None,
         }
+    }
+
+    /// Makes this provider report `floor` from [`Self::earliest_available_block`] instead of
+    /// asking its endpoint. Tests stand an HTTP node double in for a datadir reader, and an
+    /// HTTP endpoint cannot report the retention floor a datadir reader reads.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_declared_retention_floor(mut self, floor: i64) -> Self {
+        self.declared_floor = Some(floor);
+        self
     }
 
     pub const fn kind(&self) -> VerificationProviderKind {
         self.kind
+    }
+
+    pub(crate) const fn chain_provider(&self) -> &ChainProvider {
+        &self.provider
+    }
+
+    /// Lowest block this endpoint can still serve, when it can report one.
+    ///
+    /// Only a direct datadir reader answers; an RPC endpoint keeps its retention behind the
+    /// wire and reports `None`.
+    pub async fn earliest_available_block(&self) -> Result<Option<i64>> {
+        if let Some(floor) = self.declared_floor {
+            return Ok(Some(floor));
+        }
+        self.provider
+            .earliest_available_block()
+            .await
+            .map_err(|error| provider_error("failed to read the earliest available block", error))
     }
 
     pub async fn fetch(

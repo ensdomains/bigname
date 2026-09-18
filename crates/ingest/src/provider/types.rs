@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use super::decode::{address_hex_from_str, hash_hex_from_str};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct BlockBundle {
     pub block: Block,
     pub transactions: Vec<Transaction>,
@@ -16,7 +16,7 @@ pub struct BlockBundle {
 ///
 /// This is what the JSON-RPC provider fetches instead of a whole block: everything ingest
 /// stores for a transaction, and nothing it discards.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct TransactionPayload {
     pub transaction: Transaction,
     pub receipt: Receipt,
@@ -25,13 +25,13 @@ pub struct TransactionPayload {
     pub receipt_reported_status: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct ResolvedBlock {
     pub number: i64,
     pub hash: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct Transaction {
     pub hash: String,
     pub block_hash: String,
@@ -43,7 +43,7 @@ pub struct Transaction {
     pub value: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct Receipt {
     pub transaction_hash: String,
     pub block_hash: String,
@@ -56,7 +56,7 @@ pub struct Receipt {
     pub logs_bloom: Option<Vec<u8>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct Log {
     pub block_hash: String,
     pub block_number: i64,
@@ -68,14 +68,14 @@ pub struct Log {
     pub data: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct HeadSnapshot {
     pub latest: Block,
     pub safe: Option<Block>,
     pub finalized: Option<Block>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct Block {
     pub hash: String,
     pub parent_hash: Option<String>,

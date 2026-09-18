@@ -1941,7 +1941,7 @@ async fn completed_sepolia_ingest_rejects_unreviewed_source_shape_before_interpr
     assert_eq!(
         error.to_string(),
         "chain ethereum-sepolia intake descriptors [ethereum-sepolia:rpc-intake] violate the \
-         required shape: exactly one dRPC intake-capable source with ethereum_head seed basis \
+         required shape: exactly one dRPC or Reth DB intake-capable source with ethereum_head seed basis \
          and start block 0"
     );
     assert_eq!(

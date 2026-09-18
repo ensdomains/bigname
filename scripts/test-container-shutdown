@@ -127,7 +127,7 @@ mkdir "$scratch/src"
 printf '%s\n' '[package]' 'name="shutdown-cpu-probe"' 'version="0.1.0"' 'edition="2021"' > "$scratch/Cargo.toml"
 printf '%s\n' 'fn main() {}' > "$scratch/src/main.rs"
 printf '%s\n' 'fn main() { assert_eq!(std::env::var("NUM_JOBS").unwrap(),"1"); assert_eq!(std::thread::available_parallelism().unwrap().get(),1); }' > "$scratch/build.rs"
-printf '%s\n' 'FROM rust:1.93.1-bookworm' 'WORKDIR /probe' 'COPY . .' 'RUN cargo build --offline -vv' > "$scratch/Dockerfile"
+printf '%s\n' 'FROM rust:1.98.0-bookworm' 'WORKDIR /probe' 'COPY . .' 'RUN cargo build --offline -vv' > "$scratch/Dockerfile"
 docker buildx build --builder "$builder" --load -t "bigname-shutdown-probe:$$" "$scratch"
 # Only BIGNAME_BUILD_SHA is exported: the image build takes its single-job
 # constraint from the builder's pinned CPU above, which the probe verifies, and

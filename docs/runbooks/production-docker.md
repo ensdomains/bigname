@@ -28,10 +28,95 @@ docker compose --env-file .env.server \
   -f docker-compose.reth-db.yml config
 ```
 
-The reth overlay attaches the API and phase runner to the external
-`eth-archive-node_default` network and bind-mounts the configured
-`RETH_DATA_DIR` into the phase runner read-only. Create or start that network
-and make the canonical reth database path readable before using the overlay.
+The reth overlay attaches the API and phase runner to the node's external Docker
+network (`eth-archive-node_default` unless `RETH_NETWORK_NAME` names another)
+and gives the phase runner the mounts, user and PID namespace that direct Reth
+reads need. Create or start that network and complete
+[Direct Reth reader](#direct-reth-reader) before using the overlay.
+
+## Direct Reth reader
+
+This applies to any deployment whose intake source kind is `reth_db`: Ethereum
+Mainnet, and Ethereum Sepolia once it has been
+[switched from local RPC](../deployment.md#switching-sepolia-from-local-rpc-to-direct-reth-reads).
+There is no separate reader container. The reader is the `phase-runner` service
+of that deployment's Compose project with `docker-compose.reth-db.yml` applied,
+and the same service definition runs the one-off sample and
+`source-transport` commands through `docker compose run`: the image ships the
+sample as `/usr/local/bin/reth-db-smoke` next to `phase-runner`, so
+`docker compose ... run --rm phase-runner sh -c 'reth-db-smoke ethereum-sepolia
+"$RETH_DATA_DIR" <block,block,...>'` reads through the production mounts, user
+and PID namespace ([bounded sample](../reth-db-reader.md#bounded-sample); the
+container-side shell is what expands `RETH_DATA_DIR` from the service
+environment, since the host shell does not source `.env.server`). A Sepolia deployment
+is its own Compose project with its own `.env.server`
+(`BIGNAME_PHASE_RUNNER_CHAINS=ethereum-sepolia`,
+`BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT=/app/manifests/sepolia`, a Sepolia
+`RETH_DATA_DIR`, and `RETH_NETWORK_NAME` set to the Sepolia node's network).
+[Direct Reth reader](../reth-db-reader.md#mount-contract) explains why each
+requirement below exists.
+
+1. **Same host.** Run the reader on the host that runs the Reth node, against
+   the node's local filesystem. A network filesystem, a copy or a snapshot of
+   the datadir is not supported.
+2. **Reth version.** This image reads Reth v2.5.0 databases only; the version is
+   fixed in `crates/ingest/Cargo.toml` and is not configurable. Confirm the node
+   reports v2.5.0 before deploying the image, and treat a node upgrade and an
+   image upgrade as one change. This includes Mainnet deployments that already
+   used direct reads with an older image.
+3. **Reader user.** Set `RETH_READER_USER` to the numeric `uid:gid` that owns
+   the node's `db/mdbx.lck` (`stat -c '%u:%g' "$RETH_DATA_DIR/db/mdbx.lck"`).
+   The image's default `bigname` user (`10001`) cannot write that file. The
+   phase runner then runs as that user, so `BIGNAME_PHASE_RUNNER_WRITABLE_PATH`
+   must be writable by it; repeat the capacity preflight's create/remove check
+   as that user.
+4. **Wrapper directory.** Create `RETH_READER_DIR` on the host, owned by
+   `RETH_READER_USER`, outside the node's datadir and outside every path the
+   capacity preflight excludes. Compose does not create it. It holds only
+   Reth's temporary `rocksdb-secondary-tmp-<pid>` directory and the empty mount
+   points Docker creates.
+5. **Mounts.** `RETH_DATA_DIR` is the node's datadir, the directory that
+   contains `db`, `static_files` and `rocksdb`. The overlay binds
+   `RETH_READER_DIR` read-write at that path in the container, the three
+   storage directories read-only inside it, and the node's existing
+   `db/mdbx.lck` read-write. Do not replace these with one bind of the whole
+   datadir: read-only fails when the reader opens the lock file, and read-write
+   exposes the node's data files to the reader.
+6. **PID namespace.** Set `RETH_NODE_PID_NAMESPACE` to
+   `container:<reth container name>` (for the Sepolia deployment,
+   `container:bigname-sepolia-reth`), or to `host` when the node runs directly
+   on the host. The overlay passes it to the service's `pid:` setting. Without
+   it the reader can fail to open the database with
+   `Resource temporarily unavailable (11)`; see
+   [deployment.md](../deployment.md#switching-sepolia-from-local-rpc-to-direct-reth-reads).
+   A `container:` namespace belongs to one run of the node container, so start
+   the node first, and restart the phase runner whenever the node container
+   restarts or is recreated.
+7. **Memory.** Direct reads are memory-mapped, and the pages the reader touches
+   are file page cache charged to the phase-runner container. Where the runner
+   has a container memory ceiling (`BIGNAME_PHASE_RUNNER_MEMORY_LIMIT`, added
+   on `main` by [PR #917](https://github.com/ensdomains/bigname/pull/917)),
+   that page cache counts against it. Choose the ceiling from a measured run
+   with direct reads enabled; this runbook gives no figure.
+8. **Chain.** `RETH_DATA_DIR` must hold the chain the deployment indexes. The
+   reader compares the datadir's stored genesis block hash with the configured
+   chain's when it opens, and refuses on a mismatch with an error naming both
+   hashes; a Sepolia deployment pointed at a Mainnet datadir fails to start
+   rather than ingesting Mainnet facts under the Sepolia chain id. The bounded
+   sample and the `source-transport` command apply the same check.
+
+Check the result on the created container, not only the rendered file. Resolve
+the phase-runner container with the same Compose files that created it:
+
+```sh
+runner_container=$(docker compose --env-file .env.server \
+  -f docker-compose.server.yml -f docker-compose.reth-db.yml ps -q phase-runner)
+docker inspect "$runner_container" --format '{{json .Config.User}} {{json .HostConfig.PidMode}}'
+docker inspect "$runner_container" --format '{{json .Mounts}}'
+```
+
+Require the five reth mounts with the modes above, the expected user and the
+expected PID mode.
 
 ## Capacity preflight
 
@@ -134,8 +219,10 @@ host measurement, and changes no direct CLI defaults or backup policy (#329).
    Confirm no configured ceiling through the CLI control below. Relative paths
    can render; their creation-time rejection remains a required control below.
    Require one dedicated read/write bind, identical absolute source/target and
-   `create_host_path: false`. Both Reth sets must retain their separate read-only
-   mount. Require the chosen memory ceiling on every service
+   `create_host_path: false`. Both Reth sets must retain their separate reth
+   mounts: the writable `RETH_READER_DIR` wrapper, the three read-only storage
+   directories and the writable `db/mdbx.lck`
+   ([Direct Reth reader](#direct-reth-reader)). Require the chosen memory ceiling on every service
    (`deploy.resources.limits.memory` in the rendered model — the check above —
    and `HostConfig.Memory` greater than zero on every created container) and
    the `json-file` logging options on each. No

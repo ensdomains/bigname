@@ -553,7 +553,7 @@ pub(crate) fn build_address_name_role_summary(
     subjects
         .into_iter()
         .map(|(address, mut rows)| {
-            rows.sort_by(|left, right| left.scope.storage_key().cmp(&right.scope.storage_key()));
+            rows.sort_by_key(|row| row.scope.storage_key());
             Ok(AddressNameRoleSummary {
                 address,
                 grants: rows
