@@ -46,9 +46,13 @@ RUN set -eu; \
     mkdir -p crates/ingest/examples \
         && echo 'fn main() {}' > crates/ingest/examples/reth-db-smoke.rs
 
+# The reth-db-smoke example is bigname-ingest's bounded read-only sample. It is
+# built here and shipped next to phase-runner so that an operator runs it with
+# the production mounts, user and PID namespace (docs/reth-db-reader.md). Its
+# required feature, reth-db, is unified in from phase-runner's dependency.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    cargo build --locked --release --workspace --bins
+    cargo build --locked --release --workspace --bins --example reth-db-smoke
 
 COPY apps apps
 COPY crates crates
@@ -68,7 +72,7 @@ ENV BIGNAME_BUILD_SHA=${BIGNAME_BUILD_SHA}
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     find apps crates tools migrations manifests schema-v2 -exec touch {} + \
-    && cargo build --locked --release --workspace --bins
+    && cargo build --locked --release --workspace --bins --example reth-db-smoke
 
 FROM ubuntu:24.04 AS runtime
 
@@ -82,6 +86,7 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/bigname-api /usr/local/bin/bigname-api
 COPY --from=builder /app/target/release/phase-runner /usr/local/bin/phase-runner
+COPY --from=builder /app/target/release/examples/reth-db-smoke /usr/local/bin/reth-db-smoke
 COPY --from=builder --chown=bigname:bigname /app/manifests /app/manifests
 COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/bigname
 

@@ -117,7 +117,18 @@ figure is recommended here.
 
 ## Bounded sample
 
-Build and run the bounded operator sample:
+The image ships the bounded operator sample as `/usr/local/bin/reth-db-smoke`
+next to `phase-runner` (`Dockerfile`), so it runs with the production mounts,
+user and PID namespace through the phase runner's service definition:
+
+```sh
+docker compose --env-file .env.server \
+  -f docker-compose.server.yml \
+  -f docker-compose.reth-db.yml \
+  run --rm phase-runner reth-db-smoke ethereum-sepolia "$RETH_DATA_DIR" 11550000,11550001
+```
+
+Outside the image, build and run it from a checkout:
 
 ```sh
 cargo build -p bigname-ingest --features reth-db --example reth-db-smoke --locked
