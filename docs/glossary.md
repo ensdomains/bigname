@@ -655,7 +655,24 @@ Interpret's validated operation associated with an activated
 from an `ens_v1` predecessor binding to a concrete `ens_v2` successor binding.
 Child, registrar-token `unwrapped`, and `unlocked_wrapped` second-level
 predecessors close at their recorded ENSv1 cleanup; `locked_wrapped`
-second-level predecessors close at the boundary. It is the only writer
+second-level predecessors close at the boundary. For the two registrar-token
+paths the predecessor is the BaseRegistrar token itself, found by its own
+lifecycle evidence rather than through any binding: a lease whose binding a
+[registry-only handoff](#registry-only-handoff) already closed still qualifies,
+as does a `registerOnly` successor lease that never had one, and the writer
+closes whatever ENSv1 binding of the name is still open at the cleanup, zero or
+one. On Mainnet that evidence is a `TokenControlTransferred` with the token id:
+for a never-transferred lease on the direct unwrapped path the migration
+transaction's own holder-to-controller transfer, which precedes the cleanup; on
+the unlocked-wrapped path, where `unwrapETH2LD` moves the token from the
+NameWrapper straight to the Graveyard, the cleanup transfer itself, admitted
+for a name registered straight into the NameWrapper because its controller
+grant had already been observed on the lease before the transaction. The
+Sepolia profile also indexes the numeric BaseRegistrar lifecycle events.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L128-L150 @ ens_v2@a971bd6)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2@a971bd6)
+It is the only writer
 allowed to cross those `authority_arm` values. The transition and its activated
 `MigrationApplied` event correspond one-to-one, so Project consumes the event's
 already-validated successor, position, and correlation ID without correlating
@@ -1929,6 +1946,25 @@ retracts that pointer nor prevents later old-registry root-resolver updates.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L54 @ ens_v1@91c966f)
+
+<a id="registry-only-handoff"></a>
+## Registry-only handoff
+
+a BaseRegistrar token transfer without `reclaim`. The registrar changes the
+token holder but leaves the ENSv1 registry owner the registrar wrote earlier,
+so from that transfer the name is bound to a registry-only resource, whose owner
+is the registry record, while the lease goes on under it: its expiry, renewals
+and later transfers are still the token's. Ordinary ENSv1 interpretation closes
+the lease binding and opens the registry-only binding at the transfer; Project
+reads which lease a registry-only binding stands for
+(`project_registry_only_handoffs`). An ENSv1→ENSv2 migration of such a name
+migrates the token: the unlocked controller reclaims the registry record for
+itself before parking the token, so the
+[migration authority transition](#migration-authority-transition) finds the
+lease by its token evidence and closes the registry-only binding at the
+cleanup.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L118 @ ens_v2@a971bd6)
 
 ## Resolution divergence ledger
 
