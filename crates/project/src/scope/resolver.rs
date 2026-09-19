@@ -253,14 +253,20 @@ pub(super) async fn include_resource_pointers(
 /// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64)),
 /// and joined to the scoped surfaces by primary key: the cost is the record-ID
 /// resolvers' link history, never a scan of the chain's events by node.
+/// The resolver is also a dependent: `classify_unchanged` would otherwise carry its
+/// old summary forward whenever the same pass scopes one of its record inventories.
 pub(super) async fn include_link_targets(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO project_scope_resolvers
+    for table in [
+        "project_scope_resolver_dependents",
+        "project_scope_resolvers",
+    ] {
+        sqlx::query(&format!(
+            r#"
+        INSERT INTO {table}
         SELECT DISTINCT lower(row.resolver_address)
         FROM resolver_current row
         JOIN normalized_events event
@@ -277,17 +283,18 @@ pub(super) async fn include_link_targets(
          AND surface.chain_id = $1
         JOIN project_scope_names scope ON scope.logical_name_id = surface.logical_name_id
         WHERE row.chain_id = $1
-          AND row.declared_summary #>> '{links,status}' = 'supported'
+          AND row.declared_summary #>> '{{links,status}}' = 'supported'
         ON CONFLICT DO NOTHING
-        "#,
-    )
-    .bind(chain_id)
-    .bind(target_block)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| {
-        ProjectError::database("failed to scope resolvers linking scoped names", error)
-    })?;
+        "#
+        ))
+        .bind(chain_id)
+        .bind(target_block)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to scope resolvers linking scoped names", error)
+        })?;
+    }
     Ok(())
 }
 

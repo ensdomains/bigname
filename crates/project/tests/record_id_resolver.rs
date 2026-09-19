@@ -307,13 +307,68 @@ async fn resolver_links_summary_follows_a_retracted_link_through_redo() -> Resul
 // run has no other reason to touch -- and a shadow surface never counts as a name.
 #[tokio::test]
 async fn resolver_links_summary_picks_up_a_name_discovered_later() -> Result<()> {
-    const OTHER: &str = "0x5555555555555555555555555555555555555555";
     let (db, pool) = database("record_id_link_late_name").await?;
-    seed(&pool).await?;
-    let late = bigname_domain::normalization::normalize_name("record9.eth")?;
-    let late_node = node(9);
+    link_node_before_its_name(&pool).await?;
+    assert_link_unnamed_at_12(&pool).await?;
+    discover_late_name(&pool).await?;
+    run(&pool, 13, Some(12), RunMode::Normal).await?;
+    let links = links_summary(&pool, OTHER).await?;
+    assert_eq!(late_item(&links)["name"], "record9.eth", "{links}");
+    assert_eq!(
+        late_item(&links)["logical_name_id"],
+        format!("ens:{}", node(9))
+    );
+    // A shadow surface is not a name to show: demote it and rebuild.
+    sqlx::query("UPDATE name_surfaces SET visibility_state = 'shadow', deactivation_reason = 'fixture', deactivated_at = now() WHERE logical_name_id = $1")
+        .bind(format!("ens:{}", node(9))).execute(&pool).await?;
+    run(&pool, 13, None, RunMode::Normal).await?;
+    let links = links_summary(&pool, OTHER).await?;
+    assert!(late_item(&links).get("name").is_none(), "{links}");
+    db.cleanup().await?;
+    Ok(())
+}
+
+// The same discovery on a run that also scopes a record inventory the resolver
+// serves -- here record3.eth, pointed at the resolver and touched by an event of
+// its own -- must still rebuild the summary. Such an inventory alone lets the run
+// republish the resolver's old summary, since inventories do not change it, but a
+// name for a linked node does.
+#[tokio::test]
+async fn resolver_links_summary_picks_up_a_name_discovered_beside_a_scoped_inventory() -> Result<()>
+{
+    let (db, pool) = database("record_id_link_late_name_inventory").await?;
+    link_node_before_its_name(&pool).await?;
     event(
         &pool,
+        "pointer3-other",
+        11,
+        6,
+        "ResolverChanged",
+        Some(3),
+        json!({"resolver":OTHER,"node":node(3)}),
+    )
+    .await?;
+    assert_link_unnamed_at_12(&pool).await?;
+    let provenance = inventory(&pool, 3).await?["provenance"].clone();
+    assert_eq!(provenance["resolver_address"], OTHER, "{provenance}");
+    discover_late_name(&pool).await?;
+    sqlx::query("INSERT INTO normalized_events (event_identity,namespace,logical_name_id,event_kind,source_family,manifest_version,source_manifest_id,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state,raw_fact_ref) SELECT 'preimage-three','ens',$1,'PreimageObserved','ens_v2_resolver_l1',1,manifest_id,$2,13,$3,$4,0,8,'ens_v2_resolver','canonical','{}'::jsonb,'{}'::jsonb FROM manifest_versions WHERE source_family='ens_v2_resolver_l1' AND chain_id=$2")
+        .bind(format!("ens:{}", node(3))).bind(CHAIN).bind(hash(13)).bind(hash(1300)).execute(&pool).await?;
+    run(&pool, 13, Some(12), RunMode::Normal).await?;
+    let links = links_summary(&pool, OTHER).await?;
+    assert_eq!(late_item(&links)["name"], "record9.eth", "{links}");
+    db.cleanup().await?;
+    Ok(())
+}
+
+const OTHER: &str = "0x5555555555555555555555555555555555555555";
+
+/// The seed, a second record-ID resolver, and its link to node 9 before that node
+/// has a surface.
+async fn link_node_before_its_name(pool: &PgPool) -> Result<()> {
+    seed(pool).await?;
+    event(
+        pool,
         "upgrade-other",
         10,
         8,
@@ -322,25 +377,20 @@ async fn resolver_links_summary_picks_up_a_name_discovered_later() -> Result<()>
         json!({"proxy_address":OTHER,"implementation":IMPLEMENTATION}),
     )
     .await?;
-    event(&pool,"link-late",11,5,"ResolverRecordLinked",None,json!({"source_event":"Linked","storage_model":"resolver_record_id","resolver":OTHER,"node":late_node,"resolver_record_id":"1","dns_encoded_name":"0x00"})).await?;
+    event(pool,"link-late",11,5,"ResolverRecordLinked",None,json!({"source_event":"Linked","storage_model":"resolver_record_id","resolver":OTHER,"node":node(9),"resolver_record_id":"1","dns_encoded_name":"0x00"})).await?;
     // The root surface -- the empty name at the all-zero node -- exists on every ENS
     // chain; the default record's link must not pick it up as a name.
     sqlx::query("INSERT INTO name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state) VALUES ($1,'ens','',ARRAY[]::text[],'\\x00'::bytea,$2,ARRAY[]::text[],'fixture','active',$3,$4,10,'canonical')")
-        .bind(format!("ens:{}", hash(0))).bind(hash(0)).bind(CHAIN).bind(hash(10)).execute(&pool).await?;
-    // The node's surface does not exist yet, so the link is served by namehash alone.
-    run(&pool, 12, None, RunMode::Normal).await?;
-    let item = |links: &Value| {
-        links["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|item| item["namehash"] == late_node)
-            .cloned()
-            .unwrap()
-    };
-    let links = links_summary(&pool, OTHER).await?;
-    assert!(item(&links).get("name").is_none(), "{links}");
-    let default = links_summary(&pool, RESOLVER).await?;
+        .bind(format!("ens:{}", hash(0))).bind(hash(0)).bind(CHAIN).bind(hash(10)).execute(pool).await?;
+    Ok(())
+}
+
+/// Node 9 has no surface yet, so its link is served by namehash alone.
+async fn assert_link_unnamed_at_12(pool: &PgPool) -> Result<()> {
+    run(pool, 12, None, RunMode::Normal).await?;
+    let links = links_summary(pool, OTHER).await?;
+    assert!(late_item(&links).get("name").is_none(), "{links}");
+    let default = links_summary(pool, RESOLVER).await?;
     let default = default["items"]
         .as_array()
         .unwrap()
@@ -348,23 +398,28 @@ async fn resolver_links_summary_picks_up_a_name_discovered_later() -> Result<()>
         .find(|item| item["default"] == true)
         .unwrap();
     assert!(default.get("name").is_none(), "{default}");
-    // Block 13 observes the name: a surface plus the event that carries its logical name.
-    sqlx::query("INSERT INTO name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state) VALUES ($1,'ens','record9.eth',ARRAY['record9','eth'],$2,$3,ARRAY['a','b'],'fixture','active',$4,$5,13,'canonical')")
-        .bind(format!("ens:{late_node}")).bind(late.dns_encoded_name.clone()).bind(&late_node).bind(CHAIN).bind(hash(13)).execute(&pool).await?;
-    sqlx::query("INSERT INTO normalized_events (event_identity,namespace,logical_name_id,event_kind,source_family,manifest_version,source_manifest_id,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state,raw_fact_ref) SELECT 'preimage-late','ens',$1,'PreimageObserved','ens_v2_resolver_l1',1,manifest_id,$2,13,$3,$4,0,7,'ens_v2_resolver','canonical','{}'::jsonb,'{}'::jsonb FROM manifest_versions WHERE source_family='ens_v2_resolver_l1' AND chain_id=$2")
-        .bind(format!("ens:{late_node}")).bind(CHAIN).bind(hash(13)).bind(hash(1300)).execute(&pool).await?;
-    run(&pool, 13, Some(12), RunMode::Normal).await?;
-    let links = links_summary(&pool, OTHER).await?;
-    assert_eq!(item(&links)["name"], "record9.eth", "{links}");
-    assert_eq!(item(&links)["logical_name_id"], format!("ens:{late_node}"));
-    // A shadow surface is not a name to show: demote it and rebuild.
-    sqlx::query("UPDATE name_surfaces SET visibility_state = 'shadow', deactivation_reason = 'fixture', deactivated_at = now() WHERE logical_name_id = $1")
-        .bind(format!("ens:{late_node}")).execute(&pool).await?;
-    run(&pool, 13, None, RunMode::Normal).await?;
-    let links = links_summary(&pool, OTHER).await?;
-    assert!(item(&links).get("name").is_none(), "{links}");
-    db.cleanup().await?;
     Ok(())
+}
+
+/// Block 13 observes node 9's name: a surface plus the event that carries its logical name.
+async fn discover_late_name(pool: &PgPool) -> Result<()> {
+    let late = bigname_domain::normalization::normalize_name("record9.eth")?;
+    let late_node = node(9);
+    sqlx::query("INSERT INTO name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state) VALUES ($1,'ens','record9.eth',ARRAY['record9','eth'],$2,$3,ARRAY['a','b'],'fixture','active',$4,$5,13,'canonical')")
+        .bind(format!("ens:{late_node}")).bind(late.dns_encoded_name.clone()).bind(&late_node).bind(CHAIN).bind(hash(13)).execute(pool).await?;
+    sqlx::query("INSERT INTO normalized_events (event_identity,namespace,logical_name_id,event_kind,source_family,manifest_version,source_manifest_id,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state,raw_fact_ref) SELECT 'preimage-late','ens',$1,'PreimageObserved','ens_v2_resolver_l1',1,manifest_id,$2,13,$3,$4,0,7,'ens_v2_resolver','canonical','{}'::jsonb,'{}'::jsonb FROM manifest_versions WHERE source_family='ens_v2_resolver_l1' AND chain_id=$2")
+        .bind(format!("ens:{late_node}")).bind(CHAIN).bind(hash(13)).bind(hash(1300)).execute(pool).await?;
+    Ok(())
+}
+
+fn late_item(links: &Value) -> Value {
+    links["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["namehash"] == node(9))
+        .cloned()
+        .unwrap()
 }
 
 // A row built by an earlier deploy, before a section existed, is rebuilt on the
