@@ -6,6 +6,29 @@
 SET lock_timeout = '0';
 SET statement_timeout = '6h';
 
+-- Both kept predicates name consumer_visibility, which
+-- 20260811120000_ens_v2_migration_slice_1.sql adds to normalized_events. A
+-- namespace that has not taken that schema-migration is refused here, with the
+-- prerequisite named, rather than partway through the first build with a
+-- missing-column error.
+DO $$
+BEGIN
+    IF to_regclass('bigname_phase.normalized_events') IS NULL THEN
+        RAISE EXCEPTION
+            'bigname_phase.normalized_events does not exist; this script is for an initialized namespace, and a fresh one takes these indexes from the baseline';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_attribute
+        WHERE attrelid = to_regclass('bigname_phase.normalized_events')
+          AND attname = 'consumer_visibility'
+          AND NOT attisdropped
+    ) THEN
+        RAISE EXCEPTION
+            'bigname_phase.normalized_events has no consumer_visibility column, which both kept predicates name; apply the schema-migrations through 20260811120000_ens_v2_migration_slice_1.sql first, as docs/runbooks/production-docker.md step 3 describes, then rerun this script';
+    END IF;
+END $$;
+
 -- IF NOT EXISTS matches on the name alone, so an interrupted concurrent build
 -- leaves an invalid index that the statements below then skip, and an earlier
 -- manual build can leave a valid index with other keys or another predicate,

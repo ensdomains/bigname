@@ -140,6 +140,9 @@ migration_inventory="$ROOT/schema-v2/migration-inventory.txt"
 # PROCEDURE` statements (with CONCURRENTLY, IF EXISTS, RESTRICT) whose every
 # target is `schema.name`, written with plain identifiers and no strings,
 # quoted identifiers, dollar quoting, block comments, or other lexical forms.
+# CONCURRENTLY is accepted only in a file whose first bytes are sqlx's
+# `-- no-transaction` marker and only over one index, since PostgreSQL
+# refuses it inside a transaction block and with more than one target.
 # CASCADE is refused: PostgreSQL would drop whatever depends on the target, so
 # a bigname_phase view, trigger, or foreign key hanging off a public object
 # would go with it unlisted, while RESTRICT (the default) makes such a
@@ -153,6 +156,9 @@ migration_inventory="$ROOT/schema-v2/migration-inventory.txt"
 # cannot be written under this rule, whatever statement shape carries it.
 migration_is_closed_form_drop() {
     awk "$sql_comment_stripper"'
+        # sqlx runs a file outside a transaction only when its bytes start
+        # with this marker; DROP INDEX CONCURRENTLY fails inside one.
+        NR == 1 && index($0, "-- no-transaction") == 1 { no_transaction = 1 }
         { text = text " " strip_sql_comments($0) }
         END {
             if (quote != "") { print " [unterminated quote at end of file]"; exit 1 }
@@ -190,6 +196,13 @@ migration_is_closed_form_drop() {
                 }
                 targets[++t] = target
                 if (depth != 0) { bad = bad " [unbalanced parentheses: " substr(s, 1, 40) "]"; continue }
+                # PostgreSQL runs DROP INDEX CONCURRENTLY only as a top-level
+                # statement and only over one index; either form would pass
+                # here and fail the real run.
+                if (u ~ /^DROP INDEX CONCURRENTLY /) {
+                    if (!no_transaction) { bad = bad " [CONCURRENTLY in a file sqlx runs in a transaction: " substr(s, 1, 40) "]"; continue }
+                    if (t > 1) { bad = bad " [CONCURRENTLY takes one index: " substr(s, 1, 40) "]"; continue }
+                }
                 # Each target is `schema.name`, and for a routine optionally a
                 # signature `(type, type(10,2), ...)` of plain type names; any
                 # other token before, inside, or after the signature is refused
@@ -757,6 +770,10 @@ assert_uninventoried_migrations_are_schema_qualified() {
         'DROP FUNCTION public.fn(integer),;'
         'DROP FUNCTION public.fn(integer) (text);'
         'DROP INDEX public.old_idx(integer);'
+        'DROP INDEX CONCURRENTLY IF EXISTS public.old_idx;'
+        $'-- no-transaction\nDROP INDEX CONCURRENTLY public.a, public.b;'
+        $'-- no-transaction\nDROP INDEX CONCURRENTLY IF EXISTS public.a, public.b RESTRICT;'
+        $'-- a comment\n-- no-transaction\nDROP INDEX CONCURRENTLY public.a;'
     )
     for reason in "${refused[@]}"; do
         if printf '%s\n' "$reason" | migration_is_closed_form_drop /dev/stdin >/dev/null; then
@@ -1351,7 +1368,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=210
+expected_refusal_assertions=212
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
@@ -4085,6 +4102,19 @@ for resolver_history_index_name in $resolver_history_index_names; do
         normalized_events \
         "block_number, chain_id"
 done
+# The kept predicates name consumer_visibility, which slice 1 adds; the
+# installer names that prerequisite on a namespace from before slice 1, and
+# names the table on one that has no phase schema, instead of failing inside
+# the first build. Renaming keeps every dependent, so the shape is put back.
+printf 'SET search_path TO "%s";\nALTER TABLE normalized_events RENAME COLUMN consumer_visibility TO consumer_visibility_absent;\n' "$scratch_schema" | run_psql >/dev/null
+assert_index_install_refusal resolver-history-before-slice-1 \
+    "$resolver_history_install" \
+    "$scratch_schema.normalized_events has no consumer_visibility column, which both kept predicates name; apply the schema-migrations through 20260811120000_ens_v2_migration_slice_1.sql first, as docs/runbooks/production-docker.md step 3 describes, then rerun this script"
+printf 'SET search_path TO "%s";\nALTER TABLE normalized_events RENAME COLUMN consumer_visibility_absent TO consumer_visibility;\nALTER TABLE normalized_events RENAME TO normalized_events_absent;\n' "$scratch_schema" | run_psql >/dev/null
+assert_index_install_refusal resolver-history-no-phase-table \
+    "$resolver_history_install" \
+    "$scratch_schema.normalized_events does not exist; this script is for an initialized namespace, and a fresh one takes these indexes from the baseline"
+printf 'SET search_path TO "%s";\nALTER TABLE normalized_events_absent RENAME TO normalized_events;\n' "$scratch_schema" | run_psql >/dev/null
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     printf '%s\n' "$resolver_history_retired_sql"

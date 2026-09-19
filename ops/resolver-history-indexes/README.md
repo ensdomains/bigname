@@ -47,7 +47,13 @@ permits that transaction wait and bounds each build to six hours. Retain its
 output in the deployment receipt.
 
 The script checks the kept names twice and fails, with a non-zero `psql` exit,
-instead of reporting success over an index the feed cannot use. Before it
+instead of reporting success over an index the feed cannot use. Both kept
+predicates name `consumer_visibility`, so it first refuses a namespace whose
+`normalized_events` lacks that column, naming
+`20260811120000_ens_v2_migration_slice_1.sql` as the prerequisite, and one
+that has no `normalized_events` at all; apply the schema-migrations through
+slice 1 first, as the production runbook's step 3 describes, and never run
+it on a fresh namespace, which takes the indexes from the baseline. Before it
 builds anything, it refuses a kept name that is already taken by an index that
 is not both `indisvalid` and `indisready`, an index on another table, an index
 whose definition is not the reviewed one, or a table, view, or other relation

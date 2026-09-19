@@ -586,24 +586,33 @@ place lacks them all, and a namespace replaced from the baseline since
 2026-08-14 has all four. On an initialized production namespace, run
 [`ops/resolver-history-indexes/install.sql`](../../ops/resolver-history-indexes/install.sql)
 in step 3 as [its runbook](../../ops/resolver-history-indexes/README.md)
-describes. `install.sql` is the reviewed source of those statements (the
-index list earlier in this runbook repeats the two kept builds and the two
-drops), and `schema-v2/apply-check.sh` proves it builds and drops what the
-fresh baseline and the schema-migration build and drop. The builds
-and drops are concurrent and permit writes, so they can finish while the
-existing runner is still processing, before the stop/start window opens; step
-3 then only runs `install.sql` again as the check, which is a no-op with a
-receipt on a
-namespace that already has all four. `install.sql` is its own readiness check
-and never drops or rebuilds an index; recover an interrupted build as its
-runbook describes. Keep the `install.sql` output with its start and end times
-in the release record. Then apply the schema-migrations in step 4. Unlike the
-other index schema-migrations, this one builds each index that is still
-missing itself, as an ordinary `CREATE INDEX` that blocks writes to
-`normalized_events` for the build, so on a populated namespace step 3 must
-come first; where a name is already taken it applies the same check, so
-`sqlx migrate run` stops without recording it if that name is invalid, not
-ready, on another table, not an index, or has another definition.
+describes. `install.sql` is the reviewed source of those statements: the
+index list earlier in this runbook repeats the two kept builds, and the two
+drops have no copy there, because `install.sql` drops a retired name only
+when it holds the index #415 built and refuses a table, an index on another
+table, or an index with another definition under that name, which a bare
+`DROP INDEX` would remove. `schema-v2/apply-check.sh` proves it builds and
+drops what the fresh baseline and the schema-migration build and drop, and
+proves each refusal. Both kept predicates name `consumer_visibility`, so
+`install.sql` refuses a namespace that has not taken
+`20260811120000_ens_v2_migration_slice_1.sql`, naming that prerequisite;
+apply the schema-migrations through slice 1 first, as step 3 describes. The
+builds and drops are concurrent and permit writes, so they can finish while
+the existing runner is still processing, before the stop/start window opens;
+step 3 then only runs `install.sql` again as the check, which is a no-op with
+a receipt on a namespace that already has the two kept indexes and neither
+retired one. `install.sql` is its own readiness check and never drops or
+rebuilds a kept index; recover an interrupted build as its runbook describes.
+Keep the `install.sql` output with its start and end times in the release
+record. Then apply the schema-migrations in step 4. Unlike the other index
+schema-migrations, this one builds each index that is still missing itself,
+as an ordinary `CREATE INDEX` that blocks writes to `normalized_events` for
+the build, and drops each retired index that still exists under the table's
+exclusive lock, so on a populated namespace step 3 must come first; where a
+kept name is already taken it applies the same check, so `sqlx migrate run`
+stops without recording it if that name is invalid, not ready, on another
+table, not an index, or has another definition, and it refuses a retired name
+the same way.
 
 The release containing
 `20260904120000_project_redo_child_registration_history.sql` adds the bounded
@@ -814,6 +823,27 @@ SELECT EXISTS (
 ) AS discovery_edges_reopen_index_ready;
 ```
 
+Every statement in the block below, and every `ops/*/install.sql`, is written
+against the schema as the schema-migrations older than its release left it.
+Four of the predicates below (`normalized_events_ens_v1_record_node_resolver_idx`,
+`normalized_events_basenames_record_node_resolver_idx`, and the two
+`normalized_events_pointer_*_resolver_history_idx` builds, which
+`ops/resolver-history-indexes/install.sql` also carries) name
+`consumer_visibility`, which `20260811120000_ens_v2_migration_slice_1.sql`
+adds to `normalized_events`; on a namespace that has not taken slice 1 the
+statement fails with a missing-column error, and that installer refuses
+before building, naming the prerequisite. So step 3 assumes every
+schema-migration older than the release's own is applied. When
+`sqlx migrate info` shows pending versions from more than one release with a
+step-3 entry, take the releases in order rather than prebuilding everything
+first: apply the pending schema-migrations older than the next release's
+step-3 statements with `sqlx migrate run --target-version <version>` (the
+version just before that release's index schema-migration), run that
+release's step 3, and continue to the next; the final `sqlx migrate run` in
+step 4 then applies the rest. A prebuild skipped this way leaves the
+schema-migration's `IF NOT EXISTS` build to perform the first build against
+the populated table, which the paragraphs above forbid.
+
 Apply the following index statements one at a time with the writer role. Do not
 wrap them in a transaction: PostgreSQL requires each `CREATE INDEX CONCURRENTLY`
 to run as a top-level statement. The `normalized_events` builds are expected to
@@ -854,8 +884,6 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_pointer_before_resolve
     WHERE event_kind = 'ResolverChanged'
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
-DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_permission_after_resolver_history_idx;
-DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_permission_before_resolver_history_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_subregistry_registration_history_idx;
 CREATE INDEX CONCURRENTLY normalized_events_subregistry_registration_history_idx
     ON bigname_phase.normalized_events
@@ -1004,6 +1032,13 @@ indexes are additive; rollback may leave them in place.
    `20260917150000_normalized_events_v1_lookahead_indexes.sql`, run
    `ops/v1-lookahead-indexes/install.sql` as described above, require it to
    exit zero, then run `ANALYZE bigname_phase.normalized_events`;
+   for the release containing
+   `20260918120000_normalized_events_resolver_history_idx.sql`, run
+   `ops/resolver-history-indexes/install.sql` as described above and require
+   it to exit zero; it refuses a namespace that has not taken
+   `20260811120000_ens_v2_migration_slice_1.sql`, so on one that is behind by
+   more than one release apply the releases in order as described above the
+   index block;
    otherwise skip this step;
    For the release containing
    `20260814130000_surface_binding_authority_arm.sql`, a populated phase schema
