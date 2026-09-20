@@ -289,22 +289,69 @@ role_and_database_settings() {
         printf '\\pset format unaligned\n\\pset tuples_only on\n'
         printf 'SELECT %s AS login;\n' "quote_literal('$apply_check_role')"
         cat <<'SQL'
-SELECT format('%s on %s: %s',
-           COALESCE(r.rolname, 'all roles'), COALESCE(d.datname, 'all databases'),
-           to_jsonb(s.setconfig)::text)
-FROM pg_db_role_setting s
-LEFT JOIN pg_roles r ON r.oid = s.setrole
-LEFT JOIN pg_database d ON d.oid = s.setdatabase
-WHERE (s.setdatabase = 0 OR d.datname = current_database())
-ORDER BY 1;
+SELECT line FROM (
+    SELECT format('setting %s on %s: %s',
+               COALESCE(r.rolname, 'all roles'), COALESCE(d.datname, 'all databases'),
+               to_jsonb(s.setconfig)::text) AS line
+    FROM pg_db_role_setting s
+    LEFT JOIN pg_roles r ON r.oid = s.setrole
+    LEFT JOIN pg_database d ON d.oid = s.setdatabase
+    WHERE (s.setdatabase = 0 OR d.datname = current_database())
+    UNION ALL
+    -- Every role attribute, for the same reason: LOGIN, SUPERUSER, BYPASSRLS,
+    -- CREATEDB, CREATEROLE, REPLICATION, INHERIT, a connection limit and an
+    -- expiry each change what a deployed connection may do, none of them is in
+    -- the phase-schema catalog, and cleanup drops only this run's own role.
+    SELECT format('role %s: %s connlimit=%s validuntil=%s', r.rolname,
+               to_jsonb(ARRAY[r.rolsuper, r.rolinherit, r.rolcreaterole,
+                   r.rolcreatedb, r.rolcanlogin, r.rolreplication,
+                   r.rolbypassrls])::text,
+               r.rolconnlimit, COALESCE(r.rolvaliduntil::text, '-'))
+    FROM pg_roles r
+    UNION ALL
+    -- Membership carries privileges the same way.
+    SELECT format('member %s in %s: admin=%s grantor=%s',
+               m.rolname, g.rolname, a.admin_option, COALESCE(gr.rolname, '-'))
+    FROM pg_auth_members a
+    JOIN pg_roles m ON m.oid = a.member
+    JOIN pg_roles g ON g.oid = a.roleid
+    LEFT JOIN pg_roles gr ON gr.oid = a.grantor
+    UNION ALL
+    -- `pg_roles` prints every password as one mask, so a changed one is
+    -- invisible there; the verifier lives in superuser-only `pg_authid`, which
+    -- is why the statement rule also names the password form for the run that
+    -- cannot read it.
+    SELECT format('secret %s: %s', a.rolname, md5(COALESCE(a.rolpassword, '-')))
+    FROM pg_authid a
+    WHERE has_table_privilege('pg_authid', 'SELECT')
+) configuration ORDER BY 1;
 SQL
-    } | run_psql
+    } | run_psql_as_owner
+}
+# The snapshot has to see what no text rule can. The plant is on the role this
+# run created itself, and it is restored immediately; the check refuses to run
+# if the restore does not land.
+assert_role_configuration_snapshot_sees_planted_changes() {
+    local planted seen
+    printf 'ALTER ROLE "%s" CONNECTION LIMIT 5;\n' "$apply_check_role" | run_psql_as_owner
+    planted="$(role_and_database_settings)"
+    printf 'ALTER ROLE "%s" CONNECTION LIMIT -1;\n' "$apply_check_role" | run_psql_as_owner
+    seen="$(diff "$role_and_database_settings_before" <(printf '%s\n' "$planted") || true)"
+    case "$seen" in
+        *connlimit=5*) ;;
+        *) printf '%s\n' "the role-configuration snapshot does not see a planted connection limit (saw: ${seen:-nothing})" >&2; exit 1 ;;
+    esac
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    if ! diff -u "$role_and_database_settings_before" <(role_and_database_settings) >&2; then
+        printf '%s\n' "the planted connection limit did not restore (diff above: - before, + after)" >&2
+        exit 1
+    fi
 }
 assert_no_role_or_database_settings() {
     local context="$1"
     if ! diff -u "$role_and_database_settings_before" <(role_and_database_settings) >&2; then
         printf '%s\n' \
-            "the $context replay changed a role or database default (diff above: - before, + after); a schema-migration may not change connection defaults, however it spells the statement, since the deployed runner would inherit it and no catalog records it" >&2
+            "the $context replay changed a role or database configuration (diff above: - before, + after); a schema-migration may not change a connection default, a role attribute, a role membership or a password, however it spells the statement, since the deployed runner connects through them and no catalog records them" >&2
         exit 1
     fi
 }
@@ -2045,7 +2092,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=251
+expected_refusal_assertions=255
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
@@ -2260,6 +2307,8 @@ session_state_scanner='
         while (match(t, /SET_CONFIG *\([^)]*, *FALSE *\)/)) { print file ": " substr(t, RSTART, RLENGTH); t = substr(t, RSTART + RLENGTH) }
         t = toupper(text)
         while (match(t, /ALTER (ROLE|USER|DATABASE)[^;]* (SET|RESET) [A-Z_.]+/)) { print file ": " substr(t, RSTART, RLENGTH); t = substr(t, RSTART + RLENGTH) }
+        t = toupper(text)
+        while (match(t, /(ALTER|CREATE) (ROLE|USER|GROUP)[^;]* PASSWORD/)) { print file ": " substr(t, RSTART, RLENGTH); t = substr(t, RSTART + RLENGTH) }
     }
 '
 session_state_statements_of() {
@@ -2299,6 +2348,9 @@ assert_session_state_rule_holds() {
         'ALTER ROLE CURRENT_USER SET lock_timeout = '"'"'1ms'"'"';'
         'alter user bigname reset search_path;'
         'ALTER DATABASE bigname SET lock_timeout TO '"'"'1ms'"'"';'
+        'ALTER ROLE CURRENT_USER PASSWORD '"'"'planted'"'"';'
+        'alter user bigname password '"'"'planted'"'"';'
+        'CREATE ROLE planted_login LOGIN PASSWORD '"'"'planted'"'"';'
     )
     local -a accepted=(
         'UPDATE t SET a = 1;'
@@ -2392,6 +2444,7 @@ SQL
 sqlx_bookkeeping_created=1
 role_and_database_settings_before="$(mktemp "${TMPDIR:-/tmp}/schema-v2-role-settings.XXXXXX")"
 role_and_database_settings > "$role_and_database_settings_before"
+assert_role_configuration_snapshot_sees_planted_changes
 # Prove the role boundary on every run: an identifier the rewrite cannot see,
 # assembled inside EXECUTE, must fail on the production schema whether or not
 # that schema exists in this database, while the same statement against the

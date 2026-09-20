@@ -294,10 +294,15 @@ defaults — is encoded as a JSON array rather than joined with a delimiter,
 since an element carrying the delimiter would let two different schemas
 serialize identically. Each replay also ends by comparing sqlx's
 `_sqlx_migrations` against the full expected history — one row per migration
-file, with the SHA-384 of its bytes — and `pg_db_role_setting` against the
-snapshot taken before the first replay, so a file that rewrites or deletes
-earlier bookkeeping, or changes a role's or a database's connection defaults
-however the statement is spelled, fails even though no catalog line moves.
+file, with the SHA-384 of its bytes — and the cluster's role
+configuration — connection defaults, every role attribute (`LOGIN`,
+`SUPERUSER`, `BYPASSRLS`, `CREATEDB`, `CREATEROLE`, `REPLICATION`, `INHERIT`,
+connection limit, expiry), role memberships, and, where the check can read
+`pg_authid`, the password verifiers — against the snapshot taken before the
+first replay. A file that rewrites or deletes earlier bookkeeping, or changes
+any of that however the statement is spelled, fails even though no catalog
+line moves; the password form is also named by the statement rule, because a
+run that cannot read `pg_authid` sees only one mask for every password.
 From acceptance on, a
 schema-migration of any of these kinds cannot land without moving the
 conformance test, which is where the carve-out or amendment is checked for.
